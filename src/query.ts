@@ -28,6 +28,14 @@ interface StoredRun {
     };
     testExitCode?: number | null;
     integrity?: CoverageRunIntegrity;
+    instrumentedBuildCache?: { key: string; reused: boolean };
+    rawEvidence?: {
+      format: string;
+      file: string;
+      files: number;
+      uncompressedBytes: number;
+      compressedBytes: number;
+    };
   };
 }
 
@@ -512,6 +520,7 @@ function help(): void {
   supercov runs <run-id> coverage covers <source-file:line> [--kind e2e] [--json]
   supercov runs <run-id> coverage test <id|name-fragment> [--kind e2e] [--limit N] [--json]
   supercov diff <older-run> <newer-run> [--limit N] [--json]
+  supercov prune [--keep N] [--dry-run]
   supercov clean [--keep N] [--dry-run]
 
 Use "latest" as <run-id> to query the newest local run.
@@ -592,6 +601,8 @@ export async function runQueryCommand(
         durationMs: run.metadata?.durationMs,
         timings: run.metadata?.timings,
         testExitCode: run.metadata?.testExitCode,
+        buildReused: run.metadata?.instrumentedBuildCache?.reused,
+        rawEvidence: run.metadata?.rawEvidence,
         ...(currentIntegrity
           ? compareRunIntegrity(run.metadata?.integrity, currentIntegrity)
           : { stale: undefined, reasons: [] }),

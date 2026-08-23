@@ -4,10 +4,10 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
+import { readEvidenceArchive } from "../dist/evidenceArchive.js";
 
 const fixture = resolve("tests/fixtures/generic-playwright");
 const runsRoot = resolve(fixture, ".supercov/runs");
-const evidenceRoot = resolve(fixture, ".supercov/evidence");
 const before = new Set(existsSync(runsRoot) ? readdirSync(runsRoot) : []);
 const result = spawnSync(
   process.execPath,
@@ -25,6 +25,11 @@ const runIds = readdirSync(runsRoot)
 if (runIds.length !== 1)
   throw new Error(`expected one opaque runner coverage run, received ${runIds}`);
 const runId = runIds[0];
+const metadata = JSON.parse(
+  readFileSync(resolve(runsRoot, runId, "run.json"), "utf8"),
+);
+if (metadata.instrumentedBuildCache?.reused !== true)
+  throw new Error("test-command-only change rebuilt unchanged instrumented source");
 const report = JSON.parse(
   gunzipSync(readFileSync(resolve(runsRoot, runId, "report.json.gz"))),
 );
@@ -35,19 +40,21 @@ for (const metric of ["lines", "statements", "functions", "branches"]) {
 if (report.summary.conditionCoveragePct !== 100)
   throw new Error("MC/DC coverage was not complete");
 
-const traceDirectory = resolve(evidenceRoot, runId);
-const traceFiles = readdirSync(traceDirectory).filter((name) =>
-  /^execution\..+\.jsonl$/.test(name),
+const archive = readEvidenceArchive(
+  resolve(runsRoot, runId, "evidence.raw.gz"),
 );
-const events = traceFiles.flatMap((name) =>
-  readFileSync(resolve(traceDirectory, name), "utf8")
+const traceFiles = archive.files.filter((entry) =>
+  /(?:^|\/)execution\..+\.jsonl$/.test(entry.path),
+);
+const events = traceFiles.flatMap(({ path, contents }) =>
+  contents
     .split("\n")
     .filter(Boolean)
     .map((line, index) => {
       try {
         return JSON.parse(line);
       } catch (error) {
-        throw new Error(`${name}:${index + 1}: ${error}`);
+        throw new Error(`${path}:${index + 1}: ${error}`);
       }
     }),
 );
@@ -59,5 +66,5 @@ if (events.some((event) => JSON.stringify(event).includes("supermachine")))
   throw new Error("provider-specific behavior leaked into the public fixture");
 
 console.log(
-  `[opaque-runner] run ${runId}: ${traceFiles.length} parseable trace shards, generic remote launch, 100% coverage`,
+  `[opaque-runner] run ${runId}: reused build, ${traceFiles.length} archived parseable trace shards, generic remote launch, 100% coverage`,
 );

@@ -13,10 +13,10 @@ is below the project's `.supercov/` directory:
 | Path | Lifetime |
 | --- | --- |
 | `locks/active.json` | Exclusive run or cleanup transaction; removed by its owner, stale owners are recovered. |
-| `work/<run>/state.json` | Durable lifecycle record retained according to `clean --keep`. |
+| `work/<run>/state.json` | In-flight lifecycle record; removed after atomic run publication. |
 | `work/<run>/report-publication/` | Incomplete report staging; atomically renamed or removed on recovery. |
-| `evidence/<run>/` | Per-test evidence retained with the run. |
-| `runs/<run>/` | Immutable published report retained according to `clean --keep`. |
+| `evidence/<run>/` | Loose in-flight evidence; packed and removed after publication. |
+| `runs/<run>/` | Immutable `report.json.gz`, `evidence.raw.gz`, and `run.json`; retained until explicit prune/clean. |
 | `cache/instrumented-workspace/<project>/` | Stable physical fallback and provider snapshot cache. |
 | `cache/instrumented-workspace/.<project>.staging-*` | Unpublished cache transaction; removed on error or recovery. |
 | `cache/instrumented-workspace/.<project>.previous-*` | Last complete cache generation during publication; restored or removed on recovery. |
@@ -51,6 +51,12 @@ mode. On filesystems such as APFS that support reflinks, file contents are
 copy-on-write. Node explicitly falls back to a real copy on unsupported
 filesystems, however, and directory entries must always be recreated. This is
 why the transaction rules remain necessary.
+
+An exact fingerprint over application source, dependencies, configuration,
+build mode, instrumenter runtime, build command, Node, OS, and architecture
+allows a complete instrumented output and its manifest to survive a source
+snapshot refresh. Test-only edits do not invalidate it. A missing artifact or
+any key change forces a new build.
 
 The stable physical path is not accidental. Some VM/container systems include
 the host mount path in a snapshot identity. A fresh random path per run would
@@ -106,3 +112,7 @@ proves all of the following:
 
 Until those gates pass, the transactional physical namespace is the conservative
 fallback rather than a temporary-directory mount whose cleanup must succeed.
+
+The filesystem gate runs the transaction suite on Linux, macOS, and Windows,
+including reflink/ordinary-copy behavior, internal links or junctions, ENOSPC,
+failed renames, and forced-process-termination recovery.

@@ -14,12 +14,21 @@ import { writeMcdcReport } from "./reporter.ts";
 import { coverageQueryCommands, runQueryCommand } from "./query.ts";
 import { discoverCoverageProject } from "./project.ts";
 import { createRunIntegrity } from "./integrity.ts";
+import { writeEvidenceArchive } from "./evidenceArchive.ts";
+import {
+  buildCacheReusePaths,
+  instrumentedBuildCacheKey,
+  readInstrumentedBuildCache,
+  writeInstrumentedBuildCache,
+} from "./buildCache.ts";
 import { instrumentDirectWorkspace } from "./directInstrumenter.ts";
 import {
   acquireProjectLock,
   cachedWorkspacePath,
   cleanCoverageStorage,
+  finalizePublishedRunStorage,
   prepareCachedWorkspace,
+  pruneCoverageStorage,
   recoverAbandonedRuns,
   updateRunState,
   writeRunState,
@@ -118,7 +127,10 @@ function signalExitCode(signal: NodeJS.Signals): number {
   return 128;
 }
 
-function parseCleanOptions(args: string[]): { keep: number; dryRun: boolean } {
+function parseRetentionOptions(
+  command: "clean" | "prune",
+  args: string[],
+): { keep: number; dryRun: boolean } {
   let keep = 20;
   let dryRun = false;
   for (let index = 0; index < args.length; index += 1) {
@@ -129,16 +141,25 @@ function parseCleanOptions(args: string[]): { keep: number; dryRun: boolean } {
       if (!Number.isSafeInteger(value) || value < 0)
         throw new Error("--keep must be a non-negative integer");
       keep = value;
-    } else throw new Error(`Unknown clean option: ${argument}`);
+    } else throw new Error(`Unknown ${command} option: ${argument}`);
   }
   return { keep, dryRun };
 }
 
 function cleanCommand(args: string[]): void {
-  const options = parseCleanOptions(args);
+  const options = parseRetentionOptions("clean", args);
   const result = cleanCoverageStorage(process.cwd(), options);
   console.log(
     `[supercov] ${options.dryRun ? "would remove" : "removed"} ${result.removedRuns.length} stored run(s), ${result.removedWorkspaces.length} per-run workspace(s), and ${result.removedBuildCache ? "the" : "no"} isolated build cache; keeping ${options.keep} newest run(s)`,
+  );
+  for (const id of result.removedRuns) console.log(id);
+}
+
+function pruneCommand(args: string[]): void {
+  const options = parseRetentionOptions("prune", args);
+  const result = pruneCoverageStorage(process.cwd(), options);
+  console.log(
+    `[supercov] ${options.dryRun ? "would remove" : "removed"} ${result.removedRuns.length} stored run(s), ${result.removedWorkspaces.length} terminal/orphan work director${result.removedWorkspaces.length === 1 ? "y" : "ies"}, and ${result.removedEvidence.length} loose evidence director${result.removedEvidence.length === 1 ? "y" : "ies"}; keeping ${options.keep} newest run(s) and preserving the shared cache`,
   );
   for (const id of result.removedRuns) console.log(id);
 }
@@ -164,6 +185,10 @@ async function createCoverageRun(command: string[]): Promise<number> {
   const packageSource = fileURLToPath(new URL(".", import.meta.url));
   const runIntegrity = createRunIntegrity(root, project, packageSource);
   const workspace = cachedWorkspacePath(root);
+  const buildCacheKey = instrumentedBuildCacheKey(runIntegrity, project);
+  const reusableBuild = project.buildAdapter === "vite"
+    ? readInstrumentedBuildCache(workspace, buildCacheKey)
+    : undefined;
   const serverEvidenceRoot = resolve(workspace, ".supercov/server-evidence");
   const reportStagingDirectory = resolve(
     root,
@@ -204,13 +229,18 @@ async function createCoverageRun(command: string[]): Promise<number> {
   let buildResult: ChildResult | undefined;
   let testResult: ChildResult | undefined;
   let reportFailed = false;
+  let reportPublished = false;
   let timingsPrinted = false;
 
   timings.initializationMs = performance.now() - runStartedMonotonic;
 
   try {
     let phaseStarted = performance.now();
-    const isolatedRoot = prepareCachedWorkspace(root);
+    const isolatedRoot = prepareCachedWorkspace(root, {
+      ...(reusableBuild
+        ? { reusePaths: buildCacheReusePaths(reusableBuild) }
+        : {}),
+    });
     timings.workspacePreparationMs = performance.now() - phaseStarted;
     if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
     phaseStarted = performance.now();
@@ -222,6 +252,10 @@ async function createCoverageRun(command: string[]): Promise<number> {
     const generatedViteConfig = resolve(generatedDirectory, "vite.config.mjs");
     const generatedVitestConfig = resolve(generatedDirectory, "vitest.config.mjs");
     const manifestPath = resolve(generatedDirectory, "manifest.json");
+    const buildOutputMetadataPath = resolve(
+      generatedDirectory,
+      "build-outputs.json",
+    );
     const isolatedPlaywrightConfig = project.playwrightConfig
       ? resolve(isolatedRoot, relative(root, project.playwrightConfig))
       : undefined;
@@ -363,7 +397,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
         `  const relocateOutput = output => output ? ({ ...output, dir: output.dir ? relocate(output.dir, 'Rollup output') : output.dir, file: output.file ? relocate(output.file, 'Rollup output') : output.file }) : output;`,
         `  const rollupOutput = config.build?.rollupOptions?.output;`,
         `  const safe = { ...config, cacheDir: resolve(isolatedRoot, '.supercov/vite-cache'), build: { ...config.build, outDir: relocate(config.build?.outDir ?? 'dist', 'Vite build output'), rollupOptions: { ...config.build?.rollupOptions, output: Array.isArray(rollupOutput) ? rollupOutput.map(relocateOutput) : relocateOutput(rollupOutput) } } };`,
-        `  return mergeConfig(safe, { plugins: [mcdcVitePlugin(${JSON.stringify({ root: isolatedRoot, sourceRoots: project.sourceRoots, manifestPath })})] });`,
+        `  return mergeConfig(safe, { plugins: [mcdcVitePlugin(${JSON.stringify({ root: isolatedRoot, sourceRoots: project.sourceRoots, manifestPath, buildOutputMetadataPath })})] });`,
         `}`,
         "",
       ].join("\n"),
@@ -433,7 +467,12 @@ async function createCoverageRun(command: string[]): Promise<number> {
           .join(" ")}`,
       );
     phaseStarted = performance.now();
-    if (project.buildAdapter === "direct") {
+    if (reusableBuild) {
+      console.error(
+        `[supercov] reusing exact-fingerprint instrumented build ${buildCacheKey.slice(0, 12)}`,
+      );
+      buildResult = { status: 0, signal: null };
+    } else if (project.buildAdapter === "direct") {
       instrumentDirectWorkspace(
         isolatedRoot,
         project.sourceRoots,
@@ -458,6 +497,13 @@ async function createCoverageRun(command: string[]): Promise<number> {
           },
         },
       );
+    }
+    if (
+      buildResult.status === 0 &&
+      project.buildAdapter === "vite" &&
+      !reusableBuild
+    ) {
+      writeInstrumentedBuildCache(isolatedRoot, buildCacheKey);
     }
     timings.instrumentedBuildMs = performance.now() - phaseStarted;
     if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
@@ -486,6 +532,16 @@ async function createCoverageRun(command: string[]): Promise<number> {
         atomicRenameSync(isolatedEvidenceDirectory, persistedEvidenceDirectory);
       try {
         rmSync(reportStagingDirectory, { recursive: true, force: true });
+        const rawEvidence = writeEvidenceArchive(
+          [
+            { directory: persistedEvidenceDirectory },
+            {
+              directory: resolve(serverEvidenceRoot, runId),
+              prefix: "server",
+            },
+          ],
+          resolve(reportStagingDirectory, "evidence.raw.gz"),
+        );
         writeMcdcReport(
           persistedEvidenceDirectory,
           runId,
@@ -510,7 +566,12 @@ async function createCoverageRun(command: string[]): Promise<number> {
               command,
               testExitCode: testResult.status,
               integrity: runIntegrity,
+              rawEvidence,
               isolatedBuild: true,
+              instrumentedBuildCache: {
+                key: buildCacheKey,
+                reused: Boolean(reusableBuild),
+              },
               timings: roundedTimings(timings),
             },
             null,
@@ -518,6 +579,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
           )}\n`,
         );
         atomicRenameSync(reportStagingDirectory, storedRunDirectory);
+        reportPublished = true;
       } catch (error) {
         timings.reportPreparationMs = performance.now() - phaseStarted;
         reportFailed = true;
@@ -527,6 +589,8 @@ async function createCoverageRun(command: string[]): Promise<number> {
 
     const resultCode = exitCode(buildResult) || exitCode(testResult) || (reportFailed ? 1 : 0);
     updateRunState(root, runId, { status: resultCode === 0 ? "complete" : "failed" });
+    if (reportPublished && !finalizePublishedRunStorage(root, runId))
+      throw new Error(`Published run ${runId} is missing a durable artifact`);
     console.error(
       `[supercov] timings ${formatTimings(timings, performance.now() - runStartedMonotonic)}`,
     );
@@ -580,9 +644,10 @@ const rawArgs =
     : commandArgs;
 const queryCommand = rawArgs[0];
 
-if (queryCommand === "clean") {
+if (queryCommand === "clean" || queryCommand === "prune") {
   try {
-    cleanCommand(rawArgs.slice(1));
+    if (queryCommand === "clean") cleanCommand(rawArgs.slice(1));
+    else pruneCommand(rawArgs.slice(1));
   } catch (error) {
     console.error(`[supercov] ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 2;

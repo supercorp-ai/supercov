@@ -40,6 +40,7 @@
     "test:fixture": "npm run build && npm --prefix tests/fixtures/generic-playwright run test:coverage && node scripts/opaque-runner-integration.mjs",
     "test:packed-npx": "node scripts/packed-npx-integration.mjs",
     "test:isolation": "npm run build && node scripts/isolation-integration.mjs",
+    "test:filesystem": "npm run build && vitest run tests/unit/atomic.test.ts tests/unit/evidenceArchive.test.ts tests/unit/workspace.test.ts && node scripts/workspace-crash-integration.mjs",
     "test:clang-mcdc": "node scripts/clang-mcdc-oracle.mjs",
     "test:test262": "npm run build && node scripts/test262-equivalence.mjs",
     "benchmark:check": "npm run build && node scripts/benchmark.mjs",

@@ -51,7 +51,9 @@ computed logical assignments, defaults, `try`/`catch`/`finally`, iterator
 closing, switch fallthrough, labeled loops, async functions, and generators.
 The compatibility workflow additionally runs Node 22/24/25, Playwright
 1.55/current, Vite 5/current, Vitest 2/current, Chromium, Firefox, WebKit, and
-modern JavaScript/JSX/TypeScript/TSX syntax fixtures. Test262's module, async,
+modern JavaScript/JSX/TypeScript/TSX syntax fixtures. Filesystem publication,
+symlink, copy fallback, ENOSPC, failed rename, and forced-termination recovery
+also run on Ubuntu, macOS, and Windows. Test262's module, async,
 raw, parse/resolution-negative, Annex B sloppy-script extension, and explicit
 `Function.prototype.toString`/function-source-coercion tests are intentionally
 excluded from the source-rewrite comparison, with reason counts printed for
@@ -66,11 +68,12 @@ blocks the trusted-publishing workflow.
 
 ## Agent query workflow
 
-Each run is stored locally as a compressed, immutable report under
-`.supercov/runs/<run-id>/`. Its `report.json.gz` and `run.json` keep the
-machine report and run metadata together. HTML is not generated during a test
-run; agents should use bounded CLI queries instead of loading the complete
-report into context.
+Each run is stored locally as three immutable files under
+`.supercov/runs/<run-id>/`: `report.json.gz`, `evidence.raw.gz`, and
+`run.json`. Raw per-worker evidence is packed into the single gzip artifact
+before publication; loose evidence is removed only after the whole directory
+is atomically visible. HTML is not generated during a test run; agents should
+use bounded CLI queries instead of loading the complete report into context.
 
 ```sh
 # Orient using only a few lines.
@@ -123,7 +126,9 @@ CLI:
    only there; file data uses copy-on-write reflinks where the filesystem
    supports them, and falls back to copying where it does not; the stable path
    lets VM/container snapshot systems reuse a coverage build without touching
-   the application's ordinary build;
+   the application's ordinary build; when the complete source/config/toolchain
+   fingerprint is unchanged, the prior instrumented output and manifest are
+   carried into the refreshed source snapshot and the build is skipped;
 2. inventories every `app/**/*.ts(x)` and `src/**/*.ts(x)` file for the
    denominator, then instruments modules loaded by Vite without changing the
    project's config; when no build script exists, it instruments only the
@@ -139,14 +144,15 @@ CLI:
    automatically wraps Playwright actions and assertions, and records the
    action/assertion phase responsible for each correlated hit; then merges
    server and browser evidence into one compressed JSON report; and
-6. atomically publishes the evidence/report into `.supercov/` and retains only
-   the disposable isolated build namespace as a provider snapshot cache. The
+6. atomically publishes the compressed evidence/report into `.supercov/`, then
+   removes loose evidence and terminal per-run work state, retaining only the
+   immutable run and disposable isolated build namespace. The
    ordinary application build is never read as an input, overwritten, or
    rebuilt afterward.
 
 Only `.supercov/` is modified in the user's checkout. A per-project lock
 rejects overlapping runs before either can build. Run state is durably written
-through preparing/building/testing/reporting/terminal phases; SIGINT, SIGTERM,
+through preparing/building/testing/reporting phases; SIGINT, SIGTERM,
 and SIGHUP are forwarded to the entire child process group. If the process is
 killed without a cleanup opportunity, the next invocation marks the dead PID's
 run abandoned and refreshes the isolated namespace before using it. Cache
@@ -154,20 +160,24 @@ refresh is transactional: a new sibling generation is prepared completely,
 the stable name is switched only at publication, and the prior complete
 generation is retained until that switch succeeds. The next invocation
 discards orphan staging trees or restores the prior generation if a host crash
-landed between the two same-filesystem renames. Report, evidence, and state
-writes use sibling-temp files, fsync, and atomic rename; lock acquisition uses
-exclusive creation and fsync.
+landed between the two same-filesystem renames. Report, evidence archive, and
+state writes use sibling-temp files, fsync, and atomic rename; lock acquisition
+uses exclusive creation and fsync. Published `run.json` is the durable terminal
+record, so terminal work state is not retained.
 
 Retention is deterministic because UTC run IDs sort chronologically:
 
 ```sh
-npx supercov clean --keep 20
-npx supercov clean --keep 20 --dry-run
+npx supercov prune --keep 20
+npx supercov prune --keep 20 --dry-run
+npx supercov clean --keep 20   # also removes the shared build cache
 ```
 
-The cleanup command acquires the same project lock as a coverage run, so it
-cannot race cache publication and refuses to run while coverage is active. It
-never touches files outside `.supercov/`.
+Neither operation runs automatically. `prune` removes explicit history beyond
+the requested retention and orphan/terminal transient data while preserving
+the shared cache. `clean` also removes that cache. Both acquire the same lock
+as a coverage run, refuse to race an active run, and never touch files outside
+`.supercov/`.
 
 The complete ownership, crash-recovery, symlink, and future copy-free design is
 documented in [Workspace isolation](docs/workspace-isolation.md).

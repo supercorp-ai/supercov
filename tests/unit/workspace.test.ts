@@ -1,4 +1,5 @@
 import {
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -23,6 +24,7 @@ import {
   isolatedWorkspacePath,
   prepareIsolatedWorkspace,
   prepareCachedWorkspace,
+  pruneCoverageStorage,
   recoverCachedWorkspace,
   recoverAbandonedRuns,
   removeIsolatedWorkspace,
@@ -97,6 +99,27 @@ describe("isolated run workspaces", () => {
         entry.startsWith(`.${basename(root)}.`),
       ),
     ).toEqual([]);
+  });
+
+  it("carries only explicitly selected build artifacts into a refreshed snapshot", () => {
+    const root = project();
+    const workspace = prepareCachedWorkspace(root);
+    mkdirSync(resolve(workspace, "build"));
+    mkdirSync(resolve(workspace, ".supercov"));
+    writeFileSync(resolve(workspace, "build/index.js"), "instrumented\n");
+    writeFileSync(resolve(workspace, ".supercov/manifest.json"), "manifest\n");
+    writeFileSync(resolve(workspace, "unselected.txt"), "stale\n");
+
+    prepareCachedWorkspace(root, {
+      reusePaths: ["build", ".supercov/manifest.json"],
+    });
+    expect(readFileSync(resolve(workspace, "build/index.js"), "utf8")).toBe(
+      "instrumented\n",
+    );
+    expect(
+      readFileSync(resolve(workspace, ".supercov/manifest.json"), "utf8"),
+    ).toBe("manifest\n");
+    expect(existsSync(resolve(workspace, "unselected.txt"))).toBe(false);
   });
 
   it("recovers every interrupted cache publication boundary", () => {
@@ -184,6 +207,89 @@ describe("isolated run workspaces", () => {
         entry.startsWith(`.${basename(root)}.`),
       ),
     ).toEqual([]);
+  });
+
+  it("restores the prior generation when the publication rename fails", () => {
+    const root = project();
+    const workspace = prepareCachedWorkspace(root);
+    writeFileSync(resolve(workspace, "generation.txt"), "old\n");
+    let renames = 0;
+    expect(() =>
+      prepareCachedWorkspace(root, {
+        rename(from, to) {
+          renames += 1;
+          if (renames === 2) {
+            const failure = new Error("rename failed") as NodeJS.ErrnoException;
+            failure.code = "EIO";
+            throw failure;
+          }
+          renameSync(from, to);
+        },
+      }),
+    ).toThrow(/rename failed/);
+    expect(readFileSync(resolve(workspace, "generation.txt"), "utf8")).toBe(
+      "old\n",
+    );
+    expect(recoverCachedWorkspace(root).removedPrevious).toBe(0);
+  });
+
+  it("falls back to an ordinary copy without changing publication semantics", () => {
+    const root = project();
+    let copied = 0;
+    const workspace = prepareCachedWorkspace(root, {
+      copyFile(from, to) {
+        copied += 1;
+        copyFileSync(from, to);
+      },
+    });
+    expect(copied).toBeGreaterThan(0);
+    expect(readFileSync(resolve(workspace, "src/index.ts"), "utf8")).toContain(
+      "value = 1",
+    );
+  });
+
+  it("preserves the previous generation after an ENOSPC copy failure", () => {
+    const root = project();
+    const workspace = prepareCachedWorkspace(root);
+    writeFileSync(resolve(workspace, "generation.txt"), "complete\n");
+    let copied = 0;
+    expect(() =>
+      prepareCachedWorkspace(root, {
+        copyFile(from, to) {
+          copied += 1;
+          if (copied === 2) {
+            const failure = new Error("disk full") as NodeJS.ErrnoException;
+            failure.code = "ENOSPC";
+            throw failure;
+          }
+          copyFileSync(from, to);
+        },
+      }),
+    ).toThrow(/disk full/);
+    expect(readFileSync(resolve(workspace, "generation.txt"), "utf8")).toBe(
+      "complete\n",
+    );
+    expect(
+      readdirSync(dirname(workspace)).filter((entry) =>
+        entry.startsWith(`.${basename(root)}.`),
+      ),
+    ).toEqual([]);
+  });
+
+  it("relocates an internal directory link into the isolated generation", () => {
+    const root = project();
+    symlinkSync(
+      resolve(root, "src"),
+      resolve(root, "linked-src"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const workspace = prepareCachedWorkspace(root);
+    expect(lstatSync(resolve(workspace, "linked-src")).isSymbolicLink()).toBe(
+      true,
+    );
+    expect(realpathSync(resolve(workspace, "linked-src"))).toBe(
+      realpathSync(resolve(workspace, "src")),
+    );
   });
 
   it("keeps internal symlinks isolated and rejects links outside the project", () => {
@@ -296,6 +402,11 @@ describe("isolated run workspaces", () => {
     const publishedRun = resolve(root, ".supercov/runs", runId, "run.json");
     mkdirSync(resolve(publishedRun, ".."), { recursive: true });
     writeFileSync(publishedRun, `${JSON.stringify({ id: runId })}\n`);
+    writeFileSync(resolve(publishedRun, "../report.json.gz"), "report");
+    writeFileSync(resolve(publishedRun, "../evidence.raw.gz"), "evidence");
+    const looseEvidence = resolve(root, ".supercov/evidence", runId, "hit.json");
+    mkdirSync(resolve(looseEvidence, ".."), { recursive: true });
+    writeFileSync(looseEvidence, "loose");
     writeRunState(root, runId, {
       id: runId,
       pid: 2_147_483_647,
@@ -308,10 +419,8 @@ describe("isolated run workspaces", () => {
     expect(recoverAbandonedRuns(root)).toEqual([runId]);
     expect(existsSync(workspace)).toBe(false);
     expect(existsSync(publishedRun)).toBe(true);
-    const state = JSON.parse(
-      readFileSync(resolve(root, ".supercov/work", runId, "state.json"), "utf8"),
-    ) as { status: string };
-    expect(state.status).toBe("complete");
+    expect(existsSync(looseEvidence)).toBe(false);
+    expect(existsSync(resolve(root, ".supercov/work", runId))).toBe(false);
   });
 
   it("retains the newest runs deterministically and supports dry runs", () => {
@@ -377,5 +486,40 @@ describe("isolated run workspaces", () => {
     const inactive = cleanCoverageStorage(root, { keep: 0, dryRun: false });
     expect(inactive.removedBuildCache).toBe(true);
     expect(existsSync(workspace)).toBe(false);
+  });
+
+  it("prunes explicit history and terminal work without removing the shared cache", () => {
+    const root = project();
+    const cache = prepareCachedWorkspace(root);
+    const ids = [
+      "2026-01-01T00-00-00-000Z",
+      "2026-01-02T00-00-00-000Z",
+    ];
+    for (const id of ids) {
+      mkdirSync(resolve(root, ".supercov/runs", id), { recursive: true });
+      writeFileSync(
+        resolve(root, ".supercov/runs", id, "run.json"),
+        `${JSON.stringify({ id })}\n`,
+      );
+      mkdirSync(resolve(root, ".supercov/evidence", id), { recursive: true });
+      writeFileSync(resolve(root, ".supercov/evidence", id, "hit.json"), "{}");
+      writeRunState(root, id, {
+        id,
+        pid: process.pid,
+        root,
+        workspace: cache,
+        startedAt: id,
+        status: "complete",
+      });
+    }
+
+    const result = pruneCoverageStorage(root, { keep: 1, dryRun: false });
+    expect(result.removedRuns).toEqual([ids[0]]);
+    expect(result.removedWorkspaces).toEqual(ids.slice().reverse());
+    expect(result.removedEvidence).toEqual([ids[0]]);
+    expect(result.removedBuildCache).toBe(false);
+    expect(existsSync(cache)).toBe(true);
+    expect(existsSync(resolve(root, ".supercov/runs", ids[1]!))).toBe(true);
+    expect(existsSync(resolve(root, ".supercov/evidence", ids[1]!))).toBe(true);
   });
 });

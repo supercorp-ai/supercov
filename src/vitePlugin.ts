@@ -20,6 +20,7 @@ export interface McdcVitePluginOptions {
   root?: string;
   sourceRoots?: string[];
   manifestPath?: string;
+  buildOutputMetadataPath?: string;
 }
 
 export function mcdcVitePlugin(options: McdcVitePluginOptions = {}): Plugin {
@@ -32,6 +33,9 @@ export function mcdcVitePlugin(options: McdcVitePluginOptions = {}): Plugin {
     ? resolve(root, options.manifestPath)
     : resolve(root, ".supercov/mcdc-manifest.json");
   const markerPath = resolve(dirname(manifestPath), ".mcdc-enabled");
+  const buildOutputMetadataPath = options.buildOutputMetadataPath
+    ? resolve(root, options.buildOutputMetadataPath)
+    : undefined;
   const decisions = new Map<string, McdcDecisionMeta>();
   const points = new Map<string, CoveragePointMeta>();
   const branches = new Map<string, CoverageBranchMeta>();
@@ -61,6 +65,37 @@ export function mcdcVitePlugin(options: McdcVitePluginOptions = {}): Plugin {
   return {
     name: "supercov-mcdc",
     enforce: "pre",
+    configResolved(config) {
+      if (!buildOutputMetadataPath) return;
+      const configured = config.build.rollupOptions.output;
+      const rollupOutputs = Array.isArray(configured)
+        ? configured
+        : configured
+          ? [configured]
+          : [];
+      const absoluteOutputs = [
+        config.build.outDir,
+        ...rollupOutputs.flatMap((output) => [output.dir, output.file]),
+      ].filter((value): value is string => Boolean(value));
+      const owned = absoluteOutputs.flatMap((output) => {
+        const local = relative(root, resolve(root, output));
+        return local && local !== ".." && !local.startsWith(`..${sep}`)
+          ? [local.split(sep).join("/")]
+          : [];
+      });
+      let previous: { paths?: string[] } = {};
+      try {
+        previous = JSON.parse(
+          readFileSync(buildOutputMetadataPath, "utf8"),
+        ) as { paths?: string[] };
+      } catch {
+        // This is the first Vite configuration in the build.
+      }
+      atomicWriteFileSync(
+        buildOutputMetadataPath,
+        `${JSON.stringify({ paths: [...new Set([...(previous.paths ?? []), ...owned])].sort() }, null, 2)}\n`,
+      );
+    },
     resolveId(id) {
       if (id === mcdcRuntimeModuleId) return runtimePath;
       return null;

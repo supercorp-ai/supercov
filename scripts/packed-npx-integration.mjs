@@ -83,6 +83,15 @@ try {
   const metadata = JSON.parse(
     readFileSync(resolve(runsRoot, runIds[0], "run.json"), "utf8"),
   );
+  const evidenceArchive = resolve(runsRoot, runIds[0], "evidence.raw.gz");
+  if (!existsSync(evidenceArchive))
+    throw new Error("packed npx run did not publish its raw evidence archive");
+  if (metadata.rawEvidence?.compressedBytes !== statSync(evidenceArchive).size)
+    throw new Error("raw evidence archive metadata does not match the artifact");
+  if (existsSync(resolve(project, ".supercov/evidence", runIds[0])))
+    throw new Error("packed npx run retained loose raw evidence after publication");
+  if (existsSync(resolve(project, ".supercov/work", runIds[0])))
+    throw new Error("packed npx run retained terminal per-run work state");
   for (const phase of [
     "initializationMs",
     "workspacePreparationMs",

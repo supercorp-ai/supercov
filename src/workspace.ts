@@ -202,7 +202,36 @@ export function updateRunState(
   return next;
 }
 
-/** Mark dead runs abandoned and remove only their isolated workspace copy. */
+/**
+ * A published run is self-contained only once its raw-evidence archive exists.
+ * At that point loose evidence and per-run state are transactional leftovers,
+ * not user history. Derive every deletion target from root + run ID.
+ */
+export function finalizePublishedRunStorage(
+  root: string,
+  runId: string,
+): boolean {
+  const runDirectory = resolve(root, ".supercov/runs", runId);
+  const publishedRun = readJson<{ id?: string }>(resolve(runDirectory, "run.json"));
+  if (
+    publishedRun?.id !== runId ||
+    !existsSync(resolve(runDirectory, "report.json.gz")) ||
+    !existsSync(resolve(runDirectory, "evidence.raw.gz"))
+  ) {
+    return false;
+  }
+  rmSync(resolve(root, ".supercov/evidence", runId), {
+    recursive: true,
+    force: true,
+  });
+  rmSync(resolve(root, ".supercov/work", runId), {
+    recursive: true,
+    force: true,
+  });
+  return true;
+}
+
+/** Recover dead runs and finish any publication whose atomic rename landed. */
 export function recoverAbandonedRuns(root: string): string[] {
   const workRoot = resolve(root, ".supercov/work");
   if (!existsSync(workRoot)) return [];
@@ -211,8 +240,12 @@ export function recoverAbandonedRuns(root: string): string[] {
     if (!entry.isDirectory()) continue;
     const path = statePath(root, entry.name);
     const state = readJson<RunState>(path);
-    if (!state || TERMINAL.has(state.status) || processExists(state.pid))
+    if (!state) continue;
+    if (TERMINAL.has(state.status)) {
+      finalizePublishedRunStorage(root, entry.name);
       continue;
+    }
+    if (processExists(state.pid)) continue;
     // Never trust a persisted path as a deletion target. A partially written
     // or manually edited state file cannot widen cleanup beyond this run's
     // deterministic workspace namespace.
@@ -224,14 +257,10 @@ export function recoverAbandonedRuns(root: string): string[] {
       recursive: true,
       force: true,
     });
-    const publishedRun = readJson<{ id?: string }>(
-      resolve(root, ".supercov/runs", entry.name, "run.json"),
-    );
-    if (publishedRun?.id === entry.name) {
+    if (finalizePublishedRunStorage(root, entry.name)) {
       // The report directory is published by one atomic rename before the run
-      // state flips terminal. A kill in that tiny window must recover the
-      // already complete run rather than discard or mislabel it.
-      updateRunState(root, entry.name, { status: "complete" });
+      // state flips terminal. Its run.json is the durable terminal record, so
+      // recovery completes cleanup without recreating disposable state.
     } else {
       // Evidence moved out of the disposable workspace before report
       // generation is not a visible run. Remove that orphan on recovery so a
@@ -313,6 +342,7 @@ function copyTree(
   root = false,
   sourceRoot = source,
   destinationRoot = destination,
+  hooks: CachePreparationHooks = {},
 ): void {
   mkdirSync(destination, { recursive: true });
   for (const entry of readdirSync(source, { withFileTypes: true })) {
@@ -321,7 +351,7 @@ function copyTree(
     const to = resolve(destination, entry.name);
     const stat = lstatSync(from);
     if (stat.isDirectory())
-      copyTree(from, to, false, sourceRoot, destinationRoot);
+      copyTree(from, to, false, sourceRoot, destinationRoot, hooks);
     else if (stat.isSymbolicLink()) {
       const link = readlinkSync(from);
       const lexicalTarget = isAbsolute(link)
@@ -341,23 +371,32 @@ function copyTree(
           `Refusing to preserve symlink outside the isolated project: ${relative(sourceRoot, from)} -> ${link}`,
         );
       }
-      const isolatedLink = isAbsolute(link)
+      const targetIsDirectory = statSync(from).isDirectory();
+      const relocatedAbsoluteTarget = resolve(
+        destinationRoot,
+        relative(sourceRoot, lexicalTarget),
+      );
+      const isolatedLink = process.platform === "win32" && targetIsDirectory
+        ? relocatedAbsoluteTarget
+        : isAbsolute(link)
         ? relative(
             dirname(to),
-            resolve(destinationRoot, relative(sourceRoot, lexicalTarget)),
+            relocatedAbsoluteTarget,
           )
         : link;
       symlinkSync(
         isolatedLink,
         to,
         process.platform === "win32"
-          ? statSync(from).isDirectory()
+          ? targetIsDirectory
             ? "junction"
             : "file"
           : undefined,
       );
-    } else if (stat.isFile())
-      copyFileSync(from, to, constants.COPYFILE_FICLONE);
+    } else if (stat.isFile()) {
+      if (hooks.copyFile) hooks.copyFile(from, to);
+      else copyFileSync(from, to, constants.COPYFILE_FICLONE);
+    }
     else
       throw new Error(
         `Unsupported filesystem entry in isolated project: ${relative(sourceRoot, from)}`,
@@ -405,6 +444,12 @@ interface CachePreparationHooks {
   afterPreviousMoved?: (previous: string) => void;
   /** Internal fault-injection seam used by the crash-boundary regression. */
   afterPublished?: (workspace: string) => void;
+  /** Internal fault-injection seam for copy fallback and ENOSPC tests. */
+  copyFile?: (source: string, destination: string) => void;
+  /** Exact-fingerprint build artifacts carried into the refreshed snapshot. */
+  reusePaths?: string[];
+  /** Internal seam for simulating platform rename failures. */
+  rename?: (source: string, destination: string) => void;
 }
 
 /** Refresh the stable, disposable instrumented-build namespace. */
@@ -418,7 +463,7 @@ export function prepareCachedWorkspace(
   const previous = cacheTransactionPath(root, "previous");
   let movedPrevious = false;
   try {
-    copyTree(root, staging, true);
+    copyTree(root, staging, true, root, staging, hooks);
     const nodeModules = resolve(root, "node_modules");
     if (existsSync(nodeModules)) {
       const isolatedNodeModules = resolve(staging, "node_modules");
@@ -435,17 +480,41 @@ export function prepareCachedWorkspace(
         );
       }
     }
+    for (const requested of hooks.reusePaths ?? []) {
+      const from = resolve(workspace, requested);
+      const to = resolve(staging, requested);
+      if (
+        !inside(workspace, from) ||
+        from === workspace ||
+        !inside(staging, to) ||
+        to === staging ||
+        !existsSync(from)
+      ) {
+        throw new Error(`Refusing to reuse unexpected build path: ${requested}`);
+      }
+      const stat = lstatSync(from);
+      if (stat.isDirectory())
+        copyTree(from, to, false, workspace, staging, hooks);
+      else if (stat.isFile()) {
+        mkdirSync(dirname(to), { recursive: true });
+        if (hooks.copyFile) hooks.copyFile(from, to);
+        else copyFileSync(from, to, constants.COPYFILE_FICLONE);
+      } else {
+        throw new Error(`Unsupported reusable build entry: ${requested}`);
+      }
+    }
     hooks.beforePublish?.(staging);
 
     // Keep the last complete cache available for the whole refresh. These two
     // same-filesystem renames are the only publication boundary. Recovery
     // restores `previous` if the process is killed in the narrow gap.
+    const publishRename = hooks.rename ?? atomicRenameSync;
     if (existsSync(workspace)) {
-      atomicRenameSync(workspace, previous);
+      publishRename(workspace, previous);
       movedPrevious = true;
       hooks.afterPreviousMoved?.(previous);
     }
-    atomicRenameSync(staging, workspace);
+    publishRename(staging, workspace);
     hooks.afterPublished?.(workspace);
   } catch (error) {
     if (movedPrevious && !existsSync(workspace) && existsSync(previous)) {
@@ -488,6 +557,7 @@ export interface CleanupOptions {
 export interface CleanupResult {
   removedRuns: string[];
   removedWorkspaces: string[];
+  removedEvidence: string[];
   removedBuildCache: boolean;
 }
 
@@ -495,11 +565,13 @@ export interface CleanupResult {
 function cleanCoverageStorageLocked(
   root: string,
   options: CleanupOptions,
+  removeBuildCache: boolean,
 ): CleanupResult {
   recoverAbandonedRuns(root);
-  const bases = ["runs", "work", "evidence"].map((name) =>
-    resolve(root, ".supercov", name),
-  );
+  const runsRoot = resolve(root, ".supercov/runs");
+  const workRoot = resolve(root, ".supercov/work");
+  const evidenceRoot = resolve(root, ".supercov/evidence");
+  const bases = [runsRoot, workRoot, evidenceRoot];
   const ids = new Set<string>();
   for (const base of bases) {
     if (!existsSync(base)) continue;
@@ -513,32 +585,48 @@ function cleanCoverageStorageLocked(
       return Boolean(state && !TERMINAL.has(state.status));
     }),
   );
+  const published = existsSync(runsRoot)
+    ? readdirSync(runsRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort((left, right) => right.localeCompare(left))
+    : [];
   const retained = new Set(
-    ordered.filter((id) => !active.has(id)).slice(0, Math.max(0, options.keep)),
+    published.filter((id) => !active.has(id)).slice(0, Math.max(0, options.keep)),
   );
   const removedRuns: string[] = [];
   const removedWorkspaces: string[] = [];
+  const removedEvidence: string[] = [];
   for (const id of ordered) {
     const work = resolve(root, ".supercov/work", id);
     const state = readJson<RunState>(resolve(work, "state.json"));
-    const workspace = isolatedWorkspacePath(root, id);
     if (active.has(id)) continue;
-    if (existsSync(workspace) && (!state || TERMINAL.has(state.status))) {
+    const hasPublishedRun = existsSync(resolve(runsRoot, id));
+    const removeHistory = hasPublishedRun && !retained.has(id);
+    const removeTransientWork =
+      existsSync(work) && (!state || TERMINAL.has(state.status));
+    if (removeTransientWork) {
       removedWorkspaces.push(id);
-      if (!options.dryRun) rmSync(workspace, { recursive: true, force: true });
+      if (!options.dryRun) rmSync(work, { recursive: true, force: true });
     }
-    if (retained.has(id)) continue;
-    removedRuns.push(id);
-    if (!options.dryRun) {
-      for (const base of bases)
-        rmSync(resolve(base, id), { recursive: true, force: true });
+    const hasLooseEvidence = existsSync(resolve(evidenceRoot, id));
+    if (hasLooseEvidence && (!hasPublishedRun || removeHistory)) {
+      removedEvidence.push(id);
+      if (!options.dryRun)
+        rmSync(resolve(evidenceRoot, id), { recursive: true, force: true });
+    }
+    if (removeHistory) {
+      removedRuns.push(id);
+      if (!options.dryRun)
+        rmSync(resolve(runsRoot, id), { recursive: true, force: true });
     }
   }
   const buildCache = resolve(root, ".supercov/cache/instrumented-workspace");
-  const removedBuildCache = active.size === 0 && existsSync(buildCache);
+  const removedBuildCache =
+    removeBuildCache && active.size === 0 && existsSync(buildCache);
   if (removedBuildCache && !options.dryRun)
     rmSync(buildCache, { recursive: true, force: true });
-  return { removedRuns, removedWorkspaces, removedBuildCache };
+  return { removedRuns, removedWorkspaces, removedEvidence, removedBuildCache };
 }
 
 /** Cleanup is itself a project-wide transaction, so it cannot race a run. */
@@ -551,7 +639,23 @@ export function cleanCoverageStorage(
     `clean-${process.pid}-${randomUUID()}`,
   );
   try {
-    return cleanCoverageStorageLocked(root, options);
+    return cleanCoverageStorageLocked(root, options, true);
+  } finally {
+    lock.release();
+  }
+}
+
+/** Explicit history retention that deliberately preserves the shared cache. */
+export function pruneCoverageStorage(
+  root: string,
+  options: CleanupOptions,
+): CleanupResult {
+  const lock = acquireProjectLock(
+    root,
+    `prune-${process.pid}-${randomUUID()}`,
+  );
+  try {
+    return cleanCoverageStorageLocked(root, options, false);
   } finally {
     lock.release();
   }

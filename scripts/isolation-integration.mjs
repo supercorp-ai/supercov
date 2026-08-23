@@ -244,8 +244,18 @@ if (existsSync(resolve("/tmp/supercov-server-evidence", publishedRuns[0])))
 const publishedFiles = new Set(
   readdirSync(resolve(storedRunsRoot, publishedRuns[0])),
 );
+const publishedMetadata = JSON.parse(
+  readFileSync(resolve(storedRunsRoot, publishedRuns[0], "run.json"), "utf8"),
+);
+if (publishedMetadata.instrumentedBuildCache?.reused !== true)
+  throw new Error("unchanged source did not reuse the exact-fingerprint build");
+if (publishedMetadata.timings?.instrumentedBuildMs > 10)
+  throw new Error(
+    `reused build still spent ${publishedMetadata.timings?.instrumentedBuildMs}ms in the build phase`,
+  );
 for (const required of [
   "report.json.gz",
+  "evidence.raw.gz",
   "run.json",
 ]) {
   if (!publishedFiles.has(required))
@@ -253,12 +263,10 @@ for (const required of [
 }
 if ([...publishedFiles].some((file) => file.endsWith(".html")))
   throw new Error("coverage run generated an HTML report without an explicit preview request");
-if (
-  existsSync(
-    resolve(root, ".supercov/work", publishedRuns[0], "report-publication"),
-  )
-)
-  throw new Error("report staging directory survived atomic publication");
+if (existsSync(resolve(root, ".supercov/work", publishedRuns[0])))
+  throw new Error("terminal per-run work state survived atomic publication");
+if (existsSync(resolve(root, ".supercov/evidence", publishedRuns[0])))
+  throw new Error("loose evidence survived atomic publication");
 const projectAfterSuccess = snapshot(root);
 if (JSON.stringify(projectAfterSuccess) !== JSON.stringify(projectBefore))
   throw new Error("a project file outside .supercov changed during a successful coverage run");
@@ -274,5 +282,5 @@ if (existsSync(expectedCache))
   throw new Error("supercov clean left the isolated build cache behind");
 
 console.log(
-  `[isolation] SIGKILL preserved the prior cache generation, the next run recovered its transaction, SIGTERM remained cooperative, clean removed all cache data, and no project file outside .supercov changed`,
+  `[isolation] SIGKILL preserved the prior cache generation, the next run recovered its transaction, unchanged source reused its instrumented build, SIGTERM remained cooperative, clean removed all cache data, and no project file outside .supercov changed`,
 );

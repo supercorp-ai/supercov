@@ -14,7 +14,7 @@ Every coverage run prints and stores monotonic durations for:
 | `initializationMs` | recovery, locking, project discovery, and integrity fingerprints |
 | `workspacePreparationMs` | transactional refresh of the isolated namespace |
 | `adapterSetupMs` | generated adapters, configs, manifests, and runtime files |
-| `instrumentedBuildMs` | the coverage-aware build or direct instrumentation pass |
+| `instrumentedBuildMs` | the coverage-aware build/direct pass, or near-zero when an exact-fingerprint build is reused |
 | `testCommandMs` | the user's unchanged command, including any runner or remote infrastructure latency |
 | `reportPreparationMs` | evidence collection, analysis, compressed JSON generation, and report staging |
 
@@ -69,13 +69,22 @@ Cold VM-image runs were 170.34 s without Supercov and 175.44 s with Supercov in
 the same session, but a single cold pair is too noisy for a general percentage.
 Both spent approximately 124 seconds preparing their VM image.
 
-Before automatic HTML generation was removed, the reference run retained 4.5
-MB of reports and 1.7 MB of raw evidence. Its canonical compressed JSON was 0.9
-MB, so the equivalent current-format run retains approximately 2.6 MB plus its
-shared 32 MB physical cache. These numbers are application- and
-filesystem-specific and exist to establish an optimization baseline. A
-post-change run confirmed 888 KiB of canonical report data, 1.7 MiB of raw
-evidence, no HTML artifacts, and 0.35 seconds of report preparation.
+Before automatic HTML generation and raw-evidence packing, the reference run
+retained 4.5 MB of reports and 1.7 MB across 178 loose evidence files. Its
+canonical compressed JSON was 0.9 MB. The same loose evidence packed to about
+121 KiB; current runs publish that one archive and remove the loose directory.
+These numbers are application- and filesystem-specific optimization baselines.
+An exact matching Vite build is also reused across runs, removing the measured
+4.87-second repeated build; any source/configuration/toolchain-key change falls
+back to a fresh isolated build.
+
+The post-change Essential SEO validation packed 178 evidence files into 118
+KiB and retained about 1.0 MiB for the complete run. After the one required
+cache-invalidating build, the next identical 29-test run recorded 0 ms for the
+build phase and 39.99 seconds total: 0.04 seconds initialization, 0.37 seconds
+workspace refresh, 0.06 seconds adapter setup, 39.08 seconds in the unchanged
+test command, and 0.38 seconds report/archive publication. Test execution is
+still the dominant and naturally variable part of that total.
 
 ## Isolation strategy trade-offs
 
