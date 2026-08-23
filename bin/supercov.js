@@ -13,6 +13,16 @@ const child = spawn(
   },
 );
 
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.once(signal, () => {
+    try {
+      child.kill(signal);
+    } catch {
+      // The child may already have completed.
+    }
+  });
+}
+
 child.on("error", (error) => {
   console.error("[supercov] failed to start", error);
   process.exitCode = 1;

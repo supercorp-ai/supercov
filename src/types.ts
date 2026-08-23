@@ -63,7 +63,7 @@ export interface CoverageManifest {
 
 export interface CoverageLimitation {
   id: string;
-  kind: "dynamic-code";
+  kind: "dynamic-code" | "semantic-safety";
   file: string;
   line: number;
   column: number;

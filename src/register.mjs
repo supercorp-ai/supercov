@@ -110,10 +110,13 @@ if (
     const normalizedRoot = projectRoot
       ?.replaceAll("\\", "/")
       .replace(/\/$/, "");
+    const generatedRoot = normalizedRoot
+      ? `${normalizedRoot}/.supercov/`
+      : undefined;
     const belongsToProject =
       Boolean(parentFile) &&
       !parentFile.includes("/node_modules/") &&
-      !parentFile.includes("/.supercov/") &&
+      (!generatedRoot || !parentFile.startsWith(generatedRoot)) &&
       (normalizedRoot
         ? parentFile.startsWith(`${normalizedRoot}/`)
         : parentFile.includes("/tests/"));

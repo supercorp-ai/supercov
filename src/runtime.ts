@@ -544,9 +544,27 @@ export function selectionBegin(
   return { shortId, rightId, rightEvaluated: false };
 }
 
-export function selectionRight<T>(frame: SelectionFrame, value: T): T {
-  frame.rightEvaluated = true;
+function applyInferredName<T>(value: T, inferredName?: string): T {
+  if (
+    inferredName &&
+    typeof value === "function" &&
+    value.name === ""
+  ) {
+    Object.defineProperty(value, "name", {
+      value: inferredName,
+      configurable: true,
+    });
+  }
   return value;
+}
+
+export function selectionRight<T>(
+  frame: SelectionFrame,
+  value: T,
+  inferredName?: string,
+): T {
+  frame.rightEvaluated = true;
+  return applyInferredName(value, inferredName);
 }
 
 export function selectionEnd<T>(frame: SelectionFrame, value: T): T {
@@ -563,9 +581,13 @@ export function optionalSelect<T>(
   return value;
 }
 
-export function defaultSelected<T>(defaultId: string, value: T): T {
+export function defaultSelected<T>(
+  defaultId: string,
+  value: T,
+  inferredName?: string,
+): T {
   pendingDefaults.set(defaultId, (pendingDefaults.get(defaultId) ?? 0) + 1);
-  return value;
+  return applyInferredName(value, inferredName);
 }
 
 export function defaultEntered(defaultId: string, providedId: string): void {

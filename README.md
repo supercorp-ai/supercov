@@ -18,24 +18,51 @@ npm link
 
 ## Verifying the instrumenter
 
-The coverage engine has three independent test layers:
+The coverage engine has seven independent release gates:
 
 - semantic differential fixtures execute original and instrumented programs
   in isolated scopes and compare return values, thrown errors, and observable
   side-effect order;
 - a deterministic generated corpus exercises 160 nested combinations of
   short-circuiting, ternaries, coercion, and thrown expressions on every run;
+- seeded `fast-check` properties exercise another 500 generated nested
+  expressions and 300 generated control-flow executions, with shrinking and a
+  reproducible seed on failure;
 - coverage oracles assert exact decision vectors, MC/DC witnesses, and branch
-  alternatives independently of program behavior.
+  alternatives independently of program behavior;
+- the same three-condition masking-MC/DC golden cases must report 100% for a
+  complete witness set and 33.33% for an incomplete one under both Supercov
+  and Clang/LLVM source-based MC/DC;
+- release CI shards the pinned TC39 Test262 corpus across 16 workers, runs the
+  official Test262 harness on original and instrumented sources, and rejects
+  any scenario that passes originally but fails after transformation; and
+- checked performance budgets cover transform latency, output expansion, and
+  runtime probe overhead.
 
 ```sh
 npm test
+npm run test:clang-mcdc
+npm run benchmark:check
+TEST262_DIR=/path/to/test262 npm run test:test262
 ```
 
 The differential suite includes getters, proxies, optional calls and `this`,
 computed logical assignments, defaults, `try`/`catch`/`finally`, iterator
 closing, switch fallthrough, labeled loops, async functions, and generators.
-Every generated failure prints its reproducible seed and expression.
+The compatibility workflow additionally runs Node 22/24/25, Playwright
+1.50/current, Vite 5/current, Vitest 2/current, Chromium, Firefox, WebKit, and
+modern JavaScript/JSX/TypeScript/TSX syntax fixtures. Test262's module, async,
+raw, parse/resolution-negative, Annex B sloppy-script extension, and explicit
+`Function.prototype.toString`/function-source-coercion tests are intentionally
+excluded from the source-rewrite comparison, with reason counts printed for
+every shard. Annex B does not apply to the Vite application modules Supercov
+instruments; exact source reflection necessarily observes a source transform.
+When application code directly coerces or observes a function's source,
+Supercov leaves that function body uninstrumented and records a visible
+`semantic-safety` completeness blocker. The release corpus covers every other eligible synchronous
+script and runtime-negative scenario, while dedicated differential fixtures
+cover async functions and generators. Every semantic-equivalence failure
+blocks the trusted-publishing workflow.
 
 ## Agent query workflow
 
@@ -89,8 +116,9 @@ stored schema.
 
 For a conventional Vite project, the CLI:
 
-1. creates ignored Vite, Vitest, and Playwright overlays under
-   `.supercov/`;
+1. takes a copy-on-write source snapshot under
+   `.supercov/work/<run-id>/<project>/`, links the existing dependency tree,
+   and creates all Vite, Vitest, Playwright, and build output only there;
 2. inventories every `app/**/*.ts(x)` and `src/**/*.ts(x)` file for the
    denominator, then
    instruments modules loaded by Vite without changing the project's config;
@@ -102,7 +130,28 @@ For a conventional Vite project, the CLI:
    automatically wraps Playwright actions and assertions, and records the
    action/assertion phase responsible for each correlated hit; then merges
    server and browser evidence into HTML and JSON reports; and
-6. restores an ordinary application build even after a failed test command.
+6. atomically publishes the evidence/report into `.supercov/` and removes the
+   disposable project snapshot. The ordinary application build is never read
+   as an input, overwritten, or rebuilt afterward.
+
+Only `.supercov/` is modified in the user's checkout. A per-project lock
+rejects overlapping runs before either can build. Run state is durably written
+through preparing/building/testing/reporting/terminal phases; SIGINT, SIGTERM,
+and SIGHUP are forwarded to the entire child process group, then the isolated
+workspace is removed. If the process is killed without a cleanup opportunity,
+the next invocation marks the dead PID's run abandoned and deletes only its
+disposable snapshot. Report, evidence, and state writes use sibling-temp files,
+fsync, and atomic rename; lock acquisition uses exclusive creation and fsync.
+
+Retention is deterministic because UTC run IDs sort chronologically:
+
+```sh
+npx supercov clean --keep 20
+npx supercov clean --keep 20 --dry-run
+```
+
+The cleanup command never removes an active workspace and never touches files
+outside `.supercov/`.
 
 The automatic adapters currently support standard Playwright suites (ESM and
 CommonJS specs in arbitrary project directories), Vitest, and the Essential

@@ -4,12 +4,12 @@ import {
   readFileSync,
   readdirSync,
   statSync,
-  writeFileSync,
 } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import type { FullConfig, Reporter } from "@playwright/test/reporter";
 import { createMcdcReport } from "./analyze.ts";
+import { atomicWriteFileSync } from "./atomic.ts";
 import { backgroundEvidenceDirectory } from "./transport.ts";
 import type {
   CoverageManifest,
@@ -332,6 +332,7 @@ export function writeMcdcReport(
   configuredManifestPath?: string,
   testExitCode?: number | null,
   integrity?: CoverageRunIntegrity,
+  publication?: { directory: string; displayDirectory?: string },
 ): McdcReport {
   const manifestPath = configuredManifestPath
     ? resolve(configuredManifestPath)
@@ -374,27 +375,25 @@ export function writeMcdcReport(
   if (testExitCode !== undefined) {
     report.execution = { testExitCode, valid: testExitCode === 0 };
   }
-  const storedRunDirectory = resolve(
-    process.cwd(),
-    ".supercov/runs",
-    runId,
-  );
+  const storedRunDirectory = publication?.directory
+    ? resolve(publication.directory)
+    : resolve(process.cwd(), ".supercov/runs", runId);
   mkdirSync(storedRunDirectory, { recursive: true });
   const htmlPath = resolve(storedRunDirectory, "report.html");
   const serializedReport = `${JSON.stringify(report, null, 2)}\n`;
-  writeFileSync(
+  atomicWriteFileSync(
     resolve(storedRunDirectory, "report.json.gz"),
     gzipSync(serializedReport, { level: 9 }),
   );
-  writeFileSync(
+  atomicWriteFileSync(
     htmlPath,
     renderHtml(report, "all", report.execution?.valid),
   );
-  writeFileSync(
+  atomicWriteFileSync(
     resolve(storedRunDirectory, "report-passed.html"),
     renderHtml(passed, "passed", report.execution?.valid),
   );
-  writeFileSync(
+  atomicWriteFileSync(
     resolve(storedRunDirectory, "report-failed.html"),
     renderHtml(failed, "failed", report.execution?.valid),
   );
@@ -411,7 +410,9 @@ export function writeMcdcReport(
   console.log(
     `[coverage] passed only: lines ${passed.summary.lines.percentage}%, branches ${passed.summary.branches.percentage}%, MC/DC ${passed.summary.conditionCoveragePct}%`,
   );
-  console.log(`[coverage] report: ${htmlPath}`);
+  console.log(
+    `[coverage] report: ${resolve(publication?.displayDirectory ?? storedRunDirectory, "report.html")}`,
+  );
   return report;
 }
 

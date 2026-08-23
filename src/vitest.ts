@@ -1,8 +1,9 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { afterEach, beforeEach } from "vitest";
 import { coverageSnapshot, resetCoverage } from "./runtime.ts";
 import { inferTestProvenance } from "./provenance.ts";
+import { atomicWriteFileSync } from "./atomic.ts";
 import type { McdcRawTestResult } from "./types.ts";
 
 const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
@@ -33,7 +34,7 @@ function writeEvidence(payload: McdcRawTestResult, suffix: string): void {
   if (!evidenceDirectory) return;
   const directory = resolve(process.cwd(), evidenceDirectory, suffix);
   mkdirSync(directory, { recursive: true });
-  writeFileSync(
+  atomicWriteFileSync(
     resolve(directory, "mcdc.json"),
     `${JSON.stringify(payload)}\n`,
   );

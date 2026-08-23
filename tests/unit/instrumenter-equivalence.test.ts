@@ -3,6 +3,33 @@ import { executeDifferential } from "./instrumenter-harness";
 
 const semanticCases: Array<{ name: string; source: string }> = [
   {
+    name: "runtime helper-like user bindings never collide with injected bindings",
+    source: `
+      const __supercovMcdcBegin = "user:mcdc";
+      const __supercovCoverageHit = "user:hit";
+      const __supercovLoopBegin = "user:loop";
+      const effects = [];
+      function run() {
+        effects.push(__supercovMcdcBegin, __supercovCoverageHit, __supercovLoopBegin);
+        if (effects.length === 3 && __supercovMcdcBegin) return effects.join("|");
+        return "wrong";
+      }
+      function observe() { return effects; }
+    `,
+  },
+  {
+    name: "primitive thrown values and their preceding effects remain identical",
+    source: `
+      const effects = [];
+      function run() {
+        effects.push("before-throw");
+        if (effects.length === 1 && true) throw "primitive failure";
+        return "unreachable";
+      }
+      function observe() { return effects; }
+    `,
+  },
+  {
     name: "short-circuiting preserves getter count and evaluation order",
     source: `
       const effects = [];
@@ -46,6 +73,41 @@ const semanticCases: Array<{ name: string; source: string }> = [
         const called = target.method?.(argument());
         const skippedCall = ({ method: undefined }).method?.(argument());
         return { skippedProperty, property, called, skippedCall };
+      }
+      function observe() { return effects; }
+    `,
+  },
+  {
+    name: "optional method calls preserve whole-chain short-circuit continuation",
+    source: `
+      const effects = [];
+      const absent = { method: undefined };
+      const present = {
+        value: 4,
+        method() {
+          effects.push(this === present ? "receiver" : "wrong-receiver");
+          return () => ({ value: this.value });
+        },
+      };
+      function run() {
+        const skipped = absent.method?.()().value;
+        const called = present.method?.()().value;
+        return { skipped, called };
+      }
+      function observe() { return effects; }
+    `,
+  },
+  {
+    name: "direct function source coercion remains behaviorally identical",
+    source: `
+      const effects = [];
+      function run() {
+        const left = {} + function () { effects.push("left"); return 1; };
+        const right = String(function () { effects.push("right"); return 1; });
+        return {
+          leftHasFunction: left.includes("function"),
+          rightHasFunction: right.includes("function"),
+        };
       }
       function observe() { return effects; }
     `,
@@ -296,4 +358,3 @@ describe("instrumenter semantic equivalence", () => {
     });
   }
 });
-

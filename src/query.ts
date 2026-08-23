@@ -504,6 +504,7 @@ function help(): void {
   supercov runs <run-id> coverage covers <source-file:line> [--kind e2e] [--json]
   supercov runs <run-id> coverage test <id|name-fragment> [--kind e2e] [--limit N] [--json]
   supercov diff <older-run> <newer-run> [--limit N] [--json]
+  supercov clean [--keep N] [--dry-run]
 
 Use "latest" as <run-id> to query the newest local run.
 

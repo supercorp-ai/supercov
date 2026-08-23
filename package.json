@@ -36,9 +36,14 @@
     "test": "vitest run tests/unit",
     "test:types": "tsc --noEmit",
     "test:fixture": "npm run build && npm --prefix tests/fixtures/generic-playwright run test:coverage",
+    "test:isolation": "npm run build && node scripts/isolation-integration.mjs",
+    "test:clang-mcdc": "node scripts/clang-mcdc-oracle.mjs",
+    "test:test262": "npm run build && node scripts/test262-equivalence.mjs",
+    "benchmark:check": "npm run build && node scripts/benchmark.mjs",
     "check": "npm run test && npm run test:types",
+    "release:check": "npm run check && npm run build && node scripts/isolation-integration.mjs && npm run test:clang-mcdc && node scripts/benchmark.mjs",
     "prepack": "npm run build",
-    "prepublishOnly": "npm run check"
+    "prepublishOnly": "npm run release:check"
   },
   "dependencies": {
     "@babel/generator": "^8.0.0",
@@ -62,8 +67,11 @@
   "devDependencies": {
     "@playwright/test": "1.62.1",
     "@types/node": "^24.0.0",
+    "fast-check": "^4.9.0",
+    "test262-harness": "^10.0.0",
     "typescript": "7.0.2",
     "vite": "8.2.2",
-    "vitest": "4.1.11"
+    "vitest": "4.1.11",
+    "yaml": "^2.9.0"
   }
 }

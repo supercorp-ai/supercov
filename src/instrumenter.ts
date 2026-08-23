@@ -98,6 +98,7 @@ function instrumentConditions(
   frameId: t.Identifier,
   nextIndex: { value: number },
   decisionLogicalNodes: WeakSet<t.LogicalExpression>,
+  conditionRuntimeName: string,
 ): t.Expression {
   if (
     t.isLogicalExpression(node) &&
@@ -105,12 +106,19 @@ function instrumentConditions(
   ) {
     const logical = t.logicalExpression(
       node.operator,
-      instrumentConditions(node.left, frameId, nextIndex, decisionLogicalNodes),
+      instrumentConditions(
+        node.left,
+        frameId,
+        nextIndex,
+        decisionLogicalNodes,
+        conditionRuntimeName,
+      ),
       instrumentConditions(
         node.right,
         frameId,
         nextIndex,
         decisionLogicalNodes,
+        conditionRuntimeName,
       ),
     );
     decisionLogicalNodes.add(logical);
@@ -128,6 +136,7 @@ function instrumentConditions(
         frameId,
         nextIndex,
         decisionLogicalNodes,
+        conditionRuntimeName,
       ),
       true,
     );
@@ -135,17 +144,52 @@ function instrumentConditions(
 
   const index = nextIndex.value;
   nextIndex.value += 1;
-  return t.callExpression(t.identifier(CONDITION), [
+  return t.callExpression(t.identifier(conditionRuntimeName), [
     t.cloneNode(frameId),
     t.numericLiteral(index),
-    t.cloneNode(node, true),
+    node,
   ]);
 }
 
-function hitStatement(id: string): t.ExpressionStatement {
+function hitStatement(
+  id: string,
+  hitRuntimeName: string,
+): t.ExpressionStatement {
   return t.expressionStatement(
-    t.callExpression(t.identifier(HIT), [t.stringLiteral(id)]),
+    t.callExpression(t.identifier(hitRuntimeName), [t.stringLiteral(id)]),
   );
+}
+
+function allocatedRuntimeNames(code: string): Record<string, string> {
+  const preferred = [
+    BEGIN,
+    CONDITION,
+    END,
+    HIT,
+    SELECTION_BEGIN,
+    SELECTION_RIGHT,
+    SELECTION_END,
+    WITH_REQUEST_PHASE,
+    OPTIONAL_SELECT,
+    DEFAULT_SELECTED,
+    DEFAULT_ENTERED,
+    TRY_BEGIN,
+    TRY_CATCH,
+    TRY_END,
+    LOOP_BEGIN,
+    LOOP_ENTERED,
+    LOOP_END,
+  ];
+  const names: Record<string, string> = {};
+  const used = new Set<string>();
+  for (const base of preferred) {
+    let candidate = base;
+    while (used.has(candidate) || code.includes(candidate))
+      candidate = `_${candidate}`;
+    names[base] = candidate;
+    used.add(candidate);
+  }
+  return names;
 }
 
 function functionLabel(path: NodePath<t.Function>): string | undefined {
@@ -178,6 +222,89 @@ function isExecutableStatement(node: t.Statement): boolean {
   return !("declare" in node && node.declare === true);
 }
 
+function isAnonymousFunctionDefinition(node: t.Expression): boolean {
+  return (
+    t.isArrowFunctionExpression(node) ||
+    (t.isFunctionExpression(node) && node.id === null) ||
+    (t.isClassExpression(node) && node.id === null)
+  );
+}
+
+function isSourceSensitiveFunction(path: NodePath<t.Function>): boolean {
+  let child: NodePath = path;
+  for (
+    let parent: NodePath | null = path.parentPath;
+    parent;
+    parent = parent.parentPath
+  ) {
+    const candidate = parent.node;
+    const value = child.node;
+    if (
+      (t.isParenthesizedExpression(candidate) ||
+        t.isTSAsExpression(candidate) ||
+        t.isTSTypeAssertion(candidate) ||
+        t.isTSNonNullExpression(candidate)) &&
+      candidate.expression === value
+    ) {
+      child = parent;
+      continue;
+    }
+    if (
+      (t.isConditionalExpression(candidate) &&
+        (candidate.consequent === value || candidate.alternate === value)) ||
+      (t.isLogicalExpression(candidate) &&
+        (candidate.left === value || candidate.right === value)) ||
+      (t.isSequenceExpression(candidate) &&
+        candidate.expressions.at(-1) === value) ||
+      (t.isAssignmentExpression(candidate) && candidate.right === value)
+    ) {
+      child = parent;
+      continue;
+    }
+    if (
+      ((t.isClassMethod(candidate) ||
+        t.isClassProperty(candidate) ||
+        t.isObjectMethod(candidate) ||
+        t.isObjectProperty(candidate)) &&
+        candidate.computed &&
+        candidate.key === value) ||
+      ((t.isMemberExpression(candidate) ||
+        t.isOptionalMemberExpression(candidate)) &&
+        candidate.computed &&
+        candidate.property === value)
+    )
+      return true;
+    if (
+      t.isCallExpression(candidate) &&
+      t.isIdentifier(candidate.callee, { name: "String" }) &&
+      candidate.arguments.includes(value as t.Expression)
+    )
+      return true;
+    if (
+      t.isBinaryExpression(candidate) &&
+      ["+", "<", "<=", ">", ">="].includes(candidate.operator) &&
+      (candidate.left === value || candidate.right === value)
+    )
+      return true;
+    if (
+      (t.isMemberExpression(candidate) ||
+        t.isOptionalMemberExpression(candidate)) &&
+      !candidate.computed &&
+      t.isIdentifier(candidate.property, { name: "toString" }) &&
+      candidate.object === value
+    )
+      return true;
+    // Any other operation consumes or stores the function value. Static
+    // ancestry can no longer prove that this exact function is coerced.
+    return false;
+  }
+  return false;
+}
+
+function isInsideWithStatement(path: NodePath): boolean {
+  return Boolean(path.findParent((parent) => parent.isWithStatement()));
+}
+
 export interface InstrumentMcdcResult {
   code: string;
   map: ReturnType<typeof generate>["map"];
@@ -189,9 +316,28 @@ export function instrumentMcdc(
   code: string,
   file: string,
 ): InstrumentMcdcResult {
+  const names = allocatedRuntimeNames(code);
+  const BEGIN = names["__supercovMcdcBegin"]!;
+  const CONDITION = names["__supercovMcdcCondition"]!;
+  const END = names["__supercovMcdcEnd"]!;
+  const HIT = names["__supercovCoverageHit"]!;
+  const SELECTION_BEGIN = names["__supercovSelectionBegin"]!;
+  const SELECTION_RIGHT = names["__supercovSelectionRight"]!;
+  const SELECTION_END = names["__supercovSelectionEnd"]!;
+  const WITH_REQUEST_PHASE = names["__supercovWithRequestPhase"]!;
+  const OPTIONAL_SELECT = names["__supercovOptionalSelect"]!;
+  const DEFAULT_SELECTED = names["__supercovDefaultSelected"]!;
+  const DEFAULT_ENTERED = names["__supercovDefaultEntered"]!;
+  const TRY_BEGIN = names["__supercovTryBegin"]!;
+  const TRY_CATCH = names["__supercovTryCatch"]!;
+  const TRY_END = names["__supercovTryEnd"]!;
+  const LOOP_BEGIN = names["__supercovLoopBegin"]!;
+  const LOOP_ENTERED = names["__supercovLoopEntered"]!;
+  const LOOP_END = names["__supercovLoopEnd"]!;
   const parserPlugins: ParserPlugin[] = [
     "typescript",
     "decorators-legacy",
+    "sourcePhaseImports",
     ...(file.endsWith("x") ? (["jsx"] as const) : []),
   ];
   const ast = parse(code, {
@@ -208,12 +354,60 @@ export function instrumentMcdc(
   const decisionLogicalNodes = new WeakSet<t.LogicalExpression>();
   let usesRequestPhaseHandler = false;
 
+  // Instrumentation necessarily changes a function's source text. When code
+  // directly observes or coerces that source, keep the entire function body
+  // untouched and report the resulting coverage boundary explicitly.
+  const sourceSensitiveFunctions = new WeakSet<t.Function>();
+  traverse(ast, {
+    Function(path) {
+      if (!isSourceSensitiveFunction(path)) return;
+      sourceSensitiveFunctions.add(path.node);
+      if (!path.node.loc) return;
+      limitations.push({
+        id: stableId(file, "semantic-safety", path.node, "function-source"),
+        kind: "semantic-safety",
+        file,
+        line: path.node.loc.start.line,
+        column: path.node.loc.start.column + 1,
+        source: sourceFor(code, path.node),
+        reason:
+          "function body is left uninstrumented because this expression observes or coerces Function source text",
+      });
+    },
+  });
+  const isWithinSourceSensitiveFunction = (path: NodePath): boolean =>
+    (path.isFunction() && sourceSensitiveFunctions.has(path.node)) ||
+    Boolean(
+      path.findParent(
+        (parent) =>
+          parent.isFunction() && sourceSensitiveFunctions.has(parent.node),
+      ),
+    );
+  traverse(ast, {
+    WithStatement(path) {
+      if (!path.node.loc) return;
+      limitations.push({
+        id: stableId(file, "semantic-safety", path.node, "with-environment"),
+        kind: "semantic-safety",
+        file,
+        line: path.node.loc.start.line,
+        column: path.node.loc.start.column + 1,
+        source: sourceFor(code, path.node),
+        reason:
+          "with-statement body is left uninstrumented because its object environment can intercept probe identifiers",
+      });
+    },
+  });
+  const isUnsafeInstrumentationContext = (path: NodePath): boolean =>
+    isWithinSourceSensitiveFunction(path) || isInsideWithStatement(path);
+
   // Record executable statements before adding any instrumentation statements.
   traverse(ast, {
     Statement(path) {
       const node = path.node;
       if (
         !node.loc ||
+        isUnsafeInstrumentationContext(path) ||
         generatedStatements.has(node) ||
         !isExecutableStatement(node)
       )
@@ -229,7 +423,7 @@ export function instrumentMcdc(
         column: node.loc.start.column + 1,
         source: sourceFor(code, node),
       });
-      const probe = hitStatement(id);
+      const probe = hitStatement(id, HIT);
       generatedStatements.add(probe);
 
       if (
@@ -288,6 +482,7 @@ export function instrumentMcdc(
 
   traverse(ast, {
     OptionalMemberExpression(path) {
+      if (isUnsafeInstrumentationContext(path)) return;
       if (!path.node.optional || !t.isExpression(path.node.object)) return;
       path.node.object = instrumentOptionalOperand(
         path as unknown as NodePath<t.Expression>,
@@ -295,63 +490,41 @@ export function instrumentMcdc(
       );
     },
     OptionalCallExpression(path) {
+      if (isUnsafeInstrumentationContext(path)) return;
       if (!path.node.optional || !t.isExpression(path.node.callee)) return;
       const callee = path.node.callee;
-      if (t.isMemberExpression(callee) || t.isOptionalMemberExpression(callee)) {
-        // Preserve the receiver of `object.method?.()` by evaluating the
-        // object and method once and calling through Function#call.
-        if (t.isSuper(callee.object) || !t.isExpression(callee.object)) {
-          if (path.node.loc) {
-            limitations.push({
-              id: stableId(file, "dynamic-code", path.node, "optional-super"),
-              kind: "dynamic-code",
-              file,
-              line: path.node.loc.start.line,
-              column: path.node.loc.start.column + 1,
-              source: sourceFor(code, path.node),
-              reason: "optional calls through super cannot be probed without changing receiver semantics",
-            });
-          }
-          return;
+      if (t.isOptionalMemberExpression(callee)) {
+        if (path.node.loc) {
+          limitations.push({
+            id: stableId(file, "semantic-safety", path.node, "optional-chain-call"),
+            kind: "semantic-safety",
+            file,
+            line: path.node.loc.start.line,
+            column: path.node.loc.start.column + 1,
+            source: sourceFor(code, path.node),
+            reason:
+              "optional calls whose receiver is itself an optional chain are left native to preserve chain short-circuiting and method receiver semantics",
+          });
         }
-        const objectId = path.scope.generateUidIdentifier("supercovOptionalObject");
-        const callableId = path.scope.generateUidIdentifier("supercovOptionalCallable");
-        const frameScope = path.scope.getFunctionParent() ?? path.scope.getProgramParent();
-        frameScope.push({ id: t.cloneNode(objectId), kind: "let" });
-        frameScope.push({ id: t.cloneNode(callableId), kind: "let" });
-        const objectAssignment = t.assignmentExpression(
-          "=",
-          t.cloneNode(objectId),
-          callee.object,
-        );
-        const member = t.memberExpression(
-          t.cloneNode(objectId),
-          t.cloneNode(callee.property),
-          callee.computed,
-        );
-        const callableAssignment = t.assignmentExpression(
-          "=",
-          t.cloneNode(callableId),
-          member,
-        );
-        const selected = instrumentOptionalOperand(
-          path as unknown as NodePath<t.Expression>,
-          t.cloneNode(callableId),
-        );
-        const call = t.optionalCallExpression(
-          t.optionalMemberExpression(
-            selected,
-            t.identifier("call"),
-            false,
-            true,
-          ),
-          [t.cloneNode(objectId), ...path.node.arguments.map((argument) => t.cloneNode(argument))],
-          false,
-        );
-        path.replaceWith(
-          t.sequenceExpression([objectAssignment, callableAssignment, call]),
-        );
-        path.skip();
+        return;
+      }
+      if (t.isMemberExpression(callee) || t.isOptionalMemberExpression(callee)) {
+        // Rewriting `object.method?.()` through `.call` preserves `this` for
+        // the immediate invocation but breaks the specification's optional
+        // chain continuation (`object.method?.()()`). Leave it native until a
+        // probe can preserve the chain's internal short-circuit target.
+        if (path.node.loc) {
+          limitations.push({
+            id: stableId(file, "semantic-safety", path.node, "optional-method-call"),
+            kind: "semantic-safety",
+            file,
+            line: path.node.loc.start.line,
+            column: path.node.loc.start.column + 1,
+            source: sourceFor(code, path.node),
+            reason:
+              "optional method calls are left native to preserve receiver and whole-chain short-circuit semantics",
+          });
+        }
         return;
       }
       path.node.callee = instrumentOptionalOperand(
@@ -366,6 +539,7 @@ export function instrumentMcdc(
   traverse(ast, {
     AssignmentExpression: {
       exit(path) {
+        if (isUnsafeInstrumentationContext(path)) return;
         const node = path.node;
         if (
           !node.loc ||
@@ -406,6 +580,11 @@ export function instrumentMcdc(
           t.callExpression(t.identifier(SELECTION_RIGHT), [
             t.cloneNode(frameId),
             node.right,
+            ...(t.isIdentifier(node.left) &&
+            !node.left.extra?.parenthesized &&
+            isAnonymousFunctionDefinition(node.right)
+              ? [t.stringLiteral(node.left.name)]
+              : []),
           ]),
         );
         path.replaceWith(
@@ -427,6 +606,7 @@ export function instrumentMcdc(
   // value without comparing values or evaluating either expression twice.
   traverse(ast, {
     Function(path) {
+      if (isUnsafeInstrumentationContext(path)) return;
       if (!t.isBlockStatement(path.node.body)) return;
       const entries: t.Statement[] = [];
       const visitPattern = (pattern: t.Node): void => {
@@ -454,6 +634,10 @@ export function instrumentMcdc(
           pattern.right = t.callExpression(t.identifier(DEFAULT_SELECTED), [
             t.stringLiteral(defaultId),
             pattern.right,
+            ...(t.isIdentifier(pattern.left) &&
+            isAnonymousFunctionDefinition(pattern.right)
+              ? [t.stringLiteral(pattern.left.name)]
+              : []),
           ]);
           entries.push(
             t.expressionStatement(
@@ -489,6 +673,7 @@ export function instrumentMcdc(
   // after JavaScript has completed the binding operation.
   traverse(ast, {
     VariableDeclaration(path) {
+      if (isUnsafeInstrumentationContext(path)) return;
       const parent = path.parentPath;
       if (parent.isForStatement() && path.key === "init") {
         let hasDefault = false;
@@ -532,6 +717,10 @@ export function instrumentMcdc(
           pattern.right = t.callExpression(t.identifier(DEFAULT_SELECTED), [
             t.stringLiteral(defaultId),
             pattern.right,
+            ...(t.isIdentifier(pattern.left) &&
+            isAnonymousFunctionDefinition(pattern.right)
+              ? [t.stringLiteral(pattern.left.name)]
+              : []),
           ]);
           entries.push(
             t.expressionStatement(
@@ -581,6 +770,7 @@ export function instrumentMcdc(
   // return, break, continue, rejection, and throw paths remain observable.
   traverse(ast, {
     TryStatement(path) {
+      if (isUnsafeInstrumentationContext(path)) return;
       const node = path.node;
       if (!node.loc || !node.handler) return;
       const id = stableId(file, "try-catch", node);
@@ -629,6 +819,7 @@ export function instrumentMcdc(
       path.skip();
     },
     "ForInStatement|ForOfStatement"(path: NodePath<t.ForInStatement | t.ForOfStatement>) {
+      if (isUnsafeInstrumentationContext(path)) return;
       const node = path.node;
       if (!node.loc) return;
       const kind = t.isForOfStatement(node) ? "for-of" : "for-in";
@@ -709,6 +900,7 @@ export function instrumentMcdc(
     Function(path) {
       const node = path.node;
       if (!node.loc || !node.body) return;
+      if (isUnsafeInstrumentationContext(path)) return;
       const id = stableId(file, "function", node);
       points.push({
         id,
@@ -719,7 +911,7 @@ export function instrumentMcdc(
         source: sourceFor(code, node),
         ...(functionLabel(path) ? { label: functionLabel(path) } : {}),
       });
-      const probe = hitStatement(id);
+      const probe = hitStatement(id, HIT);
       generatedStatements.add(probe);
       if (t.isBlockStatement(node.body)) {
         node.body.body.unshift(probe);
@@ -752,19 +944,28 @@ export function instrumentMcdc(
     };
     decisions.push(meta);
 
-    const frameId = path.scope.generateUidIdentifier("supercovMcdcFrame");
     // A loop predicate's path scope may be represented by Babel as the loop
     // body's block. Declaring the frame there puts it after the predicate that
     // uses it (and is especially visible in async generators). Hoist scratch
     // frames to the nearest function/program scope instead.
+    const evaluationScope =
+      (path.isFunctionExpression() ||
+        path.isArrowFunctionExpression() ||
+        path.isClassExpression()) &&
+      path.scope.parent
+        ? path.scope.parent
+        : path.scope;
     const frameScope =
-      path.scope.getFunctionParent() ?? path.scope.getProgramParent();
+      evaluationScope.getFunctionParent() ??
+      evaluationScope.getProgramParent();
+    const frameId = frameScope.generateUidIdentifier("supercovMcdcFrame");
     frameScope.push({ id: t.cloneNode(frameId), kind: "let" });
     const instrumented = instrumentConditions(
       path.node,
       frameId,
       { value: 0 },
       decisionLogicalNodes,
+      CONDITION,
     );
     const begin = t.callExpression(t.identifier(BEGIN), [
       t.stringLiteral(id),
@@ -785,18 +986,23 @@ export function instrumentMcdc(
 
   traverse(ast, {
     IfStatement(path) {
+      if (isUnsafeInstrumentationContext(path)) return;
       instrumentDecision(path.get("test"), "if");
     },
     ConditionalExpression(path) {
+      if (isUnsafeInstrumentationContext(path)) return;
       instrumentDecision(path.get("test"), "ternary");
     },
     WhileStatement(path) {
+      if (isUnsafeInstrumentationContext(path)) return;
       instrumentDecision(path.get("test"), "while");
     },
     DoWhileStatement(path) {
+      if (isUnsafeInstrumentationContext(path)) return;
       instrumentDecision(path.get("test"), "do-while");
     },
     ForStatement(path) {
+      if (isUnsafeInstrumentationContext(path)) return;
       const test = path.get("test");
       if (test.node) instrumentDecision(test as NodePath<t.Expression>, "for");
     },
@@ -808,6 +1014,7 @@ export function instrumentMcdc(
   traverse(ast, {
     LogicalExpression: {
       exit(path) {
+        if (isUnsafeInstrumentationContext(path)) return;
         const node = path.node;
         if (!node.loc || decisionLogicalNodes.has(node)) return;
         const id = stableId(file, "logical-value", node, node.operator);
@@ -858,6 +1065,7 @@ export function instrumentMcdc(
   // can legally fall through to the end and must not be counted as no-match.
   traverse(ast, {
     SwitchStatement(path) {
+      if (isUnsafeInstrumentationContext(path)) return;
       const node = path.node;
       if (!node.loc) return;
       const id = stableId(file, "switch", node);
@@ -872,7 +1080,7 @@ export function instrumentMcdc(
         const label = switchCase.test
           ? `case ${sourceFor(code, switchCase.test)}`
           : "default";
-        const probe = hitStatement(alternativeId);
+        const probe = hitStatement(alternativeId, HIT);
         generatedStatements.add(probe);
         switchCase.consequent.unshift(
           ...(enteredId
@@ -922,7 +1130,7 @@ export function instrumentMcdc(
         );
         replacementPath = replacementPath.parentPath;
       }
-      const noMatchProbe = hitStatement(noMatchId);
+      const noMatchProbe = hitStatement(noMatchId, HIT);
       generatedStatements.add(noMatchProbe);
       replacementPath.replaceWith(
         t.blockStatement([
@@ -949,6 +1157,7 @@ export function instrumentMcdc(
   // instead of silently claiming 100% for only the surrounding file.
   traverse(ast, {
     CallExpression(path) {
+      if (isUnsafeInstrumentationContext(path)) return;
       const callee = path.node.callee;
       if (!path.node.loc || !t.isIdentifier(callee, { name: "eval" })) return;
       limitations.push({
@@ -962,6 +1171,7 @@ export function instrumentMcdc(
       });
     },
     NewExpression(path) {
+      if (isUnsafeInstrumentationContext(path)) return;
       if (
         !path.node.loc ||
         !t.isIdentifier(path.node.callee, { name: "Function" })
@@ -1119,6 +1329,7 @@ export function instrumentMcdc(
   // let the runtime scan callback arguments for Fetch or Node request headers.
   traverse(ast, {
     CallExpression(path) {
+      if (isUnsafeInstrumentationContext(path)) return;
       const callee = path.node.callee;
       const property =
         (t.isMemberExpression(callee) || t.isOptionalMemberExpression(callee)) &&

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import childProcess from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import { syncBuiltinESMExports } from "node:module";
@@ -26,6 +26,7 @@ import type {
   McdcRawTestResult,
 } from "./types.ts";
 import { inferTestProvenance } from "./provenance.ts";
+import { atomicWriteFileSync } from "./atomic.ts";
 import {
   COVERAGE_PHASE_HEADER,
   COVERAGE_SCOPE_HEADER,
@@ -974,7 +975,7 @@ const instrumentedTest = base.extend<{ mcdcAutoCollect: void }>({
           server,
         };
         const serialized = `${JSON.stringify(payload)}\n`;
-        writeFileSync(outputPath, serialized);
+        atomicWriteFileSync(outputPath, serialized);
 
         // Pool runners may cycle-restore a VM immediately after Playwright
         // exits, which can discard or overwrite the normal artifact copy.
@@ -993,7 +994,7 @@ const instrumentedTest = base.extend<{ mcdcAutoCollect: void }>({
             `${safeTestId}-${testInfo.retry}`,
           );
           mkdirSync(testEvidenceDirectory, { recursive: true });
-          writeFileSync(
+          atomicWriteFileSync(
             resolve(testEvidenceDirectory, "mcdc.json"),
             serialized,
           );

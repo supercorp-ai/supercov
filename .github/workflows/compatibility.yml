@@ -1,0 +1,83 @@
+name: Compatibility
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24, 25]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+
+  runners:
+    name: ${{ matrix.name }} runners
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: minimum
+            playwright: 1.50.0
+            vite: 5.4.19
+            vitest: 2.1.9
+          - name: current
+            playwright: 1.62.1
+            vite: 8.2.2
+            vitest: 4.1.11
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Select runner versions
+        env:
+          PLAYWRIGHT_VERSION: ${{ matrix.playwright }}
+          VITE_VERSION: ${{ matrix.vite }}
+          VITEST_VERSION: ${{ matrix.vitest }}
+        run: npm install --no-save "@playwright/test@$PLAYWRIGHT_VERSION" "vite@$VITE_VERSION" "vitest@$VITEST_VERSION"
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: node ../../../bin/supercov.js -- npm test
+        working-directory: tests/fixtures/generic-playwright
+
+  browsers:
+    name: Playwright ${{ matrix.browser }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps ${{ matrix.browser }}
+      - run: npm run build
+      - run: node ../../../bin/supercov.js -- npm test
+        working-directory: tests/fixtures/generic-playwright
+        env:
+          SUPERCOV_BROWSER: ${{ matrix.browser }}

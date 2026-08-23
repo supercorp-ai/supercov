@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createMcdcReport } from "../../src/analyze";
 import type { CoverageBranchKind } from "../../src/types";
 import { executeDifferential } from "./instrumenter-harness";
+import clangGolden from "../fixtures/clang-mcdc/oracle.json";
 
 function alternatives(
   result: Awaited<ReturnType<typeof executeDifferential>>,
@@ -14,32 +15,30 @@ function alternatives(
 
 describe("instrumenter coverage oracles", () => {
   it("records the exact short-circuit vectors for a three-condition decision", async () => {
+    const calls = clangGolden.inputs
+      .map((values) => `decide(${values.join(", ")})`)
+      .join(",\n");
     const result = await executeDifferential(`
       const effects = [];
       function decide(a, b, c) {
-        if ((a && b) || c) return "yes";
+        if (${clangGolden.expression}) return "yes";
         return "no";
       }
       function run() {
         return [
-          decide(false, false, false),
-          decide(false, true, true),
-          decide(true, false, false),
-          decide(true, false, true),
-          decide(true, true, false),
+          ${calls}
         ];
       }
       function observe() { return effects; }
     `);
 
     expect(result.instrumented).toStrictEqual(result.original);
-    expect(result.evidence.vectors).toEqual([
-      { values: [false, null, false], outcome: false },
-      { values: [false, null, true], outcome: true },
-      { values: [true, false, false], outcome: false },
-      { values: [true, false, true], outcome: true },
-      { values: [true, true, null], outcome: true },
-    ]);
+    expect(result.evidence.vectors).toEqual(
+      clangGolden.observedVectors.map((values, index) => ({
+        values,
+        outcome: clangGolden.outcomes[index],
+      })),
+    );
 
     const decision = result.evidence.manifest.decisions[0]!;
     const report = createMcdcReport(result.evidence.manifest, [
@@ -64,10 +63,40 @@ describe("instrumenter coverage oracles", () => {
     ]);
     expect(report.summary).toMatchObject({
       decisions: 1,
-      conditions: 3,
-      coveredConditions: 3,
+      conditions: clangGolden.conditions,
+      coveredConditions: clangGolden.conditions,
       conditionCoveragePct: 100,
     });
+
+    for (const oracleCase of clangGolden.cases) {
+      const vectors = oracleCase.inputIndexes.map(
+        (index) => result.evidence.vectors[index]!,
+      );
+      const subsetReport = createMcdcReport(result.evidence.manifest, [
+        {
+          testId: oracleCase.name,
+          test: oracleCase.name,
+          status: "passed",
+          provenance: {
+            runner: "vitest",
+            kind: "unit",
+            source: "explicit",
+          },
+          runtime: [
+            {
+              decisions: [{ meta: decision, vectors }],
+              hits: result.evidence.hits,
+            },
+          ],
+          browser: [],
+          server: [],
+        },
+      ]);
+      expect(
+        subsetReport.summary.coveredConditions,
+        oracleCase.name,
+      ).toBe(oracleCase.coveredConditions);
+    }
   });
 
   it("records both alternatives for optional, default, assignment, try, and loops", async () => {
@@ -170,4 +199,3 @@ describe("instrumenter coverage oracles", () => {
     ).toBe(false);
   });
 });
-

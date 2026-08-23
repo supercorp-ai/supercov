@@ -12,10 +12,13 @@ const PROJECT_ROOT = process.env.SUPERCOV_PROJECT_ROOT;
 
 function belongsToProject(parentURL) {
   if (!parentURL || parentURL.includes("/node_modules/")) return false;
-  if (parentURL.includes("/.supercov/")) return false;
   if (!PROJECT_ROOT) return parentURL.includes("/tests/");
   const normalizedRoot = PROJECT_ROOT.replaceAll("\\", "/").replace(/\/$/, "");
-  return parentURL.startsWith(`file://${normalizedRoot}/`);
+  const projectURL = `file://${normalizedRoot}/`;
+  const generatedURL = `${projectURL}.supercov/`;
+  return (
+    parentURL.startsWith(projectURL) && !parentURL.startsWith(generatedURL)
+  );
 }
 
 export async function resolve(specifier, context, nextResolve) {

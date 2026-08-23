@@ -98,10 +98,10 @@ function normalized(value: unknown, seen = new WeakSet<object>()): unknown {
   };
 }
 
-function runtimeBindings(evidence: ProbeEvidence): {
-  names: string[];
-  values: unknown[];
-} {
+function runtimeBindings(
+  code: string,
+  evidence: ProbeEvidence,
+): { names: string[]; values: unknown[] } {
   const pendingDefaults = new Map<string, number>();
   const begin = (_id: string, meta: McdcDecisionMeta): DecisionFrame => ({
     values: Array.from({ length: meta.conditions.length }, () => null),
@@ -118,9 +118,21 @@ function runtimeBindings(evidence: ProbeEvidence): {
     shortId: string,
     rightId: string,
   ): SelectionFrame => ({ shortId, rightId, rightEvaluated: false });
-  const selectionRight = <T>(frame: SelectionFrame, value: T): T => {
-    frame.rightEvaluated = true;
+  const applyInferredName = <T>(value: T, inferredName?: string): T => {
+    if (inferredName && typeof value === "function" && value.name === "")
+      Object.defineProperty(value, "name", {
+        value: inferredName,
+        configurable: true,
+      });
     return value;
+  };
+  const selectionRight = <T>(
+    frame: SelectionFrame,
+    value: T,
+    inferredName?: string,
+  ): T => {
+    frame.rightEvaluated = true;
+    return applyInferredName(value, inferredName);
   };
   const selectionEnd = <T>(frame: SelectionFrame, value: T): T => {
     evidence.hits.push(frame.rightEvaluated ? frame.rightId : frame.shortId);
@@ -136,9 +148,13 @@ function runtimeBindings(evidence: ProbeEvidence): {
     );
     return value;
   };
-  const defaultSelected = <T>(id: string, value: T): T => {
+  const defaultSelected = <T>(
+    id: string,
+    value: T,
+    inferredName?: string,
+  ): T => {
     pendingDefaults.set(id, (pendingDefaults.get(id) ?? 0) + 1);
-    return value;
+    return applyInferredName(value, inferredName);
   };
   const defaultEntered = (defaultId: string, providedId: string): void => {
     const pending = pendingDefaults.get(defaultId) ?? 0;
@@ -168,26 +184,40 @@ function runtimeBindings(evidence: ProbeEvidence): {
   const loopEnd = (frame: LoopFrame): void => {
     evidence.hits.push(frame.entered ? frame.enteredId : frame.zeroId);
   };
-  const bindings = {
-    __supercovMcdcBegin: begin,
-    __supercovMcdcCondition: condition,
-    __supercovMcdcEnd: end,
-    __supercovCoverageHit: (id: string) => evidence.hits.push(id),
-    __supercovSelectionBegin: selectionBegin,
-    __supercovSelectionRight: selectionRight,
-    __supercovSelectionEnd: selectionEnd,
-    __supercovOptionalSelect: optionalSelect,
-    __supercovDefaultSelected: defaultSelected,
-    __supercovDefaultEntered: defaultEntered,
-    __supercovTryBegin: tryBegin,
-    __supercovTryCatch: tryCatch,
-    __supercovTryEnd: tryEnd,
-    __supercovLoopBegin: loopBegin,
-    __supercovLoopEntered: loopEntered,
-    __supercovLoopEnd: loopEnd,
-    __supercovWithRequestPhase: <T>(handler: T): T => handler,
+  const implementations: Record<string, unknown> = {
+    mcdcBegin: begin,
+    mcdcCondition: condition,
+    mcdcEnd: end,
+    coverageHit: (id: string) => evidence.hits.push(id),
+    selectionBegin,
+    selectionRight,
+    selectionEnd,
+    optionalSelect,
+    defaultSelected,
+    defaultEntered,
+    tryBegin,
+    tryCatch,
+    tryEnd,
+    loopBegin,
+    loopEntered,
+    loopEnd,
+    withRequestPhase: <T>(handler: T): T => handler,
   };
-  return { names: Object.keys(bindings), values: Object.values(bindings) };
+  const importMatch = code.match(
+    /^import\s*\{([\s\S]*?)\}\s*from\s*["']virtual:supercov-runtime["'];?/,
+  );
+  if (!importMatch) throw new Error("Instrumented code is missing its runtime import");
+  const bindings = [...importMatch[1]!.matchAll(/([\w$]+)\s+as\s+([\w$]+)/g)].map(
+    ([, imported, local]) => {
+      if (!(imported! in implementations))
+        throw new Error(`Unknown Supercov runtime import: ${imported}`);
+      return [local!, implementations[imported!]] as const;
+    },
+  );
+  return {
+    names: bindings.map(([name]) => name),
+    values: bindings.map(([, value]) => value),
+  };
 }
 
 function stripRuntimeImport(code: string): string {
@@ -205,7 +235,9 @@ function compile(
     vectors: [],
     hits: [],
   };
-  const bindings = runtimeBindings(evidence);
+  const bindings = instrumented
+    ? runtimeBindings(transformed.code, evidence)
+    : { names: [], values: [] };
   const executable = instrumented
     ? stripRuntimeImport(transformed.code)
     : source;
@@ -240,13 +272,16 @@ async function execute(
     };
   } catch (error) {
     const failure = error as { name?: unknown; message?: unknown; cause?: unknown };
+    const canHaveProperties =
+      (typeof failure === "object" && failure !== null) ||
+      typeof failure === "function";
     return {
       outcome: {
         status: "threw",
         error: {
           name: String(failure?.name ?? typeof error),
           message: String(failure?.message ?? error),
-          ...(failure && "cause" in failure
+          ...(canHaveProperties && "cause" in failure
             ? { cause: normalized(failure.cause) }
             : {}),
         },

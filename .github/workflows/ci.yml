@@ -19,5 +19,11 @@ jobs:
           node-version: "24"
           cache: npm
       - run: npm ci
-      - run: npm run check
-      - run: npm run build
+      - run: npm run release:check
+      - uses: actions/checkout@v6
+        with:
+          repository: tc39/test262
+          ref: 3655e7464de3d52643ecddd4b5f9f4f3e7f62398
+          path: .test262
+      - name: Test262 semantic-equivalence smoke gate
+        run: node scripts/test262-equivalence.mjs --test262 .test262 --limit 250 --minimum 200

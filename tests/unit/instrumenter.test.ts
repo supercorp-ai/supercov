@@ -222,6 +222,11 @@ describe("MC/DC instrumenter", () => {
       ),
     ).toBe(4);
     expect(optionalMethod.decide({ method: undefined }, undefined)).toBeUndefined();
+    expect(optionalMethod.manifest.limitations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "semantic-safety" }),
+      ]),
+    );
 
     const assignment = executeInstrumented(`
       function decide(left, right) {
@@ -261,6 +266,45 @@ describe("MC/DC instrumenter", () => {
         destructuringBranch!.alternatives.map((item) => item.id),
       ),
     );
+  });
+
+  it("makes source-reflection safety boundaries explicit", () => {
+    const transformed = instrumentMcdc(
+      `const rendered = String(function () { return 1; });`,
+      "app/source-reflection.ts",
+    );
+    expect(transformed.manifest.limitations).toEqual([
+      expect.objectContaining({
+        kind: "semantic-safety",
+        reason: expect.stringContaining("Function source text"),
+      }),
+    ]);
+    expect(transformed.code).toMatch(
+      /String\(function \(\) \{\s*return 1;\s*\}\)/,
+    );
+
+    const invoked = instrumentMcdc(
+      `const value = (function () { return 1; })() + 2;`,
+      "app/iife.ts",
+    );
+    expect(invoked.manifest.limitations ?? []).toHaveLength(0);
+    expect(
+      invoked.manifest.points.some((point) => point.kind === "function"),
+    ).toBe(true);
+
+    const dynamicEnvironment = instrumentMcdc(
+      `with (scope) { if (left && right) value = 1; }`,
+      "app/sloppy-script.js",
+    );
+    expect(dynamicEnvironment.manifest.limitations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "semantic-safety",
+          reason: expect.stringContaining("with-statement"),
+        }),
+      ]),
+    );
+    expect(dynamicEnvironment.manifest.decisions).toHaveLength(0);
   });
 
   it("measures try/catch, zero/entered enumeration, and switch no-match", () => {

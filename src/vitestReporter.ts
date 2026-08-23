@@ -1,8 +1,9 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Reporter } from "vitest/reporters";
 import { inferTestProvenance } from "./provenance.ts";
+import { atomicWriteFileSync } from "./atomic.ts";
 import type { McdcRawTestResult } from "./types.ts";
 
 interface ReportedTestCase {
@@ -64,7 +65,7 @@ export default class SupercovVitestReporter implements Reporter {
       `vitest-${safeId}-${retry}-status`,
     );
     mkdirSync(directory, { recursive: true });
-    writeFileSync(
+    atomicWriteFileSync(
       resolve(directory, "mcdc.json"),
       `${JSON.stringify(payload)}\n`,
     );

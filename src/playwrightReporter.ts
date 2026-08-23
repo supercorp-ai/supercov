@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import type {
   Reporter,
@@ -6,6 +6,7 @@ import type {
   TestResult,
 } from "@playwright/test/reporter";
 import { inferTestProvenance } from "./provenance.ts";
+import { atomicWriteFileSync } from "./atomic.ts";
 import type { McdcRawTestResult } from "./types.ts";
 
 const GENERATED_EVIDENCE_DIRECTORY =
@@ -47,7 +48,7 @@ export default class SupercovPlaywrightReporter implements Reporter {
       `playwright-${safeId}-${result.retry}-status`,
     );
     mkdirSync(directory, { recursive: true });
-    writeFileSync(
+    atomicWriteFileSync(
       resolve(directory, "mcdc.json"),
       `${JSON.stringify(payload)}\n`,
     );

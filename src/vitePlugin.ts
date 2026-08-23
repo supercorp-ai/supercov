@@ -3,12 +3,12 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
-  writeFileSync,
 } from "node:fs";
 import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plugin } from "vite";
 import { instrumentMcdc, mcdcRuntimeModuleId } from "./instrumenter.ts";
+import { atomicWriteFileSync } from "./atomic.ts";
 import type {
   CoverageBranchMeta,
   CoverageLimitation,
@@ -114,8 +114,11 @@ export function mcdcVitePlugin(options: McdcVitePluginOptions = {}): Plugin {
         branches: sortByLocation([...branches.values()]),
         limitations: sortByLocation([...limitations.values()]),
       };
-      writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-      writeFileSync(markerPath, "coverage-completeness-v2\n");
+      atomicWriteFileSync(
+        manifestPath,
+        `${JSON.stringify(manifest, null, 2)}\n`,
+      );
+      atomicWriteFileSync(markerPath, "coverage-completeness-v2\n");
     },
   };
 }

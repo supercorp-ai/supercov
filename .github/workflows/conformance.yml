@@ -1,0 +1,32 @@
+name: Full Test262 Conformance
+
+on:
+  schedule:
+    - cron: "41 2 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test262:
+    name: Test262 ${{ matrix.shard }}/16
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: tc39/test262
+          ref: 3655e7464de3d52643ecddd4b5f9f4f3e7f62398
+          path: .test262
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/test262-equivalence.mjs --test262 .test262 --shard ${{ matrix.shard }}/16 --minimum 1000

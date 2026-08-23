@@ -1,5 +1,10 @@
 import { defineConfig } from "@playwright/test";
 
+const browserName = (process.env["SUPERCOV_BROWSER"] ?? "chromium") as
+  | "chromium"
+  | "firefox"
+  | "webkit";
+
 export default defineConfig({
   testDir: ".",
   testMatch: ["tests/e2e/**/*.spec.ts", "specs/**/*.spec.cjs"],
@@ -10,6 +15,7 @@ export default defineConfig({
   reporter: "list",
   use: {
     baseURL: "http://127.0.0.1:4397",
+    browserName,
     launchOptions: {
       executablePath: process.env["SUPERCOV_CHROME"] || undefined,
     },
