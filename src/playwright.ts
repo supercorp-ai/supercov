@@ -29,6 +29,8 @@ import { inferTestProvenance } from "./provenance.ts";
 import { atomicWriteFileSync } from "./atomic.ts";
 import {
   COVERAGE_PHASE_HEADER,
+  COVERAGE_PHASE_COOKIE,
+  COVERAGE_SCOPE_COOKIE,
   COVERAGE_SCOPE_HEADER,
   COVERAGE_CARRIER_ENV,
   encodeCoverageCarrier,
@@ -106,8 +108,7 @@ function isApiRequestContext(value: object): value is APIRequestContext {
   return (
     typeof candidate["fetch"] === "function" &&
     typeof candidate["get"] === "function" &&
-    typeof candidate["post"] === "function" &&
-    typeof candidate["storageState"] === "function"
+    typeof candidate["post"] === "function"
   );
 }
 
@@ -181,13 +182,14 @@ class CoveragePhaseController {
     this.contexts.add(context);
     this.contextConfiguredHeaders.set(context, configuredHeaders);
     await context.addInitScript(
-      ({ attemptId, scopeHeader, scopeValue }) => {
+      ({ attemptId, scopeHeader, scopeValue, scopeCookie }) => {
         (
           globalThis as typeof globalThis & {
             __SUPERCOV_MCDC_TEST_ID__?: string;
           }
         ).__SUPERCOV_MCDC_TEST_ID__ = attemptId;
         try {
+          document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=Lax`;
           const originalFetch = globalThis.fetch?.bind(globalThis);
           if (originalFetch) {
             globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
@@ -213,6 +215,7 @@ class CoveragePhaseController {
         attemptId: this.scope.attemptId,
         scopeHeader: COVERAGE_SCOPE_HEADER,
         scopeValue: encodeCoverageScope(this.scope),
+        scopeCookie: COVERAGE_SCOPE_COOKIE,
       },
     );
     const attachPhase = async (route: Route): Promise<void> => {
@@ -487,7 +490,7 @@ class CoveragePhaseController {
       [...this.pages].flatMap((page) => page.frames()).map((frame) =>
         frame
           .evaluate(
-            ({ id, storageKey }) => {
+            ({ id, storageKey, scopeCookie, scopeValue, phaseCookie }) => {
               (
                 globalThis as typeof globalThis & {
                   __SUPERCOV_PHASE_ID__?: string;
@@ -495,11 +498,19 @@ class CoveragePhaseController {
               ).__SUPERCOV_PHASE_ID__ = id;
               try {
                 localStorage.setItem(storageKey, id);
+                document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=Lax`;
+                document.cookie = `${phaseCookie}=${encodeURIComponent(id)}; Path=/; SameSite=Lax`;
               } catch {
                 // Sandboxed/cross-origin frames may not expose localStorage.
               }
             },
-            { id: phaseId, storageKey: PHASE_STORAGE_KEY },
+            {
+              id: phaseId,
+              storageKey: PHASE_STORAGE_KEY,
+              scopeCookie: COVERAGE_SCOPE_COOKIE,
+              scopeValue: encodeCoverageScope(this.scope),
+              phaseCookie: COVERAGE_PHASE_COOKIE,
+            },
           )
           .catch(() => undefined),
       ),

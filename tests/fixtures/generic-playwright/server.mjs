@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
-import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
+import { WebSocketServer } from "ws";
 
 const root = resolve("dist");
 const port = 4397;
@@ -10,10 +10,11 @@ const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/cs
 const server = createServer(async (request, response) => {
   const pathname = new URL(request.url ?? "/", `http://localhost:${port}`).pathname;
   if (pathname === "/coverage-headers") {
+    const cookie = cookies(request);
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({
-      scope: request.headers["x-supercov-scope"] ?? null,
-      phase: request.headers["x-supercov-phase"] ?? null,
+      scope: request.headers["x-supercov-scope"] ?? cookie.__supercov_scope ?? null,
+      phase: request.headers["x-supercov-phase"] ?? cookie.__supercov_phase ?? null,
     }));
     return;
   }
@@ -28,27 +29,37 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.on("upgrade", (request, socket) => {
-  const key = request.headers["sec-websocket-key"];
-  if (typeof key !== "string") return socket.destroy();
-  const accept = createHash("sha1")
-    .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
-    .digest("base64");
-  socket.write(
-    `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
+function cookies(request) {
+  return Object.fromEntries(
+    String(request.headers.cookie ?? "")
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const separator = part.indexOf("=");
+        const name = separator < 0 ? part : part.slice(0, separator);
+        const value = separator < 0 ? "" : part.slice(separator + 1);
+        try {
+          return [name, decodeURIComponent(value)];
+        } catch {
+          return [name, value];
+        }
+      }),
   );
-  const payload = Buffer.from(
-    JSON.stringify({
-      scope: request.headers["x-supercov-scope"] ?? null,
-      phase: request.headers["x-supercov-phase"] ?? null,
-    }),
-  );
-  const frameHeader =
-    payload.length < 126
-      ? Buffer.from([0x81, payload.length])
-      : Buffer.from([0x81, 126, payload.length >> 8, payload.length & 0xff]);
-  socket.write(Buffer.concat([frameHeader, payload]));
-  socket.end();
+}
+
+const webSockets = new WebSocketServer({ noServer: true });
+server.on("upgrade", (request, socket, head) => {
+  webSockets.handleUpgrade(request, socket, head, (webSocket) => {
+    webSockets.emit("connection", webSocket, request);
+  });
+});
+webSockets.on("connection", (webSocket, request) => {
+  const cookie = cookies(request);
+  webSocket.send(JSON.stringify({
+    scope: request.headers["x-supercov-scope"] ?? cookie.__supercov_scope ?? null,
+    phase: request.headers["x-supercov-phase"] ?? cookie.__supercov_phase ?? null,
+  }));
 });
 
 server.listen(port);

@@ -50,7 +50,7 @@ The differential suite includes getters, proxies, optional calls and `this`,
 computed logical assignments, defaults, `try`/`catch`/`finally`, iterator
 closing, switch fallthrough, labeled loops, async functions, and generators.
 The compatibility workflow additionally runs Node 22/24/25, Playwright
-1.50/current, Vite 5/current, Vitest 2/current, Chromium, Firefox, WebKit, and
+1.55/current, Vite 5/current, Vitest 2/current, Chromium, Firefox, WebKit, and
 modern JavaScript/JSX/TypeScript/TSX syntax fixtures. Test262's module, async,
 raw, parse/resolution-negative, Annex B sloppy-script extension, and explicit
 `Function.prototype.toString`/function-source-coercion tests are intentionally

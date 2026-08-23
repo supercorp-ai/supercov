@@ -13,6 +13,8 @@ import {
   backgroundEvidencePath,
   COVERAGE_CARRIER_ENV,
   COVERAGE_PHASE_HEADER,
+  COVERAGE_PHASE_COOKIE,
+  COVERAGE_SCOPE_COOKIE,
   COVERAGE_SCOPE_HEADER,
   decodeCoverageCarrier,
   decodeCoverageScope,
@@ -451,8 +453,25 @@ function requestHeaders(
 function requestCoverageContext(value: unknown): CoverageRequestContext {
   const headers = requestHeaders(value);
   if (!headers) return {};
-  const encodedScope = headers.get(COVERAGE_SCOPE_HEADER);
-  const rawPhaseId = headers.get(COVERAGE_PHASE_HEADER);
+  const rawCookie = headers.get("cookie");
+  const cookies = new Map<string, string>();
+  if (typeof rawCookie === "string") {
+    for (const part of rawCookie.split(";")) {
+      const separator = part.indexOf("=");
+      if (separator < 0) continue;
+      const name = part.slice(0, separator).trim();
+      const encoded = part.slice(separator + 1).trim();
+      try {
+        cookies.set(name, decodeURIComponent(encoded));
+      } catch {
+        // Ignore a malformed unrelated cookie.
+      }
+    }
+  }
+  const encodedScope =
+    headers.get(COVERAGE_SCOPE_HEADER) ?? cookies.get(COVERAGE_SCOPE_COOKIE);
+  const rawPhaseId =
+    headers.get(COVERAGE_PHASE_HEADER) ?? cookies.get(COVERAGE_PHASE_COOKIE);
   const scope = decodeCoverageScope(
     typeof encodedScope === "string" ? encodedScope : undefined,
   );

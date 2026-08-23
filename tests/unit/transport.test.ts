@@ -9,6 +9,8 @@ import {
 } from "../../src/runtime";
 import {
   COVERAGE_PHASE_HEADER,
+  COVERAGE_PHASE_COOKIE,
+  COVERAGE_SCOPE_COOKIE,
   COVERAGE_SCOPE_HEADER,
   decodeCoverageScope,
   encodeCoverageScope,
@@ -137,6 +139,42 @@ describe("concurrent server evidence transport", () => {
       ).toMatchObject({ id: "hit-test-b" });
     } finally {
       rmSync(serverRunEvidenceDirectory(runId), {
+        recursive: true,
+        force: true,
+      });
+    }
+  });
+
+  it("recovers WebSocket request context from browser cookies", async () => {
+    const execution = scope(
+      `websocket-${process.pid}-${Date.now()}`,
+      "worker-1",
+      "websocket-test",
+      0,
+    );
+    const phase = "phase-websocket";
+    const handler = withRequestPhase(async (request: { headers: Headers }) => {
+      await Promise.resolve();
+      coverageHit("websocket-hit");
+      return request;
+    });
+
+    try {
+      await handler({
+        headers: new Headers({
+          cookie: `${COVERAGE_SCOPE_COOKIE}=${encodeURIComponent(encodeCoverageScope(execution))}; ${COVERAGE_PHASE_COOKIE}=${encodeURIComponent(phase)}`,
+        }),
+      });
+      expect(records(execution)).toMatchObject([
+        {
+          type: "hit",
+          id: "websocket-hit",
+          phaseId: phase,
+          scope: { attemptId: execution.attemptId },
+        },
+      ]);
+    } finally {
+      rmSync(serverRunEvidenceDirectory(execution.runId), {
         recursive: true,
         force: true,
       });

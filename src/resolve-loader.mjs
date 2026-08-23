@@ -9,9 +9,18 @@ const REPLACEMENT =
   process.env.SUPERCOV_PLAYWRIGHT_WRAPPER ??
   "./.supercov/playwright.js";
 const PROJECT_ROOT = process.env.SUPERCOV_PROJECT_ROOT;
+const ORIGINAL_CONFIG = process.env.SUPERCOV_ORIGINAL_PLAYWRIGHT_CONFIG;
 
 function belongsToProject(parentURL) {
   if (!parentURL || parentURL.includes("/node_modules/")) return false;
+  // Never redirect the original config while Playwright is synchronously
+  // loading it. Test modules still need the ESM redirect because Playwright's
+  // transform path does not consistently pass through Module._load.
+  if (
+    ORIGINAL_CONFIG &&
+    parentURL === pathToFileURL(resolvePath(ORIGINAL_CONFIG)).href
+  )
+    return false;
   if (!PROJECT_ROOT) return parentURL.includes("/tests/");
   const normalizedRoot = PROJECT_ROOT.replaceAll("\\", "/").replace(/\/$/, "");
   const projectURL = `file://${normalizedRoot}/`;

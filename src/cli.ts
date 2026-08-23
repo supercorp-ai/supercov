@@ -249,9 +249,11 @@ async function createCoverageRun(command: string[]): Promise<number> {
     );
 
     if (isolatedPlaywrightConfig) {
-      const configImport = project.essentialOffline
-        ? `../${relative(isolatedRoot, isolatedPlaywrightConfig).split(sep).join("/")}`
-        : pathToFileURL(isolatedPlaywrightConfig).href;
+      // Keep this import inside Playwright's own transform graph. In older
+      // supported releases, a native ESM file-URL import of a TypeScript
+      // config enters the synchronous transform bridge recursively and can
+      // deadlock in Atomics.wait before test discovery starts.
+      const configImport = `../${relative(isolatedRoot, isolatedPlaywrightConfig).split(sep).join("/")}`;
       atomicWriteFileSync(
         generatedPlaywrightConfig,
         [
@@ -361,6 +363,9 @@ async function createCoverageRun(command: string[]): Promise<number> {
       SUPERCOV_PROJECT_ROOT: isolatedRoot,
       SUPERCOV_GENERATED_VITEST_CONFIG: generatedVitestConfig,
       SUPERCOV_GENERATED_PLAYWRIGHT_CONFIG: generatedPlaywrightConfig,
+      ...(isolatedPlaywrightConfig
+        ? { SUPERCOV_ORIGINAL_PLAYWRIGHT_CONFIG: isolatedPlaywrightConfig }
+        : {}),
       ...(essentialLinuxModulesCache
         ? { TEST_LINUX_NODE_MODULES: essentialLinuxModulesCache }
         : {}),
@@ -400,7 +405,10 @@ async function createCoverageRun(command: string[]): Promise<number> {
           ...(!project.essentialOffline ? { SUPERCOV_CJS_INTERCEPT: "1" } : {}),
           ...(project.essentialOffline
             ? {
-                TEST_PLAYWRIGHT_CONFIG: ".supercov/playwright.config.mjs",
+                TEST_PLAYWRIGHT_CONFIG: relative(
+                  isolatedRoot,
+                  generatedPlaywrightConfig,
+                ),
                 TEST_OFFLINE_LOCAL_OVERLAY: "true",
                 TEST_OFFLINE_LOCAL_OVERLAY_PKGS: "runner",
               }

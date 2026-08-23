@@ -1,8 +1,6 @@
 import Module, { register } from "node:module";
 import { resolve } from "node:path";
 
-register(new URL("./resolve-loader.mjs", import.meta.url));
-
 // NODE_OPTIONS reaches commands launched through npm scripts. When that child
 // is Vitest, replace its config with our generated merging config before the
 // CLI parses argv. This is what makes `supercov -- npm test` work
@@ -13,6 +11,13 @@ const generatedPlaywrightConfig =
   process.env.SUPERCOV_GENERATED_PLAYWRIGHT_CONFIG;
 const entrypoint = process.argv[1]?.replaceAll("\\", "/") ?? "";
 const playwrightTarget = process.env.SUPERCOV_PLAYWRIGHT_MODULE;
+const isPlaywrightEntrypoint =
+  /\/(?:node_modules\/\.bin\/playwright|node_modules\/(?:@playwright\/test|playwright)\/(?:cli\.js|.*\/program\.js))$/.test(
+    entrypoint,
+  );
+if (generatedPlaywrightConfig && isPlaywrightEntrypoint)
+  process.env.SUPERCOV_INSIDE_PLAYWRIGHT = "1";
+register(new URL("./resolve-loader.mjs", import.meta.url));
 
 if (process.env.SUPERCOV_DEBUG === "1") {
   console.error("[supercov] preload", { entrypoint });
@@ -78,9 +83,7 @@ if (generatedVitestConfig && /\/vitest(?:\.m?js)?$/.test(entrypoint)) {
 
 if (
   generatedPlaywrightConfig &&
-  /\/(?:node_modules\/\.bin\/playwright|node_modules\/(?:@playwright\/test|playwright)\/(?:cli\.js|.*\/program\.js))$/.test(
-    entrypoint,
-  )
+  isPlaywrightEntrypoint
 ) {
   for (let index = 2; index < process.argv.length; index += 1) {
     const argument = process.argv[index];
@@ -97,11 +100,14 @@ if (
 
 if (
   process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
+  !isPlaywrightEntrypoint &&
   process.env.SUPERCOV_INSIDE_VITEST !== "1" &&
   process.env.VITEST !== "true"
 ) {
   const target = playwrightTarget ?? "@playwright/test";
   const projectRoot = process.env.SUPERCOV_PROJECT_ROOT;
+  const originalPlaywrightConfig = process.env.SUPERCOV_ORIGINAL_PLAYWRIGHT_CONFIG
+    ?.replaceAll("\\", "/");
   const wrapper = await import(new URL("./playwright.js", import.meta.url));
   const originalLoad = Module._load;
 
@@ -116,6 +122,7 @@ if (
     const belongsToProject =
       Boolean(parentFile) &&
       !parentFile.includes("/node_modules/") &&
+      parentFile !== originalPlaywrightConfig &&
       (!generatedRoot || !parentFile.startsWith(generatedRoot)) &&
       (normalizedRoot
         ? parentFile.startsWith(`${normalizedRoot}/`)

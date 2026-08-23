@@ -2,6 +2,8 @@ import type { CoverageCarrier, CoverageExecutionScope } from "./types.ts";
 
 export const COVERAGE_SCOPE_HEADER = "x-supercov-scope";
 export const COVERAGE_PHASE_HEADER = "x-supercov-phase";
+export const COVERAGE_SCOPE_COOKIE = "__supercov_scope";
+export const COVERAGE_PHASE_COOKIE = "__supercov_phase";
 export const COVERAGE_CARRIER_ENV = "SUPERCOV_CONTEXT";
 export const DEFAULT_SERVER_EVIDENCE_ROOT =
   "/tmp/supercov-server-evidence";
