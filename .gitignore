@@ -1,0 +1,7 @@
+node_modules
+.supercov
+coverage
+dist
+playwright-report
+test-results
+*.tgz
