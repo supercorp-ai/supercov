@@ -87,4 +87,3 @@ optimization is an adaptive hybrid that selects a proven loader/plugin path
 and lazily materializes the same transactional fallback whenever an opaque
 runner needs real files. FUSE is not an appropriate portable default for a
 zero-install `npx` tool.
-
