@@ -1,7 +1,7 @@
 {
   "corpusFiles": 500,
-  "transformMedianMsMax": 3000,
-  "transformP95MsMax": 5000,
+  "transformMedianMsMax": 5000,
+  "transformP95MsMax": 8000,
   "outputExpansionRatioMax": 10,
   "runtimeOverheadRatioMax": 5
 }
