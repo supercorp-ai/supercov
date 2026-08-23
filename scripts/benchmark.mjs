@@ -1,9 +1,17 @@
 #!/usr/bin/env node
 
 import { performance } from "node:perf_hooks";
-import { readFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { instrumentMcdc } from "../dist/instrumenter.js";
+import { prepareCachedWorkspace } from "../dist/workspace.js";
 
 const budget = JSON.parse(readFileSync(resolve("benchmarks/budget.json"), "utf8"));
 
@@ -90,8 +98,32 @@ const originalRuntime = median(timed(() => originalRun(250_000), 7));
 const instrumentedRuntime = median(timed(() => instrumentedRun(250_000), 7));
 const runtimeOverhead = instrumentedRuntime / Math.max(originalRuntime, 0.001);
 
+const workspaceRoot = mkdtempSync(resolve(tmpdir(), "supercov-benchmark-"));
+let workspacePreparation;
+try {
+  mkdirSync(resolve(workspaceRoot, "src"));
+  writeFileSync(
+    resolve(workspaceRoot, "package.json"),
+    '{"name":"supercov-workspace-benchmark","private":true}\n',
+  );
+  for (let index = 0; index < budget.workspaceFiles; index += 1)
+    writeFileSync(
+      resolve(workspaceRoot, "src", `${index}.js`),
+      `export const value${index} = ${index};\n`,
+    );
+  workspacePreparation = timed(
+    () => prepareCachedWorkspace(workspaceRoot),
+    7,
+  );
+} finally {
+  rmSync(workspaceRoot, { recursive: true, force: true });
+}
+const workspaceMedian = median(workspacePreparation);
+const workspaceP95 = Math.max(...workspacePreparation);
+
 console.log(`[benchmark] transform median=${transformMedian.toFixed(1)}ms p95=${transformP95.toFixed(1)}ms files=${budget.corpusFiles}`);
 console.log(`[benchmark] output expansion=${expansion.toFixed(2)}x; runtime overhead=${runtimeOverhead.toFixed(2)}x`);
+console.log(`[benchmark] workspace median=${workspaceMedian.toFixed(1)}ms p95=${workspaceP95.toFixed(1)}ms files=${budget.workspaceFiles}`);
 
 const failures = [];
 if (transformMedian > budget.transformMedianMsMax)
@@ -102,6 +134,10 @@ if (expansion > budget.outputExpansionRatioMax)
   failures.push(`output expansion ${expansion.toFixed(2)}x > ${budget.outputExpansionRatioMax}x`);
 if (runtimeOverhead > budget.runtimeOverheadRatioMax)
   failures.push(`runtime overhead ${runtimeOverhead.toFixed(2)}x > ${budget.runtimeOverheadRatioMax}x`);
+if (workspaceMedian > budget.workspaceMedianMsMax)
+  failures.push(`workspace median ${workspaceMedian.toFixed(1)}ms > ${budget.workspaceMedianMsMax}ms`);
+if (workspaceP95 > budget.workspaceP95MsMax)
+  failures.push(`workspace p95 ${workspaceP95.toFixed(1)}ms > ${budget.workspaceP95MsMax}ms`);
 if (failures.length) {
   for (const failure of failures) console.error(`[benchmark] FAIL ${failure}`);
   process.exitCode = 1;

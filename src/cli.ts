@@ -7,6 +7,7 @@ import {
   rmSync,
 } from "node:fs";
 import { relative, resolve, sep } from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { atomicRenameSync, atomicWriteFileSync } from "./atomic.ts";
 import { writeMcdcReport } from "./reporter.ts";
@@ -28,6 +29,37 @@ interface ChildResult {
   status: number | null;
   signal: NodeJS.Signals | null;
   error?: Error;
+}
+
+interface RunPhaseTimings {
+  initializationMs: number;
+  workspacePreparationMs: number;
+  adapterSetupMs: number;
+  instrumentedBuildMs: number;
+  testCommandMs: number;
+  reportPreparationMs: number;
+}
+
+function roundedTimings(timings: RunPhaseTimings): RunPhaseTimings {
+  return Object.fromEntries(
+    Object.entries(timings).map(([phase, duration]) => [
+      phase,
+      Math.round(duration * 10) / 10,
+    ]),
+  ) as unknown as RunPhaseTimings;
+}
+
+function formatTimings(timings: RunPhaseTimings, totalMs: number): string {
+  const rounded = roundedTimings(timings);
+  return [
+    `initialization=${rounded.initializationMs}ms`,
+    `workspace=${rounded.workspacePreparationMs}ms`,
+    `setup=${rounded.adapterSetupMs}ms`,
+    `build=${rounded.instrumentedBuildMs}ms`,
+    `tests=${rounded.testCommandMs}ms`,
+    `report=${rounded.reportPreparationMs}ms`,
+    `total=${Math.round(totalMs * 10) / 10}ms`,
+  ].join(" ");
 }
 
 let activeChild: ChildProcess | undefined;
@@ -115,6 +147,15 @@ async function createCoverageRun(command: string[]): Promise<number> {
   const root = process.cwd();
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   const runStartedAt = Date.now();
+  const runStartedMonotonic = performance.now();
+  const timings: RunPhaseTimings = {
+    initializationMs: 0,
+    workspacePreparationMs: 0,
+    adapterSetupMs: 0,
+    instrumentedBuildMs: 0,
+    testCommandMs: 0,
+    reportPreparationMs: 0,
+  };
   const recovered = recoverAbandonedRuns(root);
   if (recovered.length > 0)
     console.error(`[supercov] recovered abandoned run(s): ${recovered.join(", ")}`);
@@ -163,10 +204,16 @@ async function createCoverageRun(command: string[]): Promise<number> {
   let buildResult: ChildResult | undefined;
   let testResult: ChildResult | undefined;
   let reportFailed = false;
+  let timingsPrinted = false;
+
+  timings.initializationMs = performance.now() - runStartedMonotonic;
 
   try {
+    let phaseStarted = performance.now();
     const isolatedRoot = prepareCachedWorkspace(root);
+    timings.workspacePreparationMs = performance.now() - phaseStarted;
     if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
+    phaseStarted = performance.now();
     const generatedDirectory = resolve(isolatedRoot, ".supercov");
     const evidenceDirectoryRelative = `.supercov/evidence/${runId}`;
     const isolatedEvidenceDirectory = resolve(isolatedRoot, evidenceDirectoryRelative);
@@ -375,6 +422,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
     ]
       .filter(Boolean)
       .join(" ");
+    timings.adapterSetupMs = performance.now() - phaseStarted;
 
     updateRunState(root, runId, { status: "building" });
     console.error(`[supercov] instrumenting isolated workspace ${isolatedRoot}`);
@@ -384,6 +432,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
           .map(([key, value]) => `${key}=${value}`)
           .join(" ")}`,
       );
+    phaseStarted = performance.now();
     if (project.buildAdapter === "direct") {
       instrumentDirectWorkspace(
         isolatedRoot,
@@ -410,12 +459,14 @@ async function createCoverageRun(command: string[]): Promise<number> {
         },
       );
     }
+    timings.instrumentedBuildMs = performance.now() - phaseStarted;
     if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
     if (buildResult.error) throw buildResult.error;
 
     if (buildResult.status === 0) {
       updateRunState(root, runId, { status: "testing" });
       console.error(`[supercov] running in isolated workspace: ${command.join(" ")}`);
+      phaseStarted = performance.now();
       testResult = await runChild(command[0]!, command.slice(1), {
         cwd: isolatedRoot,
         env: {
@@ -424,10 +475,12 @@ async function createCoverageRun(command: string[]): Promise<number> {
           SUPERCOV_CJS_INTERCEPT: "1",
         },
       });
+      timings.testCommandMs = performance.now() - phaseStarted;
       if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
       if (testResult.error) throw testResult.error;
 
       updateRunState(root, runId, { status: "reporting" });
+      phaseStarted = performance.now();
       rmSync(persistedEvidenceDirectory, { recursive: true, force: true });
       if (existsSync(isolatedEvidenceDirectory))
         atomicRenameSync(isolatedEvidenceDirectory, persistedEvidenceDirectory);
@@ -446,6 +499,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
             serverEvidenceRoot,
           },
         );
+        timings.reportPreparationMs = performance.now() - phaseStarted;
         atomicWriteFileSync(
           resolve(reportStagingDirectory, "run.json"),
           `${JSON.stringify(
@@ -457,6 +511,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
               testExitCode: testResult.status,
               integrity: runIntegrity,
               isolatedBuild: true,
+              timings: roundedTimings(timings),
             },
             null,
             2,
@@ -464,6 +519,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
         );
         atomicRenameSync(reportStagingDirectory, storedRunDirectory);
       } catch (error) {
+        timings.reportPreparationMs = performance.now() - phaseStarted;
         reportFailed = true;
         console.error("[supercov] failed to generate report", error);
       }
@@ -471,6 +527,10 @@ async function createCoverageRun(command: string[]): Promise<number> {
 
     const resultCode = exitCode(buildResult) || exitCode(testResult) || (reportFailed ? 1 : 0);
     updateRunState(root, runId, { status: resultCode === 0 ? "complete" : "failed" });
+    console.error(
+      `[supercov] timings ${formatTimings(timings, performance.now() - runStartedMonotonic)}`,
+    );
+    timingsPrinted = true;
     return resultCode;
   } catch (error) {
     const status = receivedSignal ? "interrupted" : "failed";
@@ -487,6 +547,10 @@ async function createCoverageRun(command: string[]): Promise<number> {
     if (!receivedSignal) console.error(`[supercov] ${message}`);
     return receivedSignal ? signalExitCode(receivedSignal) : 1;
   } finally {
+    if (!timingsPrinted)
+      console.error(
+        `[supercov] timings ${formatTimings(timings, performance.now() - runStartedMonotonic)}`,
+      );
     if (signalEscalation) {
       clearTimeout(signalEscalation);
       signalEscalation = undefined;

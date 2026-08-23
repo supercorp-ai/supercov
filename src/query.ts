@@ -18,6 +18,14 @@ interface StoredRun {
   metadata?: {
     command?: string[];
     durationMs?: number;
+    timings?: {
+      initializationMs: number;
+      workspacePreparationMs: number;
+      adapterSetupMs: number;
+      instrumentedBuildMs: number;
+      testCommandMs: number;
+      reportPreparationMs: number;
+    };
     testExitCode?: number | null;
     integrity?: CoverageRunIntegrity;
   };
@@ -582,6 +590,7 @@ export async function runQueryCommand(
         mcdc: report?.summary.conditionCoveragePct,
         command: run.metadata?.command,
         durationMs: run.metadata?.durationMs,
+        timings: run.metadata?.timings,
         testExitCode: run.metadata?.testExitCode,
         ...(currentIntegrity
           ? compareRunIntegrity(run.metadata?.integrity, currentIntegrity)

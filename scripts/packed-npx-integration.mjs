@@ -74,6 +74,20 @@ try {
     throw new Error(`expected one packed npx run, received ${runIds}`);
   if (existsSync(resolve("/tmp/supercov-server-evidence", runIds[0])))
     throw new Error("packed npx run leaked evidence into the global temp directory");
+  const metadata = JSON.parse(
+    readFileSync(resolve(runsRoot, runIds[0], "run.json"), "utf8"),
+  );
+  for (const phase of [
+    "initializationMs",
+    "workspacePreparationMs",
+    "adapterSetupMs",
+    "instrumentedBuildMs",
+    "testCommandMs",
+    "reportPreparationMs",
+  ]) {
+    if (!Number.isFinite(metadata.timings?.[phase]) || metadata.timings[phase] < 0)
+      throw new Error(`packed npx run is missing ${phase}`);
+  }
   const report = JSON.parse(
     gunzipSync(
       readFileSync(resolve(runsRoot, runIds[0], "report.json.gz")),

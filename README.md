@@ -36,8 +36,8 @@ The coverage engine has seven independent release gates:
 - release CI shards the pinned TC39 Test262 corpus across 16 workers, runs the
   official Test262 harness on original and instrumented sources, and rejects
   any scenario that passes originally but fails after transformation; and
-- checked performance budgets cover transform latency, output expansion, and
-  runtime probe overhead.
+- checked performance budgets cover transform latency, transactional workspace
+  preparation, output expansion, and runtime probe overhead.
 
 ```sh
 npm test
@@ -171,6 +171,17 @@ never touches files outside `.supercov/`.
 
 The complete ownership, crash-recovery, symlink, and future copy-free design is
 documented in [Workspace isolation](docs/workspace-isolation.md).
+
+Every run prints and stores monotonic phase timings for initialization,
+workspace preparation, adapter setup, the instrumented build, the unchanged
+test command, and report preparation. They are available in
+`.supercov/runs/<run-id>/run.json` and in the JSON form of `supercov runs`.
+These phase timings do not pretend to be end-to-end overhead: that percentage
+requires an explicit comparison with the same command run without Supercov,
+which Supercov never executes automatically because an arbitrary test command
+may have side effects or external cost. See
+[Performance and storage](docs/performance.md) for the comparison methodology,
+strategy trade-offs, and a measured real-suite reference.
 
 The automatic adapters currently support standard Playwright suites (ESM and
 CommonJS specs in arbitrary project directories), project-owned Playwright
