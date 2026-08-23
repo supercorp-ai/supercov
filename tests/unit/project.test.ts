@@ -65,6 +65,22 @@ describe("coverage project discovery", () => {
     });
   });
 
+  it("uses the generic isolated adapter for a non-Vite build", () => {
+    const root = project({
+      "package.json": JSON.stringify({
+        type: "module",
+        scripts: { build: "webpack", test: "node --test" },
+        devDependencies: { webpack: "1" },
+      }),
+      "src/index.js": "export const ready = true",
+    });
+    expect(discoverCoverageProject(root, {})).toMatchObject({
+      sourceRoots: ["src"],
+      buildAdapter: "generic",
+      buildCommand: ["npm", "run", "build"],
+    });
+  });
+
   it("discovers a project-owned Playwright fixture module from test imports", () => {
     const root = project({
       "package.json": JSON.stringify({

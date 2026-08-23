@@ -43,6 +43,35 @@ export type EvidenceArchiveSource =
 
 const ARCHIVE_MAGIC = Buffer.from("SUPERCOV-EVIDENCE-2\n");
 
+function writeEntries(
+  entries: Array<{ path: string; contents: Buffer }>,
+  destination: string,
+): EvidenceArchiveMetadata {
+  const files = [...entries].sort((left, right) => left.path.localeCompare(right.path));
+  for (let index = 1; index < files.length; index += 1) {
+    if (files[index - 1]!.path === files[index]!.path)
+      throw new Error(`Duplicate Supercov evidence archive path: ${files[index]!.path}`);
+  }
+  const chunks: Buffer[] = [ARCHIVE_MAGIC];
+  for (const { path, contents } of files) {
+    const header = Buffer.from(`${JSON.stringify({ path, bytes: contents.byteLength })}\n`);
+    const headerSize = Buffer.allocUnsafe(4);
+    headerSize.writeUInt32BE(header.byteLength);
+    chunks.push(headerSize, header, contents);
+  }
+  const serialized = Buffer.concat(chunks);
+  const compressed = gzipSync(serialized, { level: 9 });
+  atomicWriteFileSync(destination, compressed);
+  return {
+    schemaVersion: EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+    format: "framed+gzip",
+    file: "evidence.raw.gz",
+    files: files.length,
+    uncompressedBytes: serialized.byteLength,
+    compressedBytes: compressed.byteLength,
+  };
+}
+
 function evidenceFiles(directory: string): string[] {
   if (!existsSync(directory)) return [];
   return readdirSync(directory, { withFileTypes: true })
@@ -58,7 +87,7 @@ function evidenceFiles(directory: string): string[] {
 /**
  * Pack the evidence needed to reproduce a report into one deterministic gzip
  * artifact. Publication remains the caller's responsibility so loose files
- * are never removed before the report directory is atomically visible.
+ * are never removed before the immutable run directory is atomically visible.
  */
 export function writeEvidenceArchive(
   evidence: string | EvidenceArchiveSource[],
@@ -81,27 +110,21 @@ export function writeEvidenceArchive(
     if (files[index - 1]!.path === files[index]!.path)
       throw new Error(`Duplicate Supercov evidence archive path: ${files[index]!.path}`);
   }
-  const chunks: Buffer[] = [ARCHIVE_MAGIC];
-  for (const { path, sourcePath } of files) {
-    const contents = readFileSync(sourcePath);
-    const header = Buffer.from(`${JSON.stringify({ path, bytes: contents.byteLength })}\n`);
-    const headerSize = Buffer.allocUnsafe(4);
-    headerSize.writeUInt32BE(header.byteLength);
-    chunks.push(headerSize, header, contents);
-  }
-  const serialized = Buffer.concat(chunks);
-  // Node emits a zero gzip mtime, so identical evidence produces identical
-  // bytes without depending on wall-clock time.
-  const compressed = gzipSync(serialized, { level: 9 });
-  atomicWriteFileSync(destination, compressed);
-  return {
-    schemaVersion: EVIDENCE_ARCHIVE_SCHEMA_VERSION,
-    format: "framed+gzip",
-    file: "evidence.raw.gz",
-    files: files.length,
-    uncompressedBytes: serialized.byteLength,
-    compressedBytes: compressed.byteLength,
-  };
+  return writeEntries(
+    files.map(({ path, sourcePath }) => ({ path, contents: readFileSync(sourcePath) })),
+    destination,
+  );
+}
+
+/** Write already-decoded evidence, used for integrity-checked shard merging. */
+export function writeEvidenceArchiveEntries(
+  entries: EvidenceArchiveEntry[],
+  destination: string,
+): EvidenceArchiveMetadata {
+  return writeEntries(
+    entries.map((entry) => ({ path: entry.path, contents: Buffer.from(entry.contents) })),
+    destination,
+  );
 }
 
 export function readEvidenceArchive(path: string): EvidenceArchive {

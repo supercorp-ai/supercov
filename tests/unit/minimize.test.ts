@@ -1,0 +1,67 @@
+import { describe, expect, it } from "vitest";
+import { createMcdcReport } from "../../src/analyze";
+import { minimumTestSet } from "../../src/query";
+import type { CoverageManifest, McdcRawTestResult, McdcVector } from "../../src/types";
+
+const manifest: CoverageManifest = {
+  points: [],
+  branches: [],
+  decisions: [
+    {
+      id: "decision",
+      file: "src/permission.js",
+      line: 1,
+      column: 1,
+      source: "admin || owner",
+      conditions: ["admin", "owner"],
+      kind: "if",
+    },
+  ],
+};
+
+function result(id: string, vector: McdcVector): McdcRawTestResult {
+  return {
+    testId: id,
+    test: id,
+    testFile: "tests/permission.test.js",
+    status: "passed",
+    provenance: { runner: "node:test", kind: "unit", source: "runner-default" },
+    runtime: [
+      {
+        hits: [],
+        decisions: [{ meta: manifest.decisions[0]!, vectors: [vector] }],
+      },
+    ],
+    browser: [],
+    server: [],
+  };
+}
+
+describe("exact smallest test-set solver", () => {
+  it("recomputes MC/DC witnesses and removes a redundant vector", () => {
+    const report = createMcdcReport(manifest, [
+      result("admin", { values: [true, null], outcome: true }),
+      result("owner", { values: [false, true], outcome: true }),
+      result("both", { values: [true, null], outcome: true }),
+      result("neither", { values: [false, false], outcome: false }),
+    ]);
+    const minimized = minimumTestSet(report, 100, "mcdc");
+    expect(minimized.optimal).toBe(true);
+    expect(minimized.selected).toHaveLength(3);
+    expect(minimized.selected).toContain("owner");
+    expect(minimized.selected).toContain("neither");
+    expect(minimized.summary.conditionCoveragePct).toBe(100);
+  });
+
+  it("refuses to call aggregate background evidence a zero-test subset", () => {
+    const aggregate = result("aggregate", {
+      values: [false, false],
+      outcome: false,
+    });
+    aggregate.role = "background";
+    const report = createMcdcReport(manifest, [aggregate]);
+    expect(() => minimumTestSet(report, 100, "mcdc")).toThrow(
+      "background/unattributed",
+    );
+  });
+});

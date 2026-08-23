@@ -50,6 +50,8 @@ interface QueryOptions {
   limit: number;
   offset: number;
   json: boolean;
+  target: number;
+  metric: "all" | "lines" | "statements" | "functions" | "branches" | "mcdc";
   positional: string[];
 }
 
@@ -59,6 +61,8 @@ function parseOptions(args: string[]): QueryOptions {
     offset: 0,
     json: false,
     filter: "all",
+    target: 100,
+    metric: "all",
     positional: [],
   };
   for (let index = 0; index < args.length; index += 1) {
@@ -68,6 +72,18 @@ function parseOptions(args: string[]): QueryOptions {
     else if (value === "--kind") options.kind = args[++index]?.toLowerCase();
     else if (value === "--runner")
       options.runner = args[++index]?.toLowerCase();
+    else if (value === "--target") {
+      const target = Number(args[++index]);
+      if (!Number.isFinite(target) || target < 0 || target > 100)
+        throw new Error("--target must be between 0 and 100");
+      options.target = target;
+    }
+    else if (value === "--metric") {
+      const metric = args[++index]?.toLowerCase();
+      if (!metric || !["all", "lines", "statements", "functions", "branches", "mcdc"].includes(metric))
+        throw new Error("--metric must be all, lines, statements, functions, branches, or mcdc");
+      options.metric = metric as QueryOptions["metric"];
+    }
     else if (value === "--filter") {
       const filter = args[++index]?.toLowerCase();
       if (filter !== "all" && filter !== "passed" && filter !== "failed")
@@ -206,6 +222,217 @@ function pct(value: number): string {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+type MinimizeMetric = Exclude<QueryOptions["metric"], "all">;
+
+interface CoverageObligation {
+  id: string;
+  metric: MinimizeMetric;
+  /** Any one option fully contained in the selected set satisfies this obligation. */
+  options: string[][];
+}
+
+export interface MinimumTestSetResult {
+  optimal: true;
+  target: number;
+  metric: QueryOptions["metric"];
+  selected: string[];
+  expanded: string[];
+  summary: McdcReport["summary"];
+  exploredStates: number;
+}
+
+function optionKey(option: string[]): string {
+  return [...new Set(option)].sort().join("\0");
+}
+
+function minimumTestObligations(
+  report: McdcReport,
+  candidates: Set<string>,
+): {
+  obligations: CoverageObligation[];
+  expand(selected: Set<string>): Set<string>;
+} {
+  const tests = new Map(report.tests.map((test) => [test.id, test]));
+  const testsByFile = new Map<string, string[]>();
+  for (const test of report.tests) {
+    if (test.role !== "test" || !test.file || !candidates.has(test.id)) continue;
+    const ids = testsByFile.get(test.file) ?? [];
+    ids.push(test.id);
+    testsByFile.set(test.file, ids);
+  }
+  const evidenceChoices = (ids: string[]): string[][] => {
+    const options: string[][] = [];
+    for (const id of ids) {
+      const test = tests.get(id);
+      if (!test) continue;
+      if (test.role === "background") options.push([]);
+      else if (test.role === "setup" && test.file)
+        options.push(...(testsByFile.get(test.file) ?? []).map((candidate) => [candidate]));
+      else if (candidates.has(id)) options.push([id]);
+    }
+    return [...new Map(options.map((option) => [optionKey(option), option])).values()];
+  };
+  const obligations: CoverageObligation[] = [];
+  const uniqueLines = new Map<string, McdcReport["lines"][number]>();
+  for (const line of report.lines) uniqueLines.set(`${line.file}:${line.line}`, line);
+  for (const [id, line] of uniqueLines)
+    obligations.push({ id: `line:${id}`, metric: "lines", options: evidenceChoices(line.tests) });
+  for (const point of report.points)
+    obligations.push({
+      id: `${point.meta.kind}:${point.meta.id}`,
+      metric: point.meta.kind === "statement" ? "statements" : "functions",
+      options: evidenceChoices(point.tests),
+    });
+  for (const branch of report.branches)
+    for (const alternative of branch.alternatives)
+      obligations.push({
+        id: `branch:${branch.meta.id}:${alternative.id}`,
+        metric: "branches",
+        options: evidenceChoices(alternative.tests),
+      });
+  for (const decision of report.decisions) {
+    for (let condition = 0; condition < decision.meta.conditions.length; condition += 1) {
+      const options: string[][] = [];
+      for (let left = 0; left < decision.vectorObservations.length; left += 1) {
+        for (let right = left + 1; right < decision.vectorObservations.length; right += 1) {
+          const first = decision.vectorObservations[left]!;
+          const second = decision.vectorObservations[right]!;
+          if (!isIndependencePair(first.vector, second.vector, condition)) continue;
+          for (const firstChoice of evidenceChoices(first.tests))
+            for (const secondChoice of evidenceChoices(second.tests))
+              options.push([...new Set([...firstChoice, ...secondChoice])].sort());
+        }
+      }
+      obligations.push({
+        id: `mcdc:${decision.meta.id}:${condition}`,
+        metric: "mcdc",
+        options: [...new Map(options.map((option) => [optionKey(option), option])).values()],
+      });
+    }
+  }
+  return {
+    obligations,
+    expand(selected) {
+      const expanded = new Set(selected);
+      for (const test of report.tests) {
+        if (test.role === "background") expanded.add(test.id);
+        else if (
+          test.role === "setup" &&
+          test.file &&
+          (testsByFile.get(test.file) ?? []).some((id) => selected.has(id))
+        ) expanded.add(test.id);
+      }
+      return expanded;
+    },
+  };
+}
+
+function obligationSatisfied(obligation: CoverageObligation, selected: Set<string>): boolean {
+  return obligation.options.some((option) => option.every((test) => selected.has(test)));
+}
+
+/** Exact branch-and-bound solver; MC/DC obligations retain their witness-pair structure. */
+export function minimumTestSet(
+  report: McdcReport,
+  target = 100,
+  metric: QueryOptions["metric"] = "all",
+): MinimumTestSetResult {
+  const unattributed = report.tests.filter(
+    (test) =>
+      test.role === "background" &&
+      (test.hits.length > 0 || test.decisions.some((decision) => decision.vectors.length > 0)),
+  );
+  if (unattributed.length > 0) {
+    throw new Error(
+      "Cannot minimize exactly: this coverage view contains background/unattributed evidence. Use a runner with exact test attribution or select a fully attributed coverage view.",
+    );
+  }
+  const candidateTests = report.tests
+    .filter((test) => test.role === "test")
+    .map((test) => test.id)
+    .sort();
+  const candidates = new Set(candidateTests);
+  const model = minimumTestObligations(report, candidates);
+  const metrics: MinimizeMetric[] = metric === "all"
+    ? ["lines", "statements", "functions", "branches", "mcdc"]
+    : [metric];
+  const obligations = model.obligations.filter((obligation) => metrics.includes(obligation.metric));
+  const totals = new Map<MinimizeMetric, number>();
+  for (const obligation of obligations)
+    totals.set(obligation.metric, (totals.get(obligation.metric) ?? 0) + 1);
+  const skipLimits = new Map<MinimizeMetric, number>();
+  for (const selectedMetric of metrics) {
+    const total = totals.get(selectedMetric) ?? 0;
+    const required = Math.ceil((total * target) / 100);
+    skipLimits.set(selectedMetric, total - required);
+  }
+  let best = new Set(candidateTests);
+  const fullExpanded = model.expand(best);
+  const fullSummary = coverageSummaryForTests(report, fullExpanded);
+  const percentage = (selectedMetric: MinimizeMetric, summary: McdcReport["summary"]): number =>
+    selectedMetric === "mcdc" ? summary.conditionCoveragePct : summary[selectedMetric].percentage;
+  const impossible = metrics.find((selectedMetric) => percentage(selectedMetric, fullSummary) + 1e-9 < target);
+  if (impossible)
+    throw new Error(
+      `The full selected test view reaches only ${percentage(impossible, fullSummary).toFixed(2)}% ${impossible}; target ${target}% is impossible`,
+    );
+
+  let exploredStates = 0;
+  const seen = new Set<string>();
+  const search = (
+    selected: Set<string>,
+    skipped: Set<string>,
+    skippedByMetric: Map<MinimizeMetric, number>,
+  ): void => {
+    exploredStates += 1;
+    if (selected.size >= best.size) return;
+    const stateKey = `${[...selected].sort().join(",")}|${[...skipped].sort().join(",")}`;
+    if (seen.has(stateKey)) return;
+    seen.add(stateKey);
+    const unmet = obligations.filter(
+      (obligation) => !skipped.has(obligation.id) && !obligationSatisfied(obligation, selected),
+    );
+    if (unmet.length === 0) {
+      best = new Set(selected);
+      return;
+    }
+    const obligation = unmet.sort((left, right) => {
+      const feasible = (value: CoverageObligation) =>
+        value.options.filter((option) => option.some((test) => !selected.has(test))).length;
+      return feasible(left) - feasible(right) || left.id.localeCompare(right.id);
+    })[0]!;
+    const additions = [...new Map(
+      obligation.options
+        .map((option) => option.filter((test) => !selected.has(test)))
+        .filter((option) => option.length > 0)
+        .map((option) => [optionKey(option), option]),
+    ).values()].sort((left, right) => left.length - right.length || optionKey(left).localeCompare(optionKey(right)));
+    for (const addition of additions) {
+      if (selected.size + addition.length >= best.size) continue;
+      search(new Set([...selected, ...addition]), skipped, skippedByMetric);
+    }
+    const skippedCount = skippedByMetric.get(obligation.metric) ?? 0;
+    if (skippedCount < (skipLimits.get(obligation.metric) ?? 0)) {
+      const nextSkipped = new Set(skipped);
+      nextSkipped.add(obligation.id);
+      const nextCounts = new Map(skippedByMetric);
+      nextCounts.set(obligation.metric, skippedCount + 1);
+      search(selected, nextSkipped, nextCounts);
+    }
+  };
+  search(new Set(), new Set(), new Map());
+  const expanded = model.expand(best);
+  return {
+    optimal: true,
+    target,
+    metric,
+    selected: [...best].sort(),
+    expanded: [...expanded].sort(),
+    summary: coverageSummaryForTests(report, expanded),
+    exploredStates,
+  };
 }
 
 function coverageCommand(
@@ -527,13 +754,16 @@ function help(): void {
   supercov runs <run-id> coverage [--filter all|passed|failed] [--kind e2e] [--runner playwright] [--json]
   supercov runs <run-id> coverage kinds [--json]
   supercov runs <run-id> coverage runners [--json]
+  supercov runs <run-id> coverage scope [--limit N] [--offset N] [--json]
   supercov runs <run-id> coverage files [--filter all|passed|failed] [--limit N] [--offset N] [--json]
   supercov runs <run-id> coverage gaps [--filter all|passed|failed] [--kind e2e] [--limit N] [--offset N] [--json]
   supercov runs <run-id> coverage file <source-file> [--kind e2e] [--limit N] [--offset N] [--json]
   supercov runs <run-id> coverage decision <id|source-file:line> [--kind e2e] [--json]
   supercov runs <run-id> coverage covers <source-file:line> [--kind e2e] [--json]
   supercov runs <run-id> coverage test <id|name-fragment> [--kind e2e] [--limit N] [--json]
+  supercov runs <run-id> coverage minimize [--target 0..100] [--metric all|lines|statements|functions|branches|mcdc] [--filter all|passed|failed] [--limit N] [--offset N] [--json]
   supercov diff <older-run> <newer-run> [--limit N] [--json]
+  supercov merge <run-id> <run-id> [...]
   supercov prune [--keep N] [--dry-run]
   supercov clean [--keep N] [--dry-run]
 
@@ -568,12 +798,14 @@ export function resolveCoverageQueryInvocation(
     "summary",
     "kinds",
     "runners",
+    "scope",
     "files",
     "gaps",
     "file",
     "decision",
     "covers",
     "test",
+    "minimize",
   ]);
   if (!coverageCommands.has(child)) {
     throw new Error(
@@ -866,11 +1098,85 @@ export async function runQueryCommand(
       tests: testCount,
       setups: setupCount,
       testOutcomes,
+      sourceScope: report.scope
+        ? {
+            mode: report.scope.mode,
+            roots: report.scope.roots,
+            included: report.scope.entries.filter((entry) => entry.status === "included").length,
+            excluded: report.scope.entries.filter((entry) => entry.status === "excluded").length,
+            ambiguous: report.scope.entries.filter((entry) => entry.status === "ambiguous").length,
+          }
+        : undefined,
     };
     return output(
       result,
       options,
       `run ${run.id}${filterLabel(options) ? ` (${filterLabel(options)})` : ""}${run.metadata?.testExitCode !== 0 ? ` [INVALID: test exit ${run.metadata?.testExitCode ?? "unknown"}]` : ""}${report.integrity?.stale ? ` [STALE: ${(report.integrity.staleReasons ?? []).join(", ")}]` : ""}\nlines ${pct(summary.lines.percentage)} (${summary.lines.covered}/${summary.lines.total})\nbranches ${pct(summary.branches.percentage)} (${summary.branches.covered}/${summary.branches.total})\nMC/DC ${pct(summary.conditionCoveragePct)} (${summary.coveredConditions}/${summary.conditions})${!selectedTestSet ? `\nconfidence: ${report.lines.filter((line) => line.confidence?.level === "asserted").length} asserted lines, ${report.lines.filter((line) => line.confidence?.level === "action").length} action-linked, ${report.lines.filter((line) => line.confidence?.level === "executed").length} execution-only; ${report.decisions.reduce((total, decision) => total + decision.conditions.filter((condition) => condition.assertionCovered).length, 0)} assertion-linked MC/DC conditions` : ""}\n${testCount} test(s)${setupCount ? ` + ${setupCount} setup scope(s)` : ""}; outcomes ${Object.entries(testOutcomes).filter(([, count]) => count > 0).map(([outcome, count]) => `${outcome}=${count}`).join(", ") || "none"}; ${gaps.length} file(s) have remaining obligations${(report.limitations?.length ?? 0) ? `; ${report.limitations!.length} completeness blocker(s)` : ""}`,
+    );
+  }
+
+  if (command === "minimize") {
+    const solverReport = selectedTestSet
+      ? {
+          ...report,
+          tests: report.tests.filter((test) => selectedTestSet.has(test.id)),
+        }
+      : report;
+    const minimized = minimumTestSet(solverReport, options.target, options.metric);
+    const selectedDetails = minimized.selected.map((id) => {
+      const test = report.tests.find((candidate) => candidate.id === id)!;
+      return {
+        id,
+        name: test.name,
+        file: test.file,
+        runner: test.provenance.runner,
+        kind: test.provenance.kind,
+      };
+    });
+    const selectedPage = page(selectedDetails, options);
+    const base = `${coverageCommand(run.id, options, "minimize")} --target ${options.target}${options.metric !== "all" ? ` --metric ${options.metric}` : ""}`;
+    const next = nextPageCommand(base, selectedDetails.length, selectedPage.length, options);
+    return output(
+      {
+        run: run.id,
+        ...minimized,
+        selectedCount: selectedDetails.length,
+        totalCandidateTests: solverReport.tests.filter((test) => test.role === "test").length,
+        offset: options.offset,
+        tests: selectedPage,
+      },
+      options,
+      `exact minimum ${selectedDetails.length}/${solverReport.tests.filter((test) => test.role === "test").length} test(s) for ${options.target}% ${options.metric === "all" ? "coverage across all measured metrics" : options.metric}; explored ${minimized.exploredStates} state(s)\nlines ${pct(minimized.summary.lines.percentage)}, statements ${pct(minimized.summary.statements.percentage)}, functions ${pct(minimized.summary.functions.percentage)}, branches ${pct(minimized.summary.branches.percentage)}, MC/DC ${pct(minimized.summary.conditionCoveragePct)}\n${selectedPage.map((test) => `${test.id}  ${test.kind}/${test.runner}  ${test.file ?? "unknown"}  ${test.name}`).join("\n")}\n${pageLabel(selectedDetails.length, selectedPage.length, options)}${next ? `\nnext page: ${next}` : ""}`,
+    );
+  }
+
+  if (command === "scope") {
+    if (!report.scope)
+      throw new Error("This run does not contain a source-scope inventory.");
+    const ordered = [...report.scope.entries].sort((left, right) => {
+      const rank = { ambiguous: 0, included: 1, excluded: 2 } as const;
+      return rank[left.status] - rank[right.status] || left.file.localeCompare(right.file);
+    });
+    const selectedEntries = page(ordered, options);
+    const base = coverageCommand(run.id, options, "scope");
+    const next = nextPageCommand(base, ordered.length, selectedEntries.length, options);
+    const counts = {
+      included: ordered.filter((entry) => entry.status === "included").length,
+      excluded: ordered.filter((entry) => entry.status === "excluded").length,
+      ambiguous: ordered.filter((entry) => entry.status === "ambiguous").length,
+    };
+    return output(
+      {
+        run: run.id,
+        mode: report.scope.mode,
+        roots: report.scope.roots,
+        counts,
+        total: ordered.length,
+        offset: options.offset,
+        entries: selectedEntries,
+      },
+      options,
+      `mode ${report.scope.mode}; roots ${report.scope.roots.join(", ") || "none"}; included ${counts.included}, excluded ${counts.excluded}, ambiguous ${counts.ambiguous}\n${selectedEntries.map((entry) => `${entry.status.toUpperCase()}  ${entry.file}  ${entry.reason}${entry.packageRoot ? `  [package ${entry.packageRoot}]` : ""}`).join("\n")}\n${pageLabel(ordered.length, selectedEntries.length, options)}${next ? `\nnext page: ${next}` : ""}`,
     );
   }
 

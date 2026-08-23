@@ -51,6 +51,14 @@ function integrityWithTests(execution: string, tests: string): CoverageRunIntegr
 const project: CoverageProject = {
   root: "/project",
   sourceRoots: ["src"],
+  sourceFiles: ["src/index.ts"],
+  sourceScope: {
+    version: 1,
+    mode: "automatic",
+    roots: ["src"],
+    entries: [],
+  },
+  sourceLimitations: [],
   playwrightModule: "@playwright/test",
   playwrightTestExport: "test",
   playwrightExports: [],

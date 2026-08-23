@@ -32,6 +32,16 @@ function belongsToProject(parentURL) {
 
 export async function resolve(specifier, context, nextResolve) {
   if (
+    process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
+    (specifier === "node:test" || specifier === "test") &&
+    belongsToProject(context.parentURL)
+  ) {
+    return {
+      url: new URL("./nodeTest.js", import.meta.url).href,
+      shortCircuit: true,
+    };
+  }
+  if (
     process.env.SUPERCOV_INSIDE_PLAYWRIGHT === "1" &&
     TARGET &&
     REPLACEMENT &&
@@ -55,4 +65,32 @@ export async function resolve(specifier, context, nextResolve) {
     return nextResolve(REPLACEMENT, context);
   }
   return nextResolve(specifier, context);
+}
+
+export async function load(url, context, nextLoad) {
+  const loaded = await nextLoad(url, context);
+  const transformer = process.env.SUPERCOV_ESM_TRANSFORMER;
+  const wrapper = process.env.SUPERCOV_ESM_CAPABILITY_WRAPPER;
+  if (
+    !transformer ||
+    !wrapper ||
+    loaded.format !== "module" ||
+    !belongsToProject(url) ||
+    loaded.source === undefined ||
+    loaded.source === null
+  ) return loaded;
+  const source = typeof loaded.source === "string"
+    ? loaded.source
+    : Buffer.from(loaded.source).toString("utf8");
+  try {
+    const { transformCapabilityImports } = await import(transformer);
+    const transformed = transformCapabilityImports(source, url, wrapper);
+    return transformed.transformed
+      ? { ...loaded, source: transformed.code }
+      : loaded;
+  } catch (error) {
+    if (process.env.SUPERCOV_DEBUG === "1")
+      console.error("[supercov] ESM capability transform skipped", { url, error });
+    return loaded;
+  }
 }

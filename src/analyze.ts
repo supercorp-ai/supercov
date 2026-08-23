@@ -951,6 +951,7 @@ export function createMcdcReport(
   return {
     generatedAt: new Date().toISOString(),
     variant: "masking-short-circuit",
+    ...(manifest.scope ? { scope: manifest.scope } : {}),
     model: {
       name: "coverage-completeness-v2",
       completenessMeaning:

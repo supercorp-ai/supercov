@@ -16,6 +16,7 @@ import { coverageQueryCommands, runQueryCommand } from "./query.ts";
 import { discoverCoverageProject } from "./project.ts";
 import { createRunIntegrity } from "./integrity.ts";
 import { writeEvidenceArchive } from "./evidenceArchive.ts";
+import { mergeCoverageRuns } from "./merge.ts";
 import {
   buildCacheReusePaths,
   instrumentedBuildCacheKey,
@@ -187,7 +188,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
   const runIntegrity = createRunIntegrity(root, project, packageSource);
   const workspace = cachedWorkspacePath(root);
   const buildCacheKey = instrumentedBuildCacheKey(runIntegrity, project);
-  const reusableBuild = project.buildAdapter === "vite"
+  const reusableBuild = project.buildAdapter !== "direct"
     ? readInstrumentedBuildCache(workspace, buildCacheKey)
     : undefined;
   const serverEvidenceRoot = resolve(workspace, ".supercov/server-evidence");
@@ -252,6 +253,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
     const generatedPlaywrightConfig = resolve(generatedDirectory, "playwright.config.mjs");
     const generatedViteConfig = resolve(generatedDirectory, "vite.config.mjs");
     const generatedVitestConfig = resolve(generatedDirectory, "vitest.config.mjs");
+    const generatedJestConfig = resolve(generatedDirectory, "jest.config.mjs");
     const manifestPath = resolve(generatedDirectory, "manifest.json");
     const buildOutputMetadataPath = resolve(
       generatedDirectory,
@@ -263,18 +265,27 @@ async function createCoverageRun(command: string[]): Promise<number> {
     const isolatedVitestConfig = project.vitestConfig
       ? resolve(isolatedRoot, relative(root, project.vitestConfig))
       : undefined;
+    const isolatedJestConfig = project.jestConfig
+      ? resolve(isolatedRoot, relative(root, project.jestConfig))
+      : undefined;
 
     mkdirSync(generatedDirectory, { recursive: true });
     mkdirSync(isolatedEvidenceDirectory, { recursive: true });
+    atomicWriteFileSync(
+      resolve(generatedDirectory, "package.json"),
+      `${JSON.stringify({ private: true, type: "module" })}\n`,
+    );
     for (const file of [
       "atomic.js",
       "launchSupervisor.js",
+      "nodeTest.js",
       "playwright.js",
       "playwrightReporter.js",
       "provenance.js",
       "register.mjs",
       "resolve-loader.mjs",
       "runtime.js",
+      "runnerEvidence.js",
       "transport.js",
       "types.js",
     ]) {
@@ -398,7 +409,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
         `  const relocateOutput = output => output ? ({ ...output, dir: output.dir ? relocate(output.dir, 'Rollup output') : output.dir, file: output.file ? relocate(output.file, 'Rollup output') : output.file }) : output;`,
         `  const rollupOutput = config.build?.rollupOptions?.output;`,
         `  const safe = { ...config, cacheDir: resolve(isolatedRoot, '.supercov/vite-cache'), build: { ...config.build, outDir: relocate(config.build?.outDir ?? 'dist', 'Vite build output'), rollupOptions: { ...config.build?.rollupOptions, output: Array.isArray(rollupOutput) ? rollupOutput.map(relocateOutput) : relocateOutput(rollupOutput) } } };`,
-        `  return mergeConfig(safe, { plugins: [mcdcVitePlugin(${JSON.stringify({ root: isolatedRoot, sourceRoots: project.sourceRoots, manifestPath, buildOutputMetadataPath })})] });`,
+        `  return mergeConfig(safe, { plugins: [mcdcVitePlugin(${JSON.stringify({ root: isolatedRoot, sourceRoots: project.sourceRoots, sourceFiles: project.sourceFiles, sourceScope: project.sourceScope, sourceLimitations: project.sourceLimitations, manifestPath, buildOutputMetadataPath })})] });`,
         `}`,
         "",
       ].join("\n"),
@@ -416,7 +427,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
         `  const loaded = originalPath ? await loadConfigFromFile(env, originalPath, process.cwd()) : undefined;`,
         `  const config = mergeConfig(loaded?.config ?? {}, {`,
         `    cacheDir: resolve(process.cwd(), '.supercov/vitest-cache'),`,
-        `    plugins: ${project.buildAdapter === "vite" ? `[mcdcVitePlugin(${JSON.stringify({ root: isolatedRoot, sourceRoots: project.sourceRoots, manifestPath })})]` : "[]"},`,
+        `    plugins: ${project.buildAdapter === "vite" ? `[mcdcVitePlugin(${JSON.stringify({ root: isolatedRoot, sourceRoots: project.sourceRoots, sourceFiles: project.sourceFiles, sourceScope: project.sourceScope, sourceLimitations: project.sourceLimitations, manifestPath })})]` : "[]"},`,
         `    test: { setupFiles: [${JSON.stringify(resolve(packageSource, "vitest.js"))}], maxConcurrency: 1 },`,
         `  });`,
         `  const configuredReporters = loaded?.config?.test?.reporters;`,
@@ -429,12 +440,73 @@ async function createCoverageRun(command: string[]): Promise<number> {
         "",
       ].join("\n"),
     );
+    const generatedJestSetup = resolve(generatedDirectory, "jest.setup.cjs");
+    const generatedJestReporter = resolve(generatedDirectory, "jest-reporter.cjs");
+    const jestEvidenceHelpers = [
+      `const { createHash } = require('node:crypto');`,
+      `const { mkdirSync, renameSync, writeFileSync } = require('node:fs');`,
+      `const { relative, resolve, sep } = require('node:path');`,
+      `const local = file => file ? relative(process.cwd(), file).split(sep).join('/') : 'unknown';`,
+      `const id = (file, name) => 'jest:' + createHash('sha256').update(['jest', local(file), 0, 0, name].join('\\0')).digest('hex').slice(0, 24);`,
+      `const scope = (file, name, retry) => { const testId = id(file, name); const testKey = createHash('sha256').update(testId).digest('hex').slice(0, 24); return { version: 1, runId: process.env.SUPERCOV_RUN_ID || 'unscoped', workerId: 'jest-' + (process.env.JEST_WORKER_ID || process.pid), testId, testKey, retry, attemptId: testKey + '-' + retry }; };`,
+      `const provenance = file => ({ runner: 'jest', kind: process.env.SUPERCOV_TEST_KIND || (/(^|[/_.-])(e2e|end-to-end|offline|online)([/_.-]|$)/i.test(file) ? 'e2e' : /(^|[/_.-])(integration|int)([/_.-]|$)/i.test(file) ? 'integration' : /(^|[/_.-])(component|components|ct)([/_.-]|$)/i.test(file) ? 'component' : 'unit'), source: process.env.SUPERCOV_TEST_KIND ? 'explicit' : 'runner-default' });`,
+      `const write = (payload, suffix) => { const base = process.env.SUPERCOV_EVIDENCE_DIR; if (!base) return; const directory = resolve(process.cwd(), base, suffix); mkdirSync(directory, { recursive: true }); const target = resolve(directory, 'mcdc.json'); const temporary = target + '.' + process.pid + '.' + Math.random().toString(16).slice(2) + '.tmp'; writeFileSync(temporary, JSON.stringify(payload) + '\\n'); renameSync(temporary, target); };`,
+    ];
+    atomicWriteFileSync(
+      generatedJestSetup,
+      [
+        ...jestEvidenceHelpers,
+        `const { bind: bindJestEach } = require('jest-each');`,
+        `const attempts = new Map();`,
+        `const suites = [];`,
+        `const copyModifiers = (target, source, wrap, ancestors = new Set()) => { if (ancestors.has(source)) return target; const seen = new Set(ancestors); seen.add(source); for (const key of Object.getOwnPropertyNames(source)) { if (['length', 'name', 'prototype'].includes(key)) continue; const value = source[key]; if (typeof value !== 'function') continue; try { const decorated = key === 'each' ? (...eachArgs) => wrap(value.apply(source, eachArgs), eachArgs) : copyModifiers(wrap(value.bind(source)), value, wrap, seen); Object.defineProperty(target, key, { configurable: true, enumerable: true, value: decorated }); } catch {} } return target; };`,
+        `const wrapTest = (original, eachArgs) => { const wrapped = function(...args) { const callbackIndex = args.findLastIndex(value => typeof value === 'function'); if (callbackIndex < 0) return original.apply(this, args); const callback = args[callbackIndex]; const title = typeof args[0] === 'string' ? args[0] : callback.name || 'anonymous test'; const expandedNames = []; if (eachArgs) { try { bindJestEach(name => expandedNames.push([...suites, name].join(' ')))(...eachArgs)(title, callback, args[callbackIndex + 1]); } catch {} } const registeredName = [...suites, title].join(' '); let invocation = 0; const next = [...args]; const execute = (owner, callbackArgs) => { const state = expect.getState(); const file = state.testPath; const name = expandedNames.length ? expandedNames[invocation++ % expandedNames.length] : registeredName; const testId = id(file, name); const retry = attempts.get(testId) || 0; attempts.set(testId, retry + 1); const execution = scope(file, name, retry); return process.__SUPERCOV_DIRECT_RUNTIME__.withCoverageCarrier({ version: 1, scope: execution }, () => callback.apply(owner, callbackArgs)); }; let instrumented; if (eachArgs) { instrumented = function(...callbackArgs) { return execute(this, callbackArgs); }; try { Object.defineProperty(instrumented, 'length', { value: callback.length }); } catch {} } else { instrumented = callback.length ? function(done) { return execute(this, [done]); } : function() { return execute(this, []); }; } next[callbackIndex] = instrumented; return original.apply(this, next); }; return copyModifiers(wrapped, original, wrapTest); };`,
+        `const wrapSuite = original => { const wrapped = function(...args) { const callbackIndex = args.findLastIndex(value => typeof value === 'function'); if (callbackIndex < 0) return original.apply(this, args); const callback = args[callbackIndex]; const name = typeof args[0] === 'string' ? args[0] : callback.name || 'suite'; const next = [...args]; next[callbackIndex] = function(...callbackArgs) { suites.push(name); try { return callback.apply(this, callbackArgs); } finally { suites.pop(); } }; return original.apply(this, next); }; return copyModifiers(wrapped, original, wrapSuite); };`,
+        `globalThis.test = wrapTest(globalThis.test);`,
+        `globalThis.it = globalThis.test;`,
+        `globalThis.describe = wrapSuite(globalThis.describe);`,
+        "",
+      ].join("\n"),
+    );
+    atomicWriteFileSync(
+      generatedJestReporter,
+      [
+        ...jestEvidenceHelpers,
+        `module.exports = class SupercovJestReporter {`,
+        `  onTestResult(_suite, result) { for (const assertion of result.testResults || []) {`,
+        `    const file = result.testFilePath; const name = assertion.fullName || [...(assertion.ancestorTitles || []), assertion.title || 'unknown test'].join(' '); const retry = Math.max(0, (assertion.invocations || 1) - 1); const execution = scope(file, name, retry); const status = assertion.status === 'passed' ? 'passed' : assertion.status === 'failed' ? 'failed' : ['pending', 'todo', 'disabled'].includes(assertion.status) ? 'skipped' : 'unknown';`,
+        `    write({ testId: execution.testId, scope: execution, test: name, testFile: local(file), title: assertion.title || name, retry, status, flaky: (assertion.retryReasons || []).length > 0, provenance: provenance(local(file)), runtime: [], browser: [], server: [] }, 'jest-' + execution.attemptId + '-status');`,
+        `  } }`,
+        `};`,
+        "",
+      ].join("\n"),
+    );
+    const jestOriginal = isolatedJestConfig
+      ? `import originalModule from ${JSON.stringify(pathToFileURL(isolatedJestConfig).href)};\nconst original = typeof originalModule === 'function' ? await originalModule() : originalModule;`
+      : `const original = {};`;
+    atomicWriteFileSync(
+      generatedJestConfig,
+      [
+        `import { isAbsolute, resolve } from 'node:path';`,
+        jestOriginal,
+        `const decorate = config => ({ ...config,`,
+        `  rootDir: config?.rootDir ? (isAbsolute(config.rootDir) ? config.rootDir : resolve(${JSON.stringify(isolatedJestConfig ? resolve(isolatedJestConfig, "..") : isolatedRoot)}, config.rootDir)) : ${JSON.stringify(isolatedRoot)},`,
+        `  setupFilesAfterEnv: [...(config?.setupFilesAfterEnv ?? []), ${JSON.stringify(generatedJestSetup)}],`,
+        `  reporters: [...(config?.reporters ?? ['default']), ${JSON.stringify(generatedJestReporter)}],`,
+        `  testLocationInResults: true,`,
+        `});`,
+        `export default { ...decorate(original), projects: original?.projects?.map(project => typeof project === 'object' ? decorate(project) : project) };`,
+        "",
+      ].join("\n"),
+    );
 
     const coverageEnv: NodeJS.ProcessEnv = {
       ...process.env,
       SUPERCOV_EVIDENCE_DIR: evidenceDirectoryRelative,
       SUPERCOV_EXECUTION_FINGERPRINT: runIntegrity.fingerprint.execution,
       SUPERCOV_EXECUTION_LOG: resolve(isolatedEvidenceDirectory, "execution.jsonl"),
+      SUPERCOV_ESM_TRANSFORMER: pathToFileURL(resolve(packageSource, "esmInterceptor.js")).href,
+      SUPERCOV_ESM_CAPABILITY_WRAPPER: pathToFileURL(resolve(generatedDirectory, "launchSupervisor.js")).href,
       SUPERCOV_RUN_ID: runId,
       SUPERCOV_SERVER_EVIDENCE_ROOT: serverEvidenceRoot,
       SUPERCOV_MANIFEST: manifestPath,
@@ -447,6 +519,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
         : {}),
       SUPERCOV_GENERATED_VITEST_CONFIG: generatedVitestConfig,
       SUPERCOV_GENERATED_PLAYWRIGHT_CONFIG: generatedPlaywrightConfig,
+      SUPERCOV_GENERATED_JEST_CONFIG: generatedJestConfig,
       ...(isolatedPlaywrightConfig
         ? { SUPERCOV_ORIGINAL_PLAYWRIGHT_CONFIG: isolatedPlaywrightConfig }
         : {}),
@@ -476,10 +549,33 @@ async function createCoverageRun(command: string[]): Promise<number> {
     } else if (project.buildAdapter === "direct") {
       instrumentDirectWorkspace(
         isolatedRoot,
-        project.sourceRoots,
+        project.sourceFiles,
         manifestPath,
+        project.sourceScope,
+        project.sourceLimitations,
       );
       buildResult = { status: 0, signal: null };
+    } else if (project.buildAdapter === "generic") {
+      instrumentDirectWorkspace(
+        isolatedRoot,
+        project.sourceFiles,
+        manifestPath,
+        project.sourceScope,
+        project.sourceLimitations,
+        "module",
+      );
+      buildResult = await runChild(
+        project.buildCommand[0]!,
+        project.buildCommand.slice(1),
+        {
+          cwd: isolatedRoot,
+          env: {
+            ...coverageEnv,
+            ...project.buildEnvironment,
+            NODE_ENV: "production",
+          },
+        },
+      );
     } else {
       buildResult = await runChild(
         project.buildCommand[0]!,
@@ -501,7 +597,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
     }
     if (
       buildResult.status === 0 &&
-      project.buildAdapter === "vite" &&
+      project.buildAdapter !== "direct" &&
       !reusableBuild
     ) {
       writeInstrumentedBuildCache(isolatedRoot, buildCacheKey);
@@ -652,6 +748,15 @@ if (queryCommand === "clean" || queryCommand === "prune") {
   try {
     if (queryCommand === "clean") cleanCommand(rawArgs.slice(1));
     else pruneCommand(rawArgs.slice(1));
+  } catch (error) {
+    console.error(`[supercov] ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 2;
+  }
+} else if (queryCommand === "merge") {
+  try {
+    const mergedRunId = mergeCoverageRuns(process.cwd(), rawArgs.slice(1));
+    console.log(`[supercov] merged run ${mergedRunId}`);
+    console.log(`npx supercov runs ${mergedRunId} coverage`);
   } catch (error) {
     console.error(`[supercov] ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 2;

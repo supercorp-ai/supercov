@@ -129,6 +129,29 @@ export function analyzeCoverageArchive(
   const rawResults = archive.files
     .filter((entry) => /(?:^|\/)mcdc\.json$/.test(entry.path))
     .map((entry) => parseJson<McdcRawTestResult>(entry.contents, entry.path));
+  const scopedRecords = archive.files
+    .filter((entry) => /^server\/.*\/server\.jsonl$/.test(entry.path))
+    .flatMap((entry) =>
+      entry.contents
+        .split("\n")
+        .filter(Boolean)
+        .map((line, index) =>
+          parseJson<CoverageServerRecord>(line, `${entry.path}:${index + 1}`),
+        ),
+    );
+  for (const record of scopedRecords) {
+    if (!record.scope) continue;
+    const matching = rawResults.find(
+      (raw) =>
+        rawTestId(raw) === record.scope!.testId &&
+        (raw.retry ?? 0) === record.scope!.retry,
+    );
+    if (!matching) continue;
+    const serialized = JSON.stringify(record);
+    matching.server ??= [];
+    if (!matching.server.some((candidate) => JSON.stringify(candidate) === serialized))
+      matching.server.push(record);
+  }
   const backgroundRecords = archive.files
     .filter((entry) => /^server\/background\/.*\.jsonl$/.test(entry.path))
     .flatMap((entry) =>

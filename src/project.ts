@@ -1,15 +1,24 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, resolve } from "node:path";
+import { discoverSourceScope } from "./sourceDiscovery.ts";
+import type {
+  CoverageLimitation,
+  CoverageSourceScope,
+} from "./types.ts";
 
 export interface CoverageProject {
   root: string;
   sourceRoots: string[];
+  sourceFiles: string[];
+  sourceScope: CoverageSourceScope;
+  sourceLimitations: CoverageLimitation[];
   playwrightConfig?: string;
   vitestConfig?: string;
+  jestConfig?: string;
   playwrightModule: string;
   playwrightTestExport: string;
   playwrightExports: string[];
-  buildAdapter: "vite" | "direct";
+  buildAdapter: "vite" | "generic" | "direct";
   buildCommand: string[];
   buildEnvironment: Record<string, string>;
 }
@@ -34,6 +43,15 @@ const VITEST_CONFIG_CANDIDATES = [
   "vite.config.mts",
   "vite.config.js",
   "vite.config.mjs",
+];
+
+const JEST_CONFIG_CANDIDATES = [
+  "jest.config.ts",
+  "jest.config.mts",
+  "jest.config.js",
+  "jest.config.mjs",
+  "jest.config.cts",
+  "jest.config.cjs",
 ];
 
 function packageJson(root: string): {
@@ -275,12 +293,10 @@ export function discoverCoverageProject(
     ?.split(",")
     .map((value) => value.trim())
     .filter(Boolean);
-  const sourceRoots = (
-    configuredSourceRoots?.length ? configuredSourceRoots : ["app", "src"]
-  ).filter((directory) => existsSync(resolve(root, directory)));
-  if (sourceRoots.length === 0) {
+  const discoveredSource = discoverSourceScope(root, configuredSourceRoots);
+  if (discoveredSource.sourceFiles.length === 0) {
     throw new Error(
-      "No application source root found. Set SUPERCOV_SOURCE_ROOTS=src,app.",
+      "No application source files were discovered. Set SUPERCOV_SOURCE_ROOTS=src,app.",
     );
   }
 
@@ -296,6 +312,12 @@ export function discoverCoverageProject(
   const vitestConfig = configuredVitest
     ? resolve(root, configuredVitest)
     : VITEST_CONFIG_CANDIDATES.map((candidate) =>
+        resolve(root, candidate),
+      ).find((candidate) => existsSync(candidate));
+  const configuredJest = environment["SUPERCOV_JEST_CONFIG"];
+  const jestConfig = configuredJest
+    ? resolve(root, configuredJest)
+    : JEST_CONFIG_CANDIDATES.map((candidate) =>
         resolve(root, candidate),
       ).find((candidate) => existsSync(candidate));
 
@@ -324,24 +346,26 @@ export function discoverCoverageProject(
   const buildCommand = manifest.scripts?.["build"]
     ? ["npm", "run", "build"]
     : [];
-  if (buildCommand.length > 0 && !hasVite) {
-    throw new Error(
-      "The project is not a detected Vite build. A framework build adapter is required.",
-    );
-  }
-
   return {
     root,
-    sourceRoots,
+    sourceRoots: discoveredSource.sourceRoots,
+    sourceFiles: discoveredSource.sourceFiles,
+    sourceScope: discoveredSource.scope,
+    sourceLimitations: discoveredSource.limitations,
     ...(playwrightConfig ? { playwrightConfig } : {}),
     ...(vitestConfig ? { vitestConfig } : {}),
+    ...(jestConfig ? { jestConfig } : {}),
     playwrightModule,
     playwrightTestExport,
     playwrightExports:
       playwrightModule === discoveredPlaywright.module
         ? discoveredPlaywright.exports
         : [playwrightTestExport, "expect"],
-    buildAdapter: buildCommand.length > 0 ? "vite" : "direct",
+    buildAdapter: buildCommand.length > 0
+      ? hasVite
+        ? "vite"
+        : "generic"
+      : "direct",
     buildCommand,
     buildEnvironment: inferBuildEnvironment(root, command, environment),
   };

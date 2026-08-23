@@ -14,11 +14,15 @@ import type {
   CoverageLimitation,
   CoveragePointMeta,
   McdcDecisionMeta,
+  CoverageManifest,
 } from "./types.ts";
 
 export interface McdcVitePluginOptions {
   root?: string;
   sourceRoots?: string[];
+  sourceFiles?: string[];
+  sourceScope?: CoverageManifest["scope"];
+  sourceLimitations?: CoverageLimitation[];
   manifestPath?: string;
   buildOutputMetadataPath?: string;
 }
@@ -28,6 +32,12 @@ export function mcdcVitePlugin(options: McdcVitePluginOptions = {}): Plugin {
   const sourceRoots = (options.sourceRoots ?? ["app", "src"])
     .map((directory) => resolve(root, directory))
     .filter((directory) => existsSync(directory));
+  const configuredSourceFiles = options.sourceFiles?.map((file) =>
+    resolve(root, file)
+  );
+  const sourceFileSet = configuredSourceFiles
+    ? new Set(configuredSourceFiles)
+    : undefined;
   const runtimePath = fileURLToPath(new URL("./runtime.js", import.meta.url));
   const manifestPath = options.manifestPath
     ? resolve(root, options.manifestPath)
@@ -40,6 +50,8 @@ export function mcdcVitePlugin(options: McdcVitePluginOptions = {}): Plugin {
   const points = new Map<string, CoveragePointMeta>();
   const branches = new Map<string, CoverageBranchMeta>();
   const limitations = new Map<string, CoverageLimitation>();
+  for (const limitation of options.sourceLimitations ?? [])
+    limitations.set(limitation.id, limitation);
 
   const recordManifest = (manifest: {
     decisions: McdcDecisionMeta[];
@@ -104,8 +116,9 @@ export function mcdcVitePlugin(options: McdcVitePluginOptions = {}): Plugin {
       // Vite only transforms modules reachable from a build entry. Scan every
       // source file up front so never-imported executable code is still in the
       // denominator and appears as uncovered rather than disappearing.
-      for (const sourceRoot of sourceRoots) {
-        for (const id of sourceFiles(sourceRoot)) {
+      const inventory = configuredSourceFiles ?? sourceRoots.flatMap(sourceFiles);
+      for (const id of inventory) {
+        if (existsSync(id)) {
           const file = relative(root, id).split(sep).join("/");
           recordManifest(
             instrumentMcdc(readFileSync(id, "utf8"), file).manifest,
@@ -116,10 +129,12 @@ export function mcdcVitePlugin(options: McdcVitePluginOptions = {}): Plugin {
     transform(code, rawId) {
       const id = rawId.split("?")[0] ?? rawId;
       if (
-        !sourceRoots.some(
-          (sourceRoot) =>
-            id === sourceRoot || id.startsWith(`${sourceRoot}${sep}`),
-        ) ||
+        !(sourceFileSet
+          ? sourceFileSet.has(id)
+          : sourceRoots.some(
+              (sourceRoot) =>
+                id === sourceRoot || id.startsWith(`${sourceRoot}${sep}`),
+            )) ||
         !/\.[cm]?[jt]sx?$/.test(id)
       )
         return null;
@@ -148,6 +163,7 @@ export function mcdcVitePlugin(options: McdcVitePluginOptions = {}): Plugin {
         points: sortByLocation([...points.values()]),
         branches: sortByLocation([...branches.values()]),
         limitations: sortByLocation([...limitations.values()]),
+        ...(options.sourceScope ? { scope: options.sourceScope } : {}),
       };
       atomicWriteFileSync(
         manifestPath,

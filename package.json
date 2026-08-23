@@ -1,6 +1,6 @@
 {
   "name": "supercov",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Zero-edit, runner-aware coverage completeness for JavaScript test suites",
   "license": "MIT",
   "repository": {
@@ -37,7 +37,7 @@
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run tests/unit",
     "test:types": "tsc --noEmit",
-    "test:fixture": "npm run build && npm --prefix tests/fixtures/generic-playwright run test:coverage && node scripts/opaque-runner-integration.mjs",
+    "test:fixture": "npm run build && npm --prefix tests/fixtures/generic-playwright run test:coverage && node scripts/opaque-runner-integration.mjs && node scripts/opaque-esm-integration.mjs && node scripts/node-test-integration.mjs && node scripts/jest-integration.mjs && node scripts/generic-build-integration.mjs && node scripts/next-integration.mjs && node scripts/distributed-merge-integration.mjs && node scripts/agent-query-eval.mjs",
     "test:packed-npx": "node scripts/packed-npx-integration.mjs",
     "test:isolation": "npm run build && node scripts/isolation-integration.mjs",
     "test:filesystem": "npm run build && vitest run tests/unit/atomic.test.ts tests/unit/evidenceArchive.test.ts tests/unit/workspace.test.ts && node scripts/workspace-crash-integration.mjs",
@@ -73,12 +73,20 @@
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",
+    "@swc/core": "^1.16.1",
     "@types/node": "^24.0.0",
+    "esbuild": "^0.28.2",
     "fast-check": "^4.9.0",
+    "jest": "^30.4.2",
+    "next": "^16.3.2",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
     "test262-harness": "^10.0.0",
     "typescript": "7.0.2",
     "vite": "8.2.2",
     "vitest": "4.1.11",
+    "webpack": "^5.109.2",
+    "webpack-cli": "^6.0.1",
     "ws": "^8.21.3",
     "yaml": "^2.9.0"
   }

@@ -78,16 +78,12 @@ export function createRunIntegrity(
   project: CoverageProject,
   toolSourceDirectory: string,
 ): CoverageRunIntegrity {
-  const sourceFiles = project.sourceRoots.flatMap((directory) =>
-    filesUnder(resolve(root, directory)).filter((path) => SOURCE_PATTERN.test(path)),
-  );
+  const sourceFiles = project.sourceFiles.map((path) => resolve(root, path));
   const explicitTests = ["test", "tests", "__tests__"].flatMap((directory) =>
     filesUnder(resolve(root, directory)).filter((path) => SOURCE_PATTERN.test(path)),
   );
-  const colocatedTests = project.sourceRoots.flatMap((directory) =>
-    filesUnder(resolve(root, directory)).filter((path) =>
-      TEST_PATTERN.test(normalized(root, path)),
-    ),
+  const colocatedTests = filesUnder(root).filter((path) =>
+    SOURCE_PATTERN.test(path) && TEST_PATTERN.test(normalized(root, path)),
   );
   const testFiles = [...new Set([...explicitTests, ...colocatedTests])];
   const dependencyFiles = [
@@ -204,7 +200,7 @@ export function compareRunIntegrity(
   if (!stored) return { stale: true, reasons: ["run predates integrity fingerprints"] };
   const reasons: string[] = [];
   if (stored.schemaVersion !== current.schemaVersion)
-    reasons.push("report schema changed");
+    reasons.push("coverage schema changed");
   if (stored.fingerprint.instrumenter !== current.fingerprint.instrumenter)
     reasons.push("instrumenter changed");
   if (stored.fingerprint.source !== current.fingerprint.source)

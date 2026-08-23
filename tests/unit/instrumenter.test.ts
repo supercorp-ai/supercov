@@ -432,6 +432,15 @@ describe("MC/DC instrumenter", () => {
     );
   });
 
+  it("wraps Next route handlers for request-context attribution", () => {
+    const transformed = instrumentMcdc(
+      `export function GET(request) { return Response.json({ url: request.url }); }`,
+      "app/api/items/route.ts",
+    ).code;
+    expect(transformed).toContain("const GET = __supercovWithRequestPhase(");
+    expect(transformed).toContain("withRequestPhase as __supercovWithRequestPhase");
+  });
+
   it("reports masking MC/DC witnesses for every independently effective condition", () => {
     const meta: McdcDecisionMeta = {
       id: "decision",

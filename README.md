@@ -85,10 +85,11 @@ npx supercov runs latest coverage --filter passed
 npx supercov runs latest coverage --filter failed
 npx supercov runs latest coverage kinds
 npx supercov runs latest coverage runners
+npx supercov runs latest coverage scope
 npx supercov runs latest coverage --kind e2e
 npx supercov runs latest coverage files
-npx supercov runs latest coverage gaps --limit 10
-npx supercov runs latest coverage gaps --kind e2e --limit 10
+npx supercov runs latest coverage gaps
+npx supercov runs latest coverage gaps --kind e2e
 
 # Drill into one target selected from the gap list.
 npx supercov runs latest coverage file app/routes/example.ts
@@ -98,17 +99,22 @@ npx supercov runs latest coverage covers app/routes/example.ts:57
 # Understand redundancy/contribution and validate a newly written test. Replace
 # "latest" with the immutable run ID when an agent continues work later.
 npx supercov runs latest coverage test "test title fragment"
+npx supercov runs latest coverage minimize --filter passed
+npx supercov runs latest coverage minimize --filter passed --metric mcdc --target 80
 npx supercov diff <older-run> <newer-run>
+
+# Combine compatible shards without deleting their immutable source runs.
+npx supercov merge <first-run-id> <second-run-id>
 ```
 
 Coverage queries use `--filter all` by default, matching conventional coverage
 tools: every executed attempt contributes, including attempts that later fail.
 Use `--filter passed` for verified coverage from successful attempts of
 ultimately passing tests, or `--filter failed` to inspect only execution from
-failed attempts (including failed retries of flaky tests). Reports record
+failed attempts (including failed retries of flaky tests). Evidence records
 attempt status and classify each test as passed, failed, flaky, skipped, timed
-out, interrupted, or unknown. The passed and failed subsets are stored inside
-the same compressed report rather than duplicated into presentation files.
+out, interrupted, or unknown. Passed and failed views are derived from the
+same immutable archive rather than duplicated into presentation files.
 
 The run ID is positional because all coverage queries operate on one immutable
 run. `latest` is a convenience selector for interactive use. Every query
@@ -117,36 +123,52 @@ Every collection is paginated at 20 items by default and prints its range plus
 a copyable next-page command; generated commands omit the default limit.
 Text output is concise for an interactive agent; JSON is the stable machine
 interface that can later back hosted coverage tools without changing the
-stored schema.
+stored evidence schema. `coverage minimize` is an exact branch-and-bound
+solver: line, statement, function, and branch obligations use per-test
+provenance, while MC/DC obligations retain complete independence-witness pairs
+and are recomputed for every candidate subset. Its result is therefore a
+proved minimum, not a greedy approximation.
+It intentionally refuses a view containing background/unattributed evidence:
+there is no honest way to claim an exact test subset when the runner did not
+expose test boundaries.
 
-For a conventional Vite project, or a Node project with no build step, the
-CLI:
+`merge` accepts only runs with identical source, test, dependency,
+configuration, instrumenter, schema, and denominator fingerprints. It rewrites
+the run scope inside every evidence record, namespaces shard paths, publishes a
+new immutable run atomically, and leaves all input runs untouched. This is the
+distributed/multi-host primitive; incompatible shards fail clearly instead of
+producing a plausible but invalid aggregate.
+
+For a JavaScript or TypeScript project, the CLI:
 
 1. refreshes a stable isolated source namespace under
    `.supercov/cache/instrumented-workspace/<project>/`, links the existing
-   dependency tree, and creates all Vite, Vitest, Playwright, and build output
+   dependency tree, and creates generated runner configuration and build output
    only there; file data uses copy-on-write reflinks where the filesystem
    supports them, and falls back to copying where it does not; the stable path
    lets VM/container snapshot systems reuse a coverage build without touching
    the application's ordinary build; when the complete source/config/toolchain
    fingerprint is unchanged, the prior instrumented output and manifest are
    carried into the refreshed source snapshot and the build is skipped;
-2. inventories every `app/**/*.ts(x)` and `src/**/*.ts(x)` file for the
-   denominator, then instruments modules loaded by Vite without changing the
-   project's config; when no build script exists, it instruments only the
-   disposable source copy and supplies a module-format-neutral runtime through
-   the inherited Node preload;
-3. discovers the Playwright-compatible fixture provider, test export, and
-   additional named exports from the suite's existing imports, then redirects
-   that provider at module-load time; Vitest setup is injected through the
-   child runner's generated config;
+2. inventories first-party source from package entry points, workspaces,
+   conventional source directories, and TypeScript roots. Every candidate is
+   retained as included, excluded, or ambiguous; ambiguity blocks a complete
+   verdict and is inspectable with `coverage scope`. Set
+   `SUPERCOV_SOURCE_ROOTS` for an explicit authoritative scope;
+3. instruments through the existing Vite graph when available, or instruments
+   only the disposable source copy before the project's unchanged
+   Next/Turbopack, Webpack, esbuild, SWC, or other build command. No-build ESM
+   and CommonJS projects use the same disposable direct path;
 4. runs the exact command following `--`, propagating coverage through every
-   Node child process it launches;
-5. attributes every source hit and decision vector to its individual test,
+   Node child process it launches. Generated adapters provide exact test,
+   worker, retry, and outcome scopes for Playwright, Vitest, Jest, and
+   `node:test` without changing test imports or configs;
+5. attributes source hits and decision vectors to individual tests where an
+   exact adapter is active,
    automatically wraps Playwright actions and assertions, and records the
-   action/assertion phase responsible for each correlated hit; then merges
-   server and browser evidence into one compressed JSON report; and
-6. atomically publishes the compressed evidence/report into `.supercov/`, then
+   action/assertion phase responsible for each correlated hit; and
+6. atomically publishes the exact denominator and raw evidence into one gzip
+   archive under `.supercov/`, then
    removes loose evidence and terminal per-run work state, retaining only the
    immutable run and disposable isolated build namespace. The
    ordinary application build is never read as an input, overwritten, or
@@ -154,7 +176,7 @@ CLI:
 
 Only `.supercov/` is modified in the user's checkout. A per-project lock
 rejects overlapping runs before either can build. Run state is durably written
-through preparing/building/testing/reporting phases; SIGINT, SIGTERM,
+through preparing/building/testing/publishing phases; SIGINT, SIGTERM,
 and SIGHUP are forwarded to the entire child process group. If the process is
 killed without a cleanup opportunity, the next invocation marks the dead PID's
 run abandoned and refreshes the isolated namespace before using it. Cache
@@ -162,7 +184,7 @@ refresh is transactional: a new sibling generation is prepared completely,
 the stable name is switched only at publication, and the prior complete
 generation is retained until that switch succeeds. The next invocation
 discards orphan staging trees or restores the prior generation if a host crash
-landed between the two same-filesystem renames. Report, evidence archive, and
+landed between the two same-filesystem renames. Evidence archive, metadata, and
 state writes use sibling-temp files, fsync, and atomic rename; lock acquisition
 uses exclusive creation and fsync. Published `run.json` is the durable terminal
 record, so terminal work state is not retained.
@@ -186,7 +208,7 @@ documented in [Workspace isolation](docs/workspace-isolation.md).
 
 Every run prints and stores monotonic phase timings for initialization,
 workspace preparation, adapter setup, the instrumented build, the unchanged
-test command, and report preparation. They are available in
+test command, and evidence publication. They are available in
 `.supercov/runs/<run-id>/run.json` and in the JSON form of `supercov runs`.
 These phase timings do not pretend to be end-to-end overhead: that percentage
 requires an explicit comparison with the same command run without Supercov,
@@ -195,20 +217,20 @@ may have side effects or external cost. See
 [Performance and storage](docs/performance.md) for the comparison methodology,
 strategy trade-offs, and a measured real-suite reference.
 
-The automatic adapters currently support standard Playwright suites (ESM and
-CommonJS specs in arbitrary project directories), project-owned Playwright
-fixture packages, Vitest, no-build Node commands, and Node coordinators that
-launch tests inside a mounted VM/container workspace. A single command such as
-`supercov -- npm test` can collect Vitest and Playwright evidence into the same
-run. No-build Node execution is retained as background/unattributed evidence
-until a recognized test-runner adapter supplies exact test boundaries. Jest,
-exact `node:test` attribution, non-Vite application builds, browser component
-runners, and distributed multi-host merging still require adapters; they are
-not silently reported as per-test coverage.
+The automatic exact-attribution adapters support standard Playwright suites
+(ESM and CommonJS specs in arbitrary project directories), project-owned
+Playwright fixture packages, Vitest, Jest—including concurrent and
+parameterized tests—and `node:test`. A single command can collect several
+runners into one run. Unsupported runners such as AVA or Mocha still receive
+aggregate first-party structural coverage through inherited process
+instrumentation, but their hits remain background/unattributed rather than
+being guessed onto tests. Browser component runners without a recognized
+adapter have the same explicit boundary.
 
 Remote execution discovery is structural rather than provider-specific. The
-preload observes CommonJS exports for a static `build(options)` capability,
-activates only when those options contain a host-to-guest mount that includes
+preload and narrowly gated ESM transform observe exports for a static
+`build(options)` capability,
+activate only when those options contain a host-to-guest mount that includes
 the isolated project, scopes an existing cache/snapshot identity to the run's
 source fingerprint, and follows the opaque returned object graph. A method
 whose options contain `argv`, `cmd`, or `command` receives guest-translated
@@ -216,17 +238,17 @@ Supercov paths and a guest-valid Node preload. The execution log records this
 process/capability graph but hashes long or multiline arguments so embedded
 shell bodies and credentials are never persisted.
 
-This first zero-edit mechanism has explicit boundaries. It follows Node child
+This zero-edit mechanism has explicit boundaries. It follows Node child
 processes, not arbitrary non-Node supervisors or a remote control plane that
-never exposes launches to the local process. The remote SDK must currently be
-visible through CommonJS loading, its build options must expose the workspace
-mount, and its execution call must accept an environment. Pure-ESM executor
-SDKs, positional-only remote exec APIs, and providers that hide all launch
-state behind an RPC need additional interception layers. Supercov reports
-missing evidence rather than claiming those paths are covered.
+never exposes launches to the local process. CommonJS and pure-ESM executor
+SDKs, object-shaped and positional execution APIs, and opaque returned object
+graphs are covered when a discoverable build capability exposes the workspace
+mount and an execution capability accepts an environment. Providers that hide
+all launch state behind an out-of-process RPC still need an adapter. Supercov
+reports missing evidence rather than claiming those paths are covered.
 
-The public regression suite includes a provider-neutral opaque executor. Its
-CommonJS SDK exposes only a static build capability, a host-to-guest mount,
+The public regression suite includes provider-neutral CommonJS and pure-ESM
+opaque executors. Each exposes only a static build capability, a host-to-guest mount,
 an existing snapshot key, an opaque image/pool/machine chain, and an
 argv-shaped execution method. CI requires Supercov to discover that structure,
 scope the cache identity, translate paths and the Node preload into the guest,
@@ -263,13 +285,13 @@ for either filtered subset. With `--kind e2e`, gap and file queries also
 distinguish obligations covered only by other test levels from obligations
 uncovered everywhere.
 
-The JSON report contains both per-test and per-test-file coverage data. MC/DC
-stores vector-level provenance rather than only a decision-level test list, so
-a later suite minimizer can recompute valid independence pairs for any proposed
-subset. This matters because the two vectors in a witness pair may come from
-different tests.
+The query model reconstructed from the archive contains both per-test and
+per-test-file coverage data. MC/DC stores vector-level provenance rather than
+only a decision-level test list, so the exact minimizer recomputes valid
+independence pairs for every proposed subset. This matters because the two
+vectors in a witness pair may come from different tests.
 
-The same report also contains an action/assertion trace without requiring spec
+The reconstructed query model also contains an action/assertion trace without requiring spec
 changes. Calls such as `page.goto()`, `locator.click()`, and `locator.fill()`
 open action phases; Playwright `expect()` matchers open assertion phases. The
 phase travels on browser requests into automatically wrapped Remix loaders,
@@ -290,7 +312,7 @@ test. HTTP callbacks inherit the carrier automatically; child processes inherit
 it through their environment; and exported queue helpers support BullMQ,
 Bee-Queue, pg-boss, Agenda, and in-process schedulers. Evidence that arrives
 without a carrier is persisted under a first-class `background/unattributed`
-scope. It is visible in the all-attempt report and excluded from passed-only
+scope. It is visible in the all-attempt view and excluded from passed-only
 per-test coverage.
 
 The Playwright adapter covers the page and request fixtures, API request
@@ -300,7 +322,7 @@ processes. A two-worker generic fixture exercises these surfaces without
 changing its test imports or Playwright config.
 
 Every run stores SHA-256 fingerprints for source, tests, dependency lockfiles,
-test/build configuration, and the instrumenter, plus its report schema and Git
+test/build configuration, and the instrumenter, plus its evidence schema and Git
 revision/dirty state. Queries compare the stored fingerprint with the current
 workspace, visibly mark stale runs, and reject evidence carrying a different
 run scope.
@@ -326,5 +348,5 @@ The v2 denominator additionally measures optional-chain short-circuiting,
 logical assignments, parameter/destructuring defaults, try versus catch,
 zero versus entered `for-in`/`for-of`, and implicit switch no-match. Direct
 `eval`/`Function` source cannot receive a stable pre-run denominator; when such
-code is discovered the report records its exact location as a completeness
+code is discovered the evidence records its exact location as a completeness
 blocker instead of allowing a misleading 100% verdict.

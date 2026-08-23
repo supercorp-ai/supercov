@@ -23,6 +23,7 @@ const CACHE_IDENTITY = /^(?:warmup|snapshot|cache)(?:key|tag|id)$/i;
 const patchedBuilders = new WeakSet<Function>();
 const exportedValues = new WeakSet<object>();
 const capabilityProxies = new WeakMap<object, object>();
+const importedCapabilityProxies = new WeakMap<object, object>();
 let installed = false;
 let remoteLaunchSequence = 0;
 
@@ -301,14 +302,39 @@ export function wrapCapabilityObject(
       if (typeof member !== "function") return member;
       return (...args: unknown[]) => {
         let callArguments = args;
-        const index = args.findIndex(launchOptions);
+        let index = args.findIndex(launchOptions);
+        let positionalCommand: string[] | undefined;
+        if (
+          index < 0 &&
+          typeof property === "string" &&
+          /^(?:exec|execute|launch|run|spawn)$/i.test(property)
+        ) {
+          const commandIndex = args.findIndex(
+            (argument) =>
+              typeof argument === "string" ||
+              (Array.isArray(argument) && argument.every((item) => typeof item === "string")),
+          );
+          if (commandIndex >= 0) {
+            const command = args[commandIndex];
+            positionalCommand = Array.isArray(command)
+              ? (command as string[])
+              : [String(command), ...(Array.isArray(args[commandIndex + 1]) ? args[commandIndex + 1] as string[] : [])];
+            index = args.findIndex(
+              (argument, argumentIndex) =>
+                argumentIndex > commandIndex &&
+                Boolean(argument) &&
+                typeof argument === "object" &&
+                !Array.isArray(argument),
+            );
+          }
+        }
         if (index >= 0) {
           const original = args[index] as UnknownRecord;
           callArguments = [...args];
           callArguments[index] = injectRemoteLaunch(original, mapping);
           record({
             event: "remote-launch",
-            command: commandSummary(launchArgv(original)),
+            command: commandSummary(positionalCommand ?? launchArgv(original)),
             guestRoot: mapping.guestRoot,
           });
         }
@@ -320,6 +346,66 @@ export function wrapCapabilityObject(
     },
   });
   capabilityProxies.set(object, proxy);
+  return proxy;
+}
+
+/**
+ * Proxy a value imported by a first-party ESM launcher. The proxy remains
+ * provider-neutral: it waits until arguments reveal a host/guest mount, then
+ * delegates to the same capability graph used for CommonJS exports.
+ */
+export function wrapImportedCapability(value: unknown): unknown {
+  if ((!value || typeof value !== "object") && typeof value !== "function")
+    return value;
+  const object = value as object;
+  const cached = importedCapabilityProxies.get(object);
+  if (cached) return cached;
+  const invoke = (
+    callable: Function,
+    receiver: unknown,
+    args: unknown[],
+  ): unknown => {
+    const hostRoot = process.env["SUPERCOV_PROJECT_ROOT"];
+    const mapping = hostRoot
+      ? args.map((argument) => discoverWorkspaceMapping(argument, hostRoot)).find(Boolean)
+      : undefined;
+    if (mapping) {
+      const fingerprint = process.env["SUPERCOV_EXECUTION_FINGERPRINT"] ?? "unversioned";
+      const scopedArguments = args.map((argument) =>
+        scopeCapabilityCache(argument, fingerprint),
+      );
+      record({
+        event: "workspace-capability",
+        hostRoot: mapping.hostRoot,
+        guestRoot: mapping.guestRoot,
+        cacheIdentities: scopedArguments.flatMap((entry) => entry.changed),
+      });
+      return wrapResult(
+        Reflect.apply(callable, receiver, scopedArguments.map((entry) => entry.value)),
+        mapping,
+      );
+    }
+    return wrapImportedCapability(Reflect.apply(callable, receiver, args));
+  };
+  const proxy = new Proxy(object, {
+    get(target, property) {
+      const member = Reflect.get(target, property, target) as unknown;
+      if (typeof member !== "function") return wrapImportedCapability(member);
+      return (...args: unknown[]) => invoke(member, target, args);
+    },
+    ...(typeof value === "function"
+      ? {
+          apply(target: object, thisArgument: unknown, args: unknown[]) {
+            return invoke(target as Function, thisArgument, args);
+          },
+          construct(target: object, args: unknown[], newTarget: Function): object {
+            const result = Reflect.construct(target as Function, args, newTarget);
+            return wrapImportedCapability(result) as object;
+          },
+        }
+      : {}),
+  });
+  importedCapabilityProxies.set(object, proxy);
   return proxy;
 }
 
@@ -380,14 +466,18 @@ function childOptionsIndex(
   args: unknown[],
 ): number | undefined {
   if (method === "spawn" || method === "spawnSync" || method === "fork")
-    return Array.isArray(args[1]) ? 2 : 1;
+    return Array.isArray(args[1]) || (args.length > 2 && args[2] !== undefined)
+      ? 2
+      : 1;
   if (
     method === "exec" ||
     method === "execSync" ||
     method === "execFile" ||
     method === "execFileSync"
   )
-    return Array.isArray(args[1]) ? 2 : 1;
+    return Array.isArray(args[1]) || (args.length > 2 && args[2] !== undefined)
+      ? 2
+      : 1;
   return undefined;
 }
 

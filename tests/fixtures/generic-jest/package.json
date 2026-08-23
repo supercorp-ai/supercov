@@ -1,0 +1,7 @@
+{
+  "name": "supercov-generic-jest-fixture",
+  "private": true,
+  "scripts": {
+    "test": "jest"
+  }
+}

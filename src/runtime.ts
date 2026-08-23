@@ -365,7 +365,9 @@ function installServerChildPropagation(): void {
       method === "execFile" ||
       method === "execFileSync"
     )
-      return Array.isArray(args[1]) ? 2 : 1;
+      return Array.isArray(args[1]) || (args.length > 2 && args[2] !== undefined)
+        ? 2
+        : 1;
     return 1;
   };
   for (const method of [

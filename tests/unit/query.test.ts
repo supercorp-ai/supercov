@@ -18,7 +18,7 @@ describe("coverage query routing", () => {
     });
   });
 
-  it.each(["files", "gaps", "file", "decision", "covers", "test"])(
+  it.each(["scope", "files", "gaps", "file", "decision", "covers", "test", "minimize"])(
     "resolves the coverage %s subresource",
     (child) => {
       expect(

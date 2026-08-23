@@ -23,6 +23,14 @@ describe("run integrity", () => {
       const project: CoverageProject = {
         root,
         sourceRoots: ["app"],
+        sourceFiles: ["app/index.ts"],
+        sourceScope: {
+          version: 1,
+          mode: "automatic",
+          roots: ["app"],
+          entries: [],
+        },
+        sourceLimitations: [],
         playwrightModule: "@playwright/test",
         playwrightTestExport: "test",
         playwrightExports: ["expect", "test"],

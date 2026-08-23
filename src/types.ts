@@ -59,11 +59,26 @@ export interface CoverageManifest {
   points: CoveragePointMeta[];
   branches: CoverageBranchMeta[];
   limitations?: CoverageLimitation[];
+  scope?: CoverageSourceScope;
+}
+
+export interface CoverageSourceScopeEntry {
+  file: string;
+  status: "included" | "excluded" | "ambiguous";
+  reason: string;
+  packageRoot?: string;
+}
+
+export interface CoverageSourceScope {
+  version: 1;
+  mode: "automatic" | "explicit";
+  roots: string[];
+  entries: CoverageSourceScopeEntry[];
 }
 
 export interface CoverageLimitation {
   id: string;
-  kind: "dynamic-code" | "semantic-safety";
+  kind: "dynamic-code" | "semantic-safety" | "source-scope";
   file: string;
   line: number;
   column: number;
@@ -367,6 +382,7 @@ export interface McdcCoverageView {
     notMeasured: string[];
   };
   integrity?: CoverageRunIntegrity;
+  scope?: CoverageSourceScope;
   limitations?: CoverageLimitation[];
   summary: CoverageSummary;
   coverageByKind: Array<{

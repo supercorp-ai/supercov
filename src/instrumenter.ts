@@ -30,8 +30,12 @@ const LOOP_BEGIN = "__supercovLoopBegin";
 const LOOP_ENTERED = "__supercovLoopEntered";
 const LOOP_END = "__supercovLoopEnd";
 
-function isRemixRequestHandlerName(name: string | undefined): boolean {
-  return name === "loader" || name === "action";
+function isRequestHandlerName(file: string, name: string | undefined): boolean {
+  if (name === "loader" || name === "action") return /^app\/routes\//.test(file);
+  return (
+    /(?:^|\/)app\/.*\/route\.[cm]?[jt]sx?$/.test(file) &&
+    ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"].includes(name ?? "")
+  );
 }
 
 function sourceFor(code: string, node: t.Node): string {
@@ -1194,7 +1198,10 @@ export function instrumentMcdc(
   // that exact phase through every awaited helper without application edits.
   // This runs after source instrumentation so generated wrappers never become
   // coverage obligations themselves.
-  if (/^app\/routes\//.test(file)) {
+  if (
+    /^app\/routes\//.test(file) ||
+    /(?:^|\/)app\/.*\/route\.[cm]?[jt]sx?$/.test(file)
+  ) {
     traverse(ast, {
       ExportNamedDeclaration(path) {
         const declaration = path.node.declaration;
@@ -1202,7 +1209,7 @@ export function instrumentMcdc(
           for (const declarator of declaration.declarations) {
             if (
               t.isIdentifier(declarator.id) &&
-              isRemixRequestHandlerName(declarator.id.name) &&
+              isRequestHandlerName(file, declarator.id.name) &&
               declarator.init
             ) {
               declarator.init = t.callExpression(
@@ -1218,7 +1225,7 @@ export function instrumentMcdc(
         if (
           t.isFunctionDeclaration(declaration) &&
           declaration.id &&
-          isRemixRequestHandlerName(declaration.id.name)
+          isRequestHandlerName(file, declaration.id.name)
         ) {
           const exportedName = declaration.id.name;
           const originalId = path.scope.generateUidIdentifier(
@@ -1245,7 +1252,7 @@ export function instrumentMcdc(
           (specifier): specifier is t.ExportSpecifier =>
             t.isExportSpecifier(specifier) &&
             t.isIdentifier(specifier.exported) &&
-            isRemixRequestHandlerName(specifier.exported.name),
+            isRequestHandlerName(file, specifier.exported.name),
         );
         if (handlerSpecifiers.length === 0) return;
 
