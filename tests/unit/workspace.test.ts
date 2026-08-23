@@ -4,12 +4,17 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
+  realpathSync,
+  readdirSync,
+  renameSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   acquireProjectLock,
@@ -18,6 +23,7 @@ import {
   isolatedWorkspacePath,
   prepareIsolatedWorkspace,
   prepareCachedWorkspace,
+  recoverCachedWorkspace,
   recoverAbandonedRuns,
   removeIsolatedWorkspace,
   writeRunState,
@@ -86,6 +92,136 @@ describe("isolated run workspaces", () => {
     expect(readFileSync(resolve(root, "dist/index.js"), "utf8")).toBe(
       "normal-build\n",
     );
+    expect(
+      readdirSync(dirname(second)).filter((entry) =>
+        entry.startsWith(`.${basename(root)}.`),
+      ),
+    ).toEqual([]);
+  });
+
+  it("recovers every interrupted cache publication boundary", () => {
+    const root = project();
+    const workspace = prepareCachedWorkspace(root);
+    const parent = dirname(workspace);
+    const prefix = `.${basename(root)}`;
+
+    const incompleteStaging = resolve(parent, `${prefix}.staging-interrupted`);
+    mkdirSync(incompleteStaging);
+    writeFileSync(resolve(incompleteStaging, "partial.txt"), "partial\n");
+    expect(recoverCachedWorkspace(root)).toEqual({
+      restoredPrevious: false,
+      removedStaging: 1,
+      removedPrevious: 0,
+    });
+    expect(existsSync(workspace)).toBe(true);
+    expect(existsSync(incompleteStaging)).toBe(false);
+
+    const previous = resolve(parent, `${prefix}.previous-interrupted`);
+    const readyStaging = resolve(parent, `${prefix}.staging-ready`);
+    renameSync(workspace, previous);
+    mkdirSync(readyStaging);
+    writeFileSync(resolve(readyStaging, "unpublished.txt"), "new\n");
+    expect(recoverCachedWorkspace(root)).toEqual({
+      restoredPrevious: true,
+      removedStaging: 1,
+      removedPrevious: 0,
+    });
+    expect(existsSync(resolve(workspace, "src/index.ts"))).toBe(true);
+    expect(existsSync(readyStaging)).toBe(false);
+
+    const obsoletePrevious = resolve(parent, `${prefix}.previous-obsolete`);
+    mkdirSync(obsoletePrevious);
+    writeFileSync(resolve(obsoletePrevious, "old.txt"), "old\n");
+    expect(recoverCachedWorkspace(root)).toEqual({
+      restoredPrevious: false,
+      removedStaging: 0,
+      removedPrevious: 1,
+    });
+    expect(existsSync(obsoletePrevious)).toBe(false);
+  });
+
+  it("preserves or recovers a complete generation when publication throws", () => {
+    const root = project();
+    const workspace = prepareCachedWorkspace(root);
+    writeFileSync(resolve(workspace, "generation.txt"), "old\n");
+
+    expect(() =>
+      prepareCachedWorkspace(root, {
+        beforePublish() {
+          throw new Error("injected before publication");
+        },
+      }),
+    ).toThrow(/injected before publication/);
+    expect(readFileSync(resolve(workspace, "generation.txt"), "utf8")).toBe(
+      "old\n",
+    );
+
+    expect(() =>
+      prepareCachedWorkspace(root, {
+        afterPreviousMoved() {
+          throw new Error("injected between renames");
+        },
+      }),
+    ).toThrow(/injected between renames/);
+    expect(readFileSync(resolve(workspace, "generation.txt"), "utf8")).toBe(
+      "old\n",
+    );
+
+    writeFileSync(resolve(root, "src/index.ts"), "export const value = 3;\n");
+    expect(() =>
+      prepareCachedWorkspace(root, {
+        afterPublished() {
+          throw new Error("injected after publication");
+        },
+      }),
+    ).toThrow(/injected after publication/);
+    expect(readFileSync(resolve(workspace, "src/index.ts"), "utf8")).toContain(
+      "value = 3",
+    );
+    expect(recoverCachedWorkspace(root).removedPrevious).toBe(1);
+    expect(
+      readdirSync(dirname(workspace)).filter((entry) =>
+        entry.startsWith(`.${basename(root)}.`),
+      ),
+    ).toEqual([]);
+  });
+
+  it("keeps internal symlinks isolated and rejects links outside the project", () => {
+    if (process.platform === "win32") return;
+    const root = project();
+    symlinkSync(
+      resolve(root, "src/index.ts"),
+      resolve(root, "src/absolute-link.ts"),
+    );
+    const workspace = prepareCachedWorkspace(root);
+    const isolatedLink = resolve(workspace, "src/absolute-link.ts");
+    expect(readlinkSync(isolatedLink)).toBe("index.ts");
+    expect(realpathSync(isolatedLink)).toBe(
+      realpathSync(resolve(workspace, "src/index.ts")),
+    );
+    writeFileSync(resolve(workspace, "src/index.ts"), "isolated\n");
+    expect(readFileSync(resolve(root, "src/index.ts"), "utf8")).toContain(
+      "value = 1",
+    );
+
+    const external = mkdtempSync(resolve(tmpdir(), "supercov-external-"));
+    temporaryDirectories.push(external);
+    writeFileSync(resolve(external, "shared.ts"), "external\n");
+    symlinkSync(
+      resolve(external, "shared.ts"),
+      resolve(root, "src/external-link.ts"),
+    );
+    expect(() => prepareCachedWorkspace(root)).toThrow(
+      /symlink outside the isolated project/,
+    );
+    expect(readFileSync(resolve(workspace, "src/index.ts"), "utf8")).toBe(
+      "isolated\n",
+    );
+    expect(
+      readdirSync(dirname(workspace)).filter((entry) =>
+        entry.startsWith(`.${basename(root)}.`),
+      ),
+    ).toEqual([]);
   });
 
   it("rejects concurrent runs and recovers a stale project lock", () => {
@@ -223,5 +359,23 @@ describe("isolated run workspaces", () => {
     expect(existsSync(resolve(root, ".supercov/runs", ids[1]!))).toBe(false);
     expect(existsSync(isolatedWorkspacePath(root, ids[2]!))).toBe(false);
     expect(existsSync(activeWorkspace)).toBe(true);
+  });
+
+  it("never removes the stable cache while the project lock is live", () => {
+    const root = project();
+    const workspace = prepareCachedWorkspace(root);
+    const lock = acquireProjectLock(root, "active-clean-test");
+    try {
+      expect(() =>
+        cleanCoverageStorage(root, { keep: 0, dryRun: false }),
+      ).toThrow(/active-clean-test.*already active/);
+      expect(existsSync(workspace)).toBe(true);
+    } finally {
+      lock.release();
+    }
+
+    const inactive = cleanCoverageStorage(root, { keep: 0, dryRun: false });
+    expect(inactive.removedBuildCache).toBe(true);
+    expect(existsSync(workspace)).toBe(false);
   });
 });

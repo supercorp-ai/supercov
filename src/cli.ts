@@ -123,6 +123,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
   const packageSource = fileURLToPath(new URL(".", import.meta.url));
   const runIntegrity = createRunIntegrity(root, project, packageSource);
   const workspace = cachedWorkspacePath(root);
+  const serverEvidenceRoot = resolve(workspace, ".supercov/server-evidence");
   const reportStagingDirectory = resolve(
     root,
     ".supercov/work",
@@ -353,6 +354,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
       SUPERCOV_EXECUTION_FINGERPRINT: runIntegrity.fingerprint.execution,
       SUPERCOV_EXECUTION_LOG: resolve(isolatedEvidenceDirectory, "execution.jsonl"),
       SUPERCOV_RUN_ID: runId,
+      SUPERCOV_SERVER_EVIDENCE_ROOT: serverEvidenceRoot,
       SUPERCOV_MANIFEST: manifestPath,
       SUPERCOV_PLAYWRIGHT_MODULE: project.playwrightModule,
       SUPERCOV_PLAYWRIGHT_TEST_EXPORT: project.playwrightTestExport,
@@ -441,6 +443,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
           {
             directory: reportStagingDirectory,
             displayDirectory: storedRunDirectory,
+            serverEvidenceRoot,
           },
         );
         atomicWriteFileSync(
@@ -492,6 +495,10 @@ async function createCoverageRun(command: string[]): Promise<number> {
       process.removeListener(signal, handler);
     try {
       rmSync(reportStagingDirectory, { recursive: true, force: true });
+      rmSync(resolve(serverEvidenceRoot, runId), {
+        recursive: true,
+        force: true,
+      });
       // The stable isolated namespace is a deliberate build/snapshot cache.
       // It never overlaps the user's ordinary build and `supercov clean`
       // removes it deterministically.

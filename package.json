@@ -15,6 +15,7 @@
   "files": [
     "bin",
     "dist",
+    "docs",
     "README.md"
   ],
   "engines": {

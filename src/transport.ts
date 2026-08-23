@@ -8,6 +8,13 @@ export const COVERAGE_CARRIER_ENV = "SUPERCOV_CONTEXT";
 export const DEFAULT_SERVER_EVIDENCE_ROOT =
   "/tmp/supercov-server-evidence";
 
+function configuredServerEvidenceRoot(): string {
+  return typeof process !== "undefined" &&
+    process.env?.["SUPERCOV_SERVER_EVIDENCE_ROOT"]
+    ? process.env["SUPERCOV_SERVER_EVIDENCE_ROOT"]!
+    : DEFAULT_SERVER_EVIDENCE_ROOT;
+}
+
 function nonEmpty(value: string | null): value is string {
   return typeof value === "string" && value.length > 0;
 }
@@ -99,28 +106,28 @@ export function decodeCoverageCarrier(
 
 export function serverRunEvidenceDirectory(
   runId: string,
-  root = DEFAULT_SERVER_EVIDENCE_ROOT,
+  root = configuredServerEvidenceRoot(),
 ): string {
   return `${root.replace(/\/+$/, "")}/${pathComponent(runId)}`;
 }
 
 export function serverEvidenceDirectory(
   scope: CoverageExecutionScope,
-  root = DEFAULT_SERVER_EVIDENCE_ROOT,
+  root = configuredServerEvidenceRoot(),
 ): string {
   return `${serverRunEvidenceDirectory(scope.runId, root)}/${pathComponent(scope.workerId)}/${scope.testKey}/${scope.retry}`;
 }
 
 export function serverEvidencePath(
   scope: CoverageExecutionScope,
-  root = DEFAULT_SERVER_EVIDENCE_ROOT,
+  root = configuredServerEvidenceRoot(),
 ): string {
   return `${serverEvidenceDirectory(scope, root)}/server.jsonl`;
 }
 
 export function backgroundEvidenceDirectory(
   runId: string,
-  root = DEFAULT_SERVER_EVIDENCE_ROOT,
+  root = configuredServerEvidenceRoot(),
 ): string {
   return `${serverRunEvidenceDirectory(runId, root)}/background`;
 }
@@ -128,7 +135,7 @@ export function backgroundEvidenceDirectory(
 export function backgroundEvidencePath(
   runId: string,
   processId = typeof process === "undefined" ? "unknown" : String(process.pid),
-  root = DEFAULT_SERVER_EVIDENCE_ROOT,
+  root = configuredServerEvidenceRoot(),
 ): string {
   return `${backgroundEvidenceDirectory(runId, root)}/${pathComponent(processId)}.jsonl`;
 }

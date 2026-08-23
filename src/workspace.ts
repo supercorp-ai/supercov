@@ -10,13 +10,15 @@ import {
   readFileSync,
   readdirSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, relative, resolve, sep } from "node:path";
-import { atomicWriteFileSync } from "./atomic.ts";
+import { randomUUID } from "node:crypto";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { atomicRenameSync, atomicWriteFileSync } from "./atomic.ts";
 
 export type RunStateStatus =
   | "preparing"
@@ -95,6 +97,77 @@ export function isolatedWorkspacePath(root: string, runId: string): string {
  */
 export function cachedWorkspacePath(root: string): string {
   return resolve(root, ".supercov/cache/instrumented-workspace", basename(root));
+}
+
+function cacheTransactionPrefix(
+  root: string,
+  kind: "staging" | "previous",
+): string {
+  return `.${basename(root)}.${kind}-`;
+}
+
+function cacheTransactionPath(
+  root: string,
+  kind: "staging" | "previous",
+): string {
+  const workspace = cachedWorkspacePath(root);
+  return resolve(
+    dirname(workspace),
+    `${cacheTransactionPrefix(root, kind)}${process.pid}-${randomUUID()}`,
+  );
+}
+
+export interface CacheRecoveryResult {
+  restoredPrevious: boolean;
+  removedStaging: number;
+  removedPrevious: number;
+}
+
+/**
+ * Recover the stable cache at transaction boundaries that SIGKILL or a host
+ * crash can interrupt. A staging tree is never live. A previous tree is
+ * restored only when the stable name is absent; otherwise it is obsolete.
+ */
+export function recoverCachedWorkspace(root: string): CacheRecoveryResult {
+  const workspace = cachedWorkspacePath(root);
+  const parent = dirname(workspace);
+  if (!existsSync(parent))
+    return { restoredPrevious: false, removedStaging: 0, removedPrevious: 0 };
+
+  const entries = readdirSync(parent, { withFileTypes: true });
+  const stagingPrefix = cacheTransactionPrefix(root, "staging");
+  const previousPrefix = cacheTransactionPrefix(root, "previous");
+  const staging = entries
+    .filter((entry) => entry.name.startsWith(stagingPrefix))
+    .map((entry) => resolve(parent, entry.name));
+  const previous = entries
+    .filter(
+      (entry) => entry.name.startsWith(previousPrefix) && entry.isDirectory(),
+    )
+    .map((entry) => resolve(parent, entry.name))
+    .sort((left, right) => lstatSync(right).mtimeMs - lstatSync(left).mtimeMs);
+  const invalidPrevious = entries
+    .filter(
+      (entry) => entry.name.startsWith(previousPrefix) && !entry.isDirectory(),
+    )
+    .map((entry) => resolve(parent, entry.name));
+
+  let restoredPrevious = false;
+  if (!existsSync(workspace) && previous[0]) {
+    atomicRenameSync(previous[0], workspace);
+    previous.shift();
+    restoredPrevious = true;
+  }
+
+  for (const path of staging) rmSync(path, { recursive: true, force: true });
+  for (const path of previous) rmSync(path, { recursive: true, force: true });
+  for (const path of invalidPrevious)
+    rmSync(path, { recursive: true, force: true });
+  return {
+    restoredPrevious,
+    removedStaging: staging.length,
+    removedPrevious: previous.length + invalidPrevious.length,
+  };
 }
 
 export function writeRunState(
@@ -226,17 +299,69 @@ export function acquireProjectLock(root: string, runId: string): ProjectLock {
   throw new Error("Could not acquire the Supercov project lock");
 }
 
-function copyTree(source: string, destination: string, root = false): void {
+function inside(root: string, path: string): boolean {
+  const local = relative(root, path);
+  return (
+    local === "" ||
+    (!local.startsWith(`..${sep}`) && local !== ".." && !isAbsolute(local))
+  );
+}
+
+function copyTree(
+  source: string,
+  destination: string,
+  root = false,
+  sourceRoot = source,
+  destinationRoot = destination,
+): void {
   mkdirSync(destination, { recursive: true });
   for (const entry of readdirSync(source, { withFileTypes: true })) {
     if (root && ROOT_EXCLUSIONS.has(entry.name)) continue;
     const from = resolve(source, entry.name);
     const to = resolve(destination, entry.name);
     const stat = lstatSync(from);
-    if (stat.isDirectory()) copyTree(from, to);
-    else if (stat.isSymbolicLink())
-      symlinkSync(readlinkSync(from), to, process.platform === "win32" ? "junction" : undefined);
-    else if (stat.isFile()) copyFileSync(from, to, constants.COPYFILE_FICLONE);
+    if (stat.isDirectory())
+      copyTree(from, to, false, sourceRoot, destinationRoot);
+    else if (stat.isSymbolicLink()) {
+      const link = readlinkSync(from);
+      const lexicalTarget = isAbsolute(link)
+        ? resolve(link)
+        : resolve(dirname(from), link);
+      let finalTarget: string | undefined;
+      try {
+        finalTarget = realpathSync(from);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (
+        !inside(sourceRoot, lexicalTarget) ||
+        (finalTarget && !inside(realpathSync(sourceRoot), finalTarget))
+      ) {
+        throw new Error(
+          `Refusing to preserve symlink outside the isolated project: ${relative(sourceRoot, from)} -> ${link}`,
+        );
+      }
+      const isolatedLink = isAbsolute(link)
+        ? relative(
+            dirname(to),
+            resolve(destinationRoot, relative(sourceRoot, lexicalTarget)),
+          )
+        : link;
+      symlinkSync(
+        isolatedLink,
+        to,
+        process.platform === "win32"
+          ? statSync(from).isDirectory()
+            ? "junction"
+            : "file"
+          : undefined,
+      );
+    } else if (stat.isFile())
+      copyFileSync(from, to, constants.COPYFILE_FICLONE);
+    else
+      throw new Error(
+        `Unsupported filesystem entry in isolated project: ${relative(sourceRoot, from)}`,
+      );
   }
 }
 
@@ -273,26 +398,75 @@ export function prepareIsolatedWorkspace(root: string, runId: string): string {
   return workspace;
 }
 
+interface CachePreparationHooks {
+  /** Internal fault-injection seam used by the crash-boundary regression. */
+  beforePublish?: (staging: string) => void;
+  /** Internal fault-injection seam used by the crash-boundary regression. */
+  afterPreviousMoved?: (previous: string) => void;
+  /** Internal fault-injection seam used by the crash-boundary regression. */
+  afterPublished?: (workspace: string) => void;
+}
+
 /** Refresh the stable, disposable instrumented-build namespace. */
-export function prepareCachedWorkspace(root: string): string {
+export function prepareCachedWorkspace(
+  root: string,
+  hooks: CachePreparationHooks = {},
+): string {
   const workspace = cachedWorkspacePath(root);
-  rmSync(workspace, { recursive: true, force: true });
-  copyTree(root, workspace, true);
-  const nodeModules = resolve(root, "node_modules");
-  if (existsSync(nodeModules)) {
-    const isolatedNodeModules = resolve(workspace, "node_modules");
-    mkdirSync(isolatedNodeModules, { recursive: true });
-    for (const entry of readdirSync(nodeModules, { withFileTypes: true })) {
-      symlinkSync(
-        resolve(nodeModules, entry.name),
-        resolve(isolatedNodeModules, entry.name),
-        process.platform === "win32"
-          ? entry.isDirectory()
-            ? "junction"
-            : "file"
-          : undefined,
-      );
+  recoverCachedWorkspace(root);
+  const staging = cacheTransactionPath(root, "staging");
+  const previous = cacheTransactionPath(root, "previous");
+  let movedPrevious = false;
+  try {
+    copyTree(root, staging, true);
+    const nodeModules = resolve(root, "node_modules");
+    if (existsSync(nodeModules)) {
+      const isolatedNodeModules = resolve(staging, "node_modules");
+      mkdirSync(isolatedNodeModules, { recursive: true });
+      for (const entry of readdirSync(nodeModules, { withFileTypes: true })) {
+        symlinkSync(
+          resolve(nodeModules, entry.name),
+          resolve(isolatedNodeModules, entry.name),
+          process.platform === "win32"
+            ? entry.isDirectory()
+              ? "junction"
+              : "file"
+            : undefined,
+        );
+      }
     }
+    hooks.beforePublish?.(staging);
+
+    // Keep the last complete cache available for the whole refresh. These two
+    // same-filesystem renames are the only publication boundary. Recovery
+    // restores `previous` if the process is killed in the narrow gap.
+    if (existsSync(workspace)) {
+      atomicRenameSync(workspace, previous);
+      movedPrevious = true;
+      hooks.afterPreviousMoved?.(previous);
+    }
+    atomicRenameSync(staging, workspace);
+    hooks.afterPublished?.(workspace);
+  } catch (error) {
+    if (movedPrevious && !existsSync(workspace) && existsSync(previous)) {
+      try {
+        atomicRenameSync(previous, workspace);
+      } catch {
+        // Leave the previous tree for deterministic recovery next invocation.
+      }
+    }
+    throw error;
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+  }
+
+  // Failure to remove an obsolete previous generation must not invalidate the
+  // newly published cache. The next invocation and `supercov clean` both
+  // remove it deterministically.
+  try {
+    rmSync(previous, { recursive: true, force: true });
+  } catch {
+    // Deliberately retained for recoverCachedWorkspace().
   }
   return workspace;
 }
@@ -318,7 +492,7 @@ export interface CleanupResult {
 }
 
 /** Deterministic retention: IDs sort newest-first because run IDs are UTC. */
-export function cleanCoverageStorage(
+function cleanCoverageStorageLocked(
   root: string,
   options: CleanupOptions,
 ): CleanupResult {
@@ -365,4 +539,20 @@ export function cleanCoverageStorage(
   if (removedBuildCache && !options.dryRun)
     rmSync(buildCache, { recursive: true, force: true });
   return { removedRuns, removedWorkspaces, removedBuildCache };
+}
+
+/** Cleanup is itself a project-wide transaction, so it cannot race a run. */
+export function cleanCoverageStorage(
+  root: string,
+  options: CleanupOptions,
+): CleanupResult {
+  const lock = acquireProjectLock(
+    root,
+    `clean-${process.pid}-${randomUUID()}`,
+  );
+  try {
+    return cleanCoverageStorageLocked(root, options);
+  } finally {
+    lock.release();
+  }
 }

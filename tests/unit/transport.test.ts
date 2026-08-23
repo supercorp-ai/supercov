@@ -1,5 +1,7 @@
 import { readFileSync, rmSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   coverageHit,
   mcdcBegin,
@@ -23,6 +25,24 @@ import type {
   CoverageServerRecord,
   McdcDecisionMeta,
 } from "../../src/types";
+
+const transportRoot = resolve(
+  tmpdir(),
+  `supercov-transport-test-${process.pid}`,
+);
+let previousTransportRoot: string | undefined;
+
+beforeAll(() => {
+  previousTransportRoot = process.env.SUPERCOV_SERVER_EVIDENCE_ROOT;
+  process.env.SUPERCOV_SERVER_EVIDENCE_ROOT = transportRoot;
+});
+
+afterAll(() => {
+  if (previousTransportRoot === undefined)
+    delete process.env.SUPERCOV_SERVER_EVIDENCE_ROOT;
+  else process.env.SUPERCOV_SERVER_EVIDENCE_ROOT = previousTransportRoot;
+  rmSync(transportRoot, { recursive: true, force: true });
+});
 
 function scope(
   runId: string,
@@ -52,6 +72,9 @@ function records(execution: CoverageExecutionScope): CoverageServerRecord[] {
 describe("concurrent server evidence transport", () => {
   it("round-trips scoped headers and rejects malformed filesystem keys", () => {
     const execution = scope("run with spaces", "worker/1", "test > one", 2);
+    expect(serverRunEvidenceDirectory(execution.runId)).toBe(
+      resolve(transportRoot, "run_with_spaces"),
+    );
     expect(decodeCoverageScope(encodeCoverageScope(execution))).toEqual(
       execution,
     );

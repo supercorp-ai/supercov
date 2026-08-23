@@ -4,12 +4,16 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, resolve } from "node:path";
 
 const root = resolve("tests/fixtures/generic-playwright");
 const build = spawnSync("npm", ["run", "build"], {
@@ -44,9 +48,121 @@ function snapshot(directory) {
   return entries;
 }
 
+async function verifyUncatchableCacheRecovery() {
+  const crashRoot = mkdtempSync(resolve(tmpdir(), "supercov-crash-recovery-"));
+  try {
+    mkdirSync(resolve(crashRoot, "src"));
+    writeFileSync(
+      resolve(crashRoot, "package.json"),
+      '{"name":"crash-recovery","private":true,"type":"module"}\n',
+    );
+    writeFileSync(
+      resolve(crashRoot, "src/decision.js"),
+      "export const decision = (a, b) => a && b;\n",
+    );
+    writeFileSync(
+      resolve(crashRoot, "test.mjs"),
+      'import { decision } from "./src/decision.js"; decision(true, true);\n',
+    );
+    const padding = resolve(crashRoot, "padding");
+    mkdirSync(padding);
+    for (let index = 0; index < 1_000; index += 1)
+      writeFileSync(resolve(padding, `${index}.txt`), `${index}\n`);
+
+    const projectBefore = snapshot(crashRoot);
+    const expectedCache = resolve(
+      crashRoot,
+      ".supercov/cache/instrumented-workspace",
+      basename(crashRoot),
+    );
+    const cacheParent = resolve(expectedCache, "..");
+    const stagingPrefix = `.${basename(crashRoot)}.staging-`;
+    mkdirSync(expectedCache, { recursive: true });
+    const previousGenerationMarker = resolve(
+      expectedCache,
+      "previous-generation.txt",
+    );
+    writeFileSync(previousGenerationMarker, "last complete generation\n");
+
+    const killed = spawn(
+      process.execPath,
+      [resolve("dist/cli.js"), "--", process.execPath, "test.mjs"],
+      { cwd: crashRoot, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let killedOutput = "";
+    killed.stdout.on("data", (chunk) => (killedOutput += chunk.toString()));
+    killed.stderr.on("data", (chunk) => (killedOutput += chunk.toString()));
+    const killedExit = new Promise((resolveExit) =>
+      killed.once("exit", (code, signal) => resolveExit({ code, signal })),
+    );
+    await new Promise((resolveKill, reject) => {
+      const timeout = setTimeout(() => {
+        killed.kill("SIGKILL");
+        reject(new Error(`cache preparation was not observable:\n${killedOutput}`));
+      }, 20_000);
+      const poll = setInterval(() => {
+        const staging = existsSync(cacheParent)
+          ? readdirSync(cacheParent).some((entry) =>
+              entry.startsWith(stagingPrefix),
+            )
+          : false;
+        const ownsLock = existsSync(
+          resolve(crashRoot, ".supercov/locks/active.json"),
+        );
+        if (!staging || !ownsLock) return;
+        clearInterval(poll);
+        clearTimeout(timeout);
+        killed.kill("SIGKILL");
+        resolveKill();
+      }, 2);
+      killed.once("exit", (code, signal) => {
+        if (signal === "SIGKILL") return;
+        clearInterval(poll);
+        clearTimeout(timeout);
+        reject(
+          new Error(
+            `preparation process exited before SIGKILL (${code ?? signal}):\n${killedOutput}`,
+          ),
+        );
+      });
+      killed.once("error", reject);
+    });
+    const killedResult = await killedExit;
+    if (killedResult.signal !== "SIGKILL")
+      throw new Error(`expected SIGKILL, received ${JSON.stringify(killedResult)}`);
+    if (!existsSync(previousGenerationMarker))
+      throw new Error("SIGKILL replaced or removed the last complete generation");
+    if (!existsSync(resolve(crashRoot, ".supercov/locks/active.json")))
+      throw new Error("SIGKILL unexpectedly ran cooperative lock cleanup");
+
+    const recovered = spawnSync(
+      process.execPath,
+      [resolve("dist/cli.js"), "--", process.execPath, "test.mjs"],
+      { cwd: crashRoot, encoding: "utf8", stdio: "pipe" },
+    );
+    if (recovered.status !== 0)
+      throw new Error(
+        `post-SIGKILL recovery failed:\n${recovered.stderr}\n${recovered.stdout}`,
+      );
+    if (existsSync(previousGenerationMarker))
+      throw new Error("the recovered run did not publish a fresh cache generation");
+    if (JSON.stringify(snapshot(crashRoot)) !== JSON.stringify(projectBefore))
+      throw new Error("SIGKILL recovery changed a file outside .supercov");
+  } finally {
+    rmSync(crashRoot, { recursive: true, force: true });
+  }
+}
+
+await verifyUncatchableCacheRecovery();
+
 const projectBefore = snapshot(root);
 const workRoot = resolve(root, ".supercov/work");
 const runsBefore = new Set(existsSync(workRoot) ? readdirSync(workRoot) : []);
+const expectedCache = resolve(
+  root,
+  ".supercov/cache/instrumented-workspace/generic-playwright",
+);
+
 const child = spawn(
   process.execPath,
   [resolve("bin/supercov.js"), "--", process.execPath, "-e", "setInterval(() => {}, 1000)"],
@@ -88,10 +204,8 @@ const runId = newRuns[0];
 const state = JSON.parse(readFileSync(resolve(workRoot, runId, "state.json"), "utf8"));
 if (state.status !== "interrupted" || state.signal !== "SIGTERM")
   throw new Error(`unexpected run state: ${JSON.stringify(state)}`);
-const expectedCache = resolve(
-  root,
-  ".supercov/cache/instrumented-workspace/generic-playwright",
-);
+if (existsSync(resolve("/tmp/supercov-server-evidence", runId)))
+  throw new Error("interrupted CLI run leaked evidence into the global temp directory");
 if (state.workspace !== expectedCache || !existsSync(state.workspace))
   throw new Error(
     `interrupted run did not remain confined to the stable isolated cache: ${state.workspace}`,
@@ -125,6 +239,8 @@ const publishedRuns = (existsSync(storedRunsRoot)
 ).filter((id) => !storedRunsBefore.has(id));
 if (publishedRuns.length !== 1)
   throw new Error(`expected one atomically published run, found ${publishedRuns.join(", ")}`);
+if (existsSync(resolve("/tmp/supercov-server-evidence", publishedRuns[0])))
+  throw new Error("successful CLI run leaked evidence into the global temp directory");
 const publishedFiles = new Set(
   readdirSync(resolve(storedRunsRoot, publishedRuns[0])),
 );
@@ -159,5 +275,5 @@ if (existsSync(expectedCache))
   throw new Error("supercov clean left the isolated build cache behind");
 
 console.log(
-  `[isolation] SIGTERM left only a refreshable .supercov cache; the next run recovered it, clean removed it, and no project file outside .supercov changed`,
+  `[isolation] SIGKILL preserved the prior cache generation, the next run recovered its transaction, SIGTERM remained cooperative, clean removed all cache data, and no project file outside .supercov changed`,
 );

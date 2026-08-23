@@ -3,6 +3,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
 } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
@@ -10,7 +11,10 @@ import { gzipSync } from "node:zlib";
 import type { FullConfig, Reporter } from "@playwright/test/reporter";
 import { createMcdcReport } from "./analyze.ts";
 import { atomicWriteFileSync } from "./atomic.ts";
-import { backgroundEvidenceDirectory } from "./transport.ts";
+import {
+  backgroundEvidenceDirectory,
+  serverRunEvidenceDirectory,
+} from "./transport.ts";
 import type {
   CoverageManifest,
   McdcCoverageView,
@@ -32,8 +36,11 @@ function findFiles(root: string, name: string): string[] {
   return found;
 }
 
-function readBackgroundEvidence(runId: string): McdcRawTestResult | undefined {
-  const directory = backgroundEvidenceDirectory(runId);
+function readBackgroundEvidence(
+  runId: string,
+  serverEvidenceRoot?: string,
+): McdcRawTestResult | undefined {
+  const directory = backgroundEvidenceDirectory(runId, serverEvidenceRoot);
   if (!existsSync(directory)) return undefined;
   const records = readdirSync(directory, { withFileTypes: true }).flatMap(
     (entry) => {
@@ -332,7 +339,11 @@ export function writeMcdcReport(
   configuredManifestPath?: string,
   testExitCode?: number | null,
   integrity?: CoverageRunIntegrity,
-  publication?: { directory: string; displayDirectory?: string },
+  publication?: {
+    directory: string;
+    displayDirectory?: string;
+    serverEvidenceRoot?: string;
+  },
 ): McdcReport {
   const manifestPath = configuredManifestPath
     ? resolve(configuredManifestPath)
@@ -350,7 +361,10 @@ export function writeMcdcReport(
   const rawResults = findFiles(outputDir, "mcdc.json")
     .filter((path) => statSync(path).mtimeMs >= minimumArtifactMtimeMs)
     .map((path) => JSON.parse(readFileSync(path, "utf8")) as McdcRawTestResult);
-  const background = readBackgroundEvidence(runId);
+  const background = readBackgroundEvidence(
+    runId,
+    publication?.serverEvidenceRoot,
+  );
   if (background) rawResults.push(background);
   const incompatibleScope = rawResults.find(
     (raw) => raw.scope && raw.scope.runId !== runId,
@@ -412,6 +426,10 @@ export function writeMcdcReport(
   );
   console.log(
     `[coverage] report: ${resolve(publication?.displayDirectory ?? storedRunDirectory, "report.html")}`,
+  );
+  rmSync(
+    serverRunEvidenceDirectory(runId, publication?.serverEvidenceRoot),
+    { recursive: true, force: true },
   );
   return report;
 }

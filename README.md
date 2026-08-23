@@ -120,8 +120,10 @@ CLI:
 1. refreshes a stable isolated source namespace under
    `.supercov/cache/instrumented-workspace/<project>/`, links the existing
    dependency tree, and creates all Vite, Vitest, Playwright, and build output
-   only there; the stable path lets VM/container snapshot systems reuse a
-   coverage build without touching the application's ordinary build;
+   only there; file data uses copy-on-write reflinks where the filesystem
+   supports them, and falls back to copying where it does not; the stable path
+   lets VM/container snapshot systems reuse a coverage build without touching
+   the application's ordinary build;
 2. inventories every `app/**/*.ts(x)` and `src/**/*.ts(x)` file for the
    denominator, then instruments modules loaded by Vite without changing the
    project's config; when no build script exists, it instruments only the
@@ -147,9 +149,14 @@ rejects overlapping runs before either can build. Run state is durably written
 through preparing/building/testing/reporting/terminal phases; SIGINT, SIGTERM,
 and SIGHUP are forwarded to the entire child process group. If the process is
 killed without a cleanup opportunity, the next invocation marks the dead PID's
-run abandoned and refreshes the isolated namespace before using it. Report,
-evidence, and state writes use sibling-temp files, fsync, and atomic rename;
-lock acquisition uses exclusive creation and fsync.
+run abandoned and refreshes the isolated namespace before using it. Cache
+refresh is transactional: a new sibling generation is prepared completely,
+the stable name is switched only at publication, and the prior complete
+generation is retained until that switch succeeds. The next invocation
+discards orphan staging trees or restores the prior generation if a host crash
+landed between the two same-filesystem renames. Report, evidence, and state
+writes use sibling-temp files, fsync, and atomic rename; lock acquisition uses
+exclusive creation and fsync.
 
 Retention is deterministic because UTC run IDs sort chronologically:
 
@@ -158,8 +165,12 @@ npx supercov clean --keep 20
 npx supercov clean --keep 20 --dry-run
 ```
 
-The cleanup command never removes an active workspace and never touches files
-outside `.supercov/`.
+The cleanup command acquires the same project lock as a coverage run, so it
+cannot race cache publication and refuses to run while coverage is active. It
+never touches files outside `.supercov/`.
+
+The complete ownership, crash-recovery, symlink, and future copy-free design is
+documented in [Workspace isolation](docs/workspace-isolation.md).
 
 The automatic adapters currently support standard Playwright suites (ESM and
 CommonJS specs in arbitrary project directories), project-owned Playwright

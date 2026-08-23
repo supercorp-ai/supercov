@@ -72,6 +72,8 @@ try {
   const runIds = existsSync(runsRoot) ? readdirSync(runsRoot).sort() : [];
   if (runIds.length !== 1)
     throw new Error(`expected one packed npx run, received ${runIds}`);
+  if (existsSync(resolve("/tmp/supercov-server-evidence", runIds[0])))
+    throw new Error("packed npx run leaked evidence into the global temp directory");
   const report = JSON.parse(
     gunzipSync(
       readFileSync(resolve(runsRoot, runIds[0], "report.json.gz")),
