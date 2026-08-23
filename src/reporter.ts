@@ -88,7 +88,8 @@ function escapeHtml(value: unknown): string {
     .replaceAll('"', "&quot;");
 }
 
-function renderHtml(
+/** Derived presentation primitive reserved for a future explicit preview command. */
+export function renderHtml(
   report: McdcCoverageView,
   filter: "all" | "passed" | "failed",
   runValid?: boolean,
@@ -393,23 +394,10 @@ export function writeMcdcReport(
     ? resolve(publication.directory)
     : resolve(process.cwd(), ".supercov/runs", runId);
   mkdirSync(storedRunDirectory, { recursive: true });
-  const htmlPath = resolve(storedRunDirectory, "report.html");
   const serializedReport = `${JSON.stringify(report, null, 2)}\n`;
   atomicWriteFileSync(
     resolve(storedRunDirectory, "report.json.gz"),
     gzipSync(serializedReport, { level: 9 }),
-  );
-  atomicWriteFileSync(
-    htmlPath,
-    renderHtml(report, "all", report.execution?.valid),
-  );
-  atomicWriteFileSync(
-    resolve(storedRunDirectory, "report-passed.html"),
-    renderHtml(passed, "passed", report.execution?.valid),
-  );
-  atomicWriteFileSync(
-    resolve(storedRunDirectory, "report-failed.html"),
-    renderHtml(failed, "failed", report.execution?.valid),
   );
 
   const summary = report.summary;
@@ -425,7 +413,7 @@ export function writeMcdcReport(
     `[coverage] passed only: lines ${passed.summary.lines.percentage}%, branches ${passed.summary.branches.percentage}%, MC/DC ${passed.summary.conditionCoveragePct}%`,
   );
   console.log(
-    `[coverage] report: ${resolve(publication?.displayDirectory ?? storedRunDirectory, "report.html")}`,
+    `[coverage] report data: ${resolve(publication?.displayDirectory ?? storedRunDirectory, "report.json.gz")}`,
   );
   rmSync(
     serverRunEvidenceDirectory(runId, publication?.serverEvidenceRoot),

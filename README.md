@@ -67,10 +67,10 @@ blocks the trusted-publishing workflow.
 ## Agent query workflow
 
 Each run is stored locally as a compressed, immutable report under
-`.supercov/runs/<run-id>/`. Its `report.json.gz`, `run.json`, and
-`report.html` keep the machine report, run metadata, and human report together.
-Agents should use bounded CLI queries instead of loading the complete report
-into context.
+`.supercov/runs/<run-id>/`. Its `report.json.gz` and `run.json` keep the
+machine report and run metadata together. HTML is not generated during a test
+run; agents should use bounded CLI queries instead of loading the complete
+report into context.
 
 ```sh
 # Orient using only a few lines.
@@ -102,8 +102,8 @@ Use `--filter passed` for verified coverage from successful attempts of
 ultimately passing tests, or `--filter failed` to inspect only execution from
 failed attempts (including failed retries of flaky tests). Reports record
 attempt status and classify each test as passed, failed, flaky, skipped, timed
-out, interrupted, or unknown. The HTML equivalents are `report.html`,
-`report-passed.html`, and `report-failed.html`.
+out, interrupted, or unknown. The passed and failed subsets are stored inside
+the same compressed report rather than duplicated into presentation files.
 
 The run ID is positional because all coverage queries operate on one immutable
 run. `latest` is a convenience selector for interactive use. Every query
@@ -138,7 +138,7 @@ CLI:
 5. attributes every source hit and decision vector to its individual test,
    automatically wraps Playwright actions and assertions, and records the
    action/assertion phase responsible for each correlated hit; then merges
-   server and browser evidence into HTML and JSON reports; and
+   server and browser evidence into one compressed JSON report; and
 6. atomically publishes the evidence/report into `.supercov/` and retains only
    the disposable isolated build namespace as a provider snapshot cache. The
    ordinary application build is never read as an input, overwritten, or
@@ -264,7 +264,7 @@ phase travels on browser requests into automatically wrapped Remix loaders,
 actions, and the server document renderer. Node async context preserves that
 ID through awaited helpers. An assertion also retains the preceding action ID,
 making chains such as “click -> application lines/decisions -> visible
-assertion” queryable in JSON and visible in HTML.
+assertion” queryable in JSON.
 
 Server evidence is safe when Playwright uses multiple workers against one
 application server. Every routed request carries a run/worker/test/retry scope;

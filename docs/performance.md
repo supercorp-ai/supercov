@@ -16,7 +16,7 @@ Every coverage run prints and stores monotonic durations for:
 | `adapterSetupMs` | generated adapters, configs, manifests, and runtime files |
 | `instrumentedBuildMs` | the coverage-aware build or direct instrumentation pass |
 | `testCommandMs` | the user's unchanged command, including any runner or remote infrastructure latency |
-| `reportPreparationMs` | evidence collection, analysis, HTML/JSON generation, and report staging |
+| `reportPreparationMs` | evidence collection, analysis, compressed JSON generation, and report staging |
 
 The fields are stored in `.supercov/runs/<run-id>/run.json` and returned by
 `supercov runs --json`. Total duration is stored separately as `durationMs`.
@@ -69,9 +69,13 @@ Cold VM-image runs were 170.34 s without Supercov and 175.44 s with Supercov in
 the same session, but a single cold pair is too noisy for a general percentage.
 Both spent approximately 124 seconds preparing their VM image.
 
-The latest coverage run retained 4.5 MB of reports and 1.7 MB of raw evidence;
-its reusable physical cache occupied 32 MB. These numbers are application- and
-filesystem-specific and exist to establish an optimization baseline.
+Before automatic HTML generation was removed, the reference run retained 4.5
+MB of reports and 1.7 MB of raw evidence. Its canonical compressed JSON was 0.9
+MB, so the equivalent current-format run retains approximately 2.6 MB plus its
+shared 32 MB physical cache. These numbers are application- and
+filesystem-specific and exist to establish an optimization baseline. A
+post-change run confirmed 888 KiB of canonical report data, 1.7 MiB of raw
+evidence, no HTML artifacts, and 0.35 seconds of report preparation.
 
 ## Isolation strategy trade-offs
 

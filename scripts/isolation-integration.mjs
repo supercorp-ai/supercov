@@ -246,14 +246,13 @@ const publishedFiles = new Set(
 );
 for (const required of [
   "report.json.gz",
-  "report.html",
-  "report-passed.html",
-  "report-failed.html",
   "run.json",
 ]) {
   if (!publishedFiles.has(required))
     throw new Error(`atomically published run is missing ${required}`);
 }
+if ([...publishedFiles].some((file) => file.endsWith(".html")))
+  throw new Error("coverage run generated an HTML report without an explicit preview request");
 if (
   existsSync(
     resolve(root, ".supercov/work", publishedRuns[0], "report-publication"),

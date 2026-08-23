@@ -72,6 +72,12 @@ try {
   const runIds = existsSync(runsRoot) ? readdirSync(runsRoot).sort() : [];
   if (runIds.length !== 1)
     throw new Error(`expected one packed npx run, received ${runIds}`);
+  if (
+    readdirSync(resolve(runsRoot, runIds[0])).some((file) =>
+      file.endsWith(".html"),
+    )
+  )
+    throw new Error("packed npx run generated an implicit HTML report");
   if (existsSync(resolve("/tmp/supercov-server-evidence", runIds[0])))
     throw new Error("packed npx run leaked evidence into the global temp directory");
   const metadata = JSON.parse(
