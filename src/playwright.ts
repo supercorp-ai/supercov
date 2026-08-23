@@ -41,10 +41,8 @@ import {
 
 export * from "@playwright/test";
 
-type PlaywrightAdapterModule = typeof standardPlaywright & {
-  offlineTest?: TestType<Record<string, unknown>, Record<string, unknown>>;
-  WebhookBodiesContract?: unknown;
-};
+type PlaywrightAdapterModule = typeof standardPlaywright &
+  Record<string, unknown>;
 
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const targetModule =
@@ -52,6 +50,10 @@ const targetModule =
   (generatedTargetModule.startsWith("__")
     ? "@playwright/test"
     : generatedTargetModule);
+const generatedTestExport = "__SUPERCOV_PLAYWRIGHT_TEST_EXPORT__";
+const targetTestExport =
+  process.env["SUPERCOV_PLAYWRIGHT_TEST_EXPORT"] ??
+  (generatedTestExport.startsWith("__") ? "test" : generatedTestExport);
 const adapter = (
   targetModule === "@playwright/test"
     ? standardPlaywright
@@ -60,7 +62,7 @@ const adapter = (
 type BaseTestArgs = PlaywrightTestArgs & Record<string, unknown>;
 type BaseWorkerArgs = PlaywrightWorkerArgs & Record<string, unknown>;
 
-const base = (adapter.offlineTest ?? adapter.test) as TestType<
+const base = (adapter[targetTestExport] ?? adapter.test) as TestType<
   BaseTestArgs,
   BaseWorkerArgs
 >;
@@ -121,11 +123,14 @@ function callerSource(): string | undefined {
       !line.includes("node_modules"),
   );
   if (!candidate) return undefined;
-  return candidate
-    .trim()
-    .replace(/^at\s+/, "")
-    .replace("file:///workspace/", "")
-    .replace("/workspace/", "");
+  const normalized = candidate.trim().replace(/^at\s+/, "");
+  const projectRoot = process.env["SUPERCOV_PROJECT_ROOT"]
+    ?.replaceAll("\\", "/")
+    .replace(/\/$/, "");
+  if (!projectRoot) return normalized;
+  return normalized
+    .replace(`file://${projectRoot}/`, "")
+    .replace(`${projectRoot}/`, "");
 }
 
 class CoveragePhaseController {
@@ -1017,5 +1022,4 @@ const instrumentedTest = base.extend<{ mcdcAutoCollect: void }>({
 });
 
 export const test = instrumentedTest;
-export const offlineTest = instrumentedTest;
-export const WebhookBodiesContract = adapter.WebhookBodiesContract;
+/*__SUPERCOV_ADAPTER_EXPORTS__*/

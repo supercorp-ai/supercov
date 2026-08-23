@@ -1,27 +1,25 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import {
   copyFileSync,
-  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
   rmSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, relative, resolve, sep } from "node:path";
+import { relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { atomicRenameSync, atomicWriteFileSync } from "./atomic.ts";
 import { writeMcdcReport } from "./reporter.ts";
 import { coverageQueryCommands, runQueryCommand } from "./query.ts";
 import { discoverCoverageProject } from "./project.ts";
 import { createRunIntegrity } from "./integrity.ts";
+import { instrumentDirectWorkspace } from "./directInstrumenter.ts";
 import {
   acquireProjectLock,
+  cachedWorkspacePath,
   cleanCoverageStorage,
-  isolatedWorkspacePath,
-  prepareIsolatedWorkspace,
+  prepareCachedWorkspace,
   recoverAbandonedRuns,
-  removeIsolatedWorkspace,
   updateRunState,
   writeRunState,
 } from "./workspace.ts";
@@ -108,7 +106,7 @@ function cleanCommand(args: string[]): void {
   const options = parseCleanOptions(args);
   const result = cleanCoverageStorage(process.cwd(), options);
   console.log(
-    `[supercov] ${options.dryRun ? "would remove" : "removed"} ${result.removedRuns.length} stored run(s) and ${result.removedWorkspaces.length} isolated workspace(s); keeping ${options.keep} newest run(s)`,
+    `[supercov] ${options.dryRun ? "would remove" : "removed"} ${result.removedRuns.length} stored run(s), ${result.removedWorkspaces.length} per-run workspace(s), and ${result.removedBuildCache ? "the" : "no"} isolated build cache; keeping ${options.keep} newest run(s)`,
   );
   for (const id of result.removedRuns) console.log(id);
 }
@@ -121,10 +119,10 @@ async function createCoverageRun(command: string[]): Promise<number> {
   if (recovered.length > 0)
     console.error(`[supercov] recovered abandoned run(s): ${recovered.join(", ")}`);
   const lock = acquireProjectLock(root, runId);
-  const project = discoverCoverageProject(root);
+  const project = discoverCoverageProject(root, process.env, command);
   const packageSource = fileURLToPath(new URL(".", import.meta.url));
   const runIntegrity = createRunIntegrity(root, project, packageSource);
-  const workspace = isolatedWorkspacePath(root, runId);
+  const workspace = cachedWorkspacePath(root);
   const reportStagingDirectory = resolve(
     root,
     ".supercov/work",
@@ -132,19 +130,6 @@ async function createCoverageRun(command: string[]): Promise<number> {
     "report-publication",
   );
   const storedRunDirectory = resolve(root, ".supercov/runs", runId);
-  const projectPackage = JSON.parse(
-    readFileSync(resolve(root, "package.json"), "utf8"),
-  ) as { name?: string };
-  const essentialAppName = project.essentialOffline
-    ? (projectPackage.name?.replace(/^@[^/]+\//, "") ?? "application")
-    : undefined;
-  // The Essential runner maintains a disposable Linux dependency cache outside
-  // the project. Reuse that cache, but never derive a different application
-  // identity: its package name is also part of the database-safety contract.
-  const essentialLinuxModulesCache = essentialAppName
-    ? (process.env["TEST_LINUX_NODE_MODULES"] ??
-      resolve(homedir(), `.cache/${essentialAppName}-e2e/node_modules`))
-    : undefined;
   const startedAt = new Date(runStartedAt).toISOString();
   writeRunState(root, runId, {
     id: runId,
@@ -179,7 +164,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
   let reportFailed = false;
 
   try {
-    const isolatedRoot = prepareIsolatedWorkspace(root, runId);
+    const isolatedRoot = prepareCachedWorkspace(root);
     if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
     const generatedDirectory = resolve(isolatedRoot, ".supercov");
     const evidenceDirectoryRelative = `.supercov/evidence/${runId}`;
@@ -188,7 +173,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
     const generatedPlaywrightConfig = resolve(generatedDirectory, "playwright.config.mjs");
     const generatedViteConfig = resolve(generatedDirectory, "vite.config.mjs");
     const generatedVitestConfig = resolve(generatedDirectory, "vitest.config.mjs");
-    const manifestPath = resolve(root, ".supercov/work", runId, "manifest.json");
+    const manifestPath = resolve(generatedDirectory, "manifest.json");
     const isolatedPlaywrightConfig = project.playwrightConfig
       ? resolve(isolatedRoot, relative(root, project.playwrightConfig))
       : undefined;
@@ -198,26 +183,15 @@ async function createCoverageRun(command: string[]): Promise<number> {
 
     mkdirSync(generatedDirectory, { recursive: true });
     mkdirSync(isolatedEvidenceDirectory, { recursive: true });
-    if (project.essentialOffline) {
-      // Ask the Essential runner for its supported validation snapshot family
-      // without changing the app name (which also controls its isolated DB
-      // prefix). Overlaying the exact runner dist it is already executing is
-      // semantically neutral, while the per-run path/mtime signature gives the
-      // instrumented source a snapshot separate from ordinary app test runs.
-      const installedRunnerDist = resolve(
-        root,
-        "node_modules/@essential-apps/shopify-test-runner/dist",
-      );
-      const isolatedRunnerDist = resolve(dirname(isolatedRoot), "runner/dist");
-      cpSync(installedRunnerDist, isolatedRunnerDist, { recursive: true });
-    }
     for (const file of [
       "atomic.js",
+      "launchSupervisor.js",
       "playwright.js",
       "playwrightReporter.js",
       "provenance.js",
       "register.mjs",
       "resolve-loader.mjs",
+      "runtime.js",
       "transport.js",
       "types.js",
     ]) {
@@ -230,6 +204,31 @@ async function createCoverageRun(command: string[]): Promise<number> {
       readFileSync(generatedPlaywrightAdapter, "utf8")
         .replace("__SUPERCOV_EVIDENCE_DIRECTORY__", evidenceDirectoryRelative)
         .replace("__SUPERCOV_PLAYWRIGHT_MODULE__", project.playwrightModule)
+        .replace(
+          "__SUPERCOV_PLAYWRIGHT_TEST_EXPORT__",
+          project.playwrightTestExport,
+        )
+        .replace(
+          "/*__SUPERCOV_ADAPTER_EXPORTS__*/",
+          [
+            ...(project.playwrightTestExport === "test"
+              ? []
+              : [
+                  `export { instrumentedTest as ${project.playwrightTestExport} };`,
+                ]),
+            ...project.playwrightExports
+              .filter(
+                (name) =>
+                  name !== "test" &&
+                  name !== "expect" &&
+                  name !== project.playwrightTestExport,
+              )
+              .map(
+                (name) =>
+                  `export const ${name} = adapter[${JSON.stringify(name)}];`,
+              ),
+          ].join("\n"),
+        )
         .replace("__SUPERCOV_RUN_ID__", runId),
     );
     atomicWriteFileSync(
@@ -258,41 +257,37 @@ async function createCoverageRun(command: string[]): Promise<number> {
         generatedPlaywrightConfig,
         [
           `import './register.mjs';`,
-          `import { isAbsolute, relative, resolve } from 'node:path';`,
+          `import { dirname, isAbsolute, relative, resolve } from 'node:path';`,
+          `import { fileURLToPath } from 'node:url';`,
           `import original from '${configImport}';`,
           `const resolved = typeof original === 'function' ? await original({ command: 'test', mode: 'test' }) : original;`,
-          `const originalDirectory = ${JSON.stringify(dirname(isolatedPlaywrightConfig))};`,
-          `const originalProjectRoot = ${JSON.stringify(root)};`,
-          `const isolatedProjectRoot = ${JSON.stringify(isolatedRoot)};`,
-          `const isolatedPath = value => {`,
+          `const runtimeProjectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');`,
+          `const originalDirectory = dirname(fileURLToPath(new URL(${JSON.stringify(configImport)}, import.meta.url)));`,
+          `const sourceProjectRoot = process.env.SUPERCOV_SOURCE_PROJECT_ROOT;`,
+          `const runtimePath = value => {`,
           `  if (!value) return value;`,
           `  const absolute = isAbsolute(value) ? value : resolve(originalDirectory, value);`,
-          `  if (process.env.TEST_IN_CONTAINER === 'true') {`,
-          `    const containerLocal = relative('/workspace', absolute);`,
-          `    if (containerLocal === '' || (!containerLocal.startsWith('..') && !isAbsolute(containerLocal))) return absolute;`,
-          `    throw new Error('Supercov refuses a Playwright output/cwd outside the isolated VM workspace: ' + absolute);`,
+          `  const local = relative(runtimeProjectRoot, absolute);`,
+          `  if (local === '' || (!local.startsWith('..') && !isAbsolute(local))) return absolute;`,
+          `  if (sourceProjectRoot) {`,
+          `    const sourceLocal = relative(sourceProjectRoot, absolute);`,
+          `    if (sourceLocal === '' || (!sourceLocal.startsWith('..') && !isAbsolute(sourceLocal))) return resolve(runtimeProjectRoot, sourceLocal);`,
           `  }`,
-          `  const alreadyIsolated = relative(isolatedProjectRoot, absolute);`,
-          `  if (alreadyIsolated === '' || (!alreadyIsolated.startsWith('..') && !isAbsolute(alreadyIsolated))) return absolute;`,
-          `  const local = relative(originalProjectRoot, absolute);`,
-          `  if (local.startsWith('..') || isAbsolute(local)) throw new Error('Supercov refuses a Playwright output/cwd outside the isolated project: ' + absolute);`,
-          `  return resolve(isolatedProjectRoot, local);`,
+          `  throw new Error('Supercov refuses a Playwright output/cwd outside the isolated project: ' + absolute);`,
           `};`,
-          `const normalizeWebServer = server => server ? ({ ...server, cwd: isolatedPath(server.cwd ?? originalDirectory) }) : server;`,
+          `const normalizeWebServer = server => server ? ({ ...server, cwd: runtimePath(server.cwd ?? originalDirectory) }) : server;`,
           `const normalized = { ...resolved,`,
-          `  testDir: isolatedPath(resolved?.testDir),`,
-          `  outputDir: isolatedPath(resolved?.outputDir),`,
-          `  snapshotDir: isolatedPath(resolved?.snapshotDir),`,
-          `  projects: resolved?.projects?.map(project => ({ ...project, testDir: isolatedPath(project.testDir), outputDir: isolatedPath(project.outputDir), snapshotDir: isolatedPath(project.snapshotDir) })),`,
+          `  testDir: runtimePath(resolved?.testDir),`,
+          `  outputDir: runtimePath(resolved?.outputDir),`,
+          `  snapshotDir: runtimePath(resolved?.snapshotDir),`,
+          `  projects: resolved?.projects?.map(project => ({ ...project, testDir: runtimePath(project.testDir), outputDir: runtimePath(project.outputDir), snapshotDir: runtimePath(project.snapshotDir) })),`,
           `  webServer: Array.isArray(resolved?.webServer) ? resolved.webServer.map(normalizeWebServer) : normalizeWebServer(resolved?.webServer),`,
           `};`,
           `const configuredReporters = normalized.reporter;`,
           `const reporters = configuredReporters`,
           `  ? (typeof configuredReporters === 'string' ? [[configuredReporters]] : (Array.isArray(configuredReporters[0]) ? configuredReporters : [configuredReporters]))`,
           `  : [['list']];`,
-          `const coverageReporter = process.env.TEST_IN_CONTAINER === 'true'`,
-          `  ? '/workspace/.supercov/playwrightReporter.js'`,
-          `  : ${JSON.stringify(resolve(packageSource, "playwrightReporter.js"))};`,
+          `const coverageReporter = resolve(runtimeProjectRoot, '.supercov/playwrightReporter.js');`,
           `export default { ...normalized, reporter: [...reporters, [coverageReporter]] };`,
           "",
         ].join("\n"),
@@ -338,7 +333,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
         `  const loaded = originalPath ? await loadConfigFromFile(env, originalPath, process.cwd()) : undefined;`,
         `  const config = mergeConfig(loaded?.config ?? {}, {`,
         `    cacheDir: resolve(process.cwd(), '.supercov/vitest-cache'),`,
-        `    plugins: [mcdcVitePlugin(${JSON.stringify({ root: isolatedRoot, sourceRoots: project.sourceRoots, manifestPath })})],`,
+        `    plugins: ${project.buildAdapter === "vite" ? `[mcdcVitePlugin(${JSON.stringify({ root: isolatedRoot, sourceRoots: project.sourceRoots, manifestPath })})]` : "[]"},`,
         `    test: { setupFiles: [${JSON.stringify(resolve(packageSource, "vitest.js"))}], maxConcurrency: 1 },`,
         `  });`,
         `  const configuredReporters = loaded?.config?.test?.reporters;`,
@@ -354,20 +349,22 @@ async function createCoverageRun(command: string[]): Promise<number> {
 
     const coverageEnv: NodeJS.ProcessEnv = {
       ...process.env,
-      TEST_MCDC: "true",
-      TEST_OFFLINE_RESULTS_RUN_ID: runId,
       SUPERCOV_EVIDENCE_DIR: evidenceDirectoryRelative,
+      SUPERCOV_EXECUTION_FINGERPRINT: runIntegrity.fingerprint.execution,
+      SUPERCOV_EXECUTION_LOG: resolve(isolatedEvidenceDirectory, "execution.jsonl"),
       SUPERCOV_RUN_ID: runId,
       SUPERCOV_MANIFEST: manifestPath,
       SUPERCOV_PLAYWRIGHT_MODULE: project.playwrightModule,
+      SUPERCOV_PLAYWRIGHT_TEST_EXPORT: project.playwrightTestExport,
       SUPERCOV_PROJECT_ROOT: isolatedRoot,
+      SUPERCOV_SOURCE_PROJECT_ROOT: root,
+      ...(project.buildAdapter === "direct"
+        ? { SUPERCOV_DIRECT_INSTRUMENTATION: "1" }
+        : {}),
       SUPERCOV_GENERATED_VITEST_CONFIG: generatedVitestConfig,
       SUPERCOV_GENERATED_PLAYWRIGHT_CONFIG: generatedPlaywrightConfig,
       ...(isolatedPlaywrightConfig
         ? { SUPERCOV_ORIGINAL_PLAYWRIGHT_CONFIG: isolatedPlaywrightConfig }
-        : {}),
-      ...(essentialLinuxModulesCache
-        ? { TEST_LINUX_NODE_MODULES: essentialLinuxModulesCache }
         : {}),
     };
     const testNodeOptions = [
@@ -379,18 +376,38 @@ async function createCoverageRun(command: string[]): Promise<number> {
 
     updateRunState(root, runId, { status: "building" });
     console.error(`[supercov] instrumenting isolated workspace ${isolatedRoot}`);
-    buildResult = await runChild(
-      project.buildCommand[0]!,
-      [...project.buildCommand.slice(1), "--", "--config", ".supercov/vite.config.mjs"],
-      {
-        cwd: isolatedRoot,
-        env: {
-          ...coverageEnv,
-          ...(project.essentialOffline ? { TEST_OFFLINE: "true" } : {}),
-          NODE_ENV: "production",
+    if (Object.keys(project.buildEnvironment).length > 0)
+      console.error(
+        `[supercov] inferred build mode from command/config: ${Object.entries(project.buildEnvironment)
+          .map(([key, value]) => `${key}=${value}`)
+          .join(" ")}`,
+      );
+    if (project.buildAdapter === "direct") {
+      instrumentDirectWorkspace(
+        isolatedRoot,
+        project.sourceRoots,
+        manifestPath,
+      );
+      buildResult = { status: 0, signal: null };
+    } else {
+      buildResult = await runChild(
+        project.buildCommand[0]!,
+        [
+          ...project.buildCommand.slice(1),
+          "--",
+          "--config",
+          ".supercov/vite.config.mjs",
+        ],
+        {
+          cwd: isolatedRoot,
+          env: {
+            ...coverageEnv,
+            ...project.buildEnvironment,
+            NODE_ENV: "production",
+          },
         },
-      },
-    );
+      );
+    }
     if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
     if (buildResult.error) throw buildResult.error;
 
@@ -402,17 +419,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
         env: {
           ...coverageEnv,
           NODE_OPTIONS: testNodeOptions,
-          ...(!project.essentialOffline ? { SUPERCOV_CJS_INTERCEPT: "1" } : {}),
-          ...(project.essentialOffline
-            ? {
-                TEST_PLAYWRIGHT_CONFIG: relative(
-                  isolatedRoot,
-                  generatedPlaywrightConfig,
-                ),
-                TEST_OFFLINE_LOCAL_OVERLAY: "true",
-                TEST_OFFLINE_LOCAL_OVERLAY_PKGS: "runner",
-              }
-            : {}),
+          SUPERCOV_CJS_INTERCEPT: "1",
         },
       });
       if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
@@ -485,8 +492,9 @@ async function createCoverageRun(command: string[]): Promise<number> {
       process.removeListener(signal, handler);
     try {
       rmSync(reportStagingDirectory, { recursive: true, force: true });
-      if (process.env["SUPERCOV_KEEP_WORKSPACE"] !== "1")
-        removeIsolatedWorkspace(root, runId);
+      // The stable isolated namespace is a deliberate build/snapshot cache.
+      // It never overlaps the user's ordinary build and `supercov clean`
+      // removes it deterministically.
     } catch (error) {
       console.error(`[supercov] isolated workspace cleanup failed: ${String(error)}`);
     }

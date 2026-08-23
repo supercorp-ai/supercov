@@ -29,3 +29,5 @@ jobs:
           path: .test262
       - name: Test262 semantic-equivalence smoke gate
         run: node scripts/test262-equivalence.mjs --test262 .test262 --limit 250 --minimum 200
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:fixture

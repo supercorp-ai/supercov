@@ -1,7 +1,8 @@
 {
   "name": "supercov",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Zero-edit, runner-aware coverage completeness for JavaScript test suites",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/supercorp-ai/supercov.git"
@@ -35,13 +36,14 @@
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run tests/unit",
     "test:types": "tsc --noEmit",
-    "test:fixture": "npm run build && npm --prefix tests/fixtures/generic-playwright run test:coverage",
+    "test:fixture": "npm run build && npm --prefix tests/fixtures/generic-playwright run test:coverage && node scripts/opaque-runner-integration.mjs",
+    "test:packed-npx": "node scripts/packed-npx-integration.mjs",
     "test:isolation": "npm run build && node scripts/isolation-integration.mjs",
     "test:clang-mcdc": "node scripts/clang-mcdc-oracle.mjs",
     "test:test262": "npm run build && node scripts/test262-equivalence.mjs",
     "benchmark:check": "npm run build && node scripts/benchmark.mjs",
     "check": "npm run test && npm run test:types",
-    "release:check": "npm run check && npm run build && node scripts/isolation-integration.mjs && npm run test:clang-mcdc && node scripts/benchmark.mjs",
+    "release:check": "npm run check && npm run build && node scripts/isolation-integration.mjs && npm run test:packed-npx && npm run test:clang-mcdc && node scripts/benchmark.mjs",
     "prepack": "npm run build",
     "prepublishOnly": "npm run release:check"
   },
@@ -58,6 +60,9 @@
   },
   "peerDependenciesMeta": {
     "@playwright/test": {
+      "optional": true
+    },
+    "vite": {
       "optional": true
     },
     "vitest": {

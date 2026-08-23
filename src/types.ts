@@ -339,6 +339,7 @@ export interface CoverageRunFingerprint {
   dependencies: string;
   configuration: string;
   instrumenter: string;
+  execution: string;
   combined: string;
   sourceFiles: number;
   testFiles: number;

@@ -222,7 +222,7 @@ function renderHtml(
     ? summary.coverageComplete
     : filter === "passed" && verifiedComplete;
   return `<!doctype html>
-<html><head><meta charset="utf-8"><title>Essential SEO coverage completeness</title>
+<html><head><meta charset="utf-8"><title>Supercov coverage completeness</title>
 <style>
 body{font:15px/1.45 system-ui,sans-serif;max-width:1100px;margin:40px auto;padding:0 20px;color:#202124}
 header{padding:22px;border-radius:12px;background:#f4f6f8}section{border-top:1px solid #ddd;padding:18px 0}
@@ -425,7 +425,6 @@ export default class McdcReporter implements Reporter {
 
   onEnd(): void {
     const runId =
-      process.env["TEST_OFFLINE_RESULTS_RUN_ID"] ??
       basename(dirname(this.outputDir));
     writeMcdcReport(this.outputDir, runId);
   }

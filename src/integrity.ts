@@ -127,11 +127,42 @@ export function createRunIntegrity(
   const instrumenterFiles = filesUnder(toolSourceDirectory).filter((path) =>
     /\.[cm]?[jt]s$/.test(path),
   );
+  const executionFiles = [
+    "atomic.js",
+    "directInstrumenter.js",
+    "instrumenter.js",
+    "launchSupervisor.js",
+    "playwright.js",
+    "register.mjs",
+    "resolve-loader.mjs",
+    "runtime.js",
+    "transport.js",
+    "vitePlugin.js",
+  ]
+    .map((path) => resolve(toolSourceDirectory, path))
+    .filter(existsSync);
   const source = digestFiles(root, sourceFiles);
   const tests = digestFiles(root, testFiles);
   const dependencies = digestFiles(root, dependencyFiles);
   const configuration = digestFiles(root, configurationFiles);
   const instrumenter = digestFiles(toolSourceDirectory, instrumenterFiles);
+  const executionInstrumenter = digestFiles(
+    toolSourceDirectory,
+    executionFiles.length > 0 ? executionFiles : instrumenterFiles,
+  );
+  const execution = createHash("sha256")
+    .update(
+      JSON.stringify({
+        schema: COVERAGE_REPORT_SCHEMA_VERSION,
+        version: COVERAGE_INSTRUMENTER_VERSION,
+        source,
+        dependencies,
+        configuration,
+        buildEnvironment: project.buildEnvironment,
+        executionInstrumenter,
+      }),
+    )
+    .digest("hex");
   const combined = createHash("sha256")
     .update(
       JSON.stringify({
@@ -152,6 +183,7 @@ export function createRunIntegrity(
     dependencies,
     configuration,
     instrumenter,
+    execution,
     combined,
     sourceFiles: sourceFiles.length,
     testFiles: testFiles.length,

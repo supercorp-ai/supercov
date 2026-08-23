@@ -24,13 +24,17 @@ describe("run integrity", () => {
         root,
         sourceRoots: ["app"],
         playwrightModule: "@playwright/test",
-        essentialOffline: false,
+        playwrightTestExport: "test",
+        playwrightExports: ["expect", "test"],
+        buildAdapter: "vite",
         buildCommand: ["npm", "run", "build"],
+        buildEnvironment: {},
       };
       const first = createRunIntegrity(root, project, resolve(root, "tool"));
       expect(first.fingerprint).toMatchObject({
         sourceFiles: 1,
         testFiles: 1,
+        execution: expect.stringMatching(/^[a-f0-9]{64}$/),
       });
       expect(compareRunIntegrity(first, first)).toEqual({
         stale: false,

@@ -114,34 +114,42 @@ Text output is concise for an interactive agent; JSON is the stable machine
 interface that can later back hosted coverage tools without changing the
 stored schema.
 
-For a conventional Vite project, the CLI:
+For a conventional Vite project, or a Node project with no build step, the
+CLI:
 
-1. takes a copy-on-write source snapshot under
-   `.supercov/work/<run-id>/<project>/`, links the existing dependency tree,
-   and creates all Vite, Vitest, Playwright, and build output only there;
+1. refreshes a stable isolated source namespace under
+   `.supercov/cache/instrumented-workspace/<project>/`, links the existing
+   dependency tree, and creates all Vite, Vitest, Playwright, and build output
+   only there; the stable path lets VM/container snapshot systems reuse a
+   coverage build without touching the application's ordinary build;
 2. inventories every `app/**/*.ts(x)` and `src/**/*.ts(x)` file for the
-   denominator, then
-   instruments modules loaded by Vite without changing the project's config;
-3. redirects existing `@playwright/test` imports at module-load time and injects
-   a Vitest setup through the child runner's generated config, without changing
-   specs, imports, package scripts, or checked-in configs;
-4. runs the exact command following `--`;
+   denominator, then instruments modules loaded by Vite without changing the
+   project's config; when no build script exists, it instruments only the
+   disposable source copy and supplies a module-format-neutral runtime through
+   the inherited Node preload;
+3. discovers the Playwright-compatible fixture provider, test export, and
+   additional named exports from the suite's existing imports, then redirects
+   that provider at module-load time; Vitest setup is injected through the
+   child runner's generated config;
+4. runs the exact command following `--`, propagating coverage through every
+   Node child process it launches;
 5. attributes every source hit and decision vector to its individual test,
    automatically wraps Playwright actions and assertions, and records the
    action/assertion phase responsible for each correlated hit; then merges
    server and browser evidence into HTML and JSON reports; and
-6. atomically publishes the evidence/report into `.supercov/` and removes the
-   disposable project snapshot. The ordinary application build is never read
-   as an input, overwritten, or rebuilt afterward.
+6. atomically publishes the evidence/report into `.supercov/` and retains only
+   the disposable isolated build namespace as a provider snapshot cache. The
+   ordinary application build is never read as an input, overwritten, or
+   rebuilt afterward.
 
 Only `.supercov/` is modified in the user's checkout. A per-project lock
 rejects overlapping runs before either can build. Run state is durably written
 through preparing/building/testing/reporting/terminal phases; SIGINT, SIGTERM,
-and SIGHUP are forwarded to the entire child process group, then the isolated
-workspace is removed. If the process is killed without a cleanup opportunity,
-the next invocation marks the dead PID's run abandoned and deletes only its
-disposable snapshot. Report, evidence, and state writes use sibling-temp files,
-fsync, and atomic rename; lock acquisition uses exclusive creation and fsync.
+and SIGHUP are forwarded to the entire child process group. If the process is
+killed without a cleanup opportunity, the next invocation marks the dead PID's
+run abandoned and refreshes the isolated namespace before using it. Report,
+evidence, and state writes use sibling-temp files, fsync, and atomic rename;
+lock acquisition uses exclusive creation and fsync.
 
 Retention is deterministic because UTC run IDs sort chronologically:
 
@@ -154,13 +162,51 @@ The cleanup command never removes an active workspace and never touches files
 outside `.supercov/`.
 
 The automatic adapters currently support standard Playwright suites (ESM and
-CommonJS specs in arbitrary project directories), Vitest, and the Essential
-Apps isolated Playwright VM runner. A single command such as
-`supercov -- npm test` can collect Vitest and Playwright evidence into
-the same run. The application build must currently be Vite-based. Jest,
-`node:test`, non-Vite build systems, browser component runners, and distributed
-multi-host merging still require adapters; they are not silently reported as
-covered.
+CommonJS specs in arbitrary project directories), project-owned Playwright
+fixture packages, Vitest, no-build Node commands, and Node coordinators that
+launch tests inside a mounted VM/container workspace. A single command such as
+`supercov -- npm test` can collect Vitest and Playwright evidence into the same
+run. No-build Node execution is retained as background/unattributed evidence
+until a recognized test-runner adapter supplies exact test boundaries. Jest,
+exact `node:test` attribution, non-Vite application builds, browser component
+runners, and distributed multi-host merging still require adapters; they are
+not silently reported as per-test coverage.
+
+Remote execution discovery is structural rather than provider-specific. The
+preload observes CommonJS exports for a static `build(options)` capability,
+activates only when those options contain a host-to-guest mount that includes
+the isolated project, scopes an existing cache/snapshot identity to the run's
+source fingerprint, and follows the opaque returned object graph. A method
+whose options contain `argv`, `cmd`, or `command` receives guest-translated
+Supercov paths and a guest-valid Node preload. The execution log records this
+process/capability graph but hashes long or multiline arguments so embedded
+shell bodies and credentials are never persisted.
+
+This first zero-edit mechanism has explicit boundaries. It follows Node child
+processes, not arbitrary non-Node supervisors or a remote control plane that
+never exposes launches to the local process. The remote SDK must currently be
+visible through CommonJS loading, its build options must expose the workspace
+mount, and its execution call must accept an environment. Pure-ESM executor
+SDKs, positional-only remote exec APIs, and providers that hide all launch
+state behind an RPC need additional interception layers. Supercov reports
+missing evidence rather than claiming those paths are covered.
+
+The public regression suite includes a provider-neutral opaque executor. Its
+CommonJS SDK exposes only a static build capability, a host-to-guest mount,
+an existing snapshot key, an opaque image/pool/machine chain, and an
+argv-shaped execution method. CI requires Supercov to discover that structure,
+scope the cache identity, translate paths and the Node preload into the guest,
+run nested Vitest and Playwright commands, parse every concurrent trace shard,
+and produce 100% fixture coverage. A separate clean-room gate packs the npm
+tarball and invokes it through `npx` in a project with no build step, asserting
+that no source or configuration file changes.
+
+Before the isolated build, Supercov also compares the invoked npm/pnpm/yarn/bun
+script with explicit string-valued `process.env` mode checks in the project's
+build config. A semantic match such as `test:preview` and
+`process.env.TEST_PREVIEW === "true"` activates that build-only flag and is
+printed before the build. It never guesses values for unrelated environment
+variables.
 
 Each test carries two independent provenance fields:
 

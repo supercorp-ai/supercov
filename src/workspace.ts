@@ -87,6 +87,16 @@ export function isolatedWorkspacePath(root: string, runId: string): string {
   return resolve(root, ".supercov/work", runId, basename(root));
 }
 
+/**
+ * Stable isolated namespace used as a live mount by VM/container runners.
+ * Its path must remain stable so providers whose snapshot key includes mount
+ * paths can reuse an instrumented snapshot across equivalent coverage runs.
+ * The project lock makes refreshes single-writer.
+ */
+export function cachedWorkspacePath(root: string): string {
+  return resolve(root, ".supercov/cache/instrumented-workspace", basename(root));
+}
+
 export function writeRunState(
   root: string,
   runId: string,
@@ -238,7 +248,8 @@ export function prepareIsolatedWorkspace(root: string, runId: string): string {
   const nodeModules = resolve(root, "node_modules");
   if (existsSync(nodeModules)) {
     // Keep the node_modules mount point itself as a real directory. VM-based
-    // runners layer a Linux dependency cache onto /workspace/node_modules;
+    // runners commonly layer a Linux dependency cache onto the mounted
+    // workspace's node_modules path;
     // making the mount point an external symlink causes virtio-fs's safe
     // `opaque` policy to reject LOOKUP with EACCES before the nested mount can
     // be attached. Per-entry links still give host-side builds zero-copy
@@ -250,6 +261,30 @@ export function prepareIsolatedWorkspace(root: string, runId: string): string {
       const target = resolve(nodeModules, entry.name);
       symlinkSync(
         target,
+        resolve(isolatedNodeModules, entry.name),
+        process.platform === "win32"
+          ? entry.isDirectory()
+            ? "junction"
+            : "file"
+          : undefined,
+      );
+    }
+  }
+  return workspace;
+}
+
+/** Refresh the stable, disposable instrumented-build namespace. */
+export function prepareCachedWorkspace(root: string): string {
+  const workspace = cachedWorkspacePath(root);
+  rmSync(workspace, { recursive: true, force: true });
+  copyTree(root, workspace, true);
+  const nodeModules = resolve(root, "node_modules");
+  if (existsSync(nodeModules)) {
+    const isolatedNodeModules = resolve(workspace, "node_modules");
+    mkdirSync(isolatedNodeModules, { recursive: true });
+    for (const entry of readdirSync(nodeModules, { withFileTypes: true })) {
+      symlinkSync(
+        resolve(nodeModules, entry.name),
         resolve(isolatedNodeModules, entry.name),
         process.platform === "win32"
           ? entry.isDirectory()
@@ -279,6 +314,7 @@ export interface CleanupOptions {
 export interface CleanupResult {
   removedRuns: string[];
   removedWorkspaces: string[];
+  removedBuildCache: boolean;
 }
 
 /** Deterministic retention: IDs sort newest-first because run IDs are UTC. */
@@ -324,5 +360,9 @@ export function cleanCoverageStorage(
         rmSync(resolve(base, id), { recursive: true, force: true });
     }
   }
-  return { removedRuns, removedWorkspaces };
+  const buildCache = resolve(root, ".supercov/cache/instrumented-workspace");
+  const removedBuildCache = active.size === 0 && existsSync(buildCache);
+  if (removedBuildCache && !options.dryRun)
+    rmSync(buildCache, { recursive: true, force: true });
+  return { removedRuns, removedWorkspaces, removedBuildCache };
 }

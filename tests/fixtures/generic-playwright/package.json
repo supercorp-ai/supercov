@@ -6,6 +6,8 @@
     "build": "vite build",
     "test": "npm run test:unit && npm run test:e2e",
     "test:coverage": "../../../bin/supercov.js -- npm test",
+    "test:opaque": "node opaque-runner/runner.cjs",
+    "test:coverage:opaque": "../../../bin/supercov.js -- npm run test:opaque",
     "test:unit": "vitest run tests/unit",
     "test:e2e": "playwright test"
   },

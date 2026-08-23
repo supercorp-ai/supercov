@@ -32,6 +32,7 @@ function belongsToProject(parentURL) {
 
 export async function resolve(specifier, context, nextResolve) {
   if (
+    process.env.SUPERCOV_INSIDE_PLAYWRIGHT === "1" &&
     TARGET &&
     REPLACEMENT &&
     specifier === TARGET &&

@@ -13,9 +13,11 @@ import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   acquireProjectLock,
+  cachedWorkspacePath,
   cleanCoverageStorage,
   isolatedWorkspacePath,
   prepareIsolatedWorkspace,
+  prepareCachedWorkspace,
   recoverAbandonedRuns,
   removeIsolatedWorkspace,
   writeRunState,
@@ -67,6 +69,23 @@ describe("isolated run workspaces", () => {
 
     removeIsolatedWorkspace(root, "2026-01-01T00-00-00-000Z");
     expect(existsSync(workspace)).toBe(false);
+  });
+
+  it("refreshes a stable isolated namespace for provider snapshot reuse", () => {
+    const root = project();
+    const first = prepareCachedWorkspace(root);
+    expect(first).toBe(cachedWorkspacePath(root));
+    writeFileSync(resolve(first, "stale.txt"), "stale");
+    writeFileSync(resolve(root, "src/index.ts"), "export const value = 2;\n");
+    const second = prepareCachedWorkspace(root);
+    expect(second).toBe(first);
+    expect(existsSync(resolve(second, "stale.txt"))).toBe(false);
+    expect(readFileSync(resolve(second, "src/index.ts"), "utf8")).toContain(
+      "value = 2",
+    );
+    expect(readFileSync(resolve(root, "dist/index.js"), "utf8")).toBe(
+      "normal-build\n",
+    );
   });
 
   it("rejects concurrent runs and recovers a stale project lock", () => {

@@ -1,5 +1,12 @@
 import Module, { register } from "node:module";
 import { resolve } from "node:path";
+import { installLaunchSupervisor } from "./launchSupervisor.js";
+
+installLaunchSupervisor();
+
+if (process.env.SUPERCOV_DIRECT_INSTRUMENTATION === "1") {
+  globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.js");
+}
 
 // NODE_OPTIONS reaches commands launched through npm scripts. When that child
 // is Vitest, replace its config with our generated merging config before the
@@ -23,20 +30,6 @@ if (process.env.SUPERCOV_DEBUG === "1") {
   console.error("[supercov] preload", { entrypoint });
 }
 
-// The Essential runner launches Playwright inside an isolated VM where the
-// host's absolute NODE_OPTIONS imports do not exist. Its generated Playwright
-// config already installs the adapter, so stop only that inherited preload at
-// the host runner boundary. This still lets an earlier Vitest npm script in the
-// same outer command use the generic hook.
-if (
-  playwrightTarget === "@essential-apps/shopify-test-admin" &&
-  /\/shopify-test-runner\/src\/scripts\/runOffline(?:Pool)?\.[cm]?[jt]s$/.test(
-    entrypoint,
-  )
-) {
-  delete process.env.NODE_OPTIONS;
-  delete process.env.SUPERCOV_CJS_INTERCEPT;
-}
 if (generatedVitestConfig && /\/vitest(?:\.m?js)?$/.test(entrypoint)) {
   // Worker processes inherit this marker. In particular, do not eagerly load
   // Playwright's expect implementation in a Vitest worker: both runners use
@@ -100,7 +93,7 @@ if (
 
 if (
   process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
-  !isPlaywrightEntrypoint &&
+  process.env.SUPERCOV_INSIDE_PLAYWRIGHT === "1" &&
   process.env.SUPERCOV_INSIDE_VITEST !== "1" &&
   process.env.VITEST !== "true"
 ) {

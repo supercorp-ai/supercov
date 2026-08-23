@@ -2,7 +2,13 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { resolve } from "node:path";
 
 const root = resolve("tests/fixtures/generic-playwright");
@@ -82,8 +88,16 @@ const runId = newRuns[0];
 const state = JSON.parse(readFileSync(resolve(workRoot, runId, "state.json"), "utf8"));
 if (state.status !== "interrupted" || state.signal !== "SIGTERM")
   throw new Error(`unexpected run state: ${JSON.stringify(state)}`);
-if (existsSync(state.workspace))
-  throw new Error(`isolated workspace survived SIGTERM: ${state.workspace}`);
+const expectedCache = resolve(
+  root,
+  ".supercov/cache/instrumented-workspace/generic-playwright",
+);
+if (state.workspace !== expectedCache || !existsSync(state.workspace))
+  throw new Error(
+    `interrupted run did not remain confined to the stable isolated cache: ${state.workspace}`,
+  );
+const interruptedMarker = resolve(state.workspace, "interrupted-marker.txt");
+writeFileSync(interruptedMarker, "must be removed by the next refresh\n");
 if (existsSync(resolve(root, ".supercov/locks/active.json")))
   throw new Error("project lock survived SIGTERM");
 const projectAfter = snapshot(root);
@@ -103,6 +117,8 @@ if (successful.status !== 0)
   throw new Error(
     `successful isolated run failed:\n${successful.stderr}\n${successful.stdout}`,
   );
+if (existsSync(interruptedMarker))
+  throw new Error("the next run did not refresh interrupted isolated output");
 const publishedRuns = (existsSync(storedRunsRoot)
   ? readdirSync(storedRunsRoot)
   : []
@@ -132,6 +148,16 @@ const projectAfterSuccess = snapshot(root);
 if (JSON.stringify(projectAfterSuccess) !== JSON.stringify(projectBefore))
   throw new Error("a project file outside .supercov changed during a successful coverage run");
 
+const cleaned = spawnSync(
+  process.execPath,
+  [resolve("bin/supercov.js"), "clean", "--keep", "20"],
+  { cwd: root, encoding: "utf8", stdio: "pipe" },
+);
+if (cleaned.status !== 0)
+  throw new Error(`isolated cache cleanup failed:\n${cleaned.stderr}\n${cleaned.stdout}`);
+if (existsSync(expectedCache))
+  throw new Error("supercov clean left the isolated build cache behind");
+
 console.log(
-  `[isolation] SIGTERM recovered run ${runId}; successful and interrupted runs left every project file outside .supercov unchanged`,
+  `[isolation] SIGTERM left only a refreshable .supercov cache; the next run recovered it, clean removed it, and no project file outside .supercov changed`,
 );

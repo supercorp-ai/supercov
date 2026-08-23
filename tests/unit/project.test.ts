@@ -39,25 +39,71 @@ describe("coverage project discovery", () => {
       playwrightConfig: resolve(root, "playwright.config.ts"),
       vitestConfig: resolve(root, "vitest.config.ts"),
       playwrightModule: "@playwright/test",
-      essentialOffline: false,
+      playwrightTestExport: "test",
+      playwrightExports: ["test"],
+      buildAdapter: "vite",
       buildCommand: ["npm", "run", "build"],
+      buildEnvironment: {},
     });
   });
 
-  it("detects the Essential fixture as an adapter rather than a core assumption", () => {
+  it("uses direct isolated instrumentation when no build script exists", () => {
+    const root = project({
+      "package.json": JSON.stringify({
+        type: "module",
+        scripts: { test: "node test.mjs" },
+      }),
+      "src/decision.js":
+        "export const allowed = (left, right) => left && right",
+      "test.mjs": "import './src/decision.js'",
+    });
+    expect(discoverCoverageProject(root, {}, ["npm", "test"])).toMatchObject({
+      sourceRoots: ["src"],
+      buildAdapter: "direct",
+      buildCommand: [],
+      buildEnvironment: {},
+    });
+  });
+
+  it("discovers a project-owned Playwright fixture module from test imports", () => {
     const root = project({
       "package.json": JSON.stringify({
         scripts: { build: "vite build" },
         devDependencies: { vite: "1" },
       }),
       "app/root.tsx": "export default null",
+      "tests/nested/playwright.browser.config.ts": "export default {}",
       "tests/example.spec.ts":
-        "import { offlineTest } from '@essential-apps/shopify-test-admin'",
+        "import { browserTest as test, expect, fixtureValue } from '@acme/browser-fixtures'",
     });
     expect(discoverCoverageProject(root, {})).toMatchObject({
       sourceRoots: ["app"],
-      playwrightModule: "@essential-apps/shopify-test-admin",
-      essentialOffline: true,
+      playwrightConfig: resolve(
+        root,
+        "tests/nested/playwright.browser.config.ts",
+      ),
+      playwrightModule: "@acme/browser-fixtures",
+      playwrightTestExport: "browserTest",
+      playwrightExports: ["browserTest", "expect", "fixtureValue"],
     });
+  });
+
+  it("infers a build mode from the test command and build config", () => {
+    const root = project({
+      "package.json": JSON.stringify({
+        scripts: {
+          build: "vite build",
+          "test:isolated": "node tools/run-suite.js",
+        },
+        devDependencies: { vite: "1" },
+      }),
+      "app/root.ts": "export const ready = true",
+      "vite.config.ts":
+        "const isolated = process.env.TEST_ISOLATED === 'true'; const url = process.env.PRODUCT_URL; export default { isolated, url }",
+    });
+    expect(
+      discoverCoverageProject(root, {}, ["npm", "run", "test:isolated"])
+        .buildEnvironment,
+    ).toEqual({ TEST_ISOLATED: "true" });
   });
 });
