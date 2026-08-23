@@ -65,5 +65,9 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: node -e 'const version = require("./package.json").version; if (process.env.RELEASE_TAG !== "v" + version) { console.error(`Expected tag v${version}, received ${process.env.RELEASE_TAG}`); process.exit(1); }'
       - run: npm ci
-      - run: npm run check
-      - run: npm publish
+      # All release, oracle, fixture, and Test262 gates completed in the jobs
+      # this job needs. Build the exact tarball inputs here, then suppress npm's
+      # lifecycle scripts so `prepublishOnly` does not repeat the LLVM-dependent
+      # release gate on a runner where LLVM was deliberately not installed.
+      - run: npm run build
+      - run: npm publish --ignore-scripts
