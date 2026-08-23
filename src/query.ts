@@ -1,8 +1,9 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { gunzipSync } from "node:zlib";
 import { coverageSummaryForTests, isIndependencePair } from "./analyze.ts";
+import { EVIDENCE_ARCHIVE_SCHEMA_VERSION } from "./evidenceArchive.ts";
+import { analyzeCoverageArchive } from "./runAnalysis.ts";
 import type {
   CoverageRunIntegrity,
   McdcDecisionResult,
@@ -14,8 +15,9 @@ import { discoverCoverageProject } from "./project.ts";
 
 interface StoredRun {
   id: string;
-  reportPath: string;
+  evidencePath: string;
   metadata?: {
+    startedAt?: string;
     command?: string[];
     durationMs?: number;
     timings?: {
@@ -24,12 +26,13 @@ interface StoredRun {
       adapterSetupMs: number;
       instrumentedBuildMs: number;
       testCommandMs: number;
-      reportPreparationMs: number;
+      evidencePublicationMs: number;
     };
     testExitCode?: number | null;
     integrity?: CoverageRunIntegrity;
     instrumentedBuildCache?: { key: string; reused: boolean };
     rawEvidence?: {
+      schemaVersion: number;
       format: string;
       file: string;
       files: number;
@@ -98,11 +101,7 @@ function filteredCoverage(
 
 function readJson<T>(path: string): T | undefined {
   try {
-    const contents = readFileSync(path);
-    const text = path.endsWith(".gz")
-      ? gunzipSync(contents).toString("utf8")
-      : contents.toString("utf8");
-    return JSON.parse(text) as T;
+    return JSON.parse(readFileSync(path, "utf8")) as T;
   } catch {
     return undefined;
   }
@@ -114,18 +113,34 @@ function discoverRuns(root: string): StoredRun[] {
   if (existsSync(canonical)) {
     for (const entry of readdirSync(canonical, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      const reportPath = resolve(canonical, entry.name, "report.json.gz");
-      if (!existsSync(reportPath)) continue;
+      const evidencePath = resolve(canonical, entry.name, "evidence.raw.gz");
+      const metadata = readJson<StoredRun["metadata"]>(
+        resolve(canonical, entry.name, "run.json"),
+      );
+      if (
+        !existsSync(evidencePath) ||
+        !metadata ||
+        metadata.rawEvidence?.schemaVersion !== EVIDENCE_ARCHIVE_SCHEMA_VERSION
+      ) continue;
       runs.set(entry.name, {
         id: entry.name,
-        reportPath,
-        metadata: readJson(resolve(canonical, entry.name, "run.json")),
+        evidencePath,
+        metadata,
       });
     }
   }
   return [...runs.values()].sort((left, right) =>
     right.id.localeCompare(left.id),
   );
+}
+
+function analyzeStoredRun(run: StoredRun): McdcReport {
+  return analyzeCoverageArchive(run.evidencePath, {
+    runId: run.id,
+    testExitCode: run.metadata?.testExitCode,
+    integrity: run.metadata?.integrity,
+    generatedAt: run.metadata?.startedAt,
+  });
 }
 
 function selectRun(
@@ -145,8 +160,7 @@ function selectRun(
       : (runs.find((run) => run.id === selector) ??
         runs.find((run) => run.id.startsWith(selector)));
   if (!selected) throw new Error(`Coverage run not found: ${selector}`);
-  const report = readJson<McdcReport>(selected.reportPath);
-  if (!report) throw new Error(`Cannot read ${selected.reportPath}`);
+  const report = analyzeStoredRun(selected);
   if (currentIntegrity) {
     const comparison = compareRunIntegrity(
       selected.metadata?.integrity ?? report.integrity,
@@ -587,16 +601,13 @@ export async function runQueryCommand(
   if (command === "runs") {
     const availableRuns = discoverRuns(root);
     const runs = page(availableRuns, options).map((run) => {
-      const storedReport = readJson<McdcReport>(run.reportPath);
-      const report = storedReport
-        ? filteredCoverage(storedReport, options)
-        : undefined;
+      const report = filteredCoverage(analyzeStoredRun(run), options);
       return {
         id: run.id,
-        generatedAt: report?.generatedAt,
-        lines: report?.summary.lines.percentage,
-        branches: report?.summary.branches.percentage,
-        mcdc: report?.summary.conditionCoveragePct,
+        generatedAt: report.generatedAt,
+        lines: report.summary.lines.percentage,
+        branches: report.summary.branches.percentage,
+        mcdc: report.summary.conditionCoveragePct,
         command: run.metadata?.command,
         durationMs: run.metadata?.durationMs,
         timings: run.metadata?.timings,

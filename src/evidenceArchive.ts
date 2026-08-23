@@ -7,7 +7,7 @@ import { relative, resolve, sep } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { atomicWriteFileSync } from "./atomic.ts";
 
-export const EVIDENCE_ARCHIVE_SCHEMA_VERSION = 1;
+export const EVIDENCE_ARCHIVE_SCHEMA_VERSION = 2;
 
 export interface EvidenceArchiveEntry {
   path: string;
@@ -29,13 +29,19 @@ export interface EvidenceArchiveMetadata {
   compressedBytes: number;
 }
 
-export interface EvidenceArchiveSource {
-  directory: string;
-  /** Namespace used when more than one evidence transport is archived. */
-  prefix?: string;
-}
+export type EvidenceArchiveSource =
+  | {
+      directory: string;
+      /** Namespace used when more than one evidence transport is archived. */
+      prefix?: string;
+    }
+  | {
+      /** A single immutable input, such as the coverage denominator manifest. */
+      file: string;
+      path: string;
+    };
 
-const ARCHIVE_MAGIC = Buffer.from("SUPERCOV-EVIDENCE-1\n");
+const ARCHIVE_MAGIC = Buffer.from("SUPERCOV-EVIDENCE-2\n");
 
 function evidenceFiles(directory: string): string[] {
   if (!existsSync(directory)) return [];
@@ -61,14 +67,20 @@ export function writeEvidenceArchive(
   const sources = typeof evidence === "string"
     ? [{ directory: evidence }]
     : evidence;
-  const files = sources.flatMap(({ directory, prefix }) =>
-    evidenceFiles(directory).map((path) => ({
-      path: [prefix, relative(directory, path).split(sep).join("/")]
+  const files = sources.flatMap((source) => {
+    if ("file" in source)
+      return [{ path: source.path, sourcePath: source.file }];
+    return evidenceFiles(source.directory).map((path) => ({
+      path: [source.prefix, relative(source.directory, path).split(sep).join("/")]
         .filter(Boolean)
         .join("/"),
       sourcePath: path,
-    })),
-  ).sort((left, right) => left.path.localeCompare(right.path));
+    }));
+  }).sort((left, right) => left.path.localeCompare(right.path));
+  for (let index = 1; index < files.length; index += 1) {
+    if (files[index - 1]!.path === files[index]!.path)
+      throw new Error(`Duplicate Supercov evidence archive path: ${files[index]!.path}`);
+  }
   const chunks: Buffer[] = [ARCHIVE_MAGIC];
   for (const { path, sourcePath } of files) {
     const contents = readFileSync(sourcePath);

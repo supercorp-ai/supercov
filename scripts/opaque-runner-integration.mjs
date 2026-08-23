@@ -3,8 +3,8 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { gunzipSync } from "node:zlib";
 import { readEvidenceArchive } from "../dist/evidenceArchive.js";
+import { analyzeCoverageArchive } from "../dist/runAnalysis.js";
 
 const fixture = resolve("tests/fixtures/generic-playwright");
 const runsRoot = resolve(fixture, ".supercov/runs");
@@ -30,9 +30,15 @@ const metadata = JSON.parse(
 );
 if (metadata.instrumentedBuildCache?.reused !== true)
   throw new Error("test-command-only change rebuilt unchanged instrumented source");
-const report = JSON.parse(
-  gunzipSync(readFileSync(resolve(runsRoot, runId, "report.json.gz"))),
-);
+const evidencePath = resolve(runsRoot, runId, "evidence.raw.gz");
+if (existsSync(resolve(runsRoot, runId, "report.json.gz")))
+  throw new Error("opaque runner persisted a derived report");
+const report = analyzeCoverageArchive(evidencePath, {
+  runId,
+  testExitCode: metadata.testExitCode,
+  integrity: metadata.integrity,
+  generatedAt: metadata.startedAt,
+});
 for (const metric of ["lines", "statements", "functions", "branches"]) {
   if (report.summary[metric].percentage !== 100)
     throw new Error(`${metric} coverage was not complete`);
@@ -41,7 +47,7 @@ if (report.summary.conditionCoveragePct !== 100)
   throw new Error("MC/DC coverage was not complete");
 
 const archive = readEvidenceArchive(
-  resolve(runsRoot, runId, "evidence.raw.gz"),
+  evidencePath,
 );
 const traceFiles = archive.files.filter((entry) =>
   /(?:^|\/)execution\..+\.jsonl$/.test(entry.path),

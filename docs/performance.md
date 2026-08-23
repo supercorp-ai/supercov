@@ -16,7 +16,7 @@ Every coverage run prints and stores monotonic durations for:
 | `adapterSetupMs` | generated adapters, configs, manifests, and runtime files |
 | `instrumentedBuildMs` | the coverage-aware build/direct pass, or near-zero when an exact-fingerprint build is reused |
 | `testCommandMs` | the user's unchanged command, including any runner or remote infrastructure latency |
-| `reportPreparationMs` | evidence collection, analysis, compressed JSON generation, and report staging |
+| `evidencePublicationMs` | evidence collection, validation/summary analysis, lossless archive generation, and atomic run staging |
 
 The fields are stored in `.supercov/runs/<run-id>/run.json` and returned by
 `supercov runs --json`. Total duration is stored separately as `durationMs`.
@@ -56,7 +56,7 @@ produced this warm pair:
 | adapter setup | 0.05 s |
 | instrumented build | 4.87 s |
 | test command inside Supercov | 39.60 s |
-| report preparation | 0.40 s |
+| evidence/report preparation (historical format) | 0.40 s |
 
 The test-command durations were effectively identical in this pair. The extra
 instrumented build accounted for about 84% of the measured difference. A
@@ -69,22 +69,27 @@ Cold VM-image runs were 170.34 s without Supercov and 175.44 s with Supercov in
 the same session, but a single cold pair is too noisy for a general percentage.
 Both spent approximately 124 seconds preparing their VM image.
 
-Before automatic HTML generation and raw-evidence packing, the reference run
-retained 4.5 MB of reports and 1.7 MB across 178 loose evidence files. Its
-canonical compressed JSON was 0.9 MB. The same loose evidence packed to about
-121 KiB; current runs publish that one archive and remove the loose directory.
+Before raw-evidence-only storage, the reference run retained 4.5 MB of reports
+and 1.7 MB across 178 loose evidence files. Its canonical compressed JSON was
+0.9 MB. The execution evidence alone packed to about 121 KiB; current archives
+also embed the exact denominator manifest and are the sole coverage artifact.
+Every CLI query derives its view from the archive on demand without writing a
+cache.
 These numbers are application- and filesystem-specific optimization baselines.
 An exact matching Vite build is also reused across runs, removing the measured
 4.87-second repeated build; any source/configuration/toolchain-key change falls
 back to a fresh isolated build.
 
-The post-change Essential SEO validation packed 178 evidence files into 118
-KiB and retained about 1.0 MiB for the complete run. After the one required
-cache-invalidating build, the next identical 29-test run recorded 0 ms for the
-build phase and 39.99 seconds total: 0.04 seconds initialization, 0.37 seconds
-workspace refresh, 0.06 seconds adapter setup, 39.08 seconds in the unchanged
-test command, and 0.38 seconds report/archive publication. Test execution is
-still the dominant and naturally variable part of that total.
+The evidence-only Essential SEO validation packed the exact manifest plus 178
+execution-evidence files (2.66 MB uncompressed) into a 248 KiB archive. With
+the 4 KiB `run.json`, the complete immutable run occupies 252 KiB and contains
+no derived report. Its identical warm 29-test run recorded 0 ms for the build
+phase and 40.49 seconds total: 0.07 seconds initialization, 0.36 seconds
+workspace refresh, 0.05 seconds adapter setup, 39.84 seconds in the unchanged
+test command, and 0.12 seconds evidence validation/archive publication. Fresh
+process queries for summary, files, and gaps each took 0.16–0.20 seconds on
+this run while writing no cache. Test execution is still the dominant and
+naturally variable part of the total.
 
 ## Isolation strategy trade-offs
 

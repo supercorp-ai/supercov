@@ -360,14 +360,14 @@ describe("isolated run workspaces", () => {
     const root = project();
     const runId = "2026-01-02T00-00-00-000Z";
     const workspace = prepareIsolatedWorkspace(root, runId);
-    const stagedReport = resolve(
+    const stagedRun = resolve(
       root,
       ".supercov/work",
       runId,
-      "report-publication/report.json.gz",
+      "run-publication/evidence.raw.gz",
     );
-    mkdirSync(resolve(stagedReport, ".."), { recursive: true });
-    writeFileSync(stagedReport, "incomplete");
+    mkdirSync(resolve(stagedRun, ".."), { recursive: true });
+    writeFileSync(stagedRun, "incomplete");
     const orphanEvidence = resolve(root, ".supercov/evidence", runId, "hit.json");
     mkdirSync(resolve(orphanEvidence, ".."), { recursive: true });
     writeFileSync(orphanEvidence, "partial");
@@ -383,7 +383,7 @@ describe("isolated run workspaces", () => {
 
     expect(recoverAbandonedRuns(root)).toEqual([runId]);
     expect(existsSync(workspace)).toBe(false);
-    expect(existsSync(stagedReport)).toBe(false);
+    expect(existsSync(stagedRun)).toBe(false);
     expect(existsSync(orphanEvidence)).toBe(false);
     const state = JSON.parse(
       readFileSync(resolve(root, ".supercov/work", runId, "state.json"), "utf8"),
@@ -402,7 +402,6 @@ describe("isolated run workspaces", () => {
     const publishedRun = resolve(root, ".supercov/runs", runId, "run.json");
     mkdirSync(resolve(publishedRun, ".."), { recursive: true });
     writeFileSync(publishedRun, `${JSON.stringify({ id: runId })}\n`);
-    writeFileSync(resolve(publishedRun, "../report.json.gz"), "report");
     writeFileSync(resolve(publishedRun, "../evidence.raw.gz"), "evidence");
     const looseEvidence = resolve(root, ".supercov/evidence", runId, "hit.json");
     mkdirSync(resolve(looseEvidence, ".."), { recursive: true });
@@ -413,7 +412,7 @@ describe("isolated run workspaces", () => {
       root,
       workspace,
       startedAt: "2026-01-02T01:00:00.000Z",
-      status: "reporting",
+      status: "publishing",
     });
 
     expect(recoverAbandonedRuns(root)).toEqual([runId]);

@@ -1,19 +1,18 @@
 import {
   existsSync,
-  mkdirSync,
   readFileSync,
   readdirSync,
-  rmSync,
   statSync,
 } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
-import { gzipSync } from "node:zlib";
 import type { FullConfig, Reporter } from "@playwright/test/reporter";
-import { createMcdcReport } from "./analyze.ts";
-import { atomicWriteFileSync } from "./atomic.ts";
+import { analyzeCoverageResults } from "./runAnalysis.ts";
+export {
+  failedCoverageResults,
+  passingCoverageResults,
+} from "./runAnalysis.ts";
 import {
   backgroundEvidenceDirectory,
-  serverRunEvidenceDirectory,
 } from "./transport.ts";
 import type {
   CoverageManifest,
@@ -277,74 +276,14 @@ ${phaseRows || "<p>No instrumented actions or assertions were collected.</p>"}
 </body></html>`;
 }
 
-function rawTestId(raw: McdcRawTestResult): string {
-  return raw.testId ?? raw.test;
-}
-
-/**
- * Keep only the successful final attempt of ultimately passing tests. Status
- * records and coverage records are separate for some runners, so eligibility
- * is resolved per (stable test ID, retry) before evidence is filtered.
- */
-export function passingCoverageResults(
-  rawResults: McdcRawTestResult[],
-): McdcRawTestResult[] {
-  const attemptsByTest = new Map<
-    string,
-    Map<number, { statuses: Set<string>; expectsFailure: boolean }>
-  >();
-  for (const raw of rawResults) {
-    const retry = raw.retry ?? 0;
-    const attempts = attemptsByTest.get(rawTestId(raw)) ?? new Map();
-    const attempt = attempts.get(retry) ?? {
-      statuses: new Set<string>(),
-      expectsFailure: false,
-    };
-    if (raw.status) attempt.statuses.add(raw.status);
-    attempt.expectsFailure ||= raw.expectedStatus === "failed";
-    attempts.set(retry, attempt);
-    attemptsByTest.set(rawTestId(raw), attempts);
-  }
-
-  const accepted = new Set<string>();
-  for (const [testId, attempts] of attemptsByTest) {
-    const retry = Math.max(...attempts.keys());
-    const terminal = attempts.get(retry)!;
-    if (terminal.statuses.has("passed") && !terminal.expectsFailure) {
-      accepted.add(`${testId}\0${retry}`);
-    }
-  }
-  return rawResults.filter((raw) =>
-    accepted.has(`${rawTestId(raw)}\0${raw.retry ?? 0}`),
-  );
-}
-
-/** Coverage executed by attempts whose actual runner status is failed. */
-export function failedCoverageResults(
-  rawResults: McdcRawTestResult[],
-): McdcRawTestResult[] {
-  const failedAttempts = new Set(
-    rawResults
-      .filter((raw) => raw.status === "failed")
-      .map((raw) => `${rawTestId(raw)}\0${raw.retry ?? 0}`),
-  );
-  return rawResults.filter((raw) =>
-    failedAttempts.has(`${rawTestId(raw)}\0${raw.retry ?? 0}`),
-  );
-}
-
-export function writeMcdcReport(
+export function analyzeMcdcEvidence(
   outputDir: string,
   runId: string,
   minimumArtifactMtimeMs = 0,
   configuredManifestPath?: string,
   testExitCode?: number | null,
   integrity?: CoverageRunIntegrity,
-  publication?: {
-    directory: string;
-    displayDirectory?: string;
-    serverEvidenceRoot?: string;
-  },
+  serverEvidenceRoot?: string,
 ): McdcReport {
   const manifestPath = configuredManifestPath
     ? resolve(configuredManifestPath)
@@ -364,42 +303,20 @@ export function writeMcdcReport(
     .map((path) => JSON.parse(readFileSync(path, "utf8")) as McdcRawTestResult);
   const background = readBackgroundEvidence(
     runId,
-    publication?.serverEvidenceRoot,
+    serverEvidenceRoot,
   );
   if (background) rawResults.push(background);
-  const incompatibleScope = rawResults.find(
-    (raw) => raw.scope && raw.scope.runId !== runId,
-  );
-  if (incompatibleScope) {
-    throw new Error(
-      `Coverage evidence for run ${incompatibleScope.scope!.runId} cannot be used in run ${runId}`,
-    );
-  }
-  if (rawResults.length === 0) {
-    throw new Error(`No coverage evidence was collected under ${outputDir}`);
-  }
-  const report = createMcdcReport(manifest, rawResults);
-  const passed = createMcdcReport(manifest, passingCoverageResults(rawResults));
-  const failed = createMcdcReport(manifest, failedCoverageResults(rawResults));
-  report.filters = { passed, failed };
-  if (integrity) {
-    report.integrity = integrity;
-    passed.integrity = integrity;
-    failed.integrity = integrity;
-  }
-  if (testExitCode !== undefined) {
-    report.execution = { testExitCode, valid: testExitCode === 0 };
-  }
-  const storedRunDirectory = publication?.directory
-    ? resolve(publication.directory)
-    : resolve(process.cwd(), ".supercov/runs", runId);
-  mkdirSync(storedRunDirectory, { recursive: true });
-  const serializedReport = `${JSON.stringify(report, null, 2)}\n`;
-  atomicWriteFileSync(
-    resolve(storedRunDirectory, "report.json.gz"),
-    gzipSync(serializedReport, { level: 9 }),
-  );
+  const report = analyzeCoverageResults(manifest, rawResults, {
+    runId,
+    testExitCode,
+    integrity,
+  });
+  printCoverageSummary(report);
+  return report;
+}
 
+export function printCoverageSummary(report: McdcReport): void {
+  const passed = report.filters!.passed;
   const summary = report.summary;
   console.log(
     `[coverage] lines ${summary.lines.percentage}%, statements ${summary.statements.percentage}%, ` +
@@ -412,14 +329,6 @@ export function writeMcdcReport(
   console.log(
     `[coverage] passed only: lines ${passed.summary.lines.percentage}%, branches ${passed.summary.branches.percentage}%, MC/DC ${passed.summary.conditionCoveragePct}%`,
   );
-  console.log(
-    `[coverage] report data: ${resolve(publication?.displayDirectory ?? storedRunDirectory, "report.json.gz")}`,
-  );
-  rmSync(
-    serverRunEvidenceDirectory(runId, publication?.serverEvidenceRoot),
-    { recursive: true, force: true },
-  );
-  return report;
 }
 
 export default class McdcReporter implements Reporter {
@@ -432,6 +341,6 @@ export default class McdcReporter implements Reporter {
   onEnd(): void {
     const runId =
       basename(dirname(this.outputDir));
-    writeMcdcReport(this.outputDir, runId);
+    analyzeMcdcEvidence(this.outputDir, runId);
   }
 }

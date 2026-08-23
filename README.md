@@ -68,12 +68,14 @@ blocks the trusted-publishing workflow.
 
 ## Agent query workflow
 
-Each run is stored locally as three immutable files under
-`.supercov/runs/<run-id>/`: `report.json.gz`, `evidence.raw.gz`, and
-`run.json`. Raw per-worker evidence is packed into the single gzip artifact
-before publication; loose evidence is removed only after the whole directory
-is atomically visible. HTML is not generated during a test run; agents should
-use bounded CLI queries instead of loading the complete report into context.
+Each run is stored locally as two immutable files under
+`.supercov/runs/<run-id>/`: `evidence.raw.gz` and `run.json`. The archive
+contains the exact coverage denominator manifest plus raw per-worker and
+background evidence. Every query reconstructs its requested coverage view
+directly from that archive; no derived report or query cache is retained.
+Loose evidence is removed only after the whole run directory is atomically
+visible. HTML is not generated during a test run; agents should use bounded
+CLI queries instead of loading the complete derived model into context.
 
 ```sh
 # Orient using only a few lines.

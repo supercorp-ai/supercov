@@ -10,7 +10,8 @@ import { relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { atomicRenameSync, atomicWriteFileSync } from "./atomic.ts";
-import { writeMcdcReport } from "./reporter.ts";
+import { printCoverageSummary } from "./reporter.ts";
+import { analyzeCoverageArchive } from "./runAnalysis.ts";
 import { coverageQueryCommands, runQueryCommand } from "./query.ts";
 import { discoverCoverageProject } from "./project.ts";
 import { createRunIntegrity } from "./integrity.ts";
@@ -46,7 +47,7 @@ interface RunPhaseTimings {
   adapterSetupMs: number;
   instrumentedBuildMs: number;
   testCommandMs: number;
-  reportPreparationMs: number;
+  evidencePublicationMs: number;
 }
 
 function roundedTimings(timings: RunPhaseTimings): RunPhaseTimings {
@@ -66,7 +67,7 @@ function formatTimings(timings: RunPhaseTimings, totalMs: number): string {
     `setup=${rounded.adapterSetupMs}ms`,
     `build=${rounded.instrumentedBuildMs}ms`,
     `tests=${rounded.testCommandMs}ms`,
-    `report=${rounded.reportPreparationMs}ms`,
+    `evidence=${rounded.evidencePublicationMs}ms`,
     `total=${Math.round(totalMs * 10) / 10}ms`,
   ].join(" ");
 }
@@ -175,7 +176,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
     adapterSetupMs: 0,
     instrumentedBuildMs: 0,
     testCommandMs: 0,
-    reportPreparationMs: 0,
+    evidencePublicationMs: 0,
   };
   const recovered = recoverAbandonedRuns(root);
   if (recovered.length > 0)
@@ -190,11 +191,11 @@ async function createCoverageRun(command: string[]): Promise<number> {
     ? readInstrumentedBuildCache(workspace, buildCacheKey)
     : undefined;
   const serverEvidenceRoot = resolve(workspace, ".supercov/server-evidence");
-  const reportStagingDirectory = resolve(
+  const runStagingDirectory = resolve(
     root,
     ".supercov/work",
     runId,
-    "report-publication",
+    "run-publication",
   );
   const storedRunDirectory = resolve(root, ".supercov/runs", runId);
   const startedAt = new Date(runStartedAt).toISOString();
@@ -228,8 +229,8 @@ async function createCoverageRun(command: string[]): Promise<number> {
 
   let buildResult: ChildResult | undefined;
   let testResult: ChildResult | undefined;
-  let reportFailed = false;
-  let reportPublished = false;
+  let publicationFailed = false;
+  let runPublished = false;
   let timingsPrinted = false;
 
   timings.initializationMs = performance.now() - runStartedMonotonic;
@@ -525,39 +526,39 @@ async function createCoverageRun(command: string[]): Promise<number> {
       if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
       if (testResult.error) throw testResult.error;
 
-      updateRunState(root, runId, { status: "reporting" });
+      updateRunState(root, runId, { status: "publishing" });
       phaseStarted = performance.now();
       rmSync(persistedEvidenceDirectory, { recursive: true, force: true });
       if (existsSync(isolatedEvidenceDirectory))
         atomicRenameSync(isolatedEvidenceDirectory, persistedEvidenceDirectory);
       try {
-        rmSync(reportStagingDirectory, { recursive: true, force: true });
+        rmSync(runStagingDirectory, { recursive: true, force: true });
+        const evidenceArchivePath = resolve(
+          runStagingDirectory,
+          "evidence.raw.gz",
+        );
         const rawEvidence = writeEvidenceArchive(
           [
+            { file: manifestPath, path: "manifest.json" },
             { directory: persistedEvidenceDirectory },
             {
               directory: resolve(serverEvidenceRoot, runId),
               prefix: "server",
             },
           ],
-          resolve(reportStagingDirectory, "evidence.raw.gz"),
+          evidenceArchivePath,
         );
-        writeMcdcReport(
-          persistedEvidenceDirectory,
-          runId,
-          runStartedAt,
-          manifestPath,
-          testResult.status,
-          runIntegrity,
-          {
-            directory: reportStagingDirectory,
-            displayDirectory: storedRunDirectory,
-            serverEvidenceRoot,
-          },
+        printCoverageSummary(
+          analyzeCoverageArchive(evidenceArchivePath, {
+            runId,
+            testExitCode: testResult.status,
+            integrity: runIntegrity,
+            generatedAt: startedAt,
+          }),
         );
-        timings.reportPreparationMs = performance.now() - phaseStarted;
+        timings.evidencePublicationMs = performance.now() - phaseStarted;
         atomicWriteFileSync(
-          resolve(reportStagingDirectory, "run.json"),
+          resolve(runStagingDirectory, "run.json"),
           `${JSON.stringify(
             {
               id: runId,
@@ -578,18 +579,21 @@ async function createCoverageRun(command: string[]): Promise<number> {
             2,
           )}\n`,
         );
-        atomicRenameSync(reportStagingDirectory, storedRunDirectory);
-        reportPublished = true;
+        atomicRenameSync(runStagingDirectory, storedRunDirectory);
+        runPublished = true;
+        console.log(
+          `[coverage] evidence: ${resolve(storedRunDirectory, "evidence.raw.gz")}`,
+        );
       } catch (error) {
-        timings.reportPreparationMs = performance.now() - phaseStarted;
-        reportFailed = true;
-        console.error("[supercov] failed to generate report", error);
+        timings.evidencePublicationMs = performance.now() - phaseStarted;
+        publicationFailed = true;
+        console.error("[supercov] failed to publish coverage evidence", error);
       }
     }
 
-    const resultCode = exitCode(buildResult) || exitCode(testResult) || (reportFailed ? 1 : 0);
+    const resultCode = exitCode(buildResult) || exitCode(testResult) || (publicationFailed ? 1 : 0);
     updateRunState(root, runId, { status: resultCode === 0 ? "complete" : "failed" });
-    if (reportPublished && !finalizePublishedRunStorage(root, runId))
+    if (runPublished && !finalizePublishedRunStorage(root, runId))
       throw new Error(`Published run ${runId} is missing a durable artifact`);
     console.error(
       `[supercov] timings ${formatTimings(timings, performance.now() - runStartedMonotonic)}`,
@@ -622,7 +626,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
     for (const [signal, handler] of signalHandlers)
       process.removeListener(signal, handler);
     try {
-      rmSync(reportStagingDirectory, { recursive: true, force: true });
+      rmSync(runStagingDirectory, { recursive: true, force: true });
       rmSync(resolve(serverEvidenceRoot, runId), {
         recursive: true,
         force: true,

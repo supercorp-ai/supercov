@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { relative, resolve } from "node:path";
-import { gunzipSync } from "node:zlib";
+import { analyzeCoverageArchive } from "../dist/runAnalysis.js";
 
 function filesUnder(root, directory = root) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -98,16 +98,19 @@ try {
     "adapterSetupMs",
     "instrumentedBuildMs",
     "testCommandMs",
-    "reportPreparationMs",
+    "evidencePublicationMs",
   ]) {
     if (!Number.isFinite(metadata.timings?.[phase]) || metadata.timings[phase] < 0)
       throw new Error(`packed npx run is missing ${phase}`);
   }
-  const report = JSON.parse(
-    gunzipSync(
-      readFileSync(resolve(runsRoot, runIds[0], "report.json.gz")),
-    ),
-  );
+  if (existsSync(resolve(runsRoot, runIds[0], "report.json.gz")))
+    throw new Error("packed npx run persisted a derived report");
+  const report = analyzeCoverageArchive(evidenceArchive, {
+    runId: runIds[0],
+    testExitCode: metadata.testExitCode,
+    integrity: metadata.integrity,
+    generatedAt: metadata.startedAt,
+  });
   for (const metric of ["lines", "statements", "functions", "branches"]) {
     if (report.summary[metric].percentage !== 100)
       throw new Error(`${metric} coverage was not complete`);

@@ -254,13 +254,14 @@ if (publishedMetadata.timings?.instrumentedBuildMs > 10)
     `reused build still spent ${publishedMetadata.timings?.instrumentedBuildMs}ms in the build phase`,
   );
 for (const required of [
-  "report.json.gz",
   "evidence.raw.gz",
   "run.json",
 ]) {
   if (!publishedFiles.has(required))
     throw new Error(`atomically published run is missing ${required}`);
 }
+if (publishedFiles.has("report.json.gz"))
+  throw new Error("atomically published run persisted a derived report");
 if ([...publishedFiles].some((file) => file.endsWith(".html")))
   throw new Error("coverage run generated an HTML report without an explicit preview request");
 if (existsSync(resolve(root, ".supercov/work", publishedRuns[0])))

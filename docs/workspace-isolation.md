@@ -14,13 +14,13 @@ is below the project's `.supercov/` directory:
 | --- | --- |
 | `locks/active.json` | Exclusive run or cleanup transaction; removed by its owner, stale owners are recovered. |
 | `work/<run>/state.json` | In-flight lifecycle record; removed after atomic run publication. |
-| `work/<run>/report-publication/` | Incomplete report staging; atomically renamed or removed on recovery. |
+| `work/<run>/run-publication/` | Incomplete run staging; atomically renamed or removed on recovery. |
 | `evidence/<run>/` | Loose in-flight evidence; packed and removed after publication. |
-| `runs/<run>/` | Immutable `report.json.gz`, `evidence.raw.gz`, and `run.json`; retained until explicit prune/clean. |
+| `runs/<run>/` | Immutable `evidence.raw.gz` (manifest plus raw execution evidence) and `run.json`; retained until explicit prune/clean. Derived query views are never cached. |
 | `cache/instrumented-workspace/<project>/` | Stable physical fallback and provider snapshot cache. |
 | `cache/instrumented-workspace/.<project>.staging-*` | Unpublished cache transaction; removed on error or recovery. |
 | `cache/instrumented-workspace/.<project>.previous-*` | Last complete cache generation during publication; restored or removed on recovery. |
-| `cache/instrumented-workspace/<project>/.supercov/server-evidence/<run>/` | Server/background transport shared with local or mounted guest processes; removed after reporting, interruption, refresh, or cleanup. |
+| `cache/instrumented-workspace/<project>/.supercov/server-evidence/<run>/` | Server/background transport shared with local or mounted guest processes; archived and removed after publication, interruption, refresh, or cleanup. |
 
 The lower-level runtime retains `/tmp/supercov-server-evidence` only as a
 fallback when it is embedded without the Supercov CLI and no owned transport

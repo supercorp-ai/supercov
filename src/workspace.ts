@@ -24,7 +24,7 @@ export type RunStateStatus =
   | "preparing"
   | "building"
   | "testing"
-  | "reporting"
+  | "publishing"
   | "complete"
   | "failed"
   | "interrupted"
@@ -215,7 +215,6 @@ export function finalizePublishedRunStorage(
   const publishedRun = readJson<{ id?: string }>(resolve(runDirectory, "run.json"));
   if (
     publishedRun?.id !== runId ||
-    !existsSync(resolve(runDirectory, "report.json.gz")) ||
     !existsSync(resolve(runDirectory, "evidence.raw.gz"))
   ) {
     return false;
@@ -253,16 +252,16 @@ export function recoverAbandonedRuns(root: string): string[] {
       recursive: true,
       force: true,
     });
-    rmSync(resolve(root, ".supercov/work", entry.name, "report-publication"), {
+    rmSync(resolve(root, ".supercov/work", entry.name, "run-publication"), {
       recursive: true,
       force: true,
     });
     if (finalizePublishedRunStorage(root, entry.name)) {
-      // The report directory is published by one atomic rename before the run
+      // The run directory is published by one atomic rename before the run
       // state flips terminal. Its run.json is the durable terminal record, so
       // recovery completes cleanup without recreating disposable state.
     } else {
-      // Evidence moved out of the disposable workspace before report
+      // Evidence moved out of the disposable workspace before run
       // generation is not a visible run. Remove that orphan on recovery so a
       // hard kill cannot accumulate partial run data indefinitely.
       rmSync(resolve(root, ".supercov/evidence", entry.name), {

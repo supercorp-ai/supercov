@@ -137,9 +137,11 @@ try {
   if (runs.length !== 1)
     throw new Error(`expected one recovered published run, found ${runs}`);
   const run = resolve(root, ".supercov/runs", runs[0]);
-  for (const artifact of ["report.json.gz", "evidence.raw.gz", "run.json"])
+  for (const artifact of ["evidence.raw.gz", "run.json"])
     if (!existsSync(resolve(run, artifact)))
       throw new Error(`recovered run is missing ${artifact}`);
+  if (existsSync(resolve(run, "report.json.gz")))
+    throw new Error("recovered run persisted a derived report");
   if (existsSync(resolve(root, ".supercov/work", runs[0])))
     throw new Error("recovered run retained terminal work state");
   if (existsSync(resolve(root, ".supercov/evidence", runs[0])))

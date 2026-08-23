@@ -28,16 +28,26 @@ it("packs raw evidence deterministically into one lossless gzip artifact", () =>
   mkdirSync(resolve(evidence, "worker-1"), { recursive: true });
   writeFileSync(resolve(evidence, "worker-2/result.json"), '{"hit":2}\n');
   writeFileSync(resolve(evidence, "worker-1/result.json"), '{"hit":1}\n');
+  const manifest = resolve(root, "manifest.json");
+  writeFileSync(manifest, '{"decisions":[],"points":[],"branches":[]}\n');
 
   const first = resolve(root, "first.json.gz");
   const second = resolve(root, "second.json.gz");
-  const metadata = writeEvidenceArchive(evidence, first);
-  writeEvidenceArchive(evidence, second);
+  const sources = [
+    { file: manifest, path: "manifest.json" },
+    { directory: evidence },
+  ];
+  const metadata = writeEvidenceArchive(sources, first);
+  writeEvidenceArchive(sources, second);
 
   expect(readFileSync(first)).toEqual(readFileSync(second));
-  expect(metadata.files).toBe(2);
+  expect(metadata.files).toBe(3);
   expect(metadata.compressedBytes).toBeLessThan(metadata.uncompressedBytes);
   expect(readEvidenceArchive(first).files).toEqual([
+    {
+      path: "manifest.json",
+      contents: '{"decisions":[],"points":[],"branches":[]}\n',
+    },
     { path: "worker-1/result.json", contents: '{"hit":1}\n' },
     { path: "worker-2/result.json", contents: '{"hit":2}\n' },
   ]);
