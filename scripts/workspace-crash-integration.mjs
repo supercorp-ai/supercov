@@ -83,6 +83,7 @@ try {
     child.once("exit", (code, signal) => resolveExit({ code, signal }));
   });
   await new Promise((resolveKill, reject) => {
+    let observed = false;
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
       reject(new Error(`cache staging was not observable:\n${output}`));
@@ -93,14 +94,21 @@ try {
         : false;
       const lock = existsSync(resolve(root, ".supercov/locks/active.json"));
       if (!staging || !lock) return;
+      observed = true;
       clearInterval(poll);
       clearTimeout(timeout);
       child.kill("SIGKILL");
       resolveKill();
     }, 2);
-    child.once("exit", () => {
+    child.once("exit", (code, signal) => {
       clearInterval(poll);
       clearTimeout(timeout);
+      if (!observed)
+        reject(
+          new Error(
+            `crash target exited before staging was observed (${code ?? signal}):\n${output}`,
+          ),
+        );
     });
   });
   const killed = await exit;
