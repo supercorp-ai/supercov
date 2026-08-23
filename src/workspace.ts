@@ -343,6 +343,7 @@ function copyTree(
   sourceRoot = source,
   destinationRoot = destination,
   hooks: CachePreparationHooks = {},
+  finalDestinationRoot = destinationRoot,
 ): void {
   mkdirSync(destination, { recursive: true });
   for (const entry of readdirSync(source, { withFileTypes: true })) {
@@ -351,7 +352,15 @@ function copyTree(
     const to = resolve(destination, entry.name);
     const stat = lstatSync(from);
     if (stat.isDirectory())
-      copyTree(from, to, false, sourceRoot, destinationRoot, hooks);
+      copyTree(
+        from,
+        to,
+        false,
+        sourceRoot,
+        destinationRoot,
+        hooks,
+        finalDestinationRoot,
+      );
     else if (stat.isSymbolicLink()) {
       const link = readlinkSync(from);
       const lexicalTarget = isAbsolute(link)
@@ -376,8 +385,14 @@ function copyTree(
         destinationRoot,
         relative(sourceRoot, lexicalTarget),
       );
+      // Windows junctions are absolute. Point them at the stable name that the
+      // staging tree will have after publication, not the staging name that is
+      // about to disappear. POSIX links remain relative and survive rename.
       const isolatedLink = process.platform === "win32" && targetIsDirectory
-        ? relocatedAbsoluteTarget
+        ? resolve(
+            finalDestinationRoot,
+            relative(sourceRoot, lexicalTarget),
+          )
         : isAbsolute(link)
         ? relative(
             dirname(to),
@@ -463,7 +478,7 @@ export function prepareCachedWorkspace(
   const previous = cacheTransactionPath(root, "previous");
   let movedPrevious = false;
   try {
-    copyTree(root, staging, true, root, staging, hooks);
+    copyTree(root, staging, true, root, staging, hooks, workspace);
     const nodeModules = resolve(root, "node_modules");
     if (existsSync(nodeModules)) {
       const isolatedNodeModules = resolve(staging, "node_modules");
@@ -494,7 +509,7 @@ export function prepareCachedWorkspace(
       }
       const stat = lstatSync(from);
       if (stat.isDirectory())
-        copyTree(from, to, false, workspace, staging, hooks);
+        copyTree(from, to, false, workspace, staging, hooks, workspace);
       else if (stat.isFile()) {
         mkdirSync(dirname(to), { recursive: true });
         if (hooks.copyFile) hooks.copyFile(from, to);
