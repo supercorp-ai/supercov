@@ -19,6 +19,8 @@ jobs:
         with:
           node-version: "24"
           cache: npm
+      - name: Install the independent Clang/LLVM MC/DC oracle
+        run: sudo apt-get update -qq && sudo apt-get install -y clang llvm
       - run: npm ci
       - run: npm run release:check
       - run: npx playwright install --with-deps chromium
