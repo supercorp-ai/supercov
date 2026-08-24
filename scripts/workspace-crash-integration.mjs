@@ -24,7 +24,13 @@ function snapshot(root) {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = resolve(directory, entry.name);
       const local = relative(root, path);
-      if (local === ".supercov" || local.startsWith(`.supercov${process.platform === "win32" ? "\\" : "/"}`))
+      const separator = process.platform === "win32" ? "\\" : "/";
+      // Supercov owns the dotted store and the non-dotted workspace container.
+      if (
+        [".supercov", "supercov"].some(
+          (owned) => local === owned || local.startsWith(`${owned}${separator}`),
+        )
+      )
         continue;
       if (entry.isDirectory()) visit(path);
       else if (entry.isFile())
@@ -61,7 +67,7 @@ try {
   const before = snapshot(root);
   const workspace = resolve(
     root,
-    ".supercov/.cache/instrumented-workspace",
+    "supercov/workspace",
     basename(root),
   );
   const cacheParent = resolve(workspace, "..");
@@ -131,7 +137,7 @@ try {
   if (existsSync(marker))
     throw new Error("recovery did not publish a fresh cache generation");
   if (JSON.stringify(snapshot(root)) !== JSON.stringify(before))
-    throw new Error("crash recovery changed a file outside .supercov");
+    throw new Error("crash recovery changed a file outside the Supercov store");
 
   const runs = readdirSync(resolve(root, ".supercov/runs"));
   if (runs.length !== 1)

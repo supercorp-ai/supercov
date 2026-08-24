@@ -37,10 +37,20 @@ waived conditions with the reason. `src/waivers.ts`, wired through
 `src/query.ts`; unit-tested in `tests/unit/waivers.test.ts` and end-to-end in
 `scripts/agent-query-eval.mjs`.
 
-This repository now carries 11 reviewed waivers: AST-structural impossibilities
-in `isSourceSensitiveFunction` (a parent's only expression child cannot be a
-different child), the parser's absent `createParenthesizedExpressions`, and
-Node-only/macOS-only environment conditions in `transport.ts`/`workspace.ts`.
+This repository carries **8** reviewed waivers, all AST-structural
+impossibilities: `isSourceSensitiveFunction`'s parent-node invariants (a
+parent's only expression child cannot simultaneously be a different child) and
+the parser's absent `createParenthesizedExpressions`.
+
+**Rule learned by dogfooding (2026-08-24):** three further waivers were written
+for browser-only and Windows-only conditions and then deliberately removed. A
+waiver asserts *no satisfiable independence pair exists* — not "our CI does not
+run that platform." Environment-unreachable conditions are genuine coverage
+gaps that Windows CI (spike S3) and browser fixtures will close, and labelling
+them "reviewed" would hide exactly what the mechanism exists to expose. The
+`line` disambiguator is also brittle by design: editing anything above a
+waived condition shifts it and the waiver is then reported `unmatched` — which
+is how these three were caught. Prefer source-text matching without `line`.
 
 ## 4. Runtime bug: buffered evidence destination must be pinned
 

@@ -48,26 +48,6 @@
       "decision": "(t.isMemberExpression(candidate) ||\n        t.isOptionalMemberExpression(candidate)) &&\n      !candidate.computed &&\n      t.isIdentifier(candidate.property, { name: \"toString\" }) &&\n      candidate.object === value",
       "condition": "candidate.object === value",
       "reason": "A non-computed member's property child is an Identifier, never a traversed Function node, so the walked child is always .object."
-    },
-    {
-      "file": "src/transport.ts",
-      "decision": "typeof process !== \"undefined\" &&\n    process.env?.[\"SUPERCOV_SERVER_EVIDENCE_ROOT\"]",
-      "condition": "typeof process !== \"undefined\"",
-      "reason": "The false side exists only in browser runtimes; this project's own suite is Node-only, so no self-run test can execute it."
-    },
-    {
-      "file": "src/workspace.ts",
-      "decision": "process.platform === \"win32\"",
-      "condition": "process.platform === \"win32\"",
-      "reason": "Platform-bound: the true side executes only on Windows and this project's suite runs on the host platform.",
-      "line": 495
-    },
-    {
-      "file": "src/workspace.ts",
-      "decision": "entry.isDirectory()",
-      "condition": "entry.isDirectory()",
-      "reason": "Reachable only inside the win32-only symlink-type selection; see the platform waiver on line 495.",
-      "line": 496
     }
   ]
 }

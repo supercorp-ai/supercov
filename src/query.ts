@@ -1055,6 +1055,10 @@ Use "latest" as <run-id> to query the newest local run.
 Reviewed MC/DC waivers (optional ${WAIVERS_FILE} at the project root):
   {"version":1,"waivers":[{"file":"src/x.ts","decision":"<id or source>","line":12,"condition":"<source or C2>","reason":"..."}]}
   Waived conditions stay uncovered in every raw total and are reported separately.
+  Waive only conditions with no satisfiable independence pair. A condition that
+  some platform or environment simply never runs here is a coverage gap, not an
+  impossibility; keep it visible. Prefer omitting "line" (it breaks on edits
+  above it and is then reported as unmatched).
 
 Create a run with:
   supercov -- <test command>`;

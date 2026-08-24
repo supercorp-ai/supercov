@@ -65,6 +65,45 @@ const ROOT_EXCLUSIONS = new Set([
 ]);
 const NESTED_SUPERCOV_EXCLUSIONS = new Set([".supercov", ".mcdc-pool"]);
 
+/** Marks `supercov/` as ours, so a project may own a directory by that name. */
+const WORKSPACE_CONTAINER_MARKER = ".supercov-workspace-store";
+
+/**
+ * The instrumented workspace deliberately lives outside the dotted store.
+ * Widely used libraries treat *any* dot-prefixed path segment as a hidden
+ * dotfile — `send` (and therefore `express.static`, `serve-static` and
+ * `res.sendFile`) answers 404 for them by default — so an application under
+ * test cannot serve its own files from a dotted workspace. Copied test files
+ * are kept out of the user's ordinary runner discovery by
+ * `pruneCachedWorkspaceSources` at run end, not by hiding the path.
+ */
+export function workspaceContainerPath(root: string): string {
+  return resolve(root, "supercov");
+}
+
+/** True only for a `supercov/` directory this tool created. */
+function isWorkspaceContainer(path: string): boolean {
+  return (
+    basename(path) === "supercov" &&
+    existsSync(resolve(path, WORKSPACE_CONTAINER_MARKER))
+  );
+}
+
+function ensureWorkspaceContainer(root: string): string {
+  const container = workspaceContainerPath(root);
+  mkdirSync(container, { recursive: true });
+  // Self-ignoring, so the directory never reaches the user's diff, and marked
+  // so source copying can distinguish it from a project's own `supercov/`.
+  for (const [file, contents] of [
+    [".gitignore", "*\n"],
+    [WORKSPACE_CONTAINER_MARKER, "Supercov instrumented workspace. Safe to delete.\n"],
+  ] as const) {
+    const path = resolve(container, file);
+    if (!existsSync(path)) atomicWriteFileSync(path, contents);
+  }
+  return container;
+}
+
 function processExists(pid: number): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
   try {
@@ -98,7 +137,7 @@ export function isolatedWorkspacePath(root: string, runId: string): string {
  * The project lock makes refreshes single-writer.
  */
 export function cachedWorkspacePath(root: string): string {
-  return resolve(root, ".supercov/.cache/instrumented-workspace", basename(root));
+  return resolve(workspaceContainerPath(root), "workspace", basename(root));
 }
 
 /**
@@ -384,6 +423,9 @@ function copyTree(
     )
       continue;
     const from = resolve(source, entry.name);
+    // Never copy our own workspace into itself. Matched by marker rather than
+    // by name so a project may legitimately own a `supercov/` directory.
+    if (entry.isDirectory() && isWorkspaceContainer(from)) continue;
     const to = resolve(destination, entry.name);
     const stat = lstatSync(from);
     if (stat.isDirectory())
@@ -508,6 +550,7 @@ export function prepareCachedWorkspace(
   hooks: CachePreparationHooks = {},
 ): string {
   const workspace = cachedWorkspacePath(root);
+  ensureWorkspaceContainer(root);
   recoverCachedWorkspace(root);
   const staging = cacheTransactionPath(root, "staging");
   const previous = cacheTransactionPath(root, "previous");
@@ -671,9 +714,12 @@ function cleanCoverageStorageLocked(
         rmSync(resolve(runsRoot, id), { recursive: true, force: true });
     }
   }
-  const buildCache = resolve(root, ".supercov/.cache/instrumented-workspace");
+  const buildCache = workspaceContainerPath(root);
   const removedBuildCache =
-    removeBuildCache && active.size === 0 && existsSync(buildCache);
+    removeBuildCache &&
+    active.size === 0 &&
+    existsSync(buildCache) &&
+    isWorkspaceContainer(buildCache);
   if (removedBuildCache && !options.dryRun)
     rmSync(buildCache, { recursive: true, force: true });
   return { removedRuns, removedWorkspaces, removedEvidence, removedBuildCache };

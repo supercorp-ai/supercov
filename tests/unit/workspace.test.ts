@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, relative, resolve, sep } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { expect } from "../support/expect.ts";
 import {
@@ -190,6 +190,49 @@ describe("isolated run workspaces", () => {
     );
     expect(() => removeIsolatedWorkspace(root, "")).toThrow(
       /Refusing to remove unexpected workspace path/,
+    );
+  });
+
+  it("keeps every workspace path segment free of a leading dot", () => {
+    const root = project();
+    const workspace = prepareCachedWorkspace(root);
+
+    // `send` (and so express.static / serve-static / res.sendFile) answers 404
+    // for any path containing a dot-prefixed segment, so an application under
+    // test could not serve its own files from a dotted workspace.
+    const segments = relative(root, workspace).split(sep);
+    expect(segments.filter((segment) => segment.startsWith("."))).toEqual([]);
+    expect(segments[0]).toBe("supercov");
+
+    // The container hides itself from Git without the user editing anything.
+    expect(
+      readFileSync(resolve(root, "supercov/.gitignore"), "utf8"),
+    ).toBe("*\n");
+  });
+
+  it("copies a project's own supercov directory but never its own workspace", () => {
+    const root = project();
+    // A project may legitimately own a directory called `supercov`; only ours
+    // carries the marker, so only ours is skipped.
+    mkdirSync(resolve(root, "packages/supercov/src"), { recursive: true });
+    writeFileSync(
+      resolve(root, "packages/supercov/src/index.ts"),
+      "export const owned = true;\n",
+    );
+
+    const workspace = prepareCachedWorkspace(root);
+    expect(
+      readFileSync(
+        resolve(workspace, "packages/supercov/src/index.ts"),
+        "utf8",
+      ),
+    ).toBe("export const owned = true;\n");
+
+    // A second refresh must not nest the previous workspace inside the new one.
+    const refreshed = prepareCachedWorkspace(root);
+    expect(existsSync(resolve(refreshed, "supercov"))).toBe(false);
+    expect(readFileSync(resolve(refreshed, "src/index.ts"), "utf8")).toBe(
+      "export const value = 1;\n",
     );
   });
 

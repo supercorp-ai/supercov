@@ -17,7 +17,11 @@ import { analyzeCoverageArchive } from "../dist/runAnalysis.js";
 
 function filesUnder(root, directory = root) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    if (entry.name === ".supercov" || entry.name === "node_modules") return [];
+    // Supercov owns the dotted store and the non-dotted workspace container.
+    if (
+      [".supercov", "supercov", "node_modules"].includes(entry.name)
+    )
+      return [];
     const path = resolve(directory, entry.name);
     return entry.isDirectory() ? filesUnder(root, path) : [path];
   });
@@ -52,7 +56,10 @@ try {
   const project = resolve(temporary, "project");
   cpSync(resolve("tests/fixtures/no-build-node"), project, {
     recursive: true,
-    filter: (path) => !path.split(/[\\/]/).includes(".supercov"),
+    filter: (path) =>
+      !relative(resolve("tests/fixtures/no-build-node"), path)
+        .split(/[\\/]/)
+        .some((segment) => segment === ".supercov" || segment === "supercov"),
   });
   const before = snapshot(project);
   const executed = spawnSync(

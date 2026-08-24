@@ -30,7 +30,12 @@ function snapshot(directory) {
     for (const entry of readdirSync(path, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const absolute = resolve(path, entry.name);
       const name = relativePath ? `${relativePath}/${entry.name}` : entry.name;
-      if (name === ".supercov" || name.startsWith(".supercov/") || name === "node_modules" || name.startsWith("node_modules/"))
+      // Supercov owns the dotted store and the non-dotted workspace container.
+      if (
+        [".supercov", "supercov", "node_modules"].some(
+          (owned) => name === owned || name.startsWith(`${owned}/`),
+        )
+      )
         continue;
       if (entry.isDirectory()) visit(absolute, name);
       else if (entry.isFile()) {
@@ -72,7 +77,7 @@ async function verifyUncatchableCacheRecovery() {
     const projectBefore = snapshot(crashRoot);
     const expectedCache = resolve(
       crashRoot,
-      ".supercov/.cache/instrumented-workspace",
+      "supercov/workspace",
       basename(crashRoot),
     );
     const cacheParent = resolve(expectedCache, "..");
@@ -147,7 +152,7 @@ async function verifyUncatchableCacheRecovery() {
     if (existsSync(previousGenerationMarker))
       throw new Error("the recovered run did not publish a fresh cache generation");
     if (JSON.stringify(snapshot(crashRoot)) !== JSON.stringify(projectBefore))
-      throw new Error("SIGKILL recovery changed a file outside .supercov");
+      throw new Error("SIGKILL recovery changed a file outside the Supercov store");
   } finally {
     rmSync(crashRoot, { recursive: true, force: true });
   }
@@ -160,7 +165,7 @@ const workRoot = resolve(root, ".supercov/work");
 const runsBefore = new Set(existsSync(workRoot) ? readdirSync(workRoot) : []);
 const expectedCache = resolve(
   root,
-  ".supercov/.cache/instrumented-workspace/generic-playwright",
+  "supercov/workspace/generic-playwright",
 );
 
 const child = spawn(
@@ -216,15 +221,19 @@ if (existsSync(resolve(root, ".supercov/locks/active.json")))
   throw new Error("project lock survived SIGTERM");
 const projectAfter = snapshot(root);
 if (JSON.stringify(projectAfter) !== JSON.stringify(projectBefore))
-  throw new Error("a project file outside .supercov changed during the interrupted coverage run");
+  throw new Error("a project file outside the Supercov store changed during the interrupted coverage run");
 
 const storedRunsRoot = resolve(root, ".supercov/runs");
 const storedRunsBefore = new Set(
   existsSync(storedRunsRoot) ? readdirSync(storedRunsRoot) : [],
 );
+// Deliberately an opaque runner rather than `test:unit`: Vitest transforms
+// source in-process, so Supercov correctly skips the project's production
+// build for it, and a skipped build has no instrumented artifacts to reuse.
+// Build-cache reuse is only meaningful for a command that actually builds.
 const successful = spawnSync(
   process.execPath,
-  [resolve("bin/supercov.js"), "--", "npm", "run", "test:unit"],
+  [resolve("bin/supercov.js"), "--", "npm", "run", "test:opaque"],
   { cwd: root, encoding: "utf8", stdio: "pipe" },
 );
 if (successful.status !== 0)
@@ -270,7 +279,7 @@ if (existsSync(resolve(root, ".supercov/evidence", publishedRuns[0])))
   throw new Error("loose evidence survived atomic publication");
 const projectAfterSuccess = snapshot(root);
 if (JSON.stringify(projectAfterSuccess) !== JSON.stringify(projectBefore))
-  throw new Error("a project file outside .supercov changed during a successful coverage run");
+  throw new Error("a project file outside the Supercov store changed during a successful coverage run");
 
 const cleaned = spawnSync(
   process.execPath,
@@ -283,5 +292,5 @@ if (existsSync(expectedCache))
   throw new Error("supercov clean left the isolated build cache behind");
 
 console.log(
-  `[isolation] SIGKILL preserved the prior cache generation, the next run recovered its transaction, unchanged source reused its instrumented build, SIGTERM remained cooperative, clean removed all cache data, and no project file outside .supercov changed`,
+  `[isolation] SIGKILL preserved the prior cache generation, the next run recovered its transaction, unchanged source reused its instrumented build, SIGTERM remained cooperative, clean removed all cache data, and no project file outside the Supercov store changed`,
 );
