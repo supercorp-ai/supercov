@@ -11,7 +11,10 @@ code; a compatibility sweep is in flight and Tier 1 (trust) still lands first.
    workspace isolation, instrumentation orchestration, evidence analysis,
    and query engine all compile into one 5–15 MB static binary per
    platform. The current TypeScript engine becomes the *reference
-   implementation* and is retired only after sustained differential parity.
+   implementation* only while the port is incomplete. As soon as the complete
+   Rust engine passes the frozen differential and conformance gates, the
+   cutover removes the old TypeScript engine in the same consolidation phase.
+   There is no permanent engine selector and no extra fallback release.
 2. **oxc for JS parsing/codegen** in the Rust instrumenter (published
    benchmarks: ~40x Babel, ~4x SWC for parse→transform→codegen). This is a
    true port of the ~1,600-line instrumenter, not a parser swap — Babel and
@@ -115,16 +118,20 @@ miss blocks flipping any default.
   overhead ≤1.10x, self-dogfood diff shows no lost attribution. Reaching
   ≤1.05x is deliberately deferred until the architecture and Rust parity are
   established.
-- **Phase 3: Rust instrumenter crate (oxc).** Shipped inside the npm package
-  as an optional napi addon behind `SUPERCOV_ENGINE=rust`; TS instrumenter
-  remains default. Gate: Test262 corpus green, byte-identical manifests vs TS
-  instrumenter across the matrix, 500-file gate met. Flip default after one
-  release of zero differential findings.
+- **Phase 3: Rust instrumenter crate (oxc).** Exercised behind
+  `SUPERCOV_ENGINE=rust` by development, differential and ecosystem CI while
+  the shipped TypeScript engine remains the user path. This selector is a
+  migration tool, not a product feature. Gate: Test262 corpus green,
+  byte-identical manifests vs the TypeScript instrumenter across the matrix,
+  and the 500-file gate met.
 - **Phase 4: Rust engine shell.** CLI, discovery, workspace (clonefile/
   FICLONE parity), run lifecycle, analysis (bitset MC/DC pair search),
   and query engine. Gate: differential harness zero-diff on the full sweep
-  matrix and self-dogfood; query cold-start gate met. Flip default, keep TS
-  engine one full release as fallback, then delete.
+  matrix and self-dogfood; query cold-start gate met. Then perform one atomic
+  cutover: Rust becomes the sole engine; delete the TypeScript instrumenter,
+  analyzer, report/query engine, orchestration implementation, migration flag,
+  and Babel engine dependencies. Preserve frozen contracts, golden outputs,
+  corpora and black-box tests—not a second executable engine.
 - **Phase 5: distribution matrix + Python.** Release pipeline for all
   registries; then the Python collector (generated conftest/import-hook shim,
   pytest adapter) rides on the binary. PyPI wheels ship here.
@@ -202,5 +209,9 @@ miss blocks flipping any default.
   binaries for platforms the suite has never run on.
 - Contracts (schemas, CLI, envelopes, process supervision) change only by
   versioned, deliberate revision — never as a rewrite side effect.
+- Passing parity authorizes deletion, not indefinite coexistence. A Rust
+  implementation is not complete while equivalent production engine logic is
+  still shipped in TypeScript. Only unavoidable Node/browser runtime and
+  runner hooks survive the cutover.
 - The agent-facing UX work (skill/playbook, post-run hints, grouped queries)
   continues on the TS engine throughout; users never wait on the rewrite.
