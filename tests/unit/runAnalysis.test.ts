@@ -147,3 +147,81 @@ it("keeps valid JSONL evidence and marks malformed records as corrupt", () => {
     corruptFiles: 1,
   });
 });
+
+it("reads both flat and legacy scoped server-evidence archive paths", () => {
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-flat-analysis-"));
+  temporaryDirectories.push(root);
+  const manifest: CoverageManifest = {
+    decisions: [],
+    branches: [],
+    points: [
+      {
+        id: "flat-hit",
+        kind: "statement",
+        file: "src/server.ts",
+        line: 1,
+        column: 1,
+        source: "serve();",
+      },
+      {
+        id: "legacy-hit",
+        kind: "statement",
+        file: "src/server.ts",
+        line: 2,
+        column: 1,
+        source: "serveLegacy();",
+      },
+    ],
+  };
+  const scope = {
+    version: 1 as const,
+    runId: "run-layouts",
+    workerId: "worker-1",
+    testId: "passing-test",
+    testKey: "key",
+    retry: 0,
+    attemptId: "attempt",
+  };
+  const result: McdcRawTestResult = {
+    testId: "passing-test",
+    test: "passing-test",
+    status: "passed",
+    retry: 0,
+    scope,
+    runtime: [],
+    browser: [],
+    server: [],
+  };
+  const manifestPath = resolve(root, "manifest.json");
+  const evidence = resolve(root, "evidence");
+  mkdirSync(resolve(evidence, "test"), { recursive: true });
+  mkdirSync(resolve(evidence, "server/attempts"), { recursive: true });
+  mkdirSync(resolve(evidence, "server/worker/key/0"), { recursive: true });
+  writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+  writeFileSync(
+    resolve(evidence, "test/mcdc.json"),
+    `${JSON.stringify(result)}\n`,
+  );
+  writeFileSync(
+    resolve(evidence, "server/attempts/attempt.jsonl"),
+    `${JSON.stringify({ type: "hit", id: "flat-hit", scope })}\n`,
+  );
+  writeFileSync(
+    resolve(evidence, "server/worker/key/0/server.jsonl"),
+    `${JSON.stringify({ type: "hit", id: "legacy-hit", scope })}\n`,
+  );
+  const archivePath = resolve(root, "evidence.raw.gz");
+  writeEvidenceArchive(
+    [
+      { file: manifestPath, path: "manifest.json" },
+      { directory: evidence },
+    ],
+    archivePath,
+  );
+
+  const report = analyzeCoverageArchive(archivePath, {
+    runId: "run-layouts",
+  });
+  expect(report.summary.lines).toMatchObject({ covered: 2, total: 2 });
+  expect(report.transport?.scopedServerRecords).toBe(2);
+});

@@ -116,7 +116,12 @@ try {
     7,
   );
 } finally {
-  rmSync(workspaceRoot, { recursive: true, force: true });
+  rmSync(workspaceRoot, {
+    recursive: true,
+    force: true,
+    maxRetries: 20,
+    retryDelay: 25,
+  });
 }
 const workspaceMedian = median(workspacePreparation);
 const workspaceP95 = Math.max(...workspacePreparation);

@@ -158,7 +158,12 @@ export function analyzeCoverageArchive(
     .filter((entry) => /(?:^|\/)mcdc\.json$/.test(entry.path))
     .map((entry) => parseJson<McdcRawTestResult>(entry.contents, entry.path));
   const scopedEvidence = parseJsonLines<CoverageServerRecord>(
-    archive.files.filter((entry) => /^server\/.*\/server\.jsonl$/.test(entry.path)),
+    archive.files.filter(
+      (entry) =>
+        entry.path.startsWith("server/") &&
+        !entry.path.startsWith("server/background/") &&
+        entry.path.endsWith(".jsonl"),
+    ),
   );
   const scopedRecords = scopedEvidence.records;
   for (const record of scopedRecords) {

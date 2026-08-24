@@ -14,6 +14,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, dirname, relative, resolve, sep } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -30,6 +31,8 @@ import {
   recoverCachedWorkspace,
   recoverAbandonedRuns,
   removeIsolatedWorkspace,
+  removeStoredTreeDeferred,
+  TRASH_DELETER_SCRIPT,
   writeRunState,
 } from "../../src/workspace.ts";
 
@@ -48,10 +51,42 @@ function project(): string {
 
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0))
-    rmSync(directory, { recursive: true, force: true });
+    rmSync(directory, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 20,
+    });
 });
 
 describe("isolated run workspaces", () => {
+  it("atomically moves owned data to deferred trash without touching arbitrary paths", () => {
+    const root = project();
+    const target = resolve(root, ".supercov/evidence/large-run");
+    mkdirSync(target, { recursive: true });
+    for (let index = 0; index < 100; index += 1)
+      writeFileSync(resolve(target, `${index}.jsonl`), `${index}\n`);
+
+    const trashed = removeStoredTreeDeferred(root, target);
+    expect(existsSync(target)).toBe(false);
+    expect(trashed && existsSync(trashed)).toBe(true);
+
+    const outside = resolve(root, "src");
+    expect(() => removeStoredTreeDeferred(root, outside)).toThrow(
+      /outside Supercov-owned storage/,
+    );
+    expect(existsSync(resolve(outside, "index.ts"))).toBe(true);
+
+    const trash = resolve(root, ".supercov/.trash");
+    const deletion = spawnSync(
+      process.execPath,
+      ["-e", TRASH_DELETER_SCRIPT, trash],
+      { encoding: "utf8" },
+    );
+    expect(deletion.status).toBe(0);
+    expect(readdirSync(trash)).toEqual([]);
+  });
+
   it("copies source but never copies or mutates ordinary build output", () => {
     const root = project();
     mkdirSync(resolve(root, ".cache/tool"), { recursive: true });
@@ -639,6 +674,26 @@ describe("isolated run workspaces", () => {
     const inactive = cleanCoverageStorage(root, { keep: 0, dryRun: false });
     expect(inactive.removedBuildCache).toBe(true);
     expect(existsSync(workspace)).toBe(false);
+  });
+
+  it("cleans obsolete dotted cache layouts but prune preserves them", () => {
+    const root = project();
+    const oldCaches = [
+      resolve(root, ".supercov/.cache/instrumented-workspace"),
+      resolve(root, ".supercov/cache/instrumented-workspace"),
+    ];
+    for (const cache of oldCaches) {
+      mkdirSync(cache, { recursive: true });
+      writeFileSync(resolve(cache, "stale.js"), "stale\n");
+    }
+
+    const pruned = pruneCoverageStorage(root, { keep: 0, dryRun: false });
+    expect(pruned.removedBuildCache).toBe(false);
+    expect(oldCaches.every((cache) => existsSync(cache))).toBe(true);
+
+    const cleaned = cleanCoverageStorage(root, { keep: 0, dryRun: false });
+    expect(cleaned.removedBuildCache).toBe(true);
+    expect(oldCaches.every((cache) => !existsSync(cache))).toBe(true);
   });
 
   it("prunes explicit history and terminal work without removing the shared cache", () => {

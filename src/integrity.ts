@@ -145,6 +145,7 @@ export function createRunIntegrity(
     "nodeAssertStrict.js",
     "playwright.js",
     "playwrightReporter.js",
+    "processDiagnostics.js",
     "project.js",
     "provenance.js",
     "queueAdapters.js",

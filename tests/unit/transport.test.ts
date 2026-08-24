@@ -14,6 +14,7 @@ import { expect } from "../support/expect.ts";
 import {
   beginBufferedServerEvidence,
   coverageHit,
+  flushBufferedBackgroundEvidence,
   flushBufferedServerEvidence,
   mcdcBegin,
   mcdcCondition,
@@ -99,7 +100,7 @@ describe("concurrent server evidence transport", () => {
       ),
     ).toBeUndefined();
     expect(serverEvidencePath(execution)).toContain(
-      "/run_with_spaces/worker_1/",
+      `/run_with_spaces/attempts/${execution.attemptId}.jsonl`,
     );
   });
 
@@ -162,7 +163,7 @@ describe("concurrent server evidence transport", () => {
     ).toEqual({ version: 1, scope: valid });
   });
 
-  it("keeps interleaved async requests in separate run/worker/test/retry files", async () => {
+  it("keeps interleaved async requests in separate flat attempt files", async () => {
     const runId = `transport-${process.pid}-${Date.now()}`;
     const first = scope(runId, "worker-1", "test-a", 0);
     const second = scope(runId, "worker-2", "test-b", 1);
@@ -287,9 +288,10 @@ describe("concurrent server evidence transport", () => {
     try {
       coverageHit("detached-hit");
       coverageHit("second-detached-hit");
+      flushBufferedBackgroundEvidence(runId);
       const directory = resolve(serverRunEvidenceDirectory(runId), "background");
       const files = readdirSync(directory);
-      expect(files).toHaveLength(2);
+      expect(files).toHaveLength(1);
       expect(files.every((file) => file.startsWith("replicated-snapshot-"))).toBe(true);
       const background = files.flatMap((file) =>
         readFileSync(resolve(directory, file), "utf8")
@@ -437,6 +439,26 @@ describe("concurrent server evidence transport", () => {
         recursive: true,
         force: true,
       });
+    }
+  });
+
+  it("buffers and de-duplicates unattributed hot-loop evidence into one file", () => {
+    const runId = `background-buffer-${process.pid}-${Date.now()}`;
+    const configuredRun = process.env.SUPERCOV_RUN_ID;
+    try {
+      process.env.SUPERCOV_RUN_ID = runId;
+      for (let index = 0; index < 10_000; index += 1)
+        coverageHit(`background-hit-${index % 3}`);
+      const path = flushBufferedBackgroundEvidence(runId);
+      expect(path && existsSync(path)).toBe(true);
+      const files = readdirSync(resolve(serverRunEvidenceDirectory(runId), "background"));
+      expect(files).toHaveLength(1);
+      const persisted = readFileSync(path!, "utf8").trim().split("\n");
+      expect(persisted).toHaveLength(3);
+    } finally {
+      if (configuredRun === undefined) delete process.env.SUPERCOV_RUN_ID;
+      else process.env.SUPERCOV_RUN_ID = configuredRun;
+      rmSync(serverRunEvidenceDirectory(runId), { recursive: true, force: true });
     }
   });
 

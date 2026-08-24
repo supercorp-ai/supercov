@@ -5,7 +5,6 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
-  rmSync,
 } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -33,16 +32,23 @@ import {
   pruneCachedWorkspaceSources,
   pruneCoverageStorage,
   recoverAbandonedRuns,
+  removeStoredTreeDeferred,
+  spawnTrashDeleter,
   updateRunState,
   writeRunState,
 } from "./workspace.ts";
 import { agentFailureJson, SupercovError } from "./agentJson.ts";
 import { isolateCollectorRuntime } from "./runtimeIsolation.ts";
+import {
+  positiveMilliseconds,
+  startProcessWatchdog,
+} from "./processDiagnostics.ts";
 
 interface ChildResult {
   status: number | null;
   signal: NodeJS.Signals | null;
   error?: Error;
+  timedOut?: boolean;
 }
 
 interface RunPhaseTimings {
@@ -99,8 +105,18 @@ function runChild(
   args: string[],
   options: { cwd: string; env: NodeJS.ProcessEnv },
 ): Promise<ChildResult> {
+  const diagnosticIntervalMs = positiveMilliseconds(
+    options.env["SUPERCOV_DIAGNOSTIC_INTERVAL_MS"],
+    "SUPERCOV_DIAGNOSTIC_INTERVAL_MS",
+  ) ?? 60_000;
+  const commandTimeoutMs = positiveMilliseconds(
+    options.env["SUPERCOV_COMMAND_TIMEOUT_MS"],
+    "SUPERCOV_COMMAND_TIMEOUT_MS",
+  );
   return new Promise((resolveChild) => {
     let error: Error | undefined;
+    let timedOut = false;
+    let timeoutEscalation: NodeJS.Timeout | undefined;
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: options.env,
@@ -108,18 +124,46 @@ function runChild(
       detached: process.platform !== "win32",
     });
     activeChild = child;
+    const watchdog = startProcessWatchdog(child, {
+      diagnosticIntervalMs,
+      ...(commandTimeoutMs === undefined ? {} : { timeoutMs: commandTimeoutMs }),
+      requestNodeResources: Boolean(
+        options.env["NODE_OPTIONS"]?.includes("register.mjs"),
+      ),
+      write(message) {
+        console.error(message);
+      },
+      onTimeout() {
+        if (timedOut) return;
+        timedOut = true;
+        console.error(
+          `[supercov] command exceeded SUPERCOV_COMMAND_TIMEOUT_MS=${commandTimeoutMs}; terminating process group`,
+        );
+        terminateChild("SIGTERM");
+        timeoutEscalation = setTimeout(() => terminateChild("SIGKILL"), 5_000);
+        timeoutEscalation.unref();
+      },
+    });
     child.once("error", (failure) => {
       error = failure;
     });
     child.once("close", (status, signal) => {
+      watchdog.stop();
+      if (timeoutEscalation) clearTimeout(timeoutEscalation);
       if (activeChild === child) activeChild = undefined;
-      resolveChild({ status, signal, ...(error ? { error } : {}) });
+      resolveChild({
+        status,
+        signal,
+        ...(error ? { error } : {}),
+        ...(timedOut ? { timedOut: true } : {}),
+      });
     });
   });
 }
 
 function exitCode(result?: ChildResult): number {
   if (!result) return 0;
+  if (result.timedOut) return 124;
   if (result.error) return 1;
   if (result.status !== null) return result.status;
   return result.signal ? 128 : 1;
@@ -753,11 +797,13 @@ async function createCoverageRun(command: string[]): Promise<number> {
 
       updateRunState(root, runId, { status: "publishing" });
       phaseStarted = performance.now();
-      rmSync(persistedEvidenceDirectory, { recursive: true, force: true });
+      removeStoredTreeDeferred(root, persistedEvidenceDirectory);
+      spawnTrashDeleter(root);
       if (existsSync(isolatedEvidenceDirectory))
         atomicRenameSync(isolatedEvidenceDirectory, persistedEvidenceDirectory);
       try {
-        rmSync(runStagingDirectory, { recursive: true, force: true });
+        removeStoredTreeDeferred(root, runStagingDirectory);
+        spawnTrashDeleter(root);
         const evidenceArchivePath = resolve(
           runStagingDirectory,
           "evidence.raw.gz",
@@ -782,7 +828,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
               startedAt,
               durationMs: Date.now() - runStartedAt,
               command,
-              testExitCode: testResult.status,
+              testExitCode: testResult.timedOut ? 124 : testResult.status,
               integrity: runIntegrity,
               rawEvidence,
               isolatedBuild: true,
@@ -846,16 +892,14 @@ async function createCoverageRun(command: string[]): Promise<number> {
     for (const [signal, handler] of signalHandlers)
       process.removeListener(signal, handler);
     try {
-      rmSync(runStagingDirectory, { recursive: true, force: true });
-      rmSync(resolve(serverEvidenceRoot, runId), {
-        recursive: true,
-        force: true,
-      });
+      removeStoredTreeDeferred(root, runStagingDirectory);
+      removeStoredTreeDeferred(root, resolve(serverEvidenceRoot, runId));
       // The stable isolated namespace persists as a build/snapshot cache at a
       // stable path, but its copied source and test files must not: ordinary
       // runner discovery at the project root would double-count the suite.
       if (!process.env["SUPERCOV_KEEP_WORKSPACE"])
         pruneCachedWorkspaceSources(root);
+      spawnTrashDeleter(root);
     } catch (error) {
       console.error(`[supercov] isolated workspace cleanup failed: ${String(error)}`);
     }

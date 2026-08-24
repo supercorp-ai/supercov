@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { atomicRenameSync, atomicWriteFileSync } from "./atomic.ts";
 import {
@@ -7,7 +7,11 @@ import {
   writeEvidenceArchiveEntries,
   type EvidenceArchiveEntry,
 } from "./evidenceArchive.ts";
-import { acquireProjectLock } from "./workspace.ts";
+import {
+  acquireProjectLock,
+  removeStoredTreeDeferred,
+  spawnTrashDeleter,
+} from "./workspace.ts";
 import type { CoverageRunIntegrity } from "./types.ts";
 
 interface MergeRunMetadata {
@@ -102,7 +106,8 @@ export function mergeCoverageRuns(root: string, runIds: string[]): string {
   const staging = resolve(root, ".supercov/work", mergedRunId, "run-publication");
   const destination = resolve(root, ".supercov/runs", mergedRunId);
   try {
-    rmSync(staging, { recursive: true, force: true });
+    removeStoredTreeDeferred(root, staging);
+    spawnTrashDeleter(root);
     mkdirSync(staging, { recursive: true });
     const entries: EvidenceArchiveEntry[] = [
       { path: "manifest.json", contents: manifests[0] },
@@ -137,7 +142,8 @@ export function mergeCoverageRuns(root: string, runIds: string[]): string {
     atomicRenameSync(staging, destination);
     return mergedRunId;
   } finally {
-    rmSync(resolve(root, ".supercov/work", mergedRunId), { recursive: true, force: true });
+    removeStoredTreeDeferred(root, resolve(root, ".supercov/work", mergedRunId));
+    spawnTrashDeleter(root);
     lock.release();
   }
 }

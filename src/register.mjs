@@ -4,6 +4,30 @@ import { installLaunchSupervisor } from "./launchSupervisor.js";
 
 installLaunchSupervisor();
 
+// Long-running commands are diagnosed without changing their runner's exit
+// semantics. The parent asks each preloaded Node descendant for public active
+// resource types using SIGUSR2; never include argv, paths or environment data.
+if (process.platform !== "win32" && !process.__SUPERCOV_DIAGNOSTIC_HANDLER__) {
+  process.__SUPERCOV_DIAGNOSTIC_HANDLER__ = true;
+  process.on("SIGUSR2", () => {
+    const resources = typeof process.getActiveResourcesInfo === "function"
+      ? process.getActiveResourcesInfo()
+      : [];
+    const counts = Object.fromEntries(
+      [...new Set(resources)].sort().map(resource => [
+        resource,
+        resources.filter(candidate => candidate === resource).length,
+      ]),
+    );
+    console.error(`[supercov:active-resources] ${JSON.stringify({
+      pid: process.pid,
+      ppid: process.ppid,
+      uptimeMs: Math.round(process.uptime() * 1000),
+      resources: counts,
+    })}`);
+  });
+}
+
 // Assertion-call instrumentation also uses this runtime in test processes
 // whose application build is handled by Vite or another compiler. Loading it
 // for every isolated test launch keeps node:assert attribution runner-agnostic.

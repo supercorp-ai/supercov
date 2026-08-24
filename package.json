@@ -41,11 +41,12 @@
     "test:packed-npx": "node scripts/packed-npx-integration.mjs",
     "test:isolation": "npm run build && node scripts/isolation-integration.mjs",
     "test:filesystem": "npm run build && node --test --test-concurrency=1 tests/unit/atomic.test.ts tests/unit/evidenceArchive.test.ts tests/unit/workspace.test.ts && node scripts/workspace-crash-integration.mjs",
+    "test:watchdog": "npm run build && node scripts/watchdog-integration.mjs",
     "test:clang-mcdc": "node scripts/clang-mcdc-oracle.mjs",
     "test:test262": "npm run build && node scripts/test262-equivalence.mjs",
     "benchmark:check": "npm run build && node scripts/benchmark.mjs",
     "check": "npm run test && npm run test:types",
-    "release:check": "npm run check && npm run build && node scripts/isolation-integration.mjs && npm run test:packed-npx && npm run test:clang-mcdc && node scripts/benchmark.mjs",
+    "release:check": "npm run check && npm run build && node scripts/isolation-integration.mjs && npm run test:watchdog && npm run test:packed-npx && npm run test:clang-mcdc && node scripts/benchmark.mjs",
     "prepack": "npm run build",
     "prepublishOnly": "npm run release:check"
   },

@@ -115,14 +115,14 @@ export function serverEvidenceDirectory(
   scope: CoverageExecutionScope,
   root = configuredServerEvidenceRoot(),
 ): string {
-  return `${serverRunEvidenceDirectory(scope.runId, root)}/${pathComponent(scope.workerId)}/${scope.testKey}/${scope.retry}`;
+  return `${serverRunEvidenceDirectory(scope.runId, root)}/attempts`;
 }
 
 export function serverEvidencePath(
   scope: CoverageExecutionScope,
   root = configuredServerEvidenceRoot(),
 ): string {
-  return `${serverEvidenceDirectory(scope, root)}/server.jsonl`;
+  return `${serverEvidenceDirectory(scope, root)}/${pathComponent(scope.attemptId)}.jsonl`;
 }
 
 export function backgroundEvidenceDirectory(

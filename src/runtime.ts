@@ -74,6 +74,7 @@ interface RuntimeState {
     }
   >;
   persistedServerRecords: Set<string>;
+  backgroundBuffers: Map<string, Map<string, CoverageServerRecord>>;
   backgroundSequence: number;
   runtimeSnapshots: boolean;
   assertionPhases: Map<
@@ -163,6 +164,7 @@ function createState(): RuntimeState {
     bufferedAttempts: new Set(),
     serverBuffers: new Map(),
     persistedServerRecords: new Set(),
+    backgroundBuffers: new Map(),
     backgroundSequence: 0,
     runtimeSnapshots: false,
     assertionPhases: new Map(),
@@ -332,6 +334,49 @@ export function enableRuntimeSnapshotEvidence(): void {
 function flushAllBufferedServerEvidence(): void {
   for (const buffered of [...state.serverBuffers.values()])
     flushBufferedServerEvidence(buffered.scope);
+  for (const runId of [...state.backgroundBuffers.keys()])
+    flushBufferedBackgroundEvidence(runId);
+}
+
+/**
+ * Background execution has no test attempt that can own a normal buffer.
+ * Still, one immutable file per probe is catastrophic for hot code: a single
+ * compatibility run produced millions of directory entries and made report
+ * publication consume gigabytes. De-duplicate in memory and claim one batch
+ * file per runtime at flush. O_EXCL retains clone safety for snapshot-derived
+ * processes with identical PIDs and counters.
+ */
+export function flushBufferedBackgroundEvidence(
+  runId: string,
+): string | undefined {
+  if (isBrowser) return undefined;
+  const records = state.backgroundBuffers.get(runId);
+  if (!records || records.size === 0) return undefined;
+  const fs = getFs();
+  if (!fs) return undefined;
+  const directory = backgroundEvidenceDirectory(runId);
+  const shard = process.env["SUPERCOV_EXECUTION_LOG_SHARD"] ?? "process";
+  const writer = `${shard}-${process.pid}`;
+  const payload = [...records.values()]
+    .map((record) => JSON.stringify(record))
+    .join("\n") + "\n";
+  try {
+    fs.mkdirSync(directory, { recursive: true });
+    const nextSequence = writeExclusiveBackgroundRecord(
+      fs,
+      runId,
+      writer,
+      state.backgroundSequence,
+      payload,
+    );
+    state.backgroundSequence = nextSequence;
+    state.backgroundBuffers.delete(runId);
+    return backgroundEvidencePath(runId, `${writer}-${nextSequence - 1}`);
+  } catch {
+    // Keep the buffer so a later explicit/exit flush can retry. Collection is
+    // best-effort and must never change application behavior.
+    return undefined;
+  }
 }
 
 /**
@@ -392,9 +437,7 @@ function appendServer(record: CoverageServerRecord): void {
       : undefined);
   if (!runId) return;
   try {
-    const directory = scope
-      ? serverEvidenceDirectory(scope)
-      : backgroundEvidenceDirectory(runId);
+    const directory = scope ? serverEvidenceDirectory(scope) : undefined;
     const path = scope ? serverEvidencePath(scope) : undefined;
     const serialized = { ...record, ...(scope ? { scope } : {}) };
     if (scope && state.bufferedAttempts.has(attemptKey(scope))) {
@@ -418,26 +461,16 @@ function appendServer(record: CoverageServerRecord): void {
       state.persistedServerRecords.has(deduplicationKey)
     )
       return;
-    fs.mkdirSync(directory, { recursive: true });
     if (!path) {
-      // A warm process can be snapshotted and cloned into many remote VMs.
-      // Those clones share pid, environment and in-memory counters, so they
-      // must not append to one JSONL file on a shared mount. Claim one
-      // immutable record file with O_EXCL instead. Colliding clones simply
-      // advance until one filename is theirs; no provider-specific VM identity
-      // or append-atomicity guarantee is required.
-      const shard = process.env["SUPERCOV_EXECUTION_LOG_SHARD"] ?? "process";
-      const writer = `${shard}-${process.pid}`;
-      const payload = JSON.stringify(serialized) + "\n";
-      state.backgroundSequence = writeExclusiveBackgroundRecord(
-        fs,
-        runId,
-        writer,
-        state.backgroundSequence,
-        payload,
-      );
+      const buffered = state.backgroundBuffers.get(runId) ?? new Map();
+      buffered.set(serverRecordKey(serialized), serialized);
+      state.backgroundBuffers.set(runId, buffered);
+      // Bound loss and memory for very large/dynamic denominators while still
+      // reducing millions of probe writes to at most one file per 4K records.
+      if (buffered.size >= 4_096) flushBufferedBackgroundEvidence(runId);
       return;
     }
+    fs.mkdirSync(directory!, { recursive: true });
     fs.appendFileSync(
       path,
       JSON.stringify(serialized) + "\n",

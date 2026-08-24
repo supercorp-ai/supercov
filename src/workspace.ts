@@ -11,11 +11,13 @@ import {
   readdirSync,
   readlinkSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { atomicRenameSync, atomicWriteFileSync } from "./atomic.ts";
@@ -64,6 +66,92 @@ const ROOT_EXCLUSIONS = new Set([
   "test-results",
 ]);
 const NESTED_SUPERCOV_EXCLUSIONS = new Set([".supercov", ".mcdc-pool"]);
+
+const TRASH_DIRECTORY = ".supercov/.trash";
+
+/**
+ * Unlinking a large tree (workspace copies, per-attempt evidence) can take
+ * minutes of uninterruptible I/O — observed at 26+ minutes on a real project.
+ * Removal must never block the command: rename the tree into the store's
+ * trash (atomic on the same filesystem, so the path disappears instantly) and
+ * let a detached deleter unlink it after this process has already returned.
+ * A crash between rename and unlink just leaves the entry in the trash, and
+ * every later invocation sweeps whatever it finds there.
+ */
+export function removeStoredTreeDeferred(
+  root: string,
+  target: string,
+): string | undefined {
+  const resolvedRoot = resolve(root);
+  const resolvedTarget = resolve(target);
+  if (!existsSync(resolvedTarget)) return undefined;
+  const trash = resolve(root, TRASH_DIRECTORY);
+  const store = resolve(resolvedRoot, ".supercov");
+  const container = workspaceContainerPath(resolvedRoot);
+  const inStore =
+    resolvedTarget !== store &&
+    inside(store, resolvedTarget) &&
+    !inside(trash, resolvedTarget);
+  const inWorkspaceContainer =
+    isWorkspaceContainer(container) && inside(container, resolvedTarget);
+  if (!inStore && !inWorkspaceContainer)
+    throw new Error(
+      `Refusing to defer removal outside Supercov-owned storage: ${resolvedTarget}`,
+    );
+  mkdirSync(trash, { recursive: true });
+  const destination = resolve(trash, `${process.pid}-${randomUUID()}`);
+  try {
+    renameSync(resolvedTarget, destination);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? "unknown";
+    throw new Error(
+      `Could not move Supercov data into deferred trash (${code}): ${resolvedTarget}`,
+      { cause: error },
+    );
+  }
+  return destination;
+}
+
+/** The detached deleter's whole program; also executed verbatim by tests. */
+export const TRASH_DELETER_SCRIPT = [
+  `const { closeSync, openSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } = require("node:fs");`,
+  `const { resolve } = require("node:path");`,
+  `const trash = process.argv[1];`,
+  `const lock = resolve(trash, ".deleter.lock");`,
+  `const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };`,
+  `try {`,
+  `  const existing = Number(readFileSync(lock, "utf8"));`,
+  `  if (Number.isSafeInteger(existing) && existing > 0 && alive(existing)) process.exit(0);`,
+  `  try { unlinkSync(lock); } catch {}`,
+  `} catch {}`,
+  `let descriptor;`,
+  `try { descriptor = openSync(lock, "wx"); writeFileSync(descriptor, String(process.pid)); closeSync(descriptor); } catch { process.exit(0); }`,
+  `let entries = [];`,
+  `try { entries = readdirSync(trash); } catch {}`,
+  `for (const entry of entries) {`,
+  `  if (entry === ".deleter.lock") continue;`,
+  `  try { rmSync(resolve(trash, entry), { recursive: true, force: true, maxRetries: 3 }); } catch {}`,
+  `}`,
+  `try { unlinkSync(lock); } catch {}`,
+].join("\n");
+
+/** Unlink everything in the trash without making anyone wait for it. */
+export function spawnTrashDeleter(root: string): void {
+  const trash = resolve(root, TRASH_DIRECTORY);
+  try {
+    if (readdirSync(trash).length === 0) return;
+  } catch {
+    return;
+  }
+  try {
+    spawn(process.execPath, ["-e", TRASH_DELETER_SCRIPT, trash], {
+      detached: true,
+      stdio: "ignore",
+    }).unref();
+  } catch {
+    // Spawning is best-effort; the next invocation sweeps the same trash.
+  }
+}
 
 /** Marks `supercov/` as ours, so a project may own a directory by that name. */
 const WORKSPACE_CONTAINER_MARKER = ".supercov-workspace-store";
@@ -164,9 +252,10 @@ export function pruneCachedWorkspaceSources(root: string): string[] {
   const removed: string[] = [];
   for (const entry of readdirSync(workspace, { withFileTypes: true })) {
     if (keepRoots.has(entry.name)) continue;
-    rmSync(resolve(workspace, entry.name), { recursive: true, force: true });
+    removeStoredTreeDeferred(root, resolve(workspace, entry.name));
     removed.push(entry.name);
   }
+  if (removed.length > 0) spawnTrashDeleter(root);
   return removed.sort();
 }
 
@@ -230,10 +319,11 @@ export function recoverCachedWorkspace(root: string): CacheRecoveryResult {
     restoredPrevious = true;
   }
 
-  for (const path of staging) rmSync(path, { recursive: true, force: true });
-  for (const path of previous) rmSync(path, { recursive: true, force: true });
-  for (const path of invalidPrevious)
-    rmSync(path, { recursive: true, force: true });
+  for (const path of staging) removeStoredTreeDeferred(root, path);
+  for (const path of previous) removeStoredTreeDeferred(root, path);
+  for (const path of invalidPrevious) removeStoredTreeDeferred(root, path);
+  if (staging.length + previous.length + invalidPrevious.length > 0)
+    spawnTrashDeleter(root);
   return {
     restoredPrevious,
     removedStaging: staging.length,
@@ -290,19 +380,17 @@ export function finalizePublishedRunStorage(
   ) {
     return false;
   }
-  rmSync(resolve(root, ".supercov/evidence", runId), {
-    recursive: true,
-    force: true,
-  });
-  rmSync(resolve(root, ".supercov/work", runId), {
-    recursive: true,
-    force: true,
-  });
+  removeStoredTreeDeferred(root, resolve(root, ".supercov/evidence", runId));
+  removeStoredTreeDeferred(root, resolve(root, ".supercov/work", runId));
+  spawnTrashDeleter(root);
   return true;
 }
 
 /** Recover dead runs and finish any publication whose atomic rename landed. */
 export function recoverAbandonedRuns(root: string): string[] {
+  // A prior detached deleter may have been killed with the host. Sweep its
+  // durable trash before inspecting current run state.
+  spawnTrashDeleter(root);
   const workRoot = resolve(root, ".supercov/work");
   if (!existsSync(workRoot)) return [];
   const recovered: string[] = [];
@@ -319,14 +407,11 @@ export function recoverAbandonedRuns(root: string): string[] {
     // Never trust a persisted path as a deletion target. A partially written
     // or manually edited state file cannot widen cleanup beyond this run's
     // deterministic workspace namespace.
-    rmSync(isolatedWorkspacePath(root, entry.name), {
-      recursive: true,
-      force: true,
-    });
-    rmSync(resolve(root, ".supercov/work", entry.name, "run-publication"), {
-      recursive: true,
-      force: true,
-    });
+    removeStoredTreeDeferred(root, isolatedWorkspacePath(root, entry.name));
+    removeStoredTreeDeferred(
+      root,
+      resolve(root, ".supercov/work", entry.name, "run-publication"),
+    );
     if (finalizePublishedRunStorage(root, entry.name)) {
       // The run directory is published by one atomic rename before the run
       // state flips terminal. Its run.json is the durable terminal record, so
@@ -335,10 +420,10 @@ export function recoverAbandonedRuns(root: string): string[] {
       // Evidence moved out of the disposable workspace before run
       // generation is not a visible run. Remove that orphan on recovery so a
       // hard kill cannot accumulate partial run data indefinitely.
-      rmSync(resolve(root, ".supercov/evidence", entry.name), {
-        recursive: true,
-        force: true,
-      });
+      removeStoredTreeDeferred(
+        root,
+        resolve(root, ".supercov/evidence", entry.name),
+      );
       updateRunState(root, entry.name, {
         status: "abandoned",
         error: `Recovered after process ${state.pid} exited without cleanup`,
@@ -346,6 +431,7 @@ export function recoverAbandonedRuns(root: string): string[] {
     }
     recovered.push(entry.name);
   }
+  if (recovered.length > 0) spawnTrashDeleter(root);
   return recovered.sort();
 }
 
@@ -499,7 +585,7 @@ function copyTree(
 /** Create a copy-on-write project snapshot whose build outputs are disposable. */
 export function prepareIsolatedWorkspace(root: string, runId: string): string {
   const workspace = isolatedWorkspacePath(root, runId);
-  rmSync(workspace, { recursive: true, force: true });
+  if (removeStoredTreeDeferred(root, workspace)) spawnTrashDeleter(root);
   copyTree(root, workspace, true);
   const nodeModules = resolve(root, "node_modules");
   if (existsSync(nodeModules)) {
@@ -619,14 +705,14 @@ export function prepareCachedWorkspace(
     }
     throw error;
   } finally {
-    rmSync(staging, { recursive: true, force: true });
+    if (removeStoredTreeDeferred(root, staging)) spawnTrashDeleter(root);
   }
 
   // Failure to remove an obsolete previous generation must not invalidate the
   // newly published cache. The next invocation and `supercov clean` both
   // remove it deterministically.
   try {
-    rmSync(previous, { recursive: true, force: true });
+    if (removeStoredTreeDeferred(root, previous)) spawnTrashDeleter(root);
   } catch {
     // Deliberately retained for recoverCachedWorkspace().
   }
@@ -639,7 +725,7 @@ export function removeIsolatedWorkspace(root: string, runId: string): void {
   if (relativePath.startsWith("..") || relativePath.split(sep).length < 2) {
     throw new Error(`Refusing to remove unexpected workspace path: ${workspace}`);
   }
-  rmSync(workspace, { recursive: true, force: true });
+  if (removeStoredTreeDeferred(root, workspace)) spawnTrashDeleter(root);
 }
 
 export interface CleanupOptions {
@@ -700,28 +786,51 @@ function cleanCoverageStorageLocked(
       existsSync(work) && (!state || TERMINAL.has(state.status));
     if (removeTransientWork) {
       removedWorkspaces.push(id);
-      if (!options.dryRun) rmSync(work, { recursive: true, force: true });
+      if (!options.dryRun) removeStoredTreeDeferred(root, work);
     }
     const hasLooseEvidence = existsSync(resolve(evidenceRoot, id));
     if (hasLooseEvidence && (!hasPublishedRun || removeHistory)) {
       removedEvidence.push(id);
       if (!options.dryRun)
-        rmSync(resolve(evidenceRoot, id), { recursive: true, force: true });
+        removeStoredTreeDeferred(root, resolve(evidenceRoot, id));
     }
     if (removeHistory) {
       removedRuns.push(id);
       if (!options.dryRun)
-        rmSync(resolve(runsRoot, id), { recursive: true, force: true });
+        removeStoredTreeDeferred(root, resolve(runsRoot, id));
     }
   }
   const buildCache = workspaceContainerPath(root);
-  const removedBuildCache =
-    removeBuildCache &&
-    active.size === 0 &&
-    existsSync(buildCache) &&
-    isWorkspaceContainer(buildCache);
-  if (removedBuildCache && !options.dryRun)
-    rmSync(buildCache, { recursive: true, force: true });
+  // Releases before the workspace was moved out of the dotted store used
+  // both of these names. `clean` is the explicit destructive command, so it
+  // must migrate them too; otherwise a project can retain millions of files
+  // in a layout the current engine will never reuse. `prune` deliberately
+  // preserves every cache generation.
+  const legacyBuildCaches = [
+    resolve(root, ".supercov/.cache"),
+    resolve(root, ".supercov/cache"),
+  ];
+  const removableBuildCaches =
+    removeBuildCache && active.size === 0
+      ? [
+          ...(existsSync(buildCache) && isWorkspaceContainer(buildCache)
+            ? [buildCache]
+            : []),
+          ...legacyBuildCaches.filter((path) => existsSync(path)),
+        ]
+      : [];
+  const removedBuildCache = removableBuildCaches.length > 0;
+  if (!options.dryRun)
+    for (const path of removableBuildCaches)
+      removeStoredTreeDeferred(root, path);
+  if (
+    !options.dryRun &&
+    (removedRuns.length > 0 ||
+      removedWorkspaces.length > 0 ||
+      removedEvidence.length > 0 ||
+      removedBuildCache)
+  )
+    spawnTrashDeleter(root);
   return { removedRuns, removedWorkspaces, removedEvidence, removedBuildCache };
 }
 
