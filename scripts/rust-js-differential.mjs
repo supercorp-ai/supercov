@@ -88,7 +88,7 @@ const allCases = [...corpus, ...executionCorpus, ...generatedCorpus, ...safetyCo
 const rust = spawnSync(
   "cargo",
   ["run", "--quiet", "-p", "supercov-engine", "--example", "js_manifest"],
-  { input: JSON.stringify(allCases), encoding: "utf8" },
+  { input: JSON.stringify(allCases), encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
 );
 if (rust.status !== 0)
   throw new Error(`Rust JS candidate failed (${rust.status}):\n${rust.stderr}`);
@@ -147,9 +147,11 @@ function decodeVector(conditionCount, encoded, value) {
 
 async function executeRustCandidate(testCase, candidate) {
   const vectors = [];
+  const hits = [];
   const runtime = candidate.runtime;
-  if (!runtime?.mcdcBegin || !runtime?.mcdcCondition || !runtime?.mcdcEnd || !runtime?.mcdcEndV2)
+  if (!runtime?.coverageHit || !runtime?.mcdcBegin || !runtime?.mcdcCondition || !runtime?.mcdcEnd || !runtime?.mcdcEndV2)
     throw new Error(`${testCase.file}: missing Rust candidate runtime bindings`);
+  const coverageHit = (id) => hits.push(id);
   const begin = (id, meta) => {
     if (id !== meta.id) throw new Error(`mismatched decision registration ${id}/${meta.id}`);
     return { meta, values: Array.from({ length: meta.conditions.length }, () => null) };
@@ -172,13 +174,14 @@ async function executeRustCandidate(testCase, candidate) {
   // This evaluates only the checked-in, self-contained differential corpus.
   // eslint-disable-next-line no-new-func
   const factory = new Function(
+    runtime.coverageHit,
     runtime.mcdcBegin,
     runtime.mcdcCondition,
     runtime.mcdcEnd,
     runtime.mcdcEndV2,
     `"use strict";\n${candidate.code}\nreturn { run, observe: typeof observe === "function" ? observe : undefined };`,
   );
-  const program = factory(begin, condition, end, recorder);
+  const program = factory(coverageHit, begin, condition, end, recorder);
   try {
     const value = await program.run();
     return {
@@ -187,6 +190,7 @@ async function executeRustCandidate(testCase, candidate) {
         value: normalize(value),
         effects: normalize(program.observe?.() ?? []),
       },
+      hits,
       vectors,
     };
   } catch (error) {
@@ -196,6 +200,7 @@ async function executeRustCandidate(testCase, candidate) {
         error: { name: String(error?.name ?? typeof error), message: String(error?.message ?? error) },
         effects: normalize(program.observe?.() ?? []),
       },
+      hits,
       vectors,
     };
   }
@@ -220,6 +225,12 @@ for (const [offset, testCase] of executionCorpus.entries()) {
   if (JSON.stringify(vectorSet(rustExecution.vectors)) !== JSON.stringify(vectorSet(reference.evidence.vectors)))
     throw new Error(
       `${testCase.file}: Rust/TypeScript probe-v2 vectors differ\nreference=${JSON.stringify(vectorSet(reference.evidence.vectors))}\ncandidate=${JSON.stringify(vectorSet(rustExecution.vectors))}`,
+    );
+  const referenceHits = [...new Set(reference.evidence.hits)].sort();
+  const candidateHits = [...new Set(rustExecution.hits)].sort();
+  if (JSON.stringify(candidateHits) !== JSON.stringify(referenceHits))
+    throw new Error(
+      `${testCase.file}: Rust/TypeScript point hits differ\nreference=${JSON.stringify(referenceHits)}\ncandidate=${JSON.stringify(candidateHits)}`,
     );
 }
 

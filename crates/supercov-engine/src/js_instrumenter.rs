@@ -1,11 +1,16 @@
 //! First oxc-backed vertical slice of the Rust JavaScript instrumenter.
 //!
-//! This candidate reports and instruments the frozen control-decision surface,
-//! including semantic-safety boundaries and exact wide-decision fallback.
+//! This candidate reports and instruments statements, functions, and the
+//! frozen control-decision surface, including semantic-safety boundaries and
+//! exact wide-decision fallback.
 //! It is not exposed by the CLI and cannot claim a complete denominator until
 //! the remaining reference transformations are ported.
 
-use std::{collections::HashSet, fmt::Write, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write,
+    path::Path,
+};
 
 use oxc_allocator::{Allocator, TakeIn};
 use oxc_ast::{
@@ -13,9 +18,9 @@ use oxc_ast::{
     ast::{
         Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentTarget,
         CallExpression, ConditionalExpression, Declaration, DoWhileStatement, Expression,
-        ForStatement, Function, FunctionBody, IfStatement, NewExpression, ObjectPropertyKind,
-        Program, PropertyKey, PropertyKind, Statement, VariableDeclarationKind, WhileStatement,
-        WithStatement,
+        ForInStatement, ForOfStatement, ForStatement, Function, FunctionBody, IfStatement,
+        NewExpression, ObjectPropertyKind, Program, PropertyKey, PropertyKind, Statement,
+        VariableDeclarationKind, WhileStatement, WithStatement,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -75,6 +80,7 @@ pub struct CandidateOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CandidateRuntime {
+    pub coverage_hit: String,
     pub mcdc_begin: String,
     pub mcdc_condition: String,
     pub mcdc_end: String,
@@ -131,9 +137,18 @@ struct PointCollector<'s> {
     file: &'s str,
     pass: PointPass,
     points: Vec<CandidatePoint>,
+    statement_targets: HashMap<SpanKey, Vec<String>>,
+    function_targets: HashMap<SpanKey, String>,
     source_sensitive_functions: &'s HashSet<SpanKey>,
     unsafe_function_depth: usize,
     with_depth: usize,
+}
+
+#[derive(Default)]
+struct PointAnalysis {
+    points: Vec<CandidatePoint>,
+    statement_targets: HashMap<SpanKey, Vec<String>>,
+    function_targets: HashMap<SpanKey, String>,
 }
 
 impl PointCollector<'_> {
@@ -223,7 +238,12 @@ impl<'a> Traverse<'a, ()> for PointCollector<'_> {
         {
             return;
         }
-        self.points.push(self.point(node.span(), "statement", None));
+        let point = self.point(node.span(), "statement", None);
+        self.statement_targets
+            .entry(span_key(node.span()))
+            .or_default()
+            .push(point.id.clone());
+        self.points.push(point);
     }
 
     fn enter_declaration(&mut self, node: &mut Declaration<'a>, context: &mut TraverseCtx<'a, ()>) {
@@ -239,7 +259,12 @@ impl<'a> Traverse<'a, ()> for PointCollector<'_> {
         {
             return;
         }
-        self.points.push(self.point(node.span(), "statement", None));
+        let point = self.point(node.span(), "statement", None);
+        self.statement_targets
+            .entry(span_key(node.span()))
+            .or_default()
+            .push(point.id.clone());
+        self.points.push(point);
     }
 
     fn enter_function(&mut self, node: &mut Function<'a>, context: &mut TraverseCtx<'a, ()>) {
@@ -257,7 +282,10 @@ impl<'a> Traverse<'a, ()> for PointCollector<'_> {
             return;
         }
         if self.pass == PointPass::Functions && !self.unsafe_context() && node.body.is_some() {
-            self.points.push(self.point(point_span, "function", label));
+            let point = self.point(point_span, "function", label);
+            self.function_targets
+                .insert(span_key(node.span), point.id.clone());
+            self.points.push(point);
         }
     }
 
@@ -284,7 +312,10 @@ impl<'a> Traverse<'a, ()> for PointCollector<'_> {
             return;
         }
         if self.pass == PointPass::Functions && !self.unsafe_context() {
-            self.points.push(self.point(point_span, "function", label));
+            let point = self.point(point_span, "function", label);
+            self.function_targets
+                .insert(span_key(node.span), point.id.clone());
+            self.points.push(point);
         }
     }
 
@@ -319,22 +350,28 @@ fn collect_points<'a>(
     source: &str,
     file: &str,
     source_sensitive_functions: &HashSet<SpanKey>,
-) -> Vec<CandidatePoint> {
-    let mut points = Vec::new();
+) -> PointAnalysis {
+    let mut analysis = PointAnalysis::default();
     for pass in [PointPass::Statements, PointPass::Functions] {
         let mut collector = PointCollector {
             source,
             file,
             pass,
             points: Vec::new(),
+            statement_targets: HashMap::new(),
+            function_targets: HashMap::new(),
             source_sensitive_functions,
             unsafe_function_depth: 0,
             with_depth: 0,
         };
         traverse_mut(&mut collector, allocator, program, Default::default(), ());
-        points.extend(collector.points);
+        analysis.points.extend(collector.points);
+        analysis
+            .statement_targets
+            .extend(collector.statement_targets);
+        analysis.function_targets.extend(collector.function_targets);
     }
-    points
+    analysis
 }
 
 impl<'s> SafetyScanner<'s> {
@@ -591,7 +628,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
     }
 
     let safety = analyze_safety(&allocator, &mut parsed.program, source, file);
-    let points = collect_points(
+    let point_analysis = collect_points(
         &allocator,
         &mut parsed.program,
         source,
@@ -613,7 +650,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         supported_surface: "control-decision-manifest-v1".to_string(),
         code: generated,
         decisions: collector.decisions,
-        points,
+        points: point_analysis.points,
         runtime: None,
         coverage_limitations: safety.limitations,
         limitations: vec![
@@ -647,7 +684,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     }
 
     let safety = analyze_safety(&allocator, &mut parsed.program, source, file);
-    let points = collect_points(
+    let point_analysis = collect_points(
         &allocator,
         &mut parsed.program,
         source,
@@ -664,11 +701,27 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     collector.visit_program(&parsed.program);
 
     let mut names = CandidateNames::new(source);
+    let coverage_hit = names.allocate("__supercovCoverageHit");
     let mcdc_begin = names.allocate("__supercovMcdcBegin");
     let mcdc_condition = names.allocate("__supercovMcdcCondition");
     let mcdc_end = names.allocate("__supercovMcdcEnd");
     let mcdc_end_v2 = names.allocate("__supercovMcdcEndV2");
     let ast = AstBuilder::new(&allocator);
+    let mut statement_transformer = StatementProbeTransformer {
+        ast,
+        coverage_hit: coverage_hit.clone(),
+        targets: point_analysis.statement_targets,
+        source_sensitive_functions: safety.source_sensitive_functions.clone(),
+        with_statements: safety.with_statements.clone(),
+    };
+    statement_transformer.visit_program(&mut parsed.program);
+    let mut function_transformer = FunctionProbeTransformer {
+        ast,
+        coverage_hit: coverage_hit.clone(),
+        targets: point_analysis.function_targets,
+        source_sensitive_functions: safety.source_sensitive_functions.clone(),
+    };
+    function_transformer.visit_program(&mut parsed.program);
     let mut transformer = ControlProbeV2Transformer {
         ast,
         file,
@@ -688,7 +741,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     let limitations = vec![
         "only if, ternary, while, do-while, and classic-for decisions are instrumented"
             .to_string(),
-        "coverage points, value branches, extended branch obligations, and runtime registration remain on the TypeScript reference"
+        "value branches, extended branch obligations, and runtime registration remain on the TypeScript reference"
             .to_string(),
         "candidate runtime binding is differential-only and is not exposed by the public CLI"
             .to_string(),
@@ -696,11 +749,12 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
         complete: false,
-        supported_surface: "control-decision-probe-v2-v1-fallback-safety-candidate".to_string(),
+        supported_surface: "point-control-decision-probe-candidate".to_string(),
         code: Codegen::new().build(&parsed.program).code,
         decisions: collector.decisions,
-        points,
+        points: point_analysis.points,
         runtime: Some(CandidateRuntime {
+            coverage_hit,
             mcdc_begin,
             mcdc_condition,
             mcdc_end,
@@ -709,6 +763,211 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         coverage_limitations: safety.limitations,
         limitations,
     })
+}
+
+struct StatementProbeTransformer<'a> {
+    ast: AstBuilder<'a>,
+    coverage_hit: String,
+    targets: HashMap<SpanKey, Vec<String>>,
+    source_sensitive_functions: HashSet<SpanKey>,
+    with_statements: HashSet<SpanKey>,
+}
+
+impl<'a> StatementProbeTransformer<'a> {
+    fn probe(&self, id: &str) -> Statement<'a> {
+        self.ast.statement_expression(
+            Span::default(),
+            self.ast.expression_call(
+                Span::default(),
+                self.ast
+                    .expression_identifier(Span::default(), self.ast.ident(&self.coverage_hit)),
+                NONE,
+                self.ast
+                    .vec1(Argument::from(self.ast.expression_string_literal(
+                        Span::default(),
+                        self.ast.str(id),
+                        None,
+                    ))),
+                false,
+            ),
+        )
+    }
+
+    fn take_statement_ids(&mut self, statement: &Statement<'a>) -> Vec<String> {
+        let mut ids = self
+            .targets
+            .remove(&span_key(statement.span()))
+            .unwrap_or_default();
+        if let Statement::ExportNamedDeclaration(export) = statement
+            && let Some(declaration) = &export.declaration
+            && let Some(nested) = self.targets.remove(&span_key(declaration.span()))
+        {
+            ids.extend(nested);
+        }
+        ids
+    }
+
+    fn wrap_bare(&mut self, statement: &mut Statement<'a>) {
+        let ids = self.take_statement_ids(statement);
+        if ids.is_empty() {
+            return;
+        }
+        let original = statement.take_in(self.ast.allocator);
+        let mut body = self.ast.vec_with_capacity(ids.len() + 1);
+        body.extend(ids.iter().map(|id| self.probe(id)));
+        body.push(original);
+        *statement = self.ast.statement_block(Span::default(), body);
+    }
+}
+
+impl<'a> VisitMut<'a> for StatementProbeTransformer<'a> {
+    fn visit_statements(&mut self, statements: &mut oxc_allocator::Vec<'a, Statement<'a>>) {
+        let original = statements.take_in(self.ast.allocator);
+        let mut instrumented = self.ast.vec_with_capacity(original.len() * 2);
+        for mut statement in original {
+            let ids = self.take_statement_ids(&statement);
+            self.visit_statement(&mut statement);
+            instrumented.extend(ids.iter().map(|id| self.probe(id)));
+            instrumented.push(statement);
+        }
+        *statements = instrumented;
+    }
+
+    fn visit_function(&mut self, function: &mut Function<'a>, flags: ScopeFlags) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_function(self, function, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, function: &mut ArrowFunctionExpression<'a>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_arrow_function_expression(self, function);
+    }
+
+    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
+        if self.with_statements.contains(&span_key(statement.span)) {
+            return;
+        }
+        walk_mut::walk_with_statement(self, statement);
+    }
+
+    fn visit_if_statement(&mut self, statement: &mut IfStatement<'a>) {
+        self.wrap_bare(&mut statement.consequent);
+        if let Some(alternate) = &mut statement.alternate {
+            self.wrap_bare(alternate);
+        }
+        walk_mut::walk_if_statement(self, statement);
+    }
+
+    fn visit_while_statement(&mut self, statement: &mut WhileStatement<'a>) {
+        self.wrap_bare(&mut statement.body);
+        walk_mut::walk_while_statement(self, statement);
+    }
+
+    fn visit_do_while_statement(&mut self, statement: &mut DoWhileStatement<'a>) {
+        self.wrap_bare(&mut statement.body);
+        walk_mut::walk_do_while_statement(self, statement);
+    }
+
+    fn visit_for_statement(&mut self, statement: &mut ForStatement<'a>) {
+        self.wrap_bare(&mut statement.body);
+        walk_mut::walk_for_statement(self, statement);
+    }
+
+    fn visit_for_in_statement(&mut self, statement: &mut ForInStatement<'a>) {
+        self.wrap_bare(&mut statement.body);
+        walk_mut::walk_for_in_statement(self, statement);
+    }
+
+    fn visit_for_of_statement(&mut self, statement: &mut ForOfStatement<'a>) {
+        self.wrap_bare(&mut statement.body);
+        walk_mut::walk_for_of_statement(self, statement);
+    }
+}
+
+struct FunctionProbeTransformer<'a> {
+    ast: AstBuilder<'a>,
+    coverage_hit: String,
+    targets: HashMap<SpanKey, String>,
+    source_sensitive_functions: HashSet<SpanKey>,
+}
+
+impl<'a> FunctionProbeTransformer<'a> {
+    fn probe(&self, id: &str) -> Statement<'a> {
+        self.ast.statement_expression(
+            Span::default(),
+            self.ast.expression_call(
+                Span::default(),
+                self.ast
+                    .expression_identifier(Span::default(), self.ast.ident(&self.coverage_hit)),
+                NONE,
+                self.ast
+                    .vec1(Argument::from(self.ast.expression_string_literal(
+                        Span::default(),
+                        self.ast.str(id),
+                        None,
+                    ))),
+                false,
+            ),
+        )
+    }
+}
+
+impl<'a> VisitMut<'a> for FunctionProbeTransformer<'a> {
+    fn visit_function(&mut self, function: &mut Function<'a>, flags: ScopeFlags) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        if let Some(id) = self.targets.remove(&span_key(function.span))
+            && let Some(body) = &mut function.body
+        {
+            body.statements.insert(0, self.probe(&id));
+        }
+        walk_mut::walk_function(self, function, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, function: &mut ArrowFunctionExpression<'a>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        if let Some(id) = self.targets.remove(&span_key(function.span)) {
+            let probe = self.probe(&id);
+            if function.expression {
+                let original = function
+                    .body
+                    .statements
+                    .pop()
+                    .expect("expression arrow must contain its expression statement");
+                let Statement::ExpressionStatement(expression) = original else {
+                    panic!("expression arrow body must be represented as an expression statement");
+                };
+                function.expression = false;
+                function.body.statements.push(probe);
+                function.body.statements.push(
+                    self.ast
+                        .statement_return(Span::default(), Some(expression.unbox().expression)),
+                );
+            } else {
+                function.body.statements.insert(0, probe);
+            }
+        }
+        walk_mut::walk_arrow_function_expression(self, function);
+    }
 }
 
 struct CandidateNames<'s> {
@@ -1443,7 +1702,7 @@ mod tests {
         assert!(!output.complete);
         assert_eq!(
             output.supported_surface,
-            "control-decision-probe-v2-v1-fallback-safety-candidate"
+            "point-control-decision-probe-candidate"
         );
         let runtime = output.runtime.expect("candidate runtime binding");
         assert!(output.code.contains(&runtime.mcdc_end_v2));
