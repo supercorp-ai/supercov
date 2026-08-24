@@ -477,6 +477,17 @@ function isExecutableStatement(node: t.Statement): boolean {
   return !("declare" in node && node.declare === true);
 }
 
+function executablePointNode(node: t.Statement): t.Statement | undefined {
+  if (t.isExportNamedDeclaration(node) || t.isExportDefaultDeclaration(node)) {
+    const declaration = node.declaration;
+    return declaration && t.isStatement(declaration) &&
+        isExecutableStatement(declaration)
+      ? declaration
+      : undefined;
+  }
+  return isExecutableStatement(node) ? node : undefined;
+}
+
 function isAnonymousFunctionDefinition(node: t.Expression): boolean {
   return (
     t.isArrowFunctionExpression(node) ||
@@ -766,26 +777,35 @@ export function instrumentMcdc(
   };
 
   // Record executable statements before adding any instrumentation statements.
+  const instrumentedStatements = new WeakSet<t.Statement>();
   traverse(ast, {
     Statement(path) {
       const node = path.node;
+      if (instrumentedStatements.has(node)) return;
       if (
-        !node.loc ||
+        (path.parentPath.isExportNamedDeclaration() ||
+          path.parentPath.isExportDefaultDeclaration()) &&
+        path.parentPath.node.declaration === node
+      )
+        return;
+      const pointNode = executablePointNode(node);
+      if (
+        !pointNode?.loc ||
         isUnsafeInstrumentationContext(path) ||
         generatedStatements.has(node) ||
-        !isExecutableStatement(node)
+        !isExecutableStatement(pointNode)
       )
         return;
       if (path.parentPath.isLabeledStatement()) return;
 
-      const id = stableId(file, "statement", node);
+      const id = stableId(file, "statement", pointNode);
       points.push({
         id,
         kind: "statement",
         file,
-        line: node.loc.start.line,
-        column: node.loc.start.column + 1,
-        source: sourceFor(code, node),
+        line: pointNode.loc.start.line,
+        column: pointNode.loc.start.column + 1,
+        source: sourceFor(code, pointNode),
       });
       const probe = hitStatement(
         id,
@@ -801,6 +821,7 @@ export function instrumentMcdc(
           : undefined,
       );
       generatedStatements.add(probe);
+      instrumentedStatements.add(node);
 
       if (
         path.parentPath.isProgram() ||
@@ -820,7 +841,6 @@ export function instrumentMcdc(
         path.key === "alternate"
       ) {
         path.replaceWith(t.blockStatement([probe, node]));
-        path.skip();
       }
     },
   });

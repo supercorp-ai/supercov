@@ -31,7 +31,7 @@ fn main() -> ExitCode {
         Some("__instrument-js") => instrument_js(),
         Some(command) => {
             eprintln!(
-                "[supercov] Rust engine candidate is not ready for `{command}`; the TypeScript reference remains authoritative"
+                "[supercov] Rust engine candidate is not ready for `{command}`; use the currently shipped engine while the Rust contract gates are incomplete"
             );
             ExitCode::from(2)
         }

@@ -527,6 +527,8 @@ fn executable_statement(statement: &Statement<'_>) -> bool {
         Statement::BlockStatement(_)
             | Statement::EmptyStatement(_)
             | Statement::FunctionDeclaration(_)
+            | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportDefaultDeclaration(_)
     ) && !statement.is_typescript_syntax()
 }
 
@@ -568,6 +570,30 @@ impl<'a> Traverse<'a, ()> for PointCollector<'_> {
         let point = self.point(node.span(), "statement", None);
         self.statement_targets
             .entry(span_key(node.span()))
+            .or_default()
+            .push(point.id.clone());
+        self.points.push(point);
+    }
+
+    fn enter_class(&mut self, node: &mut Class<'a>, context: &mut TraverseCtx<'a, ()>) {
+        // oxc represents `export default class` directly inside
+        // ExportDefaultDeclarationKind rather than through Declaration, so it
+        // does not reach enter_declaration. Babel treats the inner class as the
+        // executable statement obligation (excluding the `export default`
+        // prefix), which is also the location where the probe belongs.
+        if self.pass != PointPass::Statements
+            || self.unsafe_context()
+            || node.declare
+            || !matches!(
+                context.ancestors().next(),
+                Some(Ancestor::ExportDefaultDeclarationDeclaration(_))
+            )
+        {
+            return;
+        }
+        let point = self.point(node.span, "statement", None);
+        self.statement_targets
+            .entry(span_key(node.span))
             .or_default()
             .push(point.id.clone());
         self.points.push(point);
@@ -1543,7 +1569,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     }
 
     let limitations = vec![
-        "production evidence archive parity remains to be proven against the TypeScript reference"
+        "production evidence archive conformance remains to be proven across independent contracts and regression references"
             .to_string(),
         "candidate runtime registration is differential-only and is not exposed by the public CLI"
             .to_string(),
@@ -1639,6 +1665,12 @@ impl<'a> StatementProbeTransformer<'a> {
         if let Statement::ExportNamedDeclaration(export) = statement
             && let Some(declaration) = &export.declaration
             && let Some(nested) = self.targets.remove(&span_key(declaration.span()))
+        {
+            ids.extend(nested);
+        }
+        if let Statement::ExportDefaultDeclaration(export) = statement
+            && let ExportDefaultDeclarationKind::ClassDeclaration(class) = &export.declaration
+            && let Some(nested) = self.targets.remove(&span_key(class.span))
         {
             ids.extend(nested);
         }
@@ -4897,7 +4929,15 @@ impl DefaultCollector<'_> {
     fn collect_parameters(&mut self, parameters: &FormalParameters<'_>) {
         for parameter in &parameters.items {
             if let Some(initializer) = &parameter.initializer {
-                let target = self.target(parameter.span, &parameter.pattern, initializer);
+                // Babel models a formal-parameter default as an AssignmentPattern whose
+                // source range starts at the binding and ends at the initializer. oxc
+                // keeps the initializer beside the BindingPattern and, for a TypeScript
+                // parameter property, includes access/readonly modifiers in
+                // FormalParameter::span. Keep the outer span as the transformation key,
+                // but publish the same semantic default-expression range as Babel.
+                let default_span =
+                    Span::new(parameter.pattern.span().start, initializer.span().end);
+                let target = self.target(default_span, &parameter.pattern, initializer);
                 self.analysis
                     .parameter_targets
                     .insert(span_key(parameter.span), target);

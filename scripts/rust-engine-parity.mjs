@@ -12,8 +12,7 @@ import {
 } from "node:fs";
 import { basename, relative, resolve } from "node:path";
 import { inspect } from "node:util";
-import { readEvidenceArchive } from "../dist/evidenceArchive.js";
-import { analyzeCoverageArchive } from "../dist/runAnalysis.js";
+import { canonicalize } from "./rust-parity-normalize.mjs";
 
 const repository = resolve(new URL("..", import.meta.url).pathname);
 const binary =
@@ -21,7 +20,7 @@ const binary =
 const candidateRust =
   process.env.SUPERCOV_PARITY_CANDIDATE !== "typescript-reference-repeat";
 const temporary = mkdtempSync(resolve(repository, ".rust-engine-parity-"));
-const fixtures = [
+const builtInFixtures = [
   { name: "playwright", directory: "generic-playwright" },
   { name: "node-test", directory: "generic-node" },
   { name: "esbuild", directory: "generic-esbuild" },
@@ -33,14 +32,43 @@ const fixtures = [
   },
   { name: "next", directory: "generic-next" },
 ];
-const omittedDynamicKeys = new Set([
-  "generatedAt",
-  "integrity",
-  "startedAtMs",
-  "endedAtMs",
-  "timestampMs",
-]);
-
+const projectArgument = process.argv.indexOf("--project");
+const externalProject =
+  projectArgument >= 0 && process.argv[projectArgument + 1]
+    ? resolve(process.argv[projectArgument + 1])
+    : undefined;
+const typeScriptRunArgument = process.argv.indexOf("--typescript-run");
+const rustRunArgument = process.argv.indexOf("--rust-run");
+const existingRuns =
+  typeScriptRunArgument >= 0 || rustRunArgument >= 0
+    ? {
+        typescript: process.argv[typeScriptRunArgument + 1],
+        rust: process.argv[rustRunArgument + 1],
+      }
+    : undefined;
+const commandSeparator = process.argv.indexOf("--");
+const externalCommand =
+  commandSeparator >= 0 ? process.argv.slice(commandSeparator + 1) : ["npm", "test"];
+if (projectArgument >= 0 && !externalProject)
+  throw new Error("--project requires a project directory");
+if (externalProject && externalCommand.length === 0)
+  throw new Error("The project parity test requires a test command after --");
+if (
+  existingRuns &&
+  (!externalProject || !existingRuns.typescript || !existingRuns.rust)
+)
+  throw new Error(
+    "--typescript-run and --rust-run must be supplied together with --project",
+  );
+const fixtures = externalProject
+  ? [
+      {
+        name: `project-${basename(externalProject)}`,
+        project: externalProject,
+        command: externalCommand,
+      },
+    ]
+  : builtInFixtures;
 function execute(cwd, args, rust, environment = {}) {
   const result = spawnSync(
     process.execPath,
@@ -73,6 +101,23 @@ function oneRun(project) {
   return runs[0];
 }
 
+function runIds(project) {
+  try {
+    return new Set(readdirSync(resolve(project, ".supercov/runs")));
+  } catch {
+    return new Set();
+  }
+}
+
+function oneNewRun(project, previous) {
+  const created = [...runIds(project)].filter((run) => !previous.has(run));
+  if (created.length !== 1)
+    throw new Error(
+      `Expected one new run in ${project}, received ${created.join(", ") || "none"}`,
+    );
+  return created[0];
+}
+
 function query(project, run, resource, rust, environment) {
   return JSON.parse(
     execute(
@@ -84,143 +129,49 @@ function query(project, run, resource, rust, environment) {
   );
 }
 
-function parseLines(contents) {
-  return contents
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
-}
-
-function collectAttemptIdentities(value, identities) {
-  if (Array.isArray(value)) {
-    for (const entry of value) collectAttemptIdentities(entry, identities);
-    return;
-  }
-  if (!value || typeof value !== "object") return;
-  const scope = value.scope;
-  if (
-    scope &&
-    typeof scope === "object" &&
-    typeof scope.attemptId === "string" &&
-    typeof scope.testId === "string"
-  ) {
-    identities.set(
-      scope.attemptId,
-      `<attempt:${scope.testId}:retry-${scope.retry ?? 0}>`,
+function materializeState(project, run, destination, selfHosting) {
+  mkdirSync(destination, { recursive: true });
+  for (const mode of ["evidence", "report"]) {
+    const result = spawnSync(
+      process.execPath,
+      [
+        resolve(repository, "scripts/rust-parity-state.mjs"),
+        mode,
+        project,
+        run,
+        destination,
+        temporary,
+        ...(selfHosting ? ["self-hosting"] : []),
+      ],
+      { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
     );
-  }
-  for (const entry of Object.values(value))
-    collectAttemptIdentities(entry, identities);
-}
-
-function canonicalize(value, context, key) {
-  if (key && omittedDynamicKeys.has(key)) return undefined;
-  // A timestamp-only event is deliberately a weak attribution hint. Identical
-  // reference-engine runs can place it on adjacent phases when their wall
-  // clocks cross a phase boundary. Raw phase definitions and every explicit
-  // phaseId are still compared exactly; only this derived hint is excluded.
-  if (context.omitTimestampCorrelation && key === "phases") return undefined;
-  if (
-    context.omitTimestampCorrelation &&
-    (key === "browserFallback" || key === "serverFallback")
-  )
-    return undefined;
-  if (Array.isArray(value)) {
-    const entries = value
-      .map((entry) => canonicalize(entry, context))
-      .filter((entry) => entry !== undefined);
-    return key === "phases" || key === "explicitPhases"
-      ? entries.sort((left, right) =>
-          JSON.stringify(left).localeCompare(JSON.stringify(right)),
-        )
-      : entries;
-  }
-  if (value && typeof value === "object")
-    return Object.fromEntries(
-      Object.entries(value)
-        .map(([entryKey, entry]) => [
-          entryKey,
-          canonicalize(entry, context, entryKey),
-        ])
-        .filter(([, entry]) => entry !== undefined),
-    );
-  if (typeof value !== "string") return value;
-  if (key === "workerId")
-    value = value
-      .replace(/^pid-\d+-worker-(\d+)$/, "pid-<runtime>-worker-$1")
-      .replace(/^node:test-\d+$/, "node:test-<runtime>");
-  let result = value
-    .replaceAll(
-      `${context.project}/supercov/workspace/${basename(context.project)}`,
-      "<project>/supercov/workspace/<workspace>",
-    )
-    .replaceAll(context.run, "<run-id>")
-    .replaceAll(context.project, "<project>")
-    .replaceAll(temporary, "<parity-root>");
-  for (const [attempt, identity] of context.attempts)
-    result = result.replaceAll(attempt, identity);
-  return result;
-}
-
-function canonicalEvidence(archive, context) {
-  const results = archive.files
-    .filter((entry) => /(?:^|\/)mcdc\.json$/.test(entry.path))
-    .map((entry) => JSON.parse(entry.contents));
-  const scopedServer = archive.files
-    .filter(
-      (entry) =>
-        entry.path.startsWith("server/") &&
-        !entry.path.startsWith("server/background/") &&
-        entry.path.endsWith(".jsonl"),
-    )
-    .flatMap((entry) => parseLines(entry.contents));
-  const backgroundServer = archive.files
-    .filter((entry) => /^server\/background\/.*\.jsonl$/.test(entry.path))
-    .flatMap((entry) => parseLines(entry.contents));
-  for (const value of [...results, ...scopedServer])
-    collectAttemptIdentities(value, context.attempts);
-  const canonicalRecords = (values) =>
-    values
-      .map((value) => canonicalize(value, context))
-      .sort((left, right) =>
-        JSON.stringify(left).localeCompare(JSON.stringify(right)),
+    if (result.error) throw result.error;
+    if (result.status !== 0)
+      throw new Error(
+        `${mode} materialization failed for ${run} (${result.status}):\n${result.stderr}`,
       );
-  return {
-    results: canonicalRecords(results),
-    scopedServer: canonicalRecords(scopedServer),
-    backgroundServer: canonicalRecords(backgroundServer),
-  };
-}
-
-function runState(project, run) {
-  const directory = resolve(project, ".supercov/runs", run);
-  const metadata = JSON.parse(
-    readFileSync(resolve(directory, "run.json"), "utf8"),
+  }
+  const savedContext = JSON.parse(
+    readFileSync(resolve(destination, "context.json"), "utf8"),
   );
-  const archivePath = resolve(directory, "evidence.raw.gz");
-  const archive = readEvidenceArchive(archivePath);
-  const context = { run, project, attempts: new Map() };
-  const evidence = canonicalEvidence(archive, context);
-  const derivedContext = {
-    ...context,
-    omitTimestampCorrelation: true,
+  const context = {
+    run,
+    project,
+    projectName: basename(project),
+    parityRoot: temporary,
+    attempts: new Map(savedContext.attempts),
+    unorderedEvidence: true,
   };
-  const report = canonicalize(
-    analyzeCoverageArchive(archivePath, {
-      runId: run,
-      testExitCode: metadata.testExitCode,
-      integrity: metadata.integrity,
-      generatedAt: metadata.startedAt,
-    }),
-    derivedContext,
-  );
   return {
-    archive,
+    manifest: readFileSync(resolve(destination, "manifest.json"), "utf8"),
+    evidence: JSON.parse(
+      readFileSync(resolve(destination, "evidence-signatures.json"), "utf8"),
+    ),
     context,
-    derivedContext,
-    evidence,
-    metadata,
-    report,
+    derivedContext: { ...context, omitTimestampCorrelation: true },
+    report: JSON.parse(
+      readFileSync(resolve(destination, "report-state.json"), "utf8"),
+    ),
   };
 }
 
@@ -234,6 +185,76 @@ function requireEqual(actual, expected, message) {
       }`,
     );
   }
+}
+
+function requireSignaturesEqual(actual, expected, message) {
+  const differences = [];
+  for (const key of Object.keys(expected)) {
+    const left = new Map();
+    const right = new Map();
+    for (const value of expected[key]) {
+      const encoded = JSON.stringify(value);
+      left.set(encoded, (left.get(encoded) ?? 0) + 1);
+    }
+    for (const value of actual[key]) {
+      const encoded = JSON.stringify(value);
+      right.set(encoded, (right.get(encoded) ?? 0) + 1);
+    }
+    let onlyExpected = 0;
+    let onlyActual = 0;
+    for (const [value, count] of left)
+      onlyExpected += Math.max(0, count - (right.get(value) ?? 0));
+    for (const [value, count] of right)
+      onlyActual += Math.max(0, count - (left.get(value) ?? 0));
+    if (onlyExpected || onlyActual)
+      differences.push(`${key}: reference-only=${onlyExpected}, Rust-only=${onlyActual}`);
+  }
+  if (differences.length > 0)
+    throw new Error(`${message}\n${differences.join("\n")}`);
+}
+
+function validateSelfHostingEvidence(actual, expected, message) {
+  const actualResults = new Map(actual.results.map((entry) => [entry.key, entry]));
+  const expectedResults = new Map(
+    expected.results.map((entry) => [entry.key, entry]),
+  );
+  requireEqual(
+    [...actualResults.keys()].sort(),
+    [...expectedResults.keys()].sort(),
+    `${message}: test-attempt identities differ`,
+  );
+
+  const divergent = new Set();
+  for (const [key, reference] of expectedResults) {
+    const candidate = actualResults.get(key);
+    if (candidate.signature === reference.signature) continue;
+    if (
+      !reference.implementationFiles.includes("src/instrumenter.ts") ||
+      !candidate.implementationFiles.includes("src/engineInstrumenter.ts")
+    )
+      throw new Error(
+        `${message}: ${key} differs without executing the respective selected engine`,
+      );
+    divergent.add(reference.testId);
+  }
+  if (divergent.size === 0)
+    throw new Error(
+      `${message}: self-hosting did not exercise engine-specific implementations`,
+    );
+
+  const withoutDivergentTests = (evidence) => ({
+    results: evidence.results.filter((entry) => !divergent.has(entry.testId)),
+    scopedServer: evidence.scopedServer.filter(
+      (entry) => !divergent.has(entry.testId),
+    ),
+    backgroundServer: evidence.backgroundServer,
+  });
+  requireSignaturesEqual(
+    withoutDivergentTests(actual),
+    withoutDivergentTests(expected),
+    `${message}: evidence outside selected-engine tests differs`,
+  );
+  return divergent;
 }
 
 function copyFixture(fixture, destination) {
@@ -259,90 +280,113 @@ function copyFixture(fixture, destination) {
 
 try {
   for (const fixture of fixtures) {
-    const fixtureRoot = resolve(temporary, fixture.name);
-    mkdirSync(fixtureRoot, { recursive: true });
-    const projects = {
-      typescript: resolve(fixtureRoot, "typescript"),
-      rust: resolve(fixtureRoot, "rust"),
-    };
-    for (const project of Object.values(projects))
-      copyFixture(fixture, project);
-
-    execute(
-      projects.typescript,
-      ["--", "npm", "test"],
-      false,
-      fixture.environment,
-    );
-    execute(
-      projects.rust,
-      ["--", "npm", "test"],
-      candidateRust,
-      fixture.environment,
-    );
-    const runs = {
-      typescript: oneRun(projects.typescript),
-      rust: oneRun(projects.rust),
-    };
-    const states = {
-      typescript: runState(projects.typescript, runs.typescript),
-      rust: runState(projects.rust, runs.rust),
-    };
-
-    const manifests = Object.fromEntries(
-      Object.entries(states).map(([engine, state]) => [
-        engine,
-        state.archive.files.find((entry) => entry.path === "manifest.json")
-          ?.contents,
-      ]),
-    );
-    if (!manifests.typescript || manifests.typescript !== manifests.rust)
-      throw new Error(
-        `${fixture.name}: Rust and TypeScript evidence archives contain different manifests`,
+    let projects;
+    let runs;
+    if (fixture.project) {
+      projects = {
+        typescript: fixture.project,
+        rust: fixture.project,
+      };
+      if (existingRuns) {
+        runs = existingRuns;
+      } else {
+        const beforeTypeScript = runIds(fixture.project);
+        execute(
+          fixture.project,
+          ["--", ...fixture.command],
+          false,
+          fixture.environment,
+        );
+        const typescript = oneNewRun(fixture.project, beforeTypeScript);
+        const beforeRust = runIds(fixture.project);
+        execute(
+          fixture.project,
+          ["--", ...fixture.command],
+          candidateRust,
+          fixture.environment,
+        );
+        runs = {
+          typescript,
+          rust: oneNewRun(fixture.project, beforeRust),
+        };
+      }
+    } else {
+      const fixtureRoot = resolve(temporary, fixture.name);
+      mkdirSync(fixtureRoot, { recursive: true });
+      projects = {
+        typescript: resolve(fixtureRoot, "typescript"),
+        rust: resolve(fixtureRoot, "rust"),
+      };
+      for (const project of Object.values(projects))
+        copyFixture(fixture, project);
+      execute(
+        projects.typescript,
+        ["--", "npm", "test"],
+        false,
+        fixture.environment,
       );
-    requireEqual(
-      states.rust.evidence,
-      states.typescript.evidence,
-      `${fixture.name}: normalized raw evidence differs`,
-    );
-    requireEqual(
-      states.rust.report,
-      states.typescript.report,
-      `${fixture.name}: complete analyzed coverage report differs`,
-    );
+      execute(
+        projects.rust,
+        ["--", "npm", "test"],
+        candidateRust,
+        fixture.environment,
+      );
+      runs = {
+        typescript: oneRun(projects.typescript),
+        rust: oneRun(projects.rust),
+      };
+    }
+    const selfHosting =
+      resolve(projects.typescript) === repository &&
+      resolve(projects.rust) === repository;
+    const states = {
+      typescript: materializeState(
+        projects.typescript,
+        runs.typescript,
+        resolve(temporary, `${fixture.name}-typescript-state`),
+        selfHosting,
+      ),
+      rust: materializeState(
+        projects.rust,
+        runs.rust,
+        resolve(temporary, `${fixture.name}-rust-state`),
+        selfHosting,
+      ),
+    };
 
-    const referenceReport = states.typescript.report;
-    if (fixture.name === "playwright") {
-      const outcome = (title) =>
-        referenceReport.tests.find((test) => test.title === title);
-      const flaky = outcome("retains a failed retry before the terminal pass");
-      const skipped = outcome("records a skipped outcome without inventing coverage");
-      const expectedFailure = outcome(
-        "keeps expected failure out of passed-only coverage",
+    requireEqual(
+      JSON.parse(states.rust.manifest),
+      JSON.parse(states.typescript.manifest),
+      `${fixture.name}: Rust and TypeScript coverage obligations differ`,
+    );
+    let selectedEngineTests;
+    if (selfHosting) {
+      selectedEngineTests = validateSelfHostingEvidence(
+        states.rust.evidence,
+        states.typescript.evidence,
+        `${fixture.name}: normalized raw evidence differs`,
       );
       requireEqual(
-        {
-          flaky: {
-            outcome: flaky?.outcome,
-            attempts: flaky?.attempts,
-          },
-          skipped: {
-            outcome: skipped?.outcome,
-            hits: skipped?.hits,
-          },
-          expectedFailure: {
-            outcome: expectedFailure?.outcome,
-            attempts: expectedFailure?.attempts,
-          },
-          passedContainsFlakyTerminalAttempt:
-            referenceReport.filters?.passed.tests.some(
-              (test) => test.id === flaky?.id && test.retries.join(",") === "1",
-            ),
-          passedContainsExpectedFailure:
-            referenceReport.filters?.passed.tests.some(
-              (test) => test.id === expectedFailure?.id,
-            ),
-        },
+        states.rust.report.testOutcomes,
+        states.typescript.report.testOutcomes,
+        `${fixture.name}: test outcomes differ`,
+      );
+    } else {
+      requireSignaturesEqual(
+        states.rust.evidence,
+        states.typescript.evidence,
+        `${fixture.name}: normalized raw evidence differs`,
+      );
+      requireEqual(
+        states.rust.report.digest,
+        states.typescript.report.digest,
+        `${fixture.name}: complete analyzed coverage report differs`,
+      );
+    }
+
+    if (fixture.name === "playwright") {
+      requireEqual(
+        states.typescript.report.playwrightContract,
         {
           flaky: {
             outcome: "flaky",
@@ -372,23 +416,18 @@ try {
       ["runners"],
       ["scope"],
     ];
-    const firstFile = referenceReport.lines[0]?.file;
-    const firstDecision = referenceReport.decisions[0]?.meta.id;
-    const firstTest = referenceReport.tests.find(
-      (test) => test.role === "test",
-    )?.id;
-    const firstCoveredLine = referenceReport.lines.find(
-      (line) => line.covered,
-    );
+    const {
+      firstFile,
+      firstDecision,
+      firstTest,
+      firstCoveredLine,
+    } = states.typescript.report.selectors;
     if (firstFile) resources.push(["file", firstFile]);
     if (firstDecision) resources.push(["decision", firstDecision]);
     if (firstTest) resources.push(["test", firstTest]);
     if (firstCoveredLine)
-      resources.push([
-        "covers",
-        `${firstCoveredLine.file}:${firstCoveredLine.line}`,
-      ]);
-    for (const resource of resources) {
+      resources.push(["covers", firstCoveredLine]);
+    for (const resource of selfHosting ? [[]] : resources) {
       const typescript = canonicalize(
         query(
           projects.typescript,
@@ -409,17 +448,35 @@ try {
         ),
         states.rust.derivedContext,
       );
-      requireEqual(
-        rust,
-        typescript,
-        `${fixture.name}: query mismatch for coverage ${
-          resource.join(" ") || "summary"
-        }`,
-      );
+      if (selfHosting) {
+        const contract = (response) => ({
+          schemaVersion: response.schemaVersion,
+          ok: response.ok,
+          command: response.command,
+          measurement: response.data?.measurement,
+          testOutcomes: response.data?.testOutcomes,
+          tests: response.data?.tests,
+          setups: response.data?.setups,
+          sourceScope: response.data?.sourceScope,
+        });
+        requireEqual(
+          contract(rust),
+          contract(typescript),
+          `${fixture.name}: self-hosted summary contract differs`,
+        );
+      } else {
+        requireEqual(
+          rust,
+          typescript,
+          `${fixture.name}: query mismatch for coverage ${
+            resource.join(" ") || "summary"
+          }`,
+        );
+      }
     }
-    console.log(
-      `[rust-engine-parity] ${fixture.name}: exact manifest, evidence, report, attribution, outcome, confidence, and query parity`,
-    );
+    console.log(selfHosting
+      ? `[rust-engine-parity] ${fixture.name}: exact obligations and non-engine evidence; ${selectedEngineTests.size} selected-engine test outcome(s) validated separately`
+      : `[rust-engine-parity] ${fixture.name}: exact manifest, evidence, report, attribution, outcome, confidence, and query parity`);
   }
 } finally {
   rmSync(temporary, {

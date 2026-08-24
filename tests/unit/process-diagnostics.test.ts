@@ -28,7 +28,7 @@ describe("long-running command diagnostics", () => {
       process.execPath,
       [
         "-e",
-        "process.on('SIGUSR2', () => {}); setInterval(() => {}, 1000);",
+        "setInterval(() => {}, 1000);",
       ],
       { stdio: "ignore" },
     );
@@ -37,7 +37,6 @@ describe("long-running command diagnostics", () => {
     const watchdog = startProcessWatchdog(child, {
       diagnosticIntervalMs: 25,
       timeoutMs: 90,
-      requestNodeResources: process.platform !== "win32",
       write(message) {
         messages.push(message);
       },
@@ -62,6 +61,26 @@ describe("long-running command diagnostics", () => {
     expect(messages.some((message) => message.includes(`pid=${child.pid}`))).toBe(
       true,
     );
+  });
+
+  it("never signals a healthy arbitrary Node descendant for diagnostics", async () => {
+    const child = spawn(
+      process.execPath,
+      ["-e", "setTimeout(() => process.exit(0), 100)"],
+      { stdio: "ignore" },
+    );
+    const watchdog = startProcessWatchdog(child, {
+      diagnosticIntervalMs: 20,
+      write() {},
+      onTimeout() {
+        throw new Error("an observational watchdog must not time out");
+      },
+    });
+    const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolve) => child.once("close", (code, signal) => resolve({ code, signal })),
+    );
+    watchdog.stop();
+    expect(result).toEqual({ code: 0, signal: null });
   });
 
   it("rejects invalid diagnostic and timeout environment values", () => {

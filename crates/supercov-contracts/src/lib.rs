@@ -1,8 +1,9 @@
 //! Frozen, implementation-neutral Supercov engine contracts.
 //!
 //! This crate does not contain coverage behavior. It makes contract drift a
-//! compile/test failure while the TypeScript reference and Rust candidate
-//! coexist.
+//! compile/test failure while the shipped implementation and Rust candidate
+//! coexist. Independent specifications and conformance oracles—not either
+//! implementation—decide whether a contract is correct.
 
 use serde::{Deserialize, Serialize};
 

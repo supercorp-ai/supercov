@@ -130,9 +130,6 @@ function runChild(
     const watchdog = startProcessWatchdog(child, {
       diagnosticIntervalMs,
       ...(commandTimeoutMs === undefined ? {} : { timeoutMs: commandTimeoutMs }),
-      requestNodeResources: Boolean(
-        options.env["NODE_OPTIONS"]?.includes("register.mjs"),
-      ),
       write(message) {
         console.error(message);
       },
@@ -671,6 +668,10 @@ async function createCoverageRun(command: string[]): Promise<number> {
     const coverageEnv: NodeJS.ProcessEnv = {
       ...process.env,
       SUPERCOV_EVIDENCE_DIR: evidenceDirectoryRelative,
+      SUPERCOV_DIAGNOSTIC_OWNER_FILE: resolve(
+        generatedDirectory,
+        `diagnostic-owner-${runId}`,
+      ),
       SUPERCOV_EXECUTION_FINGERPRINT: runIntegrity.fingerprint.execution,
       SUPERCOV_EXECUTION_LOG: resolve(isolatedEvidenceDirectory, "execution.jsonl"),
       SUPERCOV_ESM_TRANSFORMER: pathToFileURL(resolve(packageSource, "esmInterceptor.js")).href,

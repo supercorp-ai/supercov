@@ -172,6 +172,47 @@ describe("MC/DC instrumenter", () => {
     ]);
   });
 
+  it("measures executable export declarations and every nested bare-control statement", () => {
+    const transformed = instrumentMcdc(
+      `
+        export interface Shape { value: number }
+        export type Choice = "yes" | "no";
+        export const ready = true;
+        export default class Example {
+          run(argument: string) {
+            if (argument === "first") return 1;
+            else if (argument === "second") {
+              const value = Number(argument.length);
+              if (value < 0) throw new Error("impossible");
+              return value;
+            } else throw new Error("unknown");
+          }
+        }
+      `,
+      "app/types.ts",
+    );
+    const statements = transformed.manifest.points
+      .filter((point) => point.kind === "statement")
+      .map((point) => point.source.replace(/\s+/g, " ").trim());
+    expect(statements.some((source) => source.startsWith("interface Shape"))).toBe(
+      false,
+    );
+    expect(statements.some((source) => source.startsWith("type Choice"))).toBe(
+      false,
+    );
+    expect(statements).toEqual(
+      expect.arrayContaining([
+        "const ready = true;",
+        expect.stringMatching(/^class Example/),
+        "const value = Number(argument.length);",
+        'if (value < 0) throw new Error("impossible");',
+        'throw new Error("impossible");',
+        "return value;",
+        'throw new Error("unknown");',
+      ]),
+    );
+  });
+
   it("records an atomic negation rather than its inner operand", () => {
     const { decide, vectors } = executeInstrumented(`
       function decide(value, expected) {

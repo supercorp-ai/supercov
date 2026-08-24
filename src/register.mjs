@@ -1,31 +1,56 @@
 import Module, { register, syncBuiltinESMExports } from "node:module";
+import { closeSync, openSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { installLaunchSupervisor } from "./launchSupervisor.js";
 
 installLaunchSupervisor();
 
 // Long-running commands are diagnosed without changing their runner's exit
-// semantics. The parent asks each preloaded Node descendant for public active
-// resource types using SIGUSR2; never include argv, paths or environment data.
-if (process.platform !== "win32" && !process.__SUPERCOV_DIAGNOSTIC_HANDLER__) {
-  process.__SUPERCOV_DIAGNOSTIC_HANDLER__ = true;
-  process.on("SIGUSR2", () => {
-    const resources = typeof process.getActiveResourcesInfo === "function"
-      ? process.getActiveResourcesInfo()
-      : [];
-    const counts = Object.fromEntries(
-      [...new Set(resources)].sort().map(resource => [
-        resource,
-        resources.filter(candidate => candidate === resource).length,
-      ]),
+// semantics. The first preloaded Node process atomically elects itself for the
+// run and periodically reports public active-resource types. This deliberately
+// uses no Unix signal: a launch tree may contain uninstrumented Node children,
+// and signalling one would terminate a healthy command by default.
+if (!process.__SUPERCOV_DIAGNOSTIC_REPORTER__) {
+  process.__SUPERCOV_DIAGNOSTIC_REPORTER__ = true;
+  const ownerFile = process.env.SUPERCOV_DIAGNOSTIC_OWNER_FILE;
+  let ownerDescriptor;
+  try {
+    if (ownerFile) ownerDescriptor = openSync(ownerFile, "wx");
+  } catch {
+    // Another preloaded process owns diagnostics for this run.
+  }
+  if (ownerDescriptor !== undefined) {
+    const configuredInterval = Number(
+      process.env.SUPERCOV_DIAGNOSTIC_INTERVAL_MS ?? 60_000,
     );
-    console.error(`[supercov:active-resources] ${JSON.stringify({
-      pid: process.pid,
-      ppid: process.ppid,
-      uptimeMs: Math.round(process.uptime() * 1000),
-      resources: counts,
-    })}`);
-  });
+    const intervalMs = Number.isSafeInteger(configuredInterval) && configuredInterval > 0
+      ? configuredInterval
+      : 60_000;
+    const reportResources = () => {
+      const resources = typeof process.getActiveResourcesInfo === "function"
+        ? process.getActiveResourcesInfo()
+        : [];
+      const counts = Object.fromEntries(
+        [...new Set(resources)].sort().map(resource => [
+          resource,
+          resources.filter(candidate => candidate === resource).length,
+        ]),
+      );
+      console.error(`[supercov:active-resources] ${JSON.stringify({
+        pid: process.pid,
+        ppid: process.ppid,
+        uptimeMs: Math.round(process.uptime() * 1000),
+        resources: counts,
+      })}`);
+    };
+    const diagnosticTimer = setInterval(reportResources, intervalMs);
+    diagnosticTimer.unref();
+    process.once("exit", () => {
+      clearInterval(diagnosticTimer);
+      try { closeSync(ownerDescriptor); } catch {}
+      try { unlinkSync(ownerFile); } catch {}
+    });
+  }
 }
 
 // Assertion-call instrumentation also uses this runtime in test processes

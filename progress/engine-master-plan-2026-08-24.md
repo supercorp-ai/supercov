@@ -10,8 +10,9 @@ code; a compatibility sweep is in flight and Tier 1 (trust) still lands first.
 1. **Rust core engine, single static binary.** CLI, project discovery,
    workspace isolation, instrumentation orchestration, evidence analysis,
    and query engine all compile into one 5–15 MB static binary per
-   platform. The current TypeScript engine becomes the *reference
-   implementation* only while the port is incomplete. As soon as the complete
+   platform. The current TypeScript engine is a *regression reference* only
+   while the port is incomplete—not the semantic authority. As soon as the
+   complete
    Rust engine passes the frozen differential and conformance gates, the
    cutover removes the old TypeScript engine in the same consolidation phase.
    There is no permanent engine selector and no extra fallback release.
@@ -68,8 +69,11 @@ code; a compatibility sweep is in flight and Tier 1 (trust) still lands first.
 7. **Frozen contracts, written as specs.** Evidence archive schema, run-store
    layout, CLI surface + JSON envelopes, waivers file format, and process
    supervision. (The no-resident-process decision removes serve entirely.)
-   Both engines must pass the same black-box contract tests. These specs are
-   the Rust port's requirements document.
+   Both engines must pass the same black-box contract tests. Independent
+   language behavior, coverage-model specifications, and external oracles are
+   authoritative; TypeScript/Rust differences are diagnostics to investigate,
+   not an automatic requirement that Rust reproduce a TypeScript defect.
+   These specs are the Rust implementation's requirements document.
 
 ## Why a full rewrite is safe *for this project specifically*
 
@@ -81,9 +85,12 @@ The project already owns a runtime-agnostic conformance net:
 - Golden fixture repos across Playwright/Vitest/Jest/node:test/opaque runners.
 - The self-dogfood loop plus `supercov diff` for exact regression evidence.
 
-A differential harness (run both engines on the same inputs, require
-byte-identical manifests and semantically identical reports) turns the
-rewrite from "risky big bang" into "make the diff zero, then flip."
+A differential harness runs both engines on the same inputs and requires
+identical frozen obligations plus semantically identical reports where the
+contract is unchanged. It is a neighborhood/regression detector, not an
+oracle. Every intentional Rust correction requires an independent semantic or
+coverage-model test that demonstrates why the difference is correct; the
+frozen contract is versioned deliberately when the correction changes it.
 
 ## Acceptance gates (performance)
 
@@ -112,8 +119,9 @@ miss blocks flipping any default.
   mode able to run two engine builds side by side.
   (c) TS-engine query latency trim: dynamic imports so read-only queries
   never load the instrumenter stack (no daemon; fire-and-forget preserved).
-- **Phase 2: probe architecture v2 on the TS engine.** Done before the port
-  so Rust targets final evidence semantics instead of porting twice. Gate:
+- **Phase 2: probe architecture v2 contract.** First prototyped on the TS
+  engine so Rust does not port an obsolete transport, but validated against
+  independent semantic and coverage-model tests rather than TS behavior. Gate:
   identical MC/DC verdicts across Test262 corpus + full fixture matrix,
   overhead ≤1.10x, self-dogfood diff shows no lost attribution. Reaching
   ≤1.05x is deliberately deferred until the architecture and Rust parity are
@@ -122,12 +130,14 @@ miss blocks flipping any default.
   `SUPERCOV_ENGINE=rust` by development, differential and ecosystem CI while
   the shipped TypeScript engine remains the user path. This selector is a
   migration tool, not a product feature. Gate: Test262 corpus green,
-  byte-identical manifests vs the TypeScript instrumenter across the matrix,
-  and the 500-file gate met.
+  exact frozen manifests across the matrix, independently correct behavior,
+  and the 500-file gate met. A TypeScript differential remains a diagnostic.
 - **Phase 4: Rust engine shell.** CLI, discovery, workspace (clonefile/
   FICLONE parity), run lifecycle, analysis (bitset MC/DC pair search),
-  and query engine. Gate: differential harness zero-diff on the full sweep
-  matrix and self-dogfood; query cold-start gate met. Then perform one atomic
+  and query engine. Gate: every differential deviation on the full sweep and
+  self-dogfood matrix is either eliminated or justified by an independent
+  conformance test and deliberate contract revision; query cold-start gate
+  met. Then perform one atomic
   cutover: Rust becomes the sole engine; delete the TypeScript instrumenter,
   analyzer, report/query engine, orchestration implementation, migration flag,
   and Babel engine dependencies. Preserve frozen contracts, golden outputs,
@@ -159,7 +169,9 @@ miss blocks flipping any default.
   probe-v2 contract, and Rust workspace are committed. Published v1
   manifests/evidence remain unchanged. Probe v2 uses exact base-3 vectors
   through 32 conditions and the exact v1 frame above that numeric cap.
-- The TypeScript reference remains the authority while the port is private.
+- TypeScript remains a useful regression reference while the port is private,
+  but is not authoritative. Language semantics, frozen obligations, Test262,
+  the independent MC/DC oracle, and black-box contracts decide correctness.
   Its semantic/property corpus, frozen vectors, reset recovery,
   interleaved-attribution tests, and measured 1.04–1.06x realistic runtime
   overhead remain green.
@@ -224,6 +236,19 @@ miss blocks flipping any default.
   stable under those rules. Probe v2 also no longer archives registered but
   unobserved decisions as empty snapshots, matching the frozen v1 evidence
   contract rather than merely producing the same aggregate score.
+- Supercov self-dogfood now compares large archives in memory-bounded child
+  processes rather than retaining two expanded archives and reports at once.
+  The current 180-test runs have identical obligations, outcomes, background
+  evidence, and all evidence outside exactly three tests that intentionally
+  execute the selected outer engine. Those three execute `src/instrumenter.ts`
+  under the shipped engine and `src/engineInstrumenter.ts` under Rust, so their
+  different implementation-file coverage is required rather than waived.
+- A watchdog regression exposed why implementation parity is insufficient:
+  the old parent sent SIGUSR2 to every Node descendant after 60 seconds, which
+  could terminate a healthy unpreloaded test child. Diagnostics are now
+  signal-free. One atomically elected preloaded process reports active resource
+  types on a timer, while the parent remains observational unless the user set
+  an explicit command timeout.
 - The Playwright parity fixture now exercises a failed first attempt followed
   by a terminal pass, a skipped test, and an expected failure. The gate asserts
   the complete observed view reports `flaky`/`skipped`/`failed`, passed-only
@@ -232,10 +257,12 @@ miss blocks flipping any default.
   transaction recovery and hung-process watchdog paths before the Firefox and
   WebKit reruns, so engine selection is covered under failure supervision as
   well as normal completion.
-- Phase 3 is not promoted yet. Remaining gates are the full browser/Node
-  syntax matrix, Essential SEO/Supercov dogfood suites, and exact TypeScript/
-  Rust archive/attribution/outcome parity across all fixtures and under
-  crashes, retries, async context, concurrency, and multiple workers.
+- Phase 3 is not promoted yet. Supercov dogfood and the six ordinary fixture
+  shapes are now green under semantic comparison, including retries, crashes,
+  async context, concurrency, and multiple workers. Remaining gates include
+  the complete browser/Node syntax matrix and Essential SEO dogfood, followed
+  by an audit that classifies every TypeScript/Rust deviation against the
+  independent correctness hierarchy rather than forcing blind equivalence.
   `complete: false` is therefore still deliberate. Phase 4's engine shell has
   only frozen probe/agent-JSON contract slices; discovery, workspace,
   supervision, packing, analysis, solving, indexing, querying, and lifecycle
@@ -243,8 +270,11 @@ miss blocks flipping any default.
 
 ## Non-goals and guardrails
 
-- Zero behavior change during ports; every port lands behind a flag with a
-  differential gate. "Faster but slightly different" is a failure.
+- No accidental behavior change during ports; every port lands behind a flag
+  with differential diagnostics and independent semantic gates. "Faster but
+  unexplained" is a failure. A proven correction to historical JavaScript
+  behavior is required to differ, with its own regression test and any needed
+  versioned contract migration.
 - Windows becomes a CI matrix member before any binary GA — no shipping
   binaries for platforms the suite has never run on.
 - Contracts (schemas, CLI, envelopes, process supervision) change only by

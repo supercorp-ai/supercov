@@ -17,7 +17,6 @@ export interface ProcessSnapshot {
 export interface ProcessWatchdogOptions {
   diagnosticIntervalMs: number;
   timeoutMs?: number;
-  requestNodeResources?: boolean;
   write: (message: string) => void;
   onTimeout: () => void;
 }
@@ -146,24 +145,13 @@ export function formatProcessDiagnostic(
     .join("\n")}`;
 }
 
-/** Ask only known Node descendants for public active-resource diagnostics. */
-export function requestNodeResourceDiagnostics(
-  tree: ProcessSnapshot[],
-): void {
-  if (process.platform === "win32") return;
-  for (const entry of tree) {
-    if (!/^node(?:\.exe)?$/i.test(entry.executable)) continue;
-    try {
-      process.kill(entry.pid, "SIGUSR2");
-    } catch {
-      // A process may exit between the snapshot and signal.
-    }
-  }
-}
-
 /**
  * Prevent an arbitrary wrapped command from ever hanging silently. Diagnostics
  * are observational; termination occurs only when the user supplied a timeout.
+ * Never signal descendants to request diagnostics: arbitrary launch trees can
+ * contain Node processes without Supercov's signal handler, and SIGUSR2 would
+ * terminate those otherwise healthy processes. The preloaded Node runtime
+ * reports its own active resources through a signal-free elected timer.
  */
 export function startProcessWatchdog(
   child: ChildProcess,
@@ -174,7 +162,6 @@ export function startProcessWatchdog(
   const report = (timedOut: boolean): void => {
     const tree = descendantProcessTree(child.pid!);
     options.write(formatProcessDiagnostic(child.pid!, Date.now() - startedAt, tree));
-    if (options.requestNodeResources) requestNodeResourceDiagnostics(tree);
     if (timedOut) options.onTimeout();
   };
   const diagnostics = setInterval(

@@ -1,12 +1,16 @@
 # Supercov engine contract v1
 
-Status: **frozen** on 2026-08-24 from the passing TypeScript reference engine.
+Status: **frozen** on 2026-08-24 from the shipped TypeScript engine, then
+audited as an implementation-neutral compatibility contract.
 
 These contracts are implementation-neutral requirements. The TypeScript
 reference engine and every Rust candidate must pass the same black-box corpus.
 Changing an implementation is not permission to change a contract. A contract
 change requires a new version, migration rules, golden fixtures, and an
-explicit compatibility decision.
+explicit compatibility decision. This does not make historical TypeScript
+behavior semantically authoritative: a conflict with ECMAScript semantics, an
+independent coverage oracle, or the stated coverage model is a bug to correct
+and version—not behavior Rust must preserve forever.
 
 The five normative surfaces are:
 

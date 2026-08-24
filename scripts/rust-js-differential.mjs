@@ -83,6 +83,22 @@ const safetyCorpus = [
     file: "safety/function-constructor.ts",
     source: `const decide = new Function("value", "if (value) return 1;");`,
   },
+  {
+    file: "syntax/typescript-parameter-property.ts",
+    source: `
+      interface Scope { name: string }
+      class Controller {
+        constructor(
+          readonly scope: Scope,
+          private readonly configuredHeaders: Record<string, string> = {},
+        ) {}
+      }
+    `,
+  },
+  {
+    file: "syntax/default-export-class.ts",
+    source: `export default class Reporter { onEnd() { return true; } }`,
+  },
 ];
 const allCases = [...corpus, ...executionCorpus, ...generatedCorpus, ...safetyCorpus];
 const rust = spawnSync(
