@@ -448,8 +448,23 @@ const semanticCases: Array<{ name: string; source: string }> = [
 describe("instrumenter semantic equivalence", () => {
   for (const fixture of semanticCases) {
     it(fixture.name, async () => {
-      const result = await executeDifferential(fixture.source);
-      expect(result.instrumented, fixture.name).toStrictEqual(result.original);
+      const v1 = await executeDifferential(fixture.source);
+      const v2 = await executeDifferential(fixture.source, "app/differential.ts", {
+        probeVersion: 2,
+      });
+      expect(v1.instrumented, fixture.name).toStrictEqual(v1.original);
+      expect(v2.instrumented, `${fixture.name} (probe v2)`).toStrictEqual(
+        v2.original,
+      );
+      expect(v2.evidence.manifest, `${fixture.name} manifest parity`).toStrictEqual(
+        v1.evidence.manifest,
+      );
+      expect(v2.evidence.vectors, `${fixture.name} vector parity`).toStrictEqual(
+        v1.evidence.vectors,
+      );
+      expect(v2.evidence.hits, `${fixture.name} hit parity`).toStrictEqual(
+        v1.evidence.hits,
+      );
     });
   }
 });

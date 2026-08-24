@@ -59,15 +59,23 @@ describe("instrumenter generated differential corpus", () => {
         }
         function observe() { return effects; }
       `;
-      const result = await executeDifferential(
+      const v1 = await executeDifferential(
         source,
         `app/generated-${seed.toString(16)}.ts`,
       );
+      const v2 = await executeDifferential(
+        source,
+        `app/generated-${seed.toString(16)}.ts`,
+        { probeVersion: 2 },
+      );
       expect(
-        result.instrumented,
+        v1.instrumented,
         `seed ${seed.toString(16)}\n${expression}`,
-      ).toStrictEqual(result.original);
+      ).toStrictEqual(v1.original);
+      expect(v2.instrumented).toStrictEqual(v2.original);
+      expect(v2.evidence.manifest).toStrictEqual(v1.evidence.manifest);
+      expect(v2.evidence.vectors).toStrictEqual(v1.evidence.vectors);
+      expect(v2.evidence.hits).toStrictEqual(v1.evidence.hits);
     }
   });
 });
-

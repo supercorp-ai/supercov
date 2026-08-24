@@ -1,4 +1,7 @@
-import { instrumentMcdc } from "../../src/instrumenter.ts";
+import {
+  instrumentMcdc,
+  type InstrumentMcdcOptions,
+} from "../../src/instrumenter.ts";
 import type {
   CoverageManifest,
   McdcDecisionMeta,
@@ -226,6 +229,40 @@ function runtimeBindings(
     mcdcCondition: condition,
     mcdcEnd: end,
     coverageHit: (id: string) => evidence.hits.push(id),
+    registerProbeV2: (definition: {
+      decisions: McdcDecisionMeta[];
+      pointIds: string[];
+    }) => ({
+      ...definition,
+      clock: { epoch: 1, fast: false },
+      hitEpochs: new Uint32Array(definition.pointIds.length),
+      decisionEpochs: definition.decisions.map((meta) =>
+        meta.conditions.length <= 6
+          ? new Uint32Array(2 * 3 ** meta.conditions.length)
+          : new Map<number, number>()
+      ),
+    }),
+    coverageHitV2: (
+      file: { pointIds: string[] },
+      index: number,
+    ) => evidence.hits.push(file.pointIds[index]!),
+    mcdcEndV2: <T>(
+      file: { decisions: McdcDecisionMeta[] },
+      decisionIndex: number,
+      encoded: number,
+      value: T,
+    ): T => {
+      const meta = file.decisions[decisionIndex]!;
+      const values: Array<boolean | null> = [];
+      let remaining = encoded;
+      for (let index = 0; index < meta.conditions.length; index += 1) {
+        const digit = remaining % 3;
+        values.push(digit === 0 ? null : digit === 2);
+        remaining = Math.floor(remaining / 3);
+      }
+      evidence.vectors.push({ values, outcome: Boolean(value) });
+      return value;
+    },
     selectionBegin,
     selectionRight,
     selectionEnd,
@@ -269,8 +306,9 @@ function compile(
   source: string,
   instrumented: boolean,
   file: string,
+  options: InstrumentMcdcOptions = {},
 ): { program: ProgramExports; evidence: ProbeEvidence } {
-  const transformed = instrumentMcdc(source, file);
+  const transformed = instrumentMcdc(source, file, options);
   const evidence: ProbeEvidence = {
     manifest: transformed.manifest,
     vectors: [],
@@ -299,8 +337,9 @@ async function execute(
   source: string,
   instrumented: boolean,
   file: string,
+  options: InstrumentMcdcOptions = {},
 ): Promise<{ outcome: ProgramOutcome; evidence: ProbeEvidence }> {
-  const { program, evidence } = compile(source, instrumented, file);
+  const { program, evidence } = compile(source, instrumented, file, options);
   try {
     const value = await program.run();
     return {
@@ -336,6 +375,7 @@ async function execute(
 export async function executeDifferential(
   source: string,
   file = "app/differential.ts",
+  options: InstrumentMcdcOptions = {},
 ): Promise<{
   original: ProgramOutcome;
   instrumented: ProgramOutcome;
@@ -344,7 +384,7 @@ export async function executeDifferential(
   // Keep the two executions sequential so timers, microtasks, and any host
   // resources used by a fixture cannot influence the comparison by racing.
   const original = await execute(source, false, file);
-  const instrumented = await execute(source, true, file);
+  const instrumented = await execute(source, true, file, options);
   return {
     original: original.outcome,
     instrumented: instrumented.outcome,

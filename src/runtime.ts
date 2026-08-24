@@ -30,6 +30,14 @@ interface DecisionFrame {
   values: Array<boolean | null>;
 }
 
+export interface ProbeV2FileState {
+  decisions: McdcDecisionMeta[];
+  pointIds: string[];
+  clock: { epoch: number; fast: boolean };
+  hitEpochs: Uint32Array;
+  decisionEpochs: Array<Uint32Array | Map<number, number>>;
+}
+
 interface SelectionFrame {
   shortId: string;
   rightId: string;
@@ -81,6 +89,11 @@ interface RuntimeState {
     string,
     { counter: number; phases: CoveragePhase[] }
   >;
+  probeV2Files: Set<ProbeV2FileState>;
+  probeV2Clock: { epoch: number; fast: boolean };
+  probeV2ContextEpochs: Map<string, number>;
+  probeV2NextEpoch: number;
+  probeV2HookInstalled: boolean;
 }
 
 type McdcGlobal = typeof globalThis & {
@@ -95,6 +108,10 @@ type McdcGlobal = typeof globalThis & {
   __SUPERCOV_MCDC_SNAPSHOT__?: () => McdcDecisionSnapshot[];
   __SUPERCOV_COVERAGE_SNAPSHOT__?: () => CoverageRuntimeSnapshot;
   __SUPERCOV_RESET__?: (testId?: string) => void;
+  __SUPERCOV_ACTIVATE_PROBE_CONTEXT__?: (
+    testId: string,
+    phaseId?: string,
+  ) => void;
 };
 
 interface CoverageRequestContext {
@@ -109,6 +126,10 @@ interface RequestStorage {
 
 interface AsyncHooksBuiltin {
   AsyncLocalStorage: new () => RequestStorage;
+  createHook?(callbacks: {
+    before(asyncId: number): void;
+    after(asyncId: number): void;
+  }): { enable(): void };
 }
 
 interface FsBuiltin {
@@ -168,6 +189,11 @@ function createState(): RuntimeState {
     backgroundSequence: 0,
     runtimeSnapshots: false,
     assertionPhases: new Map(),
+    probeV2Files: new Set(),
+    probeV2Clock: { epoch: 1, fast: false },
+    probeV2ContextEpochs: new Map(),
+    probeV2NextEpoch: 1,
+    probeV2HookInstalled: false,
   };
   if (!isBrowser) return state;
   try {
@@ -222,6 +248,103 @@ const serverPhaseStorage =
 if (serverPhaseStorage)
   serverPhaseStorages.set(runtimeInstance, serverPhaseStorage);
 
+function probeV2ContextKey(context: CoverageRequestContext): string {
+  const phase = context.phaseId ?? "unscoped";
+  if (!context.scope) {
+    const runId =
+      typeof process !== "undefined" ? process.env["SUPERCOV_RUN_ID"] : undefined;
+    return `background\0${runId ?? runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__ ?? testId}\0${phase}`;
+  }
+  return `scope\0${attemptKey(context.scope)}\0${phase}`;
+}
+
+function activateProbeV2Key(key: string, force = false): number {
+  let epoch = force ? undefined : state.probeV2ContextEpochs.get(key);
+  if (epoch === undefined) {
+    state.probeV2NextEpoch += 1;
+    // Uint32Array uses zero as "never observed". A wrap is implausible, but
+    // clearing is still safer than silently aliasing two execution contexts.
+    if (state.probeV2NextEpoch >= 0xffff_ffff) {
+      state.probeV2NextEpoch = 1;
+      state.probeV2ContextEpochs.clear();
+      for (const file of state.probeV2Files) {
+        file.hitEpochs.fill(0);
+        for (const vectors of file.decisionEpochs) {
+          if (vectors instanceof Uint32Array) vectors.fill(0);
+          else vectors.clear();
+        }
+      }
+    }
+    epoch = state.probeV2NextEpoch;
+    state.probeV2ContextEpochs.set(key, epoch);
+  }
+  state.probeV2Clock.epoch = epoch;
+  return epoch;
+}
+
+function activateProbeV2Context(context: CoverageRequestContext): number {
+  return activateProbeV2Key(probeV2ContextKey(context));
+}
+
+function withProbeV2Context<T>(
+  context: CoverageRequestContext,
+  callback: () => T,
+): T {
+  const previous = state.probeV2Clock.epoch;
+  activateProbeV2Context(context);
+  try {
+    return callback();
+  } finally {
+    state.probeV2Clock.epoch = previous;
+  }
+}
+
+function installProbeV2AsyncHook(): void {
+  if (
+    isBrowser ||
+    state.probeV2HookInstalled ||
+    typeof process === "undefined"
+  )
+    return;
+  try {
+    const getBuiltinModule = (
+      process as typeof process & {
+        getBuiltinModule?: (name: string) => AsyncHooksBuiltin;
+      }
+    ).getBuiltinModule;
+    const createHook = getBuiltinModule?.("node:async_hooks")?.createHook;
+    if (!createHook) return;
+    const epochs: number[] = [];
+    createHook({
+      before() {
+        epochs.push(state.probeV2Clock.epoch);
+        activateProbeV2Context(
+          serverPhaseStorage?.getStore() ?? environmentRequestContext() ?? {},
+        );
+      },
+      after() {
+        state.probeV2Clock.epoch = epochs.pop() ?? state.probeV2Clock.epoch;
+      },
+    }).enable();
+    state.probeV2HookInstalled = true;
+    state.probeV2Clock.fast = true;
+  } catch {
+    // Probe v2 remains correct for synchronous contexts; the run's
+    // compatibility gate keeps this experimental mode from being promoted on
+    // hosts without async context hooks.
+  }
+}
+
+runtimeGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__ = (
+  browserTestId,
+  browserPhaseId,
+) => {
+  state.probeV2Clock.fast = true;
+  activateProbeV2Key(
+    `browser\0${browserTestId}\0${browserPhaseId ?? "unscoped"}`,
+  );
+};
+
 function decisionSnapshot(): McdcDecisionSnapshot[] {
   return [...state.decisions.values()].map((decision) => ({
     meta: decision.meta,
@@ -242,6 +365,8 @@ export function resetCoverage(testId?: string): void {
   state.hits.clear();
   state.events.length = 0;
   state.eventKeys.clear();
+  state.probeV2ContextEpochs.clear();
+  activateProbeV2Key(`reset\0${state.probeV2NextEpoch}`, true);
   if (testId) runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__ = testId;
   if (isBrowser) {
     try {
@@ -513,12 +638,12 @@ export function withCoverageCarrier<T>(
   const decoded =
     typeof carrier === "string" ? decodeCoverageCarrier(carrier) : carrier;
   if (!serverPhaseStorage || !decoded) return callback();
-  return serverPhaseStorage.run(
-    {
-      ...(decoded.scope ? { scope: decoded.scope } : {}),
-      ...(decoded.phaseId ? { phaseId: decoded.phaseId } : {}),
-    },
-    callback,
+  const context = {
+    ...(decoded.scope ? { scope: decoded.scope } : {}),
+    ...(decoded.phaseId ? { phaseId: decoded.phaseId } : {}),
+  };
+  return serverPhaseStorage.run(context, () =>
+    withProbeV2Context(context, callback)
   );
 }
 
@@ -826,7 +951,9 @@ export function withRequestPhase<T extends (...args: never[]) => unknown>(
     };
     const invoke = () => Reflect.apply(handler, this, args) as ReturnType<T>;
     return context.scope || context.phaseId
-      ? serverPhaseStorage.run(context, invoke)
+      ? serverPhaseStorage.run(context, () =>
+          withProbeV2Context(context, invoke)
+        )
       : invoke();
   } as T;
 }
@@ -872,6 +999,108 @@ export function coverageHit(id: string): void {
       ...(phaseId ? { phaseId } : {}),
     });
   }
+}
+
+/** Register immutable, file-local numeric probe tables once at module load. */
+export function registerProbeV2(definition: {
+  decisions: McdcDecisionMeta[];
+  pointIds: string[];
+}): ProbeV2FileState {
+  const file: ProbeV2FileState = {
+    decisions: definition.decisions,
+    pointIds: definition.pointIds,
+    clock: state.probeV2Clock,
+    hitEpochs: new Uint32Array(definition.pointIds.length),
+    decisionEpochs: definition.decisions.map((meta) =>
+      meta.conditions.length <= 6
+        ? new Uint32Array(2 * 3 ** meta.conditions.length)
+        : new Map<number, number>()
+    ),
+  };
+  state.probeV2Files.add(file);
+  for (const meta of definition.decisions) {
+    if (!state.decisions.has(meta.id))
+      state.decisions.set(meta.id, { meta, vectors: new Map() });
+  }
+  if (isBrowser) {
+    state.probeV2Clock.fast = true;
+    activateProbeV2Key(
+      `browser\0${runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__ ?? testId}\0${runtimeGlobal.__SUPERCOV_PHASE_ID__ ?? "unscoped"}`,
+    );
+  } else {
+    installProbeV2AsyncHook();
+  }
+  return file;
+}
+
+/** Numeric point probes deduplicate before timestamps, records, and serialization. */
+export function coverageHitV2(file: ProbeV2FileState, index: number): void {
+  const id = file.pointIds[index];
+  if (!id) return;
+  if (!file.clock.fast)
+    activateProbeV2Context(currentRequestContext());
+  const epoch = file.clock.epoch;
+  if (file.hitEpochs[index] === epoch) return;
+  file.hitEpochs[index] = epoch;
+  coverageHit(id);
+}
+
+/** Decode the exact v1 masking vector from the allocation-free base-3 frame. */
+export function decodeProbeV2Vector(
+  conditionCount: number,
+  encoded: number,
+  outcome: boolean,
+): McdcVector | undefined {
+  if (
+    !Number.isSafeInteger(conditionCount) ||
+    conditionCount < 0 ||
+    conditionCount > 32 ||
+    !Number.isSafeInteger(encoded) ||
+    encoded < 0
+  )
+    return undefined;
+  const values: Array<boolean | null> = [];
+  let remaining = encoded;
+  for (let index = 0; index < conditionCount; index += 1) {
+    const digit = remaining % 3;
+    values.push(digit === 0 ? null : digit === 2);
+    remaining = Math.floor(remaining / 3);
+  }
+  return remaining === 0 ? { values, outcome } : undefined;
+}
+
+/** Record one exact decision vector, at most once per attempt/phase epoch. */
+export function mcdcEndV2<T>(
+  file: ProbeV2FileState,
+  decisionIndex: number,
+  encoded: number,
+  value: T,
+): T {
+  const meta = file.decisions[decisionIndex];
+  if (!meta || !Number.isSafeInteger(encoded) || encoded < 0) return value;
+  const outcome = Boolean(value);
+  const vectorIndex = encoded * 2 + (outcome ? 1 : 0);
+  if (!Number.isSafeInteger(vectorIndex)) return value;
+  if (!file.clock.fast)
+    activateProbeV2Context(currentRequestContext());
+  const epoch = file.clock.epoch;
+  const seen = file.decisionEpochs[decisionIndex];
+  if (!seen) return value;
+  if (seen instanceof Uint32Array) {
+    if (seen[vectorIndex] === epoch) return value;
+    seen[vectorIndex] = epoch;
+  } else {
+    if (seen.get(vectorIndex) === epoch) return value;
+    seen.set(vectorIndex, epoch);
+  }
+  if (!state.decisions.has(meta.id))
+    state.decisions.set(meta.id, { meta, vectors: new Map() });
+  const vector = decodeProbeV2Vector(
+    meta.conditions.length,
+    encoded,
+    outcome,
+  );
+  return vector ? mcdcEnd({ meta, values: vector.values }, value) : value;
 }
 
 export function selectionBegin(

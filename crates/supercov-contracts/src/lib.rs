@@ -17,6 +17,9 @@ pub const PROCESS_SUPERVISION_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_DIAGNOSTIC_INTERVAL_MS: u64 = 60_000;
 pub const COMMAND_TIMEOUT_EXIT_CODE: i32 = 124;
 pub const COMMAND_TERMINATION_GRACE_MS: u64 = 5_000;
+pub const PROBE_V2_VERSION: u32 = 2;
+pub const PROBE_V2_RADIX: u32 = 3;
+pub const PROBE_V2_JS_MAX_CONDITIONS: usize = 32;
 
 pub const ERROR_CODES: &[&str] = &[
     "AMBIGUOUS_SELECTOR",
@@ -108,6 +111,49 @@ pub fn registry() -> Result<ContractRegistry, serde_json::Error> {
     serde_json::from_str(include_str!("../../../contracts/v1/contract.json"))
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeV2Contract {
+    pub probe_version: u32,
+    pub semantics: String,
+    pub implementation: String,
+    pub decision_encoding: ProbeV2DecisionEncoding,
+    pub published_evidence: String,
+    pub attribution_epoch: Vec<String>,
+    pub fallback: String,
+    pub promotion: ProbeV2Promotion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeV2DecisionEncoding {
+    pub radix: u32,
+    pub digits: ProbeV2Digits,
+    pub outcome_stored_separately: bool,
+    pub javascript_maximum_encoded_conditions: usize,
+    pub wider_decision_behavior: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ProbeV2Digits {
+    pub unreached: u32,
+    pub r#false: u32,
+    pub r#true: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProbeV2Promotion {
+    pub realistic_median_runtime_ratio_max: f64,
+    pub semantic_equivalence_required: bool,
+    pub manifest_parity_required: bool,
+    pub evidence_parity_required: bool,
+}
+
+pub fn probe_v2_contract() -> Result<ProbeV2Contract, serde_json::Error> {
+    serde_json::from_str(include_str!("../../../contracts/probe-v2/contract.json"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +193,25 @@ mod tests {
             contract.process_supervision.termination_grace_ms,
             COMMAND_TERMINATION_GRACE_MS
         );
+    }
+
+    #[test]
+    fn checked_in_probe_v2_contract_matches_rust_constants() {
+        let contract = probe_v2_contract().expect("probe v2 contract must be valid JSON");
+        assert_eq!(contract.probe_version, PROBE_V2_VERSION);
+        assert_eq!(contract.semantics, "frozen");
+        assert_eq!(contract.implementation, "experimental");
+        assert_eq!(contract.decision_encoding.radix, PROBE_V2_RADIX);
+        assert_eq!(contract.decision_encoding.digits.unreached, 0);
+        assert_eq!(contract.decision_encoding.digits.r#false, 1);
+        assert_eq!(contract.decision_encoding.digits.r#true, 2);
+        assert!(contract.decision_encoding.outcome_stored_separately);
+        assert_eq!(
+            contract
+                .decision_encoding
+                .javascript_maximum_encoded_conditions,
+            PROBE_V2_JS_MAX_CONDITIONS
+        );
+        assert_eq!(contract.promotion.realistic_median_runtime_ratio_max, 1.05);
     }
 }

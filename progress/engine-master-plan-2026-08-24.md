@@ -22,7 +22,7 @@ code; a compatibility sweep is in flight and Tier 1 (trust) still lands first.
    Per language the engine grows exactly two things — where probes are
    inserted, and how test/phase identity propagates to a probe. The evidence
    contract, analysis, MC/DC pair search and query surface are shared and are
-   never rewritten per language; probe v2's bitmap model is language-neutral
+   never rewritten per language; probe v2's ternary-vector/epoch model is language-neutral
    precisely to keep that true.
 4. **No resident processes — ever.** (User decision 2026-08-24; supersedes
    the earlier `supercov serve` proposal.) Every invocation is fire-and-
@@ -36,11 +36,12 @@ code; a compatibility sweep is in flight and Tier 1 (trust) still lands first.
    MCP, if ever shipped, is a thin optional wrapper spawned and owned by the
    agent harness over the same CLI semantics — never an engine assumption.
 5. **Probe architecture v2** — the real performance ceiling is instrumented
-   runtime overhead (currently 1.14x synthetic), which no engine rewrite
-   touches. Target ≤1.05x. Candidate designs, to be settled by measurement:
-   counter-array probes (`c[i]++` istanbul-style) instead of string-keyed
-   calls; per-attempt epoch short-circuiting so hot loops hit each probe once
-   per test; V8 builtin coverage as a cheap line/function source where
+   runtime overhead, which no engine rewrite touches. Target ≤1.05x. The
+   frozen design uses base-3 decision frames (`unreached/false/true`),
+   file-local numeric point indices, dense vector epochs for ordinary
+   decisions, and per-attempt/phase epoch short-circuiting so hot loops enter
+   the collector only once per obligation. V8 builtin coverage remains a
+   possible cheap line/function source where
    attribution semantics allow (serial runners only — precise V8 deltas are
    process-global and cannot attribute concurrently interleaved tests, so
    probes remain the attribution mechanism; this constraint is load-bearing).
@@ -59,7 +60,8 @@ code; a compatibility sweep is in flight and Tier 1 (trust) still lands first.
 ## Why a full rewrite is safe *for this project specifically*
 
 The project already owns a runtime-agnostic conformance net:
-- Test262 semantic-equivalence corpus (65,053 baseline-passing scenarios) —
+- Test262 semantic-equivalence corpus (65,051 baseline-passing scenarios at
+  revision `3655e7464de3d52643ecddd4b5f9f4f3e7f62398`) —
   validates instrumented-output *behavior*, not implementation.
 - Independent Clang/LLVM MC/DC oracle.
 - Golden fixture repos across Playwright/Vitest/Jest/node:test/opaque runners.
@@ -130,6 +132,31 @@ miss blocks flipping any default.
   green is a language we do not claim to support. Full design, per-language
   matrix, attribution ladder, tier-ordering guardrails and spikes S8–S10:
   `progress/multi-language-architecture-2026-08-24.md`.
+
+## Checkpoint — 2026-08-24 probe v2 / first Rust behavior
+
+- Phase 0 compatibility findings and Phase 1's five frozen v1 contracts,
+  black-box harness, and Rust workspace are committed in the preceding
+  checkpoints.
+- Probe-v2 semantics are frozen under `contracts/probe-v2/`. Published v1
+  manifests/evidence remain unchanged. JavaScript encodes exact ternary
+  vectors through 32 conditions and falls back to exact v1 frames above that
+  cap.
+- The TypeScript reference has experimental v2 transforms and an epoch-based
+  collector. Hand-written semantic cases, 160 deterministic generated
+  programs, 800 property cases, frozen vectors, reset recovery, and
+  interleaved async-attribution tests pass with exact v1/v2 evidence parity.
+- Full Test262 v2 run on revision `3655e746...`: 41,593 selected files,
+  65,051 baseline-passing scenarios, zero transform failures, zero semantic
+  failures. A later dense-vector runtime fast path does not change source
+  condition evaluation, but the full on-demand corpus should be rerun at the
+  final Phase-2 fingerprint before promotion.
+- Runtime stress improved from roughly 164 ms (v1) to roughly 2 ms (v2) for
+  250,000 attributed empty-loop iterations. The pinned realistic workload is
+  currently about 1.14x, so the ≤1.05x default-flip gate remains open.
+- Rust now parses the same probe contract and decodes the same golden vectors.
+  It is still a contract/differential candidate; the oxc AST port must not
+  begin until Phase 2's performance and full fixture/self-dogfood gates close.
 
 ## Non-goals and guardrails
 

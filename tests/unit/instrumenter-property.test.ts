@@ -3,6 +3,16 @@ import { describe, it } from "node:test";
 import { expect } from "../support/expect.ts";
 import { executeDifferential } from "./instrumenter-harness.ts";
 
+async function expectProbeParity(source: string, file: string): Promise<void> {
+  const v1 = await executeDifferential(source, file);
+  const v2 = await executeDifferential(source, file, { probeVersion: 2 });
+  expect(v1.instrumented).toStrictEqual(v1.original);
+  expect(v2.instrumented).toStrictEqual(v2.original);
+  expect(v2.evidence.manifest).toStrictEqual(v1.evidence.manifest);
+  expect(v2.evidence.vectors).toStrictEqual(v1.evidence.vectors);
+  expect(v2.evidence.hits).toStrictEqual(v1.evidence.hits);
+}
+
 const atoms = [
   "false",
   "true",
@@ -52,8 +62,7 @@ describe("instrumenter property-based semantic equivalence", () => {
           function run() { return ${expression}; }
           function observe() { return effects; }
         `;
-        const result = await executeDifferential(source, "app/property-expression.js");
-        expect(result.instrumented).toStrictEqual(result.original);
+        await expectProbeParity(source, "app/property-expression.js");
       }),
       { numRuns: 500, seed: 0x5e71c0 },
     );
@@ -101,8 +110,7 @@ describe("instrumenter property-based semantic equivalence", () => {
           }
           function observe() { return effects; }
         `;
-        const result = await executeDifferential(source, "app/property-control.js");
-        expect(result.instrumented).toStrictEqual(result.original);
+        await expectProbeParity(source, "app/property-control.js");
       }),
       { numRuns: 300, seed: 0xc07f10 },
     );

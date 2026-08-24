@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { instrumentMcdc } from "../dist/instrumenter.js";
+import * as collectorRuntime from "../dist/runtime.js";
 import { prepareCachedWorkspace } from "../dist/workspace.js";
 
 const budget = JSON.parse(readFileSync(resolve("benchmarks/budget.json"), "utf8"));
@@ -62,11 +63,6 @@ const runtimeSource = `
     return total;
   }
 `;
-const runtimeTransformed = instrumentMcdc(runtimeSource, "benchmark/runtime.js").code;
-const importMatch = runtimeTransformed.match(
-  /^import\s*\{([\s\S]*?)\}\s*from\s*["']virtual:supercov-runtime["'];?/,
-);
-if (!importMatch) throw new Error("runtime benchmark has no Supercov import");
 const implementations = {
   mcdcBegin: "function(){return {};}",
   mcdcCondition: "function(frame,index,value){return value;}",
@@ -84,19 +80,148 @@ const implementations = {
   loopBegin: "function(){return {};}",
   loopEntered: "function(){}",
   loopEnd: "function(){}",
+  registerProbeV2: "function(definition){return Object.assign(definition,{clock:{epoch:1,fast:true},hitEpochs:new Uint32Array(definition.pointIds.length),decisionEpochs:definition.decisions.map(function(meta){return meta.conditions.length<=6?new Uint32Array(2*3**meta.conditions.length):new Map();})});}",
+  coverageHitV2: "function(){}",
+  mcdcEndV2: "function(file,index,encoded,value){return value;}",
 };
-const runtimePrelude = [...importMatch[1].matchAll(/([\w$]+)\s+as\s+([\w$]+)/g)]
-  .map(([, imported, local]) => `var ${local}=${implementations[imported]};`)
-  .join("");
+function compileInstrumentedRuntime(probeVersion, source = runtimeSource) {
+  const transformed = instrumentMcdc(
+    source,
+    "benchmark/runtime.js",
+    { probeVersion },
+  ).code;
+  const importMatch = transformed.match(
+    /^import\s*\{([\s\S]*?)\}\s*from\s*["']virtual:supercov-runtime["'];?/,
+  );
+  if (!importMatch) throw new Error("runtime benchmark has no Supercov import");
+  const runtimePrelude = [...importMatch[1].matchAll(/([\w$]+)\s+as\s+([\w$]+)/g)]
+    .map(([, imported, local]) => `var ${local}=${implementations[imported]};`)
+    .join("");
+  return new Function(
+    `${runtimePrelude}${transformed.slice(importMatch[0].length)}\nreturn run;`,
+  )();
+}
+function compileCollectorRuntime(probeVersion, source = runtimeSource) {
+  const transformed = instrumentMcdc(
+    source,
+    "benchmark/runtime.js",
+    { probeVersion },
+  ).code;
+  const importMatch = transformed.match(
+    /^import\s*\{([\s\S]*?)\}\s*from\s*["']virtual:supercov-runtime["'];?/,
+  );
+  if (!importMatch) throw new Error("runtime benchmark has no Supercov import");
+  const bindings = [...importMatch[1].matchAll(/([\w$]+)\s+as\s+([\w$]+)/g)]
+    .map(([, imported, local]) => [local, collectorRuntime[imported]]);
+  if (bindings.some(([, implementation]) => typeof implementation !== "function"))
+    throw new Error("collector runtime benchmark is missing an imported probe");
+  return new Function(
+    ...bindings.map(([local]) => local),
+    `${transformed.slice(importMatch[0].length)}\nreturn run;`,
+  )(...bindings.map(([, implementation]) => implementation));
+}
 const originalRun = new Function(`${runtimeSource}\nreturn run;`)();
-const instrumentedRun = new Function(
-  `${runtimePrelude}${runtimeTransformed.slice(importMatch[0].length)}\nreturn run;`,
-)();
+const instrumentedRunV1 = compileInstrumentedRuntime(1);
+const instrumentedRunV2 = compileInstrumentedRuntime(2);
+const collectorRunV1 = compileCollectorRuntime(1);
+const collectorRunV2 = compileCollectorRuntime(2);
 originalRun(10_000);
-instrumentedRun(10_000);
+instrumentedRunV1(10_000);
+instrumentedRunV2(10_000);
+collectorRuntime.resetCoverage();
+collectorRunV1(10_000);
+collectorRuntime.resetCoverage();
+collectorRunV2(10_000);
+collectorRuntime.resetCoverage();
 const originalRuntime = median(timed(() => originalRun(250_000), 7));
-const instrumentedRuntime = median(timed(() => instrumentedRun(250_000), 7));
-const runtimeOverhead = instrumentedRuntime / Math.max(originalRuntime, 0.001);
+const instrumentedRuntimeV1 = median(timed(() => instrumentedRunV1(250_000), 7));
+const instrumentedRuntimeV2 = median(timed(() => instrumentedRunV2(250_000), 7));
+const runtimeOverhead = instrumentedRuntimeV1 / Math.max(originalRuntime, 0.001);
+const probeV2RuntimeOverhead = instrumentedRuntimeV2 / Math.max(originalRuntime, 0.001);
+const collectorRuntimeV1 = median(timed(() => collectorRunV1(250_000), 7));
+collectorRuntime.resetCoverage();
+const collectorRuntimeV2 = median(timed(() => collectorRunV2(250_000), 7));
+collectorRuntime.resetCoverage();
+const collectorOverheadV1 = collectorRuntimeV1 / Math.max(originalRuntime, 0.001);
+const collectorOverheadV2 = collectorRuntimeV2 / Math.max(originalRuntime, 0.001);
+const benchmarkScope = {
+  version: 1,
+  runId: "benchmark",
+  workerId: "worker-0",
+  testId: "hot-loop",
+  testKey: "hot-loop",
+  retry: 0,
+  attemptId: "attempt-0",
+};
+collectorRuntime.enableRuntimeSnapshotEvidence();
+collectorRuntime.resetCoverage();
+const scopedCollectorRuntimeV1 = median(
+  timed(
+    () => collectorRuntime.withCoverageCarrier(
+      { version: 1, scope: benchmarkScope },
+      () => collectorRunV1(250_000),
+    ),
+    7,
+  ),
+);
+collectorRuntime.resetCoverage();
+const scopedCollectorRuntimeV2 = median(
+  timed(
+    () => collectorRuntime.withCoverageCarrier(
+      { version: 1, scope: benchmarkScope },
+      () => collectorRunV2(250_000),
+    ),
+    7,
+  ),
+);
+collectorRuntime.resetCoverage();
+const scopedCollectorOverheadV1 = scopedCollectorRuntimeV1 / Math.max(originalRuntime, 0.001);
+const scopedCollectorOverheadV2 = scopedCollectorRuntimeV2 / Math.max(originalRuntime, 0.001);
+
+const realisticRuntimeSource = `
+  const records = Array.from({ length: 2_000 }, (_, index) => ({
+    name: " Customer " + index + " ",
+    payload: JSON.stringify({ active: index % 3 !== 0, score: index % 101 }),
+    tags: index % 11 === 0 ? ["priority", "batch"] : ["batch"],
+  }));
+  function run(rounds) {
+    let digest = 2_166_136_261;
+    for (let round = 0; round < rounds; round += 1) {
+      for (const record of records) {
+        const parsed = JSON.parse(record.payload);
+        const normalized = record.name.trim().toLowerCase();
+        if ((parsed.active && parsed.score >= 50) || record.tags.includes("priority")) {
+          digest = Math.imul(digest ^ normalized.length ^ parsed.score, 16_777_619);
+        } else {
+          digest = Math.imul(digest ^ round, 16_777_619);
+        }
+      }
+    }
+    return digest >>> 0;
+  }
+`;
+const realisticOriginal = new Function(`${realisticRuntimeSource}\nreturn run;`)();
+const realisticCollectorV2 = compileCollectorRuntime(2, realisticRuntimeSource);
+realisticOriginal(1);
+collectorRuntime.resetCoverage();
+collectorRuntime.withCoverageCarrier(
+  { version: 1, scope: benchmarkScope },
+  () => realisticCollectorV2(1),
+);
+collectorRuntime.resetCoverage();
+const realisticOriginalMs = median(timed(() => realisticOriginal(10), 7));
+const realisticCollectorV2Ms = median(
+  timed(
+    () => collectorRuntime.withCoverageCarrier(
+      { version: 1, scope: benchmarkScope },
+      () => realisticCollectorV2(10),
+    ),
+    7,
+  ),
+);
+collectorRuntime.resetCoverage();
+const realisticProbeV2Overhead =
+  realisticCollectorV2Ms / Math.max(realisticOriginalMs, 0.001);
 
 const workspaceRoot = mkdtempSync(resolve(tmpdir(), "supercov-benchmark-"));
 let workspacePreparation;
@@ -127,7 +252,10 @@ const workspaceMedian = median(workspacePreparation);
 const workspaceP95 = Math.max(...workspacePreparation);
 
 console.log(`[benchmark] transform median=${transformMedian.toFixed(1)}ms p95=${transformP95.toFixed(1)}ms files=${budget.corpusFiles}`);
-console.log(`[benchmark] output expansion=${expansion.toFixed(2)}x; runtime overhead=${runtimeOverhead.toFixed(2)}x`);
+console.log(`[benchmark] output expansion=${expansion.toFixed(2)}x; runtime overhead v1=${runtimeOverhead.toFixed(2)}x v2=${probeV2RuntimeOverhead.toFixed(2)}x`);
+console.log(`[benchmark] collector hot-loop overhead v1=${collectorOverheadV1.toFixed(2)}x v2=${collectorOverheadV2.toFixed(2)}x`);
+console.log(`[benchmark] attributed collector original=${originalRuntime.toFixed(2)}ms v1=${scopedCollectorRuntimeV1.toFixed(2)}ms (${scopedCollectorOverheadV1.toFixed(2)}x) v2=${scopedCollectorRuntimeV2.toFixed(2)}ms (${scopedCollectorOverheadV2.toFixed(2)}x)`);
+console.log(`[benchmark] realistic attributed v2 original=${realisticOriginalMs.toFixed(2)}ms instrumented=${realisticCollectorV2Ms.toFixed(2)}ms overhead=${realisticProbeV2Overhead.toFixed(2)}x`);
 console.log(`[benchmark] workspace median=${workspaceMedian.toFixed(1)}ms p95=${workspaceP95.toFixed(1)}ms files=${budget.workspaceFiles}`);
 
 const failures = [];

@@ -247,6 +247,10 @@ class CoveragePhaseController {
               globalThis as typeof globalThis & {
                 __SUPERCOV_MCDC_TEST_ID__?: string;
                 __SUPERCOV_PHASE_ID__?: string;
+                __SUPERCOV_ACTIVATE_PROBE_CONTEXT__?: (
+                  testId: string,
+                  phaseId?: string,
+                ) => void;
               }
             ).__SUPERCOV_MCDC_TEST_ID__ = attemptId;
             if (phase)
@@ -255,6 +259,14 @@ class CoveragePhaseController {
                   __SUPERCOV_PHASE_ID__?: string;
                 }
               ).__SUPERCOV_PHASE_ID__ = phase;
+            (
+              globalThis as typeof globalThis & {
+                __SUPERCOV_ACTIVATE_PROBE_CONTEXT__?: (
+                  testId: string,
+                  phaseId?: string,
+                ) => void;
+              }
+            ).__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(attemptId, phase);
             const originalFetch = globalThis.fetch?.bind(globalThis);
             if (!originalFetch) return;
             globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
@@ -483,8 +495,24 @@ class CoveragePhaseController {
               (
                 globalThis as typeof globalThis & {
                   __SUPERCOV_PHASE_ID__?: string;
+                  __SUPERCOV_MCDC_TEST_ID__?: string;
+                  __SUPERCOV_ACTIVATE_PROBE_CONTEXT__?: (
+                    testId: string,
+                    phaseId?: string,
+                  ) => void;
                 }
               ).__SUPERCOV_PHASE_ID__ = id;
+              const coverageGlobal = globalThis as typeof globalThis & {
+                __SUPERCOV_MCDC_TEST_ID__?: string;
+                __SUPERCOV_ACTIVATE_PROBE_CONTEXT__?: (
+                  testId: string,
+                  phaseId?: string,
+                ) => void;
+              };
+              coverageGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(
+                coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ ?? "unscoped",
+                id,
+              );
               try {
                 localStorage.setItem(storageKey, id);
                 document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=Lax`;
@@ -508,11 +536,19 @@ class CoveragePhaseController {
       [...this.workers].map((worker) =>
         worker
           .evaluate((id) => {
-            (
-              globalThis as typeof globalThis & {
-                __SUPERCOV_PHASE_ID__?: string;
-              }
-            ).__SUPERCOV_PHASE_ID__ = id;
+            const coverageGlobal = globalThis as typeof globalThis & {
+              __SUPERCOV_PHASE_ID__?: string;
+              __SUPERCOV_MCDC_TEST_ID__?: string;
+              __SUPERCOV_ACTIVATE_PROBE_CONTEXT__?: (
+                testId: string,
+                phaseId?: string,
+              ) => void;
+            };
+            coverageGlobal.__SUPERCOV_PHASE_ID__ = id;
+            coverageGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(
+              coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ ?? "unscoped",
+              id,
+            );
           }, phaseId)
           .catch(() => undefined),
       ),
@@ -545,7 +581,7 @@ class CoveragePhaseController {
       }
       const installed = (await cdp
         .send("Page.addScriptToEvaluateOnNewDocument", {
-          source: `globalThis.__SUPERCOV_PHASE_ID__=${JSON.stringify(phaseId)};`,
+          source: `globalThis.__SUPERCOV_PHASE_ID__=${JSON.stringify(phaseId)};globalThis.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(globalThis.__SUPERCOV_MCDC_TEST_ID__??"unscoped",${JSON.stringify(phaseId)});`,
           runImmediately: true,
         })
         .catch(() => undefined)) as { identifier?: string } | undefined;

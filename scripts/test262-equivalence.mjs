@@ -107,6 +107,9 @@ function runtimePrelude(transformed) {
     mcdcCondition: "function(frame,index,value){return value;}",
     mcdcEnd: "function(frame,value){return value;}",
     coverageHit: "function(){}",
+    registerProbeV2: "function(definition){return Object.assign(definition,{clock:{epoch:1,fast:true},hitEpochs:new Uint32Array(definition.pointIds.length),decisionEpochs:definition.decisions.map(function(meta){return new Uint32Array(2*3**Math.min(meta.conditions.length,6));})});}",
+    coverageHitV2: "function(){}",
+    mcdcEndV2: "function(file,index,encoded,value){return value;}",
     selectionBegin: "function(){return {};}",
     selectionRight: "function(frame,value,name){if(name&&typeof value==='function'&&value.name==='')Object.defineProperty(value,'name',{value:name,configurable:true});return value;}",
     selectionEnd: "function(frame,value){return value;}",
@@ -256,7 +259,14 @@ try {
     const relativePath = relative(corpusRoot, test.path).replaceAll("\\", "/");
     if (!baselineFiles.has(relativePath)) continue;
     try {
-      const transformed = instrumentMcdc(test.source, `test262/${relativePath}`).code;
+      const transformed = instrumentMcdc(
+        test.source,
+        `test262/${relativePath}`,
+        {
+          probeVersion:
+            process.env.SUPERCOV_PROBE_VERSION === "2" ? 2 : 1,
+        },
+      ).code;
       const runtime = runtimePrelude(transformed);
       const destination = resolve(instrumentedRoot, relativePath);
       mkdirSync(dirname(destination), { recursive: true });

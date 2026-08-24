@@ -16,6 +16,13 @@ const BEGIN = "__supercovMcdcBegin";
 const CONDITION = "__supercovMcdcCondition";
 const END = "__supercovMcdcEnd";
 const HIT = "__supercovCoverageHit";
+const REGISTER_V2 = "__supercovRegisterProbeV2";
+const END_V2 = "__supercovMcdcEndV2";
+const HIT_V2 = "__supercovCoverageHitV2";
+const FILE_V2 = "__supercovProbeFileV2";
+const CLOCK_V2 = "__supercovProbeClockV2";
+const HITS_V2 = "__supercovProbeHitsV2";
+const DECISIONS_V2 = "__supercovProbeDecisionsV2";
 const SELECTION_BEGIN = "__supercovSelectionBegin";
 const SELECTION_RIGHT = "__supercovSelectionRight";
 const SELECTION_END = "__supercovSelectionEnd";
@@ -159,10 +166,110 @@ function instrumentConditions(
   ]);
 }
 
+function instrumentConditionsV2(
+  node: t.Expression,
+  frameId: t.Identifier,
+  conditionTemps: t.Identifier[],
+  nextIndex: { value: number },
+  decisionLogicalNodes: WeakSet<t.LogicalExpression>,
+): t.Expression {
+  if (
+    t.isLogicalExpression(node) &&
+    (node.operator === "&&" || node.operator === "||")
+  ) {
+    const logical = t.logicalExpression(
+      node.operator,
+      instrumentConditionsV2(
+        node.left,
+        frameId,
+        conditionTemps,
+        nextIndex,
+        decisionLogicalNodes,
+      ),
+      instrumentConditionsV2(
+        node.right,
+        frameId,
+        conditionTemps,
+        nextIndex,
+        decisionLogicalNodes,
+      ),
+    );
+    decisionLogicalNodes.add(logical);
+    return logical;
+  }
+
+  if (
+    t.isUnaryExpression(node, { operator: "!" }) &&
+    hasCompoundBooleanDecision(node.argument)
+  ) {
+    return t.unaryExpression(
+      "!",
+      instrumentConditionsV2(
+        node.argument,
+        frameId,
+        conditionTemps,
+        nextIndex,
+        decisionLogicalNodes,
+      ),
+      true,
+    );
+  }
+
+  const index = nextIndex.value;
+  nextIndex.value += 1;
+  const temporary = conditionTemps[index]!;
+  const weight = 3 ** index;
+  return t.sequenceExpression([
+    t.assignmentExpression("=", t.cloneNode(temporary), node),
+    t.assignmentExpression(
+      "+=",
+      t.cloneNode(frameId),
+      t.conditionalExpression(
+        t.cloneNode(temporary),
+        t.numericLiteral(weight * 2),
+        t.numericLiteral(weight),
+      ),
+    ),
+    t.cloneNode(temporary),
+  ]);
+}
+
 function hitStatement(
   id: string,
   hitRuntimeName: string,
+  v2?: {
+    fileState: t.Identifier;
+    clock: t.Identifier;
+    hitEpochs: t.Identifier;
+    pointIndex: number;
+  },
 ): t.ExpressionStatement {
+  if (v2) {
+    const fileState = t.cloneNode(v2.fileState);
+    const clock = t.cloneNode(v2.clock);
+    return t.expressionStatement(
+      t.logicalExpression(
+        "||",
+        t.logicalExpression(
+          "&&",
+          t.memberExpression(t.cloneNode(clock), t.identifier("fast")),
+          t.binaryExpression(
+            "===",
+            t.memberExpression(
+              t.cloneNode(v2.hitEpochs),
+              t.numericLiteral(v2.pointIndex),
+              true,
+            ),
+            t.memberExpression(t.cloneNode(clock), t.identifier("epoch")),
+          ),
+        ),
+        t.callExpression(t.identifier(hitRuntimeName), [
+          t.cloneNode(fileState),
+          t.numericLiteral(v2.pointIndex),
+        ]),
+      ),
+    );
+  }
   return t.expressionStatement(
     t.callExpression(t.identifier(hitRuntimeName), [t.stringLiteral(id)]),
   );
@@ -174,6 +281,13 @@ function allocatedRuntimeNames(code: string): Record<string, string> {
     CONDITION,
     END,
     HIT,
+    REGISTER_V2,
+    END_V2,
+    HIT_V2,
+    FILE_V2,
+    CLOCK_V2,
+    HITS_V2,
+    DECISIONS_V2,
     SELECTION_BEGIN,
     SELECTION_RIGHT,
     SELECTION_END,
@@ -333,15 +447,33 @@ export interface InstrumentMcdcResult {
   decisions: McdcDecisionMeta[];
 }
 
+export interface InstrumentMcdcOptions {
+  /** Experimental probe transport; v1 remains the public default. */
+  probeVersion?: 1 | 2;
+}
+
+/** Number encoding remains exact while both 3^n and its doubled outcome index are safe. */
+export const PROBE_V2_MAX_CONDITIONS = 32;
+export const PROBE_V2_DENSE_CONDITION_LIMIT = 6;
+
 export function instrumentMcdc(
   code: string,
   file: string,
+  options: InstrumentMcdcOptions = {},
 ): InstrumentMcdcResult {
   const names = allocatedRuntimeNames(code);
   const BEGIN = names["__supercovMcdcBegin"]!;
   const CONDITION = names["__supercovMcdcCondition"]!;
   const END = names["__supercovMcdcEnd"]!;
   const HIT = names["__supercovCoverageHit"]!;
+  const REGISTER_V2 = names["__supercovRegisterProbeV2"]!;
+  const END_V2 = names["__supercovMcdcEndV2"]!;
+  const HIT_V2 = names["__supercovCoverageHitV2"]!;
+  const FILE_V2 = names["__supercovProbeFileV2"]!;
+  const CLOCK_V2 = names["__supercovProbeClockV2"]!;
+  const HITS_V2 = names["__supercovProbeHitsV2"]!;
+  const DECISIONS_V2 = names["__supercovProbeDecisionsV2"]!;
+  const probeVersion = options.probeVersion ?? 1;
   const SELECTION_BEGIN = names["__supercovSelectionBegin"]!;
   const SELECTION_RIGHT = names["__supercovSelectionRight"]!;
   const SELECTION_END = names["__supercovSelectionEnd"]!;
@@ -448,7 +580,18 @@ export function instrumentMcdc(
         column: node.loc.start.column + 1,
         source: sourceFor(code, node),
       });
-      const probe = hitStatement(id, HIT);
+      const probe = hitStatement(
+        id,
+        probeVersion === 2 ? HIT_V2 : HIT,
+        probeVersion === 2
+          ? {
+              fileState: t.identifier(FILE_V2),
+              clock: t.identifier(CLOCK_V2),
+              hitEpochs: t.identifier(HITS_V2),
+              pointIndex: points.length - 1,
+            }
+          : undefined,
+      );
       generatedStatements.add(probe);
 
       if (
@@ -1030,7 +1173,18 @@ export function instrumentMcdc(
         source: sourceFor(code, node),
         ...(functionLabel(path) ? { label: functionLabel(path) } : {}),
       });
-      const probe = hitStatement(id, HIT);
+      const probe = hitStatement(
+        id,
+        probeVersion === 2 ? HIT_V2 : HIT,
+        probeVersion === 2
+          ? {
+              fileState: t.identifier(FILE_V2),
+              clock: t.identifier(CLOCK_V2),
+              hitEpochs: t.identifier(HITS_V2),
+              pointIndex: points.length - 1,
+            }
+          : undefined,
+      );
       generatedStatements.add(probe);
       if (t.isBlockStatement(node.body)) {
         node.body.body.unshift(probe);
@@ -1061,6 +1215,7 @@ export function instrumentMcdc(
       ),
       kind,
     };
+    const decisionIndex = decisions.length;
     decisions.push(meta);
 
     // A loop predicate's path scope may be represented by Babel as the loop
@@ -1079,15 +1234,47 @@ export function instrumentMcdc(
       evaluationScope.getFunctionParent() ??
       evaluationScope.getProgramParent();
     const frameId = frameScope.generateUidIdentifier("supercovMcdcFrame");
-    if (!inlineFrame)
+    const useV2 =
+      probeVersion === 2 &&
+      originalConditions.length <= PROBE_V2_MAX_CONDITIONS;
+    const conditionTemps = useV2
+      ? originalConditions.map(() =>
+          frameScope.generateUidIdentifier("supercovMcdcValue"),
+        )
+      : [];
+    const resultTemp = useV2
+      ? frameScope.generateUidIdentifier("supercovMcdcResult")
+      : undefined;
+    const useDenseV2 =
+      useV2 &&
+      originalConditions.length <= PROBE_V2_DENSE_CONDITION_LIMIT;
+    const vectorTemp = useDenseV2
+      ? frameScope.generateUidIdentifier("supercovMcdcVector")
+      : undefined;
+    if (!inlineFrame) {
       frameScope.push({ id: t.cloneNode(frameId), kind: "let" });
-    const instrumented = instrumentConditions(
-      path.node,
-      frameId,
-      { value: 0 },
-      decisionLogicalNodes,
-      CONDITION,
-    );
+      for (const temporary of conditionTemps)
+        frameScope.push({ id: t.cloneNode(temporary), kind: "let" });
+      if (resultTemp)
+        frameScope.push({ id: t.cloneNode(resultTemp), kind: "let" });
+      if (vectorTemp)
+        frameScope.push({ id: t.cloneNode(vectorTemp), kind: "let" });
+    }
+    const instrumented = useV2
+      ? instrumentConditionsV2(
+          path.node,
+          frameId,
+          conditionTemps,
+          { value: 0 },
+          decisionLogicalNodes,
+        )
+      : instrumentConditions(
+          path.node,
+          frameId,
+          { value: 0 },
+          decisionLogicalNodes,
+          CONDITION,
+        );
     const begin = t.callExpression(t.identifier(BEGIN), [
       t.stringLiteral(id),
       t.valueToNode(meta),
@@ -1095,12 +1282,77 @@ export function instrumentMcdc(
     const assignFrame = t.assignmentExpression(
       "=",
       t.cloneNode(frameId),
-      begin,
+      useV2 ? t.numericLiteral(0) : begin,
     );
-    const end = t.callExpression(t.identifier(END), [
-      t.cloneNode(frameId),
-      instrumented,
-    ]);
+    const end = useV2
+      ? t.callExpression(t.identifier(END_V2), [
+          t.identifier(FILE_V2),
+          t.numericLiteral(decisionIndex),
+          t.cloneNode(frameId),
+          t.cloneNode(resultTemp!),
+        ])
+      : t.callExpression(t.identifier(END), [
+          t.cloneNode(frameId),
+          instrumented,
+        ]);
+    const v2Tail: t.Expression[] = useV2
+      ? [
+          t.assignmentExpression(
+            "=",
+            t.cloneNode(resultTemp!),
+            instrumented,
+          ),
+          ...(useDenseV2
+            ? [
+                t.assignmentExpression(
+                  "=",
+                  t.cloneNode(vectorTemp!),
+                  t.binaryExpression(
+                    "+",
+                    t.binaryExpression(
+                      "*",
+                      t.cloneNode(frameId),
+                      t.numericLiteral(2),
+                    ),
+                    t.conditionalExpression(
+                      t.cloneNode(resultTemp!),
+                      t.numericLiteral(1),
+                      t.numericLiteral(0),
+                    ),
+                  ),
+                ),
+                t.logicalExpression(
+                  "||",
+                  t.logicalExpression(
+                    "&&",
+                    t.memberExpression(
+                      t.identifier(CLOCK_V2),
+                      t.identifier("fast"),
+                    ),
+                    t.binaryExpression(
+                      "===",
+                      t.memberExpression(
+                        t.memberExpression(
+                          t.identifier(DECISIONS_V2),
+                          t.numericLiteral(decisionIndex),
+                          true,
+                        ),
+                        t.cloneNode(vectorTemp!),
+                        true,
+                      ),
+                      t.memberExpression(
+                        t.identifier(CLOCK_V2),
+                        t.identifier("epoch"),
+                      ),
+                    ),
+                  ),
+                  end,
+                ),
+                t.cloneNode(resultTemp!),
+              ]
+            : [end]),
+        ]
+      : [end];
     path.replaceWith(
       inlineFrame
         ? t.callExpression(
@@ -1108,14 +1360,31 @@ export function instrumentMcdc(
               [],
               t.blockStatement([
                 t.variableDeclaration("let", [
-                  t.variableDeclarator(t.cloneNode(frameId), begin),
+                  t.variableDeclarator(
+                    t.cloneNode(frameId),
+                    useV2 ? t.numericLiteral(0) : begin,
+                  ),
+                  ...conditionTemps.map((temporary) =>
+                    t.variableDeclarator(t.cloneNode(temporary)),
+                  ),
+                  ...(resultTemp
+                    ? [t.variableDeclarator(t.cloneNode(resultTemp))]
+                    : []),
+                  ...(vectorTemp
+                    ? [t.variableDeclarator(t.cloneNode(vectorTemp))]
+                    : []),
                 ]),
-                t.returnStatement(end),
+                t.returnStatement(
+                  useV2 ? t.sequenceExpression(v2Tail) : end,
+                ),
               ]),
             ),
             [],
           )
-        : t.sequenceExpression([assignFrame, end]),
+        : t.sequenceExpression([
+            assignFrame,
+            ...(useV2 ? v2Tail : [end]),
+          ]),
     );
     path.skip();
   };
@@ -1536,6 +1805,22 @@ export function instrumentMcdc(
           ),
           t.importSpecifier(t.identifier(END), t.identifier("mcdcEnd")),
           t.importSpecifier(t.identifier(HIT), t.identifier("coverageHit")),
+          ...(probeVersion === 2
+            ? [
+                t.importSpecifier(
+                  t.identifier(REGISTER_V2),
+                  t.identifier("registerProbeV2"),
+                ),
+                t.importSpecifier(
+                  t.identifier(END_V2),
+                  t.identifier("mcdcEndV2"),
+                ),
+                t.importSpecifier(
+                  t.identifier(HIT_V2),
+                  t.identifier("coverageHitV2"),
+                ),
+              ]
+            : []),
           t.importSpecifier(
             t.identifier(SELECTION_BEGIN),
             t.identifier("selectionBegin"),
@@ -1599,6 +1884,42 @@ export function instrumentMcdc(
         ],
         t.stringLiteral(RUNTIME_MODULE),
       ),
+      ...(probeVersion === 2
+        ? [
+            t.variableDeclaration("const", [
+              t.variableDeclarator(
+                t.identifier(FILE_V2),
+                t.callExpression(t.identifier(REGISTER_V2), [
+                  t.valueToNode({
+                    decisions,
+                    pointIds: points.map((point) => point.id),
+                  }),
+                ]),
+              ),
+              t.variableDeclarator(
+                t.identifier(CLOCK_V2),
+                t.memberExpression(
+                  t.identifier(FILE_V2),
+                  t.identifier("clock"),
+                ),
+              ),
+              t.variableDeclarator(
+                t.identifier(HITS_V2),
+                t.memberExpression(
+                  t.identifier(FILE_V2),
+                  t.identifier("hitEpochs"),
+                ),
+              ),
+              t.variableDeclarator(
+                t.identifier(DECISIONS_V2),
+                t.memberExpression(
+                  t.identifier(FILE_V2),
+                  t.identifier("decisionEpochs"),
+                ),
+              ),
+            ]),
+          ]
+        : []),
     );
   }
 

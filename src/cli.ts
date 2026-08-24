@@ -405,6 +405,9 @@ async function createCoverageRun(command: string[]): Promise<number> {
         "mcdcBegin",
         "mcdcCondition",
         "mcdcEnd",
+        "registerProbeV2",
+        "coverageHitV2",
+        "mcdcEndV2",
       ].map((name) => `export declare function ${name}(...args: any[]): any;`).join("\n")}\n`,
     );
     const generatedPlaywrightAdapter = resolve(generatedDirectory, "playwright.js");
