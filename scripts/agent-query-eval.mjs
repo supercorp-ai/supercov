@@ -191,6 +191,18 @@ requirePagination(testDetail, "test detail");
 if (testDetail.tests?.length !== 1 || testDetail.tests[0].id !== test.id) {
   throw new Error("test query did not resolve an exact test ID");
 }
+if (
+  testDetail.paginationAppliesTo !==
+    "lines, hits/hitDetails, decisions, and phases independently within the test" ||
+  testDetail.tests[0].hitDetails.some(
+    (hit) => typeof hit.id !== "string" || typeof hit.obligation !== "string",
+  ) ||
+  testDetail.tests[0].decisions.some(
+    (decision) => !decision.meta?.file || !Number.isSafeInteger(decision.meta.line),
+  )
+) {
+  throw new Error("test query exposed opaque evidence without source metadata");
+}
 
 const minimized = query(
   complete.id,

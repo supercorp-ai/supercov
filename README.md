@@ -145,6 +145,10 @@ The summary also exposes provider-neutral transport counters. If Supercov
 supervises remote launches but receives no server records, it emits a
 `REMOTE_SERVER_EVIDENCE_MISSING` diagnostic instead of letting an agent assume
 that browser-only evidence describes the whole application.
+Malformed JSONL transport records do not make the entire run unreadable.
+Supercov retains valid records, emits a `CORRUPT_EVIDENCE_RECORDS` error
+diagnostic, and marks measurement completeness false until a clean run is
+available.
 Text output is concise for an interactive agent; JSON is the stable machine
 interface that can later back hosted coverage tools without changing the
 stored evidence schema. Every JSON response uses contract version 1:

@@ -391,6 +391,8 @@ export interface McdcCoverageView {
     workspaceCapabilities: number;
     scopedServerRecords: number;
     backgroundServerRecords: number;
+    corruptRecords: number;
+    corruptFiles: number;
   };
   summary: CoverageSummary;
   coverageByKind: Array<{

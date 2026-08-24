@@ -90,6 +90,60 @@ it("reconstructs observed and outcome-filtered views solely from archived eviden
     workspaceCapabilities: 1,
     scopedServerRecords: 0,
     backgroundServerRecords: 0,
+    corruptRecords: 0,
+    corruptFiles: 0,
   });
   expect(report.filters?.passed.transport).toEqual(report.transport);
+});
+
+it("keeps valid JSONL evidence and marks malformed records as corrupt", () => {
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-corrupt-analysis-"));
+  temporaryDirectories.push(root);
+  const manifest: CoverageManifest = {
+    decisions: [],
+    branches: [],
+    points: [{
+      id: "server-hit",
+      kind: "statement",
+      file: "src/server.ts",
+      line: 1,
+      column: 1,
+      source: "serve();",
+    }],
+  };
+  const result: McdcRawTestResult = {
+    testId: "passing-test",
+    test: "passing-test",
+    status: "passed",
+    runtime: [],
+    browser: [],
+    server: [],
+  };
+  const manifestPath = resolve(root, "manifest-source.json");
+  const evidenceDirectory = resolve(root, "evidence/test");
+  const backgroundDirectory = resolve(root, "evidence/server/background");
+  mkdirSync(evidenceDirectory, { recursive: true });
+  mkdirSync(backgroundDirectory, { recursive: true });
+  writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
+  writeFileSync(resolve(evidenceDirectory, "mcdc.json"), `${JSON.stringify(result)}\n`);
+  writeFileSync(
+    resolve(backgroundDirectory, "replica.jsonl"),
+    `${JSON.stringify({ type: "hit", id: "server-hit" })}\nnot-json\n`,
+  );
+  const archivePath = resolve(root, "evidence.raw.gz");
+  writeEvidenceArchive(
+    [
+      { file: manifestPath, path: "manifest.json" },
+      { directory: resolve(root, "evidence") },
+    ],
+    archivePath,
+  );
+
+  const report = analyzeCoverageArchive(archivePath, { runId: "run-corrupt" });
+  expect(report.summary.lines).toMatchObject({ covered: 1, total: 1 });
+  expect(report.transport).toMatchObject({
+    backgroundServerRecords: 1,
+    corruptRecords: 1,
+    corruptFiles: 1,
+  });
 });

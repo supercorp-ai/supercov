@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -22,7 +22,6 @@ import {
   encodeCoverageScope,
   serverEvidencePath,
   serverRunEvidenceDirectory,
-  backgroundEvidencePath,
 } from "../../src/transport.ts";
 import type {
   CoverageExecutionScope,
@@ -211,20 +210,35 @@ describe("concurrent server evidence transport", () => {
   it("persists evidence with no test scope under the run background scope", () => {
     const runId = `background-${process.pid}-${Date.now()}`;
     const previous = process.env.SUPERCOV_RUN_ID;
+    const previousShard = process.env.SUPERCOV_EXECUTION_LOG_SHARD;
     process.env.SUPERCOV_RUN_ID = runId;
+    process.env.SUPERCOV_EXECUTION_LOG_SHARD = "replicated-snapshot";
     try {
       coverageHit("detached-hit");
-      const background = readFileSync(backgroundEvidencePath(runId), "utf8")
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line) as CoverageServerRecord);
+      coverageHit("second-detached-hit");
+      const directory = resolve(serverRunEvidenceDirectory(runId), "background");
+      const files = readdirSync(directory);
+      expect(files).toHaveLength(2);
+      expect(files.every((file) => file.startsWith("replicated-snapshot-"))).toBe(true);
+      const background = files.flatMap((file) =>
+        readFileSync(resolve(directory, file), "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as CoverageServerRecord),
+      );
       expect(background).toContainEqual(
         expect.objectContaining({ type: "hit", id: "detached-hit" }),
+      );
+      expect(background).toContainEqual(
+        expect.objectContaining({ type: "hit", id: "second-detached-hit" }),
       );
       expect(background[0]?.scope).toBeUndefined();
     } finally {
       if (previous === undefined) delete process.env.SUPERCOV_RUN_ID;
       else process.env.SUPERCOV_RUN_ID = previous;
+      if (previousShard === undefined)
+        delete process.env.SUPERCOV_EXECUTION_LOG_SHARD;
+      else process.env.SUPERCOV_EXECUTION_LOG_SHARD = previousShard;
       rmSync(serverRunEvidenceDirectory(runId), {
         recursive: true,
         force: true,

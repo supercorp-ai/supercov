@@ -58,6 +58,7 @@ describe("coverage measurement limitations", () => {
     expect(coverageMeasurement(report)).toEqual({
       complete: false,
       limitations: 2,
+      evidenceCorruptions: 0,
       blocking: 2,
       files: 2,
       byKind: {
@@ -79,6 +80,33 @@ describe("coverage measurement limitations", () => {
       missingMcdcConditions: 0,
       measurementLimitations: 1,
       limitationKinds: ["dynamic-code"],
+    });
+  });
+
+  it("blocks completeness when archived transport evidence is corrupt", () => {
+    const report = limitedReport();
+    report.limitations = [];
+    report.transport = {
+      processes: 1,
+      childLaunches: 0,
+      remoteLaunches: 0,
+      workspaceCapabilities: 0,
+      scopedServerRecords: 10,
+      backgroundServerRecords: 4,
+      corruptRecords: 2,
+      corruptFiles: 1,
+    };
+    expect(coverageMeasurement(report)).toEqual({
+      complete: false,
+      limitations: 0,
+      evidenceCorruptions: 2,
+      blocking: 2,
+      files: 1,
+      byKind: {
+        "dynamic-code": 0,
+        "semantic-safety": 0,
+        "source-scope": 0,
+      },
     });
   });
 });

@@ -702,25 +702,35 @@ function coverageDiagnostics(
   report: McdcReport,
   selected?: Set<string>,
 ): Array<{
-  code: "REMOTE_SERVER_EVIDENCE_MISSING";
-  severity: "warning";
+  code: "REMOTE_SERVER_EVIDENCE_MISSING" | "CORRUPT_EVIDENCE_RECORDS";
+  severity: "warning" | "error";
   message: string;
 }> {
   const observed = attribution(report, selected);
+  const diagnostics: ReturnType<typeof coverageDiagnostics> = [];
+  if ((report.transport?.corruptRecords ?? 0) > 0) {
+    diagnostics.push({
+      code: "CORRUPT_EVIDENCE_RECORDS",
+      severity: "error",
+      message:
+        `${report.transport!.corruptRecords} malformed evidence record(s) in ` +
+        `${report.transport!.corruptFiles} file(s) were excluded; coverage is incomplete.`,
+    });
+  }
   if (
     (report.transport?.remoteLaunches ?? 0) > 0 &&
     (report.transport?.scopedServerRecords ?? 0) === 0 &&
     observed.serverExplicit === 0 &&
     observed.serverFallback === 0
   ) {
-    return [{
+    diagnostics.push({
       code: "REMOTE_SERVER_EVIDENCE_MISSING",
       severity: "warning",
       message:
         "Remote launches were supervised, but no server evidence returned. Coverage may describe only browser/test processes; inspect how the application server is launched.",
-    }];
+    });
   }
-  return [];
+  return diagnostics;
 }
 
 interface FileGap {
@@ -901,15 +911,17 @@ function findFile(report: McdcReport, selector: string): string {
 export interface CoverageMeasurementStatus {
   complete: boolean;
   limitations: number;
+  evidenceCorruptions: number;
   blocking: number;
   files: number;
   byKind: Record<CoverageLimitation["kind"], number>;
 }
 
 export function coverageMeasurement(
-  report: Pick<McdcReport, "limitations">,
+  report: Pick<McdcReport, "limitations" | "transport">,
 ): CoverageMeasurementStatus {
   const limitations = report.limitations ?? [];
+  const evidenceCorruptions = report.transport?.corruptRecords ?? 0;
   const byKind: CoverageMeasurementStatus["byKind"] = {
     "dynamic-code": 0,
     "semantic-safety": 0,
@@ -917,11 +929,14 @@ export function coverageMeasurement(
   };
   for (const limitation of limitations) byKind[limitation.kind] += 1;
   return {
-    complete: limitations.length === 0,
+    complete: limitations.length === 0 && evidenceCorruptions === 0,
     limitations: limitations.length,
+    evidenceCorruptions,
     // Every current limitation removes source from the measured denominator.
-    blocking: limitations.length,
-    files: new Set(limitations.map((limitation) => limitation.file)).size,
+    blocking: limitations.length + evidenceCorruptions,
+    files:
+      new Set(limitations.map((limitation) => limitation.file)).size +
+      (report.transport?.corruptFiles ?? 0),
     byKind,
   };
 }
@@ -1943,6 +1958,48 @@ export async function runQueryCommand(
       );
     }
     const test = matches[0]!;
+    const pointById = new Map(
+      report.points.map((point) => [point.meta.id, point.meta]),
+    );
+    const branchAlternativeById = new Map(
+      report.branches.flatMap((branch) =>
+        branch.alternatives.map((alternative) => [
+          alternative.id,
+          {
+            ...branch.meta,
+            id: alternative.id,
+            alternative: alternative.label,
+          },
+        ] as const),
+      ),
+    );
+    const allHitDetails = test.hits.map((id) => {
+      const point = pointById.get(id);
+      if (point)
+        return {
+          id: point.id,
+          obligation: point.kind,
+          file: point.file,
+          line: point.line,
+          column: point.column,
+          label: point.label,
+        };
+      const branch = branchAlternativeById.get(id);
+      if (branch)
+        return {
+          id: branch.id,
+          obligation: "branch" as const,
+          branchKind: branch.kind,
+          file: branch.file,
+          line: branch.line,
+          column: branch.column,
+          alternative: branch.alternative,
+        };
+      return { id, obligation: "unknown" as const };
+    });
+    const decisionById = new Map(
+      report.decisions.map((decision) => [decision.meta.id, decision.meta]),
+    );
     const allPhases = report.phases
       .filter((phase) => phase.test === test.id)
       .map((phase) => ({
@@ -1968,7 +2025,11 @@ export async function runQueryCommand(
       ...test,
       lines: page(test.lines, options),
       hits: page(test.hits, options),
-      decisions: page(test.decisions, options),
+      hitDetails: page(allHitDetails, options),
+      decisions: page(test.decisions, options).map((decision) => ({
+        ...decision,
+        meta: decisionById.get(decision.id),
+      })),
       phases: page(allPhases, options),
       totals: {
         lines: test.lines.length,
@@ -1993,6 +2054,8 @@ export async function runQueryCommand(
       {
         run: run.id,
         filters: queryFilters(options),
+        paginationAppliesTo:
+          "lines, hits/hitDetails, decisions, and phases independently within the test",
         tests: [selected],
       },
       options,

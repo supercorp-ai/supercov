@@ -65,6 +65,7 @@ interface RuntimeState {
       records: Map<string, CoverageServerRecord>;
     }
   >;
+  backgroundSequence: number;
   runtimeSnapshots: boolean;
 }
 
@@ -99,6 +100,7 @@ interface AsyncHooksBuiltin {
 interface FsBuiltin {
   appendFileSync(path: string, data: string): void;
   mkdirSync(path: string, options: { recursive: boolean }): void;
+  writeFileSync(path: string, data: string, options: { flag: "wx" }): void;
 }
 
 const runtimeGlobal = globalThis as McdcGlobal;
@@ -147,6 +149,7 @@ function createState(): RuntimeState {
     eventKeys: new Set(),
     bufferedAttempts: new Set(),
     serverBuffers: new Map(),
+    backgroundSequence: 0,
     runtimeSnapshots: false,
   };
   if (!isBrowser) return state;
@@ -324,9 +327,7 @@ function appendServer(record: CoverageServerRecord): void {
     const directory = scope
       ? serverEvidenceDirectory(scope)
       : backgroundEvidenceDirectory(runId);
-    const path = scope
-      ? serverEvidencePath(scope)
-      : backgroundEvidencePath(runId);
+    const path = scope ? serverEvidencePath(scope) : undefined;
     const serialized = { ...record, ...(scope ? { scope } : {}) };
     if (scope && state.bufferedAttempts.has(attemptKey(scope))) {
       const key = attemptKey(scope);
@@ -341,6 +342,31 @@ function appendServer(record: CoverageServerRecord): void {
       return;
     }
     fs.mkdirSync(directory, { recursive: true });
+    if (!path) {
+      // A warm process can be snapshotted and cloned into many remote VMs.
+      // Those clones share pid, environment and in-memory counters, so they
+      // must not append to one JSONL file on a shared mount. Claim one
+      // immutable record file with O_EXCL instead. Colliding clones simply
+      // advance until one filename is theirs; no provider-specific VM identity
+      // or append-atomicity guarantee is required.
+      const shard = process.env["SUPERCOV_EXECUTION_LOG_SHARD"] ?? "process";
+      const writer = `${shard}-${process.pid}`;
+      const payload = JSON.stringify(serialized) + "\n";
+      for (let attempt = 0; attempt < 10_000; attempt += 1) {
+        const candidate = backgroundEvidencePath(
+          runId,
+          `${writer}-${state.backgroundSequence++}`,
+        );
+        try {
+          fs.writeFileSync(candidate, payload, { flag: "wx" });
+          return;
+        } catch (error) {
+          if ((error as { code?: string }).code === "EEXIST") continue;
+          throw error;
+        }
+      }
+      return;
+    }
     fs.appendFileSync(
       path,
       JSON.stringify(serialized) + "\n",

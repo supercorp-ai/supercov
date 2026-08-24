@@ -116,6 +116,34 @@ function parseJson<T>(contents: string, source: string): T {
   }
 }
 
+function parseJsonLines<T>(
+  entries: Array<{ path: string; contents: string }>,
+): {
+  records: T[];
+  corruptRecords: number;
+  corruptFiles: number;
+} {
+  const records: T[] = [];
+  let corruptRecords = 0;
+  const corruptFiles = new Set<string>();
+  for (const entry of entries) {
+    for (const line of entry.contents.split("\n")) {
+      if (!line) continue;
+      try {
+        records.push(JSON.parse(line) as T);
+      } catch {
+        corruptRecords += 1;
+        corruptFiles.add(entry.path);
+      }
+    }
+  }
+  return {
+    records,
+    corruptRecords,
+    corruptFiles: corruptFiles.size,
+  };
+}
+
 /** Reconstruct every derived coverage view directly from one immutable run. */
 export function analyzeCoverageArchive(
   archivePath: string,
@@ -129,16 +157,10 @@ export function analyzeCoverageArchive(
   const rawResults = archive.files
     .filter((entry) => /(?:^|\/)mcdc\.json$/.test(entry.path))
     .map((entry) => parseJson<McdcRawTestResult>(entry.contents, entry.path));
-  const scopedRecords = archive.files
-    .filter((entry) => /^server\/.*\/server\.jsonl$/.test(entry.path))
-    .flatMap((entry) =>
-      entry.contents
-        .split("\n")
-        .filter(Boolean)
-        .map((line, index) =>
-          parseJson<CoverageServerRecord>(line, `${entry.path}:${index + 1}`),
-        ),
-    );
+  const scopedEvidence = parseJsonLines<CoverageServerRecord>(
+    archive.files.filter((entry) => /^server\/.*\/server\.jsonl$/.test(entry.path)),
+  );
+  const scopedRecords = scopedEvidence.records;
   for (const record of scopedRecords) {
     if (!record.scope) continue;
     const matching = rawResults.find(
@@ -152,16 +174,10 @@ export function analyzeCoverageArchive(
     if (!matching.server.some((candidate) => JSON.stringify(candidate) === serialized))
       matching.server.push(record);
   }
-  const backgroundRecords = archive.files
-    .filter((entry) => /^server\/background\/.*\.jsonl$/.test(entry.path))
-    .flatMap((entry) =>
-      entry.contents
-        .split("\n")
-        .filter(Boolean)
-        .map((line, index) =>
-          parseJson<CoverageServerRecord>(line, `${entry.path}:${index + 1}`),
-        ),
-    );
+  const backgroundEvidence = parseJsonLines<CoverageServerRecord>(
+    archive.files.filter((entry) => /^server\/background\/.*\.jsonl$/.test(entry.path)),
+  );
+  const backgroundRecords = backgroundEvidence.records;
   if (backgroundRecords.length > 0) {
     rawResults.push({
       testId: `background:${options.runId}`,
@@ -178,16 +194,18 @@ export function analyzeCoverageArchive(
       server: backgroundRecords,
     });
   }
-  const executionEvents = archive.files
-    .filter((entry) => /^execution\..*\.jsonl$/.test(entry.path))
-    .flatMap((entry) =>
-      entry.contents
-        .split("\n")
-        .filter(Boolean)
-        .map((line, index) =>
-          parseJson<{ event?: string }>(line, `${entry.path}:${index + 1}`),
-        ),
-    );
+  const executionEvidence = parseJsonLines<{ event?: string }>(
+    archive.files.filter((entry) => /^execution\..*\.jsonl$/.test(entry.path)),
+  );
+  const executionEvents = executionEvidence.records;
+  const corruptRecords =
+    scopedEvidence.corruptRecords +
+    backgroundEvidence.corruptRecords +
+    executionEvidence.corruptRecords;
+  const corruptFiles =
+    scopedEvidence.corruptFiles +
+    backgroundEvidence.corruptFiles +
+    executionEvidence.corruptFiles;
   const transport = {
     processes: executionEvents.filter((event) => event.event === "process").length,
     childLaunches: executionEvents.filter((event) => event.event === "child-launch").length,
@@ -197,6 +215,8 @@ export function analyzeCoverageArchive(
     ).length,
     scopedServerRecords: scopedRecords.length,
     backgroundServerRecords: backgroundRecords.length,
+    corruptRecords,
+    corruptFiles,
   };
   const report = analyzeCoverageResults(manifest, rawResults, options);
   report.transport = transport;
