@@ -125,6 +125,21 @@ rkyv both work; SQLite is likely overkill. Settle by benchmark spike (S2).
 - **S7 (→ Phase 1): perf CI.** Criterion/hyperfine harness wired to the
   acceptance-gate table so gates are enforced by CI, not by memory; corpus
   ecosystem-check scheduled nightly with cached clones.
+- **S8 (→ Phase 6, Rust): insertion-point ADR.** rustc MC/DC status and
+  stability, then MIR pass vs out-of-tree LLVM plugin vs source transform,
+  including the ongoing cost of tracking LLVM/rustc release cadence. Exit:
+  ADR with a maintenance-burden estimate per option.
+- **S9 (→ Phase 6, C/C++): Tier A sufficiency.** clang's per-decision
+  condition cap and its configurability; we already observe 10-condition
+  decisions in JS, so Tier A must degrade explicitly rather than silently
+  merge. Exit: cap documented, degradation specified.
+- **S10 (→ Phase 6): attribution-ladder validation.** Per-test evidence from
+  a real Rust crate under `cargo nextest` (process-per-test = exact
+  attribution), MC/DC verdicts matching `llvm-cov` on the same run. Exit: a
+  golden-corpus fixture shaped like today's JS fixtures.
+
+Detail for S8–S10, the two-tier model and the per-language matrix live in
+`multi-language-architecture-2026-08-24.md`.
 
 ## Risk register (new since master plan)
 
@@ -135,3 +150,9 @@ rkyv both work; SQLite is likely overkill. Settle by benchmark spike (S2).
 - AsyncLocalStorage overhead varies by Node version → measure, don't assume
   (S5).
 - cargo-dist single-vendor risk → ADR keeps hand-rolled exit path (S6/Phase 5).
+- Owning compiled-language instrumentation means tracking LLVM/rustc release
+  cadence indefinitely; this is the dominant long-term cost of Phase 6 Tier B
+  and must be priced before committing to a plugin (S8).
+- Per-language equivalence corpora, not instrumenters, are the real cost
+  driver for new languages. Treat a missing corpus as a hard ship blocker,
+  not a documentation gap.

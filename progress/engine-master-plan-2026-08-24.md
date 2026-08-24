@@ -19,6 +19,11 @@ code; a compatibility sweep is in flight and Tier 1 (trust) still lands first.
 3. **Collectors stay in the target language.** The JS runtime/adapters remain
    JS generated into the isolated workspace; the future Python collector is
    Python generated the same way. The binary question is only the engine.
+   Per language the engine grows exactly two things — where probes are
+   inserted, and how test/phase identity propagates to a probe. The evidence
+   contract, analysis, MC/DC pair search and query surface are shared and are
+   never rewritten per language; probe v2's bitmap model is language-neutral
+   precisely to keep that true.
 4. **No resident processes — ever.** (User decision 2026-08-24; supersedes
    the earlier `supercov serve` proposal.) Every invocation is fire-and-
    forget; "no resident service" stays a product guarantee. Query latency is
@@ -107,6 +112,18 @@ miss blocks flipping any default.
 - **Phase 5: distribution matrix + Python.** Release pipeline for all
   registries; then the Python collector (generated conftest/import-hook shim,
   pytest adapter) rides on the binary. PyPI wheels ship here.
+- **Phase 6: every other language, at full quality.** Rust, C/C++, Go, then
+  JVM/Ruby/PHP. Two tiers per language: **Tier A** adapts native coverage
+  output (LLVM profdata, `go test -cover`), **Tier B** owns the
+  instrumentation (our probe-v2 form with task-local epochs) to reach parity
+  under in-process parallelism. Full per-test attribution and assertion
+  linkage are achievable in compiled languages — an earlier note claiming
+  otherwise described the cost-optimal path, not the ceiling. Gate per
+  language: a semantic-equivalence corpus of its own, an explicitly declared
+  attribution tier per runner, and enumerated limitations; a language whose
+  corpus is not green is a language we do not claim to support. Full design,
+  per-language matrix, attribution ladder and spikes S8–S10:
+  `progress/multi-language-architecture-2026-08-24.md`.
 
 ## Non-goals and guardrails
 
