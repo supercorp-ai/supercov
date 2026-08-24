@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { createMcdcReport } from "../../src/analyze";
-import type { CoverageBranchKind } from "../../src/types";
-import { executeDifferential } from "./instrumenter-harness";
-import clangGolden from "../fixtures/clang-mcdc/oracle.json";
+import { describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
+import { createMcdcReport } from "../../src/analyze.ts";
+import type { CoverageBranchKind } from "../../src/types.ts";
+import { executeDifferential } from "./instrumenter-harness.ts";
+import clangGolden from "../fixtures/clang-mcdc/oracle.json" with { type: "json" };
 
 function alternatives(
   result: Awaited<ReturnType<typeof executeDifferential>>,

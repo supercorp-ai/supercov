@@ -68,11 +68,14 @@ blocks the trusted-publishing workflow.
 
 ## Agent query workflow
 
-Each run is stored locally as two immutable files under
-`.supercov/runs/<run-id>/`: `evidence.raw.gz` and `run.json`. The archive
+Each run is stored locally under `.supercov/runs/<run-id>/`. Its immutable
+`evidence.raw.gz` archive and `run.json` metadata are the source of truth. The archive
 contains the exact coverage denominator manifest plus raw per-worker and
-background evidence. Every query reconstructs its requested coverage view
-directly from that archive; no derived report or query cache is retained.
+background evidence. The first query lazily reconstructs the complete coverage
+model and atomically writes a disposable, integrity-checked `query-index.v1.json.gz`;
+later queries reuse it. A changed archive, incompatible Supercov/schema version,
+or corrupt index causes automatic reconstruction, so the index can be deleted at
+any time without losing coverage data.
 Loose evidence is removed only after the whole run directory is atomically
 visible. HTML is not generated during a test run; agents should use bounded
 CLI queries instead of loading the complete derived model into context.
@@ -107,6 +110,11 @@ npx supercov diff <older-run> <newer-run>
 npx supercov merge <first-run-id> <second-run-id>
 ```
 
+`supercov runs` is metadata-only for uncached history and never reconstructs
+coverage for twenty runs merely to list them. Runs whose disposable query index
+already exists include their metrics; other rows say `coverage not indexed`.
+Selecting a run with `runs <run-id> coverage` materializes its index lazily.
+
 Coverage queries use `--filter all` by default, matching conventional coverage
 tools: every executed attempt contributes, including attempts that later fail.
 Use `--filter passed` for verified coverage from successful attempts of
@@ -121,9 +129,24 @@ run. `latest` is a convenience selector for interactive use. Every query
 accepts `--json` and—where the result can be long—`--limit` and `--offset`.
 Every collection is paginated at 20 items by default and prints its range plus
 a copyable next-page command; generated commands omit the default limit.
+Measurement limitations use the same drill-down commands as ordinary gaps.
+The coverage summary reports whether the measured denominator is complete,
+`coverage files` and `coverage gaps` include per-file limitation counts and
+kinds, and `coverage file <path>` returns the bounded source locations, reasons,
+and denominator effect. `coverage scope` attaches the same counts to included,
+excluded, and ambiguous source entries. A 100% metric with a blocking limitation
+is therefore never reported as structurally complete.
 Text output is concise for an interactive agent; JSON is the stable machine
 interface that can later back hosted coverage tools without changing the
-stored evidence schema. `coverage minimize` is an exact branch-and-bound
+stored evidence schema. Every JSON response uses contract version 1:
+successful responses contain `schemaVersion`, `ok: true`, `command`, `data`,
+and, for every bounded collection, one `pagination` object with `offset`,
+`limit`, `returned`, `total`, `hasMore`, and `nextOffset`. Failures exit with
+status 2 and emit only a parseable `ok: false` envelope containing a stable
+error `code`, message, retryability, and bounded details. JSON stdout has a
+hard 64 KiB limit; an oversized request returns `RESPONSE_TOO_LARGE` so the
+caller can paginate or narrow it instead of flooding an agent context.
+`coverage minimize` is an exact branch-and-bound
 solver: line, statement, function, and branch obligations use per-test
 provenance, while MC/DC obligations retain complete independence-witness pairs
 and are recomputed for every candidate subset. Its result is therefore a

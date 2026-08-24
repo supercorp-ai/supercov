@@ -1,11 +1,12 @@
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
 import {
   discoverWorkspaceMapping,
   guestCoverageEnvironment,
   scopeCapabilityCache,
   wrapCapabilityObject,
-} from "../../src/launchSupervisor";
+} from "../../src/launchSupervisor.ts";
 
 describe("generic launch supervision", () => {
   it("discovers a mounted isolated workspace without provider knowledge", () => {

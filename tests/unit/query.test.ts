@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { resolveCoverageQueryInvocation } from "../../src/query";
+import { describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
+import { resolveCoverageQueryInvocation } from "../../src/query.ts";
 
 describe("coverage query routing", () => {
   it("keeps runs without an ID as the run listing", () => {
@@ -18,9 +19,8 @@ describe("coverage query routing", () => {
     });
   });
 
-  it.each(["scope", "files", "gaps", "file", "decision", "covers", "test", "minimize"])(
-    "resolves the coverage %s subresource",
-    (child) => {
+  for (const child of ["scope", "files", "gaps", "file", "decision", "covers", "test", "minimize"]) {
+    it(`resolves the coverage ${child} subresource`, () => {
       expect(
         resolveCoverageQueryInvocation("runs", [
           "run-123",
@@ -33,8 +33,8 @@ describe("coverage query routing", () => {
         command: child,
         args: ["--run", "run-123", "target", "--json"],
       });
-    },
-  );
+    });
+  }
 
   it("rejects unknown coverage children", () => {
     expect(() =>

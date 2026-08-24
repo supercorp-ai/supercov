@@ -1,12 +1,13 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { atomicWriteFileSync } from "../../src/atomic";
-import { writeEvidenceArchiveEntries } from "../../src/evidenceArchive";
-import { mergeCoverageRuns } from "../../src/merge";
-import { analyzeCoverageArchive } from "../../src/runAnalysis";
-import type { CoverageRunIntegrity, McdcRawTestResult } from "../../src/types";
+import { afterEach, describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
+import { atomicWriteFileSync } from "../../src/atomic.ts";
+import { writeEvidenceArchiveEntries } from "../../src/evidenceArchive.ts";
+import { mergeCoverageRuns } from "../../src/merge.ts";
+import { analyzeCoverageArchive } from "../../src/runAnalysis.ts";
+import type { CoverageRunIntegrity, McdcRawTestResult } from "../../src/types.ts";
 
 const roots: string[] = [];
 const integrity: CoverageRunIntegrity = {

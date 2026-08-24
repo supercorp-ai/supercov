@@ -1,12 +1,13 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
 import {
   compareRunIntegrity,
   createRunIntegrity,
-} from "../../src/integrity";
-import type { CoverageProject } from "../../src/project";
+} from "../../src/integrity.ts";
+import type { CoverageProject } from "../../src/project.ts";
 
 describe("run integrity", () => {
   it("fingerprints source, tests, dependencies, configuration, and instrumenter", () => {

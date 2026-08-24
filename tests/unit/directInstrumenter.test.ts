@@ -1,8 +1,9 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { instrumentDirectWorkspace } from "../../src/directInstrumenter";
+import { afterEach, describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
+import { instrumentDirectWorkspace } from "../../src/directInstrumenter.ts";
 
 const roots: string[] = [];
 

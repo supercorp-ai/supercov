@@ -10,8 +10,6 @@ import { relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { atomicRenameSync, atomicWriteFileSync } from "./atomic.ts";
-import { printCoverageSummary } from "./reporter.ts";
-import { analyzeCoverageArchive } from "./runAnalysis.ts";
 import { coverageQueryCommands, runQueryCommand } from "./query.ts";
 import { discoverCoverageProject } from "./project.ts";
 import { createRunIntegrity } from "./integrity.ts";
@@ -35,6 +33,7 @@ import {
   updateRunState,
   writeRunState,
 } from "./workspace.ts";
+import { agentFailureJson, SupercovError } from "./agentJson.ts";
 
 interface ChildResult {
   status: number | null;
@@ -291,6 +290,14 @@ async function createCoverageRun(command: string[]): Promise<number> {
     ]) {
       copyFileSync(resolve(packageSource, file), resolve(generatedDirectory, file));
     }
+    const generatedRuntime = resolve(generatedDirectory, "runtime.js");
+    atomicWriteFileSync(
+      generatedRuntime,
+      readFileSync(generatedRuntime, "utf8").replaceAll(
+        "__SUPERCOV_RUNTIME_INSTANCE__",
+        `collector-${runId}`,
+      ),
+    );
     const generatedPlaywrightAdapter = resolve(generatedDirectory, "playwright.js");
     const generatedPlaywrightReporter = resolve(generatedDirectory, "playwrightReporter.js");
     atomicWriteFileSync(
@@ -460,7 +467,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
         `const attempts = new Map();`,
         `const suites = [];`,
         `const copyModifiers = (target, source, wrap, ancestors = new Set()) => { if (ancestors.has(source)) return target; const seen = new Set(ancestors); seen.add(source); for (const key of Object.getOwnPropertyNames(source)) { if (['length', 'name', 'prototype'].includes(key)) continue; const value = source[key]; if (typeof value !== 'function') continue; try { const decorated = key === 'each' ? (...eachArgs) => wrap(value.apply(source, eachArgs), eachArgs) : copyModifiers(wrap(value.bind(source)), value, wrap, seen); Object.defineProperty(target, key, { configurable: true, enumerable: true, value: decorated }); } catch {} } return target; };`,
-        `const wrapTest = (original, eachArgs) => { const wrapped = function(...args) { const callbackIndex = args.findLastIndex(value => typeof value === 'function'); if (callbackIndex < 0) return original.apply(this, args); const callback = args[callbackIndex]; const title = typeof args[0] === 'string' ? args[0] : callback.name || 'anonymous test'; const expandedNames = []; if (eachArgs) { try { bindJestEach(name => expandedNames.push([...suites, name].join(' ')))(...eachArgs)(title, callback, args[callbackIndex + 1]); } catch {} } const registeredName = [...suites, title].join(' '); let invocation = 0; const next = [...args]; const execute = (owner, callbackArgs) => { const state = expect.getState(); const file = state.testPath; const name = expandedNames.length ? expandedNames[invocation++ % expandedNames.length] : registeredName; const testId = id(file, name); const retry = attempts.get(testId) || 0; attempts.set(testId, retry + 1); const execution = scope(file, name, retry); return process.__SUPERCOV_DIRECT_RUNTIME__.withCoverageCarrier({ version: 1, scope: execution }, () => callback.apply(owner, callbackArgs)); }; let instrumented; if (eachArgs) { instrumented = function(...callbackArgs) { return execute(this, callbackArgs); }; try { Object.defineProperty(instrumented, 'length', { value: callback.length }); } catch {} } else { instrumented = callback.length ? function(done) { return execute(this, [done]); } : function() { return execute(this, []); }; } next[callbackIndex] = instrumented; return original.apply(this, next); }; return copyModifiers(wrapped, original, wrapTest); };`,
+        `const wrapTest = (original, eachArgs) => { const wrapped = function(...args) { const callbackIndex = args.findLastIndex(value => typeof value === 'function'); if (callbackIndex < 0) return original.apply(this, args); const callback = args[callbackIndex]; const title = typeof args[0] === 'string' ? args[0] : callback.name || 'anonymous test'; const expandedNames = []; if (eachArgs) { try { bindJestEach(name => expandedNames.push([...suites, name].join(' ')))(...eachArgs)(title, callback, args[callbackIndex + 1]); } catch {} } const registeredName = [...suites, title].join(' '); let invocation = 0; const next = [...args]; const execute = (owner, originalCallbackArgs) => { const state = expect.getState(); const file = state.testPath; const name = expandedNames.length ? expandedNames[invocation++ % expandedNames.length] : registeredName; const testId = id(file, name); const retry = attempts.get(testId) || 0; attempts.set(testId, retry + 1); const execution = scope(file, name, retry); const runtime = process.__SUPERCOV_DIRECT_RUNTIME__; runtime.beginBufferedServerEvidence(execution); let flushed = false; const flush = () => { if (!flushed) { flushed = true; runtime.flushBufferedServerEvidence(execution); } }; const callbackArgs = [...originalCallbackArgs]; const doneIndex = callbackArgs.findLastIndex(value => typeof value === 'function'); if (doneIndex >= 0) { const done = callbackArgs[doneIndex]; callbackArgs[doneIndex] = (...doneArgs) => { flush(); return done(...doneArgs); }; } try { const result = runtime.withCoverageCarrier({ version: 1, scope: execution }, () => callback.apply(owner, callbackArgs)); if (result && typeof result.then === 'function') return Promise.resolve(result).finally(flush); if (doneIndex < 0) flush(); return result; } catch (error) { flush(); throw error; } }; let instrumented; if (eachArgs) { instrumented = function(...callbackArgs) { return execute(this, callbackArgs); }; try { Object.defineProperty(instrumented, 'length', { value: callback.length }); } catch {} } else { instrumented = callback.length ? function(done) { return execute(this, [done]); } : function() { return execute(this, []); }; } next[callbackIndex] = instrumented; return original.apply(this, next); }; return copyModifiers(wrapped, original, wrapTest); };`,
         `const wrapSuite = original => { const wrapped = function(...args) { const callbackIndex = args.findLastIndex(value => typeof value === 'function'); if (callbackIndex < 0) return original.apply(this, args); const callback = args[callbackIndex]; const name = typeof args[0] === 'string' ? args[0] : callback.name || 'suite'; const next = [...args]; next[callbackIndex] = function(...callbackArgs) { suites.push(name); try { return callback.apply(this, callbackArgs); } finally { suites.pop(); } }; return original.apply(this, next); }; return copyModifiers(wrapped, original, wrapSuite); };`,
         `globalThis.test = wrapTest(globalThis.test);`,
         `globalThis.it = globalThis.test;`,
@@ -644,14 +651,6 @@ async function createCoverageRun(command: string[]): Promise<number> {
           ],
           evidenceArchivePath,
         );
-        printCoverageSummary(
-          analyzeCoverageArchive(evidenceArchivePath, {
-            runId,
-            testExitCode: testResult.status,
-            integrity: runIntegrity,
-            generatedAt: startedAt,
-          }),
-        );
         timings.evidencePublicationMs = performance.now() - phaseStarted;
         atomicWriteFileSync(
           resolve(runStagingDirectory, "run.json"),
@@ -743,14 +742,25 @@ const rawArgs =
     ? ["help", ...commandArgs.slice(1)]
     : commandArgs;
 const queryCommand = rawArgs[0];
+const wantsJson = rawArgs.includes("--json");
+const agentCommand = (() => {
+  if (queryCommand !== "runs" || rawArgs[2] !== "coverage")
+    return queryCommand;
+  const child = rawArgs[3];
+  return `coverage.${child && !child.startsWith("-") ? child : "summary"}`;
+})();
+const reportCliError = (error: unknown): void => {
+  if (wantsJson) process.stdout.write(agentFailureJson(error, agentCommand));
+  else console.error(`[supercov] ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 2;
+};
 
 if (queryCommand === "clean" || queryCommand === "prune") {
   try {
     if (queryCommand === "clean") cleanCommand(rawArgs.slice(1));
     else pruneCommand(rawArgs.slice(1));
   } catch (error) {
-    console.error(`[supercov] ${error instanceof Error ? error.message : String(error)}`);
-    process.exitCode = 2;
+    reportCliError(error);
   }
 } else if (queryCommand === "merge") {
   try {
@@ -758,19 +768,22 @@ if (queryCommand === "clean" || queryCommand === "prune") {
     console.log(`[supercov] merged run ${mergedRunId}`);
     console.log(`npx supercov runs ${mergedRunId} coverage`);
   } catch (error) {
-    console.error(`[supercov] ${error instanceof Error ? error.message : String(error)}`);
-    process.exitCode = 2;
+    reportCliError(error);
   }
 } else if (queryCommand && coverageQueryCommands.has(queryCommand)) {
   try {
     await runQueryCommand(queryCommand, rawArgs.slice(1));
   } catch (error) {
-    console.error(`[supercov] ${error instanceof Error ? error.message : String(error)}`);
-    process.exitCode = 2;
+    reportCliError(error);
   }
 } else if (rawArgs[0] && rawArgs[0] !== "--") {
-  console.error(`[supercov] Unknown command: ${rawArgs[0]}. Try supercov help.`);
-  process.exitCode = 2;
+  reportCliError(
+    new SupercovError(
+      "UNKNOWN_COMMAND",
+      `Unknown command: ${rawArgs[0]}. Try supercov help.`,
+      { details: { command: rawArgs[0] } },
+    ),
+  );
 } else {
   const separator = process.argv.indexOf("--");
   const command = separator >= 0 ? process.argv.slice(separator + 1) : [];

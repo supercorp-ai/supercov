@@ -1,12 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
 import {
   COVERAGE_JOB_FIELD,
   injectCoverageCarrier,
   wrapBullProcessor,
   wrapQueuePublisher,
-} from "../../src/queueAdapters";
-import { coverageCarrier, withCoverageCarrier } from "../../src/runtime";
-import type { CoverageExecutionScope } from "../../src/types";
+} from "../../src/queueAdapters.ts";
+import { coverageCarrier, withCoverageCarrier } from "../../src/runtime.ts";
+import type { CoverageExecutionScope } from "../../src/types.ts";
 
 const scope: CoverageExecutionScope = {
   version: 1,

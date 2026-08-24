@@ -1,8 +1,9 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import SupercovVitestReporter from "../../src/vitestReporter";
+import { afterEach, describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
+import SupercovVitestReporter from "../../src/vitestReporter.ts";
 
 const temporaryDirectories: string[] = [];
 

@@ -6,15 +6,16 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, it } from "node:test";
+import { expect } from "../support/expect.ts";
 import {
   buildCacheReusePaths,
   instrumentedBuildCacheKey,
   readInstrumentedBuildCache,
   writeInstrumentedBuildCache,
-} from "../../src/buildCache";
-import type { CoverageProject } from "../../src/project";
-import type { CoverageRunIntegrity } from "../../src/types";
+} from "../../src/buildCache.ts";
+import type { CoverageProject } from "../../src/project.ts";
+import type { CoverageRunIntegrity } from "../../src/types.ts";
 
 const temporaryDirectories: string[] = [];
 

@@ -6,10 +6,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { afterEach, expect, it } from "vitest";
-import { writeEvidenceArchive } from "../../src/evidenceArchive";
-import { analyzeCoverageArchive } from "../../src/runAnalysis";
-import type { CoverageManifest, McdcRawTestResult } from "../../src/types";
+import { afterEach, it } from "node:test";
+import { expect } from "../support/expect.ts";
+import { writeEvidenceArchive } from "../../src/evidenceArchive.ts";
+import { analyzeCoverageArchive } from "../../src/runAnalysis.ts";
+import type { CoverageManifest, McdcRawTestResult } from "../../src/types.ts";
 
 const temporaryDirectories: string[] = [];
 

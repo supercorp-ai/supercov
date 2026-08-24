@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { transformCapabilityImports } from "../../src/esmInterceptor";
+import { describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
+import { transformCapabilityImports } from "../../src/esmInterceptor.ts";
 
 describe("pure ESM capability interception", () => {
   it("wraps imported values in a provider-neutral remote launcher", () => {

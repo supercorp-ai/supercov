@@ -1,9 +1,9 @@
-import { instrumentMcdc } from "../../src/instrumenter";
+import { instrumentMcdc } from "../../src/instrumenter.ts";
 import type {
   CoverageManifest,
   McdcDecisionMeta,
   McdcVector,
-} from "../../src/types";
+} from "../../src/types.ts";
 
 interface DecisionFrame {
   values: Array<boolean | null>;

@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { createMcdcReport } from "../../src/analyze";
-import { inferTestProvenance } from "../../src/provenance";
+import { describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
+import { createMcdcReport } from "../../src/analyze.ts";
+import { inferTestProvenance } from "../../src/provenance.ts";
 import type {
   McdcDecisionMeta,
   McdcVector,
-} from "../../src/types";
+} from "../../src/types.ts";
 
 describe("coverage provenance", () => {
   it("uses explicit, project, path, and runner-default classifications in order", () => {

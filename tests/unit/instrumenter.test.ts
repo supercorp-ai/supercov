@@ -1,11 +1,12 @@
-import { describe, expect, it } from "vitest";
-import { createMcdcReport } from "../../src/analyze";
-import { instrumentMcdc } from "../../src/instrumenter";
+import { describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
+import { createMcdcReport } from "../../src/analyze.ts";
+import { instrumentMcdc } from "../../src/instrumenter.ts";
 import type {
   CoverageManifest,
   McdcDecisionMeta,
   McdcVector,
-} from "../../src/types";
+} from "../../src/types.ts";
 
 function executeInstrumented(source: string): {
   decide: (left: unknown, right: unknown) => unknown;

@@ -1,13 +1,22 @@
 import { mkdirSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { afterEach, beforeEach } from "vitest";
-import { coverageSnapshot, resetCoverage } from "./runtime.ts";
+import {
+  coverageSnapshot,
+  enableRuntimeSnapshotEvidence,
+  resetCoverage,
+} from "./runtime.ts";
 import { inferTestProvenance } from "./provenance.ts";
 import { atomicWriteFileSync } from "./atomic.ts";
 import type { McdcRawTestResult } from "./types.ts";
 
 const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
 const emittedSetupFiles = new Set<string>();
+
+// Vitest persists one in-memory runtime snapshot per test. Writing the same
+// events through the server JSONL transport would be both redundant and
+// unattributed, and turns hot unit-test loops into synchronous filesystem IO.
+enableRuntimeSnapshotEvidence();
 
 function attemptStatus(
   state: string | undefined,

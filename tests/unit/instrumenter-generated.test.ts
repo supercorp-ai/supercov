@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { executeDifferential } from "./instrumenter-harness";
+import { describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
+import { executeDifferential } from "./instrumenter-harness.ts";
 
 function generator(seed: number): () => number {
   let state = seed >>> 0;

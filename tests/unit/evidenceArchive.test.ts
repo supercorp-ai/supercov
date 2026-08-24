@@ -7,11 +7,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, it } from "node:test";
+import { expect } from "../support/expect.ts";
 import {
   readEvidenceArchive,
   writeEvidenceArchive,
-} from "../../src/evidenceArchive";
+} from "../../src/evidenceArchive.ts";
 
 const temporaryDirectories: string[] = [];
 

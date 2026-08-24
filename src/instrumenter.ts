@@ -309,6 +309,15 @@ function isInsideWithStatement(path: NodePath): boolean {
   return Boolean(path.findParent((parent) => parent.isWithStatement()));
 }
 
+function isInsideFunctionParameter(path: NodePath): boolean {
+  let current: NodePath | null = path;
+  while (current?.parentPath) {
+    if (current.parentPath.isFunction()) return current.listKey === "params";
+    current = current.parentPath;
+  }
+  return false;
+}
+
 export interface InstrumentMcdcResult {
   code: string;
   map: ReturnType<typeof generate>["map"];
@@ -952,6 +961,7 @@ export function instrumentMcdc(
     // body's block. Declaring the frame there puts it after the predicate that
     // uses it (and is especially visible in async generators). Hoist scratch
     // frames to the nearest function/program scope instead.
+    const inlineFrame = isInsideFunctionParameter(path);
     const evaluationScope =
       (path.isFunctionExpression() ||
         path.isArrowFunctionExpression() ||
@@ -963,7 +973,8 @@ export function instrumentMcdc(
       evaluationScope.getFunctionParent() ??
       evaluationScope.getProgramParent();
     const frameId = frameScope.generateUidIdentifier("supercovMcdcFrame");
-    frameScope.push({ id: t.cloneNode(frameId), kind: "let" });
+    if (!inlineFrame)
+      frameScope.push({ id: t.cloneNode(frameId), kind: "let" });
     const instrumented = instrumentConditions(
       path.node,
       frameId,
@@ -984,7 +995,22 @@ export function instrumentMcdc(
       t.cloneNode(frameId),
       instrumented,
     ]);
-    path.replaceWith(t.sequenceExpression([assignFrame, end]));
+    path.replaceWith(
+      inlineFrame
+        ? t.callExpression(
+            t.arrowFunctionExpression(
+              [],
+              t.blockStatement([
+                t.variableDeclaration("let", [
+                  t.variableDeclarator(t.cloneNode(frameId), begin),
+                ]),
+                t.returnStatement(end),
+              ]),
+            ),
+            [],
+          )
+        : t.sequenceExpression([assignFrame, end]),
+    );
     path.skip();
   };
 

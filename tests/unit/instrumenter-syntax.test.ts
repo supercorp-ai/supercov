@@ -1,6 +1,7 @@
 import { parse, type ParserPlugin } from "@babel/parser";
-import { describe, expect, it } from "vitest";
-import { instrumentMcdc } from "../../src/instrumenter";
+import { describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
+import { instrumentMcdc } from "../../src/instrumenter.ts";
 
 const syntaxCases: Array<{
   file: string;

@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { createMcdcReport } from "../../src/analyze";
-import { minimumTestSet } from "../../src/query";
-import type { CoverageManifest, McdcRawTestResult, McdcVector } from "../../src/types";
+import { describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
+import { createMcdcReport } from "../../src/analyze.ts";
+import { minimumTestSet } from "../../src/query.ts";
+import type { CoverageManifest, McdcRawTestResult, McdcVector } from "../../src/types.ts";
 
 const manifest: CoverageManifest = {
   points: [],

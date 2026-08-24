@@ -16,7 +16,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
 import {
   acquireProjectLock,
   cachedWorkspacePath,
@@ -29,7 +30,7 @@ import {
   recoverAbandonedRuns,
   removeIsolatedWorkspace,
   writeRunState,
-} from "../../src/workspace";
+} from "../../src/workspace.ts";
 
 const temporaryDirectories: string[] = [];
 

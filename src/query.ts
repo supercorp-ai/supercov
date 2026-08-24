@@ -3,15 +3,25 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { coverageSummaryForTests, isIndependencePair } from "./analyze.ts";
 import { EVIDENCE_ARCHIVE_SCHEMA_VERSION } from "./evidenceArchive.ts";
-import { analyzeCoverageArchive } from "./runAnalysis.ts";
+import {
+  analyzeCoverageArchiveCached,
+  readCoverageQueryIndex,
+} from "./queryCache.ts";
 import type {
   CoverageRunIntegrity,
+  CoverageLimitation,
   McdcDecisionResult,
   McdcReport,
   McdcVector,
 } from "./types.ts";
 import { compareRunIntegrity, createRunIntegrity } from "./integrity.ts";
 import { discoverCoverageProject } from "./project.ts";
+import {
+  agentPagination,
+  agentSuccessJson,
+  SupercovError,
+  type AgentJsonPagination,
+} from "./agentJson.ts";
 
 interface StoredRun {
   id: string;
@@ -43,6 +53,7 @@ interface StoredRun {
 }
 
 interface QueryOptions {
+  command: string;
   run?: string;
   kind?: string;
   runner?: string;
@@ -55,8 +66,11 @@ interface QueryOptions {
   positional: string[];
 }
 
-function parseOptions(args: string[]): QueryOptions {
+function parseOptions(command: string, args: string[]): QueryOptions {
   const options: QueryOptions = {
+    command: command === "runs" || command === "diff" || command === "help"
+      ? command
+      : `coverage.${command}`,
     limit: 20,
     offset: 0,
     json: false,
@@ -68,34 +82,58 @@ function parseOptions(args: string[]): QueryOptions {
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index]!;
     if (value === "--json") options.json = true;
-    else if (value === "--run") options.run = args[++index];
-    else if (value === "--kind") options.kind = args[++index]?.toLowerCase();
-    else if (value === "--runner")
-      options.runner = args[++index]?.toLowerCase();
+    else if (value === "--run") {
+      const run = args[++index];
+      if (!run)
+        throw new SupercovError("INVALID_ARGUMENT", "--run requires a run ID");
+      options.run = run;
+    }
+    else if (value === "--kind") {
+      const kind = args[++index]?.toLowerCase();
+      if (!kind)
+        throw new SupercovError("INVALID_ARGUMENT", "--kind requires a test kind");
+      options.kind = kind;
+    }
+    else if (value === "--runner") {
+      const runner = args[++index]?.toLowerCase();
+      if (!runner)
+        throw new SupercovError("INVALID_ARGUMENT", "--runner requires a runner name");
+      options.runner = runner;
+    }
     else if (value === "--target") {
       const target = Number(args[++index]);
       if (!Number.isFinite(target) || target < 0 || target > 100)
-        throw new Error("--target must be between 0 and 100");
+        throw new SupercovError("INVALID_ARGUMENT", "--target must be between 0 and 100");
       options.target = target;
     }
     else if (value === "--metric") {
       const metric = args[++index]?.toLowerCase();
       if (!metric || !["all", "lines", "statements", "functions", "branches", "mcdc"].includes(metric))
-        throw new Error("--metric must be all, lines, statements, functions, branches, or mcdc");
+        throw new SupercovError("INVALID_ARGUMENT", "--metric must be all, lines, statements, functions, branches, or mcdc");
       options.metric = metric as QueryOptions["metric"];
     }
     else if (value === "--filter") {
       const filter = args[++index]?.toLowerCase();
       if (filter !== "all" && filter !== "passed" && filter !== "failed")
-        throw new Error("--filter must be all, passed, or failed");
+        throw new SupercovError("INVALID_ARGUMENT", "--filter must be all, passed, or failed");
       options.filter = filter;
     }
-    else if (value === "--limit")
-      options.limit = Math.max(1, Number(args[++index]) || 20);
-    else if (value === "--offset")
-      options.offset = Math.max(0, Number(args[++index]) || 0);
+    else if (value === "--limit") {
+      const limit = Number(args[++index]);
+      if (!Number.isSafeInteger(limit) || limit < 1)
+        throw new SupercovError("INVALID_ARGUMENT", "--limit must be a positive integer");
+      options.limit = limit;
+    }
+    else if (value === "--offset") {
+      const offset = Number(args[++index]);
+      if (!Number.isSafeInteger(offset) || offset < 0)
+        throw new SupercovError("INVALID_ARGUMENT", "--offset must be a non-negative integer");
+      options.offset = offset;
+    }
     else if (value.startsWith("--"))
-      throw new Error(`Unknown option: ${value}`);
+      throw new SupercovError("INVALID_ARGUMENT", `Unknown option: ${value}`, {
+        details: { option: value },
+      });
     else options.positional.push(value);
   }
   return options;
@@ -108,7 +146,8 @@ function filteredCoverage(
   if (options.filter === "all") return report;
   const filtered = report.filters?.[options.filter];
   if (!filtered) {
-    throw new Error(
+    throw new SupercovError(
+      "FILTER_UNAVAILABLE",
       "This run does not contain outcome-filtered coverage. Create a new coverage run.",
     );
   }
@@ -150,32 +189,50 @@ function discoverRuns(root: string): StoredRun[] {
   );
 }
 
-function analyzeStoredRun(run: StoredRun): McdcReport {
-  return analyzeCoverageArchive(run.evidencePath, {
+function storedRunAnalysisOptions(run: StoredRun) {
+  return {
     runId: run.id,
     testExitCode: run.metadata?.testExitCode,
     integrity: run.metadata?.integrity,
     generatedAt: run.metadata?.startedAt,
-  });
+  };
+}
+
+function analyzeStoredRun(run: StoredRun): McdcReport {
+  return analyzeCoverageArchiveCached(
+    run.evidencePath,
+    storedRunAnalysisOptions(run),
+  );
+}
+
+function readStoredRunIndex(run: StoredRun): McdcReport | undefined {
+  return readCoverageQueryIndex(
+    run.evidencePath,
+    storedRunAnalysisOptions(run),
+  );
 }
 
 function selectRun(
   root: string,
   selector?: string,
   currentIntegrity?: CoverageRunIntegrity,
+  quiet = false,
 ): {
   run: StoredRun;
   report: McdcReport;
 } {
   const runs = discoverRuns(root);
   if (runs.length === 0)
-    throw new Error("No local coverage runs. Run supercov first.");
+    throw new SupercovError("NO_RUNS", "No local coverage runs. Run supercov first.");
   const selected =
     !selector || selector === "latest"
       ? runs[0]
       : (runs.find((run) => run.id === selector) ??
         runs.find((run) => run.id.startsWith(selector)));
-  if (!selected) throw new Error(`Coverage run not found: ${selector}`);
+  if (!selected)
+    throw new SupercovError("RUN_NOT_FOUND", `Coverage run not found: ${selector}`, {
+      details: { selector },
+    });
   const report = analyzeStoredRun(selected);
   if (currentIntegrity) {
     const comparison = compareRunIntegrity(
@@ -187,7 +244,7 @@ function selectRun(
       stale: comparison.stale,
       staleReasons: comparison.reasons,
     };
-    if (comparison.stale) {
+    if (comparison.stale && !quiet) {
       console.error(
         `[supercov] stale run ${selected.id}: ${comparison.reasons.join(", ")}`,
       );
@@ -212,8 +269,23 @@ function page<T>(values: T[], options: QueryOptions): T[] {
   return values.slice(options.offset, options.offset + options.limit);
 }
 
-function output(value: unknown, options: QueryOptions, text: string): void {
-  console.log(options.json ? JSON.stringify(value, null, 2) : text);
+function output(
+  value: unknown,
+  options: QueryOptions,
+  text: string,
+  pagination?: AgentJsonPagination,
+): void {
+  process.stdout.write(
+    options.json ? agentSuccessJson(options.command, value, pagination) : `${text}\n`,
+  );
+}
+
+function queryPagination(
+  total: number,
+  returned: number,
+  options: QueryOptions,
+): AgentJsonPagination {
+  return agentPagination(options.offset, options.limit, returned, total);
 }
 
 function pct(value: number): string {
@@ -345,7 +417,8 @@ export function minimumTestSet(
       (test.hits.length > 0 || test.decisions.some((decision) => decision.vectors.length > 0)),
   );
   if (unattributed.length > 0) {
-    throw new Error(
+    throw new SupercovError(
+      "UNATTRIBUTED_EVIDENCE",
       "Cannot minimize exactly: this coverage view contains background/unattributed evidence. Use a runner with exact test attribution or select a fully attributed coverage view.",
     );
   }
@@ -375,8 +448,10 @@ export function minimumTestSet(
     selectedMetric === "mcdc" ? summary.conditionCoveragePct : summary[selectedMetric].percentage;
   const impossible = metrics.find((selectedMetric) => percentage(selectedMetric, fullSummary) + 1e-9 < target);
   if (impossible)
-    throw new Error(
+    throw new SupercovError(
+      "TARGET_UNREACHABLE",
       `The full selected test view reaches only ${percentage(impossible, fullSummary).toFixed(2)}% ${impossible}; target ${target}% is impossible`,
+      { details: { metric: impossible, target, reachable: percentage(impossible, fullSummary) } },
     );
 
   let exploredStates = 0;
@@ -487,7 +562,9 @@ function selectedTestIds(
     ]
       .filter(Boolean)
       .join(", ");
-    throw new Error(`No tests match ${filter}`);
+    throw new SupercovError("TEST_FILTER_EMPTY", `No tests match ${filter}`, {
+      details: { kind: options.kind, runner: options.runner },
+    });
   }
   return new Set(selected.map((test) => test.id));
 }
@@ -581,6 +658,18 @@ function filterLabel(options: QueryOptions): string {
     .join(", ");
 }
 
+function queryFilters(options: QueryOptions): {
+  outcome: QueryOptions["filter"];
+  kind: string | null;
+  runner: string | null;
+} {
+  return {
+    outcome: options.filter,
+    kind: options.kind ?? null,
+    runner: options.runner ?? null,
+  };
+}
+
 function attribution(
   report: McdcReport,
   selected?: Set<string>,
@@ -615,6 +704,8 @@ interface FileGap {
   uncoveredFunctions: number;
   missingBranches: number;
   missingMcdcConditions: number;
+  measurementLimitations: number;
+  limitationKinds: CoverageLimitation["kind"][];
   coveredByOtherTests: {
     lines: number;
     statements: number;
@@ -634,7 +725,7 @@ interface FileGap {
 
 type GapDimension = keyof FileGap["coveredByOtherTests"];
 
-function fileGaps(report: McdcReport, selected?: Set<string>): FileGap[] {
+export function fileGaps(report: McdcReport, selected?: Set<string>): FileGap[] {
   const files = new Map<string, FileGap>();
   const get = (file: string): FileGap => {
     const existing = files.get(file);
@@ -646,6 +737,8 @@ function fileGaps(report: McdcReport, selected?: Set<string>): FileGap[] {
       uncoveredFunctions: 0,
       missingBranches: 0,
       missingMcdcConditions: 0,
+      measurementLimitations: 0,
+      limitationKinds: [],
       coveredByOtherTests: {
         lines: 0,
         statements: 0,
@@ -715,12 +808,20 @@ function fileGaps(report: McdcReport, selected?: Set<string>): FileGap[] {
       }
     }
   }
+  for (const limitation of report.limitations ?? []) {
+    const gap = get(limitation.file);
+    gap.measurementLimitations += 1;
+    if (!gap.limitationKinds.includes(limitation.kind))
+      gap.limitationKinds.push(limitation.kind);
+  }
   for (const gap of files.values()) {
+    gap.limitationKinds.sort();
     gap.score =
       gap.uncoveredLines +
       gap.uncoveredFunctions * 2 +
       gap.missingBranches * 2 +
-      gap.missingMcdcConditions * 3;
+      gap.missingMcdcConditions * 3 +
+      gap.measurementLimitations * 3;
   }
   return [...files.values()].sort(
     (left, right) =>
@@ -729,18 +830,58 @@ function fileGaps(report: McdcReport, selected?: Set<string>): FileGap[] {
 }
 
 function findFile(report: McdcReport, selector: string): string {
-  const files = [...new Set(report.lines.map((line) => line.file))];
+  const files = [
+    ...new Set([
+      ...report.lines.map((line) => line.file),
+      ...(report.limitations ?? []).map((limitation) => limitation.file),
+    ]),
+  ];
   if (files.includes(selector)) return selector;
   const matches = files.filter((file) => file.includes(selector));
   if (matches.length === 1) return matches[0]!;
   if (matches.length === 0)
-    throw new Error(`Source file not found: ${selector}`);
-  throw new Error(`Ambiguous file selector: ${matches.join(", ")}`);
+    throw new SupercovError("SOURCE_NOT_FOUND", `Source file not found: ${selector}`, {
+      details: { selector },
+    });
+  throw new SupercovError("AMBIGUOUS_SELECTOR", `Ambiguous file selector: ${matches.join(", ")}`, {
+    details: { selector, matches },
+  });
+}
+
+export interface CoverageMeasurementStatus {
+  complete: boolean;
+  limitations: number;
+  blocking: number;
+  files: number;
+  byKind: Record<CoverageLimitation["kind"], number>;
+}
+
+export function coverageMeasurement(
+  report: Pick<McdcReport, "limitations">,
+): CoverageMeasurementStatus {
+  const limitations = report.limitations ?? [];
+  const byKind: CoverageMeasurementStatus["byKind"] = {
+    "dynamic-code": 0,
+    "semantic-safety": 0,
+    "source-scope": 0,
+  };
+  for (const limitation of limitations) byKind[limitation.kind] += 1;
+  return {
+    complete: limitations.length === 0,
+    limitations: limitations.length,
+    // Every current limitation removes source from the measured denominator.
+    blocking: limitations.length,
+    files: new Set(limitations.map((limitation) => limitation.file)).size,
+    byKind,
+  };
 }
 
 function locationSelector(selector: string): { file: string; line: number } {
   const match = /^(.*):(\d+)(?::\d+)?$/.exec(selector);
-  if (!match) throw new Error("Expected <source-file>:<line>");
+  if (!match)
+    throw new SupercovError("INVALID_ARGUMENT", "Expected <source-file>:<line>", {
+      details: { selector },
+    });
   return { file: match[1]!, line: Number(match[2]) };
 }
 
@@ -748,8 +889,7 @@ function vectorText(values: Array<boolean | null>, outcome: boolean): string {
   return `${values.map((value) => (value === null ? "-" : value ? "T" : "F")).join("")} -> ${outcome ? "T" : "F"}`;
 }
 
-function help(): void {
-  console.log(`Agent-oriented local coverage queries:
+const helpText = `Agent-oriented local coverage queries:
   supercov runs [--limit N] [--json]
   supercov runs <run-id> coverage [--filter all|passed|failed] [--kind e2e] [--runner playwright] [--json]
   supercov runs <run-id> coverage kinds [--json]
@@ -770,7 +910,35 @@ function help(): void {
 Use "latest" as <run-id> to query the newest local run.
 
 Create a run with:
-  supercov -- <test command>`);
+  supercov -- <test command>`;
+
+function help(options: QueryOptions): void {
+  if (options.json) {
+    return output(
+      {
+        usage: "supercov -- <test command>",
+        runSelector: "Use latest as <run-id> to query the newest local run.",
+        queryCommands: [
+          "runs",
+          "runs <run-id> coverage",
+          "runs <run-id> coverage kinds",
+          "runs <run-id> coverage runners",
+          "runs <run-id> coverage scope",
+          "runs <run-id> coverage files",
+          "runs <run-id> coverage gaps",
+          "runs <run-id> coverage file <source-file>",
+          "runs <run-id> coverage decision <id|source-file:line>",
+          "runs <run-id> coverage covers <source-file:line>",
+          "runs <run-id> coverage test <id|name-fragment>",
+          "runs <run-id> coverage minimize",
+          "diff <older-run> <newer-run>",
+        ],
+      },
+      options,
+      helpText,
+    );
+  }
+  console.log(helpText);
 }
 
 export interface CoverageQueryInvocation {
@@ -808,8 +976,10 @@ export function resolveCoverageQueryInvocation(
     "minimize",
   ]);
   if (!coverageCommands.has(child)) {
-    throw new Error(
+    throw new SupercovError(
+      "UNKNOWN_COMMAND",
       `Unknown coverage query: ${child}. Try supercov help.`,
+      { details: { command: child } },
     );
   }
 
@@ -826,20 +996,22 @@ export async function runQueryCommand(
 ): Promise<void> {
   const resolved = resolveCoverageQueryInvocation(command, args);
   command = resolved.command;
-  const options = parseOptions(resolved.args);
-  if (command === "help") return help();
+  const options = parseOptions(command, resolved.args);
+  if (command === "help") return help(options);
   const currentIntegrity = currentProjectIntegrity(root);
 
   if (command === "runs") {
     const availableRuns = discoverRuns(root);
     const runs = page(availableRuns, options).map((run) => {
-      const report = filteredCoverage(analyzeStoredRun(run), options);
+      const cached = readStoredRunIndex(run);
+      const report = cached ? filteredCoverage(cached, options) : undefined;
       return {
         id: run.id,
-        generatedAt: report.generatedAt,
-        lines: report.summary.lines.percentage,
-        branches: report.summary.branches.percentage,
-        mcdc: report.summary.conditionCoveragePct,
+        generatedAt: report?.generatedAt ?? run.metadata?.startedAt,
+        coverageIndexed: Boolean(report),
+        lines: report?.summary.lines.percentage ?? null,
+        branches: report?.summary.branches.percentage ?? null,
+        mcdc: report?.summary.conditionCoveragePct ?? null,
         command: run.metadata?.command,
         durationMs: run.metadata?.durationMs,
         timings: run.metadata?.timings,
@@ -859,25 +1031,26 @@ export async function runQueryCommand(
       options,
     );
     return output(
-      runs,
+      { filters: queryFilters(options), runs },
       options,
       runs
         .map(
           (run) =>
-            `${run.id}  lines ${pct(run.lines ?? 0)}  branches ${pct(run.branches ?? 0)}  MC/DC ${pct(run.mcdc ?? 0)}${run.stale ? `  STALE (${run.reasons.join(", ")})` : ""}`,
+            `${run.id}  ${run.coverageIndexed ? `lines ${pct(run.lines!)}  branches ${pct(run.branches!)}  MC/DC ${pct(run.mcdc!)}` : "coverage not indexed"}${run.stale ? `  STALE (${run.reasons.join(", ")})` : ""}`,
         )
         .join("\n") +
         `\n${pageLabel(availableRuns.length, runs.length, options)}` +
         (runsNext ? `\nnext page: ${runsNext}` : ""),
+      queryPagination(availableRuns.length, runs.length, options),
     );
   }
 
   if (command === "diff") {
     const [olderSelector, newerSelector] = options.positional;
     if (!olderSelector || !newerSelector)
-      throw new Error("Usage: supercov diff <older-run> <newer-run>");
-    const olderSelected = selectRun(root, olderSelector, currentIntegrity);
-    const newerSelected = selectRun(root, newerSelector, currentIntegrity);
+      throw new SupercovError("INVALID_ARGUMENT", "Usage: supercov diff <older-run> <newer-run>");
+    const olderSelected = selectRun(root, olderSelector, currentIntegrity, options.json);
+    const newerSelected = selectRun(root, newerSelector, currentIntegrity, options.json);
     const older = {
       ...olderSelected,
       report: filteredCoverage(olderSelected.report, options),
@@ -946,6 +1119,7 @@ export async function runQueryCommand(
       .map(([, label]) => label)
       .sort();
     const result = {
+      filters: queryFilters(options),
       older: older.run.id,
       newer: newer.run.id,
       delta: {
@@ -1019,10 +1193,11 @@ export async function runQueryCommand(
       result,
       options,
       `${older.run.id} -> ${newer.run.id}\nlines ${result.delta.lines >= 0 ? "+" : ""}${result.delta.lines}pp, branches ${result.delta.branches >= 0 ? "+" : ""}${result.delta.branches}pp, MC/DC ${result.delta.mcdc >= 0 ? "+" : ""}${result.delta.mcdc}pp\ngained: ${gainedLines.length} lines, ${gainedBranches.length} branches, ${gainedMcdc.length} MC/DC conditions\nlost: ${lostLines.length} lines, ${lostBranches.length} branches, ${lostMcdc.length} MC/DC conditions\n${result.gained.lines.map((line) => `+ line ${line}`).join("\n")}${result.gained.branches.length ? `\n${result.gained.branches.map((item) => `+ branch ${item}`).join("\n")}` : ""}${result.gained.mcdc.length ? `\n${result.gained.mcdc.map((item) => `+ MC/DC ${item}`).join("\n")}` : ""}\n${pageLabel(diffTotal, diffReturned, options)} per category${diffNext ? `\nnext page: ${diffNext}` : ""}`,
+      queryPagination(diffTotal, diffReturned, options),
     );
   }
 
-  const selectedRun = selectRun(root, options.run, currentIntegrity);
+  const selectedRun = selectRun(root, options.run, currentIntegrity, options.json);
   const run = selectedRun.run;
   const report = filteredCoverage(selectedRun.report, options);
   const selectedTestSet = selectedTestIds(report, options);
@@ -1033,6 +1208,7 @@ export async function runQueryCommand(
     const gaps = fileGaps(report, selectedTestSet).filter(
       (gap) => gap.score > 0,
     );
+    const measurement = coverageMeasurement(report);
     const selectedTests = report.tests.filter(
       (test) => !selectedTestSet || selectedTestSet.has(test.id),
     );
@@ -1054,19 +1230,20 @@ export async function runQueryCommand(
     );
     const result = {
       run: run.id,
-      filter: options.filter,
-      ...(filterLabel(options) ? { filter: filterLabel(options) } : {}),
+      filters: queryFilters(options),
       generatedAt: report.generatedAt,
       valid: run.metadata?.testExitCode === 0,
       stale: report.integrity?.stale ?? false,
       staleReasons: report.integrity?.staleReasons ?? [],
-      structurallyComplete: summary.coverageComplete,
+      structurallyComplete: summary.coverageComplete && measurement.complete,
       complete:
         options.filter === "passed" &&
         run.metadata?.testExitCode === 0 &&
         !report.integrity?.stale &&
-        summary.coverageComplete,
+        summary.coverageComplete &&
+        measurement.complete,
       coverage: summary,
+      measurement,
       coverageByKind: report.coverageByKind,
       coverageByRunner: report.coverageByRunner,
       attribution: attribution(report, selectedTestSet),
@@ -1095,6 +1272,15 @@ export async function runQueryCommand(
           }
         : {}),
       filesWithGaps: gaps.length,
+      filesWithCoverageGaps: gaps.filter(
+        (gap) =>
+          gap.uncoveredLines > 0 ||
+          gap.uncoveredStatements > 0 ||
+          gap.uncoveredFunctions > 0 ||
+          gap.missingBranches > 0 ||
+          gap.missingMcdcConditions > 0,
+      ).length,
+      filesWithMeasurementLimitations: measurement.files,
       tests: testCount,
       setups: setupCount,
       testOutcomes,
@@ -1111,7 +1297,7 @@ export async function runQueryCommand(
     return output(
       result,
       options,
-      `run ${run.id}${filterLabel(options) ? ` (${filterLabel(options)})` : ""}${run.metadata?.testExitCode !== 0 ? ` [INVALID: test exit ${run.metadata?.testExitCode ?? "unknown"}]` : ""}${report.integrity?.stale ? ` [STALE: ${(report.integrity.staleReasons ?? []).join(", ")}]` : ""}\nlines ${pct(summary.lines.percentage)} (${summary.lines.covered}/${summary.lines.total})\nbranches ${pct(summary.branches.percentage)} (${summary.branches.covered}/${summary.branches.total})\nMC/DC ${pct(summary.conditionCoveragePct)} (${summary.coveredConditions}/${summary.conditions})${!selectedTestSet ? `\nconfidence: ${report.lines.filter((line) => line.confidence?.level === "asserted").length} asserted lines, ${report.lines.filter((line) => line.confidence?.level === "action").length} action-linked, ${report.lines.filter((line) => line.confidence?.level === "executed").length} execution-only; ${report.decisions.reduce((total, decision) => total + decision.conditions.filter((condition) => condition.assertionCovered).length, 0)} assertion-linked MC/DC conditions` : ""}\n${testCount} test(s)${setupCount ? ` + ${setupCount} setup scope(s)` : ""}; outcomes ${Object.entries(testOutcomes).filter(([, count]) => count > 0).map(([outcome, count]) => `${outcome}=${count}`).join(", ") || "none"}; ${gaps.length} file(s) have remaining obligations${(report.limitations?.length ?? 0) ? `; ${report.limitations!.length} completeness blocker(s)` : ""}`,
+      `run ${run.id}${filterLabel(options) ? ` (${filterLabel(options)})` : ""}${run.metadata?.testExitCode !== 0 ? ` [INVALID: test exit ${run.metadata?.testExitCode ?? "unknown"}]` : ""}${report.integrity?.stale ? ` [STALE: ${(report.integrity.staleReasons ?? []).join(", ")}]` : ""}\nlines ${pct(summary.lines.percentage)} (${summary.lines.covered}/${summary.lines.total})\nbranches ${pct(summary.branches.percentage)} (${summary.branches.covered}/${summary.branches.total})\nMC/DC ${pct(summary.conditionCoveragePct)} (${summary.coveredConditions}/${summary.conditions})\nmeasurement: ${measurement.complete ? "complete" : `incomplete — ${measurement.blocking} blocking limitation(s) in ${measurement.files} file(s)`}${!selectedTestSet ? `\nconfidence: ${report.lines.filter((line) => line.confidence?.level === "asserted").length} asserted lines, ${report.lines.filter((line) => line.confidence?.level === "action").length} action-linked, ${report.lines.filter((line) => line.confidence?.level === "executed").length} execution-only; ${report.decisions.reduce((total, decision) => total + decision.conditions.filter((condition) => condition.assertionCovered).length, 0)} assertion-linked MC/DC conditions` : ""}\n${testCount} test(s)${setupCount ? ` + ${setupCount} setup scope(s)` : ""}; outcomes ${Object.entries(testOutcomes).filter(([, count]) => count > 0).map(([outcome, count]) => `${outcome}=${count}`).join(", ") || "none"}; ${gaps.length} file(s) have unresolved coverage or measurement gaps`,
     );
   }
 
@@ -1139,21 +1325,35 @@ export async function runQueryCommand(
     return output(
       {
         run: run.id,
+        filters: queryFilters(options),
         ...minimized,
         selectedCount: selectedDetails.length,
         totalCandidateTests: solverReport.tests.filter((test) => test.role === "test").length,
-        offset: options.offset,
         tests: selectedPage,
       },
       options,
       `exact minimum ${selectedDetails.length}/${solverReport.tests.filter((test) => test.role === "test").length} test(s) for ${options.target}% ${options.metric === "all" ? "coverage across all measured metrics" : options.metric}; explored ${minimized.exploredStates} state(s)\nlines ${pct(minimized.summary.lines.percentage)}, statements ${pct(minimized.summary.statements.percentage)}, functions ${pct(minimized.summary.functions.percentage)}, branches ${pct(minimized.summary.branches.percentage)}, MC/DC ${pct(minimized.summary.conditionCoveragePct)}\n${selectedPage.map((test) => `${test.id}  ${test.kind}/${test.runner}  ${test.file ?? "unknown"}  ${test.name}`).join("\n")}\n${pageLabel(selectedDetails.length, selectedPage.length, options)}${next ? `\nnext page: ${next}` : ""}`,
+      queryPagination(selectedDetails.length, selectedPage.length, options),
     );
   }
 
   if (command === "scope") {
     if (!report.scope)
-      throw new Error("This run does not contain a source-scope inventory.");
-    const ordered = [...report.scope.entries].sort((left, right) => {
+      throw new SupercovError("SCOPE_UNAVAILABLE", "This run does not contain a source-scope inventory.");
+    const limitationsByFile = new Map<string, CoverageLimitation[]>();
+    for (const limitation of report.limitations ?? []) {
+      const existing = limitationsByFile.get(limitation.file) ?? [];
+      existing.push(limitation);
+      limitationsByFile.set(limitation.file, existing);
+    }
+    const ordered = report.scope.entries.map((entry) => {
+      const limitations = limitationsByFile.get(entry.file) ?? [];
+      return {
+        ...entry,
+        measurementLimitations: limitations.length,
+        limitationKinds: [...new Set(limitations.map((item) => item.kind))].sort(),
+      };
+    }).sort((left, right) => {
       const rank = { ambiguous: 0, included: 1, excluded: 2 } as const;
       return rank[left.status] - rank[right.status] || left.file.localeCompare(right.file);
     });
@@ -1168,15 +1368,16 @@ export async function runQueryCommand(
     return output(
       {
         run: run.id,
+        filters: queryFilters(options),
         mode: report.scope.mode,
         roots: report.scope.roots,
         counts,
-        total: ordered.length,
-        offset: options.offset,
+        measurement: coverageMeasurement(report),
         entries: selectedEntries,
       },
       options,
-      `mode ${report.scope.mode}; roots ${report.scope.roots.join(", ") || "none"}; included ${counts.included}, excluded ${counts.excluded}, ambiguous ${counts.ambiguous}\n${selectedEntries.map((entry) => `${entry.status.toUpperCase()}  ${entry.file}  ${entry.reason}${entry.packageRoot ? `  [package ${entry.packageRoot}]` : ""}`).join("\n")}\n${pageLabel(ordered.length, selectedEntries.length, options)}${next ? `\nnext page: ${next}` : ""}`,
+      `mode ${report.scope.mode}; roots ${report.scope.roots.join(", ") || "none"}; included ${counts.included}, excluded ${counts.excluded}, ambiguous ${counts.ambiguous}; measurement ${coverageMeasurement(report).complete ? "complete" : `${coverageMeasurement(report).blocking} blocking limitation(s)`}\n${selectedEntries.map((entry) => `${entry.status.toUpperCase()}  ${entry.file}  ${entry.reason}${entry.measurementLimitations ? `  [measurement limitations: ${entry.measurementLimitations} ${entry.limitationKinds.join(", ")}]` : ""}${entry.packageRoot ? `  [package ${entry.packageRoot}]` : ""}`).join("\n")}\n${pageLabel(ordered.length, selectedEntries.length, options)}${next ? `\nnext page: ${next}` : ""}`,
+      queryPagination(ordered.length, selectedEntries.length, options),
     );
   }
 
@@ -1199,8 +1400,7 @@ export async function runQueryCommand(
     return output(
       {
         run: run.id,
-        total: dimension.length,
-        offset: options.offset,
+        filters: queryFilters(options),
         [command]: selectedDimension,
       },
       options,
@@ -1212,6 +1412,7 @@ export async function runQueryCommand(
         .join("\n") +
         `\n${pageLabel(dimension.length, selectedDimension.length, options)}` +
         (dimensionNext ? `\nnext page: ${dimensionNext}` : ""),
+      queryPagination(dimension.length, selectedDimension.length, options),
     );
   }
 
@@ -1233,32 +1434,40 @@ export async function runQueryCommand(
     return output(
       {
         run: run.id,
-        ...(filterLabel(options) ? { filter: filterLabel(options) } : {}),
-        total: all.length,
-        offset: options.offset,
+        filters: queryFilters(options),
         [command]: selectedFiles,
       },
       options,
       selectedFiles
         .map(
           (gap) => {
-            const status =
-              gap.score === 0
-                ? "complete"
-                : `missing: lines ${gap.uncoveredLines}  stmts ${gap.uncoveredStatements}  funcs ${gap.uncoveredFunctions}  branches ${gap.missingBranches}  MC/DC ${gap.missingMcdcConditions}`;
-            return `${gap.file}  ${status}${selectedTestSet ? `  [covered elsewhere: ${Object.values(gap.coveredByOtherTests).reduce((sum, value) => sum + value, 0)}; nowhere: ${Object.values(gap.uncoveredEverywhere).reduce((sum, value) => sum + value, 0)}]` : ""}`;
+            const missing =
+              gap.uncoveredLines +
+              gap.uncoveredStatements +
+              gap.uncoveredFunctions +
+              gap.missingBranches +
+              gap.missingMcdcConditions;
+            const status = missing === 0
+              ? "coverage complete"
+              : `missing: lines ${gap.uncoveredLines}  stmts ${gap.uncoveredStatements}  funcs ${gap.uncoveredFunctions}  branches ${gap.missingBranches}  MC/DC ${gap.missingMcdcConditions}`;
+            const limitations = gap.measurementLimitations
+              ? `  measurement limitations ${gap.measurementLimitations} (${gap.limitationKinds.join(", ")})`
+              : "";
+            return `${gap.file}  ${status}${limitations}${selectedTestSet ? `  [covered elsewhere: ${Object.values(gap.coveredByOtherTests).reduce((sum, value) => sum + value, 0)}; nowhere: ${Object.values(gap.uncoveredEverywhere).reduce((sum, value) => sum + value, 0)}]` : ""}`;
           },
         )
         .join("\n") +
         `\nshowing ${pageStart}-${pageEnd} of ${all.length}` +
         (nextCommand ? `\nnext page: ${nextCommand}` : ""),
+      queryPagination(all.length, selectedFiles.length, options),
     );
   }
 
   if (command === "file") {
     const selector = options.positional.join(" ");
     if (!selector)
-      throw new Error(
+      throw new SupercovError(
+        "INVALID_ARGUMENT",
         "Usage: supercov runs <run-id> coverage file <source-file>",
       );
     const file = findFile(report, selector);
@@ -1357,6 +1566,19 @@ export async function runQueryCommand(
       (left, right) =>
         left.line - right.line || left.kind.localeCompare(right.kind),
     );
+    const allFileLimitations = (report.limitations ?? [])
+      .filter((limitation) => limitation.file === file)
+      .map((limitation) => ({
+        ...limitation,
+        blocking: true as const,
+        effect: "outside-measured-denominator" as const,
+      }))
+      .sort(
+        (left, right) =>
+          left.line - right.line ||
+          left.column - right.column ||
+          left.id.localeCompare(right.id),
+      );
     const allFileTests = report.tests
       .filter(
         (test) =>
@@ -1370,8 +1592,17 @@ export async function runQueryCommand(
       }));
     const tests = page(allFileTests, options);
     const selected = page(obligations, options);
-    const filePageTotal = Math.max(obligations.length, allFileTests.length);
-    const filePageReturned = Math.max(selected.length, tests.length);
+    const limitations = page(allFileLimitations, options);
+    const filePageTotal = Math.max(
+      obligations.length,
+      allFileTests.length,
+      allFileLimitations.length,
+    );
+    const filePageReturned = Math.max(
+      selected.length,
+      tests.length,
+      limitations.length,
+    );
     const nextFileOffset = options.offset + filePageReturned;
     const nextFileCommand =
       filePageReturned > 0 && nextFileOffset < filePageTotal
@@ -1379,7 +1610,7 @@ export async function runQueryCommand(
         : undefined;
     const result = {
       run: run.id,
-      ...(filterLabel(options) ? { filter: filterLabel(options) } : {}),
+      filters: queryFilters(options),
       file,
       counts: {
         uncoveredLines: uncoveredLines.length,
@@ -1387,17 +1618,19 @@ export async function runQueryCommand(
         uncoveredFunctions: functions.length,
         missingBranches: branches.length,
         missingMcdcConditions: mcdc.length,
+        measurementLimitations: allFileLimitations.length,
       },
       tests,
       totalTests: allFileTests.length,
       totalObligations: obligations.length,
-      offset: options.offset,
       obligations: selected,
+      totalLimitations: allFileLimitations.length,
+      limitations,
     };
     return output(
       result,
       options,
-      `${file}\nlines ${uncoveredLines.length}, statements ${statements.length}, functions ${functions.length}, branches ${branches.length}, MC/DC ${mcdc.length}\ncovered by ${allFileTests.length} test(s)\n${selected
+      `${file}\nlines ${uncoveredLines.length}, statements ${statements.length}, functions ${functions.length}, branches ${branches.length}, MC/DC ${mcdc.length}, measurement limitations ${allFileLimitations.length}\ncovered by ${allFileTests.length} test(s)\n${selected
         .map((item) =>
           item.kind === "line"
             ? `line ${item.line}: ${item.otherCoverage.coveredElsewhere ? `covered only by ${item.otherCoverage.kinds.join(", ")}/${item.otherCoverage.runners.join(", ")}` : "uncovered everywhere"}`
@@ -1411,14 +1644,16 @@ export async function runQueryCommand(
         )
         .join(
           "\n",
-        )}\n${pageLabel(filePageTotal, filePageReturned, options)} obligations/tests${nextFileCommand ? `\nnext page: ${nextFileCommand}` : ""}`,
+        )}${selected.length && limitations.length ? "\n" : ""}${limitations.map((limitation) => `LIMITATION ${limitation.kind} ${limitation.line}:${limitation.column} [${limitation.id}]\n  ${limitation.reason}\n  source: ${limitation.source}\n  effect: outside measured denominator`).join("\n")}\n${pageLabel(filePageTotal, filePageReturned, options)} obligations/tests/limitations per category${nextFileCommand ? `\nnext page: ${nextFileCommand}` : ""}`,
+      queryPagination(filePageTotal, filePageReturned, options),
     );
   }
 
   if (command === "decision") {
     const selector = options.positional[0];
     if (!selector)
-      throw new Error(
+      throw new SupercovError(
+        "INVALID_ARGUMENT",
         "Usage: supercov runs <run-id> coverage decision <id|source-file:line>",
       );
     let matches = report.decisions.filter(
@@ -1433,7 +1668,9 @@ export async function runQueryCommand(
       );
     }
     if (matches.length === 0)
-      throw new Error(`Decision not found: ${selector}`);
+      throw new SupercovError("DECISION_NOT_FOUND", `Decision not found: ${selector}`, {
+        details: { selector },
+      });
     if (matches.length > 1) {
       const matchingDecisions = page(matches, options).map((decision) => ({
         id: decision.meta.id,
@@ -1451,12 +1688,12 @@ export async function runQueryCommand(
       return output(
         {
           run: run.id,
-          total: matches.length,
-          offset: options.offset,
+          filters: queryFilters(options),
           decisions: matchingDecisions,
         },
         options,
         `${matchingDecisions.map((decision) => `${decision.id}  ${decision.file}:${decision.line}:${decision.column}  ${decision.source}`).join("\n")}\n${pageLabel(matches.length, matchingDecisions.length, options)} matching decisions${matchesNext ? `\nnext page: ${matchesNext}` : ""}`,
+        queryPagination(matches.length, matchingDecisions.length, options),
       );
     }
     matches = matches.map((decision) =>
@@ -1500,7 +1737,7 @@ export async function runQueryCommand(
     );
     const result = {
       run: run.id,
-      ...(filterLabel(options) ? { filter: filterLabel(options) } : {}),
+      filters: queryFilters(options),
       decisions: matches,
     };
     return output(
@@ -1521,13 +1758,15 @@ export async function runQueryCommand(
         .join("\n\n") +
         `\n${pageLabel(totalDecisionEvidence, returnedDecisionEvidence, options)} conditions/vectors/tests per decision` +
         (decisionNext ? `\nnext page: ${decisionNext}` : ""),
+      queryPagination(totalDecisionEvidence, returnedDecisionEvidence, options),
     );
   }
 
   if (command === "covers") {
     const selector = options.positional[0];
     if (!selector)
-      throw new Error(
+      throw new SupercovError(
+        "INVALID_ARGUMENT",
         "Usage: supercov runs <run-id> coverage covers <source-file:line>",
       );
     const location = locationSelector(selector);
@@ -1573,7 +1812,7 @@ export async function runQueryCommand(
     );
     const result = {
       run: run.id,
-      ...(filterLabel(options) ? { filter: filterLabel(options) } : {}),
+      filters: queryFilters(options),
       location,
       covered: includesSelectedTest(line?.tests ?? [], selectedTestSet),
       confidence: line?.confidence,
@@ -1586,13 +1825,15 @@ export async function runQueryCommand(
       result,
       options,
       `${location.file}:${location.line} ${result.covered ? "covered" : "uncovered"}; confidence ${result.confidence?.level ?? "unknown"}${result.confidence?.e2e ? "; E2E-covered" : ""}\n${tests.map((test) => `test: ${test.name} [${test.id}] (${test.provenance?.kind ?? "unknown"}/${test.provenance?.runner ?? "unknown"})`).join("\n") || "no covering tests"}\n${phases.map((phase) => `phase: ${phase.operation}${phase.status ? ` (${phase.status})` : ""}${phase.source ? ` at ${phase.source}` : ""}`).join("\n")}\n${pageLabel(coversTotal, coversReturned, options)} tests/phases${coversNext ? `\nnext page: ${coversNext}` : ""}`,
+      queryPagination(coversTotal, coversReturned, options),
     );
   }
 
   if (command === "test") {
     const selector = options.positional.join(" ").toLowerCase();
     if (!selector)
-      throw new Error(
+      throw new SupercovError(
+        "INVALID_ARGUMENT",
         "Usage: supercov runs <run-id> coverage test <id|name-fragment>",
       );
     const matches = report.tests.filter(
@@ -1600,7 +1841,10 @@ export async function runQueryCommand(
         (!selectedTestSet || selectedTestSet.has(test.id)) &&
         (test.id === selector || test.name.toLowerCase().includes(selector)),
     );
-    if (matches.length === 0) throw new Error(`Test not found: ${selector}`);
+    if (matches.length === 0)
+      throw new SupercovError("TEST_NOT_FOUND", `Test not found: ${selector}`, {
+        details: { selector },
+      });
     const testBase = `${coverageCommand(run.id, options, "test")} ${shellQuote(options.positional.join(" "))}`;
     if (matches.length > 1) {
       const matchingTests = page(matches, options).map((test) => ({
@@ -1618,12 +1862,12 @@ export async function runQueryCommand(
       return output(
         {
           run: run.id,
-          total: matches.length,
-          offset: options.offset,
+          filters: queryFilters(options),
           tests: matchingTests,
         },
         options,
         `${matchingTests.map((test) => `${test.name} [${test.id}] — ${test.outcome}`).join("\n")}\n${pageLabel(matches.length, matchingTests.length, options)} matching tests${matchesNext ? `\nnext page: ${matchesNext}` : ""}`,
+        queryPagination(matches.length, matchingTests.length, options),
       );
     }
     const test = matches[0]!;
@@ -1676,16 +1920,19 @@ export async function runQueryCommand(
     return output(
       {
         run: run.id,
-        ...(filterLabel(options) ? { filter: filterLabel(options) } : {}),
+        filters: queryFilters(options),
         tests: [selected],
       },
       options,
       `${selected.name}\noutcome ${selected.outcome}${selected.attempts.length ? `; ${selected.attempts.map((attempt) => `retry ${attempt.retry}=${attempt.status}`).join(", ")}` : ""}\n${selected.totals.lines} lines, ${selected.totals.hits} hits, ${selected.totals.decisions} decisions, ${selected.totals.phases} phases\n${selected.lines.map((line) => `line: ${line.file}:${line.line}`).join("\n")}${selected.lines.length && selected.phases.length ? "\n" : ""}${selected.phases.map((phase) => `${phase.kind}: ${phase.operation}${phase.source ? ` at ${phase.source}` : ""}`).join("\n")}\n${pageLabel(testTotal, testReturned, options)} per evidence category${testNext ? `\nnext page: ${testNext}` : ""}`,
+      queryPagination(testTotal, testReturned, options),
     );
   }
 
-  throw new Error(
+  throw new SupercovError(
+    "UNKNOWN_COMMAND",
     `Unknown coverage query: ${command}. Try supercov help.`,
+    { details: { command } },
   );
 }
 

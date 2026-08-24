@@ -1,13 +1,14 @@
-import { describe, expect, it } from "vitest";
-import { createMcdcReport } from "../../src/analyze";
+import { describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
+import { createMcdcReport } from "../../src/analyze.ts";
 import {
   failedCoverageResults,
   passingCoverageResults,
-} from "../../src/reporter";
+} from "../../src/reporter.ts";
 import type {
   CoverageManifest,
   McdcRawTestResult,
-} from "../../src/types";
+} from "../../src/types.ts";
 
 const manifest: CoverageManifest = {
   decisions: [],

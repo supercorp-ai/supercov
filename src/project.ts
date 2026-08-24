@@ -330,22 +330,23 @@ export function discoverCoverageProject(
       ? discoveredPlaywright.testExport
       : "test");
 
-  const dependencies = {
-    ...manifest.dependencies,
-    ...manifest.devDependencies,
-    ...manifest.optionalDependencies,
-  };
-  const hasVite =
-    Boolean(dependencies["vite"]) ||
-    [
-      "vite.config.ts",
-      "vite.config.mts",
-      "vite.config.js",
-      "vite.config.mjs",
-    ].some((candidate) => existsSync(resolve(root, candidate)));
-  const buildCommand = manifest.scripts?.["build"]
+  const expandedTestCommand = expandedCommand(root, command);
+  const executesSourceDirectly =
+    /(?:^|\s)node\s+--test(?:\s|$)/.test(expandedTestCommand) &&
+    /\.[cm]?tsx?(?:\s|$)/.test(expandedTestCommand) &&
+    !/(?:^|\s)(?:vite\s+build|tsc|webpack|rollup|next\s+build|remix\s+build)(?:\s|$)/.test(
+      expandedTestCommand,
+    );
+  const buildCommand = manifest.scripts?.["build"] && !executesSourceDirectly
     ? ["npm", "run", "build"]
     : [];
+  // A dependency only proves that Vite is available, not that it owns the
+  // production build. Injecting Vite flags into an unrelated tsc/webpack
+  // script changes a working command. The build script itself is the
+  // authoritative zero-configuration signal.
+  const usesViteBuild = /(?:^|\s)(?:vite|vite-node)(?:\s|$)/.test(
+    expandedCommand(root, buildCommand),
+  );
   return {
     root,
     sourceRoots: discoveredSource.sourceRoots,
@@ -362,7 +363,7 @@ export function discoverCoverageProject(
         ? discoveredPlaywright.exports
         : [playwrightTestExport, "expect"],
     buildAdapter: buildCommand.length > 0
-      ? hasVite
+      ? usesViteBuild
         ? "vite"
         : "generic"
       : "direct",

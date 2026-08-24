@@ -1,6 +1,7 @@
 import fc from "fast-check";
-import { describe, expect, it } from "vitest";
-import { executeDifferential } from "./instrumenter-harness";
+import { describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
+import { executeDifferential } from "./instrumenter-harness.ts";
 
 const atoms = [
   "false",
@@ -41,7 +42,7 @@ const expressionAtDepth: fc.Memo<string> = fc.memo(
 );
 
 describe("instrumenter property-based semantic equivalence", () => {
-  it("preserves generated nested expressions, results, errors, and effects", async () => {
+  it("preserves generated nested expressions, results, errors, and effects", { timeout: 30_000 }, async () => {
     await fc.assert(
       fc.asyncProperty(expressionAtDepth(5), async (expression) => {
         const source = `
@@ -56,9 +57,9 @@ describe("instrumenter property-based semantic equivalence", () => {
       }),
       { numRuns: 500, seed: 0x5e71c0 },
     );
-  }, 30_000);
+  });
 
-  it("preserves nested control flow over generated input domains", async () => {
+  it("preserves nested control flow over generated input domains", { timeout: 30_000 }, async () => {
     const values = fc.record({
       first: fc.array(fc.integer({ min: -3, max: 3 }), { maxLength: 6 }),
       second: fc.array(fc.integer({ min: -3, max: 3 }), { maxLength: 6 }),
@@ -105,5 +106,5 @@ describe("instrumenter property-based semantic equivalence", () => {
       }),
       { numRuns: 300, seed: 0xc07f10 },
     );
-  }, 30_000);
+  });
 });

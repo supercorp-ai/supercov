@@ -1,14 +1,18 @@
-import { readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { after, before, describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
 import {
+  beginBufferedServerEvidence,
   coverageHit,
+  flushBufferedServerEvidence,
   mcdcBegin,
   mcdcCondition,
   mcdcEnd,
+  withCoverageCarrier,
   withRequestPhase,
-} from "../../src/runtime";
+} from "../../src/runtime.ts";
 import {
   COVERAGE_PHASE_HEADER,
   COVERAGE_PHASE_COOKIE,
@@ -19,12 +23,12 @@ import {
   serverEvidencePath,
   serverRunEvidenceDirectory,
   backgroundEvidencePath,
-} from "../../src/transport";
+} from "../../src/transport.ts";
 import type {
   CoverageExecutionScope,
   CoverageServerRecord,
   McdcDecisionMeta,
-} from "../../src/types";
+} from "../../src/types.ts";
 
 const transportRoot = resolve(
   tmpdir(),
@@ -32,12 +36,12 @@ const transportRoot = resolve(
 );
 let previousTransportRoot: string | undefined;
 
-beforeAll(() => {
+before(() => {
   previousTransportRoot = process.env.SUPERCOV_SERVER_EVIDENCE_ROOT;
   process.env.SUPERCOV_SERVER_EVIDENCE_ROOT = transportRoot;
 });
 
-afterAll(() => {
+after(() => {
   if (previousTransportRoot === undefined)
     delete process.env.SUPERCOV_SERVER_EVIDENCE_ROOT;
   else process.env.SUPERCOV_SERVER_EVIDENCE_ROOT = previousTransportRoot;
@@ -222,6 +226,49 @@ describe("concurrent server evidence transport", () => {
       if (previous === undefined) delete process.env.SUPERCOV_RUN_ID;
       else process.env.SUPERCOV_RUN_ID = previous;
       rmSync(serverRunEvidenceDirectory(runId), {
+        recursive: true,
+        force: true,
+      });
+    }
+  });
+
+  it("buffers and de-duplicates local Node evidence until the attempt ends", () => {
+    const execution = scope(
+      `buffered-${process.pid}-${Date.now()}`,
+      "node-worker",
+      "hot-loop",
+      0,
+    );
+    const meta: McdcDecisionMeta = {
+      id: "buffered-decision",
+      file: "src/hot.ts",
+      line: 1,
+      column: 1,
+      source: "ready && enabled",
+      conditions: ["ready", "enabled"],
+      kind: "if",
+    };
+    try {
+      beginBufferedServerEvidence(execution);
+      withCoverageCarrier({ version: 1, scope: execution }, () => {
+        for (let index = 0; index < 1_000; index += 1) {
+          coverageHit("repeated-hit");
+          const frame = mcdcBegin(meta.id, meta);
+          mcdcCondition(frame, 0, true);
+          mcdcCondition(frame, 1, true);
+          mcdcEnd(frame, true);
+        }
+      });
+      expect(existsSync(serverEvidencePath(execution))).toBe(false);
+      flushBufferedServerEvidence(execution);
+      const persisted = records(execution);
+      expect(persisted).toHaveLength(2);
+      expect(persisted.map((record) => record.type)).toEqual([
+        "hit",
+        "decision",
+      ]);
+    } finally {
+      rmSync(serverRunEvidenceDirectory(execution.runId), {
         recursive: true,
         force: true,
       });

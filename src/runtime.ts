@@ -55,15 +55,28 @@ interface RuntimeState {
   hits: Set<string>;
   events: CoverageRuntimeEvent[];
   eventKeys: Set<string>;
+  bufferedAttempts: Set<string>;
+  serverBuffers: Map<
+    string,
+    {
+      scope: CoverageExecutionScope;
+      directory: string;
+      path: string;
+      records: Map<string, CoverageServerRecord>;
+    }
+  >;
+  runtimeSnapshots: boolean;
 }
 
 type McdcGlobal = typeof globalThis & {
-  __SUPERCOV_MCDC_STATE__?: RuntimeState;
+  __SUPERCOV_MCDC_STATES__?: Map<string, RuntimeState>;
   __SUPERCOV_MCDC_TEST_ID__?: string;
   __SUPERCOV_PHASE_ID__?: string;
-  __SUPERCOV_SERVER_PHASE_STORAGE__?: RequestStorage;
+  __SUPERCOV_SERVER_PHASE_STORAGES__?: Map<string, RequestStorage>;
   __SUPERCOV_FETCH_PATCHED__?: boolean;
   __SUPERCOV_CHILD_PATCHED__?: boolean;
+  __SUPERCOV_BUFFER_EXIT_INSTALLED__?: boolean;
+  __SUPERCOV_BUFFER_FLUSHERS__?: Set<() => void>;
   __SUPERCOV_MCDC_SNAPSHOT__?: () => McdcDecisionSnapshot[];
   __SUPERCOV_COVERAGE_SNAPSHOT__?: () => CoverageRuntimeSnapshot;
   __SUPERCOV_RESET__?: (testId?: string) => void;
@@ -89,6 +102,10 @@ interface FsBuiltin {
 }
 
 const runtimeGlobal = globalThis as McdcGlobal;
+const runtimeInstanceToken = "__SUPERCOV_RUNTIME_INSTANCE__";
+const runtimeInstance = runtimeInstanceToken === "__SUPERCOV_" + "RUNTIME_INSTANCE__"
+  ? "application"
+  : runtimeInstanceToken;
 const isBrowser = !(
   typeof process !== "undefined" &&
   typeof process.versions?.node === "string"
@@ -128,6 +145,9 @@ function createState(): RuntimeState {
     hits: new Set(),
     events: [],
     eventKeys: new Set(),
+    bufferedAttempts: new Set(),
+    serverBuffers: new Map(),
+    runtimeSnapshots: false,
   };
   if (!isBrowser) return state;
   try {
@@ -153,8 +173,10 @@ function createState(): RuntimeState {
   return state;
 }
 
-const state = runtimeGlobal.__SUPERCOV_MCDC_STATE__ ?? createState();
-runtimeGlobal.__SUPERCOV_MCDC_STATE__ = state;
+const runtimeStates = runtimeGlobal.__SUPERCOV_MCDC_STATES__ ?? new Map();
+runtimeGlobal.__SUPERCOV_MCDC_STATES__ = runtimeStates;
+const state = runtimeStates.get(runtimeInstance) ?? createState();
+runtimeStates.set(runtimeInstance, state);
 
 function createServerPhaseStorage(): RequestStorage | undefined {
   if (isBrowser || typeof process === "undefined") return undefined;
@@ -172,12 +194,13 @@ function createServerPhaseStorage(): RequestStorage | undefined {
   }
 }
 
+const serverPhaseStorages =
+  runtimeGlobal.__SUPERCOV_SERVER_PHASE_STORAGES__ ?? new Map();
+runtimeGlobal.__SUPERCOV_SERVER_PHASE_STORAGES__ = serverPhaseStorages;
 const serverPhaseStorage =
-  runtimeGlobal.__SUPERCOV_SERVER_PHASE_STORAGE__ ??
-  createServerPhaseStorage();
+  serverPhaseStorages.get(runtimeInstance) ?? createServerPhaseStorage();
 if (serverPhaseStorage)
-  runtimeGlobal.__SUPERCOV_SERVER_PHASE_STORAGE__ =
-    serverPhaseStorage;
+  serverPhaseStorages.set(runtimeInstance, serverPhaseStorage);
 
 function decisionSnapshot(): McdcDecisionSnapshot[] {
   return [...state.decisions.values()].map((decision) => ({
@@ -222,7 +245,71 @@ function persistBrowser(): void {
   }
 }
 
+function attemptKey(scope: CoverageExecutionScope): string {
+  return `${scope.runId}\0${scope.workerId}\0${scope.attemptId}`;
+}
+
+function serverRecordKey(record: CoverageServerRecord): string {
+  const suffix = record.type === "decision"
+    ? `${record.meta.id}:${vectorKey(record.vector)}`
+    : record.id;
+  return `${record.phaseId ?? "unscoped"}:${record.type}:${suffix}`;
+}
+
+/** Buffer and de-duplicate local Node evidence until its test attempt ends. */
+export function beginBufferedServerEvidence(scope: CoverageExecutionScope): void {
+  if (isBrowser) return;
+  state.bufferedAttempts.add(attemptKey(scope));
+}
+
+/** Publish one local test attempt with one filesystem append. */
+export function flushBufferedServerEvidence(scope: CoverageExecutionScope): void {
+  if (isBrowser) return;
+  const key = attemptKey(scope);
+  state.bufferedAttempts.delete(key);
+  const buffered = state.serverBuffers.get(key);
+  if (!buffered) return;
+  state.serverBuffers.delete(key);
+  const fs = getFs();
+  if (!fs || buffered.records.size === 0) return;
+  try {
+    fs.mkdirSync(buffered.directory, { recursive: true });
+    fs.appendFileSync(
+      buffered.path,
+      [...buffered.records.values()]
+        .map((record) => JSON.stringify(record))
+        .join("\n") + "\n",
+    );
+  } catch {
+    // Collection is best-effort and must never change test behavior.
+  }
+}
+
+/** A local runner will persist coverageSnapshot(), so avoid duplicate files. */
+export function enableRuntimeSnapshotEvidence(): void {
+  state.runtimeSnapshots = true;
+}
+
+function flushAllBufferedServerEvidence(): void {
+  for (const buffered of [...state.serverBuffers.values()])
+    flushBufferedServerEvidence(buffered.scope);
+}
+
+if (!isBrowser) {
+  const flushers = runtimeGlobal.__SUPERCOV_BUFFER_FLUSHERS__ ?? new Set();
+  runtimeGlobal.__SUPERCOV_BUFFER_FLUSHERS__ = flushers;
+  flushers.add(flushAllBufferedServerEvidence);
+  if (!runtimeGlobal.__SUPERCOV_BUFFER_EXIT_INSTALLED__) {
+    process.once("exit", () => {
+      for (const flush of runtimeGlobal.__SUPERCOV_BUFFER_FLUSHERS__ ?? [])
+        flush();
+    });
+    runtimeGlobal.__SUPERCOV_BUFFER_EXIT_INSTALLED__ = true;
+  }
+}
+
 function appendServer(record: CoverageServerRecord): void {
+  if (state.runtimeSnapshots) return;
   const fs = getFs();
   if (!fs) return;
   const context = currentRequestContext();
@@ -240,10 +327,23 @@ function appendServer(record: CoverageServerRecord): void {
     const path = scope
       ? serverEvidencePath(scope)
       : backgroundEvidencePath(runId);
+    const serialized = { ...record, ...(scope ? { scope } : {}) };
+    if (scope && state.bufferedAttempts.has(attemptKey(scope))) {
+      const key = attemptKey(scope);
+      const buffered = state.serverBuffers.get(key) ?? {
+        scope,
+        directory,
+        path,
+        records: new Map<string, CoverageServerRecord>(),
+      };
+      buffered.records.set(serverRecordKey(serialized), serialized);
+      state.serverBuffers.set(key, buffered);
+      return;
+    }
     fs.mkdirSync(directory, { recursive: true });
     fs.appendFileSync(
       path,
-      JSON.stringify({ ...record, ...(scope ? { scope } : {}) }) + "\n",
+      JSON.stringify(serialized) + "\n",
     );
   } catch {
     // The instrumented build must remain behaviorally identical if collection fails.
@@ -546,9 +646,8 @@ export function coverageHit(id: string): void {
     )
       persistBrowser();
   } else {
-    // The server process cannot directly see the browser's active phase.
-    // Keep repeated executions and correlate them to phase time windows in
-    // the analyzer; global first-hit de-duplication would lose later actions.
+    // Request servers retain repeated executions for phase-window correlation.
+    // Local runner adapters explicitly buffer and de-duplicate per test/phase.
     appendServer({
       type: "hit",
       id,

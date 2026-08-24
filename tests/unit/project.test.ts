@@ -1,8 +1,9 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { discoverCoverageProject } from "../../src/project";
+import { afterEach, describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
+import { discoverCoverageProject } from "../../src/project.ts";
 
 const roots: string[] = [];
 
@@ -65,6 +66,24 @@ describe("coverage project discovery", () => {
     });
   });
 
+  it("does not run an unrelated production build for a source-executing node:test suite", () => {
+    const root = project({
+      "package.json": JSON.stringify({
+        scripts: {
+          build: "tsc -p tsconfig.build.json",
+          test: "node --test tests/*.test.ts",
+        },
+        devDependencies: { typescript: "1", vite: "1" },
+      }),
+      "src/index.ts": "export const ready = true",
+      "tests/index.test.ts": "import { test } from 'node:test'",
+    });
+    expect(discoverCoverageProject(root, {}, ["npm", "test"])).toMatchObject({
+      buildAdapter: "direct",
+      buildCommand: [],
+    });
+  });
+
   it("uses the generic isolated adapter for a non-Vite build", () => {
     const root = project({
       "package.json": JSON.stringify({
@@ -76,6 +95,20 @@ describe("coverage project discovery", () => {
     });
     expect(discoverCoverageProject(root, {})).toMatchObject({
       sourceRoots: ["src"],
+      buildAdapter: "generic",
+      buildCommand: ["npm", "run", "build"],
+    });
+  });
+
+  it("does not mistake an installed Vite compatibility dependency for the build tool", () => {
+    const root = project({
+      "package.json": JSON.stringify({
+        scripts: { build: "tsc -p tsconfig.build.json", test: "node --test" },
+        devDependencies: { typescript: "1", vite: "1" },
+      }),
+      "src/index.ts": "export const ready = true",
+    });
+    expect(discoverCoverageProject(root, {})).toMatchObject({
       buildAdapter: "generic",
       buildCommand: ["npm", "run", "build"],
     });

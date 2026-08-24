@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { executeDifferential } from "./instrumenter-harness";
+import { describe, it } from "node:test";
+import { expect } from "../support/expect.ts";
+import { executeDifferential } from "./instrumenter-harness.ts";
 
 const semanticCases: Array<{ name: string; source: string }> = [
   {
@@ -344,6 +345,22 @@ const semanticCases: Array<{ name: string; source: string }> = [
           }
         }
         return effects.length;
+      }
+      function observe() { return effects; }
+    `,
+  },
+  {
+    name: "control decisions in parameter defaults own an inline scratch frame",
+    source: `
+      const effects = [];
+      function choose(
+        value = typeof process === "undefined" ? "browser" : "node",
+      ) {
+        effects.push(value);
+        return value;
+      }
+      function run() {
+        return [choose(), choose("provided")];
       }
       function observe() { return effects; }
     `,

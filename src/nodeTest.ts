@@ -1,6 +1,10 @@
 import * as native from "node:test";
 import type { TestContext, TestOptions } from "node:test";
-import { withCoverageCarrier } from "./runtime.ts";
+import {
+  beginBufferedServerEvidence,
+  flushBufferedServerEvidence,
+  withCoverageCarrier,
+} from "./runtime.ts";
 import {
   callerLocation,
   runnerExecutionScope,
@@ -47,6 +51,7 @@ function wrappedRegistration(original: TestRegistration): TestRegistration {
       context: TestContext,
       done?: (error?: Error) => void,
     ): unknown => {
+      beginBufferedServerEvidence(scope);
       let status: "passed" | "failed" | "skipped" = options?.skip || options?.todo
         ? "skipped"
         : "passed";
@@ -68,6 +73,7 @@ function wrappedRegistration(original: TestRegistration): TestRegistration {
       const emit = (nextStatus = status): void => {
         if (emitted) return;
         emitted = true;
+        flushBufferedServerEvidence(scope);
         writeRunnerEvidence(identity, nextStatus, scope);
       };
       try {
