@@ -379,7 +379,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
       generatedRuntime,
       isolateCollectorRuntime(
         readFileSync(generatedRuntime, "utf8"),
-        `collector-${runId}`,
+        `collector-${buildCacheKey}`,
       ),
     );
     atomicWriteFileSync(

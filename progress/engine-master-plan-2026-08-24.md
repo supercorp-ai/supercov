@@ -199,12 +199,26 @@ miss blocks flipping any default.
   inventory through one Rust child and includes the Rust binary fingerprint in
   run/build integrity. The Rust child is excluded from application child-
   process telemetry. `SUPERCOV_ENGINE=rust` remains the only activation path.
+- The complete supported-fixture matrix now runs through that Rust selector,
+  covering Vitest, Playwright, native `node:test`, the retained Jest
+  compatibility fixture, CommonJS and ESM opaque launch interception,
+  esbuild, webpack, SWC, Next.js, distributed merge, and the bounded agent
+  query workflow. The Playwright surface is green with two workers in
+  Chromium, Firefox, and WebKit, including request fixtures, user-created
+  contexts, popup frames, service workers, and WebSockets.
+- Exact-fingerprint build reuse is a first-class Rust gate. A reused bundle
+  and its current preloader now share collector identity by build fingerprint
+  rather than run ID; otherwise cached bundle probes silently become
+  background evidence. esbuild, webpack, and SWC each prove fresh and reused
+  runs retain four attributed tests and 100% passed-only MC/DC. Pull-request,
+  weekly conformance, and release workflows run the Rust parity and browser
+  gates; weekly/release Test262 shards invoke the release Rust binary.
 - Phase 3 is not promoted yet. Remaining gates are the full browser/Node
-  syntax matrix, Rust-mode runs across every supported fixture and the
-  Essential SEO/Supercov dogfood suites, and exact archive/attribution/outcome
-  parity under crashes, retries, async context, concurrency, and multiple
-  workers. `complete: false` is therefore still deliberate. Phase 4's engine
-  shell has only frozen probe/agent-JSON contract slices; discovery, workspace,
+  syntax matrix, Essential SEO/Supercov dogfood suites, and exact TypeScript/
+  Rust archive/attribution/outcome parity across all fixtures and under
+  crashes, retries, async context, concurrency, and multiple workers.
+  `complete: false` is therefore still deliberate. Phase 4's engine shell has
+  only frozen probe/agent-JSON contract slices; discovery, workspace,
   supervision, packing, analysis, solving, indexing, querying, and lifecycle
   are still owned by TypeScript and are the next port after Phase 3 closes.
 

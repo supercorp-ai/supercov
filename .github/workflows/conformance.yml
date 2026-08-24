@@ -29,4 +29,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: node scripts/test262-equivalence.mjs --test262 .test262 --shard ${{ matrix.shard }}/16 --minimum 1000
+      - run: cargo build --release -p supercov-cli
+      - name: Require Rust semantic equivalence across the Test262 shard
+        env:
+          SUPERCOV_ENGINE: rust
+          SUPERCOV_RUST_BINARY: ${{ github.workspace }}/target/release/supercov
+        run: node scripts/test262-equivalence.mjs --test262 .test262 --shard ${{ matrix.shard }}/16 --minimum 1000

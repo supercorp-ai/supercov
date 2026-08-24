@@ -6,24 +6,38 @@ import { analyzeCoverageArchive } from "../dist/runAnalysis.js";
 for (const adapter of ["esbuild", "webpack", "swc"]) {
   const root = resolve(`tests/fixtures/generic-${adapter}`);
   rmSync(resolve(root, ".supercov"), { recursive: true, force: true });
-  execFileSync(resolve("bin/supercov.js"), ["--", "npm", "test"], {
-    cwd: root,
-    stdio: "inherit",
-    env: {
-      ...process.env,
-      PATH: `${resolve("node_modules/.bin")}${delimiter}${process.env.PATH ?? ""}`,
-      ...(adapter === "swc" ? { SUPERCOV_SOURCE_ROOTS: "src" } : {}),
-    },
-  });
-  const runId = readdirSync(resolve(root, ".supercov/runs")).sort().at(-1);
-  if (!runId) throw new Error(`${adapter} fixture did not publish a run`);
-  const metadata = JSON.parse(readFileSync(resolve(root, ".supercov/runs", runId, "run.json"), "utf8"));
-  const report = analyzeCoverageArchive(resolve(root, ".supercov/runs", runId, "evidence.raw.gz"), {
-    runId,
-    testExitCode: metadata.testExitCode,
-    integrity: metadata.integrity,
-  });
-  if (report.filters?.passed.summary.conditionCoveragePct !== 100)
-    throw new Error(`${adapter} passed-only MC/DC was ${report.filters?.passed.summary.conditionCoveragePct}%`);
-  console.log(`[generic-build] ${adapter}: build and four attributed tests passed at 100% MC/DC`);
+  rmSync(resolve(root, "supercov"), { recursive: true, force: true });
+  for (const attempt of ["fresh", "reused"]) {
+    execFileSync(resolve("bin/supercov.js"), ["--", "npm", "test"], {
+      cwd: root,
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        PATH: `${resolve("node_modules/.bin")}${delimiter}${process.env.PATH ?? ""}`,
+        ...(adapter === "swc" ? { SUPERCOV_SOURCE_ROOTS: "src" } : {}),
+      },
+    });
+    const runId = readdirSync(resolve(root, ".supercov/runs")).sort().at(-1);
+    if (!runId) throw new Error(`${adapter} fixture did not publish a run`);
+    const metadata = JSON.parse(
+      readFileSync(resolve(root, ".supercov/runs", runId, "run.json"), "utf8"),
+    );
+    const report = analyzeCoverageArchive(
+      resolve(root, ".supercov/runs", runId, "evidence.raw.gz"),
+      {
+        runId,
+        testExitCode: metadata.testExitCode,
+        integrity: metadata.integrity,
+      },
+    );
+    if (report.filters?.passed.summary.conditionCoveragePct !== 100)
+      throw new Error(
+        `${adapter} ${attempt} passed-only MC/DC was ${report.filters?.passed.summary.conditionCoveragePct}%`,
+      );
+    if (metadata.instrumentedBuildCache?.reused !== (attempt === "reused"))
+      throw new Error(`${adapter} ${attempt} run had unexpected build-cache state`);
+  }
+  console.log(
+    `[generic-build] ${adapter}: fresh and reused builds kept four attributed tests at 100% MC/DC`,
+  );
 }

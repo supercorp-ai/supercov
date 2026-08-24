@@ -22,12 +22,17 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y clang llvm
       - run: npm ci
       - run: npm run release:check
+      - run: npm run test:rust-engine
       - uses: actions/checkout@v6
         with:
           repository: tc39/test262
           ref: 3655e7464de3d52643ecddd4b5f9f4f3e7f62398
           path: .test262
       - name: Test262 semantic-equivalence smoke gate
+        env:
+          SUPERCOV_ENGINE: rust
+          SUPERCOV_RUST_BINARY: ${{ github.workspace }}/target/debug/supercov
         run: node scripts/test262-equivalence.mjs --test262 .test262 --limit 250 --minimum 200
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium firefox webkit
       - run: npm run test:fixture
+      - run: npm run test:rust-fixture

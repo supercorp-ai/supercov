@@ -23,8 +23,10 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y clang llvm
       - run: npm ci
       - run: npm run release:check
-      - run: npx playwright install --with-deps chromium
+      - run: npm run test:rust-engine
+      - run: npx playwright install --with-deps chromium firefox webkit
       - run: npm run test:fixture
+      - run: npm run test:rust-fixture
 
   test262:
     name: Test262 ${{ matrix.shard }}/16
@@ -46,7 +48,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - run: cargo build --release -p supercov-cli
       - name: Require semantic equivalence across the Test262 shard
+        env:
+          SUPERCOV_ENGINE: rust
+          SUPERCOV_RUST_BINARY: ${{ github.workspace }}/target/release/supercov
         run: node scripts/test262-equivalence.mjs --test262 .test262 --shard ${{ matrix.shard }}/16 --minimum 1000
 
   publish:

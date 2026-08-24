@@ -45,6 +45,7 @@
     "test:engine-contract": "npm run build && node scripts/engine-contract.mjs",
     "test:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && node scripts/rust-js-differential.mjs",
     "test:rust-engine": "npm run build && cargo build -p supercov-cli && node scripts/rust-engine-parity.mjs",
+    "test:rust-fixture": "npm run build && cargo build -p supercov-cli && node scripts/rust-fixture-matrix.mjs",
     "test:clang-mcdc": "node scripts/clang-mcdc-oracle.mjs",
     "test:test262": "npm run build && node scripts/test262-equivalence.mjs",
     "benchmark:check": "npm run build && node scripts/benchmark.mjs",
