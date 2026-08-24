@@ -30,7 +30,61 @@ const generatedCorpus = Array.from({ length: 160 }, (_, index) => {
     `,
   };
 });
-const allCases = [...corpus, ...executionCorpus, ...generatedCorpus];
+const coercedFunctionSources = [
+  `const value = "" + function () { if (flag) return 1; };`,
+  `const value = other < function () { if (flag) return 1; };`,
+  `const value = (function () { if (flag) return 1; }).toString();`,
+  `const value = lookup[function () { if (flag) return 1; }];`,
+  `const value = { [function () { if (flag) return 1; }]: 1 };`,
+  `class Keys { [function () { if (flag) return 1; }]() {} }`,
+  `class Fields { [function () { if (flag) return 1; }] = 1; }`,
+  `const value = { [function () { if (flag) return 1; }]() {} };`,
+  `const value = lookup?.[function () { if (flag) return 1; }];`,
+  `const value = (function () { if (flag) return 1; })?.toString();`,
+  `const value = String(flag ? function () { if (flag) return 1; } : fallback);`,
+  `const value = String(flag ? fallback : function () { if (flag) return 1; });`,
+  `const value = String(function () { if (flag) return 1; } || flag);`,
+  `const value = String(flag || function () { if (flag) return 1; });`,
+  `const value = String((0, function () { if (flag) return 1; }));`,
+  `const value = String(target = function () { if (flag) return 1; });`,
+  `const value = String(function () { if (flag) return 1; } as unknown);`,
+  `const value = String(<any>function () { if (flag) return 1; });`,
+  `const value = String((function () { if (flag) return 1; })!);`,
+];
+const consumedFunctionSources = [
+  `const value = [function () { if (flag) return 1; }];`,
+  `const value = other === function () { if (flag) return 1; };`,
+  `const value = (function () { if (flag) return 1; }).name;`,
+  `const value = (function () { if (flag) return 1; })[key];`,
+  `const value = String((function () { if (flag) return 1; }, other));`,
+  `const value = String(function () { if (flag) return 1; } ? left : right);`,
+  `const value = { plain: function () { if (flag) return 1; } };`,
+  `const value = { [key]: function () { if (flag) return 1; } };`,
+  `const value = (function () { if (flag) return 1; })?.[key];`,
+];
+const safetyCorpus = [
+  ...coercedFunctionSources.map((source, index) => ({
+    file: `safety/coerced-${index}.ts`,
+    source,
+  })),
+  ...consumedFunctionSources.map((source, index) => ({
+    file: `safety/consumed-${index}.ts`,
+    source,
+  })),
+  {
+    file: "safety/with.js",
+    source: `with (scope) { if (left && right) value = 1; }`,
+  },
+  {
+    file: "safety/eval.ts",
+    source: `function decide(source) { if (source) return eval(source); }`,
+  },
+  {
+    file: "safety/function-constructor.ts",
+    source: `const decide = new Function("value", "if (value) return 1;");`,
+  },
+];
+const allCases = [...corpus, ...executionCorpus, ...generatedCorpus, ...safetyCorpus];
 const rust = spawnSync(
   "cargo",
   ["run", "--quiet", "-p", "supercov-engine", "--example", "js_manifest"],
@@ -50,6 +104,11 @@ for (const [index, testCase] of allCases.entries()) {
   if (JSON.stringify(candidate.decisions) !== JSON.stringify(reference))
     throw new Error(
       `${testCase.file}: Rust/TypeScript decision mismatch\nreference=${JSON.stringify(reference)}\ncandidate=${JSON.stringify(candidate.decisions)}`,
+    );
+  const referenceLimitations = instrumentMcdc(testCase.source, testCase.file).manifest.limitations ?? [];
+  if (JSON.stringify(candidate.coverageLimitations) !== JSON.stringify(referenceLimitations))
+    throw new Error(
+      `${testCase.file}: Rust/TypeScript limitation mismatch\nreference=${JSON.stringify(referenceLimitations)}\ncandidate=${JSON.stringify(candidate.coverageLimitations)}`,
     );
 }
 
@@ -83,8 +142,21 @@ function decodeVector(conditionCount, encoded, value) {
 
 async function executeRustCandidate(testCase, candidate) {
   const vectors = [];
-  const runtimeName = candidate.runtime?.mcdcEndV2;
-  if (!runtimeName) throw new Error(`${testCase.file}: missing Rust candidate runtime binding`);
+  const runtime = candidate.runtime;
+  if (!runtime?.mcdcBegin || !runtime?.mcdcCondition || !runtime?.mcdcEnd || !runtime?.mcdcEndV2)
+    throw new Error(`${testCase.file}: missing Rust candidate runtime bindings`);
+  const begin = (id, meta) => {
+    if (id !== meta.id) throw new Error(`mismatched decision registration ${id}/${meta.id}`);
+    return { meta, values: Array.from({ length: meta.conditions.length }, () => null) };
+  };
+  const condition = (frame, index, value) => {
+    frame.values[index] = Boolean(value);
+    return value;
+  };
+  const end = (frame, value) => {
+    vectors.push({ values: frame.values, outcome: Boolean(value) });
+    return value;
+  };
   const recorder = (file, decisionIndex, encoded, value) => {
     if (file !== testCase.file) throw new Error(`unexpected probe file ${file}`);
     const decision = candidate.decisions[decisionIndex];
@@ -95,10 +167,13 @@ async function executeRustCandidate(testCase, candidate) {
   // This evaluates only the checked-in, self-contained differential corpus.
   // eslint-disable-next-line no-new-func
   const factory = new Function(
-    runtimeName,
+    runtime.mcdcBegin,
+    runtime.mcdcCondition,
+    runtime.mcdcEnd,
+    runtime.mcdcEndV2,
     `"use strict";\n${candidate.code}\nreturn { run, observe: typeof observe === "function" ? observe : undefined };`,
   );
-  const program = factory(recorder);
+  const program = factory(begin, condition, end, recorder);
   try {
     const value = await program.run();
     return {
@@ -158,5 +233,5 @@ for (const [offset, testCase] of generatedCorpus.entries()) {
 }
 
 console.log(
-  `[rust-js-differential] ${allCases.length} oxc/Babel control-decision manifests match; ${executionCorpus.length} behavior/effect/vector cases and ${generatedCorpus.length} generated behavior cases match`,
+  `[rust-js-differential] ${allCases.length} oxc/Babel control-decision manifests and safety limitations match; ${executionCorpus.length} behavior/effect/vector cases and ${generatedCorpus.length} generated behavior cases match`,
 );

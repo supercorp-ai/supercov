@@ -30,5 +30,9 @@
   {
     "file": "differential/for.js",
     "source": "const effects = [];\nfunction run() {\n  let total = 0;\n  for (let index = 0; (effects.push(`test:${index}`), index < 3) && total < 6; index++) { total += index + 1; }\n  return total;\n}\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/wide.js",
+    "source": "const effects = [];\nfunction decide(flags) {\n  if (flags[0] && flags[1] && flags[2] && flags[3] && flags[4] && flags[5] && flags[6] && flags[7] && flags[8] && flags[9] && flags[10] && flags[11] && flags[12] && flags[13] && flags[14] && flags[15] && flags[16] && flags[17] && flags[18] && flags[19] && flags[20] && flags[21] && flags[22] && flags[23] && flags[24] && flags[25] && flags[26] && flags[27] && flags[28] && flags[29] && flags[30] && flags[31] && flags[32]) return 'all';\n  return 'not-all';\n}\nfunction run() {\n  const all = Array.from({ length: 33 }, () => true);\n  const firstFalse = [...all]; firstFalse[0] = false;\n  return [decide(firstFalse), decide(all)];\n}\nfunction observe() { return effects; }\n"
   }
 ]

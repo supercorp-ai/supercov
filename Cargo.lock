@@ -473,6 +473,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxc_traverse"
+version = "0.133.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3faf0ba83a4aa1af760f887b628afa08c1da08d1e0f916e3580116ad2abdc955"
+dependencies = [
+ "itoa",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_ast_visit",
+ "oxc_data_structures",
+ "oxc_ecmascript",
+ "oxc_semantic",
+ "oxc_span",
+ "oxc_str",
+ "oxc_syntax",
+ "rustc-hash",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -676,8 +695,10 @@ dependencies = [
  "oxc_ast_visit",
  "oxc_codegen",
  "oxc_parser",
+ "oxc_semantic",
  "oxc_span",
  "oxc_syntax",
+ "oxc_traverse",
  "serde",
  "serde_json",
  "sha2",

@@ -1,28 +1,33 @@
 //! First oxc-backed vertical slice of the Rust JavaScript instrumenter.
 //!
-//! This candidate reports and instruments the frozen control-decision surface.
+//! This candidate reports and instruments the frozen control-decision surface,
+//! including semantic-safety boundaries and exact wide-decision fallback.
 //! It is not exposed by the CLI and cannot claim a complete denominator until
 //! the remaining reference transformations are ported.
 
-use std::{fmt::Write, path::Path};
+use std::{collections::HashSet, fmt::Write, path::Path};
 
 use oxc_allocator::{Allocator, TakeIn};
 use oxc_ast::{
     AstBuilder, NONE,
     ast::{
-        Argument, AssignmentTarget, ConditionalExpression, DoWhileStatement, Expression,
-        ForStatement, FunctionBody, IfStatement, Program, Statement, VariableDeclarationKind,
-        WhileStatement,
+        Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentTarget,
+        CallExpression, ConditionalExpression, DoWhileStatement, Expression, ForStatement,
+        Function, FunctionBody, IfStatement, NewExpression, ObjectPropertyKind, Program,
+        PropertyKind, Statement, VariableDeclarationKind, WhileStatement, WithStatement,
     },
 };
-use oxc_ast_visit::{Visit, VisitMut, walk_mut};
+use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
 use oxc_codegen::Codegen;
 use oxc_parser::Parser;
+use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_syntax::{
     number::NumberBase,
-    operator::{AssignmentOperator, LogicalOperator},
+    operator::{AssignmentOperator, BinaryOperator, LogicalOperator},
+    scope::ScopeFlags,
 };
+use oxc_traverse::{Ancestor, Traverse, TraverseCtx, traverse_mut};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -48,13 +53,29 @@ pub struct CandidateOutput {
     pub decisions: Vec<CandidateDecision>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<CandidateRuntime>,
+    pub coverage_limitations: Vec<CandidateLimitation>,
     pub limitations: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CandidateRuntime {
+    pub mcdc_begin: String,
+    pub mcdc_condition: String,
+    pub mcdc_end: String,
     pub mcdc_end_v2: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateLimitation {
+    pub id: String,
+    pub kind: String,
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub source: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,11 +84,270 @@ pub enum CandidateError {
     Parse(Vec<String>),
 }
 
+type SpanKey = (u32, u32);
+
+#[derive(Default)]
+struct SafetyAnalysis {
+    source_sensitive_functions: HashSet<SpanKey>,
+    with_statements: HashSet<SpanKey>,
+    limitations: Vec<CandidateLimitation>,
+}
+
+struct SafetyScanner<'s> {
+    source: &'s str,
+    file: &'s str,
+    source_sensitive_functions: HashSet<SpanKey>,
+    with_statements: HashSet<SpanKey>,
+    function_limitations: Vec<CandidateLimitation>,
+    with_limitations: Vec<CandidateLimitation>,
+    dynamic_limitations: Vec<CandidateLimitation>,
+    unsafe_function_depth: usize,
+    with_depth: usize,
+}
+
+impl<'s> SafetyScanner<'s> {
+    fn new(source: &'s str, file: &'s str) -> Self {
+        Self {
+            source,
+            file,
+            source_sensitive_functions: HashSet::new(),
+            with_statements: HashSet::new(),
+            function_limitations: Vec::new(),
+            with_limitations: Vec::new(),
+            dynamic_limitations: Vec::new(),
+            unsafe_function_depth: 0,
+            with_depth: 0,
+        }
+    }
+
+    fn limitation(
+        &self,
+        span: Span,
+        kind: &str,
+        suffix: &str,
+        reason: &str,
+    ) -> CandidateLimitation {
+        let (line, column) = line_and_utf16_column(self.source, span.start as usize);
+        CandidateLimitation {
+            id: stable_id(self.source, self.file, kind, span, suffix),
+            kind: kind.to_string(),
+            file: self.file.to_string(),
+            line,
+            column,
+            source: source_slice(self.source, span).to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    fn enter_source_sensitive_function<State>(
+        &mut self,
+        span: Span,
+        context: &TraverseCtx<'_, State>,
+    ) {
+        let sensitive = observes_function_source(span, context);
+        if sensitive {
+            self.source_sensitive_functions.insert(span_key(span));
+            let limitation = self.limitation(
+                span,
+                "semantic-safety",
+                "function-source",
+                "function body is left uninstrumented because this expression observes or coerces Function source text",
+            );
+            self.function_limitations.push(limitation);
+            self.unsafe_function_depth += 1;
+        }
+    }
+
+    fn exit_source_sensitive_function(&mut self, span: Span) {
+        if self.source_sensitive_functions.contains(&span_key(span)) {
+            self.unsafe_function_depth -= 1;
+        }
+    }
+
+    fn is_unsafe_context(&self) -> bool {
+        self.unsafe_function_depth > 0 || self.with_depth > 0
+    }
+}
+
+impl<'a> Traverse<'a, ()> for SafetyScanner<'_> {
+    fn enter_function(&mut self, node: &mut Function<'a>, context: &mut TraverseCtx<'a, ()>) {
+        self.enter_source_sensitive_function(node.span, context);
+    }
+
+    fn exit_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
+        self.exit_source_sensitive_function(node.span);
+    }
+
+    fn enter_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.enter_source_sensitive_function(node.span, context);
+    }
+
+    fn exit_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.exit_source_sensitive_function(node.span);
+    }
+
+    fn enter_with_statement(
+        &mut self,
+        node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_statements.insert(span_key(node.span));
+        let limitation = self.limitation(
+            node.span,
+            "semantic-safety",
+            "with-environment",
+            "with-statement body is left uninstrumented because its object environment can intercept probe identifiers",
+        );
+        self.with_limitations.push(limitation);
+        self.with_depth += 1;
+    }
+
+    fn exit_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth -= 1;
+    }
+
+    fn enter_call_expression(
+        &mut self,
+        node: &mut CallExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        if self.is_unsafe_context() || !expression_is_identifier(&node.callee, "eval") {
+            return;
+        }
+        let limitation = self.limitation(
+            node.span,
+            "dynamic-code",
+            "eval",
+            "eval-generated source has no stable pre-run coverage denominator",
+        );
+        self.dynamic_limitations.push(limitation);
+    }
+
+    fn enter_new_expression(
+        &mut self,
+        node: &mut NewExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        if self.is_unsafe_context() || !expression_is_identifier(&node.callee, "Function") {
+            return;
+        }
+        let limitation = self.limitation(
+            node.span,
+            "dynamic-code",
+            "Function",
+            "Function-generated source has no stable pre-run coverage denominator",
+        );
+        self.dynamic_limitations.push(limitation);
+    }
+}
+
+fn analyze_safety<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    source: &str,
+    file: &str,
+) -> SafetyAnalysis {
+    // oxc_traverse uses resolved lexical scope IDs while walking ancestry.
+    // Building semantics here initializes those IDs without changing the AST.
+    SemanticBuilder::new().build(program);
+    let mut scanner = SafetyScanner::new(source, file);
+    traverse_mut(&mut scanner, allocator, program, Default::default(), ());
+    let mut limitations = scanner.function_limitations;
+    limitations.extend(scanner.with_limitations);
+    limitations.extend(scanner.dynamic_limitations);
+    SafetyAnalysis {
+        source_sensitive_functions: scanner.source_sensitive_functions,
+        with_statements: scanner.with_statements,
+        limitations,
+    }
+}
+
+fn span_key(span: Span) -> SpanKey {
+    (span.start, span.end)
+}
+
+fn expression_is_identifier(expression: &Expression<'_>, name: &str) -> bool {
+    matches!(expression, Expression::Identifier(identifier) if identifier.name == name)
+}
+
+fn observes_function_source<State>(span: Span, context: &TraverseCtx<'_, State>) -> bool {
+    let mut child_end = span.end;
+    for ancestor in context.ancestors() {
+        match ancestor {
+            Ancestor::ParenthesizedExpressionExpression(parent) => child_end = parent.span().end,
+            Ancestor::TSAsExpressionExpression(parent) => child_end = parent.span().end,
+            Ancestor::TSSatisfiesExpressionExpression(parent) => child_end = parent.span().end,
+            Ancestor::TSTypeAssertionExpression(parent) => child_end = parent.span().end,
+            Ancestor::TSNonNullExpressionExpression(parent) => child_end = parent.span().end,
+            Ancestor::ConditionalExpressionConsequent(parent) => child_end = parent.span().end,
+            Ancestor::ConditionalExpressionAlternate(parent) => child_end = parent.span().end,
+            Ancestor::LogicalExpressionLeft(parent) => {
+                child_end = parent.span().end;
+            }
+            Ancestor::LogicalExpressionRight(parent) => {
+                child_end = parent.span().end;
+            }
+            Ancestor::SequenceExpressionExpressions(parent) => {
+                if child_end != parent.span().end {
+                    return false;
+                }
+                child_end = parent.span().end;
+            }
+            Ancestor::AssignmentExpressionRight(parent) => child_end = parent.span().end,
+            Ancestor::ObjectPropertyKey(parent) => return *parent.computed(),
+            Ancestor::MethodDefinitionKey(parent) => return *parent.computed(),
+            Ancestor::PropertyDefinitionKey(parent) => return *parent.computed(),
+            Ancestor::AccessorPropertyKey(parent) => return *parent.computed(),
+            Ancestor::ComputedMemberExpressionExpression(_) => return true,
+            Ancestor::StaticMemberExpressionObject(parent) => {
+                return parent.property().name == "toString";
+            }
+            Ancestor::CallExpressionArguments(parent) => {
+                return expression_is_identifier(parent.callee(), "String");
+            }
+            Ancestor::BinaryExpressionLeft(parent) => {
+                return matches!(
+                    parent.operator(),
+                    BinaryOperator::Addition
+                        | BinaryOperator::LessThan
+                        | BinaryOperator::LessEqualThan
+                        | BinaryOperator::GreaterThan
+                        | BinaryOperator::GreaterEqualThan
+                );
+            }
+            Ancestor::BinaryExpressionRight(parent) => {
+                return matches!(
+                    parent.operator(),
+                    BinaryOperator::Addition
+                        | BinaryOperator::LessThan
+                        | BinaryOperator::LessEqualThan
+                        | BinaryOperator::GreaterThan
+                        | BinaryOperator::GreaterEqualThan
+                );
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
 pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, CandidateError> {
     let source_type = SourceType::from_path(Path::new(file))
         .map_err(|error| CandidateError::UnknownSourceType(error.to_string()))?;
     let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, source, source_type).parse();
+    let mut parsed = Parser::new(&allocator, source, source_type).parse();
     if !parsed.errors.is_empty() {
         return Err(CandidateError::Parse(
             parsed
@@ -78,10 +358,13 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         ));
     }
 
+    let safety = analyze_safety(&allocator, &mut parsed.program, source, file);
     let mut collector = DecisionCollector {
         source,
         file,
         decisions: Vec::new(),
+        source_sensitive_functions: &safety.source_sensitive_functions,
+        with_statements: &safety.with_statements,
     };
     collector.visit_program(&parsed.program);
     let generated = Codegen::new().build(&parsed.program).code;
@@ -92,6 +375,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         code: generated,
         decisions: collector.decisions,
         runtime: None,
+        coverage_limitations: safety.limitations,
         limitations: vec![
             "candidate emits metadata only; use the private differential transform for probes"
                 .to_string(),
@@ -122,53 +406,59 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         ));
     }
 
+    let safety = analyze_safety(&allocator, &mut parsed.program, source, file);
     let mut collector = DecisionCollector {
         source,
         file,
         decisions: Vec::new(),
+        source_sensitive_functions: &safety.source_sensitive_functions,
+        with_statements: &safety.with_statements,
     };
     collector.visit_program(&parsed.program);
 
     let mut names = CandidateNames::new(source);
-    let runtime_name = names.allocate("__supercovMcdcEndV2");
+    let mcdc_begin = names.allocate("__supercovMcdcBegin");
+    let mcdc_condition = names.allocate("__supercovMcdcCondition");
+    let mcdc_end = names.allocate("__supercovMcdcEnd");
+    let mcdc_end_v2 = names.allocate("__supercovMcdcEndV2");
     let ast = AstBuilder::new(&allocator);
     let mut transformer = ControlProbeV2Transformer {
         ast,
         file,
-        runtime_name: runtime_name.clone(),
+        decisions: &collector.decisions,
+        mcdc_begin: mcdc_begin.clone(),
+        mcdc_condition: mcdc_condition.clone(),
+        mcdc_end: mcdc_end.clone(),
+        mcdc_end_v2: mcdc_end_v2.clone(),
         names,
         scope_declarations: Vec::new(),
         decision_index: 0,
-        wider_decisions: 0,
+        source_sensitive_functions: safety.source_sensitive_functions.clone(),
+        with_statements: safety.with_statements.clone(),
     };
     transformer.visit_program(&mut parsed.program);
 
-    let mut limitations = vec![
+    let limitations = vec![
         "only if, ternary, while, do-while, and classic-for decisions are instrumented"
             .to_string(),
         "coverage points, value branches, extended branch obligations, and runtime registration remain on the TypeScript reference"
             .to_string(),
-        "with-environment and function-source semantic-safety exclusions are not yet ported"
-            .to_string(),
         "candidate runtime binding is differential-only and is not exposed by the public CLI"
             .to_string(),
     ];
-    if transformer.wider_decisions > 0 {
-        limitations.push(format!(
-            "{} control decision(s) exceeded 32 conditions and require the exact v1 fallback",
-            transformer.wider_decisions
-        ));
-    }
-
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
         complete: false,
-        supported_surface: "control-decision-probe-v2-candidate".to_string(),
+        supported_surface: "control-decision-probe-v2-v1-fallback-safety-candidate".to_string(),
         code: Codegen::new().build(&parsed.program).code,
         decisions: collector.decisions,
         runtime: Some(CandidateRuntime {
-            mcdc_end_v2: runtime_name,
+            mcdc_begin,
+            mcdc_condition,
+            mcdc_end,
+            mcdc_end_v2,
         }),
+        coverage_limitations: safety.limitations,
         limitations,
     })
 }
@@ -207,11 +497,16 @@ impl<'s> CandidateNames<'s> {
 struct ControlProbeV2Transformer<'a, 's> {
     ast: AstBuilder<'a>,
     file: &'s str,
-    runtime_name: String,
+    decisions: &'s [CandidateDecision],
+    mcdc_begin: String,
+    mcdc_condition: String,
+    mcdc_end: String,
+    mcdc_end_v2: String,
     names: CandidateNames<'s>,
     scope_declarations: Vec<Vec<String>>,
     decision_index: usize,
-    wider_decisions: usize,
+    source_sensitive_functions: HashSet<SpanKey>,
+    with_statements: HashSet<SpanKey>,
 }
 
 #[derive(Clone, Copy)]
@@ -291,6 +586,49 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
             value as f64,
             None,
             NumberBase::Decimal,
+        )
+    }
+
+    fn string(&self, value: &str) -> Expression<'a> {
+        self.ast
+            .expression_string_literal(Span::default(), self.ast.str(value), None)
+    }
+
+    fn object_property(&self, name: &str, value: Expression<'a>) -> ObjectPropertyKind<'a> {
+        self.ast.object_property_kind_object_property(
+            Span::default(),
+            PropertyKind::Init,
+            self.ast
+                .property_key_static_identifier(Span::default(), self.ast.ident(name)),
+            value,
+            false,
+            false,
+            false,
+        )
+    }
+
+    fn decision_meta(&self, decision: &CandidateDecision) -> Expression<'a> {
+        let conditions = self.ast.expression_array(
+            Span::default(),
+            self.ast.vec_from_iter(
+                decision
+                    .conditions
+                    .iter()
+                    .map(|condition| ArrayExpressionElement::from(self.string(condition))),
+            ),
+        );
+        let properties = self.ast.vec_from_array([
+            self.object_property("id", self.string(&decision.id)),
+            self.object_property("file", self.string(&decision.file)),
+            self.object_property("line", self.number(decision.line as u64)),
+            self.object_property("column", self.number(decision.column as u64)),
+            self.object_property("source", self.string(&decision.source)),
+            self.object_property("conditions", conditions),
+            self.object_property("kind", self.string(&decision.kind)),
+        ]);
+        Expression::ObjectExpression(
+            self.ast
+                .alloc_object_expression(Span::default(), properties),
         )
     }
 
@@ -377,6 +715,55 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         }
     }
 
+    fn instrument_condition_v1(
+        &self,
+        expression: Expression<'a>,
+        frame_name: &str,
+        index: usize,
+    ) -> Expression<'a> {
+        self.ast.expression_call(
+            Span::default(),
+            self.identifier(&self.mcdc_condition),
+            NONE,
+            self.ast.vec_from_array([
+                Argument::from(self.identifier(frame_name)),
+                Argument::from(self.number(index as u64)),
+                Argument::from(expression),
+            ]),
+            false,
+        )
+    }
+
+    fn instrument_conditions_v1(
+        &self,
+        expression: &mut Expression<'a>,
+        frame_name: &str,
+        next_index: &mut usize,
+    ) {
+        match expression {
+            Expression::ParenthesizedExpression(parenthesized) => {
+                self.instrument_conditions_v1(&mut parenthesized.expression, frame_name, next_index)
+            }
+            Expression::LogicalExpression(logical)
+                if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or) =>
+            {
+                self.instrument_conditions_v1(&mut logical.left, frame_name, next_index);
+                self.instrument_conditions_v1(&mut logical.right, frame_name, next_index);
+            }
+            Expression::UnaryExpression(unary)
+                if unary.operator.is_not() && has_compound_boolean_decision(&unary.argument) =>
+            {
+                self.instrument_conditions_v1(&mut unary.argument, frame_name, next_index);
+            }
+            _ => {
+                let index = *next_index;
+                *next_index += 1;
+                let original = expression.take_in(self.ast.allocator);
+                *expression = self.instrument_condition_v1(original, frame_name, index);
+            }
+        }
+    }
+
     fn reserve_decision(&mut self, test: &Expression<'a>) -> DecisionPlan {
         let mut condition_spans = Vec::new();
         collect_conditions(test, &mut condition_spans);
@@ -390,7 +777,43 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
 
     fn apply_decision(&mut self, test: &mut Expression<'a>, plan: DecisionPlan) {
         if plan.condition_count > 32 {
-            self.wider_decisions += 1;
+            let frame_name = self.allocate_scratch("_supercovMcdcFrame");
+            let mut next_index = 0;
+            self.instrument_conditions_v1(test, &frame_name, &mut next_index);
+            debug_assert_eq!(next_index, plan.condition_count);
+
+            let decision = &self.decisions[plan.index];
+            let begin = self.ast.expression_call(
+                Span::default(),
+                self.identifier(&self.mcdc_begin),
+                NONE,
+                self.ast.vec_from_array([
+                    Argument::from(self.string(&decision.id)),
+                    Argument::from(self.decision_meta(decision)),
+                ]),
+                false,
+            );
+            let assign_frame = self.ast.expression_assignment(
+                Span::default(),
+                AssignmentOperator::Assign,
+                self.assignment_target(&frame_name),
+                begin,
+            );
+            let instrumented = test.take_in(self.ast.allocator);
+            let end = self.ast.expression_call(
+                Span::default(),
+                self.identifier(&self.mcdc_end),
+                NONE,
+                self.ast.vec_from_array([
+                    Argument::from(self.identifier(&frame_name)),
+                    Argument::from(instrumented),
+                ]),
+                false,
+            );
+            *test = self.ast.expression_sequence(
+                Span::default(),
+                self.ast.vec_from_array([assign_frame, end]),
+            );
             return;
         }
 
@@ -428,7 +851,7 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         ]);
         let record = self.ast.expression_call(
             Span::default(),
-            self.identifier(&self.runtime_name),
+            self.identifier(&self.mcdc_end_v2),
             NONE,
             arguments,
             false,
@@ -458,6 +881,33 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         walk_mut::walk_function_body(self, body);
         let declarations = self.leave_declaration_scope();
         self.prepend_declarations(declarations, &mut body.statements);
+    }
+
+    fn visit_function(&mut self, function: &mut Function<'a>, flags: ScopeFlags) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_function(self, function, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, function: &mut ArrowFunctionExpression<'a>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_arrow_function_expression(self, function);
+    }
+
+    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
+        if self.with_statements.contains(&span_key(statement.span)) {
+            return;
+        }
+        walk_mut::walk_with_statement(self, statement);
     }
 
     fn visit_if_statement(&mut self, statement: &mut IfStatement<'a>) {
@@ -515,6 +965,8 @@ struct DecisionCollector<'s> {
     source: &'s str,
     file: &'s str,
     decisions: Vec<CandidateDecision>,
+    source_sensitive_functions: &'s HashSet<SpanKey>,
+    with_statements: &'s HashSet<SpanKey>,
 }
 
 impl DecisionCollector<'_> {
@@ -542,6 +994,33 @@ impl DecisionCollector<'_> {
 }
 
 impl<'a> Visit<'a> for DecisionCollector<'_> {
+    fn visit_function(&mut self, function: &Function<'a>, flags: ScopeFlags) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk::walk_function(self, function, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, function: &ArrowFunctionExpression<'a>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk::walk_arrow_function_expression(self, function);
+    }
+
+    fn visit_with_statement(&mut self, statement: &WithStatement<'a>) {
+        if self.with_statements.contains(&span_key(statement.span)) {
+            return;
+        }
+        walk::walk_with_statement(self, statement);
+    }
+
     fn visit_if_statement(&mut self, statement: &IfStatement<'a>) {
         self.record_decision(&statement.test, "if");
         self.visit_expression(&statement.test);
@@ -716,7 +1195,7 @@ mod tests {
         assert!(!output.complete);
         assert_eq!(
             output.supported_surface,
-            "control-decision-probe-v2-candidate"
+            "control-decision-probe-v2-v1-fallback-safety-candidate"
         );
         let runtime = output.runtime.expect("candidate runtime binding");
         assert!(output.code.contains(&runtime.mcdc_end_v2));
@@ -745,7 +1224,7 @@ mod tests {
     }
 
     #[test]
-    fn leaves_wider_decisions_explicitly_uninstrumented_for_exact_v1_fallback() {
+    fn instruments_wider_decisions_with_the_exact_v1_fallback() {
         let predicate = (0..33)
             .map(|index| format!("c{index}"))
             .collect::<Vec<_>>()
@@ -753,14 +1232,15 @@ mod tests {
         let source = format!("if ({predicate}) work();");
         let output = instrument_candidate(&source, "app/wide.js").unwrap();
         assert_eq!(output.decisions[0].conditions.len(), 33);
-        assert!(
-            output
-                .limitations
-                .iter()
-                .any(|limitation| limitation.contains("exact v1 fallback"))
-        );
         let runtime = output.runtime.expect("candidate runtime binding");
         assert!(!output.code.contains(&format!("{}(", runtime.mcdc_end_v2)));
+        assert!(output.code.contains(&format!("{}(", runtime.mcdc_begin)));
+        assert!(
+            output
+                .code
+                .contains(&format!("{}(", runtime.mcdc_condition))
+        );
+        assert!(output.code.contains(&format!("{}(", runtime.mcdc_end)));
     }
 
     #[test]
