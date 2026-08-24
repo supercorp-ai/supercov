@@ -12,7 +12,7 @@ either fixed the same day or filed with evidence.
 | unjs/ufo | Vitest 4, pnpm | one test timed out (5 s) in full runs; plain `vitest run` afterwards **double-counted the suite** (978 vs 489) | ✅ 489/489 pass; no pollution; overhead still high (see §perf) |
 | vercel/ms | Jest, pnpm, edge env | exit 1: repo's own istanbul thresholds measured instrumented code; configs misclassified as ambiguous source | ✅ 167/167, MC/DC 100%, measurement complete |
 | fastify/fastify-plugin | node:test via `c8 --100` | **40/43 tests failed**: `Cannot read private member #assert` | ✅ 43/43; c8 threshold advisory printed; exit 1 remains theirs (c8 measures instrumented code) |
-| iamkun/dayjs | Jest config in package.json | crash (`node build` under ESM loader); then wrong test set (797 vs 794 — package.json jest config ignored); 15–20× slower | fixes landed; clean rerun still owed (blocked on the store-deletion bug below) |
+| iamkun/dayjs | Jest config in package.json | crash (`node build` under ESM loader); then wrong test set (797 vs 794 — package.json jest config ignored); 15–20× slower | ✅ plain and Supercov both 93 suites / **794/794**; probe-v1 remains very slow; old Jest attribution deferred by user decision |
 | debug-js/debug | Mocha (unsupported) | — | ✅ honest degradation: 16/16 pass, aggregate coverage, no per-test attribution |
 | sindresorhus/p-limit | AVA (unsupported) | 1 test failed: wall-clock assertion (590–650 ms window) blown by overhead | degradation works; failure is the perf cliff |
 | expressjs/express | Mocha, supertest | 1,205 pass / **55 fail** (baseline 1,260/0), then the process **never exited** | ✅ **1,260/1,260, exits cleanly** — one root cause behind both |
@@ -121,9 +121,10 @@ supertest's HTTP servers open, and mocha (correctly, without `--exit`) waited
 for the event loop to drain. After the path fix: **1,260 passing, 0 failing,
 exits cleanly** — identical to baseline.
 
-Supercov should still never hang silently. A wrapped command that has reported
-results and stopped making progress deserves a diagnosed timeout with an
-open-handle report. Filed as follow-up work, no longer reproducible here.
+Supercov now reports a sanitized descendant process tree every 60 seconds and
+asks preloaded Node descendants for public active-resource counts. An explicit
+`SUPERCOV_COMMAND_TIMEOUT_MS` terminates the whole process group and exits 124;
+there is deliberately no universal deadline for arbitrary valid long suites.
 
 Regression tests: the workspace path is asserted to contain no dot-prefixed
 segment, and a project-owned `supercov/` directory is asserted to still be
@@ -165,7 +166,7 @@ The `line` disambiguator proved brittle precisely as designed. Editing
 `unmatched` — which is how the bad waivers were noticed. Prefer source-text
 matching without `line`.
 
-## OPEN BUG: removing the run store can take tens of minutes
+## FIXED: removing the run store took tens of minutes
 
 `rm -rf .supercov` on the dayjs project ran **26+ minutes** in uninterruptible
 I/O wait (state `U`, 1:03 CPU at 2% — slow progress, not spinning) and had
@@ -175,10 +176,21 @@ store; the cost is the file and directory count of a full workspace copy plus
 per-attempt evidence directories
 (`server-evidence/<run>/<worker>/<testKey>/<retry>/`).
 
-This is a product bug, not a test artifact: `supercov clean` and `prune` do
-exactly this deletion. Fix direction: rename the target to a unique trash path
-and delete asynchronously so the command returns immediately, and flatten the
-per-attempt evidence layout to cut directory count.
+This was a product bug, not a test artifact. Removal now atomically renames
+only Supercov-owned trees into `.supercov/.trash`; a single detached owner
+unlinks them, and later commands recover abandoned trash. The actual old dayjs
+cache disappeared from the foreground path in **0.09 s**. Attributed server
+evidence is flat by attempt ID. Aggregate hot-loop evidence is de-duplicated
+and buffered into bounded runtime batches instead of creating one file per
+probe (the interrupted dayjs publication exposed millions of tiny files and a
+multi-gigabyte publication process). Current and both legacy cache layouts are
+removed by explicit `clean`; `prune` still preserves cache by contract.
+
+The clean parity rerun completed the test phase at 93 suites / 794 tests. Jest
+reported 451.65 s while old-cache reclamation competed for I/O, so that is not
+a clean performance benchmark. Publication of the pre-fix one-file-per-probe
+evidence was stopped at the user's request; the generic batching regression is
+covered directly, and old Jest-specific follow-up is intentionally deferred.
 
 ## Remaining sweep findings (not yet fixed)
 
