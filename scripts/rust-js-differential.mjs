@@ -254,12 +254,18 @@ async function executeRustCandidate(testCase, candidate) {
   };
   // This evaluates only the checked-in, self-contained differential corpus.
   // eslint-disable-next-line no-new-func
-  const executable = candidate.code.replace(
+  let executable = candidate.code.replace(
     /^import\s*\{[\s\S]*?\}\s*from\s*["']virtual:supercov-runtime["'];?\s*/,
     "",
   );
+  if (executable === candidate.code) {
+    executable = candidate.code.replace(
+      /const\s+[\w$]+\s*=\s*globalThis\.__supercovRuntime\.[\s\S]*?;\s*/,
+      "",
+    );
+  }
   if (executable === candidate.code)
-    throw new Error(`${testCase.file}: Rust candidate is missing its production runtime import`);
+    throw new Error(`${testCase.file}: Rust candidate is missing its production runtime binding`);
   const factory = new Function(
     runtime.coverageHit,
     runtime.mcdcBegin,

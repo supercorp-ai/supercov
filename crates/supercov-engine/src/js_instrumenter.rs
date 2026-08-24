@@ -9,6 +9,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::Write,
     path::Path,
+    sync::Arc,
 };
 
 use oxc_allocator::{Allocator, CloneIn, TakeIn};
@@ -17,13 +18,13 @@ use oxc_ast::{
     ast::{
         Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
         AssignmentPattern, AssignmentTarget, BindingPattern, CallExpression, CatchClause,
-        ChainExpression, Class, ComputedMemberExpression, ConditionalExpression, Declaration,
-        DoWhileStatement, ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement,
-        ForStatement, ForStatementLeft, FormalParameter, FormalParameterKind, FormalParameters,
-        Function, FunctionBody, IfStatement, ImportOrExportKind, LogicalExpression, NewExpression,
-        ObjectPropertyKind, PrivateFieldExpression, Program, PropertyKey, PropertyKind, Statement,
-        StaticMemberExpression, SwitchStatement, TryStatement, VariableDeclaration,
-        VariableDeclarationKind, WhileStatement, WithStatement,
+        ChainElement, ChainExpression, Class, ComputedMemberExpression, ConditionalExpression,
+        Declaration, DoWhileStatement, ExportDefaultDeclarationKind, Expression, ForInStatement,
+        ForOfStatement, ForStatement, ForStatementLeft, FormalParameter, FormalParameterKind,
+        FormalParameters, Function, FunctionBody, IfStatement, ImportOrExportKind,
+        LogicalExpression, NewExpression, ObjectPropertyKind, PrivateFieldExpression, Program,
+        PropertyKey, PropertyKind, Statement, StaticMemberExpression, SwitchStatement,
+        TryStatement, VariableDeclaration, VariableDeclarationKind, WhileStatement, WithStatement,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -101,17 +102,258 @@ pub struct CandidateOutput {
     pub limitations: Vec<String>,
 }
 
-fn generate_candidate(program: &Program<'_>, file: &str) -> (String, Option<serde_json::Value>) {
+fn restore_comment_text(
+    program: &Program<'_>,
+    generated: &str,
+    map: oxc_sourcemap::SourceMap,
+) -> Result<(String, oxc_sourcemap::SourceMap), CandidateError> {
+    if program.comments.is_empty() {
+        return Ok((generated.to_string(), map));
+    }
+    let allocator = Allocator::default();
+    let reparsed = Parser::new(&allocator, generated, program.source_type).parse();
+    if !reparsed.errors.is_empty() {
+        return Err(CandidateError::Parse(
+            reparsed
+                .errors
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect(),
+        ));
+    }
+    let mut matched = vec![false; program.comments.len()];
+    let mut original_index = 0;
+    let mut edits = Vec::<(usize, usize, String)>::new();
+    for emitted in &reparsed.program.comments {
+        let emitted_text = emitted.span.source_text(generated);
+        let (index, original) = loop {
+            let Some(original) = program.comments.get(original_index) else {
+                return Err(CandidateError::CommentPreservation {
+                    expected: program.comments.len(),
+                    actual: reparsed.program.comments.len(),
+                });
+            };
+            let index = original_index;
+            original_index += 1;
+            if original.kind == emitted.kind
+                && equal_ignoring_whitespace(
+                    original.span.source_text(program.source_text),
+                    emitted_text,
+                )
+            {
+                break (index, original);
+            }
+        };
+        matched[index] = true;
+        edits.push((
+            emitted.span.start as usize,
+            emitted.span.end as usize,
+            original.span.source_text(program.source_text).to_string(),
+        ));
+    }
+
+    let source_lines = Utf16LineIndex::new(program.source_text);
+    let generated_lines = Utf16LineIndex::new(generated);
+    let mut mappings = map
+        .get_tokens()
+        .filter_map(|token| {
+            token.get_source_id()?;
+            Some((
+                source_lines
+                    .byte_offset(token.get_src_line() as usize, token.get_src_col() as usize),
+                generated_lines
+                    .byte_offset(token.get_dst_line() as usize, token.get_dst_col() as usize),
+            ))
+        })
+        .collect::<Vec<_>>();
+    mappings.sort_unstable_by_key(|(source, destination)| (*source, *destination));
+    for (index, original) in program.comments.iter().enumerate() {
+        if matched[index] {
+            continue;
+        }
+        let anchor = if original.attached_to > 0 {
+            original.attached_to as usize
+        } else {
+            original.span.end as usize
+        };
+        let mapping_index = mappings.partition_point(|(source, _)| *source < anchor);
+        let destination = mappings
+            .get(mapping_index)
+            .map_or(generated.len(), |(_, destination)| *destination);
+        let mut text = String::new();
+        text.push(if original.preceded_by_newline() {
+            '\n'
+        } else {
+            ' '
+        });
+        text.push_str(original.span.source_text(program.source_text));
+        text.push(if original.is_line() || original.followed_by_newline() {
+            '\n'
+        } else {
+            ' '
+        });
+        edits.push((destination, destination, text));
+    }
+    edits.sort_by_key(|(start, end, _)| (*start, *end));
+    let restored_len = edits
+        .iter()
+        .fold(generated.len(), |length, (start, end, text)| {
+            length + text.len() - (end - start)
+        });
+    let mut restored = String::with_capacity(restored_len);
+    let mut cursor = 0;
+    for (start, end, replacement) in &edits {
+        if *start < cursor {
+            return Err(CandidateError::CommentPreservation {
+                expected: program.comments.len(),
+                actual: reparsed.program.comments.len(),
+            });
+        }
+        restored.push_str(&generated[cursor..*start]);
+        restored.push_str(replacement);
+        cursor = *end;
+    }
+    restored.push_str(&generated[cursor..]);
+    let map = shift_source_map(map, generated, &restored, &edits);
+    Ok((restored, map))
+}
+
+fn equal_ignoring_whitespace(left: &str, right: &str) -> bool {
+    left.chars()
+        .filter(|character| !character.is_whitespace())
+        .eq(right.chars().filter(|character| !character.is_whitespace()))
+}
+
+struct Utf16LineIndex<'s> {
+    source: &'s str,
+    starts: Vec<usize>,
+}
+
+impl<'s> Utf16LineIndex<'s> {
+    fn new(source: &'s str) -> Self {
+        let mut starts = Vec::with_capacity(source.lines().count() + 1);
+        starts.push(0);
+        starts.extend(
+            source
+                .char_indices()
+                .filter_map(|(offset, character)| (character == '\n').then_some(offset + 1)),
+        );
+        Self { source, starts }
+    }
+
+    fn byte_offset(&self, target_line: usize, target_utf16_col: usize) -> usize {
+        let Some(&start) = self.starts.get(target_line) else {
+            return self.source.len();
+        };
+        let end = self
+            .starts
+            .get(target_line + 1)
+            .copied()
+            .unwrap_or(self.source.len());
+        start + utf16_col_to_byte(&self.source[start..end], target_utf16_col)
+    }
+
+    fn line_col(&self, byte_offset: usize) -> (u32, u32) {
+        let byte_offset = byte_offset.min(self.source.len());
+        let line = self.starts.partition_point(|start| *start <= byte_offset) - 1;
+        let column = self.source[self.starts[line]..byte_offset]
+            .chars()
+            .map(char::len_utf16)
+            .sum::<usize>();
+        (line as u32, column as u32)
+    }
+}
+
+fn utf16_col_to_byte(line: &str, target_utf16_col: usize) -> usize {
+    let mut column = 0;
+    for (offset, character) in line.char_indices() {
+        if column >= target_utf16_col {
+            return offset;
+        }
+        column += character.len_utf16();
+    }
+    line.len()
+}
+
+fn shift_source_map(
+    map: oxc_sourcemap::SourceMap,
+    generated: &str,
+    restored: &str,
+    edits: &[(usize, usize, String)],
+) -> oxc_sourcemap::SourceMap {
+    let generated_lines = Utf16LineIndex::new(generated);
+    let restored_lines = Utf16LineIndex::new(restored);
+    let mut edit_index = 0;
+    let mut shift = 0isize;
+    let tokens = map
+        .get_tokens()
+        .map(|token| {
+            let original_offset = generated_lines
+                .byte_offset(token.get_dst_line() as usize, token.get_dst_col() as usize);
+            while let Some((start, end, replacement)) = edits.get(edit_index) {
+                if *end > original_offset {
+                    break;
+                }
+                shift += replacement.len() as isize - (*end - *start) as isize;
+                edit_index += 1;
+            }
+            let shifted_offset = edits
+                .get(edit_index)
+                .filter(|(start, end, _)| *start <= original_offset && original_offset < *end)
+                .map_or_else(
+                    || original_offset.saturating_add_signed(shift),
+                    |(start, _, _)| start.saturating_add_signed(shift),
+                );
+            let (dst_line, dst_col) = restored_lines.line_col(shifted_offset);
+            oxc_sourcemap::Token::new(
+                dst_line,
+                dst_col,
+                token.get_src_line(),
+                token.get_src_col(),
+                token.get_source_id(),
+                token.get_name_id(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut shifted = oxc_sourcemap::SourceMap::new(
+        map.get_file().cloned(),
+        map.get_names().cloned().collect::<Vec<Arc<str>>>(),
+        map.get_source_root().map(str::to_string),
+        map.get_sources().cloned().collect::<Vec<Arc<str>>>(),
+        map.get_source_contents()
+            .map(|content| content.cloned())
+            .collect::<Vec<Option<Arc<str>>>>(),
+        tokens.into_boxed_slice(),
+        None,
+    );
+    if let Some(ignore_list) = map.get_x_google_ignore_list() {
+        shifted.set_x_google_ignore_list(ignore_list.to_vec());
+    }
+    if let Some(debug_id) = map.get_debug_id() {
+        shifted.set_debug_id(debug_id);
+    }
+    shifted
+}
+
+fn generate_candidate(
+    program: &Program<'_>,
+    file: &str,
+) -> Result<(String, Option<serde_json::Value>), CandidateError> {
     let options = CodegenOptions {
         source_map_path: Some(Path::new(file).to_path_buf()),
         ..CodegenOptions::default()
     };
     let generated = Codegen::new().with_options(options).build(program);
-    let map = generated.map.map(|map| {
+    let (code, map) = restore_comment_text(
+        program,
+        &generated.code,
+        generated.map.expect("source maps are enabled"),
+    )?;
+    let map = Some({
         serde_json::from_str(&map.to_json_string())
             .expect("oxc must serialize its own generated source map")
     });
-    (generated.code, map)
+    Ok((code, map))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +402,7 @@ pub struct CandidateLimitation {
 pub enum CandidateError {
     UnknownSourceType(String),
     Parse(Vec<String>),
+    CommentPreservation { expected: usize, actual: usize },
 }
 
 type SpanKey = (u32, u32);
@@ -626,7 +869,54 @@ fn expression_is_anonymous_definition(expression: &Expression<'_>) -> bool {
         Expression::ArrowFunctionExpression(_) => true,
         Expression::FunctionExpression(function) => function.id.is_none(),
         Expression::ClassExpression(class) => class.id.is_none(),
+        Expression::ParenthesizedExpression(expression) => {
+            expression_is_anonymous_definition(&expression.expression)
+        }
+        Expression::TSAsExpression(expression) => {
+            expression_is_anonymous_definition(&expression.expression)
+        }
+        Expression::TSSatisfiesExpression(expression) => {
+            expression_is_anonymous_definition(&expression.expression)
+        }
+        Expression::TSTypeAssertion(expression) => {
+            expression_is_anonymous_definition(&expression.expression)
+        }
+        Expression::TSNonNullExpression(expression) => {
+            expression_is_anonymous_definition(&expression.expression)
+        }
         _ => false,
+    }
+}
+
+struct AssignmentNameSafetyTransformer<'a> {
+    ast: AstBuilder<'a>,
+}
+
+impl<'a> VisitMut<'a> for AssignmentNameSafetyTransformer<'a> {
+    fn visit_assignment_expression(&mut self, assignment: &mut AssignmentExpression<'a>) {
+        walk_mut::walk_assignment_expression(self, assignment);
+        let AssignmentTarget::AssignmentTargetIdentifier(identifier) = &assignment.left else {
+            return;
+        };
+        if assignment.operator != AssignmentOperator::Assign
+            || assignment.span.start == identifier.span.start
+            || !expression_is_anonymous_definition(&assignment.right)
+        {
+            return;
+        }
+        let right = assignment.right.take_in(self.ast.allocator);
+        assignment.right = self.ast.expression_sequence(
+            Span::default(),
+            self.ast.vec_from_array([
+                self.ast.expression_numeric_literal(
+                    Span::default(),
+                    0.0,
+                    None,
+                    NumberBase::Decimal,
+                ),
+                right,
+            ]),
+        );
     }
 }
 
@@ -781,7 +1071,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
     branches.extend(extended_analysis.branches);
     branches.extend(logical_analysis.branches);
     branches.extend(switch_analysis.branches);
-    let (generated, map) = generate_candidate(&parsed.program, file);
+    let (generated, map) = generate_candidate(&parsed.program, file)?;
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
         complete: false,
@@ -976,6 +1266,8 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     let loop_entered = names.allocate("__supercovLoopEntered");
     let loop_end = names.allocate("__supercovLoopEnd");
     let ast = AstBuilder::new(&allocator);
+    let mut assignment_name_safety = AssignmentNameSafetyTransformer { ast };
+    assignment_name_safety.visit_program(&mut parsed.program);
     let point_indices = point_analysis
         .points
         .iter()
@@ -1192,26 +1484,63 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     if uses_request_phase {
         runtime_imports.insert(10, ("withRequestPhase", &with_request_phase));
     }
-    let import_specifiers =
-        ast.vec_from_iter(runtime_imports.into_iter().map(|(imported, local)| {
-            ast.import_declaration_specifier_import_specifier(
+    if parsed.program.source_type.is_script() {
+        let declarators =
+            ast.vec_from_iter(runtime_imports.into_iter().map(|(imported, local)| {
+                let global_runtime =
+                    Expression::StaticMemberExpression(ast.alloc_static_member_expression(
+                        Span::default(),
+                        ast.expression_identifier(Span::default(), ast.ident("globalThis")),
+                        ast.identifier_name(Span::default(), ast.ident("__supercovRuntime")),
+                        false,
+                    ));
+                let runtime_helper =
+                    Expression::StaticMemberExpression(ast.alloc_static_member_expression(
+                        Span::default(),
+                        global_runtime,
+                        ast.identifier_name(Span::default(), ast.ident(imported)),
+                        false,
+                    ));
+                ast.variable_declarator(
+                    Span::default(),
+                    VariableDeclarationKind::Const,
+                    ast.binding_pattern_binding_identifier(Span::default(), ast.ident(local)),
+                    NONE,
+                    Some(runtime_helper),
+                    false,
+                )
+            }));
+        parsed.program.body.insert(
+            0,
+            Statement::VariableDeclaration(ast.alloc_variable_declaration(
                 Span::default(),
-                ast.module_export_name_identifier_name(Span::default(), ast.ident(imported)),
-                ast.binding_identifier(Span::default(), ast.ident(local)),
+                VariableDeclarationKind::Const,
+                declarators,
+                false,
+            )),
+        );
+    } else {
+        let import_specifiers =
+            ast.vec_from_iter(runtime_imports.into_iter().map(|(imported, local)| {
+                ast.import_declaration_specifier_import_specifier(
+                    Span::default(),
+                    ast.module_export_name_identifier_name(Span::default(), ast.ident(imported)),
+                    ast.binding_identifier(Span::default(), ast.ident(local)),
+                    oxc_ast::ast::ImportOrExportKind::Value,
+                )
+            }));
+        parsed.program.body.insert(
+            0,
+            Statement::ImportDeclaration(ast.alloc_import_declaration(
+                Span::default(),
+                Some(import_specifiers),
+                ast.string_literal(Span::default(), ast.str("virtual:supercov-runtime"), None),
+                None,
+                NONE,
                 oxc_ast::ast::ImportOrExportKind::Value,
-            )
-        }));
-    parsed.program.body.insert(
-        0,
-        Statement::ImportDeclaration(ast.alloc_import_declaration(
-            Span::default(),
-            Some(import_specifiers),
-            ast.string_literal(Span::default(), ast.str("virtual:supercov-runtime"), None),
-            None,
-            NONE,
-            oxc_ast::ast::ImportOrExportKind::Value,
-        )),
-    );
+            )),
+        );
+    }
 
     let limitations = vec![
         "production evidence archive parity remains to be proven against the TypeScript reference"
@@ -1219,7 +1548,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         "candidate runtime registration is differential-only and is not exposed by the public CLI"
             .to_string(),
     ];
-    let (code, map) = generate_candidate(&parsed.program, file);
+    let (code, map) = generate_candidate(&parsed.program, file)?;
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
         complete: false,
@@ -1717,9 +2046,12 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
         );
     }
 
-    fn instrument_call(&self, call: &mut CallExpression<'a>, site: &OptionalCallSiteRuntime) {
-        let callee = call.callee.take_in(self.ast.allocator);
-        call.callee = match callee {
+    fn instrument_callee(
+        &self,
+        callee: Expression<'a>,
+        site: &OptionalCallSiteRuntime,
+    ) -> Expression<'a> {
+        match callee {
             Expression::ComputedMemberExpression(mut member) => {
                 let property = member.expression.take_in(self.ast.allocator);
                 member.expression = self.reached(&site.frame, property);
@@ -1744,8 +2076,70 @@ impl<'a, 's> OptionalCallTransformer<'a, 's> {
                 member.object = self.reached(&site.frame, object);
                 Expression::PrivateFieldExpression(member)
             }
+            Expression::ChainExpression(mut chain) => {
+                match &mut chain.expression {
+                    ChainElement::ComputedMemberExpression(member) => {
+                        let property = member.expression.take_in(self.ast.allocator);
+                        member.expression = self.reached(&site.frame, property);
+                    }
+                    ChainElement::StaticMemberExpression(member) => {
+                        let member = member.take_in(self.ast.allocator);
+                        let property = self.ast.expression_string_literal(
+                            Span::default(),
+                            self.ast.str(member.property.name.as_str()),
+                            None,
+                        );
+                        chain.expression = ChainElement::ComputedMemberExpression(
+                            self.ast.alloc_computed_member_expression(
+                                member.span,
+                                member.object,
+                                self.reached(&site.frame, property),
+                                member.optional,
+                            ),
+                        );
+                    }
+                    ChainElement::PrivateFieldExpression(member) => {
+                        let object = member.object.take_in(self.ast.allocator);
+                        member.object = self.reached(&site.frame, object);
+                    }
+                    ChainElement::CallExpression(_) | ChainElement::TSNonNullExpression(_) => {
+                        return self.reached(&site.frame, Expression::ChainExpression(chain));
+                    }
+                }
+                Expression::ChainExpression(chain)
+            }
+            Expression::ParenthesizedExpression(mut parenthesized) => {
+                let inner = parenthesized.expression.take_in(self.ast.allocator);
+                parenthesized.expression = self.instrument_callee(inner, site);
+                Expression::ParenthesizedExpression(parenthesized)
+            }
+            Expression::TSAsExpression(mut wrapped) => {
+                let inner = wrapped.expression.take_in(self.ast.allocator);
+                wrapped.expression = self.instrument_callee(inner, site);
+                Expression::TSAsExpression(wrapped)
+            }
+            Expression::TSSatisfiesExpression(mut wrapped) => {
+                let inner = wrapped.expression.take_in(self.ast.allocator);
+                wrapped.expression = self.instrument_callee(inner, site);
+                Expression::TSSatisfiesExpression(wrapped)
+            }
+            Expression::TSTypeAssertion(mut wrapped) => {
+                let inner = wrapped.expression.take_in(self.ast.allocator);
+                wrapped.expression = self.instrument_callee(inner, site);
+                Expression::TSTypeAssertion(wrapped)
+            }
+            Expression::TSNonNullExpression(mut wrapped) => {
+                let inner = wrapped.expression.take_in(self.ast.allocator);
+                wrapped.expression = self.instrument_callee(inner, site);
+                Expression::TSNonNullExpression(wrapped)
+            }
             other => self.reached(&site.frame, other),
-        };
+        }
+    }
+
+    fn instrument_call(&self, call: &mut CallExpression<'a>, site: &OptionalCallSiteRuntime) {
+        let callee = call.callee.take_in(self.ast.allocator);
+        call.callee = self.instrument_callee(callee, site);
         let continued = self.call(
             &self.optional_call_continued,
             self.ast.vec1(Argument::from(self.identifier(&site.frame))),
@@ -2548,13 +2942,13 @@ impl<'a> LogicalValueTransformer<'a, '_> {
         right_id: &str,
     ) -> Expression<'a> {
         let assignment = assignment.unbox();
-        let inferred_name = match (&assignment.left, &assignment.right) {
-            (
-                AssignmentTarget::AssignmentTargetIdentifier(identifier),
-                Expression::ArrowFunctionExpression(_)
-                | Expression::FunctionExpression(_)
-                | Expression::ClassExpression(_),
-            ) => Some(identifier.name.to_string()),
+        let inferred_name = match &assignment.left {
+            AssignmentTarget::AssignmentTargetIdentifier(identifier)
+                if assignment.span.start == identifier.span.start
+                    && expression_is_anonymous_definition(&assignment.right) =>
+            {
+                Some(identifier.name.to_string())
+            }
             _ => None,
         };
         let frame = self.scratch();
@@ -5435,6 +5829,35 @@ mod tests {
             let reparsed = Parser::new(&allocator, &output.code, source_type).parse();
             assert!(reparsed.errors.is_empty(), "{file}: {:?}", reparsed.errors);
         }
+    }
+
+    #[test]
+    fn preserves_comment_payloads_byte_for_byte() {
+        let comment = "/*---\ndescription: >\n  nested indentation is data\ninfo: |\n  first\n    second\n---*/";
+        let source = format!("{comment}\nfunction run() {{ return 1; }}\n");
+        let output = instrument_candidate(&source, "app/comments.js").unwrap();
+        assert!(output.code.contains(comment), "{}", output.code);
+    }
+
+    #[test]
+    fn source_map_destinations_follow_restored_comments() {
+        let source = "function run() {\n  // first omitted comment\n  // second omitted comment\n  return 1;\n}\n";
+        let output = analyze_candidate(source, "app/comment-map.js").unwrap();
+        let encoded = serde_json::to_string(output.map.as_ref().unwrap()).unwrap();
+        let map = oxc_sourcemap::SourceMap::from_json_string(&encoded).unwrap();
+        let return_token = map
+            .get_tokens()
+            .find(|token| token.get_src_line() == 3 && token.get_src_col() == 2)
+            .expect("return token mapping");
+        let offset = Utf16LineIndex::new(&output.code).byte_offset(
+            return_token.get_dst_line() as usize,
+            return_token.get_dst_col() as usize,
+        );
+        assert!(
+            output.code[offset..].starts_with("return"),
+            "{}",
+            output.code
+        );
     }
 
     #[test]

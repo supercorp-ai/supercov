@@ -4,8 +4,10 @@ import { spawnSync } from "node:child_process";
 import { copyFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, relative, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import { parse as parseYaml } from "yaml";
 import { instrumentMcdc } from "../dist/instrumenter.js";
+import { instrumentSources } from "../dist/engineInstrumenter.js";
 
 function option(name, fallback) {
   const inline = process.argv.slice(2).find((value) => value.startsWith(`${name}=`));
@@ -92,16 +94,16 @@ function exclusionReason(path, source) {
 }
 
 function runtimePrelude(transformed) {
-  const match = transformed.match(
+  const importMatch = transformed.match(
     /import\s*\{([\s\S]*?)\}\s*from\s*["']virtual:supercov-runtime["'];?/,
   );
-  if (!match) return { prelude: "", code: transformed };
-  const aliases = Object.fromEntries(
-    [...match[1].matchAll(/([\w$]+)\s+as\s+([\w$]+)/g)].map(([, imported, local]) => [
-      imported,
-      local,
-    ]),
-  );
+  const globalMatches = [
+    ...transformed.matchAll(
+      /([\w$]+)\s*=\s*globalThis\.__supercovRuntime\.([\w$]+)/g,
+    ),
+  ];
+  if (!importMatch && globalMatches.length === 0)
+    return { prelude: "", code: transformed };
   const functions = {
     mcdcBegin: "function(){return {};}",
     mcdcCondition: "function(frame,index,value){return value;}",
@@ -128,6 +130,26 @@ function runtimePrelude(transformed) {
     loopEnd: "function(){}",
     withRequestPhase: "function(handler){return handler;}",
   };
+  if (!importMatch) {
+    const implementations = globalMatches.map(([, , imported]) => {
+      const implementation = functions[imported];
+      if (!implementation) throw new Error(`unknown runtime helper ${imported}`);
+      return `${imported}:${implementation}`;
+    });
+    const bindingIndex = globalMatches[0].index ?? 0;
+    const index = transformed.lastIndexOf("const ", bindingIndex);
+    if (index < 0)
+      throw new Error("script runtime binding declaration was not found");
+    return {
+      prelude: "",
+      code: `${transformed.slice(0, index)}globalThis.__supercovRuntime={${implementations.join(",")}};\n${transformed.slice(index)}`,
+    };
+  }
+  const aliases = Object.fromEntries(
+    [...importMatch[1].matchAll(/([\w$]+)\s+as\s+([\w$]+)/g)].map(
+      ([, imported, local]) => [imported, local],
+    ),
+  );
   const declarations = Object.entries(aliases).map(([imported, local]) => {
     const implementation = functions[imported];
     if (!implementation) throw new Error(`unknown runtime helper ${imported}`);
@@ -138,10 +160,10 @@ function runtimePrelude(transformed) {
   // Replace the import in place. Babel emits it after directive prologues, and
   // prepending the bindings would turn `"use strict"` into an ordinary string
   // expression and invalidate the equivalence test itself.
-  const index = match.index ?? 0;
+  const index = importMatch.index ?? 0;
   return {
     prelude: "",
-    code: `${transformed.slice(0, index)}${declarations.join("")}\n${transformed.slice(index + match[0].length)}`,
+    code: `${transformed.slice(0, index)}${declarations.join("")}\n${transformed.slice(index + importMatch[0].length)}`,
   };
 }
 
@@ -246,7 +268,9 @@ try {
     writeFileSync(destination, test.source);
   }
 
+  const baselineStarted = performance.now();
   const originalResults = runHarness(resolve(originalRoot, "**/*.js"));
+  const baselineDurationMs = performance.now() - baselineStarted;
   const baselinePasses = new Map();
   for (const record of originalResults.filter((item) => item.pass)) {
     const key = resultKey(record);
@@ -254,45 +278,90 @@ try {
   }
   const baselineFiles = new Set(baselinePasses.keys());
   const transformationFailures = [];
+  const transformationFailureFiles = new Set();
 
-  for (const test of selected) {
+  const baselineTests = selected.filter((test) =>
+    baselineFiles.has(relative(corpusRoot, test.path).replaceAll("\\", "/")),
+  );
+  const writeTransformed = (test, transformed) => {
     const relativePath = relative(corpusRoot, test.path).replaceAll("\\", "/");
-    if (!baselineFiles.has(relativePath)) continue;
-    try {
-      const transformed = instrumentMcdc(
-        test.source,
-        `test262/${relativePath}`,
-        {
-          probeVersion:
-            process.env.SUPERCOV_PROBE_VERSION === "2" ? 2 : 1,
-        },
-      ).code;
-      const runtime = runtimePrelude(transformed);
-      const destination = resolve(instrumentedRoot, relativePath);
-      mkdirSync(dirname(destination), { recursive: true });
-      const copyright =
-        test.source
-          .split(/\r|\n|\u2028|\u2029/)
-          .find((line) => line.includes("Copyright")) ??
-        "// Copyright Supercov Test262 equivalence run";
-      // Babel may render a transformed legacy fixture onto one very long
-      // line. test262-stream's historical copyright regex has nested greedy
-      // quantifiers, so retain the original short copyright line up front.
-      writeFileSync(
-        destination,
-        `${copyright}\n${runtime.prelude}${runtime.code}`,
-      );
-    } catch (error) {
-      transformationFailures.push({
-        file: relativePath,
-        error: error instanceof Error ? error.message : String(error),
-      });
+    const runtime = runtimePrelude(transformed);
+    const destination = resolve(instrumentedRoot, relativePath);
+    mkdirSync(dirname(destination), { recursive: true });
+    const copyright =
+      test.source
+        .split(/\r|\n|\u2028|\u2029/)
+        .find((line) => line.includes("Copyright")) ??
+      "// Copyright Supercov Test262 equivalence run";
+    // Babel may render a transformed legacy fixture onto one very long
+    // line. test262-stream's historical copyright regex has nested greedy
+    // quantifiers, so retain the original short copyright line up front.
+    writeFileSync(
+      destination,
+      `${copyright}\n${runtime.prelude}${runtime.code}`,
+    );
+  };
+  const recordFailure = (test, error) => {
+    const relativePath = relative(corpusRoot, test.path).replaceAll("\\", "/");
+    transformationFailureFiles.add(relativePath);
+    transformationFailures.push({
+      file: relativePath,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  };
+
+  const transformationStarted = performance.now();
+  if (process.env.SUPERCOV_ENGINE === "rust") {
+    const batchSize = Math.max(1, Number(process.env.SUPERCOV_TEST262_BATCH ?? 128));
+    for (let offset = 0; offset < baselineTests.length; offset += batchSize) {
+      const batch = baselineTests.slice(offset, offset + batchSize);
+      try {
+        const transformed = instrumentSources(
+          batch.map((test) => ({
+            file: `test262/${relative(corpusRoot, test.path).replaceAll("\\", "/")}`,
+            source: test.source,
+          })),
+        );
+        for (const [index, test] of batch.entries())
+          writeTransformed(test, transformed[index].code);
+      } catch (batchError) {
+        // Preserve an exact per-file failure inventory even if one malformed
+        // input causes the private batch protocol to reject the whole batch.
+        for (const test of batch) {
+          try {
+            const relativePath = relative(corpusRoot, test.path).replaceAll("\\", "/");
+            writeTransformed(
+              test,
+              instrumentSources([{ file: `test262/${relativePath}`, source: test.source }])[0].code,
+            );
+          } catch (error) {
+            recordFailure(test, error ?? batchError);
+          }
+        }
+      }
+    }
+  } else {
+    for (const test of baselineTests) {
+      const relativePath = relative(corpusRoot, test.path).replaceAll("\\", "/");
+      try {
+        writeTransformed(
+          test,
+          instrumentMcdc(test.source, `test262/${relativePath}`, {
+            probeVersion: process.env.SUPERCOV_PROBE_VERSION === "2" ? 2 : 1,
+          }).code,
+        );
+      } catch (error) {
+        recordFailure(test, error);
+      }
     }
   }
+  const transformationDurationMs = performance.now() - transformationStarted;
 
+  const instrumentedStarted = performance.now();
   const instrumentedResults = baselineFiles.size
     ? runHarness(resolve(instrumentedRoot, "**/*.js"))
     : [];
+  const instrumentedDurationMs = performance.now() - instrumentedStarted;
   const instrumentedPasses = new Map();
   for (const record of instrumentedResults.filter((item) => item.pass)) {
     const key = resultKey(record);
@@ -300,6 +369,7 @@ try {
   }
   const semanticFailures = [];
   for (const [key, expectedPasses] of baselinePasses) {
+    if (transformationFailureFiles.has(key)) continue;
     const actualPasses = instrumentedPasses.get(key) ?? 0;
     if (actualPasses < expectedPasses) {
       semanticFailures.push({
@@ -325,6 +395,9 @@ try {
     `[test262] selected files=${selected.length}; baseline passing scenarios=${baselinePassingScenarios}; baseline unsupported/failed scenarios=${baselineFailed}`,
   );
   console.log(`[test262] explicitly excluded files in shard=${exclusions.length}`);
+  console.log(
+    `[test262] durations baseline=${(baselineDurationMs / 1000).toFixed(2)}s transformation=${(transformationDurationMs / 1000).toFixed(2)}s instrumented=${(instrumentedDurationMs / 1000).toFixed(2)}s`,
+  );
   const excludedByReason = new Map();
   for (const exclusion of exclusions)
     excludedByReason.set(

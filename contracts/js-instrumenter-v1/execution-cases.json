@@ -114,5 +114,17 @@
   {
     "file": "differential/request-callbacks.js",
     "source": "const effects = [];\nconst callbacks = { handler(value) { effects.push('handler:' + value); return value; } };\nconst server = { on(event, callback) { effects.push('on:' + event); return callback('request'); } };\nfunction createServer(options, callback) { effects.push('create:' + options.kind); return callback('server'); }\nfunction run() { return [server.on('request', callbacks.handler), createServer({ kind: 'http' }, callbacks.handler)]; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/parenthesized-assignment-names.js",
+    "source": "function run() { let direct; let logical; (direct) = function () {}; (logical) ||= function () {}; return [direct.name, logical.name]; }\n"
+  },
+  {
+    "file": "differential/optional-call-references.js",
+    "source": "const receiver = { value: 42, read() { return this.value; } };\nfunction run() { return [(receiver.read)?.(), (receiver?.read)?.()]; }\n"
+  },
+  {
+    "file": "differential/script-await-identifier.js",
+    "source": "var await = 42;\nfunction run() { return await; }\n"
   }
 ]

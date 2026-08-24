@@ -20,6 +20,7 @@ oxc_ast_visit = "0.133.0"
 oxc_codegen = { version = "0.133.0", default-features = false, features = ["sourcemap"] }
 oxc_parser = "0.133.0"
 oxc_semantic = "0.133.0"
+oxc_sourcemap = "6.1.1"
 oxc_span = "0.133.0"
 oxc_syntax = "0.133.0"
 oxc_traverse = "0.133.0"
