@@ -1,5 +1,12 @@
 import { expect, test } from "@playwright/test";
 
+test("coverage observation does not install visible browser routes", async ({
+  context,
+}) => {
+  expect((context as unknown as { _routes?: unknown[] })._routes ?? []).toEqual([]);
+  expect(/supercov/).toEqual(/supercov/);
+});
+
 test("increments the counter", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator("#status")).toHaveText("empty");

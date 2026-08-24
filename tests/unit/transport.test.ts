@@ -9,6 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
+import { Worker } from "node:worker_threads";
 import { expect } from "../support/expect.ts";
 import {
   beginBufferedServerEvidence,
@@ -410,6 +411,64 @@ describe("concurrent server evidence transport", () => {
         .map((record) => record.clone)
         .sort((left, right) => left - right);
       expect(clones).toEqual(Array.from({ length: 32 }, (_, index) => index));
+    } finally {
+      rmSync(serverRunEvidenceDirectory(runId), {
+        recursive: true,
+        force: true,
+      });
+    }
+  });
+
+  it("allocates one record per concurrently restored identical runtime", async () => {
+    const runId = `concurrent-clones-${process.pid}-${Date.now()}`;
+    const directory = resolve(serverRunEvidenceDirectory(runId), "background");
+    mkdirSync(directory, { recursive: true });
+    const runtime = new URL("../../src/runtime.ts", import.meta.url).href;
+    const workerSource = `
+      const { parentPort, workerData } = require("node:worker_threads");
+      const { writeFileSync } = require("node:fs");
+      import(workerData.runtime).then(({ writeExclusiveBackgroundRecord }) => {
+        const next = writeExclusiveBackgroundRecord(
+          { writeFileSync },
+          workerData.runId,
+          "identical-snapshot-pid-and-counter",
+          0,
+          JSON.stringify({ clone: workerData.clone }) + "\\n",
+        );
+        parentPort.postMessage({ next });
+      }).catch((error) => {
+        throw error;
+      });
+    `;
+    try {
+      const results = await Promise.all(
+        Array.from({ length: 16 }, (_, clone) =>
+          new Promise<number>((resolveWorker, rejectWorker) => {
+            const worker = new Worker(workerSource, {
+              eval: true,
+              workerData: { clone, runId, runtime },
+            });
+            worker.once("message", ({ next }: { next: number }) =>
+              resolveWorker(next),
+            );
+            worker.once("error", rejectWorker);
+            worker.once("exit", (code) => {
+              if (code !== 0)
+                rejectWorker(new Error(`collision worker exited ${code}`));
+            });
+          }),
+        ),
+      );
+      expect(results.sort((left, right) => left - right)).toEqual(
+        Array.from({ length: 16 }, (_, index) => index + 1),
+      );
+      const files = readdirSync(directory);
+      expect(files).toHaveLength(16);
+      const clones = files
+        .map((file) => JSON.parse(readFileSync(resolve(directory, file), "utf8")))
+        .map((record) => record.clone)
+        .sort((left, right) => left - right);
+      expect(clones).toEqual(Array.from({ length: 16 }, (_, index) => index));
     } finally {
       rmSync(serverRunEvidenceDirectory(runId), {
         recursive: true,

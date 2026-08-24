@@ -43,6 +43,10 @@ describe("direct isolated instrumentation", () => {
       resolve(root, "src/decision.js"),
       "export const allowed = (left, right) => left && right;\n",
     );
+    mkdirSync(resolve(root, ".supercov"), { recursive: true });
+    writeFileSync(resolve(root, ".supercov/runtime.js"), "export const runtime = true;\n");
+    writeFileSync(resolve(root, ".supercov/runtime.d.ts"), "export declare const runtime: boolean;\n");
+    writeFileSync(resolve(root, ".supercov/transport.js"), "export const transport = true;\n");
     instrumentDirectWorkspace(
       root,
       ["src/decision.js"],
@@ -50,9 +54,44 @@ describe("direct isolated instrumentation", () => {
       undefined,
       [],
       "module",
+      ["src"],
     );
     const transformed = readFileSync(resolve(root, "src/decision.js"), "utf8");
-    expect(transformed).toContain('from "../.supercov/runtime.js"');
+    expect(transformed).toContain('from "./.supercov/runtime.js"');
     expect(transformed).not.toContain("__SUPERCOV_DIRECT_RUNTIME__");
+    expect(readFileSync(resolve(root, "src/.supercov/runtime.js"), "utf8")).toContain(
+      "runtime = true",
+    );
+    expect(readFileSync(resolve(root, "src/.supercov/runtime.d.ts"), "utf8")).toContain(
+      "runtime: boolean",
+    );
+  });
+
+  it("does not let coverage wrappers invalidate TypeScript narrowing", () => {
+    const root = mkdtempSync(resolve(tmpdir(), "supercov-typescript-build-"));
+    roots.push(root);
+    mkdirSync(resolve(root, "src"), { recursive: true });
+    mkdirSync(resolve(root, ".supercov"), { recursive: true });
+    writeFileSync(resolve(root, ".supercov/runtime.js"), "export const runtime = true;\n");
+    writeFileSync(resolve(root, ".supercov/runtime.d.ts"), "export declare const runtime: boolean;\n");
+    writeFileSync(resolve(root, ".supercov/transport.js"), "export const transport = true;\n");
+    writeFileSync(
+      resolve(root, "src/decision.ts"),
+      "export const value = (input?: { value: string }) => input ? input.value : 'none';\n",
+    );
+
+    instrumentDirectWorkspace(
+      root,
+      ["src/decision.ts"],
+      resolve(root, ".supercov/manifest.json"),
+      undefined,
+      [],
+      "module",
+      ["src"],
+    );
+
+    expect(readFileSync(resolve(root, "src/decision.ts"), "utf8")).toContain(
+      "// @ts-nocheck -- generated coverage workspace only",
+    );
   });
 });

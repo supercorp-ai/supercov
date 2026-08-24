@@ -151,6 +151,11 @@ function tsconfigRoots(directory: string): string[] {
       config.compilerOptions?.rootDir,
       ...(Array.isArray(config.include) ? config.include : []),
     ];
+    // TypeScript's default include is the directory containing tsconfig.json.
+    // Mirroring that default lets root-level libraries be discovered without
+    // guessing from filenames or requiring a conventional src directory.
+    if (!values.some((value) => typeof value === "string" && value.length > 0))
+      return [directory];
     return values.flatMap((value) => {
       if (typeof value !== "string" || value.startsWith("!")) return [];
       const prefix = value.split(/[?*{[]/, 1)[0]?.replace(/\/$/, "") ?? "";

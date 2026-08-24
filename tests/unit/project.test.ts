@@ -100,6 +100,22 @@ describe("coverage project discovery", () => {
     });
   });
 
+  it("detects Jest behind an npm script so generic builds use the Node runtime", () => {
+    const root = project({
+      "package.json": JSON.stringify({
+        scripts: { build: "tsc", test: "jest --runInBand" },
+        devDependencies: { jest: "25" },
+      }),
+      "src/index.ts": "export const ready = true",
+      "jest.config.js": "module.exports = {}",
+    });
+
+    expect(discoverCoverageProject(root, {}, ["npm", "test"])).toMatchObject({
+      buildAdapter: "generic",
+      usesJest: true,
+    });
+  });
+
   it("does not mistake an installed Vite compatibility dependency for the build tool", () => {
     const root = project({
       "package.json": JSON.stringify({

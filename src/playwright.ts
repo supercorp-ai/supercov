@@ -14,7 +14,6 @@ import type {
   Page,
   PlaywrightTestArgs,
   PlaywrightWorkerArgs,
-  Route,
   TestInfo,
   TestType,
   Worker,
@@ -142,7 +141,6 @@ class CoveragePhaseController {
   private readonly workers = new Set<Worker>();
   private readonly contexts = new Set<BrowserContext>();
   private readonly contextConfiguredHeaders = new Map<BrowserContext, Record<string, string>>();
-  private readonly contextRoutes = new Map<BrowserContext, (route: Route) => Promise<void>>();
   private readonly cdpSessions = new Map<Page, CDPSession>();
   private readonly newDocumentScriptIds = new Map<Page, string>();
   private readonly pendingRegistrations = new Set<Promise<void>>();
@@ -223,18 +221,6 @@ class CoveragePhaseController {
         scopeCookie: COVERAGE_SCOPE_COOKIE,
       },
     );
-    const attachPhase = async (route: Route): Promise<void> => {
-      const phaseId = this.requestPhaseId();
-      await route.continue({
-        headers: {
-          ...route.request().headers(),
-          [COVERAGE_SCOPE_HEADER]: encodeCoverageScope(this.scope),
-          ...(phaseId ? { [COVERAGE_PHASE_HEADER]: phaseId } : {}),
-        },
-      });
-    };
-    this.contextRoutes.set(context, attachPhase);
-    await context.route("**/*", attachPhase);
     const register = (page: Page): void => {
       const pending = this.registerPage(page).finally(() =>
         this.pendingRegistrations.delete(pending),
@@ -326,8 +312,6 @@ class CoveragePhaseController {
         .catch(() => undefined);
       await cdp.detach().catch(() => undefined);
     }
-    for (const [context, route] of this.contextRoutes)
-      await context.unroute("**/*", route).catch(() => undefined);
   }
 
   finish(phase: CoveragePhase, error?: unknown): void {
@@ -736,10 +720,17 @@ installChildProcessScopePropagation();
 
 function wrapMatchers<T extends object>(matchers: T, path = "expect"): T {
   return new Proxy(matchers, {
-    get(target, property, receiver) {
-      const value = Reflect.get(target, property, receiver) as unknown;
+    get(target, property) {
+      // Matcher objects and built-ins can expose getters whose internal slots
+      // require the original receiver (for example RegExp.prototype.dotAll).
+      // Passing this proxy as the receiver changes observable behaviour.
+      const value = Reflect.get(target, property, target) as unknown;
       const name = String(property);
-      if (value && typeof value === "object")
+      if (
+        value &&
+        typeof value === "object" &&
+        (name === "not" || name === "resolves" || name === "rejects")
+      )
         return wrapMatchers(value, `${path}.${name}`);
       if (typeof value !== "function") return value;
       return (...args: unknown[]) => {

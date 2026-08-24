@@ -252,7 +252,20 @@ async function createCoverageRun(command: string[]): Promise<number> {
     const generatedPlaywrightConfig = resolve(generatedDirectory, "playwright.config.mjs");
     const generatedViteConfig = resolve(generatedDirectory, "vite.config.mjs");
     const generatedVitestConfig = resolve(generatedDirectory, "vitest.config.mjs");
-    const generatedJestConfig = resolve(generatedDirectory, "jest.config.mjs");
+    let installedJestMajor: number | undefined;
+    try {
+      const installed = JSON.parse(
+        readFileSync(resolve(root, "node_modules/jest/package.json"), "utf8"),
+      ) as { version?: string };
+      installedJestMajor = Number.parseInt(installed.version?.split(".")[0] ?? "", 10);
+    } catch {
+      // Yarn PnP and custom launchers may not expose a physical Jest package.
+    }
+    const usesLegacyJestConfig =
+      installedJestMajor !== undefined && installedJestMajor < 28;
+    const generatedJestConfig = usesLegacyJestConfig
+      ? resolve(generatedDirectory, "jest-cjs/config.js")
+      : resolve(generatedDirectory, "jest.config.mjs");
     const manifestPath = resolve(generatedDirectory, "manifest.json");
     const buildOutputMetadataPath = resolve(
       generatedDirectory,
@@ -274,6 +287,13 @@ async function createCoverageRun(command: string[]): Promise<number> {
       resolve(generatedDirectory, "package.json"),
       `${JSON.stringify({ private: true, type: "module" })}\n`,
     );
+    if (usesLegacyJestConfig) {
+      mkdirSync(resolve(generatedDirectory, "jest-cjs"), { recursive: true });
+      atomicWriteFileSync(
+        resolve(generatedDirectory, "jest-cjs/package.json"),
+        `${JSON.stringify({ private: true, type: "commonjs" })}\n`,
+      );
+    }
     for (const file of [
       "atomic.js",
       "launchSupervisor.js",
@@ -297,6 +317,27 @@ async function createCoverageRun(command: string[]): Promise<number> {
         "__SUPERCOV_RUNTIME_INSTANCE__",
         `collector-${runId}`,
       ),
+    );
+    atomicWriteFileSync(
+      resolve(generatedDirectory, "runtime.d.ts"),
+      `${[
+        "coverageHit",
+        "selectionBegin",
+        "selectionRight",
+        "selectionEnd",
+        "optionalSelect",
+        "defaultSelected",
+        "defaultEntered",
+        "tryBegin",
+        "tryCatch",
+        "tryEnd",
+        "loopBegin",
+        "loopEntered",
+        "loopEnd",
+        "mcdcBegin",
+        "mcdcCondition",
+        "mcdcEnd",
+      ].map((name) => `export declare function ${name}(...args: any[]): any;`).join("\n")}\n`,
     );
     const generatedPlaywrightAdapter = resolve(generatedDirectory, "playwright.js");
     const generatedPlaywrightReporter = resolve(generatedDirectory, "playwrightReporter.js");
@@ -450,9 +491,9 @@ async function createCoverageRun(command: string[]): Promise<number> {
     const generatedJestSetup = resolve(generatedDirectory, "jest.setup.cjs");
     const generatedJestReporter = resolve(generatedDirectory, "jest-reporter.cjs");
     const jestEvidenceHelpers = [
-      `const { createHash } = require('node:crypto');`,
-      `const { mkdirSync, renameSync, writeFileSync } = require('node:fs');`,
-      `const { relative, resolve, sep } = require('node:path');`,
+      `const { createHash } = require('crypto');`,
+      `const { mkdirSync, renameSync, writeFileSync } = require('fs');`,
+      `const { relative, resolve, sep } = require('path');`,
       `const local = file => file ? relative(process.cwd(), file).split(sep).join('/') : 'unknown';`,
       `const id = (file, name) => 'jest:' + createHash('sha256').update(['jest', local(file), 0, 0, name].join('\\0')).digest('hex').slice(0, 24);`,
       `const scope = (file, name, retry) => { const testId = id(file, name); const testKey = createHash('sha256').update(testId).digest('hex').slice(0, 24); return { version: 1, runId: process.env.SUPERCOV_RUN_ID || 'unscoped', workerId: 'jest-' + (process.env.JEST_WORKER_ID || process.pid), testId, testKey, retry, attemptId: testKey + '-' + retry }; };`,
@@ -489,12 +530,16 @@ async function createCoverageRun(command: string[]): Promise<number> {
       ].join("\n"),
     );
     const jestOriginal = isolatedJestConfig
-      ? `import originalModule from ${JSON.stringify(pathToFileURL(isolatedJestConfig).href)};\nconst original = typeof originalModule === 'function' ? await originalModule() : originalModule;`
+      ? usesLegacyJestConfig
+        ? `const originalModule = require(${JSON.stringify(isolatedJestConfig)});\nconst original = typeof originalModule === 'function' ? originalModule() : originalModule;`
+        : `import originalModule from ${JSON.stringify(pathToFileURL(isolatedJestConfig).href)};\nconst original = typeof originalModule === 'function' ? await originalModule() : originalModule;`
       : `const original = {};`;
     atomicWriteFileSync(
       generatedJestConfig,
       [
-        `import { isAbsolute, resolve } from 'node:path';`,
+        usesLegacyJestConfig
+          ? `const { isAbsolute, resolve } = require('node:path');`
+          : `import { isAbsolute, resolve } from 'node:path';`,
         jestOriginal,
         `const decorate = config => ({ ...config,`,
         `  rootDir: config?.rootDir ? (isAbsolute(config.rootDir) ? config.rootDir : resolve(${JSON.stringify(isolatedJestConfig ? resolve(isolatedJestConfig, "..") : isolatedRoot)}, config.rootDir)) : ${JSON.stringify(isolatedRoot)},`,
@@ -502,7 +547,9 @@ async function createCoverageRun(command: string[]): Promise<number> {
         `  reporters: [...(config?.reporters ?? ['default']), ${JSON.stringify(generatedJestReporter)}],`,
         `  testLocationInResults: true,`,
         `});`,
-        `export default { ...decorate(original), projects: original?.projects?.map(project => typeof project === 'object' ? decorate(project) : project) };`,
+        usesLegacyJestConfig
+          ? `module.exports = { ...decorate(original), projects: original && original.projects && original.projects.map(project => typeof project === 'object' ? decorate(project) : project) };`
+          : `export default { ...decorate(original), projects: original?.projects?.map(project => typeof project === 'object' ? decorate(project) : project) };`,
         "",
       ].join("\n"),
     );
@@ -521,7 +568,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
       SUPERCOV_PLAYWRIGHT_TEST_EXPORT: project.playwrightTestExport,
       SUPERCOV_PROJECT_ROOT: isolatedRoot,
       SUPERCOV_SOURCE_PROJECT_ROOT: root,
-      ...(project.buildAdapter === "direct"
+      ...(project.buildAdapter === "direct" || project.usesJest
         ? { SUPERCOV_DIRECT_INSTRUMENTATION: "1" }
         : {}),
       SUPERCOV_GENERATED_VITEST_CONFIG: generatedVitestConfig,
@@ -569,7 +616,8 @@ async function createCoverageRun(command: string[]): Promise<number> {
         manifestPath,
         project.sourceScope,
         project.sourceLimitations,
-        "module",
+        project.usesJest ? "global" : "module",
+        project.sourceRoots,
       );
       buildResult = await runChild(
         project.buildCommand[0]!,
@@ -580,6 +628,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
             ...coverageEnv,
             ...project.buildEnvironment,
             NODE_ENV: "production",
+            ...(project.usesJest ? { NODE_OPTIONS: testNodeOptions } : {}),
           },
         },
       );

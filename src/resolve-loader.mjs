@@ -31,6 +31,20 @@ function belongsToProject(parentURL) {
 }
 
 export async function resolve(specifier, context, nextResolve) {
+  // Some transpilers preserve the source-relative runtime import while moving
+  // only the transformed application file to an output directory. The
+  // source-local copy keeps strict rootDir compilers happy; this fallback
+  // resolves the emitted import to Supercov's generated runtime without
+  // requiring the project's build to copy our helper directory.
+  if (
+    specifier.endsWith("/.supercov/runtime.js") &&
+    belongsToProject(context.parentURL)
+  ) {
+    return {
+      url: new URL("./runtime.js", import.meta.url).href,
+      shortCircuit: true,
+    };
+  }
   if (
     process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
     (specifier === "node:test" || specifier === "test") &&

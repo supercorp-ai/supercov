@@ -1,5 +1,7 @@
 import {
+  copyFileSync,
   existsSync,
+  mkdirSync,
   readFileSync,
 } from "node:fs";
 import { relative, resolve, sep } from "node:path";
@@ -43,8 +45,33 @@ function moduleRuntime(code: string, sourcePath: string, runtimePath: string): s
   const local = relative(resolve(sourcePath, ".."), runtimePath)
     .split(sep)
     .join("/");
-  const specifier = local.startsWith(".") ? local : `./${local}`;
+  const specifier = /^(?:\.\.?\/)/.test(local) ? local : `./${local}`;
   return code.replaceAll(mcdcRuntimeModuleId, specifier);
+}
+
+function isInside(parent: string, child: string): boolean {
+  const local = relative(parent, child);
+  return local === "" || (!local.startsWith(`..${sep}`) && local !== "..");
+}
+
+function containedRuntimePath(
+  root: string,
+  sourcePath: string,
+  sourceRoots: string[],
+): string {
+  const absoluteRoots = sourceRoots
+    .map((sourceRoot) => resolve(root, sourceRoot))
+    .filter((sourceRoot) => isInside(sourceRoot, sourcePath))
+    .sort((left, right) => right.length - left.length);
+  const sourceRoot = absoluteRoots[0];
+  if (!sourceRoot) return resolve(root, ".supercov/runtime.js");
+  const runtimeDirectory = resolve(sourceRoot, ".supercov");
+  mkdirSync(runtimeDirectory, { recursive: true });
+  for (const file of ["runtime.js", "runtime.d.ts", "transport.js"]) {
+    const generated = resolve(root, ".supercov", file);
+    if (existsSync(generated)) copyFileSync(generated, resolve(runtimeDirectory, file));
+  }
+  return resolve(runtimeDirectory, "runtime.js");
 }
 
 function sortByLocation<
@@ -69,6 +96,7 @@ export function instrumentDirectWorkspace(
   scope?: CoverageManifest["scope"],
   initialLimitations: CoverageLimitation[] = [],
   runtimeMode: "global" | "module" = "global",
+  sourceRoots: string[] = [],
 ): CoverageManifest {
   const decisions: McdcDecisionMeta[] = [];
   const points: CoveragePointMeta[] = [];
@@ -83,11 +111,19 @@ export function instrumentDirectWorkspace(
       points.push(...result.manifest.points);
       branches.push(...result.manifest.branches);
       limitations.push(...(result.manifest.limitations ?? []));
+      const transformed =
+        runtimeMode === "module"
+          ? moduleRuntime(
+              result.code,
+              path,
+              containedRuntimePath(root, path, sourceRoots),
+            )
+          : directRuntime(result.code);
       atomicWriteFileSync(
         path,
-        runtimeMode === "module"
-          ? moduleRuntime(result.code, path, resolve(root, ".supercov/runtime.js"))
-          : directRuntime(result.code),
+        /\.[cm]?tsx?$/.test(path)
+          ? `// @ts-nocheck -- generated coverage workspace only\n${transformed}`
+          : transformed,
       );
     }
   }

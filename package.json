@@ -1,6 +1,6 @@
 {
   "name": "supercov",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "Zero-edit, runner-aware coverage completeness for JavaScript test suites",
   "license": "MIT",
   "repository": {
@@ -34,7 +34,7 @@
     "./vitest": "./dist/vitest.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/build-runtime.mjs",
     "test": "node --test --test-concurrency=4 tests/unit/*.test.ts",
     "test:types": "tsc --noEmit",
     "test:fixture": "npm run build && npm --prefix tests/fixtures/generic-playwright run test:coverage && node scripts/opaque-runner-integration.mjs && node scripts/opaque-esm-integration.mjs && node scripts/node-test-integration.mjs && node scripts/jest-integration.mjs && node scripts/generic-build-integration.mjs && node scripts/next-integration.mjs && node scripts/distributed-merge-integration.mjs && node scripts/agent-query-eval.mjs",

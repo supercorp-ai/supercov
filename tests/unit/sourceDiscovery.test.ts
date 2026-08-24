@@ -95,6 +95,22 @@ describe("first-party source discovery", () => {
     expect(discovered.limitations).toEqual([]);
   });
 
+  it("mirrors TypeScript's default root for root-level libraries", () => {
+    const root = repository({
+      "package.json": JSON.stringify({ main: "./dist/index.js" }),
+      "tsconfig.json": JSON.stringify({ compilerOptions: { target: "es2022" } }),
+      "events.ts": "export const event = true",
+      "library.ts": "export const library = true",
+      "library.test.ts": "test('library', () => {})",
+    });
+
+    const discovered = discoverSourceScope(root);
+
+    expect(discovered.sourceRoots).toContain(".");
+    expect(discovered.sourceFiles).toEqual(["events.ts", "library.ts"]);
+    expect(discovered.limitations).toEqual([]);
+  });
+
   it("blocks a complete score while first-party source remains ambiguous", () => {
     const root = repository({
       "package.json": "{}",

@@ -15,6 +15,7 @@ export interface CoverageProject {
   playwrightConfig?: string;
   vitestConfig?: string;
   jestConfig?: string;
+  usesJest?: boolean;
   playwrightModule: string;
   playwrightTestExport: string;
   playwrightExports: string[];
@@ -59,6 +60,7 @@ function packageJson(root: string): {
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
   optionalDependencies?: Record<string, string>;
+  jest?: unknown;
 } {
   try {
     return JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
@@ -331,6 +333,10 @@ export function discoverCoverageProject(
       : "test");
 
   const expandedTestCommand = expandedCommand(root, command);
+  const usesJest =
+    Boolean(jestConfig) ||
+    /(?:^|\s)(?:npx\s+)?jest(?:\s|$)/.test(expandedTestCommand) ||
+    manifest.jest !== undefined;
   const executesSourceDirectly =
     /(?:^|\s)node\s+--test(?:\s|$)/.test(expandedTestCommand) &&
     /\.[cm]?tsx?(?:\s|$)/.test(expandedTestCommand) &&
@@ -356,6 +362,7 @@ export function discoverCoverageProject(
     ...(playwrightConfig ? { playwrightConfig } : {}),
     ...(vitestConfig ? { vitestConfig } : {}),
     ...(jestConfig ? { jestConfig } : {}),
+    usesJest,
     playwrightModule,
     playwrightTestExport,
     playwrightExports:
