@@ -224,6 +224,14 @@ miss blocks flipping any default.
   stable under those rules. Probe v2 also no longer archives registered but
   unobserved decisions as empty snapshots, matching the frozen v1 evidence
   contract rather than merely producing the same aggregate score.
+- The Playwright parity fixture now exercises a failed first attempt followed
+  by a terminal pass, a skipped test, and an expected failure. The gate asserts
+  the complete observed view reports `flaky`/`skipped`/`failed`, passed-only
+  retains only retry 1 of the flaky test, and expected-failure coverage cannot
+  become verified coverage. Rust fixture CI also executes the real SIGKILL
+  transaction recovery and hung-process watchdog paths before the Firefox and
+  WebKit reruns, so engine selection is covered under failure supervision as
+  well as normal completion.
 - Phase 3 is not promoted yet. Remaining gates are the full browser/Node
   syntax matrix, Essential SEO/Supercov dogfood suites, and exact TypeScript/
   Rust archive/attribution/outcome parity across all fixtures and under

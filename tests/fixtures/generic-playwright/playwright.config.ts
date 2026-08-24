@@ -11,7 +11,9 @@ export default defineConfig({
   // The coverage adapter must preserve exact attribution across independent
   // Playwright worker processes sharing one application server.
   workers: 2,
-  retries: 0,
+  // Exercise exact attempt identity and final-outcome filtering on every
+  // engine/runner parity pass, not only in analyzer unit tests.
+  retries: 1,
   reporter: "list",
   use: {
     baseURL: "http://127.0.0.1:4397",

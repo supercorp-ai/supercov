@@ -14,6 +14,22 @@ test("increments the counter", async ({ page }) => {
   await expect(page.locator("#status")).toHaveText("active");
 });
 
+test("retains a failed retry before the terminal pass", async ({
+  page,
+}, testInfo) => {
+  await page.goto("/");
+  await expect(page.locator("#status")).toHaveText("empty");
+  expect(testInfo.retry).toBe(1);
+});
+
+test.skip("records a skipped outcome without inventing coverage", async () => {});
+
+test("keeps expected failure out of passed-only coverage", async ({ page }) => {
+  test.fail();
+  await page.goto("/");
+  expect("observed failure").toBe("expected failure");
+});
+
 test("attributes request fixtures, user contexts, and popup frames", async ({
   browser,
   page,

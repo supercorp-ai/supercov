@@ -30,6 +30,8 @@ function run(arguments_, extraEnvironment = {}) {
 // the mixed Vitest + two-worker Playwright fixture, including user contexts,
 // popup frames, service workers, WebSockets, and request attribution.
 run(["run", "test:fixture"]);
+run(["run", "test:isolation"]);
+run(["run", "test:watchdog"]);
 for (const browser of ["firefox", "webkit"]) {
   run(
     ["--prefix", "tests/fixtures/generic-playwright", "run", "test:coverage"],

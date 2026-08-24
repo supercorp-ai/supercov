@@ -312,6 +312,58 @@ try {
     );
 
     const referenceReport = states.typescript.report;
+    if (fixture.name === "playwright") {
+      const outcome = (title) =>
+        referenceReport.tests.find((test) => test.title === title);
+      const flaky = outcome("retains a failed retry before the terminal pass");
+      const skipped = outcome("records a skipped outcome without inventing coverage");
+      const expectedFailure = outcome(
+        "keeps expected failure out of passed-only coverage",
+      );
+      requireEqual(
+        {
+          flaky: {
+            outcome: flaky?.outcome,
+            attempts: flaky?.attempts,
+          },
+          skipped: {
+            outcome: skipped?.outcome,
+            hits: skipped?.hits,
+          },
+          expectedFailure: {
+            outcome: expectedFailure?.outcome,
+            attempts: expectedFailure?.attempts,
+          },
+          passedContainsFlakyTerminalAttempt:
+            referenceReport.filters?.passed.tests.some(
+              (test) => test.id === flaky?.id && test.retries.join(",") === "1",
+            ),
+          passedContainsExpectedFailure:
+            referenceReport.filters?.passed.tests.some(
+              (test) => test.id === expectedFailure?.id,
+            ),
+        },
+        {
+          flaky: {
+            outcome: "flaky",
+            attempts: [
+              { retry: 0, status: "failed", expectedStatus: "passed" },
+              { retry: 1, status: "passed", expectedStatus: "passed" },
+            ],
+          },
+          skipped: { outcome: "skipped", hits: [] },
+          expectedFailure: {
+            outcome: "failed",
+            attempts: [
+              { retry: 0, status: "failed", expectedStatus: "failed" },
+            ],
+          },
+          passedContainsFlakyTerminalAttempt: true,
+          passedContainsExpectedFailure: false,
+        },
+        "playwright: retry, skipped, and expected-failure outcome contract regressed",
+      );
+    }
     const resources = [
       [],
       ["files"],
