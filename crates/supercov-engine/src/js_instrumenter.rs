@@ -27,7 +27,7 @@ use oxc_ast::{
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
-use oxc_codegen::Codegen;
+use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
@@ -91,6 +91,7 @@ pub struct CandidateOutput {
     pub complete: bool,
     pub supported_surface: String,
     pub code: String,
+    pub map: Option<serde_json::Value>,
     pub decisions: Vec<CandidateDecision>,
     pub points: Vec<CandidatePoint>,
     pub branches: Vec<CandidateBranch>,
@@ -98,6 +99,19 @@ pub struct CandidateOutput {
     pub runtime: Option<CandidateRuntime>,
     pub coverage_limitations: Vec<CandidateLimitation>,
     pub limitations: Vec<String>,
+}
+
+fn generate_candidate(program: &Program<'_>, file: &str) -> (String, Option<serde_json::Value>) {
+    let options = CodegenOptions {
+        source_map_path: Some(Path::new(file).to_path_buf()),
+        ..CodegenOptions::default()
+    };
+    let generated = Codegen::new().with_options(options).build(program);
+    let map = generated.map.map(|map| {
+        serde_json::from_str(&map.to_json_string())
+            .expect("oxc must serialize its own generated source map")
+    });
+    (generated.code, map)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -767,12 +781,13 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
     branches.extend(extended_analysis.branches);
     branches.extend(logical_analysis.branches);
     branches.extend(switch_analysis.branches);
-    let generated = Codegen::new().build(&parsed.program).code;
+    let (generated, map) = generate_candidate(&parsed.program, file);
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
         complete: false,
         supported_surface: "control-decision-manifest-v1".to_string(),
         code: generated,
+        map,
         decisions: collector.decisions,
         points: point_analysis.points,
         branches,
@@ -1067,12 +1082,12 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     extended_transformer.visit_program(&mut parsed.program);
     let mut transformer = ControlProbeV2Transformer {
         ast,
-        file,
         decisions: &collector.decisions,
         mcdc_begin: mcdc_begin.clone(),
         mcdc_condition: mcdc_condition.clone(),
         mcdc_end: mcdc_end.clone(),
         mcdc_end_v2: mcdc_end_v2.clone(),
+        probe_file_v2: probe_file_v2.clone(),
         names,
         scope_declarations: Vec::new(),
         decision_index: 0,
@@ -1199,16 +1214,18 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     );
 
     let limitations = vec![
-        "production evidence transport and request-phase handler adaptation remain on the TypeScript reference"
+        "production evidence archive parity remains to be proven against the TypeScript reference"
             .to_string(),
         "candidate runtime registration is differential-only and is not exposed by the public CLI"
             .to_string(),
     ];
+    let (code, map) = generate_candidate(&parsed.program, file);
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
         complete: false,
         supported_surface: "complete-js-manifest-and-differential-probes-candidate".to_string(),
-        code: Codegen::new().build(&parsed.program).code,
+        code,
+        map,
         decisions: collector.decisions,
         points: point_analysis.points,
         branches,
@@ -3245,12 +3262,12 @@ impl<'s> CandidateNames<'s> {
 
 struct ControlProbeV2Transformer<'a, 's> {
     ast: AstBuilder<'a>,
-    file: &'s str,
     decisions: &'s [CandidateDecision],
     mcdc_begin: String,
     mcdc_condition: String,
     mcdc_end: String,
     mcdc_end_v2: String,
+    probe_file_v2: String,
     names: CandidateNames<'s>,
     scope_declarations: Vec<Vec<String>>,
     decision_index: usize,
@@ -3649,11 +3666,7 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
             original,
         );
         let arguments = self.ast.vec_from_array([
-            Argument::from(self.ast.expression_string_literal(
-                Span::default(),
-                self.ast.str(self.file),
-                None,
-            )),
+            Argument::from(self.identifier(&self.probe_file_v2)),
             Argument::from(self.number(plan.index as u64)),
             Argument::from(self.identifier(&frame_name)),
             Argument::from(self.identifier(&result_name)),
@@ -5408,6 +5421,15 @@ mod tests {
             ("module.ts", SOURCE),
         ] {
             let output = analyze_candidate(source, file).unwrap();
+            let map = output.map.as_ref().expect("candidate source map");
+            assert_eq!(map["version"], 3);
+            assert_eq!(map["sources"][0], file);
+            assert_eq!(map["sourcesContent"][0], source);
+            assert!(
+                map["mappings"]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty())
+            );
             let allocator = Allocator::default();
             let source_type = SourceType::from_path(file).unwrap();
             let reparsed = Parser::new(&allocator, &output.code, source_type).parse();

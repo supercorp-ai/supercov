@@ -7,7 +7,8 @@ import {
 import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Plugin } from "vite";
-import { instrumentMcdc, mcdcRuntimeModuleId } from "./instrumenter.ts";
+import { mcdcRuntimeModuleId, type InstrumentMcdcResult } from "./instrumenter.ts";
+import { instrumentSource, instrumentSources } from "./engineInstrumenter.ts";
 import { atomicWriteFileSync } from "./atomic.ts";
 import type {
   CoverageBranchMeta,
@@ -50,6 +51,10 @@ export function mcdcVitePlugin(options: McdcVitePluginOptions = {}): Plugin {
   const points = new Map<string, CoveragePointMeta>();
   const branches = new Map<string, CoverageBranchMeta>();
   const limitations = new Map<string, CoverageLimitation>();
+  const instrumentedById = new Map<
+    string,
+    { source: string; result: InstrumentMcdcResult }
+  >();
   for (const limitation of options.sourceLimitations ?? [])
     limitations.set(limitation.id, limitation);
 
@@ -117,13 +122,21 @@ export function mcdcVitePlugin(options: McdcVitePluginOptions = {}): Plugin {
       // source file up front so never-imported executable code is still in the
       // denominator and appears as uncovered rather than disappearing.
       const inventory = configuredSourceFiles ?? sourceRoots.flatMap(sourceFiles);
-      for (const id of inventory) {
-        if (existsSync(id)) {
-          const file = relative(root, id).split(sep).join("/");
-          recordManifest(
-            instrumentMcdc(readFileSync(id, "utf8"), file).manifest,
-          );
-        }
+      const pending = inventory.flatMap((id) => {
+        if (!existsSync(id)) return [];
+        return [{
+          id,
+          file: relative(root, id).split(sep).join("/"),
+          source: readFileSync(id, "utf8"),
+        }];
+      });
+      const results = instrumentSources(
+        pending.map(({ file, source }) => ({ file, source })),
+      );
+      for (const [index, entry] of pending.entries()) {
+        const result = results[index]!;
+        instrumentedById.set(entry.id, { source: entry.source, result });
+        recordManifest(result.manifest);
       }
     },
     transform(code, rawId) {
@@ -139,7 +152,10 @@ export function mcdcVitePlugin(options: McdcVitePluginOptions = {}): Plugin {
       )
         return null;
       const file = relative(root, id).split(sep).join("/");
-      const result = instrumentMcdc(code, file);
+      const cached = instrumentedById.get(id);
+      const result = cached?.source === code
+        ? cached.result
+        : instrumentSource(code, file);
       recordManifest(result.manifest);
       return {
         code: result.code,

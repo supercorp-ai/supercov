@@ -12,6 +12,10 @@ import type { CoverageProject } from "../../src/project.ts";
 describe("run integrity", () => {
   it("fingerprints source, tests, dependencies, configuration, and instrumenter", () => {
     const root = mkdtempSync(resolve(tmpdir(), "supercov-integrity-"));
+    const previousEngine = process.env["SUPERCOV_ENGINE"];
+    const previousBinary = process.env["SUPERCOV_RUST_BINARY"];
+    delete process.env["SUPERCOV_ENGINE"];
+    delete process.env["SUPERCOV_RUST_BINARY"];
     try {
       mkdirSync(resolve(root, "app"));
       mkdirSync(resolve(root, "tests"));
@@ -54,6 +58,20 @@ describe("run integrity", () => {
         stale: false,
         reasons: [],
       });
+      const rustBinary = resolve(root, "rust-engine");
+      writeFileSync(rustBinary, "candidate-a");
+      process.env["SUPERCOV_ENGINE"] = "rust";
+      process.env["SUPERCOV_RUST_BINARY"] = rustBinary;
+      const rust = createRunIntegrity(root, project, resolve(root, "tool"));
+      expect(rust.fingerprint.instrumenter).not.toBe(first.fingerprint.instrumenter);
+      expect(rust.fingerprint.execution).not.toBe(first.fingerprint.execution);
+      writeFileSync(rustBinary, "candidate-b");
+      const rebuiltRust = createRunIntegrity(root, project, resolve(root, "tool"));
+      expect(rebuiltRust.fingerprint.instrumenter).not.toBe(
+        rust.fingerprint.instrumenter,
+      );
+      delete process.env["SUPERCOV_ENGINE"];
+      delete process.env["SUPERCOV_RUST_BINARY"];
       writeFileSync(resolve(root, "app/index.ts"), "export const value = 2;\n");
       const changed = createRunIntegrity(root, project, resolve(root, "tool"));
       expect(compareRunIntegrity(first, changed)).toMatchObject({
@@ -61,6 +79,10 @@ describe("run integrity", () => {
         reasons: ["instrumented source changed"],
       });
     } finally {
+      if (previousEngine === undefined) delete process.env["SUPERCOV_ENGINE"];
+      else process.env["SUPERCOV_ENGINE"] = previousEngine;
+      if (previousBinary === undefined) delete process.env["SUPERCOV_RUST_BINARY"];
+      else process.env["SUPERCOV_RUST_BINARY"] = previousBinary;
       rmSync(root, { recursive: true, force: true });
     }
   });

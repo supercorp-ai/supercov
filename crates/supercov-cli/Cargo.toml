@@ -12,5 +12,7 @@ name = "supercov"
 path = "src/main.rs"
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
 supercov-contracts.workspace = true
 supercov-engine.workspace = true

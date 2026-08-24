@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import type { CoverageProject } from "./project.ts";
+import { instrumentationEngineIdentity } from "./engineInstrumenter.ts";
 import type {
   CoverageRunFingerprint,
   CoverageRunIntegrity,
@@ -136,6 +137,7 @@ export function createRunIntegrity(
     "buildCache.js",
     "cli.js",
     "directInstrumenter.js",
+    "engineInstrumenter.js",
     "esmInterceptor.js",
     "instrumenter.js",
     "launchSupervisor.js",
@@ -167,7 +169,11 @@ export function createRunIntegrity(
   const tests = digestFiles(root, testFiles);
   const dependencies = digestFiles(root, dependencyFiles);
   const configuration = digestFiles(root, configurationFiles);
-  const instrumenter = digestFiles(toolSourceDirectory, instrumenterFiles);
+  const instrumenterSource = digestFiles(toolSourceDirectory, instrumenterFiles);
+  const engine = instrumentationEngineIdentity();
+  const instrumenter = createHash("sha256")
+    .update(JSON.stringify({ instrumenterSource, engine }))
+    .digest("hex");
   const executionInstrumenter = digestFiles(
     toolSourceDirectory,
     executionFiles.length > 0 ? executionFiles : instrumenterFiles,
@@ -182,6 +188,7 @@ export function createRunIntegrity(
         configuration,
         buildEnvironment: project.buildEnvironment,
         executionInstrumenter,
+        engine,
       }),
     )
     .digest("hex");

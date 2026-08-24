@@ -7,7 +7,8 @@ import {
 } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { atomicWriteFileSync } from "./atomic.ts";
-import { instrumentMcdc, mcdcRuntimeModuleId } from "./instrumenter.ts";
+import { mcdcRuntimeModuleId } from "./instrumenter.ts";
+import { instrumentSources } from "./engineInstrumenter.ts";
 import type {
   CoverageBranchMeta,
   CoverageLimitation,
@@ -116,11 +117,20 @@ export function instrumentDirectWorkspace(
   const points: CoveragePointMeta[] = [];
   const branches: CoverageBranchMeta[] = [];
   const limitations: CoverageLimitation[] = [...initialLimitations];
-  for (const sourceFile of sourceFiles) {
+  const pending = sourceFiles.flatMap((sourceFile) => {
     const path = resolve(root, sourceFile);
-    if (existsSync(path)) {
-      const file = relative(root, path).split(sep).join("/");
-      const result = instrumentMcdc(readFileSync(path, "utf8"), file);
+    if (!existsSync(path)) return [];
+    return [{
+      path,
+      file: relative(root, path).split(sep).join("/"),
+      source: readFileSync(path, "utf8"),
+    }];
+  });
+  const results = instrumentSources(
+    pending.map(({ file, source }) => ({ file, source })),
+  );
+  for (const [index, { path }] of pending.entries()) {
+      const result = results[index]!;
       decisions.push(...result.manifest.decisions);
       points.push(...result.manifest.points);
       branches.push(...result.manifest.branches);
@@ -139,7 +149,6 @@ export function instrumentDirectWorkspace(
           ? `// @ts-nocheck -- generated coverage workspace only\n${transformed}`
           : transformed,
       );
-    }
   }
   const manifest: CoverageManifest = {
     decisions: sortByLocation(decisions),

@@ -244,10 +244,11 @@ async function executeRustCandidate(testCase, candidate) {
     frame.entered = true;
   };
   const loopEnd = (frame) => coverageHit(frame.entered ? frame.enteredId : frame.zeroId);
-  const recorder = (file, decisionIndex, encoded, value) => {
-    if (file !== testCase.file) throw new Error(`unexpected probe file ${file}`);
-    const decision = candidate.decisions[decisionIndex];
+  const recorder = (fileState, decisionIndex, encoded, value) => {
+    const decision = fileState?.decisions?.[decisionIndex];
     if (!decision) throw new Error(`unexpected decision index ${decisionIndex}`);
+    if (JSON.stringify(decision) !== JSON.stringify(candidate.decisions[decisionIndex]))
+      throw new Error(`unexpected registered probe file for ${testCase.file}`);
     vectors.push(decodeVector(decision.conditions.length, encoded, value));
     return value;
   };

@@ -568,6 +568,8 @@ function injectChildEnvironment(
     options.env && typeof options.env === "object"
       ? (options.env as NodeJS.ProcessEnv)
       : undefined;
+  if (existingEnvironment?.["SUPERCOV_INTERNAL_INSTRUMENTER"] === "1")
+    return args;
   const environment = existingEnvironment
     ? { ...existingEnvironment, ...inherited }
     : { ...process.env, ...inherited };
