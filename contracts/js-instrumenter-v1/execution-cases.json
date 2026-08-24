@@ -46,5 +46,9 @@
   {
     "file": "differential/reentrant-parameter-decision.js",
     "source": "const effects = [];\nlet depth = 0;\nfunction choose(value = ((depth++ === 0 ? choose() : true) && true) ? 'yes' : 'no') { effects.push(value); return value; }\nfunction run() { return choose(); }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/logical-assignment.js",
+    "source": "const effects = [];\nlet stored = 0;\nconst target = new Proxy({}, { get(_object, key) { effects.push('get:' + String(key)); return stored; }, set(_object, key, value) { effects.push('set:' + String(key) + ':' + value); stored = value; return true; } });\nfunction key() { effects.push('key'); return 'value'; }\nfunction right(value) { effects.push('right:' + value); return value; }\nfunction run() { target[key()] ||= right(4); target[key()] &&= right(7); target[key()] ??= right(9); let named; named ||= function () {}; return { stored, name: named.name }; }\nfunction observe() { return effects; }\n"
   }
 ]

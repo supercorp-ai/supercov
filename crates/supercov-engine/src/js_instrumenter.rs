@@ -16,12 +16,12 @@ use oxc_allocator::{Allocator, TakeIn};
 use oxc_ast::{
     AstBuilder, NONE,
     ast::{
-        Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentTarget,
-        CallExpression, ConditionalExpression, Declaration, DoWhileStatement, Expression,
-        ForInStatement, ForOfStatement, ForStatement, FormalParameterKind, FormalParameters,
-        Function, FunctionBody, IfStatement, LogicalExpression, NewExpression, ObjectPropertyKind,
-        Program, PropertyKey, PropertyKind, Statement, VariableDeclarationKind, WhileStatement,
-        WithStatement,
+        Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
+        AssignmentTarget, CallExpression, ConditionalExpression, Declaration, DoWhileStatement,
+        Expression, ForInStatement, ForOfStatement, ForStatement, FormalParameterKind,
+        FormalParameters, Function, FunctionBody, IfStatement, LogicalExpression, NewExpression,
+        ObjectPropertyKind, Program, PropertyKey, PropertyKind, Statement, VariableDeclarationKind,
+        WhileStatement, WithStatement,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -668,7 +668,14 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         with_statements: &safety.with_statements,
     };
     collector.visit_program(&parsed.program);
-    let branch_analysis = collect_logical_value_branches(
+    let assignment_analysis = collect_logical_assignment_branches(
+        &allocator,
+        &mut parsed.program,
+        source,
+        file,
+        &safety.source_sensitive_functions,
+    );
+    let logical_analysis = collect_logical_value_branches(
         &allocator,
         &mut parsed.program,
         source,
@@ -676,6 +683,8 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         &collector.decision_logical_nodes,
         &safety.source_sensitive_functions,
     );
+    let mut branches = assignment_analysis.branches;
+    branches.extend(logical_analysis.branches);
     let generated = Codegen::new().build(&parsed.program).code;
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
@@ -684,7 +693,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         code: generated,
         decisions: collector.decisions,
         points: point_analysis.points,
-        branches: branch_analysis.branches,
+        branches,
         runtime: None,
         coverage_limitations: safety.limitations,
         limitations: vec![
@@ -734,7 +743,14 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         with_statements: &safety.with_statements,
     };
     collector.visit_program(&parsed.program);
-    let branch_analysis = collect_logical_value_branches(
+    let assignment_analysis = collect_logical_assignment_branches(
+        &allocator,
+        &mut parsed.program,
+        source,
+        file,
+        &safety.source_sensitive_functions,
+    );
+    let logical_analysis = collect_logical_value_branches(
         &allocator,
         &mut parsed.program,
         source,
@@ -742,6 +758,8 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         &collector.decision_logical_nodes,
         &safety.source_sensitive_functions,
     );
+    let mut branches = assignment_analysis.branches;
+    branches.extend(logical_analysis.branches);
 
     let mut names = CandidateNames::new(source);
     let coverage_hit = names.allocate("__supercovCoverageHit");
@@ -791,7 +809,8 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         selection_end: selection_end.clone(),
         names: CandidateNames::new(source),
         scope_declarations: Vec::new(),
-        targets: branch_analysis.logical_targets,
+        logical_targets: logical_analysis.logical_targets,
+        assignment_targets: assignment_analysis.targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
         with_statements: safety.with_statements.clone(),
     };
@@ -808,11 +827,11 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
         complete: false,
-        supported_surface: "point-control-logical-value-probe-candidate".to_string(),
+        supported_surface: "point-control-logical-selection-probe-candidate".to_string(),
         code: Codegen::new().build(&parsed.program).code,
         decisions: collector.decisions,
         points: point_analysis.points,
-        branches: branch_analysis.branches,
+        branches,
         runtime: Some(CandidateRuntime {
             coverage_hit,
             mcdc_begin,
@@ -1040,7 +1059,8 @@ struct LogicalValueTransformer<'a, 's> {
     selection_end: String,
     names: CandidateNames<'s>,
     scope_declarations: Vec<Vec<String>>,
-    targets: HashMap<SpanKey, (String, String)>,
+    logical_targets: HashMap<SpanKey, (String, String)>,
+    assignment_targets: HashMap<SpanKey, (String, String)>,
     source_sensitive_functions: HashSet<SpanKey>,
     with_statements: HashSet<SpanKey>,
 }
@@ -1163,6 +1183,63 @@ impl<'a> LogicalValueTransformer<'a, '_> {
         self.ast
             .expression_sequence(Span::default(), self.ast.vec_from_array([assign, end]))
     }
+
+    fn instrument_assignment(
+        &mut self,
+        assignment: oxc_allocator::Box<'a, AssignmentExpression<'a>>,
+        short_id: &str,
+        right_id: &str,
+    ) -> Expression<'a> {
+        let assignment = assignment.unbox();
+        let inferred_name = match (&assignment.left, &assignment.right) {
+            (
+                AssignmentTarget::AssignmentTargetIdentifier(identifier),
+                Expression::ArrowFunctionExpression(_)
+                | Expression::FunctionExpression(_)
+                | Expression::ClassExpression(_),
+            ) => Some(identifier.name.to_string()),
+            _ => None,
+        };
+        let frame = self.scratch();
+        let begin = self.call(
+            &self.selection_begin,
+            self.ast.vec_from_array([
+                self.string_argument(short_id),
+                self.string_argument(right_id),
+            ]),
+        );
+        let assign_frame = self.ast.expression_assignment(
+            Span::default(),
+            AssignmentOperator::Assign,
+            self.assignment_target(&frame),
+            begin,
+        );
+        let mut right_arguments = self.ast.vec_from_array([
+            Argument::from(self.identifier(&frame)),
+            Argument::from(assignment.right),
+        ]);
+        if let Some(name) = inferred_name {
+            right_arguments.push(self.string_argument(&name));
+        }
+        let right = self.call(&self.selection_right, right_arguments);
+        let measured_assignment = self.ast.expression_assignment(
+            Span::default(),
+            assignment.operator,
+            assignment.left,
+            right,
+        );
+        let end = self.call(
+            &self.selection_end,
+            self.ast.vec_from_array([
+                Argument::from(self.identifier(&frame)),
+                Argument::from(measured_assignment),
+            ]),
+        );
+        self.ast.expression_sequence(
+            Span::default(),
+            self.ast.vec_from_array([assign_frame, end]),
+        )
+    }
 }
 
 impl<'a> VisitMut<'a> for LogicalValueTransformer<'a, '_> {
@@ -1208,7 +1285,15 @@ impl<'a> VisitMut<'a> for LogicalValueTransformer<'a, '_> {
     fn visit_expression(&mut self, expression: &mut Expression<'a>) {
         let key = span_key(expression.span());
         walk_mut::walk_expression(self, expression);
-        let Some((short_id, right_id)) = self.targets.remove(&key) else {
+        if let Some((short_id, right_id)) = self.assignment_targets.remove(&key) {
+            let original = expression.take_in(self.ast.allocator);
+            let Expression::AssignmentExpression(assignment) = original else {
+                panic!("logical-assignment target must remain an assignment expression");
+            };
+            *expression = self.instrument_assignment(assignment, &short_id, &right_id);
+            return;
+        }
+        let Some((short_id, right_id)) = self.logical_targets.remove(&key) else {
             return;
         };
         let original = expression.take_in(self.ast.allocator);
@@ -1857,6 +1942,147 @@ struct LogicalBranchAnalysis {
     logical_targets: HashMap<SpanKey, (String, String)>,
 }
 
+#[derive(Default)]
+struct LogicalAssignmentAnalysis {
+    branches: Vec<CandidateBranch>,
+    targets: HashMap<SpanKey, (String, String)>,
+}
+
+struct LogicalAssignmentCollector<'s> {
+    source: &'s str,
+    file: &'s str,
+    source_sensitive_functions: &'s HashSet<SpanKey>,
+    unsafe_function_depth: usize,
+    with_depth: usize,
+    analysis: LogicalAssignmentAnalysis,
+}
+
+impl LogicalAssignmentCollector<'_> {
+    fn exit_source_function(&mut self, span: Span) {
+        if self.source_sensitive_functions.contains(&span_key(span)) {
+            self.unsafe_function_depth -= 1;
+        }
+    }
+}
+
+impl<'a> Traverse<'a, ()> for LogicalAssignmentCollector<'_> {
+    fn enter_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(node.span))
+        {
+            self.unsafe_function_depth += 1;
+        }
+    }
+
+    fn exit_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
+        self.exit_source_function(node.span);
+    }
+
+    fn enter_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(node.span))
+        {
+            self.unsafe_function_depth += 1;
+        }
+    }
+
+    fn exit_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.exit_source_function(node.span);
+    }
+
+    fn enter_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth += 1;
+    }
+
+    fn exit_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth -= 1;
+    }
+
+    fn exit_assignment_expression(
+        &mut self,
+        node: &mut AssignmentExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        if self.unsafe_function_depth > 0 || self.with_depth > 0 || !node.operator.is_logical() {
+            return;
+        }
+        let operator = match node.operator {
+            AssignmentOperator::LogicalAnd => "&&=",
+            AssignmentOperator::LogicalOr => "||=",
+            AssignmentOperator::LogicalNullish => "??=",
+            _ => unreachable!("logical assignment filter must be exhaustive"),
+        };
+        let id = stable_id(
+            self.source,
+            self.file,
+            "logical-assignment",
+            node.span,
+            operator,
+        );
+        let short_id = format!("{id}:short");
+        let right_id = format!("{id}:right");
+        let (line, column) = line_and_utf16_column(self.source, node.span.start as usize);
+        self.analysis
+            .targets
+            .insert(span_key(node.span), (short_id.clone(), right_id.clone()));
+        self.analysis.branches.push(CandidateBranch {
+            id,
+            kind: "logical-assignment".to_string(),
+            file: self.file.to_string(),
+            line,
+            column,
+            source: source_slice(self.source, node.span).to_string(),
+            alternatives: vec![
+                CandidateBranchAlternative {
+                    id: short_id,
+                    label: "assignment skipped".to_string(),
+                },
+                CandidateBranchAlternative {
+                    id: right_id,
+                    label: "right evaluated / assigned".to_string(),
+                },
+            ],
+        });
+    }
+}
+
+fn collect_logical_assignment_branches<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    source: &str,
+    file: &str,
+    source_sensitive_functions: &HashSet<SpanKey>,
+) -> LogicalAssignmentAnalysis {
+    let mut collector = LogicalAssignmentCollector {
+        source,
+        file,
+        source_sensitive_functions,
+        unsafe_function_depth: 0,
+        with_depth: 0,
+        analysis: LogicalAssignmentAnalysis::default(),
+    };
+    traverse_mut(&mut collector, allocator, program, Default::default(), ());
+    collector.analysis
+}
+
 struct LogicalBranchCollector<'s> {
     source: &'s str,
     file: &'s str,
@@ -2193,7 +2419,7 @@ mod tests {
         assert!(!output.complete);
         assert_eq!(
             output.supported_surface,
-            "point-control-logical-value-probe-candidate"
+            "point-control-logical-selection-probe-candidate"
         );
         let runtime = output.runtime.expect("candidate runtime binding");
         assert!(output.code.contains(&runtime.mcdc_end_v2));
