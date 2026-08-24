@@ -15,7 +15,7 @@ either fixed the same day or filed with evidence.
 | iamkun/dayjs | Jest config in package.json | crash (`node build` under ESM loader); then wrong test set (797 vs 794 — package.json jest config ignored); 15–20× slower | fix landed; rerun in progress |
 | debug-js/debug | Mocha (unsupported) | — | ✅ honest degradation: 16/16 pass, aggregate coverage, no per-test attribution |
 | sindresorhus/p-limit | AVA (unsupported) | 1 test failed: wall-clock assertion (590–650 ms window) blown by overhead | degradation works; failure is the perf cliff |
-| expressjs/express | Mocha, supertest | baseline 1 s → instrumented **>20 min** (still running at write-up) | unusable until probe v2 |
+| expressjs/express | Mocha, supertest | 1,205 pass / **55 fail** (baseline 1,260/0), then the process **never exits** | two open bugs, below |
 
 ## Bugs found and fixed (all with regression coverage where practical)
 
@@ -78,6 +78,82 @@ master plan (`progress/engine-master-plan-2026-08-24.md`): per-probe ALS
 lookups, per-event allocations/spreads, and string vector keys must go
 (segment-cached context, pooled frames, bitmask vectors). Target ≤1.05×; even
 ≤2× would have passed every suite above.
+
+## OPEN BUG 1 (launch blocker): dot-prefixed workspace path breaks static file serving
+
+**Verified root cause.** `send` — the module behind `res.sendFile`,
+`express.static` and `serve-static`, and therefore a large fraction of Node
+web applications — treats *any* dot-prefixed path segment as a hidden dotfile
+and, under its default `dotfiles: 'ignore'`, answers **404**. Our isolated
+workspace lives at `.supercov/.cache/instrumented-workspace/<project>/`, so
+from `send`'s perspective every file the application serves is inside a
+dotfile.
+
+Minimal proof (identical file, identical content, only the ancestor differs):
+
+```
+200  /tmp/supercov-dotfile-probe/plain/sub/file.txt
+404  /tmp/supercov-dotfile-probe/.dotted/sub/file.txt
+```
+
+Reproduction in the express repo, seconds rather than minutes:
+`supercov -- npx mocha --require test/support/env test/res.sendFile.js`
+→ baseline 55 pass / 97 ms; instrumented 16 pass / **39 fail**, every failure
+a 404 or a `NotFoundError` on a file that `fs.existsSync` confirms is
+present at the exact path passed to `sendFile`.
+
+This is **not** an instrumentation bug — the instrumented `res.sendFile`
+output was read and is semantically correct, and a minimal routing repro
+passes under instrumentation. It is a *workspace-location* design flaw, and
+it predates today's `.cache` rename: `.supercov` was always a dotted ancestor.
+
+**Fix direction: the workspace path must contain no dot-prefixed segment.**
+The store (`.supercov/`) stays dotted — applications never serve from it —
+but the instrumented workspace must move to a non-dotted directory. This is
+now viable precisely because today's `pruneCachedWorkspaceSources` fix
+removes copied test files at run end, so hiding the workspace from runner
+discovery is no longer the *path's* job. Requires a product decision on the
+directory name (a new visible top-level directory in the user's repo,
+self-ignored with a `*` gitignore, removed by `supercov clean`).
+
+Note this class is wider than `send`: bundlers, watchers and file-based
+routers commonly skip dot-directories, so a non-dotted workspace likely
+prevents further framework-discovery failures we have not hit yet.
+
+## OPEN BUG 2 (launch blocker): the run can hang forever after tests finish
+
+Under express, mocha printed its summary (`1205 passing, 55 failing, 28s`)
+and the process then **never exited** — 51 minutes elapsed against 21 seconds
+of CPU, state `S`, stack parked in `uv__io_poll`/`kevent`. That is a blocked
+event loop with live handles, not slow work. Reproduced on the single
+`res.sendFile.js` file with a 300 s cap (exit 124).
+
+Working hypothesis, not yet confirmed: the 39–55 failing tests abort
+mid-request and leave supertest's HTTP servers unclosed; mocha without
+`--exit` waits for the event loop to drain, so the run never terminates.
+Both minimal repros (`node repro-router.js`, `node repro-sendfile.js`) exit
+cleanly, which is consistent with the hang being downstream of Bug 1 rather
+than independent. Fix Bug 1, then re-test before treating this as separate.
+
+Regardless of cause, Supercov must never hang: a wrapped command that has
+reported results and stopped making progress needs a diagnosed timeout with
+an explicit message (open-handle report), not silence. "It hangs forever" is
+the worst possible first impression.
+
+## OPEN BUG 3: removing the run store can take tens of minutes
+
+`rm -rf .supercov` on the dayjs project ran **26+ minutes** in uninterruptible
+I/O wait (state `U`, 1:03 CPU, 2% — making slow progress, not spinning) and
+had still not finished when killed. The project's `node_modules` was verified
+intact afterwards (1,023 entries), so nothing followed symlinks out of the
+store; the cost is the sheer file and directory count of a full workspace copy
+plus per-attempt evidence directories
+(`server-evidence/<run>/<worker>/<testKey>/<retry>/`).
+
+This is a product bug, not a test artifact: `supercov clean` and `prune` do
+exactly this deletion. Fix direction: rename the target to a unique trash
+path and delete asynchronously (so the command returns immediately), and
+flatten the per-attempt evidence layout to cut directory count.
 
 ## Remaining sweep findings (not yet fixed)
 
