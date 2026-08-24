@@ -153,53 +153,60 @@ miss blocks flipping any default.
   matrix, attribution ladder, tier-ordering guardrails and spikes S8–S10:
   `progress/multi-language-architecture-2026-08-24.md`.
 
-## Checkpoint — 2026-08-24 probe v2 / first Rust behavior
+## Checkpoint — 2026-08-24 complete Rust JS instrumenter candidate
 
-- Phase 0 compatibility findings and Phase 1's five frozen v1 contracts,
-  black-box harness, and Rust workspace are committed in the preceding
-  checkpoints.
-- Probe-v2 semantics are frozen under `contracts/probe-v2/`. Published v1
-  manifests/evidence remain unchanged. JavaScript encodes exact ternary
-  vectors through 32 conditions and falls back to exact v1 frames above that
-  cap.
-- The TypeScript reference has experimental v2 transforms and an epoch-based
-  collector. Hand-written semantic cases, 160 deterministic generated
-  programs, 800 property cases, frozen vectors, reset recovery, and
-  interleaved async-attribution tests pass with exact v1/v2 evidence parity.
-- Full Test262 v2 run on revision `3655e746...`: 41,593 selected files,
-  65,051 baseline-passing scenarios, zero transform failures, zero semantic
-  failures. A later dense-vector runtime fast path does not change source
-  condition evaluation, but the full on-demand corpus should be rerun at the
-  final Phase-2 fingerprint before promotion.
-- Runtime stress improved from roughly 164 ms (v1) to roughly 1–2 ms (v2) for
-  250,000 attributed empty-loop iterations. Dense decisions now become a
-  direct evaluation path after every structurally reachable vector has been
-  observed in the current attribution epoch; complex conditions with nested
-  coverage obligations deliberately do not use this shortcut. The corrected
-  15-sample alternating benchmark measures about 1.04–1.06x on the pinned
-  realistic workload, inside the user-approved ≤1.10x architecture gate.
-- Rust now parses the same probe contract and decodes the same golden vectors.
-  The oxc port has now begun as an explicitly incomplete differential
-  candidate: Rust 1.93 pins oxc 0.133 (the newest compatible release; newer
-  oxc releases require Rust 1.96), parses and regenerates JS/TS/JSX/TSX, and
-  now performs real allocator-backed AST mutation. `if`, ternary, `while`,
-  `do…while`, and classic-`for` predicates through 32 conditions use
-  function/program-local scratch bindings, preserve each original leaf value
-  and native short-circuit order, encode the exact probe-v2 base-3 frame, and
-  call an internal differential-only recorder. The transform reserves parent
-  decision indices before traversing original children, follows Babel's exact
-  per-node child order, and wraps only afterwards so generated probe
-  conditionals can never enter the user denominator.
-  Wider decisions remain unchanged with an explicit exact-v1-fallback
-  limitation. The live Babel/oxc gate now covers 177 exact control-decision
-  manifests, eight hand-authored value/effect/vector cases, and 160 deterministic nested
-  behavior programs. It found a third required parser normalization: redundant
-  outer parentheses belong to syntax but not Babel's decision metadata span.
-  Rust tests also lock name-collision handling, reparsing, decision ordering,
-  and the wide-decision refusal. Unported points/value branches,
-  semantic-safety exclusions, registration
-  and evidence transport keep the candidate `complete: false`; it remains
-  unreachable from the public CLI.
+- Phase 0 findings, Phase 1's five frozen v1 contracts, black-box harness,
+  probe-v2 contract, and Rust workspace are committed. Published v1
+  manifests/evidence remain unchanged. Probe v2 uses exact base-3 vectors
+  through 32 conditions and the exact v1 frame above that numeric cap.
+- The TypeScript reference remains the authority while the port is private.
+  Its semantic/property corpus, frozen vectors, reset recovery,
+  interleaved-attribution tests, and measured 1.04–1.06x realistic runtime
+  overhead remain green.
+- The oxc 0.133 Rust transformer now implements the complete frozen JavaScript
+  denominator: statements, functions, control decisions, logical value
+  selection, optional members/calls, logical assignments, parameter and
+  destructuring defaults, try/catch, zero-versus-entered `for-in`/`for-of`,
+  switch match/no-match, exact wide-decision fallback, and explicit dynamic
+  code limitations. It also ports `with`, direct/dynamic evaluation,
+  Function source reflection, unsafe parameter/class handling, framework
+  request handlers, generic HTTP/WebSocket callbacks, full manifest
+  generation, source maps, probe-v2 registration, and real runtime evidence
+  calls.
+- Classic scripts remain scripts and bind helpers through the injected global
+  runtime; modules retain the virtual runtime import. Directive prologues,
+  parenthesized assignment name inference, anonymous default names, optional
+  call receiver references, comments (including Test262 YAML payloads), and
+  source-map destinations have dedicated regression handling. The 64,171-
+  comment Mozilla staging stress file transforms and runs in about 1.6s after
+  eliminating quadratic comment editing and line/column lookup.
+- The live Babel/oxc differential gate covers 237 exact decision/point/branch/
+  limitation manifests, 32 hand-authored behavior/effect/vector/hit cases,
+  and 160 deterministic generated programs. Rust and TypeScript also produce
+  byte-identical archived manifests and exact summary/files/gaps JSON for a
+  mixed Vitest + two-worker Playwright production run, including request,
+  popup, user-context, service-worker, and WebSocket attribution.
+- The complete pinned Test262 gate at revision `3655e746...` is green over
+  41,593 selected files. Four disjoint shards observed 65,053 baseline-passing
+  scenarios in total with zero Rust transform failures and zero semantic
+  failures. (The monolithic run observed 65,051; baseline host support has a
+  two-scenario scheduling variance, and every execution is compared only to
+  the passing baseline in the same invocation.) A representative monolithic
+  timing measured 598.54s baseline execution, 14.67s Rust transformation, and
+  454.59s instrumented execution; this conformance workload shows no gross
+  runtime regression, though it is not the realistic overhead benchmark.
+- The private production selector batches an entire direct workspace or Vite
+  inventory through one Rust child and includes the Rust binary fingerprint in
+  run/build integrity. The Rust child is excluded from application child-
+  process telemetry. `SUPERCOV_ENGINE=rust` remains the only activation path.
+- Phase 3 is not promoted yet. Remaining gates are the full browser/Node
+  syntax matrix, Rust-mode runs across every supported fixture and the
+  Essential SEO/Supercov dogfood suites, and exact archive/attribution/outcome
+  parity under crashes, retries, async context, concurrency, and multiple
+  workers. `complete: false` is therefore still deliberate. Phase 4's engine
+  shell has only frozen probe/agent-JSON contract slices; discovery, workspace,
+  supervision, packing, analysis, solving, indexing, querying, and lifecycle
+  are still owned by TypeScript and are the next port after Phase 3 closes.
 
 ## Non-goals and guardrails
 
