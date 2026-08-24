@@ -162,8 +162,14 @@ miss blocks flipping any default.
   15-sample alternating benchmark measures about 1.04–1.06x on the pinned
   realistic workload, inside the user-approved ≤1.10x architecture gate.
 - Rust now parses the same probe contract and decodes the same golden vectors.
-  It is still a contract/differential candidate; the oxc AST port must not
-  begin until Phase 2's performance and full fixture/self-dogfood gates close.
+  The oxc port has now begun as an explicitly incomplete differential
+  candidate: Rust 1.93 pins oxc 0.133 (the newest compatible release; newer
+  oxc releases require Rust 1.96), parses and regenerates JS/TS/JSX/TSX, and
+  emits exact `if`-decision metadata without probe insertion. A five-case
+  Babel/oxc corpus compares live outputs and has already forced two required
+  normalizations: transparent parenthesized expressions and Babel-compatible
+  UTF-16 offsets for stable IDs. The candidate always returns
+  `complete: false` and remains unreachable from the public CLI.
 
 ## Non-goals and guardrails
 

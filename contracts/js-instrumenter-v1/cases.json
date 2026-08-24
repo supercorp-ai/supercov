@@ -1,0 +1,22 @@
+[
+  {
+    "file": "app/decide.ts",
+    "source": "export function decide(a,b,c) {\n  if ((a && b) || !c) return 1;\n  return 0;\n}\n"
+  },
+  {
+    "file": "app/unicode.ts",
+    "source": "const π = true;\nif (π && enabled) work();\n"
+  },
+  {
+    "file": "app/negated.js",
+    "source": "function choose(a, b, c) {\n  if (!(a || b) && c) return 'yes';\n  return 'no';\n}\n"
+  },
+  {
+    "file": "app/nested.ts",
+    "source": "export function nested(a: boolean, b: boolean) {\n  if (a) {\n    if (b || a) return 1;\n  }\n  return 0;\n}\n"
+  },
+  {
+    "file": "app/view.tsx",
+    "source": "export const View = ({a, b}: {a: boolean; b: boolean}) => {\n  if (a && b) return <div>yes</div>;\n  return <div>no</div>;\n};\n"
+  }
+]

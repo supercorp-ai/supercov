@@ -43,7 +43,7 @@
     "test:filesystem": "npm run build && node --test --test-concurrency=1 tests/unit/atomic.test.ts tests/unit/evidenceArchive.test.ts tests/unit/workspace.test.ts && node scripts/workspace-crash-integration.mjs",
     "test:watchdog": "npm run build && node scripts/watchdog-integration.mjs",
     "test:engine-contract": "npm run build && node scripts/engine-contract.mjs",
-    "test:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace",
+    "test:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && node scripts/rust-js-differential.mjs",
     "test:clang-mcdc": "node scripts/clang-mcdc-oracle.mjs",
     "test:test262": "npm run build && node scripts/test262-equivalence.mjs",
     "benchmark:check": "npm run build && node scripts/benchmark.mjs",

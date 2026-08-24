@@ -8,6 +8,14 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+oxc_allocator.workspace = true
+oxc_ast.workspace = true
+oxc_ast_visit.workspace = true
+oxc_codegen.workspace = true
+oxc_parser.workspace = true
+oxc_span.workspace = true
+oxc_syntax.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 supercov-contracts.workspace = true
