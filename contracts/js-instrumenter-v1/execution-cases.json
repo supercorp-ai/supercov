@@ -110,5 +110,9 @@
   {
     "file": "differential/switch-default.js",
     "source": "const effects = [];\nfunction choose(value) { switch (value) { case 1: effects.push('one'); break; default: effects.push('default'); } return effects.length; }\nfunction run() { return [choose(1), choose(3)]; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/request-callbacks.js",
+    "source": "const effects = [];\nconst callbacks = { handler(value) { effects.push('handler:' + value); return value; } };\nconst server = { on(event, callback) { effects.push('on:' + event); return callback('request'); } };\nfunction createServer(options, callback) { effects.push('create:' + options.kind); return callback('server'); }\nfunction run() { return [server.on('request', callbacks.handler), createServer({ kind: 'http' }, callbacks.handler)]; }\nfunction observe() { return effects; }\n"
   }
 ]

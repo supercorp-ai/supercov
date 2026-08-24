@@ -114,6 +114,7 @@ pub struct CandidateRuntime {
     pub selection_begin: String,
     pub selection_right: String,
     pub selection_end: String,
+    pub with_request_phase: String,
     pub optional_select: String,
     pub optional_call_begin: String,
     pub optional_call_reached: String,
@@ -945,6 +946,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     let selection_begin = names.allocate("__supercovSelectionBegin");
     let selection_right = names.allocate("__supercovSelectionRight");
     let selection_end = names.allocate("__supercovSelectionEnd");
+    let with_request_phase = names.allocate("__supercovWithRequestPhase");
     let optional_select = names.allocate("__supercovOptionalSelect");
     let optional_call_begin = names.allocate("__supercovOptionalCallBegin");
     let optional_call_reached = names.allocate("__supercovOptionalCallReached");
@@ -1101,6 +1103,15 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         with_statements: safety.with_statements.clone(),
     };
     switch_transformer.visit_program(&mut parsed.program);
+    let mut request_transformer = RequestPhaseTransformer {
+        ast,
+        with_request_phase: with_request_phase.clone(),
+        used: false,
+        source_sensitive_functions: safety.source_sensitive_functions.clone(),
+        with_statements: safety.with_statements.clone(),
+    };
+    request_transformer.visit_program(&mut parsed.program);
+    let uses_request_phase = request_transformer.used;
 
     let registration = serde_json::json!({
         "decisions": &collector.decisions,
@@ -1130,7 +1141,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
             false,
         )),
     );
-    let runtime_imports = [
+    let mut runtime_imports = vec![
         ("mcdcBegin", &mcdc_begin),
         ("mcdcCondition", &mcdc_condition),
         ("mcdcEnd", &mcdc_end),
@@ -1155,6 +1166,9 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         ("loopEntered", &loop_entered),
         ("loopEnd", &loop_end),
     ];
+    if uses_request_phase {
+        runtime_imports.insert(10, ("withRequestPhase", &with_request_phase));
+    }
     let import_specifiers =
         ast.vec_from_iter(runtime_imports.into_iter().map(|(imported, local)| {
             ast.import_declaration_specifier_import_specifier(
@@ -1202,6 +1216,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
             selection_begin,
             selection_right,
             selection_end,
+            with_request_phase,
             optional_select,
             optional_call_begin,
             optional_call_reached,
@@ -2789,6 +2804,119 @@ impl<'a> VisitMut<'a> for SwitchTransformer<'a, '_> {
         self.instrument(statement, &target);
         if !has_no_match {
             walk_mut::walk_statement(self, statement);
+        }
+    }
+}
+
+struct RequestPhaseTransformer<'a> {
+    ast: AstBuilder<'a>,
+    with_request_phase: String,
+    used: bool,
+    source_sensitive_functions: HashSet<SpanKey>,
+    with_statements: HashSet<SpanKey>,
+}
+
+impl<'a> RequestPhaseTransformer<'a> {
+    fn identifier(&self, name: &str) -> Expression<'a> {
+        self.ast
+            .expression_identifier(Span::default(), self.ast.ident(name))
+    }
+
+    fn callee_is(callee: &Expression<'a>, name: &str) -> bool {
+        match callee {
+            Expression::Identifier(identifier) => identifier.name == name,
+            Expression::StaticMemberExpression(member) => member.property.name == name,
+            _ => false,
+        }
+    }
+
+    fn callback_candidate(argument: &Argument<'a>) -> bool {
+        matches!(
+            argument,
+            Argument::FunctionExpression(_)
+                | Argument::ArrowFunctionExpression(_)
+                | Argument::Identifier(_)
+                | Argument::ComputedMemberExpression(_)
+                | Argument::StaticMemberExpression(_)
+                | Argument::PrivateFieldExpression(_)
+        )
+    }
+
+    fn already_wrapped(&self, argument: &Argument<'a>) -> bool {
+        matches!(
+            argument,
+            Argument::CallExpression(call)
+                if expression_is_identifier(&call.callee, &self.with_request_phase)
+        )
+    }
+
+    fn wrap_argument(&mut self, argument: &mut Argument<'a>) {
+        if self.already_wrapped(argument) || !argument.is_expression() {
+            return;
+        }
+        let expression = argument.to_expression_mut();
+        let original = expression.take_in(self.ast.allocator);
+        *expression = self.ast.expression_call(
+            Span::default(),
+            self.identifier(&self.with_request_phase),
+            NONE,
+            self.ast.vec1(Argument::from(original)),
+            false,
+        );
+        self.used = true;
+    }
+}
+
+impl<'a> VisitMut<'a> for RequestPhaseTransformer<'a> {
+    fn visit_function(&mut self, function: &mut Function<'a>, flags: ScopeFlags) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_function(self, function, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, function: &mut ArrowFunctionExpression<'a>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_arrow_function_expression(self, function);
+    }
+
+    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
+        if self.with_statements.contains(&span_key(statement.span)) {
+            return;
+        }
+        walk_mut::walk_with_statement(self, statement);
+    }
+
+    fn visit_call_expression(&mut self, call: &mut CallExpression<'a>) {
+        walk_mut::walk_call_expression(self, call);
+        let property = match &call.callee {
+            Expression::StaticMemberExpression(member) => Some(member.property.name.as_str()),
+            _ => None,
+        };
+        let mut callback_index = None;
+        if matches!(property, Some("on" | "once" | "addListener"))
+            && matches!(
+                call.arguments.first(),
+                Some(Argument::StringLiteral(event))
+                    if matches!(event.value.as_str(), "request" | "upgrade" | "connection")
+            )
+        {
+            callback_index = Some(1);
+        } else if Self::callee_is(&call.callee, "createServer") {
+            callback_index = call.arguments.iter().rposition(Self::callback_candidate);
+        }
+        if let Some(index) = callback_index
+            && let Some(argument) = call.arguments.get_mut(index)
+        {
+            self.wrap_argument(argument);
         }
     }
 }

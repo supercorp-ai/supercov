@@ -154,7 +154,7 @@ async function executeRustCandidate(testCase, candidate) {
   const hits = [];
   const registrations = [];
   const runtime = candidate.runtime;
-  if (!runtime?.coverageHit || !runtime?.mcdcBegin || !runtime?.mcdcCondition || !runtime?.mcdcEnd || !runtime?.registerProbeV2 || !runtime?.mcdcEndV2 || !runtime?.coverageHitV2 || !runtime?.probeFileV2 || !runtime?.selectionBegin || !runtime?.selectionRight || !runtime?.selectionEnd || !runtime?.optionalSelect || !runtime?.optionalCallBegin || !runtime?.optionalCallReached || !runtime?.optionalCallContinued || !runtime?.optionalCallEnd || !runtime?.defaultSelected || !runtime?.defaultEntered || !runtime?.tryBegin || !runtime?.tryCatch || !runtime?.tryEnd || !runtime?.loopBegin || !runtime?.loopEntered || !runtime?.loopEnd)
+  if (!runtime?.coverageHit || !runtime?.mcdcBegin || !runtime?.mcdcCondition || !runtime?.mcdcEnd || !runtime?.registerProbeV2 || !runtime?.mcdcEndV2 || !runtime?.coverageHitV2 || !runtime?.probeFileV2 || !runtime?.selectionBegin || !runtime?.selectionRight || !runtime?.selectionEnd || !runtime?.withRequestPhase || !runtime?.optionalSelect || !runtime?.optionalCallBegin || !runtime?.optionalCallReached || !runtime?.optionalCallContinued || !runtime?.optionalCallEnd || !runtime?.defaultSelected || !runtime?.defaultEntered || !runtime?.tryBegin || !runtime?.tryCatch || !runtime?.tryEnd || !runtime?.loopBegin || !runtime?.loopEntered || !runtime?.loopEnd)
     throw new Error(`${testCase.file}: missing Rust candidate runtime bindings`);
   const coverageHit = (id) => hits.push(id);
   const registerProbeV2 = (definition) => {
@@ -195,6 +195,7 @@ async function executeRustCandidate(testCase, candidate) {
     coverageHit(frame.evaluatedRight ? frame.rightId : frame.shortId);
     return value;
   };
+  const withRequestPhase = (handler) => handler;
   const optionalSelect = (shortId, continuedId, value) => {
     coverageHit(value === null || value === undefined ? shortId : continuedId);
     return value;
@@ -269,6 +270,7 @@ async function executeRustCandidate(testCase, candidate) {
     runtime.selectionBegin,
     runtime.selectionRight,
     runtime.selectionEnd,
+    runtime.withRequestPhase,
     runtime.optionalSelect,
     runtime.optionalCallBegin,
     runtime.optionalCallReached,
@@ -295,6 +297,7 @@ async function executeRustCandidate(testCase, candidate) {
     selectionBegin,
     selectionRight,
     selectionEnd,
+    withRequestPhase,
     optionalSelect,
     optionalCallBegin,
     optionalCallReached,
