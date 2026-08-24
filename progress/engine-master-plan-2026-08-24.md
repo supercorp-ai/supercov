@@ -19,10 +19,17 @@ code; a compatibility sweep is in flight and Tier 1 (trust) still lands first.
 3. **Collectors stay in the target language.** The JS runtime/adapters remain
    JS generated into the isolated workspace; the future Python collector is
    Python generated the same way. The binary question is only the engine.
-4. **`supercov serve`** — long-lived JSON-RPC (stdio) + MCP mode so agent
-   loops pay ~0 ms per query instead of ~50–100 ms of process startup. The
-   protocol is defined and shipped on the TS engine first; the Rust engine
-   must implement the identical protocol.
+4. **No resident processes — ever.** (User decision 2026-08-24; supersedes
+   the earlier `supercov serve` proposal.) Every invocation is fire-and-
+   forget; "no resident service" stays a product guarantee. Query latency is
+   solved at the root instead: (a) Rust engine cold start ≤10 ms; (b) the
+   query index becomes a memory-mappable zero-copy binary format so opening
+   it costs milliseconds at any repo size — persistent *data*, not a
+   persistent *process*, with the same integrity checks as today; (c) engine
+   layering so read-only queries never load instrumentation code (on the TS
+   engine: dynamic imports so query commands skip Babel — cheap interim win).
+   MCP, if ever shipped, is a thin optional wrapper spawned and owned by the
+   agent harness over the same CLI semantics — never an engine assumption.
 5. **Probe architecture v2** — the real performance ceiling is instrumented
    runtime overhead (currently 1.14x synthetic), which no engine rewrite
    touches. Target ≤1.05x. Candidate designs, to be settled by measurement:
@@ -62,7 +69,7 @@ rewrite from "risky big bang" into "make the diff zero, then flip."
 | --- | --- | --- |
 | 500-file transform (median) | ~1,008 ms (Babel) | ≤50 ms |
 | 50k-file monorepo transform | ~100 s extrapolated | ≤5 s |
-| CLI query cold start | ~50–100 ms | ≤10 ms (Rust) / ≤1 ms via serve |
+| CLI query total (start + index open) | ~100–300 ms | ≤15 ms (Rust + mmap index) |
 | Instrumented runtime overhead | 1.14x synthetic | ≤1.05x |
 | Evidence analysis, 25 MB raw | ~2 s cold | ≤200 ms cold |
 | Engine binary (compressed) | n/a (needs Node) | ≤15 MB/platform |
@@ -81,8 +88,8 @@ miss blocks flipping any default.
   (b) Differential/conformance harness: golden corpus of
   (fixture → evidence archive → report JSON) with a byte/semantic comparison
   mode able to run two engine builds side by side.
-  (c) `supercov serve` on the TS engine (JSON-RPC over stdio + MCP wrapper) —
-  immediate agent-UX win and it fixes the protocol early.
+  (c) TS-engine query latency trim: dynamic imports so read-only queries
+  never load the instrumenter stack (no daemon; fire-and-forget preserved).
 - **Phase 2: probe architecture v2 on the TS engine.** Done before the port
   so Rust targets final evidence semantics instead of porting twice. Gate:
   identical MC/DC verdicts across Test262 corpus + full fixture matrix,
