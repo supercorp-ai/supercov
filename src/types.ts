@@ -384,6 +384,14 @@ export interface McdcCoverageView {
   integrity?: CoverageRunIntegrity;
   scope?: CoverageSourceScope;
   limitations?: CoverageLimitation[];
+  transport?: {
+    processes: number;
+    childLaunches: number;
+    remoteLaunches: number;
+    workspaceCapabilities: number;
+    scopedServerRecords: number;
+    backgroundServerRecords: number;
+  };
   summary: CoverageSummary;
   coverageByKind: Array<{
     kind: string;

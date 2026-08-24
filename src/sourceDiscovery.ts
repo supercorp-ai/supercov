@@ -16,7 +16,7 @@ const SOURCE_PATTERN = /\.[cm]?[jt]sx?$/i;
 const DECLARATION_PATTERN = /\.d\.[cm]?ts$/i;
 const TEST_FILE_PATTERN = /(?:^|[/_.-])(?:test|spec)(?:[/_.-]|$)/i;
 const TEST_DIRECTORY_PATTERN = /(?:^|\/)(?:__tests__|test|tests|spec|specs|e2e|fixtures?|mocks?|__mocks__)(?:\/|$)/i;
-const CONFIG_PATTERN = /(?:^|\/)(?:(?:babel|eslint|jest|next|nuxt|playwright|postcss|prettier|remix|rollup|tailwind|tsup|vite|vitest|webpack)\.config|(?:eslint|prettier)\.config)\.[cm]?[jt]s$/i;
+const CONFIG_PATTERN = /(?:^|\/)(?:(?:babel|eslint|graphql|jest|next|nuxt|playwright|postcss|prettier|remix|rollup|stylelint|tailwind|tsup|vite|vitest|webpack)\.config\.[cm]?[jt]s|\.(?:babel|eslint|graphql|prettier|stylelint)rc\.[cm]?[jt]s)$/i;
 const GENERATED_DIRECTORIES = new Map<string, string>([
   [".git", "version-control metadata"],
   [".next", "generated Next.js output"],

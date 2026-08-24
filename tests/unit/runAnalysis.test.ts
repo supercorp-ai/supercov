@@ -49,6 +49,14 @@ it("reconstructs observed and outcome-filtered views solely from archived eviden
   mkdirSync(evidenceDirectory, { recursive: true });
   writeFileSync(manifestPath, `${JSON.stringify(manifest)}\n`);
   writeFileSync(resolve(evidenceDirectory, "mcdc.json"), `${JSON.stringify(result)}\n`);
+  writeFileSync(
+    resolve(root, "evidence/execution.host.1.jsonl"),
+    [
+      JSON.stringify({ event: "process" }),
+      JSON.stringify({ event: "workspace-capability" }),
+      JSON.stringify({ event: "remote-launch" }),
+    ].join("\n") + "\n",
+  );
   const archivePath = resolve(root, "evidence.raw.gz");
   writeEvidenceArchive(
     [
@@ -75,4 +83,13 @@ it("reconstructs observed and outcome-filtered views solely from archived eviden
     total: 1,
   });
   expect(report.execution).toEqual({ testExitCode: 0, valid: true });
+  expect(report.transport).toEqual({
+    processes: 1,
+    childLaunches: 0,
+    remoteLaunches: 1,
+    workspaceCapabilities: 1,
+    scopedServerRecords: 0,
+    backgroundServerRecords: 0,
+  });
+  expect(report.filters?.passed.transport).toEqual(report.transport);
 });

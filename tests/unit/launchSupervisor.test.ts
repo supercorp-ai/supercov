@@ -5,6 +5,7 @@ import {
   discoverWorkspaceMapping,
   guestCoverageEnvironment,
   scopeCapabilityCache,
+  wrapCapabilityCallbacks,
   wrapCapabilityObject,
 } from "../../src/launchSupervisor.ts";
 
@@ -127,5 +128,42 @@ describe("generic launch supervision", () => {
     expect(firstShard).toMatch(/^\d+-\d+$/);
     expect(secondShard).toMatch(/^\d+-\d+$/);
     expect(secondShard).not.toBe(firstShard);
+  });
+
+  it("supervises launches hidden inside provider configuration callbacks", async () => {
+    const received: Record<string, unknown>[] = [];
+    const configuration = {
+      mounts: [{ hostPath: "/tmp/run/project", guestPath: "/workspace" }],
+      nested: {
+        async prepare(machine: { exec(options: Record<string, unknown>): Promise<unknown> }) {
+          return machine.exec({
+            argv: ["sh", "-c", "start-services"],
+            env: { DATABASE_URL: "isolated" },
+          });
+        },
+      },
+    };
+    const wrapped = wrapCapabilityCallbacks(configuration, {
+      hostRoot: "/tmp/run/project",
+      guestRoot: "/workspace",
+    }) as typeof configuration;
+
+    await wrapped.nested.prepare({
+      async exec(options) {
+        received.push(options);
+        return { exitCode: 0 };
+      },
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      argv: ["sh", "-c", "start-services"],
+      env: {
+        DATABASE_URL: "isolated",
+        SUPERCOV_PROJECT_ROOT: "/workspace",
+        SUPERCOV_CJS_INTERCEPT: "1",
+      },
+    });
+    expect(configuration.nested.prepare).not.toBe(wrapped.nested.prepare);
   });
 });

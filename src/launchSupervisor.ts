@@ -282,6 +282,70 @@ function wrapResult(value: unknown, mapping: WorkspaceMapping): unknown {
 }
 
 /**
+ * A remote SDK can hide its first executable launch inside a configuration
+ * callback (for example an image warmup hook). Decorate callbacks in ordinary
+ * configuration data so capability objects delivered later receive the same
+ * provider-neutral launch supervision as objects returned directly by the SDK.
+ * Accessors and class instances are deliberately left alone.
+ */
+export function wrapCapabilityCallbacks(
+  value: unknown,
+  mapping: WorkspaceMapping,
+  depth = 0,
+  seen = new WeakMap<object, unknown>(),
+): unknown {
+  if (typeof value === "function") {
+    const cached = seen.get(value);
+    if (cached) return cached;
+    const original = value;
+    const wrapped = function supercovCapabilityCallback(
+      this: unknown,
+      ...args: unknown[]
+    ) {
+      return wrapResult(
+        Reflect.apply(
+          original,
+          this,
+          args.map((argument) => wrapCapabilityObject(argument, mapping)),
+        ),
+        mapping,
+      );
+    };
+    seen.set(value, wrapped);
+    return wrapped;
+  }
+  if (!value || typeof value !== "object" || depth > 5) return value;
+  const cached = seen.get(value);
+  if (cached) return cached;
+  const prototype = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null)
+    return value;
+
+  const clone: unknown[] | UnknownRecord = Array.isArray(value)
+    ? [...value]
+    : Object.create(prototype);
+  seen.set(value, clone);
+  let changed = false;
+  for (const key of Reflect.ownKeys(value).slice(0, 200)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !("value" in descriptor)) continue;
+    const wrapped = wrapCapabilityCallbacks(
+      descriptor.value,
+      mapping,
+      depth + 1,
+      seen,
+    );
+    if (wrapped !== descriptor.value) changed = true;
+    Object.defineProperty(clone, key, { ...descriptor, value: wrapped });
+  }
+  if (!changed) {
+    seen.set(value, value);
+    return value;
+  }
+  return clone;
+}
+
+/**
  * Follow an opaque image/pool/machine-style object graph. Any method accepting
  * an argv-shaped options object receives the translated Supercov environment.
  */
@@ -374,6 +438,9 @@ export function wrapImportedCapability(value: unknown): unknown {
       const scopedArguments = args.map((argument) =>
         scopeCapabilityCache(argument, fingerprint),
       );
+      const supervisedArguments = scopedArguments.map((entry) =>
+        wrapCapabilityCallbacks(entry.value, mapping),
+      );
       record({
         event: "workspace-capability",
         hostRoot: mapping.hostRoot,
@@ -381,7 +448,7 @@ export function wrapImportedCapability(value: unknown): unknown {
         cacheIdentities: scopedArguments.flatMap((entry) => entry.changed),
       });
       return wrapResult(
-        Reflect.apply(callable, receiver, scopedArguments.map((entry) => entry.value)),
+        Reflect.apply(callable, receiver, supervisedArguments),
         mapping,
       );
     }
@@ -426,7 +493,10 @@ function patchBuilder(builder: Function): void {
       const fingerprint =
         process.env["SUPERCOV_EXECUTION_FINGERPRINT"] ?? "unversioned";
       const scoped = scopeCapabilityCache(args[0], fingerprint);
-      const callArguments = [scoped.value, ...args.slice(1)];
+      const callArguments = [
+        wrapCapabilityCallbacks(scoped.value, mapping),
+        ...args.slice(1),
+      ];
       record({
         event: "workspace-capability",
         hostRoot: mapping.hostRoot,

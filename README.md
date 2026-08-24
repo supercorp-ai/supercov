@@ -92,10 +92,12 @@ npx supercov runs latest coverage scope
 npx supercov runs latest coverage --kind e2e
 npx supercov runs latest coverage files
 npx supercov runs latest coverage gaps
+npx supercov runs latest coverage gaps --metric mcdc
 npx supercov runs latest coverage gaps --kind e2e
 
 # Drill into one target selected from the gap list.
 npx supercov runs latest coverage file app/routes/example.ts
+npx supercov runs latest coverage file app/routes/example.ts --metric mcdc
 npx supercov runs latest coverage decision app/routes/example.ts:42
 npx supercov runs latest coverage covers app/routes/example.ts:57
 
@@ -129,6 +131,9 @@ run. `latest` is a convenience selector for interactive use. Every query
 accepts `--json` and—where the result can be long—`--limit` and `--offset`.
 Every collection is paginated at 20 items by default and prints its range plus
 a copyable next-page command; generated commands omit the default limit.
+Agents targeting one coverage dimension can pass `--metric` to `coverage
+files`, `coverage gaps`, or `coverage file`; this ranks and narrows the existing
+resource instead of requiring a separate MC/DC-specific command.
 Measurement limitations use the same drill-down commands as ordinary gaps.
 The coverage summary reports whether the measured denominator is complete,
 `coverage files` and `coverage gaps` include per-file limitation counts and
@@ -136,6 +141,10 @@ kinds, and `coverage file <path>` returns the bounded source locations, reasons,
 and denominator effect. `coverage scope` attaches the same counts to included,
 excluded, and ambiguous source entries. A 100% metric with a blocking limitation
 is therefore never reported as structurally complete.
+The summary also exposes provider-neutral transport counters. If Supercov
+supervises remote launches but receives no server records, it emits a
+`REMOTE_SERVER_EVIDENCE_MISSING` diagnostic instead of letting an agent assume
+that browser-only evidence describes the whole application.
 Text output is concise for an interactive agent; JSON is the stable machine
 interface that can later back hosted coverage tools without changing the
 stored evidence schema. Every JSON response uses contract version 1:

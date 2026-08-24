@@ -132,6 +132,31 @@ if (detail.obligations.length < 1 || detail.obligations.length > 20) {
   throw new Error("file query did not expose bounded, actionable obligations");
 }
 
+const mcdcGaps = query(partial.id, "gaps", "--metric", "mcdc");
+requirePagination(mcdcGaps, "MC/DC gap inventory");
+if (
+  mcdcGaps.metric !== "mcdc" ||
+  mcdcGaps.gaps.length < 1 ||
+  mcdcGaps.gaps.some(
+    (gap) => gap.missingMcdcConditions === 0 && gap.measurementLimitations === 0,
+  )
+) {
+  throw new Error("metric-filtered gaps included unrelated coverage work");
+}
+const mcdcDetail = query(
+  partial.id,
+  "file",
+  mcdcGaps.gaps[0].file,
+  "--metric",
+  "mcdc",
+);
+if (
+  mcdcDetail.metric !== "mcdc" ||
+  mcdcDetail.obligations.some((obligation) => obligation.kind !== "mcdc")
+) {
+  throw new Error("metric-filtered file detail included unrelated obligations");
+}
+
 const missingFile = failingQuery(partial.id, "file", "src/does-not-exist.ts");
 if (missingFile.command !== "coverage.file" || missingFile.error.code !== "SOURCE_NOT_FOUND") {
   throw new Error("file query did not expose a stable structured error code");
@@ -143,7 +168,10 @@ const decisionDetail = query(partial.id, "decision", decision.meta.id);
 requirePagination(decisionDetail, "decision detail");
 if (
   decisionDetail.decisions?.length !== 1 ||
-  !Array.isArray(decisionDetail.decisions[0].conditions)
+  !Array.isArray(decisionDetail.decisions[0].conditions) ||
+  decisionDetail.paginationAppliesTo !==
+    "conditions, vectorObservations, and tests independently within each decision" ||
+  typeof decisionDetail.decisions[0].totals?.conditions !== "number"
 ) {
   throw new Error("decision query did not expose conditions and witnesses");
 }
@@ -214,6 +242,10 @@ try {
           server: [],
         }),
       },
+      {
+        path: "execution.host.1.jsonl",
+        contents: `${JSON.stringify({ event: "remote-launch" })}\n`,
+      },
     ],
     resolve(limitationDirectory, "evidence.raw.gz"),
   );
@@ -231,7 +263,8 @@ try {
   if (
     limitedSummary.measurement?.complete !== false ||
     limitedSummary.measurement?.blocking !== 1 ||
-    limitedSummary.structurallyComplete !== false
+    limitedSummary.structurallyComplete !== false ||
+    limitedSummary.diagnostics?.[0]?.code !== "REMOTE_SERVER_EVIDENCE_MISSING"
   ) {
     throw new Error("summary did not expose the blocking measurement limitation");
   }

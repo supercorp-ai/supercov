@@ -38,6 +38,8 @@ describe("first-party source discovery", () => {
       "src/index.test.ts": "test('root', () => {})",
       "tests/e2e.spec.ts": "test('e2e', () => {})",
       "vite.config.ts": "export default {}",
+      ".eslintrc.cjs": "module.exports = {}",
+      ".graphqlrc.ts": "export default {}",
       "orphan.ts": "export const missed = true",
       "packages/ui/package.json": JSON.stringify({ module: "./src/index.ts" }),
       "packages/ui/src/index.ts": "export const ui = true",
@@ -57,6 +59,8 @@ describe("first-party source discovery", () => {
         expect.objectContaining({ file: "orphan.ts", status: "ambiguous" }),
         expect.objectContaining({ file: "src/index.test.ts", status: "excluded" }),
         expect.objectContaining({ file: "vite.config.ts", status: "excluded" }),
+        expect.objectContaining({ file: ".eslintrc.cjs", status: "excluded" }),
+        expect.objectContaining({ file: ".graphqlrc.ts", status: "excluded" }),
       ]),
     );
     expect(discovered.limitations).toMatchObject([

@@ -125,15 +125,29 @@ export function createRunIntegrity(
   );
   const executionFiles = [
     "atomic.js",
+    "buildCache.js",
+    "cli.js",
     "directInstrumenter.js",
+    "esmInterceptor.js",
     "instrumenter.js",
     "launchSupervisor.js",
+    "nodeTest.js",
     "playwright.js",
+    "playwrightReporter.js",
+    "project.js",
+    "provenance.js",
+    "queueAdapters.js",
     "register.mjs",
     "resolve-loader.mjs",
+    "runnerEvidence.js",
     "runtime.js",
+    "sourceDiscovery.js",
     "transport.js",
+    "types.js",
     "vitePlugin.js",
+    "vitest.js",
+    "vitestReporter.js",
+    "workspace.js",
   ]
     .map((path) => resolve(toolSourceDirectory, path))
     .filter(existsSync);

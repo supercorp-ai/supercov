@@ -523,6 +523,7 @@ function coverageCommand(
     options.filter !== "all" ? `--filter ${options.filter}` : undefined,
     options.kind ? `--kind ${shellQuote(options.kind)}` : undefined,
     options.runner ? `--runner ${shellQuote(options.runner)}` : undefined,
+    options.metric !== "all" ? `--metric ${options.metric}` : undefined,
   ]
     .filter(Boolean)
     .join(" ");
@@ -697,6 +698,31 @@ function attribution(
   };
 }
 
+function coverageDiagnostics(
+  report: McdcReport,
+  selected?: Set<string>,
+): Array<{
+  code: "REMOTE_SERVER_EVIDENCE_MISSING";
+  severity: "warning";
+  message: string;
+}> {
+  const observed = attribution(report, selected);
+  if (
+    (report.transport?.remoteLaunches ?? 0) > 0 &&
+    (report.transport?.scopedServerRecords ?? 0) === 0 &&
+    observed.serverExplicit === 0 &&
+    observed.serverFallback === 0
+  ) {
+    return [{
+      code: "REMOTE_SERVER_EVIDENCE_MISSING",
+      severity: "warning",
+      message:
+        "Remote launches were supervised, but no server evidence returned. Coverage may describe only browser/test processes; inspect how the application server is launched.",
+    }];
+  }
+  return [];
+}
+
 interface FileGap {
   file: string;
   uncoveredLines: number;
@@ -721,6 +747,30 @@ interface FileGap {
     mcdcConditions: number;
   };
   score: number;
+}
+
+function gapMetricValue(gap: FileGap, metric: QueryOptions["metric"]): number {
+  if (metric === "all") return gap.score;
+  if (metric === "lines") return gap.uncoveredLines;
+  if (metric === "statements") return gap.uncoveredStatements;
+  if (metric === "functions") return gap.uncoveredFunctions;
+  if (metric === "branches") return gap.missingBranches;
+  return gap.missingMcdcConditions;
+}
+
+function obligationMatchesMetric(
+  obligation: { kind: "line" | "statement" | "function" | "branch" | "mcdc" },
+  metric: QueryOptions["metric"],
+): boolean {
+  if (metric === "all") return true;
+  const kindByMetric: Record<Exclude<QueryOptions["metric"], "all">, typeof obligation.kind> = {
+    lines: "line",
+    statements: "statement",
+    functions: "function",
+    branches: "branch",
+    mcdc: "mcdc",
+  };
+  return obligation.kind === kindByMetric[metric];
 }
 
 type GapDimension = keyof FileGap["coveredByOtherTests"];
@@ -895,9 +945,9 @@ const helpText = `Agent-oriented local coverage queries:
   supercov runs <run-id> coverage kinds [--json]
   supercov runs <run-id> coverage runners [--json]
   supercov runs <run-id> coverage scope [--limit N] [--offset N] [--json]
-  supercov runs <run-id> coverage files [--filter all|passed|failed] [--limit N] [--offset N] [--json]
-  supercov runs <run-id> coverage gaps [--filter all|passed|failed] [--kind e2e] [--limit N] [--offset N] [--json]
-  supercov runs <run-id> coverage file <source-file> [--kind e2e] [--limit N] [--offset N] [--json]
+  supercov runs <run-id> coverage files [--metric all|lines|statements|functions|branches|mcdc] [--filter all|passed|failed] [--limit N] [--offset N] [--json]
+  supercov runs <run-id> coverage gaps [--metric all|lines|statements|functions|branches|mcdc] [--filter all|passed|failed] [--kind e2e] [--limit N] [--offset N] [--json]
+  supercov runs <run-id> coverage file <source-file> [--metric all|lines|statements|functions|branches|mcdc] [--kind e2e] [--limit N] [--offset N] [--json]
   supercov runs <run-id> coverage decision <id|source-file:line> [--kind e2e] [--json]
   supercov runs <run-id> coverage covers <source-file:line> [--kind e2e] [--json]
   supercov runs <run-id> coverage test <id|name-fragment> [--kind e2e] [--limit N] [--json]
@@ -1228,6 +1278,7 @@ export async function runQueryCommand(
         ],
       ),
     );
+    const diagnostics = coverageDiagnostics(report, selectedTestSet);
     const result = {
       run: run.id,
       filters: queryFilters(options),
@@ -1247,6 +1298,8 @@ export async function runQueryCommand(
       coverageByKind: report.coverageByKind,
       coverageByRunner: report.coverageByRunner,
       attribution: attribution(report, selectedTestSet),
+      transport: report.transport,
+      diagnostics,
       ...(!selectedTestSet
         ? {
             confidence: {
@@ -1297,7 +1350,7 @@ export async function runQueryCommand(
     return output(
       result,
       options,
-      `run ${run.id}${filterLabel(options) ? ` (${filterLabel(options)})` : ""}${run.metadata?.testExitCode !== 0 ? ` [INVALID: test exit ${run.metadata?.testExitCode ?? "unknown"}]` : ""}${report.integrity?.stale ? ` [STALE: ${(report.integrity.staleReasons ?? []).join(", ")}]` : ""}\nlines ${pct(summary.lines.percentage)} (${summary.lines.covered}/${summary.lines.total})\nbranches ${pct(summary.branches.percentage)} (${summary.branches.covered}/${summary.branches.total})\nMC/DC ${pct(summary.conditionCoveragePct)} (${summary.coveredConditions}/${summary.conditions})\nmeasurement: ${measurement.complete ? "complete" : `incomplete — ${measurement.blocking} blocking limitation(s) in ${measurement.files} file(s)`}${!selectedTestSet ? `\nconfidence: ${report.lines.filter((line) => line.confidence?.level === "asserted").length} asserted lines, ${report.lines.filter((line) => line.confidence?.level === "action").length} action-linked, ${report.lines.filter((line) => line.confidence?.level === "executed").length} execution-only; ${report.decisions.reduce((total, decision) => total + decision.conditions.filter((condition) => condition.assertionCovered).length, 0)} assertion-linked MC/DC conditions` : ""}\n${testCount} test(s)${setupCount ? ` + ${setupCount} setup scope(s)` : ""}; outcomes ${Object.entries(testOutcomes).filter(([, count]) => count > 0).map(([outcome, count]) => `${outcome}=${count}`).join(", ") || "none"}; ${gaps.length} file(s) have unresolved coverage or measurement gaps`,
+      `run ${run.id}${filterLabel(options) ? ` (${filterLabel(options)})` : ""}${run.metadata?.testExitCode !== 0 ? ` [INVALID: test exit ${run.metadata?.testExitCode ?? "unknown"}]` : ""}${report.integrity?.stale ? ` [STALE: ${(report.integrity.staleReasons ?? []).join(", ")}]` : ""}\nlines ${pct(summary.lines.percentage)} (${summary.lines.covered}/${summary.lines.total})\nbranches ${pct(summary.branches.percentage)} (${summary.branches.covered}/${summary.branches.total})\nMC/DC ${pct(summary.conditionCoveragePct)} (${summary.coveredConditions}/${summary.conditions})\nmeasurement: ${measurement.complete ? "complete" : `incomplete — ${measurement.blocking} blocking limitation(s) in ${measurement.files} file(s)`}${diagnostics.length ? `\ndiagnostic: ${diagnostics.map((item) => `${item.code}: ${item.message}`).join("; ")}` : ""}${!selectedTestSet ? `\nconfidence: ${report.lines.filter((line) => line.confidence?.level === "asserted").length} asserted lines, ${report.lines.filter((line) => line.confidence?.level === "action").length} action-linked, ${report.lines.filter((line) => line.confidence?.level === "executed").length} execution-only; ${report.decisions.reduce((total, decision) => total + decision.conditions.filter((condition) => condition.assertionCovered).length, 0)} assertion-linked MC/DC conditions` : ""}\n${testCount} test(s)${setupCount ? ` + ${setupCount} setup scope(s)` : ""}; outcomes ${Object.entries(testOutcomes).filter(([, count]) => count > 0).map(([outcome, count]) => `${outcome}=${count}`).join(", ") || "none"}; ${gaps.length} file(s) have unresolved coverage or measurement gaps`,
     );
   }
 
@@ -1320,7 +1373,7 @@ export async function runQueryCommand(
       };
     });
     const selectedPage = page(selectedDetails, options);
-    const base = `${coverageCommand(run.id, options, "minimize")} --target ${options.target}${options.metric !== "all" ? ` --metric ${options.metric}` : ""}`;
+    const base = `${coverageCommand(run.id, options, "minimize")} --target ${options.target}`;
     const next = nextPageCommand(base, selectedDetails.length, selectedPage.length, options);
     return output(
       {
@@ -1418,8 +1471,17 @@ export async function runQueryCommand(
 
   if (command === "files" || command === "gaps") {
     const files = fileGaps(report, selectedTestSet);
-    const all =
-      command === "gaps" ? files.filter((gap) => gap.score > 0) : files;
+    const all = files
+      .filter((gap) =>
+        command === "files" ||
+        gapMetricValue(gap, options.metric) > 0 ||
+        gap.measurementLimitations > 0,
+      )
+      .sort((left, right) =>
+        gapMetricValue(right, options.metric) - gapMetricValue(left, options.metric) ||
+        right.measurementLimitations - left.measurementLimitations ||
+        left.file.localeCompare(right.file),
+      );
     const selectedFiles = page(all, options);
     const pageStart = all.length === 0 ? 0 : options.offset + 1;
     const pageEnd = Math.min(
@@ -1435,6 +1497,7 @@ export async function runQueryCommand(
       {
         run: run.id,
         filters: queryFilters(options),
+        metric: options.metric,
         [command]: selectedFiles,
       },
       options,
@@ -1562,7 +1625,7 @@ export async function runQueryCommand(
       ...functions,
       ...branches,
       ...mcdc,
-    ].sort(
+    ].filter((obligation) => obligationMatchesMetric(obligation, options.metric)).sort(
       (left, right) =>
         left.line - right.line || left.kind.localeCompare(right.kind),
     );
@@ -1612,6 +1675,7 @@ export async function runQueryCommand(
       run: run.id,
       filters: queryFilters(options),
       file,
+      metric: options.metric,
       counts: {
         uncoveredLines: uncoveredLines.length,
         uncoveredStatements: statements.length,
@@ -1710,9 +1774,15 @@ export async function runQueryCommand(
       ),
     );
     matches = matches.map((decision) => {
+      const totals = {
+        conditions: decision.conditions.length,
+        vectorObservations: decision.vectorObservations.length,
+        tests: decision.tests.length,
+      };
       const vectorObservations = page(decision.vectorObservations, options);
       return {
         ...decision,
+        totals,
         vectors: vectorObservations.map((observation) => observation.vector),
         vectorObservations,
         conditions: page(decision.conditions, options),
@@ -1738,6 +1808,8 @@ export async function runQueryCommand(
     const result = {
       run: run.id,
       filters: queryFilters(options),
+      paginationAppliesTo:
+        "conditions, vectorObservations, and tests independently within each decision",
       decisions: matches,
     };
     return output(

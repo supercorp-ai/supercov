@@ -178,5 +178,31 @@ export function analyzeCoverageArchive(
       server: backgroundRecords,
     });
   }
-  return analyzeCoverageResults(manifest, rawResults, options);
+  const executionEvents = archive.files
+    .filter((entry) => /^execution\..*\.jsonl$/.test(entry.path))
+    .flatMap((entry) =>
+      entry.contents
+        .split("\n")
+        .filter(Boolean)
+        .map((line, index) =>
+          parseJson<{ event?: string }>(line, `${entry.path}:${index + 1}`),
+        ),
+    );
+  const transport = {
+    processes: executionEvents.filter((event) => event.event === "process").length,
+    childLaunches: executionEvents.filter((event) => event.event === "child-launch").length,
+    remoteLaunches: executionEvents.filter((event) => event.event === "remote-launch").length,
+    workspaceCapabilities: executionEvents.filter(
+      (event) => event.event === "workspace-capability",
+    ).length,
+    scopedServerRecords: scopedRecords.length,
+    backgroundServerRecords: backgroundRecords.length,
+  };
+  const report = analyzeCoverageResults(manifest, rawResults, options);
+  report.transport = transport;
+  if (report.filters) {
+    report.filters.passed.transport = transport;
+    report.filters.failed.transport = transport;
+  }
+  return report;
 }
