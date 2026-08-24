@@ -117,6 +117,7 @@ describe("probe v2", () => {
   it("re-registers decision state lazily after a per-test reset", () => {
     resetCoverage();
     const file = registerProbeV2({ decisions: [decision], pointIds: [] });
+    expect(coverageSnapshot().decisions).toHaveLength(0);
     mcdcEndV2(file, 0, 8, true);
     expect(coverageSnapshot().decisions).toHaveLength(1);
     resetCoverage();

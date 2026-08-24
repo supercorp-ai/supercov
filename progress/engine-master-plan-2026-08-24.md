@@ -213,6 +213,17 @@ miss blocks flipping any default.
   runs retain four attributed tests and 100% passed-only MC/DC. Pull-request,
   weekly conformance, and release workflows run the Rust parity and browser
   gates; weekly/release Test262 shards invoke the release Rust binary.
+- Engine parity is no longer an aggregate-score check. Six production shapes
+  (mixed Playwright/Vitest, native `node:test`, esbuild, webpack, SWC, and
+  Next.js) now require byte-identical manifests plus exact normalized raw test
+  and server evidence, deterministic full-report semantics, outcomes,
+  explicit action/assertion attribution, confidence, and representative agent
+  query envelopes. Normalization is restricted to run IDs, clocks, temporary
+  paths, process-derived worker/attempt identity, and timestamp-only phase
+  correlation; a TypeScript-versus-TypeScript repeat proves the comparator is
+  stable under those rules. Probe v2 also no longer archives registered but
+  unobserved decisions as empty snapshots, matching the frozen v1 evidence
+  contract rather than merely producing the same aggregate score.
 - Phase 3 is not promoted yet. Remaining gates are the full browser/Node
   syntax matrix, Essential SEO/Supercov dogfood suites, and exact TypeScript/
   Rust archive/attribution/outcome parity across all fixtures and under

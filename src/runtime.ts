@@ -1032,10 +1032,6 @@ export function registerProbeV2(definition: {
     decisionCompleteEpochs: new Uint32Array(definition.decisions.length),
   };
   state.probeV2Files.add(file);
-  for (const meta of definition.decisions) {
-    if (!state.decisions.has(meta.id))
-      state.decisions.set(meta.id, { meta, vectors: new Map() });
-  }
   if (isBrowser) {
     state.probeV2Clock.fast = true;
     activateProbeV2Key(
