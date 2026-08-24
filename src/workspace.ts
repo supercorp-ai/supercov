@@ -22,6 +22,8 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { atomicRenameSync, atomicWriteFileSync } from "./atomic.ts";
 
+export const RUN_STORE_CONTRACT_VERSION = 1;
+
 export type RunStateStatus =
   | "preparing"
   | "building"

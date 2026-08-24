@@ -8,6 +8,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { atomicWriteFileSync } from "./atomic.ts";
 
 export const EVIDENCE_ARCHIVE_SCHEMA_VERSION = 2;
+export const EVIDENCE_ARCHIVE_MAGIC = "SUPERCOV-EVIDENCE-2\n";
 
 export interface EvidenceArchiveEntry {
   path: string;
@@ -41,7 +42,7 @@ export type EvidenceArchiveSource =
       path: string;
     };
 
-const ARCHIVE_MAGIC = Buffer.from("SUPERCOV-EVIDENCE-2\n");
+const ARCHIVE_MAGIC = Buffer.from(EVIDENCE_ARCHIVE_MAGIC);
 
 function writeEntries(
   entries: Array<{ path: string; contents: Buffer }>,

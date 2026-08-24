@@ -1,6 +1,11 @@
 import { basename } from "node:path";
 import { spawnSync, type ChildProcess } from "node:child_process";
 
+export const PROCESS_SUPERVISION_SCHEMA_VERSION = 1;
+export const DEFAULT_DIAGNOSTIC_INTERVAL_MS = 60_000;
+export const COMMAND_TERMINATION_GRACE_MS = 5_000;
+export const COMMAND_TIMEOUT_EXIT_CODE = 124;
+
 export interface ProcessSnapshot {
   pid: number;
   parentPid: number;

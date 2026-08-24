@@ -1,0 +1,27 @@
+[workspace]
+members = [
+  "crates/supercov-cli",
+  "crates/supercov-contracts",
+  "crates/supercov-engine",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.9"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+repository = "https://github.com/supercorp-ai/supercov"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+supercov-contracts = { path = "crates/supercov-contracts" }
+supercov-engine = { path = "crates/supercov-engine" }
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3
+panic = "abort"
+strip = "symbols"

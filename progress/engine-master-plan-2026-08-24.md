@@ -9,7 +9,7 @@ code; a compatibility sweep is in flight and Tier 1 (trust) still lands first.
 
 1. **Rust core engine, single static binary.** CLI, project discovery,
    workspace isolation, instrumentation orchestration, evidence analysis,
-   query engine, and serve mode all compile into one 5–15 MB static binary per
+   and query engine all compile into one 5–15 MB static binary per
    platform. The current TypeScript engine becomes the *reference
    implementation* and is retired only after sustained differential parity.
 2. **oxc for JS parsing/codegen** in the Rust instrumenter (published
@@ -51,7 +51,8 @@ code; a compatibility sweep is in flight and Tier 1 (trust) still lands first.
    limit once the engine is Rust); Homebrew; `curl | sh`; cargo-binstall.
    Wrappers are exec-only glue.
 7. **Frozen contracts, written as specs.** Evidence archive schema, run-store
-   layout, CLI surface + JSON envelopes, waivers file format, serve protocol.
+   layout, CLI surface + JSON envelopes, waivers file format, and process
+   supervision. (The no-resident-process decision removes serve entirely.)
    Both engines must pass the same black-box contract tests. These specs are
    the Rust port's requirements document.
 
@@ -106,7 +107,7 @@ miss blocks flipping any default.
   release of zero differential findings.
 - **Phase 4: Rust engine shell.** CLI, discovery, workspace (clonefile/
   FICLONE parity), run lifecycle, analysis (bitset MC/DC pair search),
-  query + serve. Gate: differential harness zero-diff on the full sweep
+  and query engine. Gate: differential harness zero-diff on the full sweep
   matrix and self-dogfood; query cold-start gate met. Flip default, keep TS
   engine one full release as fallback, then delete.
 - **Phase 5: distribution matrix + Python.** Release pipeline for all
@@ -136,7 +137,7 @@ miss blocks flipping any default.
   differential gate. "Faster but slightly different" is a failure.
 - Windows becomes a CI matrix member before any binary GA — no shipping
   binaries for platforms the suite has never run on.
-- Contracts (schemas, CLI, envelopes, serve protocol) change only by
+- Contracts (schemas, CLI, envelopes, process supervision) change only by
   versioned, deliberate revision — never as a rewrite side effect.
 - The agent-facing UX work (skill/playbook, post-run hints, grouped queries)
   continues on the TS engine throughout; users never wait on the rewrite.

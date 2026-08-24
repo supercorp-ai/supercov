@@ -40,6 +40,9 @@ import {
 import { agentFailureJson, SupercovError } from "./agentJson.ts";
 import { isolateCollectorRuntime } from "./runtimeIsolation.ts";
 import {
+  COMMAND_TERMINATION_GRACE_MS,
+  COMMAND_TIMEOUT_EXIT_CODE,
+  DEFAULT_DIAGNOSTIC_INTERVAL_MS,
   positiveMilliseconds,
   startProcessWatchdog,
 } from "./processDiagnostics.ts";
@@ -108,7 +111,7 @@ function runChild(
   const diagnosticIntervalMs = positiveMilliseconds(
     options.env["SUPERCOV_DIAGNOSTIC_INTERVAL_MS"],
     "SUPERCOV_DIAGNOSTIC_INTERVAL_MS",
-  ) ?? 60_000;
+  ) ?? DEFAULT_DIAGNOSTIC_INTERVAL_MS;
   const commandTimeoutMs = positiveMilliseconds(
     options.env["SUPERCOV_COMMAND_TIMEOUT_MS"],
     "SUPERCOV_COMMAND_TIMEOUT_MS",
@@ -140,7 +143,10 @@ function runChild(
           `[supercov] command exceeded SUPERCOV_COMMAND_TIMEOUT_MS=${commandTimeoutMs}; terminating process group`,
         );
         terminateChild("SIGTERM");
-        timeoutEscalation = setTimeout(() => terminateChild("SIGKILL"), 5_000);
+        timeoutEscalation = setTimeout(
+          () => terminateChild("SIGKILL"),
+          COMMAND_TERMINATION_GRACE_MS,
+        );
         timeoutEscalation.unref();
       },
     });
@@ -163,7 +169,7 @@ function runChild(
 
 function exitCode(result?: ChildResult): number {
   if (!result) return 0;
-  if (result.timedOut) return 124;
+  if (result.timedOut) return COMMAND_TIMEOUT_EXIT_CODE;
   if (result.error) return 1;
   if (result.status !== null) return result.status;
   return result.signal ? 128 : 1;
@@ -272,7 +278,10 @@ async function createCoverageRun(command: string[]): Promise<number> {
         // State recovery on the next invocation remains the fallback.
       }
       terminateChild(signal);
-      signalEscalation = setTimeout(() => terminateChild("SIGKILL"), 5_000);
+      signalEscalation = setTimeout(
+        () => terminateChild("SIGKILL"),
+        COMMAND_TERMINATION_GRACE_MS,
+      );
       signalEscalation.unref();
     };
     signalHandlers.set(signal, handler);
@@ -828,7 +837,9 @@ async function createCoverageRun(command: string[]): Promise<number> {
               startedAt,
               durationMs: Date.now() - runStartedAt,
               command,
-              testExitCode: testResult.timedOut ? 124 : testResult.status,
+              testExitCode: testResult.timedOut
+                ? COMMAND_TIMEOUT_EXIT_CODE
+                : testResult.status,
               integrity: runIntegrity,
               rawEvidence,
               isolatedBuild: true,

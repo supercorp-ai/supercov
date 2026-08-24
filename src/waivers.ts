@@ -4,6 +4,7 @@ import { SupercovError } from "./agentJson.ts";
 import type { McdcDecisionResult } from "./types.ts";
 
 export const WAIVERS_FILE = "supercov.waivers.json";
+export const WAIVERS_SCHEMA_VERSION = 1;
 
 /**
  * A reviewed statement that one MC/DC condition has no satisfiable
@@ -81,7 +82,7 @@ export function readCoverageWaivers(
     );
   }
   const record = parsed as { version?: unknown; waivers?: unknown };
-  if (record?.version !== 1 || !Array.isArray(record.waivers)) {
+  if (record?.version !== WAIVERS_SCHEMA_VERSION || !Array.isArray(record.waivers)) {
     throw new SupercovError(
       "INVALID_ARGUMENT",
       `${WAIVERS_FILE} must be {"version": 1, "waivers": [...]}`,
