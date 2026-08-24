@@ -110,8 +110,9 @@ for (const [index, testCase] of allCases.entries()) {
     throw new Error(
       `${testCase.file}: Rust/TypeScript point mismatch\nreference=${JSON.stringify(referenceManifest.points)}\ncandidate=${JSON.stringify(candidate.points)}`,
     );
-  const referenceLogicalBranches = referenceManifest.branches.filter(
-    (branch) => branch.kind === "logical-assignment" || branch.kind === "logical-value",
+  const candidateBranchIds = new Set(candidate.branches.map((branch) => branch.id));
+  const referenceLogicalBranches = referenceManifest.branches.filter((branch) =>
+    candidateBranchIds.has(branch.id),
   );
   if (JSON.stringify(candidate.branches) !== JSON.stringify(referenceLogicalBranches))
     throw new Error(
@@ -156,7 +157,7 @@ async function executeRustCandidate(testCase, candidate) {
   const vectors = [];
   const hits = [];
   const runtime = candidate.runtime;
-  if (!runtime?.coverageHit || !runtime?.mcdcBegin || !runtime?.mcdcCondition || !runtime?.mcdcEnd || !runtime?.mcdcEndV2 || !runtime?.selectionBegin || !runtime?.selectionRight || !runtime?.selectionEnd)
+  if (!runtime?.coverageHit || !runtime?.mcdcBegin || !runtime?.mcdcCondition || !runtime?.mcdcEnd || !runtime?.mcdcEndV2 || !runtime?.selectionBegin || !runtime?.selectionRight || !runtime?.selectionEnd || !runtime?.optionalSelect)
     throw new Error(`${testCase.file}: missing Rust candidate runtime bindings`);
   const coverageHit = (id) => hits.push(id);
   const begin = (id, meta) => {
@@ -182,6 +183,10 @@ async function executeRustCandidate(testCase, candidate) {
     coverageHit(frame.evaluatedRight ? frame.rightId : frame.shortId);
     return value;
   };
+  const optionalSelect = (shortId, continuedId, value) => {
+    coverageHit(value === null || value === undefined ? shortId : continuedId);
+    return value;
+  };
   const recorder = (file, decisionIndex, encoded, value) => {
     if (file !== testCase.file) throw new Error(`unexpected probe file ${file}`);
     const decision = candidate.decisions[decisionIndex];
@@ -200,6 +205,7 @@ async function executeRustCandidate(testCase, candidate) {
     runtime.selectionBegin,
     runtime.selectionRight,
     runtime.selectionEnd,
+    runtime.optionalSelect,
     `"use strict";\n${candidate.code}\nreturn { run, observe: typeof observe === "function" ? observe : undefined };`,
   );
   const program = factory(
@@ -211,6 +217,7 @@ async function executeRustCandidate(testCase, candidate) {
     selectionBegin,
     selectionRight,
     selectionEnd,
+    optionalSelect,
   );
   try {
     const value = await program.run();
@@ -283,5 +290,5 @@ for (const [offset, testCase] of generatedCorpus.entries()) {
 }
 
 console.log(
-  `[rust-js-differential] ${allCases.length} oxc/Babel decisions, points, logical selection/assignment branches, and safety limitations match; ${executionCorpus.length} behavior/effect/vector/hit cases and ${generatedCorpus.length} generated behavior cases match`,
+  `[rust-js-differential] ${allCases.length} oxc/Babel decisions, points, logical/optional-member branches, and safety limitations match; ${executionCorpus.length} behavior/effect/vector/hit cases and ${generatedCorpus.length} generated behavior cases match`,
 );

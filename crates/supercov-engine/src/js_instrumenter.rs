@@ -17,10 +17,11 @@ use oxc_ast::{
     AstBuilder, NONE,
     ast::{
         Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
-        AssignmentTarget, CallExpression, ConditionalExpression, Declaration, DoWhileStatement,
-        Expression, ForInStatement, ForOfStatement, ForStatement, FormalParameterKind,
-        FormalParameters, Function, FunctionBody, IfStatement, LogicalExpression, NewExpression,
-        ObjectPropertyKind, Program, PropertyKey, PropertyKind, Statement, VariableDeclarationKind,
+        AssignmentTarget, CallExpression, ComputedMemberExpression, ConditionalExpression,
+        Declaration, DoWhileStatement, Expression, ForInStatement, ForOfStatement, ForStatement,
+        FormalParameterKind, FormalParameters, Function, FunctionBody, IfStatement,
+        LogicalExpression, NewExpression, ObjectPropertyKind, PrivateFieldExpression, Program,
+        PropertyKey, PropertyKind, Statement, StaticMemberExpression, VariableDeclarationKind,
         WhileStatement, WithStatement,
     },
 };
@@ -109,6 +110,7 @@ pub struct CandidateRuntime {
     pub selection_begin: String,
     pub selection_right: String,
     pub selection_end: String,
+    pub optional_select: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -668,6 +670,13 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         with_statements: &safety.with_statements,
     };
     collector.visit_program(&parsed.program);
+    let optional_analysis = collect_optional_member_branches(
+        &allocator,
+        &mut parsed.program,
+        source,
+        file,
+        &safety.source_sensitive_functions,
+    );
     let assignment_analysis = collect_logical_assignment_branches(
         &allocator,
         &mut parsed.program,
@@ -683,7 +692,8 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         &collector.decision_logical_nodes,
         &safety.source_sensitive_functions,
     );
-    let mut branches = assignment_analysis.branches;
+    let mut branches = optional_analysis.branches;
+    branches.extend(assignment_analysis.branches);
     branches.extend(logical_analysis.branches);
     let generated = Codegen::new().build(&parsed.program).code;
     Ok(CandidateOutput {
@@ -743,6 +753,13 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         with_statements: &safety.with_statements,
     };
     collector.visit_program(&parsed.program);
+    let optional_analysis = collect_optional_member_branches(
+        &allocator,
+        &mut parsed.program,
+        source,
+        file,
+        &safety.source_sensitive_functions,
+    );
     let assignment_analysis = collect_logical_assignment_branches(
         &allocator,
         &mut parsed.program,
@@ -758,7 +775,8 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         &collector.decision_logical_nodes,
         &safety.source_sensitive_functions,
     );
-    let mut branches = assignment_analysis.branches;
+    let mut branches = optional_analysis.branches;
+    branches.extend(assignment_analysis.branches);
     branches.extend(logical_analysis.branches);
 
     let mut names = CandidateNames::new(source);
@@ -770,6 +788,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     let selection_begin = names.allocate("__supercovSelectionBegin");
     let selection_right = names.allocate("__supercovSelectionRight");
     let selection_end = names.allocate("__supercovSelectionEnd");
+    let optional_select = names.allocate("__supercovOptionalSelect");
     let ast = AstBuilder::new(&allocator);
     let mut statement_transformer = StatementProbeTransformer {
         ast,
@@ -786,6 +805,14 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
     function_transformer.visit_program(&mut parsed.program);
+    let mut optional_transformer = OptionalMemberTransformer {
+        ast,
+        optional_select: optional_select.clone(),
+        targets: optional_analysis.targets,
+        source_sensitive_functions: safety.source_sensitive_functions.clone(),
+        with_statements: safety.with_statements.clone(),
+    };
+    optional_transformer.visit_program(&mut parsed.program);
     let mut transformer = ControlProbeV2Transformer {
         ast,
         file,
@@ -827,7 +854,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
         complete: false,
-        supported_surface: "point-control-logical-selection-probe-candidate".to_string(),
+        supported_surface: "point-control-logical-optional-member-probe-candidate".to_string(),
         code: Codegen::new().build(&parsed.program).code,
         decisions: collector.decisions,
         points: point_analysis.points,
@@ -841,6 +868,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
             selection_begin,
             selection_right,
             selection_end,
+            optional_select,
         }),
         coverage_limitations: safety.limitations,
         limitations,
@@ -1049,6 +1077,96 @@ impl<'a> VisitMut<'a> for FunctionProbeTransformer<'a> {
             }
         }
         walk_mut::walk_arrow_function_expression(self, function);
+    }
+}
+
+struct OptionalMemberTransformer<'a> {
+    ast: AstBuilder<'a>,
+    optional_select: String,
+    targets: HashMap<SpanKey, (String, String)>,
+    source_sensitive_functions: HashSet<SpanKey>,
+    with_statements: HashSet<SpanKey>,
+}
+
+impl<'a> OptionalMemberTransformer<'a> {
+    fn instrument_operand(
+        &self,
+        operand: Expression<'a>,
+        short_id: &str,
+        continued_id: &str,
+    ) -> Expression<'a> {
+        self.ast.expression_call(
+            Span::default(),
+            self.ast
+                .expression_identifier(Span::default(), self.ast.ident(&self.optional_select)),
+            NONE,
+            self.ast.vec_from_array([
+                Argument::from(self.ast.expression_string_literal(
+                    Span::default(),
+                    self.ast.str(short_id),
+                    None,
+                )),
+                Argument::from(self.ast.expression_string_literal(
+                    Span::default(),
+                    self.ast.str(continued_id),
+                    None,
+                )),
+                Argument::from(operand),
+            ]),
+            false,
+        )
+    }
+
+    fn instrument_target(&mut self, span: Span, object: &mut Expression<'a>) {
+        let Some((short_id, continued_id)) = self.targets.remove(&span_key(span)) else {
+            return;
+        };
+        let operand = object.take_in(self.ast.allocator);
+        *object = self.instrument_operand(operand, &short_id, &continued_id);
+    }
+}
+
+impl<'a> VisitMut<'a> for OptionalMemberTransformer<'a> {
+    fn visit_function(&mut self, function: &mut Function<'a>, flags: ScopeFlags) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_function(self, function, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, function: &mut ArrowFunctionExpression<'a>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_arrow_function_expression(self, function);
+    }
+
+    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
+        if self.with_statements.contains(&span_key(statement.span)) {
+            return;
+        }
+        walk_mut::walk_with_statement(self, statement);
+    }
+
+    fn visit_computed_member_expression(&mut self, member: &mut ComputedMemberExpression<'a>) {
+        self.instrument_target(member.span, &mut member.object);
+        walk_mut::walk_computed_member_expression(self, member);
+    }
+
+    fn visit_static_member_expression(&mut self, member: &mut StaticMemberExpression<'a>) {
+        self.instrument_target(member.span, &mut member.object);
+        walk_mut::walk_static_member_expression(self, member);
+    }
+
+    fn visit_private_field_expression(&mut self, member: &mut PrivateFieldExpression<'a>) {
+        self.instrument_target(member.span, &mut member.object);
+        walk_mut::walk_private_field_expression(self, member);
     }
 }
 
@@ -1948,6 +2066,155 @@ struct LogicalAssignmentAnalysis {
     targets: HashMap<SpanKey, (String, String)>,
 }
 
+#[derive(Default)]
+struct OptionalMemberAnalysis {
+    branches: Vec<CandidateBranch>,
+    targets: HashMap<SpanKey, (String, String)>,
+}
+
+struct OptionalMemberCollector<'s> {
+    source: &'s str,
+    file: &'s str,
+    source_sensitive_functions: &'s HashSet<SpanKey>,
+    unsafe_function_depth: usize,
+    with_depth: usize,
+    analysis: OptionalMemberAnalysis,
+}
+
+impl OptionalMemberCollector<'_> {
+    fn record(&mut self, span: Span, optional: bool) {
+        if !optional || self.unsafe_function_depth > 0 || self.with_depth > 0 {
+            return;
+        }
+        let id = stable_id(self.source, self.file, "optional-chain", span, "");
+        let short_id = format!("{id}:short");
+        let continued_id = format!("{id}:continued");
+        let (line, column) = line_and_utf16_column(self.source, span.start as usize);
+        self.analysis
+            .targets
+            .insert(span_key(span), (short_id.clone(), continued_id.clone()));
+        self.analysis.branches.push(CandidateBranch {
+            id,
+            kind: "optional-chain".to_string(),
+            file: self.file.to_string(),
+            line,
+            column,
+            source: source_slice(self.source, span).to_string(),
+            alternatives: vec![
+                CandidateBranchAlternative {
+                    id: short_id,
+                    label: "nullish / short-circuited".to_string(),
+                },
+                CandidateBranchAlternative {
+                    id: continued_id,
+                    label: "non-nullish / continued".to_string(),
+                },
+            ],
+        });
+    }
+
+    fn exit_source_function(&mut self, span: Span) {
+        if self.source_sensitive_functions.contains(&span_key(span)) {
+            self.unsafe_function_depth -= 1;
+        }
+    }
+}
+
+impl<'a> Traverse<'a, ()> for OptionalMemberCollector<'_> {
+    fn enter_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(node.span))
+        {
+            self.unsafe_function_depth += 1;
+        }
+    }
+
+    fn exit_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
+        self.exit_source_function(node.span);
+    }
+
+    fn enter_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(node.span))
+        {
+            self.unsafe_function_depth += 1;
+        }
+    }
+
+    fn exit_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.exit_source_function(node.span);
+    }
+
+    fn enter_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth += 1;
+    }
+
+    fn exit_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth -= 1;
+    }
+
+    fn enter_computed_member_expression(
+        &mut self,
+        node: &mut ComputedMemberExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.record(node.span, node.optional);
+    }
+
+    fn enter_static_member_expression(
+        &mut self,
+        node: &mut StaticMemberExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.record(node.span, node.optional);
+    }
+
+    fn enter_private_field_expression(
+        &mut self,
+        node: &mut PrivateFieldExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.record(node.span, node.optional);
+    }
+}
+
+fn collect_optional_member_branches<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    source: &str,
+    file: &str,
+    source_sensitive_functions: &HashSet<SpanKey>,
+) -> OptionalMemberAnalysis {
+    let mut collector = OptionalMemberCollector {
+        source,
+        file,
+        source_sensitive_functions,
+        unsafe_function_depth: 0,
+        with_depth: 0,
+        analysis: OptionalMemberAnalysis::default(),
+    };
+    traverse_mut(&mut collector, allocator, program, Default::default(), ());
+    collector.analysis
+}
+
 struct LogicalAssignmentCollector<'s> {
     source: &'s str,
     file: &'s str,
@@ -2419,7 +2686,7 @@ mod tests {
         assert!(!output.complete);
         assert_eq!(
             output.supported_surface,
-            "point-control-logical-selection-probe-candidate"
+            "point-control-logical-optional-member-probe-candidate"
         );
         let runtime = output.runtime.expect("candidate runtime binding");
         assert!(output.code.contains(&runtime.mcdc_end_v2));

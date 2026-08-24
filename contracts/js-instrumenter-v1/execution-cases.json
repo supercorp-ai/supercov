@@ -50,5 +50,9 @@
   {
     "file": "differential/logical-assignment.js",
     "source": "const effects = [];\nlet stored = 0;\nconst target = new Proxy({}, { get(_object, key) { effects.push('get:' + String(key)); return stored; }, set(_object, key, value) { effects.push('set:' + String(key) + ':' + value); stored = value; return true; } });\nfunction key() { effects.push('key'); return 'value'; }\nfunction right(value) { effects.push('right:' + value); return value; }\nfunction run() { target[key()] ||= right(4); target[key()] &&= right(7); target[key()] ??= right(9); let named; named ||= function () {}; return { stored, name: named.name }; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/optional-member.js",
+    "source": "const effects = [];\nfunction key() { effects.push('key'); return 'value'; }\nfunction read(target) { return target?.[key()]; }\nfunction run() { return [read(null), read({ value: undefined }), read({ value: 3 })]; }\nfunction observe() { return effects; }\n"
   }
 ]
