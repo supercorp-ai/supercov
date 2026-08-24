@@ -78,9 +78,10 @@ export function callerLocation(ignored: RegExp): {
 
 export function readScopedServerEvidence(
   scope: CoverageExecutionScope,
+  evidencePath = serverEvidencePath(scope),
 ): CoverageServerRecord[] {
   try {
-    return readFileSync(serverEvidencePath(scope), "utf8")
+    return readFileSync(evidencePath, "utf8")
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as CoverageServerRecord)
@@ -96,6 +97,7 @@ export function writeRunnerEvidence(
   scope: CoverageExecutionScope,
   evidenceDirectoryOverride?: string,
   phases: CoveragePhase[] = [],
+  serverEvidenceSource?: string,
 ): void {
   const evidenceDirectory =
     evidenceDirectoryOverride ?? process.env["SUPERCOV_EVIDENCE_DIR"];
@@ -117,7 +119,9 @@ export function writeRunnerEvidence(
     ...(phases.length > 0 ? { phases } : {}),
     runtime: [],
     browser: [],
-    server: readScopedServerEvidence(scope),
+    server: serverEvidenceSource
+      ? readScopedServerEvidence(scope, serverEvidenceSource)
+      : readScopedServerEvidence(scope),
   };
   const directory = resolve(
     process.cwd(),

@@ -274,22 +274,41 @@ function serverRecordKey(record: CoverageServerRecord): string {
   return `${record.phaseId ?? "unscoped"}:${record.type}:${suffix}`;
 }
 
-/** Buffer and de-duplicate local Node evidence until its test attempt ends. */
+/**
+ * Buffer and de-duplicate local Node evidence until its test attempt ends.
+ * The transport destination is pinned here: a test may legitimately mutate
+ * SUPERCOV_SERVER_EVIDENCE_ROOT while exercising Supercov's own transport,
+ * and the eventual flush must land where this attempt's reader will look.
+ */
 export function beginBufferedServerEvidence(scope: CoverageExecutionScope): void {
   if (isBrowser) return;
-  state.bufferedAttempts.add(attemptKey(scope));
+  const key = attemptKey(scope);
+  state.bufferedAttempts.add(key);
+  if (!state.serverBuffers.has(key))
+    state.serverBuffers.set(key, {
+      scope,
+      directory: serverEvidenceDirectory(scope),
+      path: serverEvidencePath(scope),
+      records: new Map<string, CoverageServerRecord>(),
+    });
 }
 
-/** Publish one local test attempt with one filesystem append. */
-export function flushBufferedServerEvidence(scope: CoverageExecutionScope): void {
-  if (isBrowser) return;
+/**
+ * Publish one local test attempt with one filesystem append. Returns the
+ * pinned evidence path when records were written so the attempt's reader
+ * never re-derives it from mutable environment.
+ */
+export function flushBufferedServerEvidence(
+  scope: CoverageExecutionScope,
+): string | undefined {
+  if (isBrowser) return undefined;
   const key = attemptKey(scope);
   state.bufferedAttempts.delete(key);
   const buffered = state.serverBuffers.get(key);
-  if (!buffered) return;
+  if (!buffered) return undefined;
   state.serverBuffers.delete(key);
   const fs = getFs();
-  if (!fs || buffered.records.size === 0) return;
+  if (!fs || buffered.records.size === 0) return undefined;
   try {
     fs.mkdirSync(buffered.directory, { recursive: true });
     fs.appendFileSync(
@@ -298,8 +317,10 @@ export function flushBufferedServerEvidence(scope: CoverageExecutionScope): void
         .map((record) => JSON.stringify(record))
         .join("\n") + "\n",
     );
+    return buffered.path;
   } catch {
     // Collection is best-effort and must never change test behavior.
+    return undefined;
   }
 }
 

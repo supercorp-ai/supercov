@@ -111,6 +111,16 @@ describe("concurrent server evidence transport", () => {
       return params.toString();
     };
 
+    const configured = process.env.SUPERCOV_SERVER_EVIDENCE_ROOT;
+    try {
+      delete process.env.SUPERCOV_SERVER_EVIDENCE_ROOT;
+      expect(serverRunEvidenceDirectory("run-1")).toBe(
+        "/tmp/supercov-server-evidence/run-1",
+      );
+    } finally {
+      process.env.SUPERCOV_SERVER_EVIDENCE_ROOT = configured;
+    }
+
     expect(decodeCoverageScope(undefined)).toBeUndefined();
     expect(decodeCoverageScope(encodeCoverageScope(valid))).toEqual(valid);
     expect(decodeCoverageScope(tampered("v", "2"))).toBeUndefined();
@@ -343,6 +353,42 @@ describe("concurrent server evidence transport", () => {
         "decision",
       ]);
     } finally {
+      rmSync(serverRunEvidenceDirectory(execution.runId), {
+        recursive: true,
+        force: true,
+      });
+    }
+  });
+
+  it("keeps buffered evidence on the destination pinned at attempt start", () => {
+    const execution = scope(
+      `pinned-${process.pid}-${Date.now()}`,
+      "node-worker",
+      "env-mutating-test",
+      0,
+    );
+    const configured = process.env.SUPERCOV_SERVER_EVIDENCE_ROOT;
+    try {
+      beginBufferedServerEvidence(execution);
+      withCoverageCarrier({ version: 1, scope: execution }, () => {
+        // A test may mutate Supercov's public environment mid-attempt while
+        // exercising the transport itself. Records before, during, and after
+        // the mutation must land on the destination pinned at attempt start.
+        coverageHit("before-mutation");
+        delete process.env.SUPERCOV_SERVER_EVIDENCE_ROOT;
+        coverageHit("during-mutation");
+        process.env.SUPERCOV_SERVER_EVIDENCE_ROOT = configured;
+        coverageHit("after-mutation");
+      });
+      const flushedPath = flushBufferedServerEvidence(execution);
+      expect(flushedPath).toBe(serverEvidencePath(execution));
+      expect(
+        records(execution).map((record) =>
+          record.type === "hit" ? record.id : record.type,
+        ),
+      ).toEqual(["before-mutation", "during-mutation", "after-mutation"]);
+    } finally {
+      process.env.SUPERCOV_SERVER_EVIDENCE_ROOT = configured;
       rmSync(serverRunEvidenceDirectory(execution.runId), {
         recursive: true,
         force: true,

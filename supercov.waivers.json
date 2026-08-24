@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "waivers": [
+    {
+      "file": "src/instrumenter.ts",
+      "decision": "(t.isParenthesizedExpression(candidate) ||\n        t.isTSAsExpression(candidate) ||\n        t.isTSTypeAssertion(candidate) ||\n        t.isTSNonNullExpression(candidate)) &&\n      candidate.expression === value",
+      "condition": "t.isParenthesizedExpression(candidate)",
+      "reason": "instrumentMcdc parses without createParenthesizedExpressions, so ParenthesizedExpression nodes never occur in the traversed AST."
+    },
+    {
+      "file": "src/instrumenter.ts",
+      "decision": "(t.isParenthesizedExpression(candidate) ||\n        t.isTSAsExpression(candidate) ||\n        t.isTSTypeAssertion(candidate) ||\n        t.isTSNonNullExpression(candidate)) &&\n      candidate.expression === value",
+      "condition": "candidate.expression === value",
+      "reason": "The parent node type admits no other expression child in this position, so the false-side independence vector cannot exist for any input program."
+    },
+    {
+      "file": "src/instrumenter.ts",
+      "decision": "(t.isConditionalExpression(candidate) &&\n        (candidate.consequent === value || candidate.alternate === value)) ||\n      (t.isLogicalExpression(candidate) &&\n        (candidate.left === value || candidate.right === value)) ||\n      (t.isSequenceExpression(candidate) &&\n        candidate.expressions.at(-1) === value) ||\n      (t.isAssignmentExpression(candidate) && candidate.right === value)",
+      "condition": "candidate.left === value",
+      "reason": "The parent node type admits no other expression child in this position, so the false-side independence vector cannot exist for any input program."
+    },
+    {
+      "file": "src/instrumenter.ts",
+      "decision": "(t.isConditionalExpression(candidate) &&\n        (candidate.consequent === value || candidate.alternate === value)) ||\n      (t.isLogicalExpression(candidate) &&\n        (candidate.left === value || candidate.right === value)) ||\n      (t.isSequenceExpression(candidate) &&\n        candidate.expressions.at(-1) === value) ||\n      (t.isAssignmentExpression(candidate) && candidate.right === value)",
+      "condition": "candidate.right === value",
+      "reason": "The parent node type admits no other expression child in this position, so the false-side independence vector cannot exist for any input program."
+    },
+    {
+      "file": "src/instrumenter.ts",
+      "decision": "(t.isConditionalExpression(candidate) &&\n        (candidate.consequent === value || candidate.alternate === value)) ||\n      (t.isLogicalExpression(candidate) &&\n        (candidate.left === value || candidate.right === value)) ||\n      (t.isSequenceExpression(candidate) &&\n        candidate.expressions.at(-1) === value) ||\n      (t.isAssignmentExpression(candidate) && candidate.right === value)",
+      "condition": "C10",
+      "reason": "An AssignmentExpression's other child is the assignment target; a function expression is never a valid lvalue, so the walked child is always .right."
+    },
+    {
+      "file": "src/instrumenter.ts",
+      "decision": "t.isBinaryExpression(candidate) &&\n      [\"+\", \"<\", \"<=\", \">\", \">=\"].includes(candidate.operator) &&\n      (candidate.left === value || candidate.right === value)",
+      "condition": "candidate.left === value",
+      "reason": "The parent node type admits no other expression child in this position, so the false-side independence vector cannot exist for any input program."
+    },
+    {
+      "file": "src/instrumenter.ts",
+      "decision": "t.isBinaryExpression(candidate) &&\n      [\"+\", \"<\", \"<=\", \">\", \">=\"].includes(candidate.operator) &&\n      (candidate.left === value || candidate.right === value)",
+      "condition": "candidate.right === value",
+      "reason": "The parent node type admits no other expression child in this position, so the false-side independence vector cannot exist for any input program."
+    },
+    {
+      "file": "src/instrumenter.ts",
+      "decision": "(t.isMemberExpression(candidate) ||\n        t.isOptionalMemberExpression(candidate)) &&\n      !candidate.computed &&\n      t.isIdentifier(candidate.property, { name: \"toString\" }) &&\n      candidate.object === value",
+      "condition": "candidate.object === value",
+      "reason": "A non-computed member's property child is an Identifier, never a traversed Function node, so the walked child is always .object."
+    },
+    {
+      "file": "src/transport.ts",
+      "decision": "typeof process !== \"undefined\" &&\n    process.env?.[\"SUPERCOV_SERVER_EVIDENCE_ROOT\"]",
+      "condition": "typeof process !== \"undefined\"",
+      "reason": "The false side exists only in browser runtimes; this project's own suite is Node-only, so no self-run test can execute it."
+    },
+    {
+      "file": "src/workspace.ts",
+      "decision": "process.platform === \"win32\"",
+      "condition": "process.platform === \"win32\"",
+      "reason": "Platform-bound: the true side executes only on Windows and this project's suite runs on the host platform.",
+      "line": 495
+    },
+    {
+      "file": "src/workspace.ts",
+      "decision": "entry.isDirectory()",
+      "condition": "entry.isDirectory()",
+      "reason": "Reachable only inside the win32-only symlink-type selection; see the platform waiver on line 495.",
+      "line": 496
+    }
+  ]
+}

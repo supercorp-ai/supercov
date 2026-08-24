@@ -78,13 +78,14 @@ function wrappedRegistration(original: TestRegistration): TestRegistration {
       const emit = (nextStatus = status): void => {
         if (emitted) return;
         emitted = true;
-        flushBufferedServerEvidence(scope);
+        const flushedServerEvidence = flushBufferedServerEvidence(scope);
         writeRunnerEvidence(
           identity,
           nextStatus,
           scope,
           evidenceDirectory,
           takeNodeAssertionPhases(scope),
+          flushedServerEvidence,
         );
       };
       try {

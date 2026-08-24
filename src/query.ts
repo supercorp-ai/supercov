@@ -15,6 +15,12 @@ import type {
   McdcVector,
 } from "./types.ts";
 import { compareRunIntegrity, createRunIntegrity } from "./integrity.ts";
+import {
+  evaluateCoverageWaivers,
+  readCoverageWaivers,
+  WAIVERS_FILE,
+  type CoverageWaiverEvaluation,
+} from "./waivers.ts";
 import { discoverCoverageProject } from "./project.ts";
 import {
   agentPagination,
@@ -63,6 +69,8 @@ interface QueryOptions {
   json: boolean;
   target: number;
   metric: "all" | "lines" | "statements" | "functions" | "branches" | "mcdc";
+  group: "none" | "decision";
+  sort: "location" | "missing";
   positional: string[];
 }
 
@@ -77,6 +85,8 @@ function parseOptions(command: string, args: string[]): QueryOptions {
     filter: "all",
     target: 100,
     metric: "all",
+    group: "none",
+    sort: "location",
     positional: [],
   };
   for (let index = 0; index < args.length; index += 1) {
@@ -130,12 +140,39 @@ function parseOptions(command: string, args: string[]): QueryOptions {
         throw new SupercovError("INVALID_ARGUMENT", "--offset must be a non-negative integer");
       options.offset = offset;
     }
+    else if (value === "--group") {
+      const group = args[++index]?.toLowerCase();
+      if (group !== "decision")
+        throw new SupercovError("INVALID_ARGUMENT", "--group must be decision");
+      if (command !== "file")
+        throw new SupercovError(
+          "INVALID_ARGUMENT",
+          "--group is only supported by: supercov runs <run-id> coverage file <source-file>",
+        );
+      options.group = "decision";
+    }
+    else if (value === "--sort") {
+      const sort = args[++index]?.toLowerCase();
+      if (sort !== "location" && sort !== "missing")
+        throw new SupercovError("INVALID_ARGUMENT", "--sort must be location or missing");
+      options.sort = sort;
+    }
     else if (value.startsWith("--"))
       throw new SupercovError("INVALID_ARGUMENT", `Unknown option: ${value}`, {
         details: { option: value },
       });
     else options.positional.push(value);
   }
+  if (options.sort !== "location" && options.group === "none")
+    throw new SupercovError(
+      "INVALID_ARGUMENT",
+      "--sort requires --group decision",
+    );
+  if (options.group === "decision" && options.metric !== "all" && options.metric !== "mcdc")
+    throw new SupercovError(
+      "INVALID_ARGUMENT",
+      "--group decision lists MC/DC decisions; omit --metric or use --metric mcdc",
+    );
   return options;
 }
 
@@ -979,7 +1016,7 @@ const helpText = `Agent-oriented local coverage queries:
   supercov runs <run-id> coverage scope [--limit N] [--offset N] [--json]
   supercov runs <run-id> coverage files [--metric all|lines|statements|functions|branches|mcdc] [--filter all|passed|failed] [--limit N] [--offset N] [--json]
   supercov runs <run-id> coverage gaps [--metric all|lines|statements|functions|branches|mcdc] [--filter all|passed|failed] [--kind e2e] [--limit N] [--offset N] [--json]
-  supercov runs <run-id> coverage file <source-file> [--metric all|lines|statements|functions|branches|mcdc] [--kind e2e] [--limit N] [--offset N] [--json]
+  supercov runs <run-id> coverage file <source-file> [--metric all|lines|statements|functions|branches|mcdc] [--group decision] [--sort location|missing] [--kind e2e] [--limit N] [--offset N] [--json]
   supercov runs <run-id> coverage decision <id|source-file:line> [--kind e2e] [--json]
   supercov runs <run-id> coverage covers <source-file:line> [--kind e2e] [--json]
   supercov runs <run-id> coverage test <id|name-fragment> [--kind e2e] [--limit N] [--json]
@@ -990,6 +1027,10 @@ const helpText = `Agent-oriented local coverage queries:
   supercov clean [--keep N] [--dry-run]
 
 Use "latest" as <run-id> to query the newest local run.
+
+Reviewed MC/DC waivers (optional ${WAIVERS_FILE} at the project root):
+  {"version":1,"waivers":[{"file":"src/x.ts","decision":"<id or source>","line":12,"condition":"<source or C2>","reason":"..."}]}
+  Waived conditions stay uncovered in every raw total and are reported separately.
 
 Create a run with:
   supercov -- <test command>`;
@@ -1036,8 +1077,19 @@ export function resolveCoverageQueryInvocation(
   if (command !== "runs") return { command, args };
 
   const runId = args[0];
-  if (!runId || runId.startsWith("-") || args[1] !== "coverage") {
+  if (!runId || runId.startsWith("-")) {
     return { command, args };
+  }
+  if (args[1] !== "coverage") {
+    // A positional run ID must never silently degrade to the run listing:
+    // an agent that omits "coverage" would otherwise get unrelated output.
+    throw new SupercovError(
+      "UNKNOWN_COMMAND",
+      args[1] === undefined || args[1].startsWith("-")
+        ? `Missing coverage query after run ${runId}. Expected: supercov runs <run-id> coverage [<query>]. Try supercov help.`
+        : `Unknown runs query: ${args[1]}. Expected: supercov runs <run-id> coverage [<query>]. Try supercov help.`,
+      { details: { run: runId, command: args[1] ?? null } },
+    );
   }
 
   const childToken = args[2];
@@ -1081,6 +1133,7 @@ export async function runQueryCommand(
   const options = parseOptions(command, resolved.args);
   if (command === "help") return help(options);
   const currentIntegrity = currentProjectIntegrity(root);
+  const waiverSource = readCoverageWaivers(root);
 
   if (command === "runs") {
     const availableRuns = discoverRuns(root);
@@ -1283,6 +1336,9 @@ export async function runQueryCommand(
   const run = selectedRun.run;
   const report = filteredCoverage(selectedRun.report, options);
   const selectedTestSet = selectedTestIds(report, options);
+  const waiverEvaluation: CoverageWaiverEvaluation | undefined = waiverSource
+    ? evaluateCoverageWaivers(report.decisions, waiverSource)
+    : undefined;
   if (command === "summary") {
     const summary = selectedTestSet
       ? coverageSummaryForTests(report, selectedTestSet)
@@ -1327,6 +1383,37 @@ export async function runQueryCommand(
         measurement.complete,
       coverage: summary,
       measurement,
+      ...(waiverEvaluation
+        ? {
+            waivers: {
+              file: WAIVERS_FILE,
+              entries: waiverEvaluation.waivers.length,
+              applied: waiverEvaluation.applied.length,
+              contradicted: waiverEvaluation.contradicted.map((match) => ({
+                file: match.file,
+                line: match.line,
+                condition: match.conditionSource,
+                reason: match.waiver.reason,
+              })),
+              unmatched: waiverEvaluation.unmatched,
+              mcdcExcludingWaived: {
+                covered: report.summary.coveredConditions,
+                total:
+                  report.summary.conditions -
+                  waiverEvaluation.applied.length,
+                percentage:
+                  report.summary.conditions -
+                    waiverEvaluation.applied.length >
+                  0
+                    ? (report.summary.coveredConditions /
+                        (report.summary.conditions -
+                          waiverEvaluation.applied.length)) *
+                      100
+                    : 100,
+              },
+            },
+          }
+        : {}),
       coverageByKind: report.coverageByKind,
       coverageByRunner: report.coverageByRunner,
       attribution: attribution(report, selectedTestSet),
@@ -1382,7 +1469,7 @@ export async function runQueryCommand(
     return output(
       result,
       options,
-      `run ${run.id}${filterLabel(options) ? ` (${filterLabel(options)})` : ""}${run.metadata?.testExitCode !== 0 ? ` [INVALID: test exit ${run.metadata?.testExitCode ?? "unknown"}]` : ""}${report.integrity?.stale ? ` [STALE: ${(report.integrity.staleReasons ?? []).join(", ")}]` : ""}\nlines ${pct(summary.lines.percentage)} (${summary.lines.covered}/${summary.lines.total})\nbranches ${pct(summary.branches.percentage)} (${summary.branches.covered}/${summary.branches.total})\nMC/DC ${pct(summary.conditionCoveragePct)} (${summary.coveredConditions}/${summary.conditions})\nmeasurement: ${measurement.complete ? "complete" : `incomplete — ${measurement.blocking} blocking limitation(s) in ${measurement.files} file(s)`}${diagnostics.length ? `\ndiagnostic: ${diagnostics.map((item) => `${item.code}: ${item.message}`).join("; ")}` : ""}${!selectedTestSet ? `\nconfidence: ${report.lines.filter((line) => line.confidence?.level === "asserted").length} asserted lines, ${report.lines.filter((line) => line.confidence?.level === "action").length} action-linked, ${report.lines.filter((line) => line.confidence?.level === "executed").length} execution-only; ${report.decisions.reduce((total, decision) => total + decision.conditions.filter((condition) => condition.assertionCovered).length, 0)} assertion-linked MC/DC conditions` : ""}\n${testCount} test(s)${setupCount ? ` + ${setupCount} setup scope(s)` : ""}; outcomes ${Object.entries(testOutcomes).filter(([, count]) => count > 0).map(([outcome, count]) => `${outcome}=${count}`).join(", ") || "none"}; ${gaps.length} file(s) have unresolved coverage or measurement gaps`,
+      `run ${run.id}${filterLabel(options) ? ` (${filterLabel(options)})` : ""}${run.metadata?.testExitCode !== 0 ? ` [INVALID: test exit ${run.metadata?.testExitCode ?? "unknown"}]` : ""}${report.integrity?.stale ? ` [STALE: ${(report.integrity.staleReasons ?? []).join(", ")}]` : ""}\nlines ${pct(summary.lines.percentage)} (${summary.lines.covered}/${summary.lines.total})\nbranches ${pct(summary.branches.percentage)} (${summary.branches.covered}/${summary.branches.total})\nMC/DC ${pct(summary.conditionCoveragePct)} (${summary.coveredConditions}/${summary.conditions})\nmeasurement: ${measurement.complete ? "complete" : `incomplete — ${measurement.blocking} blocking limitation(s) in ${measurement.files} file(s)`}${waiverEvaluation ? `\nwaivers: ${waiverEvaluation.applied.length} applied, ${waiverEvaluation.contradicted.length} contradicted, ${waiverEvaluation.unmatched.length} unmatched; MC/DC excluding waived ${pct(report.summary.conditions - waiverEvaluation.applied.length > 0 ? (report.summary.coveredConditions / (report.summary.conditions - waiverEvaluation.applied.length)) * 100 : 100)} (${report.summary.coveredConditions}/${report.summary.conditions - waiverEvaluation.applied.length})${waiverEvaluation.contradicted.map((match) => `\n  contradicted (condition is covered): ${match.file}:${match.line} ${match.conditionSource}`).join("")}${waiverEvaluation.unmatched.map((waiver) => `\n  unmatched (no such condition): ${waiver.file}${waiver.line !== undefined ? `:${waiver.line}` : ""} ${waiver.condition}`).join("")}` : ""}${diagnostics.length ? `\ndiagnostic: ${diagnostics.map((item) => `${item.code}: ${item.message}`).join("; ")}` : ""}${!selectedTestSet ? `\nconfidence: ${report.lines.filter((line) => line.confidence?.level === "asserted").length} asserted lines, ${report.lines.filter((line) => line.confidence?.level === "action").length} action-linked, ${report.lines.filter((line) => line.confidence?.level === "executed").length} execution-only; ${report.decisions.reduce((total, decision) => total + decision.conditions.filter((condition) => condition.assertionCovered).length, 0)} assertion-linked MC/DC conditions` : ""}\n${testCount} test(s)${setupCount ? ` + ${setupCount} setup scope(s)` : ""}; outcomes ${Object.entries(testOutcomes).filter(([, count]) => count > 0).map(([outcome, count]) => `${outcome}=${count}`).join(", ") || "none"}; ${gaps.length} file(s) have unresolved coverage or measurement gaps`,
     );
   }
 
@@ -1514,7 +1601,15 @@ export async function runQueryCommand(
         right.measurementLimitations - left.measurementLimitations ||
         left.file.localeCompare(right.file),
       );
-    const selectedFiles = page(all, options);
+    const selectedFiles = page(all, options).map((gap) => ({
+      ...gap,
+      ...(waiverEvaluation
+        ? {
+            waivedMcdcConditions:
+              waiverEvaluation.appliedByFile.get(gap.file) ?? 0,
+          }
+        : {}),
+    }));
     const pageStart = all.length === 0 ? 0 : options.offset + 1;
     const pageEnd = Math.min(
       options.offset + selectedFiles.length,
@@ -1544,7 +1639,7 @@ export async function runQueryCommand(
               gap.missingMcdcConditions;
             const status = missing === 0
               ? "coverage complete"
-              : `missing: lines ${gap.uncoveredLines}  stmts ${gap.uncoveredStatements}  funcs ${gap.uncoveredFunctions}  branches ${gap.missingBranches}  MC/DC ${gap.missingMcdcConditions}`;
+              : `missing: lines ${gap.uncoveredLines}  stmts ${gap.uncoveredStatements}  funcs ${gap.uncoveredFunctions}  branches ${gap.missingBranches}  MC/DC ${gap.missingMcdcConditions}${(gap as { waivedMcdcConditions?: number }).waivedMcdcConditions ? ` (${(gap as { waivedMcdcConditions?: number }).waivedMcdcConditions} waived)` : ""}`;
             const limitations = gap.measurementLimitations
               ? `  measurement limitations ${gap.measurementLimitations} (${gap.limitationKinds.join(", ")})`
               : "";
@@ -1566,6 +1661,91 @@ export async function runQueryCommand(
         "Usage: supercov runs <run-id> coverage file <source-file>",
       );
     const file = findFile(report, selector);
+    if (options.group === "decision") {
+      const decisionRows = report.decisions
+        .filter((decision) => decision.meta.file === file)
+        .map((decision) => {
+          const filtered = filterDecision(decision, selectedTestSet);
+          const waived = waiverEvaluation?.waivedByDecision.get(
+            decision.meta.id,
+          );
+          const missing = filtered.conditions.filter(
+            (condition) => !condition.covered,
+          );
+          const waivedMissing = missing.filter((condition) =>
+            waived?.has(condition.index),
+          );
+          return {
+            id: decision.meta.id,
+            line: decision.meta.line,
+            column: decision.meta.column,
+            kind: decision.meta.kind,
+            conditions: filtered.conditions.length,
+            missingConditions: missing.length,
+            waivedConditions: waivedMissing.length,
+            source: decision.meta.source.replace(/\s+/g, " ").trim(),
+          };
+        });
+      const withMissing = decisionRows.filter(
+        (row) => row.missingConditions > 0,
+      );
+      const ordered = [...withMissing].sort((left, right) =>
+        options.sort === "missing"
+          ? right.missingConditions -
+              right.waivedConditions -
+              (left.missingConditions - left.waivedConditions) ||
+            right.missingConditions - left.missingConditions ||
+            left.line - right.line ||
+            left.column - right.column
+          : left.line - right.line ||
+            left.column - right.column ||
+            left.id.localeCompare(right.id),
+      );
+      const rows = page(ordered, options);
+      const totals = {
+        decisions: decisionRows.length,
+        decisionsWithMissingConditions: withMissing.length,
+        conditions: decisionRows.reduce((sum, row) => sum + row.conditions, 0),
+        missingConditions: decisionRows.reduce(
+          (sum, row) => sum + row.missingConditions,
+          0,
+        ),
+        waivedConditions: decisionRows.reduce(
+          (sum, row) => sum + row.waivedConditions,
+          0,
+        ),
+      };
+      const groupedBase = `${coverageCommand(run.id, options, "file")} ${shellQuote(file)} --group decision${options.sort !== "location" ? ` --sort ${options.sort}` : ""}`;
+      const groupedNext = nextPageCommand(
+        groupedBase,
+        ordered.length,
+        rows.length,
+        options,
+      );
+      const snippet = (source: string): string =>
+        source.length > 96 ? `${source.slice(0, 95)}…` : source;
+      return output(
+        {
+          run: run.id,
+          filters: queryFilters(options),
+          file,
+          group: "decision" as const,
+          sort: options.sort,
+          totals,
+          decisions: rows,
+        },
+        options,
+        `${file}  MC/DC by decision\ndecisions ${totals.decisions}, with missing conditions ${totals.decisionsWithMissingConditions}; conditions missing ${totals.missingConditions}/${totals.conditions}${totals.waivedConditions ? `, waived ${totals.waivedConditions}` : ""}\n${rows
+          .map(
+            (row) =>
+              `${row.line}:${row.column}  [${row.id}]  missing ${row.missingConditions}/${row.conditions}${row.waivedConditions ? ` (${row.waivedConditions} waived)` : ""}  ${snippet(row.source)}`,
+          )
+          .join(
+            "\n",
+          )}\n${pageLabel(ordered.length, rows.length, options)} decisions with missing conditions${groupedNext ? `\nnext page: ${groupedNext}` : ""}`,
+        queryPagination(ordered.length, rows.length, options),
+      );
+    }
     const uncoveredLines = report.lines
       .filter(
         (line) =>
@@ -1638,6 +1818,16 @@ export async function runQueryCommand(
             column: decision.meta.column,
             decision: decision.meta.source,
             missingCondition: condition.source,
+            ...(waiverEvaluation?.waivedByDecision
+              .get(decision.meta.id)
+              ?.has(condition.index)
+              ? {
+                  waived: true,
+                  waiverReason: waiverEvaluation.waivedByDecision
+                    .get(decision.meta.id)!
+                    .get(condition.index)!.reason,
+                }
+              : {}),
             observedVectors: filterDecision(
               decision,
               selectedTestSet,
@@ -1714,6 +1904,7 @@ export async function runQueryCommand(
         uncoveredFunctions: functions.length,
         missingBranches: branches.length,
         missingMcdcConditions: mcdc.length,
+        waivedMcdcConditions: mcdc.filter((item) => item.waived).length,
         measurementLimitations: allFileLimitations.length,
       },
       tests,
@@ -1736,7 +1927,7 @@ export async function runQueryCommand(
               ? `function ${item.line}:${item.column}: ${item.source}${item.otherCoverage.coveredElsewhere ? ` [covered only by ${item.otherCoverage.kinds.join(", ")}/${item.otherCoverage.runners.join(", ")}]` : ""}`
               : item.kind === "branch"
                 ? `branch ${item.line}:${item.column}: missing ${item.missing}${item.otherCoverage.coveredElsewhere ? ` [covered only by ${item.otherCoverage.kinds.join(", ")}/${item.otherCoverage.runners.join(", ")}]` : ""}`
-                : `MC/DC ${item.line}:${item.column} [${item.id}]: ${item.missingCondition}${item.otherCoverage.coveredElsewhere ? ` [covered only by ${item.otherCoverage.kinds.join(", ")}/${item.otherCoverage.runners.join(", ")}]` : ""}`,
+                : `MC/DC ${item.line}:${item.column} [${item.id}]: ${item.missingCondition}${item.waived ? " [waived]" : ""}${item.otherCoverage.coveredElsewhere ? ` [covered only by ${item.otherCoverage.kinds.join(", ")}/${item.otherCoverage.runners.join(", ")}]` : ""}`,
         )
         .join(
           "\n",
@@ -1811,13 +2002,22 @@ export async function runQueryCommand(
         vectorObservations: decision.vectorObservations.length,
         tests: decision.tests.length,
       };
+      const waived = waiverEvaluation?.waivedByDecision.get(decision.meta.id);
       const vectorObservations = page(decision.vectorObservations, options);
       return {
         ...decision,
         totals,
         vectors: vectorObservations.map((observation) => observation.vector),
         vectorObservations,
-        conditions: page(decision.conditions, options),
+        conditions: page(decision.conditions, options).map((condition) =>
+          !condition.covered && waived?.has(condition.index)
+            ? {
+                ...condition,
+                waived: true,
+                waiverReason: waived.get(condition.index)!.reason,
+              }
+            : condition,
+        ),
         tests: page(decision.tests, options),
       };
     });
@@ -1853,7 +2053,7 @@ export async function runQueryCommand(
             `${decision.meta.id}  ${decision.meta.file}:${decision.meta.line}:${decision.meta.column}\n${decision.meta.source}\n${decision.conditions
               .map(
                 (condition) =>
-                  `C${condition.index + 1} ${condition.covered ? "covered" : "MISSING"}${condition.assertionCovered ? " + asserted" : ""}: ${condition.source}`,
+                  `C${condition.index + 1} ${condition.covered ? "covered" : (condition as { waived?: boolean }).waived ? "MISSING (waived)" : "MISSING"}${condition.assertionCovered ? " + asserted" : ""}: ${condition.source}${(condition as { waiverReason?: string }).waiverReason ? `\n   waived: ${(condition as { waiverReason?: string }).waiverReason}` : ""}`,
               )
               .join(
                 "\n",
@@ -1878,6 +2078,75 @@ export async function runQueryCommand(
       (candidate) =>
         candidate.file === location.file && candidate.line === location.line,
     );
+    if (!line) {
+      // "Uncovered" would be a false claim here: nothing is measured on this
+      // exact line. Report what does anchor at it instead of a misleading no.
+      const anchored = [
+        ...report.decisions
+          .filter(
+            (decision) =>
+              decision.meta.file === location.file &&
+              decision.meta.line === location.line,
+          )
+          .map((decision) => ({
+            kind: "decision" as const,
+            id: decision.meta.id,
+            column: decision.meta.column,
+            covered: decision.covered,
+            coveredConditions: decision.conditions.filter(
+              (condition) => condition.covered,
+            ).length,
+            conditions: decision.conditions.length,
+          })),
+        ...report.branches
+          .filter(
+            (branch) =>
+              branch.meta.file === location.file &&
+              branch.meta.line === location.line,
+          )
+          .map((branch) => ({
+            kind: "branch" as const,
+            id: branch.meta.id,
+            column: branch.meta.column,
+            covered: branch.alternatives.every(
+              (alternative) => alternative.covered,
+            ),
+          })),
+        ...report.points
+          .filter(
+            (point) =>
+              point.meta.file === location.file &&
+              point.meta.line === location.line,
+          )
+          .map((point) => ({
+            kind: point.meta.kind,
+            id: point.meta.id,
+            column: point.meta.column,
+            covered: includesSelectedTest(point.tests, selectedTestSet),
+          })),
+      ].sort((left, right) => left.column - right.column);
+      const anchoredPage = page(anchored, options);
+      return output(
+        {
+          run: run.id,
+          filters: queryFilters(options),
+          location,
+          lineObligation: false,
+          anchored: anchoredPage,
+          totalAnchored: anchored.length,
+        },
+        options,
+        `${location.file}:${location.line} has no line obligation${anchored.length === 0 ? "; nothing is measured at this exact line" : `; ${anchored.length} obligation(s) anchor here`}\n${anchoredPage
+          .map(
+            (obligation) =>
+              `${obligation.kind} ${location.line}:${obligation.column} [${obligation.id}] ${obligation.covered ? "covered" : "not fully covered"}${"conditions" in obligation ? ` (${obligation.coveredConditions}/${obligation.conditions} conditions)` : ""}`,
+          )
+          .join(
+            "\n",
+          )}${anchoredPage.length ? "\n" : ""}${pageLabel(anchored.length, anchoredPage.length, options)} anchored obligations`,
+        queryPagination(anchored.length, anchoredPage.length, options),
+      );
+    }
     const allTests = (line?.tests ?? [])
       .filter((id) => !selectedTestSet || selectedTestSet.has(id))
       .map((id) => {

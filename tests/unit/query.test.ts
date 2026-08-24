@@ -36,6 +36,21 @@ describe("coverage query routing", () => {
     });
   }
 
+  it("rejects a run query that omits the coverage segment", () => {
+    expect(() =>
+      resolveCoverageQueryInvocation("runs", ["run-123", "file", "src/x.ts"]),
+    ).toThrow(/Unknown runs query: file/);
+  });
+
+  it("rejects a run ID without any coverage query", () => {
+    expect(() =>
+      resolveCoverageQueryInvocation("runs", ["run-123"]),
+    ).toThrow(/Missing coverage query after run run-123/);
+    expect(() =>
+      resolveCoverageQueryInvocation("runs", ["run-123", "--json"]),
+    ).toThrow(/Missing coverage query after run run-123/);
+  });
+
   it("rejects unknown coverage children", () => {
     expect(() =>
       resolveCoverageQueryInvocation("runs", [

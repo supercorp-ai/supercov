@@ -157,9 +157,143 @@ if (
   throw new Error("metric-filtered file detail included unrelated obligations");
 }
 
+const grouped = query(
+  partial.id,
+  "file",
+  mcdcGaps.gaps[0].file,
+  "--metric",
+  "mcdc",
+  "--group",
+  "decision",
+);
+requirePagination(grouped, "grouped file detail");
+if (
+  grouped.group !== "decision" ||
+  typeof grouped.totals?.decisions !== "number" ||
+  !Array.isArray(grouped.decisions) ||
+  grouped.decisions.length < 1 ||
+  grouped.decisions.some(
+    (row) =>
+      typeof row.id !== "string" ||
+      !Number.isSafeInteger(row.line) ||
+      !Number.isSafeInteger(row.conditions) ||
+      !Number.isSafeInteger(row.missingConditions) ||
+      row.missingConditions < 1 ||
+      row.missingConditions > row.conditions ||
+      typeof row.source !== "string",
+  )
+) {
+  throw new Error("grouped file query did not expose per-decision missing counts");
+}
+const sortedGrouped = query(
+  partial.id,
+  "file",
+  mcdcGaps.gaps[0].file,
+  "--group",
+  "decision",
+  "--sort",
+  "missing",
+);
+for (let index = 1; index < sortedGrouped.decisions.length; index += 1) {
+  const previous = sortedGrouped.decisions[index - 1];
+  const current = sortedGrouped.decisions[index];
+  if (
+    previous.missingConditions - previous.waivedConditions <
+    current.missingConditions - current.waivedConditions
+  ) {
+    throw new Error("--sort missing did not order decisions by unwaived missing count");
+  }
+}
+
 const missingFile = failingQuery(partial.id, "file", "src/does-not-exist.ts");
 if (missingFile.command !== "coverage.file" || missingFile.error.code !== "SOURCE_NOT_FOUND") {
   throw new Error("file query did not expose a stable structured error code");
+}
+
+const malformedRuns = spawnSync(
+  process.execPath,
+  [cli, "runs", partial.id, "file", mcdcGaps.gaps[0].file, "--json"],
+  { cwd: fixture, encoding: "utf8" },
+);
+if (malformedRuns.status === 0) {
+  throw new Error("runs without the coverage segment must fail, not list runs");
+}
+const malformedEnvelope = JSON.parse(malformedRuns.stdout);
+if (
+  malformedEnvelope.ok !== false ||
+  malformedEnvelope.error?.code !== "UNKNOWN_COMMAND" ||
+  !malformedEnvelope.error.message.includes("Unknown runs query: file")
+) {
+  throw new Error("malformed runs query did not return a structured usage error");
+}
+
+const waiversPath = resolve(fixture, "supercov.waivers.json");
+const waivedObligation = mcdcDetail.obligations[0];
+try {
+  writeFileSync(
+    waiversPath,
+    JSON.stringify({
+      version: 1,
+      waivers: [
+        {
+          file: mcdcGaps.gaps[0].file,
+          decision: waivedObligation.id,
+          condition: waivedObligation.missingCondition,
+          reason: "agent-query-eval fixture waiver",
+        },
+        {
+          file: "src/never-existed.ts",
+          condition: "impossible",
+          reason: "must surface as unmatched",
+        },
+      ],
+    }),
+  );
+  const waivedSummary = query(partial.id);
+  if (
+    waivedSummary.waivers?.applied !== 1 ||
+    waivedSummary.waivers.unmatched.length !== 1 ||
+    waivedSummary.waivers.unmatched[0].file !== "src/never-existed.ts" ||
+    waivedSummary.waivers.contradicted.length !== 0 ||
+    waivedSummary.waivers.mcdcExcludingWaived.total !==
+      waivedSummary.coverage.conditions - 1
+  ) {
+    throw new Error("summary did not report applied and unmatched waivers as facts");
+  }
+  const waivedDetail = query(
+    partial.id,
+    "file",
+    mcdcGaps.gaps[0].file,
+    "--metric",
+    "mcdc",
+  );
+  const annotated = waivedDetail.obligations.find(
+    (obligation) =>
+      obligation.id === waivedObligation.id &&
+      obligation.missingCondition === waivedObligation.missingCondition,
+  );
+  if (
+    !annotated?.waived ||
+    annotated.waiverReason !== "agent-query-eval fixture waiver" ||
+    waivedDetail.counts.waivedMcdcConditions < 1
+  ) {
+    throw new Error("file query did not annotate the waived condition");
+  }
+  const waivedGrouped = query(
+    partial.id,
+    "file",
+    mcdcGaps.gaps[0].file,
+    "--group",
+    "decision",
+  );
+  const waivedRow = waivedGrouped.decisions.find(
+    (row) => row.id === waivedObligation.id,
+  );
+  if (!waivedRow || waivedRow.waivedConditions < 1) {
+    throw new Error("grouped view did not count the waived condition");
+  }
+} finally {
+  rmSync(waiversPath, { force: true });
 }
 
 const decision = partial.report.decisions[0];
