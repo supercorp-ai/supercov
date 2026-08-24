@@ -157,7 +157,7 @@ async function executeRustCandidate(testCase, candidate) {
   const vectors = [];
   const hits = [];
   const runtime = candidate.runtime;
-  if (!runtime?.coverageHit || !runtime?.mcdcBegin || !runtime?.mcdcCondition || !runtime?.mcdcEnd || !runtime?.mcdcEndV2 || !runtime?.selectionBegin || !runtime?.selectionRight || !runtime?.selectionEnd || !runtime?.optionalSelect)
+  if (!runtime?.coverageHit || !runtime?.mcdcBegin || !runtime?.mcdcCondition || !runtime?.mcdcEnd || !runtime?.mcdcEndV2 || !runtime?.selectionBegin || !runtime?.selectionRight || !runtime?.selectionEnd || !runtime?.optionalSelect || !runtime?.optionalCallBegin || !runtime?.optionalCallReached || !runtime?.optionalCallContinued || !runtime?.optionalCallEnd)
     throw new Error(`${testCase.file}: missing Rust candidate runtime bindings`);
   const coverageHit = (id) => hits.push(id);
   const begin = (id, meta) => {
@@ -187,6 +187,24 @@ async function executeRustCandidate(testCase, candidate) {
     coverageHit(value === null || value === undefined ? shortId : continuedId);
     return value;
   };
+  const optionalCallBegin = (shortId, continuedId) => ({
+    shortId,
+    continuedId,
+    reached: false,
+    continued: false,
+  });
+  const optionalCallReached = (frame, value) => {
+    frame.reached = true;
+    return value;
+  };
+  const optionalCallContinued = (frame) => {
+    frame.continued = true;
+    return [];
+  };
+  const optionalCallEnd = (frame, value) => {
+    if (frame.reached) coverageHit(frame.continued ? frame.continuedId : frame.shortId);
+    return value;
+  };
   const recorder = (file, decisionIndex, encoded, value) => {
     if (file !== testCase.file) throw new Error(`unexpected probe file ${file}`);
     const decision = candidate.decisions[decisionIndex];
@@ -206,6 +224,10 @@ async function executeRustCandidate(testCase, candidate) {
     runtime.selectionRight,
     runtime.selectionEnd,
     runtime.optionalSelect,
+    runtime.optionalCallBegin,
+    runtime.optionalCallReached,
+    runtime.optionalCallContinued,
+    runtime.optionalCallEnd,
     `"use strict";\n${candidate.code}\nreturn { run, observe: typeof observe === "function" ? observe : undefined };`,
   );
   const program = factory(
@@ -218,6 +240,10 @@ async function executeRustCandidate(testCase, candidate) {
     selectionRight,
     selectionEnd,
     optionalSelect,
+    optionalCallBegin,
+    optionalCallReached,
+    optionalCallContinued,
+    optionalCallEnd,
   );
   try {
     const value = await program.run();
@@ -290,5 +316,5 @@ for (const [offset, testCase] of generatedCorpus.entries()) {
 }
 
 console.log(
-  `[rust-js-differential] ${allCases.length} oxc/Babel decisions, points, logical/optional-member branches, and safety limitations match; ${executionCorpus.length} behavior/effect/vector/hit cases and ${generatedCorpus.length} generated behavior cases match`,
+  `[rust-js-differential] ${allCases.length} oxc/Babel decisions, points, logical/optional-chain branches, and safety limitations match; ${executionCorpus.length} behavior/effect/vector/hit cases and ${generatedCorpus.length} generated behavior cases match`,
 );

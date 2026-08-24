@@ -54,5 +54,29 @@
   {
     "file": "differential/optional-member.js",
     "source": "const effects = [];\nfunction key() { effects.push('key'); return 'value'; }\nfunction read(target) { return target?.[key()]; }\nfunction run() { return [read(null), read({ value: undefined }), read({ value: 3 })]; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/optional-call.js",
+    "source": "const effects = [];\nfunction argument() { effects.push('argument'); return 3; }\nconst receiver = { base: 4, method(value) { effects.push('this:' + this.base); return { value: this.base + value }; } };\nfunction run() { const first = receiver.method?.(argument()).value; const missing = undefined; const second = missing?.(argument()); const target = receiver.method?.(argument()); const deleted = delete target?.value; return { first, second, deleted, target }; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/optional-call-continuation.js",
+    "source": "const effects = [];\nconst absent = { method: undefined };\nconst present = { value: 4, method() { effects.push(this === present ? 'receiver' : 'wrong-receiver'); return () => ({ value: this.value }); } };\nfunction run() { const skipped = absent.method?.()().value; const called = present.method?.()().value; return { skipped, called }; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/nested-optional-call.js",
+    "source": "const effects = [];\nconst present = { value: 8, get method() { effects.push('getter'); return function (argument) { effects.push(['call', this === present, argument]); return this.value + argument; }; } };\nfunction key() { effects.push('key'); return 'method'; }\nfunction argument() { effects.push('argument'); return 2; }\nfunction run() { const skippedReceiver = null?.[key()]?.(argument()); const skippedMethod = ({ method: undefined })?.[key()]?.(argument()); const called = present?.[key()]?.(argument()); return { skippedReceiver, skippedMethod, called }; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/optional-super-call.js",
+    "source": "const effects = [];\nclass Parent { method() { effects.push(this instanceof Child ? 'child' : 'wrong'); return () => ({ value: 5 }); } }\nclass Child extends Parent { run() { return super.method?.()().value; } }\nfunction run() { return new Child().run(); }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/delete-optional-call.js",
+    "source": "const effects = [];\nconst target = { nested: { removable: 3 } };\nconst absent = { method: undefined };\nconst present = { method() { effects.push('called'); return target.nested; } };\nfunction run() { const skipped = delete absent.method?.().removable; const removed = delete present.method?.().removable; return { skipped, removed, remains: 'removable' in target.nested }; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/optional-private-call.js",
+    "source": "const effects = [];\nclass Example { value = 6; #present(argument) { effects.push(this instanceof Example ? 'receiver' : 'wrong'); return this.value + argument; } #absent; run() { return [this.#present?.(2), this.#absent?.(3)]; } }\nfunction run() { return new Example().run(); }\nfunction observe() { return effects; }\n"
   }
 ]

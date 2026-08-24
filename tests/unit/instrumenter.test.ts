@@ -332,6 +332,25 @@ describe("MC/DC instrumenter", () => {
     );
     expect(optionalMethod.manifest.limitations ?? []).toHaveLength(0);
 
+    const optionalPrivate = executeInstrumented(`
+      class Example {
+        #callable;
+        constructor(callable) { this.#callable = callable; }
+        run() { return this.#callable?.(); }
+      }
+      function decide(left) { return new Example(left).run(); }
+    `);
+    expect(optionalPrivate.decide(undefined, undefined)).toBeUndefined();
+    expect(optionalPrivate.decide(function () { return 3; }, undefined)).toBe(3);
+    const privateCallBranch = optionalPrivate.manifest.branches.find(
+      (branch) => branch.source.includes("#callable?.()"),
+    );
+    expect(optionalPrivate.hits).toEqual(
+      expect.arrayContaining(
+        privateCallBranch!.alternatives.map((item) => item.id),
+      ),
+    );
+
     const assignment = executeInstrumented(`
       function decide(left, right) {
         left.value ||= right;

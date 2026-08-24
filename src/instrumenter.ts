@@ -930,6 +930,13 @@ export function instrumentMcdc(
               t.identifier(OPTIONAL_CALL_REACHED),
               [t.cloneNode(site.frame), callee.object],
             );
+          site.node.arguments.unshift(
+            t.spreadElement(
+              t.callExpression(t.identifier(OPTIONAL_CALL_CONTINUED), [
+                t.cloneNode(site.frame),
+              ]),
+            ),
+          );
           continue;
         }
         const property = callee.computed

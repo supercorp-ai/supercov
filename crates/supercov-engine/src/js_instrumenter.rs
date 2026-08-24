@@ -17,12 +17,12 @@ use oxc_ast::{
     AstBuilder, NONE,
     ast::{
         Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
-        AssignmentTarget, CallExpression, ComputedMemberExpression, ConditionalExpression,
-        Declaration, DoWhileStatement, Expression, ForInStatement, ForOfStatement, ForStatement,
-        FormalParameterKind, FormalParameters, Function, FunctionBody, IfStatement,
-        LogicalExpression, NewExpression, ObjectPropertyKind, PrivateFieldExpression, Program,
-        PropertyKey, PropertyKind, Statement, StaticMemberExpression, VariableDeclarationKind,
-        WhileStatement, WithStatement,
+        AssignmentTarget, CallExpression, ChainExpression, ComputedMemberExpression,
+        ConditionalExpression, Declaration, DoWhileStatement, Expression, ForInStatement,
+        ForOfStatement, ForStatement, FormalParameterKind, FormalParameters, Function,
+        FunctionBody, IfStatement, LogicalExpression, NewExpression, ObjectPropertyKind,
+        PrivateFieldExpression, Program, PropertyKey, PropertyKind, Statement,
+        StaticMemberExpression, VariableDeclarationKind, WhileStatement, WithStatement,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -32,7 +32,7 @@ use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_syntax::{
     number::NumberBase,
-    operator::{AssignmentOperator, BinaryOperator, LogicalOperator},
+    operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator},
     scope::ScopeFlags,
 };
 use oxc_traverse::{Ancestor, Traverse, TraverseCtx, traverse_mut};
@@ -111,6 +111,10 @@ pub struct CandidateRuntime {
     pub selection_right: String,
     pub selection_end: String,
     pub optional_select: String,
+    pub optional_call_begin: String,
+    pub optional_call_reached: String,
+    pub optional_call_continued: String,
+    pub optional_call_end: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,7 +141,8 @@ type SpanKey = (u32, u32);
 struct SafetyAnalysis {
     source_sensitive_functions: HashSet<SpanKey>,
     with_statements: HashSet<SpanKey>,
-    limitations: Vec<CandidateLimitation>,
+    semantic_limitations: Vec<CandidateLimitation>,
+    dynamic_limitations: Vec<CandidateLimitation>,
 }
 
 struct SafetyScanner<'s> {
@@ -559,13 +564,13 @@ fn analyze_safety<'a>(
     SemanticBuilder::new().build(program);
     let mut scanner = SafetyScanner::new(source, file);
     traverse_mut(&mut scanner, allocator, program, Default::default(), ());
-    let mut limitations = scanner.function_limitations;
-    limitations.extend(scanner.with_limitations);
-    limitations.extend(scanner.dynamic_limitations);
+    let mut semantic_limitations = scanner.function_limitations;
+    semantic_limitations.extend(scanner.with_limitations);
     SafetyAnalysis {
         source_sensitive_functions: scanner.source_sensitive_functions,
         with_statements: scanner.with_statements,
-        limitations,
+        semantic_limitations,
+        dynamic_limitations: scanner.dynamic_limitations,
     }
 }
 
@@ -677,6 +682,13 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         file,
         &safety.source_sensitive_functions,
     );
+    let call_analysis = collect_optional_call_branches(
+        &allocator,
+        &mut parsed.program,
+        source,
+        file,
+        &safety.source_sensitive_functions,
+    );
     let assignment_analysis = collect_logical_assignment_branches(
         &allocator,
         &mut parsed.program,
@@ -693,6 +705,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         &safety.source_sensitive_functions,
     );
     let mut branches = optional_analysis.branches;
+    branches.extend(call_analysis.branches);
     branches.extend(assignment_analysis.branches);
     branches.extend(logical_analysis.branches);
     let generated = Codegen::new().build(&parsed.program).code;
@@ -705,7 +718,12 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         points: point_analysis.points,
         branches,
         runtime: None,
-        coverage_limitations: safety.limitations,
+        coverage_limitations: {
+            let mut limitations = safety.semantic_limitations;
+            limitations.extend(call_analysis.limitations);
+            limitations.extend(safety.dynamic_limitations);
+            limitations
+        },
         limitations: vec![
             "candidate emits metadata only; use the private differential transform for probes"
                 .to_string(),
@@ -760,6 +778,13 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         file,
         &safety.source_sensitive_functions,
     );
+    let call_analysis = collect_optional_call_branches(
+        &allocator,
+        &mut parsed.program,
+        source,
+        file,
+        &safety.source_sensitive_functions,
+    );
     let assignment_analysis = collect_logical_assignment_branches(
         &allocator,
         &mut parsed.program,
@@ -776,6 +801,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         &safety.source_sensitive_functions,
     );
     let mut branches = optional_analysis.branches;
+    branches.extend(call_analysis.branches.clone());
     branches.extend(assignment_analysis.branches);
     branches.extend(logical_analysis.branches);
 
@@ -789,6 +815,10 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     let selection_right = names.allocate("__supercovSelectionRight");
     let selection_end = names.allocate("__supercovSelectionEnd");
     let optional_select = names.allocate("__supercovOptionalSelect");
+    let optional_call_begin = names.allocate("__supercovOptionalCallBegin");
+    let optional_call_reached = names.allocate("__supercovOptionalCallReached");
+    let optional_call_continued = names.allocate("__supercovOptionalCallContinued");
+    let optional_call_end = names.allocate("__supercovOptionalCallEnd");
     let ast = AstBuilder::new(&allocator);
     let mut statement_transformer = StatementProbeTransformer {
         ast,
@@ -813,6 +843,19 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         with_statements: safety.with_statements.clone(),
     };
     optional_transformer.visit_program(&mut parsed.program);
+    let mut call_transformer = OptionalCallTransformer::new(
+        ast,
+        source,
+        optional_call_begin.clone(),
+        optional_call_reached.clone(),
+        optional_call_continued.clone(),
+        optional_call_end.clone(),
+        call_analysis.sites,
+        call_analysis.roots,
+        safety.source_sensitive_functions.clone(),
+        safety.with_statements.clone(),
+    );
+    call_transformer.visit_program(&mut parsed.program);
     let mut transformer = ControlProbeV2Transformer {
         ast,
         file,
@@ -854,7 +897,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
         complete: false,
-        supported_surface: "point-control-logical-optional-member-probe-candidate".to_string(),
+        supported_surface: "point-control-logical-optional-chain-probe-candidate".to_string(),
         code: Codegen::new().build(&parsed.program).code,
         decisions: collector.decisions,
         points: point_analysis.points,
@@ -869,8 +912,17 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
             selection_right,
             selection_end,
             optional_select,
+            optional_call_begin,
+            optional_call_reached,
+            optional_call_continued,
+            optional_call_end,
         }),
-        coverage_limitations: safety.limitations,
+        coverage_limitations: {
+            let mut limitations = safety.semantic_limitations;
+            limitations.extend(call_analysis.limitations);
+            limitations.extend(safety.dynamic_limitations);
+            limitations
+        },
         limitations,
     })
 }
@@ -1167,6 +1219,289 @@ impl<'a> VisitMut<'a> for OptionalMemberTransformer<'a> {
     fn visit_private_field_expression(&mut self, member: &mut PrivateFieldExpression<'a>) {
         self.instrument_target(member.span, &mut member.object);
         walk_mut::walk_private_field_expression(self, member);
+    }
+}
+
+#[derive(Clone)]
+struct OptionalCallSiteRuntime {
+    frame: String,
+    short_id: String,
+    continued_id: String,
+}
+
+struct OptionalCallTransformer<'a, 's> {
+    ast: AstBuilder<'a>,
+    optional_call_begin: String,
+    optional_call_reached: String,
+    optional_call_continued: String,
+    optional_call_end: String,
+    scope_declarations: Vec<Vec<String>>,
+    sites: HashMap<SpanKey, OptionalCallSiteRuntime>,
+    roots: HashMap<SpanKey, Vec<SpanKey>>,
+    source_sensitive_functions: HashSet<SpanKey>,
+    with_statements: HashSet<SpanKey>,
+    _source: std::marker::PhantomData<&'s str>,
+}
+
+impl<'a, 's> OptionalCallTransformer<'a, 's> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        ast: AstBuilder<'a>,
+        source: &'s str,
+        optional_call_begin: String,
+        optional_call_reached: String,
+        optional_call_continued: String,
+        optional_call_end: String,
+        sites: HashMap<SpanKey, (String, String)>,
+        roots: HashMap<SpanKey, Vec<SpanKey>>,
+        source_sensitive_functions: HashSet<SpanKey>,
+        with_statements: HashSet<SpanKey>,
+    ) -> Self {
+        let mut names = CandidateNames::new(source);
+        let sites = sites
+            .into_iter()
+            .map(|(key, (short_id, continued_id))| {
+                (
+                    key,
+                    OptionalCallSiteRuntime {
+                        frame: names.allocate("_optionalCall"),
+                        short_id,
+                        continued_id,
+                    },
+                )
+            })
+            .collect();
+        Self {
+            ast,
+            optional_call_begin,
+            optional_call_reached,
+            optional_call_continued,
+            optional_call_end,
+            scope_declarations: Vec::new(),
+            sites,
+            roots,
+            source_sensitive_functions,
+            with_statements,
+            _source: std::marker::PhantomData,
+        }
+    }
+
+    fn identifier(&self, name: &str) -> Expression<'a> {
+        self.ast
+            .expression_identifier(Span::default(), self.ast.ident(name))
+    }
+
+    fn assignment_target(&self, name: &str) -> AssignmentTarget<'a> {
+        AssignmentTarget::from(
+            self.ast
+                .simple_assignment_target_assignment_target_identifier(
+                    Span::default(),
+                    self.ast.ident(name),
+                ),
+        )
+    }
+
+    fn call(&self, name: &str, arguments: oxc_allocator::Vec<'a, Argument<'a>>) -> Expression<'a> {
+        self.ast.expression_call(
+            Span::default(),
+            self.identifier(name),
+            NONE,
+            arguments,
+            false,
+        )
+    }
+
+    fn string_argument(&self, value: &str) -> Argument<'a> {
+        Argument::from(self.ast.expression_string_literal(
+            Span::default(),
+            self.ast.str(value),
+            None,
+        ))
+    }
+
+    fn reached(&self, frame: &str, value: Expression<'a>) -> Expression<'a> {
+        self.call(
+            &self.optional_call_reached,
+            self.ast.vec_from_array([
+                Argument::from(self.identifier(frame)),
+                Argument::from(value),
+            ]),
+        )
+    }
+
+    fn enter_scope(&mut self) {
+        self.scope_declarations.push(Vec::new());
+    }
+
+    fn leave_scope(&mut self, statements: &mut oxc_allocator::Vec<'a, Statement<'a>>) {
+        let names = self
+            .scope_declarations
+            .pop()
+            .expect("optional-call scope stack must remain balanced");
+        if names.is_empty() {
+            return;
+        }
+        let declarations = self.ast.vec_from_iter(names.into_iter().map(|name| {
+            self.ast.variable_declarator(
+                Span::default(),
+                VariableDeclarationKind::Let,
+                self.ast
+                    .binding_pattern_binding_identifier(Span::default(), self.ast.ident(&name)),
+                NONE,
+                None,
+                false,
+            )
+        }));
+        statements.insert(
+            0,
+            Statement::VariableDeclaration(self.ast.alloc_variable_declaration(
+                Span::default(),
+                VariableDeclarationKind::Let,
+                declarations,
+                false,
+            )),
+        );
+    }
+
+    fn instrument_call(&self, call: &mut CallExpression<'a>, site: &OptionalCallSiteRuntime) {
+        let callee = call.callee.take_in(self.ast.allocator);
+        call.callee = match callee {
+            Expression::ComputedMemberExpression(mut member) => {
+                let property = member.expression.take_in(self.ast.allocator);
+                member.expression = self.reached(&site.frame, property);
+                Expression::ComputedMemberExpression(member)
+            }
+            Expression::StaticMemberExpression(member) => {
+                let member = member.unbox();
+                let property = self.ast.expression_string_literal(
+                    Span::default(),
+                    self.ast.str(member.property.name.as_str()),
+                    None,
+                );
+                Expression::ComputedMemberExpression(self.ast.alloc_computed_member_expression(
+                    member.span,
+                    member.object,
+                    self.reached(&site.frame, property),
+                    member.optional,
+                ))
+            }
+            Expression::PrivateFieldExpression(mut member) => {
+                let object = member.object.take_in(self.ast.allocator);
+                member.object = self.reached(&site.frame, object);
+                Expression::PrivateFieldExpression(member)
+            }
+            other => self.reached(&site.frame, other),
+        };
+        let continued = self.call(
+            &self.optional_call_continued,
+            self.ast.vec1(Argument::from(self.identifier(&site.frame))),
+        );
+        call.arguments.insert(
+            0,
+            Argument::SpreadElement(self.ast.alloc_spread_element(Span::default(), continued)),
+        );
+    }
+
+    fn wrap_root(&mut self, expression: &mut Expression<'a>, site_keys: &[SpanKey]) {
+        let sites = site_keys
+            .iter()
+            .map(|key| {
+                self.sites
+                    .get(key)
+                    .expect("optional-call root must reference a known site")
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        self.scope_declarations
+            .last_mut()
+            .expect("optional-call root must be inside a program or function")
+            .extend(sites.iter().map(|site| site.frame.clone()));
+
+        let original = expression.take_in(self.ast.allocator);
+        let mut measured = original;
+        for site in sites.iter().rev() {
+            measured = self.call(
+                &self.optional_call_end,
+                self.ast.vec_from_array([
+                    Argument::from(self.identifier(&site.frame)),
+                    Argument::from(measured),
+                ]),
+            );
+        }
+        let mut sequence = self.ast.vec_with_capacity(sites.len() + 1);
+        for site in &sites {
+            let begin = self.call(
+                &self.optional_call_begin,
+                self.ast.vec_from_array([
+                    self.string_argument(&site.short_id),
+                    self.string_argument(&site.continued_id),
+                ]),
+            );
+            sequence.push(self.ast.expression_assignment(
+                Span::default(),
+                AssignmentOperator::Assign,
+                self.assignment_target(&site.frame),
+                begin,
+            ));
+        }
+        sequence.push(measured);
+        *expression = self.ast.expression_sequence(Span::default(), sequence);
+    }
+}
+
+impl<'a> VisitMut<'a> for OptionalCallTransformer<'a, '_> {
+    fn visit_program(&mut self, program: &mut Program<'a>) {
+        self.enter_scope();
+        walk_mut::walk_program(self, program);
+        self.leave_scope(&mut program.body);
+    }
+
+    fn visit_function_body(&mut self, body: &mut FunctionBody<'a>) {
+        self.enter_scope();
+        walk_mut::walk_function_body(self, body);
+        self.leave_scope(&mut body.statements);
+    }
+
+    fn visit_function(&mut self, function: &mut Function<'a>, flags: ScopeFlags) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_function(self, function, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, function: &mut ArrowFunctionExpression<'a>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_arrow_function_expression(self, function);
+    }
+
+    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
+        if self.with_statements.contains(&span_key(statement.span)) {
+            return;
+        }
+        walk_mut::walk_with_statement(self, statement);
+    }
+
+    fn visit_call_expression(&mut self, call: &mut CallExpression<'a>) {
+        walk_mut::walk_call_expression(self, call);
+        if let Some(site) = self.sites.get(&span_key(call.span)).cloned() {
+            self.instrument_call(call, &site);
+        }
+    }
+
+    fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        let key = span_key(expression.span());
+        walk_mut::walk_expression(self, expression);
+        if let Some(site_keys) = self.roots.remove(&key) {
+            self.wrap_root(expression, &site_keys);
+        }
     }
 }
 
@@ -2072,6 +2407,177 @@ struct OptionalMemberAnalysis {
     targets: HashMap<SpanKey, (String, String)>,
 }
 
+#[derive(Default)]
+struct OptionalCallAnalysis {
+    branches: Vec<CandidateBranch>,
+    sites: HashMap<SpanKey, (String, String)>,
+    roots: HashMap<SpanKey, Vec<SpanKey>>,
+    limitations: Vec<CandidateLimitation>,
+}
+
+struct OptionalCallCollector<'s> {
+    source: &'s str,
+    file: &'s str,
+    source_sensitive_functions: &'s HashSet<SpanKey>,
+    unsafe_function_depth: usize,
+    with_depth: usize,
+    chain_roots: Vec<SpanKey>,
+    analysis: OptionalCallAnalysis,
+}
+
+impl OptionalCallCollector<'_> {
+    fn unsafe_context(&self) -> bool {
+        self.unsafe_function_depth > 0 || self.with_depth > 0
+    }
+
+    fn exit_source_function(&mut self, span: Span) {
+        if self.source_sensitive_functions.contains(&span_key(span)) {
+            self.unsafe_function_depth -= 1;
+        }
+    }
+}
+
+impl<'a> Traverse<'a, ()> for OptionalCallCollector<'_> {
+    fn enter_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(node.span))
+        {
+            self.unsafe_function_depth += 1;
+        }
+    }
+
+    fn exit_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
+        self.exit_source_function(node.span);
+    }
+
+    fn enter_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(node.span))
+        {
+            self.unsafe_function_depth += 1;
+        }
+    }
+
+    fn exit_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.exit_source_function(node.span);
+    }
+
+    fn enter_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth += 1;
+    }
+
+    fn exit_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth -= 1;
+    }
+
+    fn enter_chain_expression(
+        &mut self,
+        node: &mut ChainExpression<'a>,
+        context: &mut TraverseCtx<'a, ()>,
+    ) {
+        let root = match context.ancestors().next() {
+            Some(Ancestor::UnaryExpressionArgument(parent))
+                if *parent.operator() == UnaryOperator::Delete =>
+            {
+                span_key(*parent.span())
+            }
+            _ => span_key(node.span),
+        };
+        self.chain_roots.push(root);
+    }
+
+    fn exit_chain_expression(
+        &mut self,
+        _node: &mut ChainExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.chain_roots.pop();
+    }
+
+    fn enter_call_expression(
+        &mut self,
+        node: &mut CallExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        if !node.optional || self.unsafe_context() {
+            return;
+        }
+        let root = *self
+            .chain_roots
+            .last()
+            .expect("an optional call must be enclosed by a chain expression");
+        let id = stable_id(self.source, self.file, "optional-chain", node.span, "call");
+        let short_id = format!("{id}:short");
+        let continued_id = format!("{id}:continued");
+        let (line, column) = line_and_utf16_column(self.source, node.span.start as usize);
+        self.analysis.sites.insert(
+            span_key(node.span),
+            (short_id.clone(), continued_id.clone()),
+        );
+        self.analysis
+            .roots
+            .entry(root)
+            .or_default()
+            .push(span_key(node.span));
+        self.analysis.branches.push(CandidateBranch {
+            id,
+            kind: "optional-chain".to_string(),
+            file: self.file.to_string(),
+            line,
+            column,
+            source: source_slice(self.source, node.span).to_string(),
+            alternatives: vec![
+                CandidateBranchAlternative {
+                    id: short_id,
+                    label: "nullish / short-circuited".to_string(),
+                },
+                CandidateBranchAlternative {
+                    id: continued_id,
+                    label: "non-nullish / continued".to_string(),
+                },
+            ],
+        });
+    }
+}
+
+fn collect_optional_call_branches<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    source: &str,
+    file: &str,
+    source_sensitive_functions: &HashSet<SpanKey>,
+) -> OptionalCallAnalysis {
+    let mut collector = OptionalCallCollector {
+        source,
+        file,
+        source_sensitive_functions,
+        unsafe_function_depth: 0,
+        with_depth: 0,
+        chain_roots: Vec::new(),
+        analysis: OptionalCallAnalysis::default(),
+    };
+    traverse_mut(&mut collector, allocator, program, Default::default(), ());
+    collector.analysis
+}
+
 struct OptionalMemberCollector<'s> {
     source: &'s str,
     file: &'s str,
@@ -2686,7 +3192,7 @@ mod tests {
         assert!(!output.complete);
         assert_eq!(
             output.supported_surface,
-            "point-control-logical-optional-member-probe-candidate"
+            "point-control-logical-optional-chain-probe-candidate"
         );
         let runtime = output.runtime.expect("candidate runtime binding");
         assert!(output.code.contains(&runtime.mcdc_end_v2));
