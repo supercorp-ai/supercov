@@ -41,6 +41,11 @@ export interface ProbeEvidence {
   manifest: CoverageManifest;
   vectors: McdcVector[];
   hits: string[];
+  registrations: Array<{
+    decisions: McdcDecisionMeta[];
+    pointIds: string[];
+    decisionVectorCounts?: number[];
+  }>;
 }
 
 export interface ProgramOutcome {
@@ -233,17 +238,20 @@ function runtimeBindings(
       decisions: McdcDecisionMeta[];
       pointIds: string[];
       decisionVectorCounts?: number[];
-    }) => ({
-      ...definition,
-      clock: { epoch: 1, fast: false },
-      hitEpochs: new Uint32Array(definition.pointIds.length),
-      decisionEpochs: definition.decisions.map((meta) =>
-        meta.conditions.length <= 6
-          ? new Uint32Array(2 * 3 ** meta.conditions.length)
-          : new Map<number, number>()
-      ),
-      decisionCompleteEpochs: new Uint32Array(definition.decisions.length),
-    }),
+    }) => {
+      evidence.registrations.push(definition);
+      return {
+        ...definition,
+        clock: { epoch: 1, fast: false },
+        hitEpochs: new Uint32Array(definition.pointIds.length),
+        decisionEpochs: definition.decisions.map((meta) =>
+          meta.conditions.length <= 6
+            ? new Uint32Array(2 * 3 ** meta.conditions.length)
+            : new Map<number, number>()
+        ),
+        decisionCompleteEpochs: new Uint32Array(definition.decisions.length),
+      };
+    },
     coverageHitV2: (
       file: { pointIds: string[] },
       index: number,
@@ -315,6 +323,7 @@ function compile(
     manifest: transformed.manifest,
     vectors: [],
     hits: [],
+    registrations: [],
   };
   const bindings = instrumented
     ? runtimeBindings(transformed.code, evidence)

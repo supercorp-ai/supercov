@@ -152,10 +152,26 @@ function decodeVector(conditionCount, encoded, value) {
 async function executeRustCandidate(testCase, candidate) {
   const vectors = [];
   const hits = [];
+  const registrations = [];
   const runtime = candidate.runtime;
-  if (!runtime?.coverageHit || !runtime?.mcdcBegin || !runtime?.mcdcCondition || !runtime?.mcdcEnd || !runtime?.mcdcEndV2 || !runtime?.selectionBegin || !runtime?.selectionRight || !runtime?.selectionEnd || !runtime?.optionalSelect || !runtime?.optionalCallBegin || !runtime?.optionalCallReached || !runtime?.optionalCallContinued || !runtime?.optionalCallEnd || !runtime?.defaultSelected || !runtime?.defaultEntered || !runtime?.tryBegin || !runtime?.tryCatch || !runtime?.tryEnd || !runtime?.loopBegin || !runtime?.loopEntered || !runtime?.loopEnd)
+  if (!runtime?.coverageHit || !runtime?.mcdcBegin || !runtime?.mcdcCondition || !runtime?.mcdcEnd || !runtime?.registerProbeV2 || !runtime?.mcdcEndV2 || !runtime?.coverageHitV2 || !runtime?.probeFileV2 || !runtime?.selectionBegin || !runtime?.selectionRight || !runtime?.selectionEnd || !runtime?.optionalSelect || !runtime?.optionalCallBegin || !runtime?.optionalCallReached || !runtime?.optionalCallContinued || !runtime?.optionalCallEnd || !runtime?.defaultSelected || !runtime?.defaultEntered || !runtime?.tryBegin || !runtime?.tryCatch || !runtime?.tryEnd || !runtime?.loopBegin || !runtime?.loopEntered || !runtime?.loopEnd)
     throw new Error(`${testCase.file}: missing Rust candidate runtime bindings`);
   const coverageHit = (id) => hits.push(id);
+  const registerProbeV2 = (definition) => {
+    registrations.push(definition);
+    return {
+      ...definition,
+      clock: { epoch: 1, fast: false },
+      hitEpochs: new Uint32Array(definition.pointIds.length),
+      decisionEpochs: definition.decisions.map((meta) =>
+        meta.conditions.length <= 6
+          ? new Uint32Array(2 * 3 ** meta.conditions.length)
+          : new Map(),
+      ),
+      decisionCompleteEpochs: new Uint32Array(definition.decisions.length),
+    };
+  };
+  const coverageHitV2 = (file, index) => coverageHit(file.pointIds[index]);
   const begin = (id, meta) => {
     if (id !== meta.id) throw new Error(`mismatched decision registration ${id}/${meta.id}`);
     return { meta, values: Array.from({ length: meta.conditions.length }, () => null) };
@@ -241,7 +257,9 @@ async function executeRustCandidate(testCase, candidate) {
     runtime.mcdcBegin,
     runtime.mcdcCondition,
     runtime.mcdcEnd,
+    runtime.registerProbeV2,
     runtime.mcdcEndV2,
+    runtime.coverageHitV2,
     runtime.selectionBegin,
     runtime.selectionRight,
     runtime.selectionEnd,
@@ -265,7 +283,9 @@ async function executeRustCandidate(testCase, candidate) {
     begin,
     condition,
     end,
+    registerProbeV2,
     recorder,
+    coverageHitV2,
     selectionBegin,
     selectionRight,
     selectionEnd,
@@ -293,6 +313,7 @@ async function executeRustCandidate(testCase, candidate) {
       },
       hits,
       vectors,
+      registrations,
     };
   } catch (error) {
     return {
@@ -303,6 +324,7 @@ async function executeRustCandidate(testCase, candidate) {
       },
       hits,
       vectors,
+      registrations,
     };
   }
 }
@@ -319,6 +341,10 @@ for (const [offset, testCase] of executionCorpus.entries()) {
   if (JSON.stringify(reference.original) !== JSON.stringify(reference.instrumented))
     throw new Error(`${testCase.file}: TypeScript reference changed program behavior`);
   const rustExecution = await executeRustCandidate(testCase, candidate);
+  if (JSON.stringify(rustExecution.registrations) !== JSON.stringify(reference.evidence.registrations))
+    throw new Error(
+      `${testCase.file}: Rust/TypeScript probe registration mismatch\nreference=${JSON.stringify(reference.evidence.registrations)}\ncandidate=${JSON.stringify(rustExecution.registrations)}`,
+    );
   if (JSON.stringify(rustExecution.outcome) !== JSON.stringify(reference.original))
     throw new Error(
       `${testCase.file}: Rust candidate changed program behavior\noriginal=${JSON.stringify(reference.original)}\ncandidate=${JSON.stringify(rustExecution.outcome)}`,
@@ -347,10 +373,18 @@ for (const [offset, testCase] of generatedCorpus.entries()) {
   if (JSON.stringify(reference.original) !== JSON.stringify(reference.instrumented))
     throw new Error(`${testCase.file}: TypeScript reference changed generated-program behavior`);
   const rustExecution = await executeRustCandidate(testCase, candidate);
+  if (JSON.stringify(rustExecution.registrations) !== JSON.stringify(reference.evidence.registrations))
+    throw new Error(`${testCase.file}: Rust/TypeScript generated-program registration mismatch`);
   if (JSON.stringify(rustExecution.outcome) !== JSON.stringify(reference.original))
     throw new Error(
       `${testCase.file}: Rust candidate changed generated-program behavior\noriginal=${JSON.stringify(reference.original)}\ncandidate=${JSON.stringify(rustExecution.outcome)}`,
     );
+  if (JSON.stringify(vectorSet(rustExecution.vectors)) !== JSON.stringify(vectorSet(reference.evidence.vectors)))
+    throw new Error(`${testCase.file}: Rust/TypeScript generated-program vectors differ`);
+  const referenceHits = [...new Set(reference.evidence.hits)].sort();
+  const candidateHits = [...new Set(rustExecution.hits)].sort();
+  if (JSON.stringify(candidateHits) !== JSON.stringify(referenceHits))
+    throw new Error(`${testCase.file}: Rust/TypeScript generated-program hits differ`);
 }
 
 console.log(

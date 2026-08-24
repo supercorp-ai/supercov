@@ -1,10 +1,9 @@
 //! First oxc-backed vertical slice of the Rust JavaScript instrumenter.
 //!
-//! This candidate reports and instruments statements, functions, and the
-//! frozen control-decision surface, including semantic-safety boundaries and
-//! exact wide-decision fallback.
-//! It is not exposed by the CLI and cannot claim a complete denominator until
-//! the remaining reference transformations are ported.
+//! This candidate reports and instruments the complete frozen JavaScript
+//! denominator, including semantic-safety boundaries and exact wide-decision
+//! fallback. It remains private until its generated runtime import, evidence
+//! transport, and attribution behavior match the reference engine.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -18,7 +17,7 @@ use oxc_ast::{
     ast::{
         Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
         AssignmentPattern, AssignmentTarget, BindingPattern, CallExpression, CatchClause,
-        ChainExpression, ComputedMemberExpression, ConditionalExpression, Declaration,
+        ChainExpression, Class, ComputedMemberExpression, ConditionalExpression, Declaration,
         DoWhileStatement, Expression, ForInStatement, ForOfStatement, ForStatement,
         ForStatementLeft, FormalParameter, FormalParameterKind, FormalParameters, Function,
         FunctionBody, IfStatement, LogicalExpression, NewExpression, ObjectPropertyKind,
@@ -108,7 +107,10 @@ pub struct CandidateRuntime {
     pub mcdc_begin: String,
     pub mcdc_condition: String,
     pub mcdc_end: String,
+    pub register_probe_v2: String,
     pub mcdc_end_v2: String,
+    pub coverage_hit_v2: String,
+    pub probe_file_v2: String,
     pub selection_begin: String,
     pub selection_right: String,
     pub selection_end: String,
@@ -190,6 +192,11 @@ struct PointAnalysis {
     points: Vec<CandidatePoint>,
     statement_targets: HashMap<SpanKey, Vec<String>>,
     function_targets: HashMap<SpanKey, String>,
+}
+
+#[derive(Clone)]
+struct PointTarget {
+    index: usize,
 }
 
 impl PointCollector<'_> {
@@ -696,6 +703,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         source,
         file,
         decisions: Vec::new(),
+        decision_vector_counts: Vec::new(),
         decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
         with_statements: &safety.with_statements,
@@ -784,6 +792,46 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
     })
 }
 
+fn json_expression<'a>(ast: AstBuilder<'a>, value: &serde_json::Value) -> Expression<'a> {
+    match value {
+        serde_json::Value::Null => ast.expression_null_literal(Span::default()),
+        serde_json::Value::Bool(value) => ast.expression_boolean_literal(Span::default(), *value),
+        serde_json::Value::Number(value) => ast.expression_numeric_literal(
+            Span::default(),
+            value
+                .as_f64()
+                .expect("coverage registration numbers must fit JavaScript"),
+            None,
+            NumberBase::Decimal,
+        ),
+        serde_json::Value::String(value) => {
+            ast.expression_string_literal(Span::default(), ast.str(value), None)
+        }
+        serde_json::Value::Array(values) => ast.expression_array(
+            Span::default(),
+            ast.vec_from_iter(
+                values
+                    .iter()
+                    .map(|value| ArrayExpressionElement::from(json_expression(ast, value))),
+            ),
+        ),
+        serde_json::Value::Object(properties) => ast.expression_object(
+            Span::default(),
+            ast.vec_from_iter(properties.iter().map(|(key, value)| {
+                ast.object_property_kind_object_property(
+                    Span::default(),
+                    PropertyKind::Init,
+                    ast.property_key_static_identifier(Span::default(), ast.ident(key)),
+                    json_expression(ast, value),
+                    false,
+                    false,
+                    false,
+                )
+            })),
+        ),
+    }
+}
+
 /// Instrument the first deliberately narrow Rust port slice.
 ///
 /// The generated code is internal differential-test output, not a public
@@ -817,6 +865,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         source,
         file,
         decisions: Vec::new(),
+        decision_vector_counts: Vec::new(),
         decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
         with_statements: &safety.with_statements,
@@ -881,11 +930,18 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     branches.extend(switch_analysis.branches.clone());
 
     let mut names = CandidateNames::new(source);
-    let coverage_hit = names.allocate("__supercovCoverageHit");
     let mcdc_begin = names.allocate("__supercovMcdcBegin");
     let mcdc_condition = names.allocate("__supercovMcdcCondition");
     let mcdc_end = names.allocate("__supercovMcdcEnd");
+    let coverage_hit = names.allocate("__supercovCoverageHit");
+    let register_probe_v2 = names.allocate("__supercovRegisterProbeV2");
     let mcdc_end_v2 = names.allocate("__supercovMcdcEndV2");
+    let coverage_hit_v2 = names.allocate("__supercovCoverageHitV2");
+    let probe_file_v2 = names.allocate("__supercovProbeFileV2");
+    let _probe_clock_v2 = names.allocate("__supercovProbeClockV2");
+    let _probe_hits_v2 = names.allocate("__supercovProbeHitsV2");
+    let _probe_decisions_v2 = names.allocate("__supercovProbeDecisionsV2");
+    let _probe_complete_v2 = names.allocate("__supercovProbeCompleteV2");
     let selection_begin = names.allocate("__supercovSelectionBegin");
     let selection_right = names.allocate("__supercovSelectionRight");
     let selection_end = names.allocate("__supercovSelectionEnd");
@@ -903,18 +959,56 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     let loop_entered = names.allocate("__supercovLoopEntered");
     let loop_end = names.allocate("__supercovLoopEnd");
     let ast = AstBuilder::new(&allocator);
+    let point_indices = point_analysis
+        .points
+        .iter()
+        .enumerate()
+        .map(|(index, point)| (point.id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let statement_targets = point_analysis
+        .statement_targets
+        .into_iter()
+        .map(|(span, ids)| {
+            (
+                span,
+                ids.into_iter()
+                    .map(|id| PointTarget {
+                        index: *point_indices
+                            .get(&id)
+                            .expect("statement point must have a global index"),
+                    })
+                    .collect(),
+            )
+        })
+        .collect();
+    let function_targets = point_analysis
+        .function_targets
+        .into_iter()
+        .map(|(span, id)| {
+            (
+                span,
+                PointTarget {
+                    index: *point_indices
+                        .get(&id)
+                        .expect("function point must have a global index"),
+                },
+            )
+        })
+        .collect();
     let mut statement_transformer = StatementProbeTransformer {
         ast,
-        coverage_hit: coverage_hit.clone(),
-        targets: point_analysis.statement_targets,
+        coverage_hit_v2: coverage_hit_v2.clone(),
+        probe_file_v2: probe_file_v2.clone(),
+        targets: statement_targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
         with_statements: safety.with_statements.clone(),
     };
     statement_transformer.visit_program(&mut parsed.program);
     let mut function_transformer = FunctionProbeTransformer {
         ast,
-        coverage_hit: coverage_hit.clone(),
-        targets: point_analysis.function_targets,
+        coverage_hit_v2: coverage_hit_v2.clone(),
+        probe_file_v2: probe_file_v2.clone(),
+        targets: function_targets,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
     };
     function_transformer.visit_program(&mut parsed.program);
@@ -1008,18 +1102,45 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     };
     switch_transformer.visit_program(&mut parsed.program);
 
+    let registration = serde_json::json!({
+        "decisions": &collector.decisions,
+        "pointIds": point_analysis.points.iter().map(|point| &point.id).collect::<Vec<_>>(),
+        "decisionVectorCounts": &collector.decision_vector_counts,
+    });
+    let registration_call = ast.expression_call(
+        Span::default(),
+        ast.expression_identifier(Span::default(), ast.ident(&register_probe_v2)),
+        NONE,
+        ast.vec1(Argument::from(json_expression(ast, &registration))),
+        false,
+    );
+    parsed.program.body.insert(
+        0,
+        Statement::VariableDeclaration(ast.alloc_variable_declaration(
+            Span::default(),
+            VariableDeclarationKind::Const,
+            ast.vec1(ast.variable_declarator(
+                Span::default(),
+                VariableDeclarationKind::Const,
+                ast.binding_pattern_binding_identifier(Span::default(), ast.ident(&probe_file_v2)),
+                NONE,
+                Some(registration_call),
+                false,
+            )),
+            false,
+        )),
+    );
+
     let limitations = vec![
-        "only if, ternary, while, do-while, and classic-for decisions are instrumented"
+        "generated runtime import and production evidence transport remain on the TypeScript reference"
             .to_string(),
-        "remaining value/extended branch obligations and runtime registration remain on the TypeScript reference"
-            .to_string(),
-        "candidate runtime binding is differential-only and is not exposed by the public CLI"
+        "candidate runtime registration is differential-only and is not exposed by the public CLI"
             .to_string(),
     ];
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
         complete: false,
-        supported_surface: "point-control-logical-optional-chain-probe-candidate".to_string(),
+        supported_surface: "complete-js-manifest-and-differential-probes-candidate".to_string(),
         code: Codegen::new().build(&parsed.program).code,
         decisions: collector.decisions,
         points: point_analysis.points,
@@ -1029,7 +1150,10 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
             mcdc_begin,
             mcdc_condition,
             mcdc_end,
+            register_probe_v2,
             mcdc_end_v2,
+            coverage_hit_v2,
+            probe_file_v2,
             selection_begin,
             selection_right,
             selection_end,
@@ -1060,33 +1184,40 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
 
 struct StatementProbeTransformer<'a> {
     ast: AstBuilder<'a>,
-    coverage_hit: String,
-    targets: HashMap<SpanKey, Vec<String>>,
+    coverage_hit_v2: String,
+    probe_file_v2: String,
+    targets: HashMap<SpanKey, Vec<PointTarget>>,
     source_sensitive_functions: HashSet<SpanKey>,
     with_statements: HashSet<SpanKey>,
 }
 
 impl<'a> StatementProbeTransformer<'a> {
-    fn probe(&self, id: &str) -> Statement<'a> {
+    fn probe(&self, target: &PointTarget) -> Statement<'a> {
         self.ast.statement_expression(
             Span::default(),
             self.ast.expression_call(
                 Span::default(),
                 self.ast
-                    .expression_identifier(Span::default(), self.ast.ident(&self.coverage_hit)),
+                    .expression_identifier(Span::default(), self.ast.ident(&self.coverage_hit_v2)),
                 NONE,
-                self.ast
-                    .vec1(Argument::from(self.ast.expression_string_literal(
+                self.ast.vec_from_array([
+                    Argument::from(self.ast.expression_identifier(
                         Span::default(),
-                        self.ast.str(id),
+                        self.ast.ident(&self.probe_file_v2),
+                    )),
+                    Argument::from(self.ast.expression_numeric_literal(
+                        Span::default(),
+                        target.index as f64,
                         None,
-                    ))),
+                        NumberBase::Decimal,
+                    )),
+                ]),
                 false,
             ),
         )
     }
 
-    fn take_statement_ids(&mut self, statement: &Statement<'a>) -> Vec<String> {
+    fn take_statement_ids(&mut self, statement: &Statement<'a>) -> Vec<PointTarget> {
         let mut ids = self
             .targets
             .remove(&span_key(statement.span()))
@@ -1107,7 +1238,7 @@ impl<'a> StatementProbeTransformer<'a> {
         }
         let original = statement.take_in(self.ast.allocator);
         let mut body = self.ast.vec_with_capacity(ids.len() + 1);
-        body.extend(ids.iter().map(|id| self.probe(id)));
+        body.extend(ids.iter().map(|target| self.probe(target)));
         body.push(original);
         *statement = self.ast.statement_block(Span::default(), body);
     }
@@ -1120,7 +1251,7 @@ impl<'a> VisitMut<'a> for StatementProbeTransformer<'a> {
         for mut statement in original {
             let ids = self.take_statement_ids(&statement);
             self.visit_statement(&mut statement);
-            instrumented.extend(ids.iter().map(|id| self.probe(id)));
+            instrumented.extend(ids.iter().map(|target| self.probe(target)));
             instrumented.push(statement);
         }
         *statements = instrumented;
@@ -1189,26 +1320,33 @@ impl<'a> VisitMut<'a> for StatementProbeTransformer<'a> {
 
 struct FunctionProbeTransformer<'a> {
     ast: AstBuilder<'a>,
-    coverage_hit: String,
-    targets: HashMap<SpanKey, String>,
+    coverage_hit_v2: String,
+    probe_file_v2: String,
+    targets: HashMap<SpanKey, PointTarget>,
     source_sensitive_functions: HashSet<SpanKey>,
 }
 
 impl<'a> FunctionProbeTransformer<'a> {
-    fn probe(&self, id: &str) -> Statement<'a> {
+    fn probe(&self, target: &PointTarget) -> Statement<'a> {
         self.ast.statement_expression(
             Span::default(),
             self.ast.expression_call(
                 Span::default(),
                 self.ast
-                    .expression_identifier(Span::default(), self.ast.ident(&self.coverage_hit)),
+                    .expression_identifier(Span::default(), self.ast.ident(&self.coverage_hit_v2)),
                 NONE,
-                self.ast
-                    .vec1(Argument::from(self.ast.expression_string_literal(
+                self.ast.vec_from_array([
+                    Argument::from(self.ast.expression_identifier(
                         Span::default(),
-                        self.ast.str(id),
+                        self.ast.ident(&self.probe_file_v2),
+                    )),
+                    Argument::from(self.ast.expression_numeric_literal(
+                        Span::default(),
+                        target.index as f64,
                         None,
-                    ))),
+                        NumberBase::Decimal,
+                    )),
+                ]),
                 false,
             ),
         )
@@ -1223,10 +1361,10 @@ impl<'a> VisitMut<'a> for FunctionProbeTransformer<'a> {
         {
             return;
         }
-        if let Some(id) = self.targets.remove(&span_key(function.span))
+        if let Some(target) = self.targets.remove(&span_key(function.span))
             && let Some(body) = &mut function.body
         {
-            body.statements.insert(0, self.probe(&id));
+            body.statements.insert(0, self.probe(&target));
         }
         walk_mut::walk_function(self, function, flags);
     }
@@ -1238,8 +1376,8 @@ impl<'a> VisitMut<'a> for FunctionProbeTransformer<'a> {
         {
             return;
         }
-        if let Some(id) = self.targets.remove(&span_key(function.span)) {
-            let probe = self.probe(&id);
+        if let Some(target) = self.targets.remove(&span_key(function.span)) {
+            let probe = self.probe(&target);
             if function.expression {
                 let original = function
                     .body
@@ -3191,6 +3329,7 @@ struct DecisionCollector<'s> {
     source: &'s str,
     file: &'s str,
     decisions: Vec<CandidateDecision>,
+    decision_vector_counts: Vec<usize>,
     decision_logical_nodes: HashSet<SpanKey>,
     source_sensitive_functions: &'s HashSet<SpanKey>,
     with_statements: &'s HashSet<SpanKey>,
@@ -3213,12 +3352,126 @@ impl DecisionCollector<'_> {
             column,
             source: source_slice(self.source, span).to_string(),
             conditions: condition_spans
-                .into_iter()
-                .map(|condition| source_slice(self.source, condition).to_string())
+                .iter()
+                .map(|condition| source_slice(self.source, *condition).to_string())
                 .collect(),
             kind: kind.to_string(),
         });
+        self.decision_vector_counts.push(
+            (condition_spans.len() <= 6 && decision_conditions_are_transparent(test))
+                .then(|| reachable_vector_count(test, &condition_spans))
+                .unwrap_or(0),
+        );
     }
+}
+
+#[derive(Default)]
+struct CoverageSurfaceScanner {
+    found: bool,
+}
+
+impl<'a> Visit<'a> for CoverageSurfaceScanner {
+    fn visit_logical_expression(&mut self, _expression: &LogicalExpression<'a>) {
+        self.found = true;
+    }
+
+    fn visit_conditional_expression(&mut self, _expression: &ConditionalExpression<'a>) {
+        self.found = true;
+    }
+
+    fn visit_chain_expression(&mut self, _expression: &ChainExpression<'a>) {
+        self.found = true;
+    }
+
+    fn visit_function(&mut self, _function: &Function<'a>, _flags: ScopeFlags) {
+        self.found = true;
+    }
+
+    fn visit_arrow_function_expression(&mut self, _function: &ArrowFunctionExpression<'a>) {
+        self.found = true;
+    }
+
+    fn visit_class(&mut self, _class: &Class<'a>) {
+        self.found = true;
+    }
+
+    fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'a>) {
+        if expression.operator.is_logical() {
+            self.found = true;
+        } else {
+            walk::walk_assignment_expression(self, expression);
+        }
+    }
+}
+
+fn decision_conditions_are_transparent(expression: &Expression<'_>) -> bool {
+    fn visit_condition(expression: &Expression<'_>) -> bool {
+        let mut scanner = CoverageSurfaceScanner::default();
+        scanner.visit_expression(expression);
+        !scanner.found
+    }
+    match transparent_expression(expression) {
+        Expression::LogicalExpression(logical)
+            if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or) =>
+        {
+            decision_conditions_are_transparent(&logical.left)
+                && decision_conditions_are_transparent(&logical.right)
+        }
+        Expression::UnaryExpression(unary)
+            if unary.operator.is_not() && has_compound_boolean_decision(&unary.argument) =>
+        {
+            decision_conditions_are_transparent(&unary.argument)
+        }
+        condition => visit_condition(condition),
+    }
+}
+
+fn reachable_vector_count(expression: &Expression<'_>, conditions: &[Span]) -> usize {
+    fn evaluate(
+        expression: &Expression<'_>,
+        assignment: usize,
+        encoded: &mut usize,
+        indices: &HashMap<SpanKey, usize>,
+    ) -> bool {
+        match transparent_expression(expression) {
+            Expression::LogicalExpression(logical)
+                if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or) =>
+            {
+                let left = evaluate(&logical.left, assignment, encoded, indices);
+                if logical.operator == LogicalOperator::And {
+                    left && evaluate(&logical.right, assignment, encoded, indices)
+                } else {
+                    left || evaluate(&logical.right, assignment, encoded, indices)
+                }
+            }
+            Expression::UnaryExpression(unary)
+                if unary.operator.is_not() && has_compound_boolean_decision(&unary.argument) =>
+            {
+                !evaluate(&unary.argument, assignment, encoded, indices)
+            }
+            condition => {
+                let index = indices
+                    .get(&span_key(condition.span()))
+                    .expect("decision condition index must remain stable");
+                let value = assignment & (1 << index) != 0;
+                *encoded += (if value { 2 } else { 1 }) * 3_usize.pow(*index as u32);
+                value
+            }
+        }
+    }
+
+    let indices = conditions
+        .iter()
+        .enumerate()
+        .map(|(index, span)| (span_key(*span), index))
+        .collect::<HashMap<_, _>>();
+    let mut vectors = HashSet::new();
+    for assignment in 0..(1_usize << conditions.len()) {
+        let mut encoded = 0;
+        let outcome = evaluate(expression, assignment, &mut encoded, &indices);
+        vectors.insert(encoded * 2 + usize::from(outcome));
+    }
+    vectors.len()
 }
 
 fn collect_decision_logical_nodes(expression: &Expression<'_>, nodes: &mut HashSet<SpanKey>) {
@@ -4716,7 +4969,7 @@ mod tests {
         assert!(!output.complete);
         assert_eq!(
             output.supported_surface,
-            "point-control-logical-optional-chain-probe-candidate"
+            "complete-js-manifest-and-differential-probes-candidate"
         );
         let runtime = output.runtime.expect("candidate runtime binding");
         assert!(output.code.contains(&runtime.mcdc_end_v2));
