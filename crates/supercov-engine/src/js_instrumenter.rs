@@ -1130,9 +1130,54 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
             false,
         )),
     );
+    let runtime_imports = [
+        ("mcdcBegin", &mcdc_begin),
+        ("mcdcCondition", &mcdc_condition),
+        ("mcdcEnd", &mcdc_end),
+        ("coverageHit", &coverage_hit),
+        ("registerProbeV2", &register_probe_v2),
+        ("mcdcEndV2", &mcdc_end_v2),
+        ("coverageHitV2", &coverage_hit_v2),
+        ("selectionBegin", &selection_begin),
+        ("selectionRight", &selection_right),
+        ("selectionEnd", &selection_end),
+        ("optionalSelect", &optional_select),
+        ("optionalCallBegin", &optional_call_begin),
+        ("optionalCallReached", &optional_call_reached),
+        ("optionalCallContinued", &optional_call_continued),
+        ("optionalCallEnd", &optional_call_end),
+        ("defaultSelected", &default_selected),
+        ("defaultEntered", &default_entered),
+        ("tryBegin", &try_begin),
+        ("tryCatch", &try_catch),
+        ("tryEnd", &try_end),
+        ("loopBegin", &loop_begin),
+        ("loopEntered", &loop_entered),
+        ("loopEnd", &loop_end),
+    ];
+    let import_specifiers =
+        ast.vec_from_iter(runtime_imports.into_iter().map(|(imported, local)| {
+            ast.import_declaration_specifier_import_specifier(
+                Span::default(),
+                ast.module_export_name_identifier_name(Span::default(), ast.ident(imported)),
+                ast.binding_identifier(Span::default(), ast.ident(local)),
+                oxc_ast::ast::ImportOrExportKind::Value,
+            )
+        }));
+    parsed.program.body.insert(
+        0,
+        Statement::ImportDeclaration(ast.alloc_import_declaration(
+            Span::default(),
+            Some(import_specifiers),
+            ast.string_literal(Span::default(), ast.str("virtual:supercov-runtime"), None),
+            None,
+            NONE,
+            oxc_ast::ast::ImportOrExportKind::Value,
+        )),
+    );
 
     let limitations = vec![
-        "generated runtime import and production evidence transport remain on the TypeScript reference"
+        "production evidence transport and request-phase handler adaptation remain on the TypeScript reference"
             .to_string(),
         "candidate runtime registration is differential-only and is not exposed by the public CLI"
             .to_string(),

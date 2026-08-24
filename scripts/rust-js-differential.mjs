@@ -252,6 +252,12 @@ async function executeRustCandidate(testCase, candidate) {
   };
   // This evaluates only the checked-in, self-contained differential corpus.
   // eslint-disable-next-line no-new-func
+  const executable = candidate.code.replace(
+    /^import\s*\{[\s\S]*?\}\s*from\s*["']virtual:supercov-runtime["'];?\s*/,
+    "",
+  );
+  if (executable === candidate.code)
+    throw new Error(`${testCase.file}: Rust candidate is missing its production runtime import`);
   const factory = new Function(
     runtime.coverageHit,
     runtime.mcdcBegin,
@@ -276,7 +282,7 @@ async function executeRustCandidate(testCase, candidate) {
     runtime.loopBegin,
     runtime.loopEntered,
     runtime.loopEnd,
-    `"use strict";\n${candidate.code}\nreturn { run, observe: typeof observe === "function" ? observe : undefined };`,
+    `"use strict";\n${executable}\nreturn { run, observe: typeof observe === "function" ? observe : undefined };`,
   );
   const program = factory(
     coverageHit,
