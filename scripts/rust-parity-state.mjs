@@ -70,6 +70,13 @@ if (mode === "evidence") {
     resolve(output, "report-state.json"),
     JSON.stringify({
       digest: canonicalDigest(report, context),
+      digests: Object.fromEntries(
+        Object.entries(report).map(([key, value]) => [
+          key,
+          canonicalDigest({ [key]: value }, context),
+        ]),
+      ),
+      transport: report.transport,
       testOutcomes: report.tests
         .filter((test) => test.role === "test")
         .map((test) => ({

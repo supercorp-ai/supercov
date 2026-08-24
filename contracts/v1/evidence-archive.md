@@ -14,14 +14,20 @@ After gzip decompression the byte stream is:
      `{"path":<string>,"bytes":<non-negative integer>}\n`;
    - exactly `bytes` uninterpreted payload bytes.
 
-Archive paths use `/`, are unique, and are relative. Duplicate paths,
-truncated headers/payloads, invalid byte lengths, invalid magic, and trailing
-non-entry data are fatal corruption. Readers must not partially trust a corrupt
-archive or call its measurement complete.
+Archive paths use `/`, are unique, non-empty, relative, and sorted by Unicode
+code-point order. Empty, `.`, and `..` segments, trailing separators,
+backslashes, NULs, absolute paths, duplicate paths, and unsorted paths are
+invalid. Headers must have the exact key order and compact JSON encoding shown
+above, with no unknown keys or whitespace variation. Truncated
+headers/payloads, invalid byte lengths, invalid UTF-8 header data, invalid
+magic, another gzip member, trailing compressed bytes, and trailing non-entry
+data are fatal corruption. Readers must reject the whole archive rather than
+partially trust it or call its measurement complete. Payloads remain arbitrary
+bytes; only individual evidence namespaces may impose UTF-8/JSON requirements.
 
 Required namespaces:
 
-- `manifest.json`: the complete structural denominator.
+- exactly one `manifest.json`: the complete structural denominator.
 - runner evidence at its transport-relative paths.
 - `server/attempts/*.jsonl`: attributed server evidence.
 - `server/background/*.jsonl`: aggregate/unattributed evidence.

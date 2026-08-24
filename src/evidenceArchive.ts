@@ -1,5 +1,6 @@
 import {
   existsSync,
+  lstatSync,
   readFileSync,
   readdirSync,
 } from "node:fs";
@@ -44,15 +45,53 @@ export type EvidenceArchiveSource =
 
 const ARCHIVE_MAGIC = Buffer.from(EVIDENCE_ARCHIVE_MAGIC);
 
-function writeEntries(
-  entries: Array<{ path: string; contents: Buffer }>,
-  destination: string,
-): EvidenceArchiveMetadata {
-  const files = [...entries].sort((left, right) => left.path.localeCompare(right.path));
+function compareCodePoints(left: string, right: string): number {
+  const leftPoints = [...left];
+  const rightPoints = [...right];
+  const length = Math.min(leftPoints.length, rightPoints.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftPoint = leftPoints[index]!.codePointAt(0)!;
+    const rightPoint = rightPoints[index]!.codePointAt(0)!;
+    if (leftPoint !== rightPoint) return leftPoint - rightPoint;
+  }
+  return leftPoints.length - rightPoints.length;
+}
+
+function validArchivePath(path: string): boolean {
+  return (
+    path.length > 0 &&
+    !path.startsWith("/") &&
+    !path.endsWith("/") &&
+    !path.includes("\\") &&
+    !path.includes("\0") &&
+    path.split("/").every((part) => part.length > 0 && part !== "." && part !== "..")
+  );
+}
+
+function requireArchivePath(path: string): void {
+  if (!validArchivePath(path))
+    throw new Error(`Invalid Supercov evidence archive path: ${JSON.stringify(path)}`);
+}
+
+function canonicalEntries<T extends { path: string }>(entries: T[]): T[] {
+  const files = [...entries].sort((left, right) =>
+    compareCodePoints(left.path, right.path)
+  );
+  for (const file of files) requireArchivePath(file.path);
   for (let index = 1; index < files.length; index += 1) {
     if (files[index - 1]!.path === files[index]!.path)
       throw new Error(`Duplicate Supercov evidence archive path: ${files[index]!.path}`);
   }
+  if (!files.some((file) => file.path === "manifest.json"))
+    throw new Error("Supercov evidence archive is missing manifest.json");
+  return files;
+}
+
+function writeEntries(
+  entries: Array<{ path: string; contents: Buffer }>,
+  destination: string,
+): EvidenceArchiveMetadata {
+  const files = canonicalEntries(entries);
   const chunks: Buffer[] = [ARCHIVE_MAGIC];
   for (const { path, contents } of files) {
     const header = Buffer.from(`${JSON.stringify({ path, bytes: contents.byteLength })}\n`);
@@ -82,7 +121,7 @@ function evidenceFiles(directory: string): string[] {
       if (entry.isFile()) return [path];
       throw new Error(`Unsupported raw evidence entry: ${path}`);
     })
-    .sort((left, right) => left.localeCompare(right));
+    .sort(compareCodePoints);
 }
 
 /**
@@ -98,19 +137,20 @@ export function writeEvidenceArchive(
     ? [{ directory: evidence }]
     : evidence;
   const files = sources.flatMap((source) => {
-    if ("file" in source)
+    if ("file" in source) {
+      requireArchivePath(source.path);
+      if (!lstatSync(source.file).isFile())
+        throw new Error(`Unsupported raw evidence entry: ${source.file}`);
       return [{ path: source.path, sourcePath: source.file }];
+    }
+    if (source.prefix) requireArchivePath(source.prefix);
     return evidenceFiles(source.directory).map((path) => ({
       path: [source.prefix, relative(source.directory, path).split(sep).join("/")]
         .filter(Boolean)
         .join("/"),
       sourcePath: path,
     }));
-  }).sort((left, right) => left.path.localeCompare(right.path));
-  for (let index = 1; index < files.length; index += 1) {
-    if (files[index - 1]!.path === files[index]!.path)
-      throw new Error(`Duplicate Supercov evidence archive path: ${files[index]!.path}`);
-  }
+  });
   return writeEntries(
     files.map(({ path, sourcePath }) => ({ path, contents: readFileSync(sourcePath) })),
     destination,
@@ -133,6 +173,7 @@ export function readEvidenceArchive(path: string): EvidenceArchive {
   if (!serialized.subarray(0, ARCHIVE_MAGIC.byteLength).equals(ARCHIVE_MAGIC))
     throw new Error(`Unsupported Supercov evidence archive: ${path}`);
   const files: EvidenceArchiveEntry[] = [];
+  let previousPath: string | undefined;
   let offset = ARCHIVE_MAGIC.byteLength;
   while (offset < serialized.byteLength) {
     if (offset + 4 > serialized.byteLength)
@@ -141,18 +182,27 @@ export function readEvidenceArchive(path: string): EvidenceArchive {
     offset += 4;
     if (offset + headerSize > serialized.byteLength)
       throw new Error(`Truncated Supercov evidence archive: ${path}`);
+    const encodedHeader = serialized.subarray(offset, offset + headerSize);
+    if (encodedHeader.at(-1) !== 0x0a)
+      throw new Error(`Invalid Supercov evidence archive entry: ${path}`);
     const header = JSON.parse(
-      serialized.subarray(offset, offset + headerSize).toString("utf8"),
+      encodedHeader.subarray(0, -1).toString("utf8"),
     ) as { path?: string; bytes?: number };
     offset += headerSize;
     if (
-      !header.path ||
+      typeof header.path !== "string" ||
+      !validArchivePath(header.path) ||
       !Number.isSafeInteger(header.bytes) ||
       header.bytes! < 0 ||
+      !encodedHeader.equals(
+        Buffer.from(`${JSON.stringify({ path: header.path, bytes: header.bytes })}\n`),
+      ) ||
       offset + header.bytes! > serialized.byteLength
     ) {
       throw new Error(`Invalid Supercov evidence archive entry: ${path}`);
     }
+    if (previousPath !== undefined && compareCodePoints(previousPath, header.path) >= 0)
+      throw new Error(`Invalid Supercov evidence archive entry ordering: ${path}`);
     files.push({
       path: header.path,
       contents: serialized
@@ -160,7 +210,10 @@ export function readEvidenceArchive(path: string): EvidenceArchive {
         .toString("utf8"),
     });
     offset += header.bytes!;
+    previousPath = header.path;
   }
+  if (!files.some((file) => file.path === "manifest.json"))
+    throw new Error(`Coverage manifest is missing from ${path}`);
   return {
     schemaVersion: EVIDENCE_ARCHIVE_SCHEMA_VERSION,
     format: "supercov-evidence",

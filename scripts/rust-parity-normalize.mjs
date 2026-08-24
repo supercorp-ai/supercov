@@ -7,6 +7,13 @@ const omittedDynamicKeys = new Set([
   "endedAtMs",
   "timestampMs",
 ]);
+const selectedEngineImplementationFiles = new Set([
+  "src/engineEvidence.ts",
+  "src/engineInstrumenter.ts",
+  "src/engineProcess.ts",
+  "src/evidenceArchive.ts",
+  "src/instrumenter.ts",
+]);
 
 export function collectAttemptIdentities(value, identities) {
   if (Array.isArray(value)) {
@@ -153,8 +160,65 @@ function records(archive, kind) {
     );
 }
 
+function obligationFiles(archive) {
+  const manifestEntry = archive.files.find((entry) => entry.path === "manifest.json");
+  const manifest = manifestEntry ? JSON.parse(manifestEntry.contents) : {};
+  const files = new Map();
+  for (const decision of manifest.decisions ?? []) files.set(decision.id, decision.file);
+  for (const point of manifest.points ?? []) files.set(point.id, point.file);
+  for (const branch of manifest.branches ?? [])
+    for (const alternative of branch.alternatives ?? [])
+      files.set(alternative.id, branch.file);
+  return files;
+}
+
+function evidenceFile(value, files) {
+  return value?.meta?.file ?? files.get(value?.id ?? value?.meta?.id);
+}
+
+function implementationFile(value, files) {
+  const file = evidenceFile(value, files);
+  return selectedEngineImplementationFiles.has(file) ? file : undefined;
+}
+
+function stripRuntimeBatch(batch, files) {
+  const decisions = (batch.decisions ?? []).filter(
+    (snapshot) => !implementationFile(snapshot, files),
+  );
+  const hits = (batch.hits ?? []).filter(
+    (id) => !selectedEngineImplementationFiles.has(files.get(id)),
+  );
+  const events = (batch.events ?? []).filter(
+    (event) => !implementationFile(event, files),
+  );
+  if (decisions.length === 0 && hits.length === 0 && events.length === 0)
+    return undefined;
+  return {
+    ...batch,
+    decisions,
+    hits,
+    ...(batch.events === undefined ? {} : { events }),
+  };
+}
+
+function withoutSelectedEngineEvidence(value, files) {
+  return {
+    ...value,
+    server: (value.server ?? []).filter(
+      (event) => !implementationFile(event, files),
+    ),
+    browser: (value.browser ?? [])
+      .map((batch) => stripRuntimeBatch(batch, files))
+      .filter(Boolean),
+    runtime: (value.runtime ?? [])
+      .map((batch) => stripRuntimeBatch(batch, files))
+      .filter(Boolean),
+  };
+}
+
 export function canonicalEvidenceSignatures(archive, context) {
   context.unorderedEvidence = true;
+  const files = obligationFiles(archive);
   const results = records(archive, "results");
   const scopedServer = records(archive, "scopedServer");
   for (const value of [...results, ...scopedServer])
@@ -165,18 +229,30 @@ export function canonicalEvidenceSignatures(archive, context) {
         key: `${value.testId}:retry-${value.retry ?? 0}`,
         testId: value.testId,
         signature: canonicalDigest(value, context),
+        semanticSignature: canonicalDigest(
+          withoutSelectedEngineEvidence(value, files),
+          context,
+        ),
         implementationFiles: [
           ...new Set(
             (value.server ?? [])
-              .map((event) => event?.meta?.file)
-              .filter((file) =>
-                ["src/instrumenter.ts", "src/engineInstrumenter.ts"].includes(file),
-              ),
+              .map((event) => implementationFile(event, files))
+              .filter(Boolean),
           ),
         ].sort(),
       }))
       .sort((left, right) => left.key.localeCompare(right.key)),
     scopedServer: scopedServer
+      .map((value) => ({
+        testId: value.scope?.testId ?? "unscoped",
+        signature: canonicalDigest(value, context),
+      }))
+      .sort((left, right) =>
+        left.testId.localeCompare(right.testId) ||
+        left.signature.localeCompare(right.signature),
+      ),
+    semanticScopedServer: scopedServer
+      .filter((value) => !implementationFile(value, files))
       .map((value) => ({
         testId: value.scope?.testId ?? "unscoped",
         signature: canonicalDigest(value, context),

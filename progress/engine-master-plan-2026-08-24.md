@@ -239,8 +239,8 @@ miss blocks flipping any default.
 - Supercov self-dogfood now compares large archives in memory-bounded child
   processes rather than retaining two expanded archives and reports at once.
   The current 180-test runs have identical obligations, outcomes, background
-  evidence, and all evidence outside exactly three tests that intentionally
-  execute the selected outer engine. Those three execute `src/instrumenter.ts`
+  evidence, and all evidence outside exactly four tests that intentionally
+  execute the selected outer engine. Those tests execute `src/instrumenter.ts`
   under the shipped engine and `src/engineInstrumenter.ts` under Rust, so their
   different implementation-file coverage is required rather than waived.
 - A watchdog regression exposed why implementation parity is insufficient:
@@ -249,6 +249,18 @@ miss blocks flipping any default.
   signal-free. One atomically elected preloaded process reports active resource
   types on a timer, while the parent remains observational unless the user set
   an explicit command timeout.
+- The first language-neutral Phase 4 ownership slice is now real Rust code:
+  evidence archives are collected, framed, gzip-compressed, fsynced, and
+  atomically published by Rust whenever the private Rust engine is selected.
+  Its streaming reader is also implemented for the coming Rust analyzer. The
+  contract tests reject unsafe/unsorted/duplicate paths, non-canonical headers,
+  symlinks, missing manifests, truncation, concatenated gzip members, trailing
+  data, and leftover temporary files; they prove deterministic gzip metadata,
+  arbitrary binary payloads, and true Unicode code-point ordering. This audit
+  found and corrected two historical JavaScript deviations—locale-dependent
+  ordering and permissive archive reads—instead of preserving them as Rust
+  behavior. The internal Rust child is explicitly excluded from application
+  launch telemetry.
 - The Playwright parity fixture now exercises a failed first attempt followed
   by a terminal pass, a skipped test, and an expected failure. The gate asserts
   the complete observed view reports `flaky`/`skipped`/`failed`, passed-only
@@ -263,10 +275,11 @@ miss blocks flipping any default.
   the complete browser/Node syntax matrix and Essential SEO dogfood, followed
   by an audit that classifies every TypeScript/Rust deviation against the
   independent correctness hierarchy rather than forcing blind equivalence.
-  `complete: false` is therefore still deliberate. Phase 4's engine shell has
-  only frozen probe/agent-JSON contract slices; discovery, workspace,
-  supervision, packing, analysis, solving, indexing, querying, and lifecycle
-  are still owned by TypeScript and are the next port after Phase 3 closes.
+  `complete: false` is therefore still deliberate. Phase 4's engine shell now
+  owns frozen probe/agent-JSON contract slices and evidence packing/strict
+  reading. Discovery, workspace, supervision, analysis, solving, indexing,
+  querying, and lifecycle are still owned by TypeScript and are the next port
+  after Phase 3 closes.
 
 ## Non-goals and guardrails
 

@@ -5,6 +5,7 @@
 //! ported until probe-v2 semantics are frozen.
 
 pub mod agent_json;
+pub mod evidence_archive;
 pub mod js_instrumenter;
 pub mod probe_v2;
 

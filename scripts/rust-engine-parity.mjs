@@ -228,13 +228,15 @@ function validateSelfHostingEvidence(actual, expected, message) {
   for (const [key, reference] of expectedResults) {
     const candidate = actualResults.get(key);
     if (candidate.signature === reference.signature) continue;
-    if (
-      !reference.implementationFiles.includes("src/instrumenter.ts") ||
-      !candidate.implementationFiles.includes("src/engineInstrumenter.ts")
-    )
+    if (candidate.semanticSignature !== reference.semanticSignature)
       throw new Error(
-        `${message}: ${key} differs without executing the respective selected engine`,
+        `${message}: ${key} differs outside the selected-engine implementation boundary`,
       );
+    if (
+      reference.implementationFiles.length === 0 &&
+      candidate.implementationFiles.length === 0
+    )
+      throw new Error(`${message}: ${key} differs without engine implementation evidence`);
     divergent.add(reference.testId);
   }
   if (divergent.size === 0)
@@ -242,17 +244,16 @@ function validateSelfHostingEvidence(actual, expected, message) {
       `${message}: self-hosting did not exercise engine-specific implementations`,
     );
 
-  const withoutDivergentTests = (evidence) => ({
-    results: evidence.results.filter((entry) => !divergent.has(entry.testId)),
-    scopedServer: evidence.scopedServer.filter(
-      (entry) => !divergent.has(entry.testId),
-    ),
-    backgroundServer: evidence.backgroundServer,
-  });
   requireSignaturesEqual(
-    withoutDivergentTests(actual),
-    withoutDivergentTests(expected),
-    `${message}: evidence outside selected-engine tests differs`,
+    {
+      scopedServer: actual.semanticScopedServer,
+      backgroundServer: actual.backgroundServer,
+    },
+    {
+      scopedServer: expected.semanticScopedServer,
+      backgroundServer: expected.backgroundServer,
+    },
+    `${message}: evidence outside selected-engine implementation files differs`,
   );
   return divergent;
 }
@@ -378,8 +379,13 @@ try {
         `${fixture.name}: normalized raw evidence differs`,
       );
       requireEqual(
-        states.rust.report.digest,
-        states.typescript.report.digest,
+        states.rust.report.transport,
+        states.typescript.report.transport,
+        `${fixture.name}: evidence transport counts differ`,
+      );
+      requireEqual(
+        states.rust.report.digests,
+        states.typescript.report.digests,
         `${fixture.name}: complete analyzed coverage report differs`,
       );
     }

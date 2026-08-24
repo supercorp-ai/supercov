@@ -4,9 +4,9 @@ import { atomicRenameSync, atomicWriteFileSync } from "./atomic.ts";
 import {
   EVIDENCE_ARCHIVE_SCHEMA_VERSION,
   readEvidenceArchive,
-  writeEvidenceArchiveEntries,
   type EvidenceArchiveEntry,
 } from "./evidenceArchive.ts";
+import { writeEngineEvidenceArchiveEntries } from "./engineEvidence.ts";
 import {
   acquireProjectLock,
   removeStoredTreeDeferred,
@@ -120,7 +120,7 @@ export function mergeCoverageRuns(root: string, runIds: string[]): string {
           })),
       ),
     ];
-    const rawEvidence = writeEvidenceArchiveEntries(
+    const rawEvidence = writeEngineEvidenceArchiveEntries(
       entries,
       resolve(staging, "evidence.raw.gz"),
     );

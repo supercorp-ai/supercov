@@ -13,7 +13,7 @@ import { atomicRenameSync, atomicWriteFileSync } from "./atomic.ts";
 import { coverageQueryCommands, runQueryCommand } from "./query.ts";
 import { discoverCoverageProject, expandedCommand } from "./project.ts";
 import { createRunIntegrity } from "./integrity.ts";
-import { writeEvidenceArchive } from "./evidenceArchive.ts";
+import { writeEngineEvidenceArchive } from "./engineEvidence.ts";
 import { mergeCoverageRuns } from "./merge.ts";
 import {
   buildCacheReusePaths,
@@ -821,7 +821,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
           runStagingDirectory,
           "evidence.raw.gz",
         );
-        const rawEvidence = writeEvidenceArchive(
+        const rawEvidence = writeEngineEvidenceArchive(
           [
             { file: manifestPath, path: "manifest.json" },
             { directory: persistedEvidenceDirectory },

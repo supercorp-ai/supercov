@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+flate2.workspace = true
 oxc_allocator.workspace = true
 oxc_ast.workspace = true
 oxc_ast_visit.workspace = true
