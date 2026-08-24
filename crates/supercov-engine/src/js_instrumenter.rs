@@ -1,8 +1,8 @@
 //! First oxc-backed vertical slice of the Rust JavaScript instrumenter.
 //!
-//! This candidate intentionally reports only the frozen metadata for `if`
-//! decisions. It is not exposed by the CLI and cannot claim a complete
-//! denominator until the remaining reference transformations are ported.
+//! This candidate reports and instruments the frozen control-decision surface.
+//! It is not exposed by the CLI and cannot claim a complete denominator until
+//! the remaining reference transformations are ported.
 
 use std::{fmt::Write, path::Path};
 
@@ -10,11 +10,12 @@ use oxc_allocator::{Allocator, TakeIn};
 use oxc_ast::{
     AstBuilder, NONE,
     ast::{
-        Argument, AssignmentTarget, Expression, FunctionBody, IfStatement, Program, Statement,
-        VariableDeclarationKind,
+        Argument, AssignmentTarget, ConditionalExpression, DoWhileStatement, Expression,
+        ForStatement, FunctionBody, IfStatement, Program, Statement, VariableDeclarationKind,
+        WhileStatement,
     },
 };
-use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
+use oxc_ast_visit::{Visit, VisitMut, walk_mut};
 use oxc_codegen::Codegen;
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
@@ -87,13 +88,15 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
         complete: false,
-        supported_surface: "if-decision-manifest-v1".to_string(),
+        supported_surface: "control-decision-manifest-v1".to_string(),
         code: generated,
         decisions: collector.decisions,
         runtime: None,
         limitations: vec![
-            "candidate emits metadata only; probe insertion is not implemented".to_string(),
-            "only if-statement decision metadata is currently compared".to_string(),
+            "candidate emits metadata only; use the private differential transform for probes"
+                .to_string(),
+            "coverage points, value branches, and extended branch obligations are not included"
+                .to_string(),
         ],
     })
 }
@@ -101,8 +104,8 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
 /// Instrument the first deliberately narrow Rust port slice.
 ///
 /// The generated code is internal differential-test output, not a public
-/// runtime ABI. It instruments `if` predicates of at most 32 conditions with
-/// the frozen probe-v2 ternary frame while leaving every other coverage
+/// runtime ABI. It instruments control predicates of at most 32 conditions
+/// with the frozen probe-v2 ternary frame while leaving every other coverage
 /// surface explicitly incomplete.
 pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput, CandidateError> {
     let source_type = SourceType::from_path(Path::new(file))
@@ -129,7 +132,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     let mut names = CandidateNames::new(source);
     let runtime_name = names.allocate("__supercovMcdcEndV2");
     let ast = AstBuilder::new(&allocator);
-    let mut transformer = IfProbeV2Transformer {
+    let mut transformer = ControlProbeV2Transformer {
         ast,
         file,
         runtime_name: runtime_name.clone(),
@@ -141,8 +144,9 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     transformer.visit_program(&mut parsed.program);
 
     let mut limitations = vec![
-        "only if-statement decisions are instrumented".to_string(),
-        "coverage points, non-if decisions, branches, and runtime registration remain on the TypeScript reference"
+        "only if, ternary, while, do-while, and classic-for decisions are instrumented"
+            .to_string(),
+        "coverage points, value branches, extended branch obligations, and runtime registration remain on the TypeScript reference"
             .to_string(),
         "with-environment and function-source semantic-safety exclusions are not yet ported"
             .to_string(),
@@ -151,7 +155,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     ];
     if transformer.wider_decisions > 0 {
         limitations.push(format!(
-            "{} if decision(s) exceeded 32 conditions and require the exact v1 fallback",
+            "{} control decision(s) exceeded 32 conditions and require the exact v1 fallback",
             transformer.wider_decisions
         ));
     }
@@ -159,7 +163,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
         complete: false,
-        supported_surface: "if-probe-v2-candidate".to_string(),
+        supported_surface: "control-decision-probe-v2-candidate".to_string(),
         code: Codegen::new().build(&parsed.program).code,
         decisions: collector.decisions,
         runtime: Some(CandidateRuntime {
@@ -200,7 +204,7 @@ impl<'s> CandidateNames<'s> {
     }
 }
 
-struct IfProbeV2Transformer<'a, 's> {
+struct ControlProbeV2Transformer<'a, 's> {
     ast: AstBuilder<'a>,
     file: &'s str,
     runtime_name: String,
@@ -210,7 +214,13 @@ struct IfProbeV2Transformer<'a, 's> {
     wider_decisions: usize,
 }
 
-impl<'a> IfProbeV2Transformer<'a, '_> {
+#[derive(Clone, Copy)]
+struct DecisionPlan {
+    index: usize,
+    condition_count: usize,
+}
+
+impl<'a> ControlProbeV2Transformer<'a, '_> {
     fn enter_declaration_scope(&mut self) {
         self.scope_declarations.push(Vec::new());
     }
@@ -225,7 +235,7 @@ impl<'a> IfProbeV2Transformer<'a, '_> {
         let name = self.names.allocate(base);
         self.scope_declarations
             .last_mut()
-            .expect("an if statement must be inside a program or function body")
+            .expect("a control decision must be inside a program or function body")
             .push(name.clone());
         name
     }
@@ -366,9 +376,76 @@ impl<'a> IfProbeV2Transformer<'a, '_> {
             }
         }
     }
+
+    fn reserve_decision(&mut self, test: &Expression<'a>) -> DecisionPlan {
+        let mut condition_spans = Vec::new();
+        collect_conditions(test, &mut condition_spans);
+        let plan = DecisionPlan {
+            index: self.decision_index,
+            condition_count: condition_spans.len(),
+        };
+        self.decision_index += 1;
+        plan
+    }
+
+    fn apply_decision(&mut self, test: &mut Expression<'a>, plan: DecisionPlan) {
+        if plan.condition_count > 32 {
+            self.wider_decisions += 1;
+            return;
+        }
+
+        let frame_name = self.allocate_scratch("_supercovMcdcFrame");
+        let result_name = self.allocate_scratch("_supercovMcdcResult");
+        let temporary_names = (0..plan.condition_count)
+            .map(|_| self.allocate_scratch("_supercovMcdcValue"))
+            .collect::<Vec<_>>();
+        let mut next_index = 0;
+        self.instrument_conditions(test, &frame_name, &temporary_names, &mut next_index);
+        debug_assert_eq!(next_index, plan.condition_count);
+
+        let original = test.take_in(self.ast.allocator);
+        let assign_frame = self.ast.expression_assignment(
+            Span::default(),
+            AssignmentOperator::Assign,
+            self.assignment_target(&frame_name),
+            self.number(0),
+        );
+        let assign_result = self.ast.expression_assignment(
+            Span::default(),
+            AssignmentOperator::Assign,
+            self.assignment_target(&result_name),
+            original,
+        );
+        let arguments = self.ast.vec_from_array([
+            Argument::from(self.ast.expression_string_literal(
+                Span::default(),
+                self.ast.str(self.file),
+                None,
+            )),
+            Argument::from(self.number(plan.index as u64)),
+            Argument::from(self.identifier(&frame_name)),
+            Argument::from(self.identifier(&result_name)),
+        ]);
+        let record = self.ast.expression_call(
+            Span::default(),
+            self.identifier(&self.runtime_name),
+            NONE,
+            arguments,
+            false,
+        );
+        *test = self.ast.expression_sequence(
+            Span::default(),
+            self.ast.vec_from_array([
+                assign_frame,
+                assign_result,
+                record,
+                self.identifier(&result_name),
+            ]),
+        );
+    }
 }
 
-impl<'a> VisitMut<'a> for IfProbeV2Transformer<'a, '_> {
+impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
     fn visit_program(&mut self, program: &mut Program<'a>) {
         self.enter_declaration_scope();
         walk_mut::walk_program(self, program);
@@ -384,71 +461,53 @@ impl<'a> VisitMut<'a> for IfProbeV2Transformer<'a, '_> {
     }
 
     fn visit_if_statement(&mut self, statement: &mut IfStatement<'a>) {
-        let mut condition_spans = Vec::new();
-        collect_conditions(&statement.test, &mut condition_spans);
-        let condition_count = condition_spans.len();
-        let decision_index = self.decision_index;
-        self.decision_index += 1;
-
-        if condition_count <= 32 {
-            let frame_name = self.allocate_scratch("_supercovMcdcFrame");
-            let result_name = self.allocate_scratch("_supercovMcdcResult");
-            let temporary_names = (0..condition_count)
-                .map(|_| self.allocate_scratch("_supercovMcdcValue"))
-                .collect::<Vec<_>>();
-            let mut next_index = 0;
-            self.instrument_conditions(
-                &mut statement.test,
-                &frame_name,
-                &temporary_names,
-                &mut next_index,
-            );
-            debug_assert_eq!(next_index, condition_count);
-
-            let original = statement.test.take_in(self.ast.allocator);
-            let assign_frame = self.ast.expression_assignment(
-                Span::default(),
-                AssignmentOperator::Assign,
-                self.assignment_target(&frame_name),
-                self.number(0),
-            );
-            let assign_result = self.ast.expression_assignment(
-                Span::default(),
-                AssignmentOperator::Assign,
-                self.assignment_target(&result_name),
-                original,
-            );
-            let arguments = self.ast.vec_from_array([
-                Argument::from(self.ast.expression_string_literal(
-                    Span::default(),
-                    self.ast.str(self.file),
-                    None,
-                )),
-                Argument::from(self.number(decision_index as u64)),
-                Argument::from(self.identifier(&frame_name)),
-                Argument::from(self.identifier(&result_name)),
-            ]);
-            let record = self.ast.expression_call(
-                Span::default(),
-                self.identifier(&self.runtime_name),
-                NONE,
-                arguments,
-                false,
-            );
-            statement.test = self.ast.expression_sequence(
-                Span::default(),
-                self.ast.vec_from_array([
-                    assign_frame,
-                    assign_result,
-                    record,
-                    self.identifier(&result_name),
-                ]),
-            );
-        } else {
-            self.wider_decisions += 1;
+        let plan = self.reserve_decision(&statement.test);
+        self.visit_expression(&mut statement.test);
+        self.apply_decision(&mut statement.test, plan);
+        self.visit_statement(&mut statement.consequent);
+        if let Some(alternate) = &mut statement.alternate {
+            self.visit_statement(alternate);
         }
+    }
 
-        walk_mut::walk_if_statement(self, statement);
+    fn visit_conditional_expression(&mut self, expression: &mut ConditionalExpression<'a>) {
+        let plan = self.reserve_decision(&expression.test);
+        self.visit_expression(&mut expression.test);
+        self.apply_decision(&mut expression.test, plan);
+        self.visit_expression(&mut expression.consequent);
+        self.visit_expression(&mut expression.alternate);
+    }
+
+    fn visit_while_statement(&mut self, statement: &mut WhileStatement<'a>) {
+        let plan = self.reserve_decision(&statement.test);
+        self.visit_expression(&mut statement.test);
+        self.apply_decision(&mut statement.test, plan);
+        self.visit_statement(&mut statement.body);
+    }
+
+    fn visit_do_while_statement(&mut self, statement: &mut DoWhileStatement<'a>) {
+        let plan = self.reserve_decision(&statement.test);
+        self.visit_statement(&mut statement.body);
+        self.visit_expression(&mut statement.test);
+        self.apply_decision(&mut statement.test, plan);
+    }
+
+    fn visit_for_statement(&mut self, statement: &mut ForStatement<'a>) {
+        let plan = statement
+            .test
+            .as_ref()
+            .map(|test| self.reserve_decision(test));
+        if let Some(init) = &mut statement.init {
+            self.visit_for_statement_init(init);
+        }
+        if let (Some(test), Some(plan)) = (&mut statement.test, plan) {
+            self.visit_expression(test);
+            self.apply_decision(test, plan);
+        }
+        if let Some(update) = &mut statement.update {
+            self.visit_expression(update);
+        }
+        self.visit_statement(&mut statement.body);
     }
 }
 
@@ -458,17 +517,17 @@ struct DecisionCollector<'s> {
     decisions: Vec<CandidateDecision>,
 }
 
-impl<'a> Visit<'a> for DecisionCollector<'_> {
-    fn visit_if_statement(&mut self, statement: &IfStatement<'a>) {
+impl DecisionCollector<'_> {
+    fn record_decision(&mut self, test: &Expression<'_>, kind: &str) {
         let mut condition_spans = Vec::new();
-        collect_conditions(&statement.test, &mut condition_spans);
+        collect_conditions(test, &mut condition_spans);
         // Babel treats redundant parentheses as parser metadata rather than
         // part of the decision node. oxc preserves a ParenthesizedExpression,
         // so normalize it here to keep locations and stable IDs parser-neutral.
-        let span = transparent_expression(&statement.test).span();
+        let span = transparent_expression(test).span();
         let (line, column) = line_and_utf16_column(self.source, span.start as usize);
         self.decisions.push(CandidateDecision {
-            id: stable_id(self.source, self.file, "decision", span, "if"),
+            id: stable_id(self.source, self.file, "decision", span, kind),
             file: self.file.to_string(),
             line,
             column,
@@ -477,9 +536,54 @@ impl<'a> Visit<'a> for DecisionCollector<'_> {
                 .into_iter()
                 .map(|condition| source_slice(self.source, condition).to_string())
                 .collect(),
-            kind: "if".to_string(),
+            kind: kind.to_string(),
         });
-        walk::walk_if_statement(self, statement);
+    }
+}
+
+impl<'a> Visit<'a> for DecisionCollector<'_> {
+    fn visit_if_statement(&mut self, statement: &IfStatement<'a>) {
+        self.record_decision(&statement.test, "if");
+        self.visit_expression(&statement.test);
+        self.visit_statement(&statement.consequent);
+        if let Some(alternate) = &statement.alternate {
+            self.visit_statement(alternate);
+        }
+    }
+
+    fn visit_conditional_expression(&mut self, expression: &ConditionalExpression<'a>) {
+        self.record_decision(&expression.test, "ternary");
+        self.visit_expression(&expression.test);
+        self.visit_expression(&expression.consequent);
+        self.visit_expression(&expression.alternate);
+    }
+
+    fn visit_while_statement(&mut self, statement: &WhileStatement<'a>) {
+        self.record_decision(&statement.test, "while");
+        self.visit_expression(&statement.test);
+        self.visit_statement(&statement.body);
+    }
+
+    fn visit_do_while_statement(&mut self, statement: &DoWhileStatement<'a>) {
+        self.record_decision(&statement.test, "do-while");
+        self.visit_statement(&statement.body);
+        self.visit_expression(&statement.test);
+    }
+
+    fn visit_for_statement(&mut self, statement: &ForStatement<'a>) {
+        if let Some(test) = &statement.test {
+            self.record_decision(test, "for");
+        }
+        if let Some(init) = &statement.init {
+            self.visit_for_statement_init(init);
+        }
+        if let Some(test) = &statement.test {
+            self.visit_expression(test);
+        }
+        if let Some(update) = &statement.update {
+            self.visit_expression(update);
+        }
+        self.visit_statement(&statement.body);
     }
 }
 
@@ -593,10 +697,27 @@ mod tests {
     }
 
     #[test]
+    fn preserves_reference_order_across_every_control_decision_kind() {
+        let source = "function run(a,b) {\n  const selected = a ? b : a;\n  while (a && b) break;\n  do { a = false; } while (a || b);\n  for (let i = 0; i < 1 && b; i++) work();\n  if (selected) return 1;\n  return 0;\n}";
+        let output = instrument_candidate(source, "app/control.js").unwrap();
+        assert_eq!(
+            output
+                .decisions
+                .iter()
+                .map(|decision| decision.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ternary", "while", "do-while", "for", "if"]
+        );
+    }
+
+    #[test]
     fn inserts_probe_v2_without_claiming_the_unported_surfaces() {
         let output = instrument_candidate(SOURCE, "app/decide.ts").unwrap();
         assert!(!output.complete);
-        assert_eq!(output.supported_surface, "if-probe-v2-candidate");
+        assert_eq!(
+            output.supported_surface,
+            "control-decision-probe-v2-candidate"
+        );
         let runtime = output.runtime.expect("candidate runtime binding");
         assert!(output.code.contains(&runtime.mcdc_end_v2));
         assert!(output.code.contains("_supercovMcdcFrame"));

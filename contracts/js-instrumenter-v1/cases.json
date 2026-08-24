@@ -18,5 +18,21 @@
   {
     "file": "app/view.tsx",
     "source": "export const View = ({a, b}: {a: boolean; b: boolean}) => {\n  if (a && b) return <div>yes</div>;\n  return <div>no</div>;\n};\n"
+  },
+  {
+    "file": "app/ternary.js",
+    "source": "export function choose(a, b) {\n  return a && b ? 'yes' : 'no';\n}\n"
+  },
+  {
+    "file": "app/while.js",
+    "source": "export function count(limit, enabled) {\n  let value = 0;\n  while (value < limit && enabled) value++;\n  return value;\n}\n"
+  },
+  {
+    "file": "app/do-while.js",
+    "source": "export function count(limit, enabled) {\n  let value = 0;\n  do value++; while (value < limit && enabled);\n  return value;\n}\n"
+  },
+  {
+    "file": "app/for.js",
+    "source": "export function count(limit, enabled) {\n  let value = 0;\n  for (; value < limit && enabled; value++) work(value);\n  return value;\n}\n"
   }
 ]

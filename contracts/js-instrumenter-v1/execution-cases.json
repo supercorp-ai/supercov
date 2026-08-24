@@ -14,5 +14,21 @@
   {
     "file": "differential/negation.js",
     "source": "const effects = [];\nfunction decide(a, b, c) {\n  if (!(a || (effects.push('b'), b)) && (effects.push('c'), c)) return 1;\n  return 0;\n}\nfunction run() { return [decide(false, false, true), decide(false, true, true), decide(true, false, true)]; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/ternary.js",
+    "source": "const effects = [];\nfunction decide(a, b) {\n  return (effects.push(`a:${a}`), a) && (effects.push(`b:${b}`), b) ? 'yes' : 'no';\n}\nfunction run() { return [decide(false, false), decide(true, false), decide(true, true)]; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/while.js",
+    "source": "const effects = [];\nfunction run() {\n  let index = 0;\n  let total = 0;\n  while ((effects.push(`test:${index}`), index < 3) && total < 6) { total += ++index; }\n  return { index, total };\n}\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/do-while.js",
+    "source": "const effects = [];\nfunction run() {\n  let index = 0;\n  let total = 0;\n  do { total += index; index++; } while ((effects.push(`test:${index}`), index < 3) || total < 1);\n  return { index, total };\n}\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/for.js",
+    "source": "const effects = [];\nfunction run() {\n  let total = 0;\n  for (let index = 0; (effects.push(`test:${index}`), index < 3) && total < 6; index++) { total += index + 1; }\n  return total;\n}\nfunction observe() { return effects; }\n"
   }
 ]

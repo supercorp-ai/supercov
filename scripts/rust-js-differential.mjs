@@ -43,8 +43,7 @@ if (outputs.length !== allCases.length)
   throw new Error(`Rust candidate returned ${outputs.length} outputs for ${allCases.length} cases`);
 
 for (const [index, testCase] of allCases.entries()) {
-  const reference = instrumentMcdc(testCase.source, testCase.file).manifest.decisions
-    .filter((decision) => decision.kind === "if");
+  const reference = instrumentMcdc(testCase.source, testCase.file).manifest.decisions;
   const candidate = outputs[index];
   if (candidate.complete !== false)
     throw new Error(`${testCase.file}: partial Rust slice claimed completeness`);
@@ -159,5 +158,5 @@ for (const [offset, testCase] of generatedCorpus.entries()) {
 }
 
 console.log(
-  `[rust-js-differential] ${allCases.length} oxc/Babel if-decision manifests match; ${executionCorpus.length} behavior/effect/vector cases and ${generatedCorpus.length} generated behavior cases match`,
+  `[rust-js-differential] ${allCases.length} oxc/Babel control-decision manifests match; ${executionCorpus.length} behavior/effect/vector cases and ${generatedCorpus.length} generated behavior cases match`,
 );

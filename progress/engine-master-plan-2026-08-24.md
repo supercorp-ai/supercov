@@ -175,17 +175,22 @@ miss blocks flipping any default.
   The oxc port has now begun as an explicitly incomplete differential
   candidate: Rust 1.93 pins oxc 0.133 (the newest compatible release; newer
   oxc releases require Rust 1.96), parses and regenerates JS/TS/JSX/TSX, and
-  now performs the first real allocator-backed AST mutation. `if` predicates
-  through 32 conditions use function/program-local scratch bindings, preserve
-  each original leaf value and native short-circuit order, encode the exact
-  probe-v2 base-3 frame, and call an internal differential-only recorder.
+  now performs real allocator-backed AST mutation. `if`, ternary, `while`,
+  `do…while`, and classic-`for` predicates through 32 conditions use
+  function/program-local scratch bindings, preserve each original leaf value
+  and native short-circuit order, encode the exact probe-v2 base-3 frame, and
+  call an internal differential-only recorder. The transform reserves parent
+  decision indices before traversing original children, follows Babel's exact
+  per-node child order, and wraps only afterwards so generated probe
+  conditionals can never enter the user denominator.
   Wider decisions remain unchanged with an explicit exact-v1-fallback
-  limitation. The live Babel/oxc gate now covers 169 exact `if` manifests,
-  four hand-authored value/effect/vector cases, and 160 deterministic nested
+  limitation. The live Babel/oxc gate now covers 177 exact control-decision
+  manifests, eight hand-authored value/effect/vector cases, and 160 deterministic nested
   behavior programs. It found a third required parser normalization: redundant
   outer parentheses belong to syntax but not Babel's decision metadata span.
-  Rust tests also lock name-collision handling, reparsing, and the wide-decision
-  refusal. Unported decisions, points, semantic-safety exclusions, registration
+  Rust tests also lock name-collision handling, reparsing, decision ordering,
+  and the wide-decision refusal. Unported points/value branches,
+  semantic-safety exclusions, registration
   and evidence transport keep the candidate `complete: false`; it remains
   unreachable from the public CLI.
 
