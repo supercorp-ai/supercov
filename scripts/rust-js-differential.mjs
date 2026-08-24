@@ -97,7 +97,8 @@ if (outputs.length !== allCases.length)
   throw new Error(`Rust candidate returned ${outputs.length} outputs for ${allCases.length} cases`);
 
 for (const [index, testCase] of allCases.entries()) {
-  const reference = instrumentMcdc(testCase.source, testCase.file).manifest.decisions;
+  const referenceManifest = instrumentMcdc(testCase.source, testCase.file).manifest;
+  const reference = referenceManifest.decisions;
   const candidate = outputs[index];
   if (candidate.complete !== false)
     throw new Error(`${testCase.file}: partial Rust slice claimed completeness`);
@@ -105,7 +106,11 @@ for (const [index, testCase] of allCases.entries()) {
     throw new Error(
       `${testCase.file}: Rust/TypeScript decision mismatch\nreference=${JSON.stringify(reference)}\ncandidate=${JSON.stringify(candidate.decisions)}`,
     );
-  const referenceLimitations = instrumentMcdc(testCase.source, testCase.file).manifest.limitations ?? [];
+  if (JSON.stringify(candidate.points) !== JSON.stringify(referenceManifest.points))
+    throw new Error(
+      `${testCase.file}: Rust/TypeScript point mismatch\nreference=${JSON.stringify(referenceManifest.points)}\ncandidate=${JSON.stringify(candidate.points)}`,
+    );
+  const referenceLimitations = referenceManifest.limitations ?? [];
   if (JSON.stringify(candidate.coverageLimitations) !== JSON.stringify(referenceLimitations))
     throw new Error(
       `${testCase.file}: Rust/TypeScript limitation mismatch\nreference=${JSON.stringify(referenceLimitations)}\ncandidate=${JSON.stringify(candidate.coverageLimitations)}`,
@@ -233,5 +238,5 @@ for (const [offset, testCase] of generatedCorpus.entries()) {
 }
 
 console.log(
-  `[rust-js-differential] ${allCases.length} oxc/Babel control-decision manifests and safety limitations match; ${executionCorpus.length} behavior/effect/vector cases and ${generatedCorpus.length} generated behavior cases match`,
+  `[rust-js-differential] ${allCases.length} oxc/Babel decisions, statement/function points, and safety limitations match; ${executionCorpus.length} behavior/effect/vector cases and ${generatedCorpus.length} generated behavior cases match`,
 );

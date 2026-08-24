@@ -12,9 +12,10 @@ use oxc_ast::{
     AstBuilder, NONE,
     ast::{
         Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentTarget,
-        CallExpression, ConditionalExpression, DoWhileStatement, Expression, ForStatement,
-        Function, FunctionBody, IfStatement, NewExpression, ObjectPropertyKind, Program,
-        PropertyKind, Statement, VariableDeclarationKind, WhileStatement, WithStatement,
+        CallExpression, ConditionalExpression, Declaration, DoWhileStatement, Expression,
+        ForStatement, Function, FunctionBody, IfStatement, NewExpression, ObjectPropertyKind,
+        Program, PropertyKey, PropertyKind, Statement, VariableDeclarationKind, WhileStatement,
+        WithStatement,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -45,12 +46,26 @@ pub struct CandidateDecision {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CandidatePoint {
+    pub id: String,
+    pub kind: String,
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CandidateOutput {
     pub engine: String,
     pub complete: bool,
     pub supported_surface: String,
     pub code: String,
     pub decisions: Vec<CandidateDecision>,
+    pub points: Vec<CandidatePoint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<CandidateRuntime>,
     pub coverage_limitations: Vec<CandidateLimitation>,
@@ -103,6 +118,223 @@ struct SafetyScanner<'s> {
     dynamic_limitations: Vec<CandidateLimitation>,
     unsafe_function_depth: usize,
     with_depth: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PointPass {
+    Statements,
+    Functions,
+}
+
+struct PointCollector<'s> {
+    source: &'s str,
+    file: &'s str,
+    pass: PointPass,
+    points: Vec<CandidatePoint>,
+    source_sensitive_functions: &'s HashSet<SpanKey>,
+    unsafe_function_depth: usize,
+    with_depth: usize,
+}
+
+impl PointCollector<'_> {
+    fn point(&self, span: Span, kind: &str, label: Option<String>) -> CandidatePoint {
+        let (line, column) = line_and_utf16_column(self.source, span.start as usize);
+        CandidatePoint {
+            id: stable_id(self.source, self.file, kind, span, ""),
+            kind: kind.to_string(),
+            file: self.file.to_string(),
+            line,
+            column,
+            source: source_slice(self.source, span).to_string(),
+            label,
+        }
+    }
+
+    fn unsafe_context(&self) -> bool {
+        self.unsafe_function_depth > 0 || self.with_depth > 0
+    }
+
+    fn exit_function(&mut self, span: Span) {
+        if self.source_sensitive_functions.contains(&span_key(span)) {
+            self.unsafe_function_depth -= 1;
+        }
+    }
+}
+
+fn function_label<State>(
+    own_name: Option<&str>,
+    context: &TraverseCtx<'_, State>,
+) -> Option<String> {
+    if let Some(name) = own_name {
+        return Some(name.to_string());
+    }
+    match context.ancestors().next()? {
+        Ancestor::ObjectPropertyValue(parent) => property_label(parent.key()),
+        Ancestor::MethodDefinitionValue(parent) => property_label(parent.key()),
+        Ancestor::VariableDeclaratorInit(parent) => parent
+            .id()
+            .get_binding_identifier()
+            .map(|identifier| identifier.name.to_string()),
+        _ => None,
+    }
+}
+
+fn property_label(key: &PropertyKey<'_>) -> Option<String> {
+    key.static_name()
+        .map(|name| name.into_owned())
+        .or_else(|| match key {
+            PropertyKey::Identifier(identifier) => Some(identifier.name.to_string()),
+            _ => None,
+        })
+}
+
+fn function_point_span<State>(span: Span, context: &TraverseCtx<'_, State>) -> Span {
+    match context.ancestors().next() {
+        Some(Ancestor::ObjectPropertyValue(parent))
+            if *parent.method() || *parent.kind() != PropertyKind::Init =>
+        {
+            *parent.span()
+        }
+        Some(Ancestor::MethodDefinitionValue(parent)) => *parent.span(),
+        _ => span,
+    }
+}
+
+fn executable_statement(statement: &Statement<'_>) -> bool {
+    !matches!(
+        statement,
+        Statement::BlockStatement(_)
+            | Statement::EmptyStatement(_)
+            | Statement::FunctionDeclaration(_)
+    ) && !statement.is_typescript_syntax()
+}
+
+impl<'a> Traverse<'a, ()> for PointCollector<'_> {
+    fn enter_statement(&mut self, node: &mut Statement<'a>, context: &mut TraverseCtx<'a, ()>) {
+        let mut ancestors = context.ancestors();
+        let parent = ancestors.next();
+        let expression_arrow_body = matches!(parent, Some(Ancestor::FunctionBodyStatements(_)))
+            && matches!(ancestors.next(), Some(Ancestor::ArrowFunctionExpressionBody(arrow)) if *arrow.expression());
+        if self.pass != PointPass::Statements
+            || self.unsafe_context()
+            || !executable_statement(node)
+            || matches!(parent, Some(Ancestor::LabeledStatementBody(_)))
+            || expression_arrow_body
+        {
+            return;
+        }
+        self.points.push(self.point(node.span(), "statement", None));
+    }
+
+    fn enter_declaration(&mut self, node: &mut Declaration<'a>, context: &mut TraverseCtx<'a, ()>) {
+        if self.pass != PointPass::Statements
+            || self.unsafe_context()
+            || node.is_typescript_syntax()
+            || matches!(node, Declaration::FunctionDeclaration(_))
+            || !matches!(
+                context.ancestors().next(),
+                Some(Ancestor::ExportNamedDeclarationDeclaration(_))
+                    | Some(Ancestor::ExportDefaultDeclarationDeclaration(_))
+            )
+        {
+            return;
+        }
+        self.points.push(self.point(node.span(), "statement", None));
+    }
+
+    fn enter_function(&mut self, node: &mut Function<'a>, context: &mut TraverseCtx<'a, ()>) {
+        let point_span = function_point_span(node.span, context);
+        let label = if point_span == node.span {
+            function_label(node.id.as_ref().map(|id| id.name.as_str()), context)
+        } else {
+            None
+        };
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(node.span))
+        {
+            self.unsafe_function_depth += 1;
+            return;
+        }
+        if self.pass == PointPass::Functions && !self.unsafe_context() && node.body.is_some() {
+            self.points.push(self.point(point_span, "function", label));
+        }
+    }
+
+    fn exit_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
+        self.exit_function(node.span);
+    }
+
+    fn enter_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        context: &mut TraverseCtx<'a, ()>,
+    ) {
+        let point_span = function_point_span(node.span, context);
+        let label = if point_span == node.span {
+            function_label(None, context)
+        } else {
+            None
+        };
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(node.span))
+        {
+            self.unsafe_function_depth += 1;
+            return;
+        }
+        if self.pass == PointPass::Functions && !self.unsafe_context() {
+            self.points.push(self.point(point_span, "function", label));
+        }
+    }
+
+    fn exit_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.exit_function(node.span);
+    }
+
+    fn enter_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth += 1;
+    }
+
+    fn exit_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth -= 1;
+    }
+}
+
+fn collect_points<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    source: &str,
+    file: &str,
+    source_sensitive_functions: &HashSet<SpanKey>,
+) -> Vec<CandidatePoint> {
+    let mut points = Vec::new();
+    for pass in [PointPass::Statements, PointPass::Functions] {
+        let mut collector = PointCollector {
+            source,
+            file,
+            pass,
+            points: Vec::new(),
+            source_sensitive_functions,
+            unsafe_function_depth: 0,
+            with_depth: 0,
+        };
+        traverse_mut(&mut collector, allocator, program, Default::default(), ());
+        points.extend(collector.points);
+    }
+    points
 }
 
 impl<'s> SafetyScanner<'s> {
@@ -359,6 +591,13 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
     }
 
     let safety = analyze_safety(&allocator, &mut parsed.program, source, file);
+    let points = collect_points(
+        &allocator,
+        &mut parsed.program,
+        source,
+        file,
+        &safety.source_sensitive_functions,
+    );
     let mut collector = DecisionCollector {
         source,
         file,
@@ -374,6 +613,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         supported_surface: "control-decision-manifest-v1".to_string(),
         code: generated,
         decisions: collector.decisions,
+        points,
         runtime: None,
         coverage_limitations: safety.limitations,
         limitations: vec![
@@ -407,6 +647,13 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     }
 
     let safety = analyze_safety(&allocator, &mut parsed.program, source, file);
+    let points = collect_points(
+        &allocator,
+        &mut parsed.program,
+        source,
+        file,
+        &safety.source_sensitive_functions,
+    );
     let mut collector = DecisionCollector {
         source,
         file,
@@ -452,6 +699,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         supported_surface: "control-decision-probe-v2-v1-fallback-safety-candidate".to_string(),
         code: Codegen::new().build(&parsed.program).code,
         decisions: collector.decisions,
+        points,
         runtime: Some(CandidateRuntime {
             mcdc_begin,
             mcdc_condition,
@@ -1203,6 +1451,8 @@ mod tests {
         assert!(output.code.contains("_supercovMcdcResult"));
         assert!(output.code.contains("+= _supercovMcdcValue"));
         assert_eq!(output.decisions.len(), 1);
+        assert!(output.points.iter().any(|point| point.kind == "statement"));
+        assert!(output.points.iter().any(|point| point.kind == "function"));
 
         let allocator = Allocator::default();
         let reparsed = Parser::new(
