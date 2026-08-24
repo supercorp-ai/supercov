@@ -20,6 +20,7 @@ import { afterEach, describe, it } from "node:test";
 import { expect } from "../support/expect.ts";
 import {
   acquireProjectLock,
+  pruneCachedWorkspaceSources,
   cachedWorkspacePath,
   cleanCoverageStorage,
   isolatedWorkspacePath,
@@ -107,11 +108,11 @@ describe("isolated run workspaces", () => {
 
   it("never traverses nested Supercov run stores", () => {
     const root = project();
-    mkdirSync(resolve(root, "packages/example/.supercov/cache"), {
+    mkdirSync(resolve(root, "packages/example/.supercov/.cache"), {
       recursive: true,
     });
     writeFileSync(
-      resolve(root, "packages/example/.supercov/cache/stale.json"),
+      resolve(root, "packages/example/.supercov/.cache/stale.json"),
       "stale\n",
     );
     writeFileSync(resolve(root, "packages/example/source.ts"), "source\n");
@@ -190,6 +191,46 @@ describe("isolated run workspaces", () => {
     expect(() => removeIsolatedWorkspace(root, "")).toThrow(
       /Refusing to remove unexpected workspace path/,
     );
+  });
+
+  it("prunes copied sources from the cache but keeps reusable artifacts", () => {
+    const root = project();
+    mkdirSync(resolve(root, "node_modules/example"), { recursive: true });
+    writeFileSync(resolve(root, "node_modules/example/index.js"), "module\n");
+    writeFileSync(resolve(root, "src/index.test.ts"), "test copy\n");
+    const workspace = prepareCachedWorkspace(root);
+
+    mkdirSync(resolve(workspace, ".supercov"), { recursive: true });
+    mkdirSync(resolve(workspace, "build"), { recursive: true });
+    writeFileSync(resolve(workspace, "build/index.js"), "instrumented\n");
+    writeFileSync(
+      resolve(workspace, ".supercov/build-cache.json"),
+      JSON.stringify({ artifactPaths: ["build", ".supercov/manifest.json"] }),
+    );
+
+    const removed = pruneCachedWorkspaceSources(root);
+    expect(removed).toContain("src");
+    expect(removed).toContain("package.json");
+    expect(existsSync(resolve(workspace, "src"))).toBe(false);
+    expect(existsSync(resolve(workspace, "node_modules/example"))).toBe(true);
+    expect(readFileSync(resolve(workspace, "build/index.js"), "utf8")).toBe(
+      "instrumented\n",
+    );
+    expect(
+      existsSync(resolve(workspace, ".supercov/build-cache.json")),
+    ).toBe(true);
+
+    // A refresh after pruning restores a complete workspace.
+    const refreshed = prepareCachedWorkspace(root);
+    expect(readFileSync(resolve(refreshed, "src/index.ts"), "utf8")).toBe(
+      "export const value = 1;\n",
+    );
+
+    expect(
+      pruneCachedWorkspaceSources(
+        resolve(root, "never-prepared-subdirectory"),
+      ),
+    ).toEqual([]);
   });
 
   it("recovers every interrupted cache publication boundary", () => {

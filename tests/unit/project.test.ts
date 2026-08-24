@@ -108,10 +108,30 @@ describe("coverage project discovery", () => {
       }),
       "src/index.ts": "export const ready = true",
       "jest.config.js": "module.exports = {}",
+      // This suite deliberately tests compiled output, so the build must run.
+      "test/index.test.js": "require('../dist/index.js')",
     });
 
     expect(discoverCoverageProject(root, {}, ["npm", "test"])).toMatchObject({
       buildAdapter: "generic",
+      usesJest: true,
+    });
+  });
+
+  it("skips an unrelated production build for a source-transforming Jest suite", () => {
+    const root = project({
+      "package.json": JSON.stringify({
+        scripts: { build: "node build", test: "jest" },
+        devDependencies: { jest: "29" },
+      }),
+      "src/index.ts": "export const ready = true",
+      "jest.config.js": "module.exports = {}",
+      "test/index.test.js": "require('../src/index.ts')",
+    });
+
+    expect(discoverCoverageProject(root, {}, ["npm", "test"])).toMatchObject({
+      buildAdapter: "direct",
+      buildCommand: [],
       usesJest: true,
     });
   });

@@ -214,7 +214,36 @@ function words(value: string): Set<string> {
   );
 }
 
-function expandedCommand(root: string, command: string[]): string {
+const BUILD_OUTPUT_IMPORT_PATTERN =
+  /(?:from\s*|require\s*\(\s*|import\s*\(\s*)["'](?:\.\.?\/)+(?:dist|build|out|output)(?:\/|["'])/;
+
+/** Some suites deliberately test compiled output; those still need the build. */
+function testsImportBuildOutput(root: string): boolean {
+  const visit = (directory: string): boolean => {
+    if (!existsSync(directory)) return false;
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+      const path = resolve(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (visit(path)) return true;
+        continue;
+      }
+      if (!/\.[cm]?[jt]sx?$/.test(entry.name)) continue;
+      try {
+        if (BUILD_OUTPUT_IMPORT_PATTERN.test(readFileSync(path, "utf8")))
+          return true;
+      } catch {
+        // Discovery is best-effort; unreadable files prove nothing.
+      }
+    }
+    return false;
+  };
+  return ["test", "tests", "spec", "specs", "e2e", "__tests__"].some(
+    (directory) => visit(resolve(root, directory)),
+  );
+}
+
+export function expandedCommand(root: string, command: string[]): string {
   const executable = basename(command[0] ?? "").replace(/\.(?:cmd|exe)$/i, "");
   const runIndex = command.findIndex((argument) => argument === "run");
   const shorthandScript =
@@ -337,12 +366,18 @@ export function discoverCoverageProject(
     Boolean(jestConfig) ||
     /(?:^|\s)(?:npx\s+)?jest(?:\s|$)/.test(expandedTestCommand) ||
     manifest.jest !== undefined;
+  // Jest and Vitest transform application source in-process; unless the test
+  // files themselves import build output, the production build is never what
+  // their tests execute, so running it only adds time and risk (dayjs's
+  // `node build` script, unbuild artifacts, ...).
   const executesSourceDirectly =
-    /(?:^|\s)node\s+--test(?:\s|$)/.test(expandedTestCommand) &&
-    /\.[cm]?tsx?(?:\s|$)/.test(expandedTestCommand) &&
-    !/(?:^|\s)(?:vite\s+build|tsc|webpack|rollup|next\s+build|remix\s+build)(?:\s|$)/.test(
-      expandedTestCommand,
-    );
+    (/(?:^|\s|\/)(?:jest|vitest)(?:\s|$)/.test(expandedTestCommand) &&
+      !testsImportBuildOutput(root)) ||
+    (/(?:^|\s)node\s+--test(?:\s|$)/.test(expandedTestCommand) &&
+      /\.[cm]?tsx?(?:\s|$)/.test(expandedTestCommand) &&
+      !/(?:^|\s)(?:vite\s+build|tsc|webpack|rollup|next\s+build|remix\s+build)(?:\s|$)/.test(
+        expandedTestCommand,
+      ));
   const buildCommand = manifest.scripts?.["build"] && !executesSourceDirectly
     ? ["npm", "run", "build"]
     : [];

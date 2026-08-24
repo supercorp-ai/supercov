@@ -752,16 +752,40 @@ function attribution(
   };
 }
 
-function coverageDiagnostics(
+export function coverageDiagnostics(
   report: McdcReport,
   selected?: Set<string>,
 ): Array<{
-  code: "REMOTE_SERVER_EVIDENCE_MISSING" | "CORRUPT_EVIDENCE_RECORDS";
+  code:
+    | "REMOTE_SERVER_EVIDENCE_MISSING"
+    | "CORRUPT_EVIDENCE_RECORDS"
+    | "TEST_EVIDENCE_MISSING";
   severity: "warning" | "error";
   message: string;
 }> {
   const observed = attribution(report, selected);
   const diagnostics: ReturnType<typeof coverageDiagnostics> = [];
+  // A test that opened assertion phases but attributed no coverage at all is
+  // the signature of lost evidence transport, not of a test that touched no
+  // measured source: the phases prove the adapter instrumented its attempt.
+  const emptyEvidenceTests = report.tests.filter(
+    (test) =>
+      (test.role ?? "test") === "test" &&
+      (!selected || selected.has(test.id)) &&
+      test.lines.length === 0 &&
+      test.hits.length === 0 &&
+      test.decisions.length === 0 &&
+      report.phases.some((phase) => phase.test === test.id),
+  );
+  if (emptyEvidenceTests.length > 0) {
+    diagnostics.push({
+      code: "TEST_EVIDENCE_MISSING",
+      severity: "error",
+      message:
+        `${emptyEvidenceTests.length} test(s) recorded assertion phases but attributed zero coverage evidence; ` +
+        `their execution was lost in evidence transport. First: ${emptyEvidenceTests[0]!.name}`,
+    });
+  }
   if ((report.transport?.corruptRecords ?? 0) > 0) {
     diagnostics.push({
       code: "CORRUPT_EVIDENCE_RECORDS",

@@ -61,8 +61,11 @@ function wrappedRegistration(original: TestRegistration): TestRegistration {
         ? "skipped"
         : "passed";
       const contextProxy = new Proxy(context, {
-        get(target, property, receiver) {
-          const value = Reflect.get(target, property, receiver) as unknown;
+        get(target, property) {
+          // Read with the real context as receiver: TestContext accessors
+          // (t.assert, t.mock, ...) touch private fields that only exist on
+          // the target, never on the proxy.
+          const value = Reflect.get(target, property, target) as unknown;
           if ((property === "skip" || property === "todo") && typeof value === "function") {
             return (...callArgs: unknown[]) => {
               status = "skipped";

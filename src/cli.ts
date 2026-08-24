@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createRequire } from "node:module";
 import {
   copyFileSync,
   existsSync,
@@ -11,7 +12,7 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { atomicRenameSync, atomicWriteFileSync } from "./atomic.ts";
 import { coverageQueryCommands, runQueryCommand } from "./query.ts";
-import { discoverCoverageProject } from "./project.ts";
+import { discoverCoverageProject, expandedCommand } from "./project.ts";
 import { createRunIntegrity } from "./integrity.ts";
 import { writeEvidenceArchive } from "./evidenceArchive.ts";
 import { mergeCoverageRuns } from "./merge.ts";
@@ -29,6 +30,7 @@ import {
   cleanCoverageStorage,
   finalizePublishedRunStorage,
   prepareCachedWorkspace,
+  pruneCachedWorkspaceSources,
   pruneCoverageStorage,
   recoverAbandonedRuns,
   updateRunState,
@@ -184,6 +186,10 @@ async function createCoverageRun(command: string[]): Promise<number> {
   if (recovered.length > 0)
     console.error(`[supercov] recovered abandoned run(s): ${recovered.join(", ")}`);
   const lock = acquireProjectLock(root, runId);
+  // The run store is derived local state; keep it out of the user's diff
+  // without asking them to edit their own .gitignore.
+  const storeIgnorePath = resolve(root, ".supercov/.gitignore");
+  if (!existsSync(storeIgnorePath)) atomicWriteFileSync(storeIgnorePath, "*\n");
   const project = discoverCoverageProject(root, process.env, command);
   const packageSource = fileURLToPath(new URL(".", import.meta.url));
   const runIntegrity = createRunIntegrity(root, project, packageSource);
@@ -398,6 +404,26 @@ async function createCoverageRun(command: string[]): Promise<number> {
       ),
     );
 
+    // Strict (pnpm-style) installs never hoist vite to the project root, so
+    // the generated configs must import it exactly where the project's own
+    // tooling would find it: directly, or through vitest's dependencies.
+    const viteModuleSpecifier = ((): string => {
+      const projectRequire = createRequire(resolve(root, "package.json"));
+      try {
+        return pathToFileURL(projectRequire.resolve("vite")).href;
+      } catch {
+        try {
+          return pathToFileURL(
+            createRequire(
+              projectRequire.resolve("vitest/package.json"),
+            ).resolve("vite"),
+          ).href;
+        } catch {
+          return "vite";
+        }
+      }
+    })();
+
     if (isolatedPlaywrightConfig) {
       // Keep this import inside Playwright's own transform graph. In older
       // supported releases, a native ESM file-URL import of a TypeScript
@@ -447,7 +473,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
     atomicWriteFileSync(
       generatedViteConfig,
       [
-        `import { loadConfigFromFile, mergeConfig } from 'vite';`,
+        `import { loadConfigFromFile, mergeConfig } from '${viteModuleSpecifier}';`,
         `import { isAbsolute, relative, resolve } from 'node:path';`,
         `import { mcdcVitePlugin } from '${pathToFileURL(resolve(packageSource, "vitePlugin.js")).href}';`,
         `export default async function supercovViteConfig(env) {`,
@@ -474,7 +500,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
     atomicWriteFileSync(
       generatedVitestConfig,
       [
-        `import { loadConfigFromFile, mergeConfig } from 'vite';`,
+        `import { loadConfigFromFile, mergeConfig } from '${viteModuleSpecifier}';`,
         `import { resolve } from 'node:path';`,
         `import { mcdcVitePlugin } from '${pathToFileURL(resolve(packageSource, "vitePlugin.js")).href}';`,
         `import SupercovVitestReporter from '${pathToFileURL(resolve(packageSource, "vitestReporter.js")).href}';`,
@@ -538,11 +564,24 @@ async function createCoverageRun(command: string[]): Promise<number> {
         "",
       ].join("\n"),
     );
+    // Jest configuration commonly lives in the package.json "jest" field;
+    // replacing it with {} silently changes test discovery (roots, testRegex).
+    const packageJestConfig = ((): unknown => {
+      try {
+        return (
+          JSON.parse(readFileSync(resolve(root, "package.json"), "utf8")) as {
+            jest?: unknown;
+          }
+        ).jest;
+      } catch {
+        return undefined;
+      }
+    })();
     const jestOriginal = isolatedJestConfig
       ? usesLegacyJestConfig
         ? `const originalModule = require(${JSON.stringify(isolatedJestConfig)});\nconst original = typeof originalModule === 'function' ? originalModule() : originalModule;`
         : `import originalModule from ${JSON.stringify(pathToFileURL(isolatedJestConfig).href)};\nconst original = typeof originalModule === 'function' ? await originalModule() : originalModule;`
-      : `const original = {};`;
+      : `const original = ${JSON.stringify(packageJestConfig ?? {})};`;
     atomicWriteFileSync(
       generatedJestConfig,
       [
@@ -552,6 +591,16 @@ async function createCoverageRun(command: string[]): Promise<number> {
         jestOriginal,
         `const decorate = config => ({ ...config,`,
         `  rootDir: config?.rootDir ? (isAbsolute(config.rootDir) ? config.rootDir : resolve(${JSON.stringify(isolatedJestConfig ? resolve(isolatedJestConfig, "..") : isolatedRoot)}, config.rootDir)) : ${JSON.stringify(isolatedRoot)},`,
+        // Jest matches ignore patterns against absolute test paths, and the
+        // isolated workspace path itself contains a node_modules segment.
+        // Anchor the default pattern below the workspace so it keeps ignoring
+        // the project's dependencies without ignoring the whole workspace.
+        `  testPathIgnorePatterns: (config?.testPathIgnorePatterns ?? ['/node_modules/']).map(pattern => pattern === '/node_modules/' ? '<rootDir>/.*node_modules/' : pattern),`,
+        // Supercov replaces coverage measurement inside the wrapped run; the
+        // project's own istanbul pass would measure instrumented code and
+        // fail any thresholds against meaningless numbers.
+        `  collectCoverage: false,`,
+        `  coverageThreshold: undefined,`,
         `  setupFilesAfterEnv: [...(config?.setupFilesAfterEnv ?? []), ${JSON.stringify(generatedJestSetup)}],`,
         `  reporters: [...(config?.reporters ?? ['default']), ${JSON.stringify(generatedJestReporter)}],`,
         `  testLocationInResults: true,`,
@@ -681,6 +730,13 @@ async function createCoverageRun(command: string[]): Promise<number> {
           `[supercov] attributed ${assertionCount} native node:assert call(s)`,
         );
       updateRunState(root, runId, { status: "testing" });
+      const innerCoverageTool = expandedCommand(root, command)
+        .split(/\s+/)
+        .find((part) => /(?:^|\/)(?:c8|nyc)$/.test(part));
+      if (innerCoverageTool)
+        console.error(
+          `[supercov] the wrapped command runs ${innerCoverageTool} over Supercov-instrumented code; its percentages and thresholds are not meaningful there. Wrap the underlying test command instead (for example: supercov -- node --test).`,
+        );
       console.error(`[supercov] running in isolated workspace: ${command.join(" ")}`);
       phaseStarted = performance.now();
       testResult = await runChild(command[0]!, command.slice(1), {
@@ -773,7 +829,10 @@ async function createCoverageRun(command: string[]): Promise<number> {
     } catch {
       // The original error remains authoritative.
     }
-    if (!receivedSignal) console.error(`[supercov] ${message}`);
+    if (!receivedSignal)
+      console.error(
+        `[supercov] ${process.env["SUPERCOV_DEBUG"] && error instanceof Error ? error.stack ?? message : message}`,
+      );
     return receivedSignal ? signalExitCode(receivedSignal) : 1;
   } finally {
     if (!timingsPrinted)
@@ -792,9 +851,11 @@ async function createCoverageRun(command: string[]): Promise<number> {
         recursive: true,
         force: true,
       });
-      // The stable isolated namespace is a deliberate build/snapshot cache.
-      // It never overlaps the user's ordinary build and `supercov clean`
-      // removes it deterministically.
+      // The stable isolated namespace persists as a build/snapshot cache at a
+      // stable path, but its copied source and test files must not: ordinary
+      // runner discovery at the project root would double-count the suite.
+      if (!process.env["SUPERCOV_KEEP_WORKSPACE"])
+        pruneCachedWorkspaceSources(root);
     } catch (error) {
       console.error(`[supercov] isolated workspace cleanup failed: ${String(error)}`);
     }

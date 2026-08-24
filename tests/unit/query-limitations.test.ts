@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import { createMcdcReport } from "../../src/analyze.ts";
 import {
+  coverageDiagnostics,
   coverageMeasurement,
   fileGaps,
 } from "../../src/query.ts";
@@ -108,5 +109,64 @@ describe("coverage measurement limitations", () => {
         "source-scope": 0,
       },
     });
+  });
+
+  it("flags a test whose phases arrived without any coverage evidence", () => {
+    const manifest = {
+      decisions: [],
+      branches: [],
+      points: [
+        {
+          id: "point",
+          kind: "statement" as const,
+          file: "src/app.ts",
+          line: 1,
+          column: 1,
+          source: "run();",
+        },
+      ],
+    };
+    const phases = [
+      {
+        id: "phase-1",
+        kind: "assertion" as const,
+        operation: "expect.toBe",
+        startedAtMs: 1,
+        status: "passed" as const,
+      },
+    ];
+    const lost = createMcdcReport(manifest, [
+      {
+        testId: "lost-test",
+        test: "loses its evidence",
+        retry: 0,
+        status: "passed",
+        phases,
+        runtime: [],
+        browser: [],
+        server: [],
+      },
+    ]);
+    expect(coverageDiagnostics(lost)).toMatchObject([
+      {
+        code: "TEST_EVIDENCE_MISSING",
+        severity: "error",
+        message: expect.stringContaining("loses its evidence"),
+      },
+    ]);
+
+    const healthy = createMcdcReport(manifest, [
+      {
+        testId: "healthy-test",
+        test: "keeps its evidence",
+        retry: 0,
+        status: "passed",
+        phases,
+        runtime: [{ decisions: [], hits: ["point"] }],
+        browser: [],
+        server: [],
+      },
+    ]);
+    expect(coverageDiagnostics(healthy)).toEqual([]);
   });
 });

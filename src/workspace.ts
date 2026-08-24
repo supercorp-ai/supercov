@@ -98,7 +98,37 @@ export function isolatedWorkspacePath(root: string, runId: string): string {
  * The project lock makes refreshes single-writer.
  */
 export function cachedWorkspacePath(root: string): string {
-  return resolve(root, ".supercov/cache/instrumented-workspace", basename(root));
+  return resolve(root, ".supercov/.cache/instrumented-workspace", basename(root));
+}
+
+/**
+ * Remove the copied source and test files from the stable cached workspace
+ * once a run ends. Between runs those copies are pure liability: the next
+ * refresh re-copies them anyway, but an ordinary test runner invoked at the
+ * project root (whose default discovery does not exclude dot-directories —
+ * Vitest 4 excludes only node_modules and .git) would find the copied test
+ * files and silently double-count the user's suite. Keep only what the next
+ * run genuinely reuses: dependency symlinks, the generated adapter directory,
+ * and the instrumented build artifacts the build cache declares.
+ */
+export function pruneCachedWorkspaceSources(root: string): string[] {
+  const workspace = cachedWorkspacePath(root);
+  if (!existsSync(workspace)) return [];
+  const metadata = readJson<{ artifactPaths?: string[] }>(
+    resolve(workspace, ".supercov/build-cache.json"),
+  );
+  const keepRoots = new Set(["node_modules", ".supercov"]);
+  for (const artifact of metadata?.artifactPaths ?? []) {
+    const top = artifact.split(/[\\/]/)[0];
+    if (top) keepRoots.add(top);
+  }
+  const removed: string[] = [];
+  for (const entry of readdirSync(workspace, { withFileTypes: true })) {
+    if (keepRoots.has(entry.name)) continue;
+    rmSync(resolve(workspace, entry.name), { recursive: true, force: true });
+    removed.push(entry.name);
+  }
+  return removed.sort();
 }
 
 function cacheTransactionPrefix(
@@ -641,7 +671,7 @@ function cleanCoverageStorageLocked(
         rmSync(resolve(runsRoot, id), { recursive: true, force: true });
     }
   }
-  const buildCache = resolve(root, ".supercov/cache/instrumented-workspace");
+  const buildCache = resolve(root, ".supercov/.cache/instrumented-workspace");
   const removedBuildCache =
     removeBuildCache && active.size === 0 && existsSync(buildCache);
   if (removedBuildCache && !options.dryRun)

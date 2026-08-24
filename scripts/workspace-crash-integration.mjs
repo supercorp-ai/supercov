@@ -61,7 +61,7 @@ try {
   const before = snapshot(root);
   const workspace = resolve(
     root,
-    ".supercov/cache/instrumented-workspace",
+    ".supercov/.cache/instrumented-workspace",
     basename(root),
   );
   const cacheParent = resolve(workspace, "..");

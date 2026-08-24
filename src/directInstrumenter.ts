@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  statSync,
 } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { atomicWriteFileSync } from "./atomic.ts";
@@ -54,6 +55,18 @@ function isInside(parent: string, child: string): boolean {
   return local === "" || (!local.startsWith(`..${sep}`) && local !== "..");
 }
 
+function runtimeHostDirectory(candidate: string): string | undefined {
+  // A source root may be a package entry target, i.e. a file such as
+  // "lib/index.cjs"; the runtime then belongs beside it, not inside it.
+  try {
+    return statSync(candidate).isDirectory()
+      ? candidate
+      : resolve(candidate, "..");
+  } catch {
+    return undefined;
+  }
+}
+
 function containedRuntimePath(
   root: string,
   sourcePath: string,
@@ -63,8 +76,9 @@ function containedRuntimePath(
     .map((sourceRoot) => resolve(root, sourceRoot))
     .filter((sourceRoot) => isInside(sourceRoot, sourcePath))
     .sort((left, right) => right.length - left.length);
-  const sourceRoot = absoluteRoots[0];
-  if (!sourceRoot) return resolve(root, ".supercov/runtime.js");
+  const sourceRoot = runtimeHostDirectory(absoluteRoots[0] ?? "");
+  if (!sourceRoot || absoluteRoots.length === 0)
+    return resolve(root, ".supercov/runtime.js");
   const runtimeDirectory = resolve(sourceRoot, ".supercov");
   mkdirSync(runtimeDirectory, { recursive: true });
   for (const file of ["runtime.js", "runtime.d.ts", "transport.js"]) {
