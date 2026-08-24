@@ -17,12 +17,13 @@ use oxc_ast::{
     AstBuilder, NONE,
     ast::{
         Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
-        AssignmentTarget, CallExpression, ChainExpression, ComputedMemberExpression,
-        ConditionalExpression, Declaration, DoWhileStatement, Expression, ForInStatement,
-        ForOfStatement, ForStatement, FormalParameterKind, FormalParameters, Function,
-        FunctionBody, IfStatement, LogicalExpression, NewExpression, ObjectPropertyKind,
-        PrivateFieldExpression, Program, PropertyKey, PropertyKind, Statement,
-        StaticMemberExpression, VariableDeclarationKind, WhileStatement, WithStatement,
+        AssignmentPattern, AssignmentTarget, BindingPattern, CallExpression, ChainExpression,
+        ComputedMemberExpression, ConditionalExpression, Declaration, DoWhileStatement, Expression,
+        ForInStatement, ForOfStatement, ForStatement, ForStatementLeft, FormalParameter,
+        FormalParameterKind, FormalParameters, Function, FunctionBody, IfStatement,
+        LogicalExpression, NewExpression, ObjectPropertyKind, PrivateFieldExpression, Program,
+        PropertyKey, PropertyKind, Statement, StaticMemberExpression, VariableDeclaration,
+        VariableDeclarationKind, WhileStatement, WithStatement,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -115,6 +116,8 @@ pub struct CandidateRuntime {
     pub optional_call_reached: String,
     pub optional_call_continued: String,
     pub optional_call_end: String,
+    pub default_selected: String,
+    pub default_entered: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -582,6 +585,22 @@ fn expression_is_identifier(expression: &Expression<'_>, name: &str) -> bool {
     matches!(expression, Expression::Identifier(identifier) if identifier.name == name)
 }
 
+fn binding_identifier_name(pattern: &BindingPattern<'_>) -> Option<String> {
+    match pattern {
+        BindingPattern::BindingIdentifier(identifier) => Some(identifier.name.to_string()),
+        _ => None,
+    }
+}
+
+fn expression_is_anonymous_definition(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::ArrowFunctionExpression(_) => true,
+        Expression::FunctionExpression(function) => function.id.is_none(),
+        Expression::ClassExpression(class) => class.id.is_none(),
+        _ => false,
+    }
+}
+
 fn observes_function_source<State>(span: Span, context: &TraverseCtx<'_, State>) -> bool {
     let mut child_end = span.end;
     for ancestor in context.ancestors() {
@@ -696,6 +715,13 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         file,
         &safety.source_sensitive_functions,
     );
+    let default_analysis = collect_default_branches(
+        &allocator,
+        &mut parsed.program,
+        source,
+        file,
+        &safety.source_sensitive_functions,
+    );
     let logical_analysis = collect_logical_value_branches(
         &allocator,
         &mut parsed.program,
@@ -707,6 +733,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
     let mut branches = optional_analysis.branches;
     branches.extend(call_analysis.branches);
     branches.extend(assignment_analysis.branches);
+    branches.extend(default_analysis.branches);
     branches.extend(logical_analysis.branches);
     let generated = Codegen::new().build(&parsed.program).code;
     Ok(CandidateOutput {
@@ -721,6 +748,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         coverage_limitations: {
             let mut limitations = safety.semantic_limitations;
             limitations.extend(call_analysis.limitations);
+            limitations.extend(default_analysis.limitations);
             limitations.extend(safety.dynamic_limitations);
             limitations
         },
@@ -792,6 +820,13 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         file,
         &safety.source_sensitive_functions,
     );
+    let default_analysis = collect_default_branches(
+        &allocator,
+        &mut parsed.program,
+        source,
+        file,
+        &safety.source_sensitive_functions,
+    );
     let logical_analysis = collect_logical_value_branches(
         &allocator,
         &mut parsed.program,
@@ -803,6 +838,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     let mut branches = optional_analysis.branches;
     branches.extend(call_analysis.branches.clone());
     branches.extend(assignment_analysis.branches);
+    branches.extend(default_analysis.branches.clone());
     branches.extend(logical_analysis.branches);
 
     let mut names = CandidateNames::new(source);
@@ -819,6 +855,8 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     let optional_call_reached = names.allocate("__supercovOptionalCallReached");
     let optional_call_continued = names.allocate("__supercovOptionalCallContinued");
     let optional_call_end = names.allocate("__supercovOptionalCallEnd");
+    let default_selected = names.allocate("__supercovDefaultSelected");
+    let default_entered = names.allocate("__supercovDefaultEntered");
     let ast = AstBuilder::new(&allocator);
     let mut statement_transformer = StatementProbeTransformer {
         ast,
@@ -856,6 +894,20 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         safety.with_statements.clone(),
     );
     call_transformer.visit_program(&mut parsed.program);
+    let mut default_transformer = DefaultTransformer {
+        ast,
+        default_selected: default_selected.clone(),
+        default_entered: default_entered.clone(),
+        parameter_targets: default_analysis.parameter_targets,
+        binding_targets: default_analysis.binding_targets,
+        function_entries: Vec::new(),
+        declaration_entries: HashMap::new(),
+        active_declaration: Vec::new(),
+        parameter_pattern_depth: 0,
+        source_sensitive_functions: safety.source_sensitive_functions.clone(),
+        with_statements: safety.with_statements.clone(),
+    };
+    default_transformer.visit_program(&mut parsed.program);
     let mut transformer = ControlProbeV2Transformer {
         ast,
         file,
@@ -916,10 +968,13 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
             optional_call_reached,
             optional_call_continued,
             optional_call_end,
+            default_selected,
+            default_entered,
         }),
         coverage_limitations: {
             let mut limitations = safety.semantic_limitations;
             limitations.extend(call_analysis.limitations);
+            limitations.extend(default_analysis.limitations);
             limitations.extend(safety.dynamic_limitations);
             limitations
         },
@@ -1502,6 +1557,256 @@ impl<'a> VisitMut<'a> for OptionalCallTransformer<'a, '_> {
         if let Some(site_keys) = self.roots.remove(&key) {
             self.wrap_root(expression, &site_keys);
         }
+    }
+}
+
+struct DefaultTransformer<'a> {
+    ast: AstBuilder<'a>,
+    default_selected: String,
+    default_entered: String,
+    parameter_targets: HashMap<SpanKey, DefaultTarget>,
+    binding_targets: HashMap<SpanKey, DefaultTarget>,
+    function_entries: Vec<Vec<Statement<'a>>>,
+    declaration_entries: HashMap<SpanKey, Vec<Statement<'a>>>,
+    active_declaration: Vec<SpanKey>,
+    parameter_pattern_depth: usize,
+    source_sensitive_functions: HashSet<SpanKey>,
+    with_statements: HashSet<SpanKey>,
+}
+
+impl<'a> DefaultTransformer<'a> {
+    fn identifier(&self, name: &str) -> Expression<'a> {
+        self.ast
+            .expression_identifier(Span::default(), self.ast.ident(name))
+    }
+
+    fn string_argument(&self, value: &str) -> Argument<'a> {
+        Argument::from(self.ast.expression_string_literal(
+            Span::default(),
+            self.ast.str(value),
+            None,
+        ))
+    }
+
+    fn selected(&self, value: Expression<'a>, target: &DefaultTarget) -> Expression<'a> {
+        let mut arguments = self.ast.vec_from_array([
+            self.string_argument(&target.default_id),
+            Argument::from(value),
+        ]);
+        if let Some(name) = &target.inferred_name {
+            arguments.push(self.string_argument(name));
+        }
+        self.ast.expression_call(
+            Span::default(),
+            self.identifier(&self.default_selected),
+            NONE,
+            arguments,
+            false,
+        )
+    }
+
+    fn entered(&self, target: &DefaultTarget) -> Statement<'a> {
+        self.ast.statement_expression(
+            Span::default(),
+            self.ast.expression_call(
+                Span::default(),
+                self.identifier(&self.default_entered),
+                NONE,
+                self.ast.vec_from_array([
+                    self.string_argument(&target.default_id),
+                    self.string_argument(&target.provided_id),
+                ]),
+                false,
+            ),
+        )
+    }
+
+    fn push_entry(&mut self, target: &DefaultTarget) {
+        let entry = self.entered(target);
+        if self.parameter_pattern_depth > 0 {
+            self.function_entries
+                .last_mut()
+                .expect("parameter default must belong to a function")
+                .push(entry);
+        } else {
+            let declaration = *self
+                .active_declaration
+                .last()
+                .expect("binding default must belong to a declaration");
+            self.declaration_entries
+                .entry(declaration)
+                .or_default()
+                .push(entry);
+        }
+    }
+
+    fn prepend_entries(&self, body: &mut Statement<'a>, entries: Vec<Statement<'a>>) {
+        if entries.is_empty() {
+            return;
+        }
+        if let Statement::BlockStatement(block) = body {
+            for (index, entry) in entries.into_iter().enumerate() {
+                block.body.insert(index, entry);
+            }
+            return;
+        }
+        let original = body.take_in(self.ast.allocator);
+        let mut statements = self.ast.vec_with_capacity(entries.len() + 1);
+        statements.extend(entries);
+        statements.push(original);
+        *body = self.ast.statement_block(Span::default(), statements);
+    }
+
+    fn variable_span(statement: &Statement<'a>) -> Option<SpanKey> {
+        match statement {
+            Statement::VariableDeclaration(declaration) => Some(span_key(declaration.span)),
+            Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                Some(Declaration::VariableDeclaration(declaration)) => {
+                    Some(span_key(declaration.span))
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn loop_declaration_span(left: &ForStatementLeft<'a>) -> Option<SpanKey> {
+        match left {
+            ForStatementLeft::VariableDeclaration(declaration) => Some(span_key(declaration.span)),
+            _ => None,
+        }
+    }
+}
+
+impl<'a> VisitMut<'a> for DefaultTransformer<'a> {
+    fn visit_statements(&mut self, statements: &mut oxc_allocator::Vec<'a, Statement<'a>>) {
+        let original = statements.take_in(self.ast.allocator);
+        let mut instrumented = self.ast.vec_with_capacity(original.len() * 2);
+        for mut statement in original {
+            let declaration = Self::variable_span(&statement);
+            self.visit_statement(&mut statement);
+            instrumented.push(statement);
+            if let Some(declaration) = declaration
+                && let Some(entries) = self.declaration_entries.remove(&declaration)
+            {
+                instrumented.extend(entries);
+            }
+        }
+        *statements = instrumented;
+    }
+
+    fn visit_function(&mut self, function: &mut Function<'a>, flags: ScopeFlags) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        self.function_entries.push(Vec::new());
+        walk_mut::walk_function(self, function, flags);
+        let entries = self
+            .function_entries
+            .pop()
+            .expect("default function-entry stack must remain balanced");
+        if let Some(body) = &mut function.body {
+            for (index, entry) in entries.into_iter().enumerate() {
+                body.statements.insert(index, entry);
+            }
+        }
+    }
+
+    fn visit_arrow_function_expression(&mut self, function: &mut ArrowFunctionExpression<'a>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        self.function_entries.push(Vec::new());
+        walk_mut::walk_arrow_function_expression(self, function);
+        let entries = self
+            .function_entries
+            .pop()
+            .expect("default arrow-entry stack must remain balanced");
+        for (index, entry) in entries.into_iter().enumerate() {
+            function.body.statements.insert(index, entry);
+        }
+    }
+
+    fn visit_formal_parameter(&mut self, parameter: &mut FormalParameter<'a>) {
+        let outer = self.parameter_targets.remove(&span_key(parameter.span));
+        if let Some(target) = &outer {
+            let entry = self.entered(target);
+            self.function_entries
+                .last_mut()
+                .expect("formal parameter must belong to a function")
+                .push(entry);
+        }
+        self.visit_decorators(&mut parameter.decorators);
+        self.parameter_pattern_depth += 1;
+        self.visit_binding_pattern(&mut parameter.pattern);
+        self.parameter_pattern_depth -= 1;
+        if let Some(annotation) = &mut parameter.type_annotation {
+            self.visit_ts_type_annotation(annotation);
+        }
+        if let Some(initializer) = &mut parameter.initializer {
+            self.visit_expression(initializer);
+            if let Some(target) = outer {
+                let value = initializer.take_in(self.ast.allocator);
+                **initializer = self.selected(value, &target);
+            }
+        }
+    }
+
+    fn visit_assignment_pattern(&mut self, assignment: &mut AssignmentPattern<'a>) {
+        let target = if self.parameter_pattern_depth > 0 {
+            self.parameter_targets.remove(&span_key(assignment.span))
+        } else {
+            self.binding_targets.remove(&span_key(assignment.span))
+        };
+        if let Some(target) = &target {
+            self.push_entry(target);
+        }
+        walk_mut::walk_assignment_pattern(self, assignment);
+        if let Some(target) = target {
+            let value = assignment.right.take_in(self.ast.allocator);
+            assignment.right = self.selected(value, &target);
+        }
+    }
+
+    fn visit_variable_declaration(&mut self, declaration: &mut VariableDeclaration<'a>) {
+        self.active_declaration.push(span_key(declaration.span));
+        walk_mut::walk_variable_declaration(self, declaration);
+        self.active_declaration
+            .pop()
+            .expect("default declaration stack must remain balanced");
+    }
+
+    fn visit_for_in_statement(&mut self, statement: &mut ForInStatement<'a>) {
+        let declaration = Self::loop_declaration_span(&statement.left);
+        walk_mut::walk_for_in_statement(self, statement);
+        if let Some(declaration) = declaration
+            && let Some(entries) = self.declaration_entries.remove(&declaration)
+        {
+            self.prepend_entries(&mut statement.body, entries);
+        }
+    }
+
+    fn visit_for_of_statement(&mut self, statement: &mut ForOfStatement<'a>) {
+        let declaration = Self::loop_declaration_span(&statement.left);
+        walk_mut::walk_for_of_statement(self, statement);
+        if let Some(declaration) = declaration
+            && let Some(entries) = self.declaration_entries.remove(&declaration)
+        {
+            self.prepend_entries(&mut statement.body, entries);
+        }
+    }
+
+    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
+        if self.with_statements.contains(&span_key(statement.span)) {
+            return;
+        }
+        walk_mut::walk_with_statement(self, statement);
     }
 }
 
@@ -2413,6 +2718,277 @@ struct OptionalCallAnalysis {
     sites: HashMap<SpanKey, (String, String)>,
     roots: HashMap<SpanKey, Vec<SpanKey>>,
     limitations: Vec<CandidateLimitation>,
+}
+
+#[derive(Clone)]
+struct DefaultTarget {
+    default_id: String,
+    provided_id: String,
+    inferred_name: Option<String>,
+}
+
+#[derive(Default)]
+struct DefaultAnalysis {
+    branches: Vec<CandidateBranch>,
+    parameter_targets: HashMap<SpanKey, DefaultTarget>,
+    binding_targets: HashMap<SpanKey, DefaultTarget>,
+    limitations: Vec<CandidateLimitation>,
+}
+
+struct DefaultCollector<'s> {
+    source: &'s str,
+    file: &'s str,
+    source_sensitive_functions: &'s HashSet<SpanKey>,
+    unsafe_function_depth: usize,
+    with_depth: usize,
+    analysis: DefaultAnalysis,
+}
+
+impl DefaultCollector<'_> {
+    fn unsafe_context(&self) -> bool {
+        self.unsafe_function_depth > 0 || self.with_depth > 0
+    }
+
+    fn target(
+        &mut self,
+        span: Span,
+        left: &BindingPattern<'_>,
+        right: &Expression<'_>,
+    ) -> DefaultTarget {
+        let id = stable_id(self.source, self.file, "default-value", span, "");
+        let default_id = format!("{id}:default");
+        let provided_id = format!("{id}:provided");
+        let (line, column) = line_and_utf16_column(self.source, span.start as usize);
+        self.analysis.branches.push(CandidateBranch {
+            id,
+            kind: "default-value".to_string(),
+            file: self.file.to_string(),
+            line,
+            column,
+            source: source_slice(self.source, span).to_string(),
+            alternatives: vec![
+                CandidateBranchAlternative {
+                    id: default_id.clone(),
+                    label: "default evaluated".to_string(),
+                },
+                CandidateBranchAlternative {
+                    id: provided_id.clone(),
+                    label: "value provided".to_string(),
+                },
+            ],
+        });
+        DefaultTarget {
+            default_id,
+            provided_id,
+            inferred_name: binding_identifier_name(left)
+                .filter(|_| expression_is_anonymous_definition(right)),
+        }
+    }
+
+    fn collect_binding_pattern(&mut self, pattern: &BindingPattern<'_>, parameter: bool) {
+        match pattern {
+            BindingPattern::AssignmentPattern(assignment) => {
+                let target = self.target(assignment.span, &assignment.left, &assignment.right);
+                if parameter {
+                    self.analysis
+                        .parameter_targets
+                        .insert(span_key(assignment.span), target);
+                } else {
+                    self.analysis
+                        .binding_targets
+                        .insert(span_key(assignment.span), target);
+                }
+                self.collect_binding_pattern(&assignment.left, parameter);
+            }
+            BindingPattern::ObjectPattern(object) => {
+                for property in &object.properties {
+                    self.collect_binding_pattern(&property.value, parameter);
+                }
+                if let Some(rest) = &object.rest {
+                    self.collect_binding_pattern(&rest.argument, parameter);
+                }
+            }
+            BindingPattern::ArrayPattern(array) => {
+                for element in array.elements.iter().flatten() {
+                    self.collect_binding_pattern(element, parameter);
+                }
+                if let Some(rest) = &array.rest {
+                    self.collect_binding_pattern(&rest.argument, parameter);
+                }
+            }
+            BindingPattern::BindingIdentifier(_) => {}
+        }
+    }
+
+    fn collect_parameters(&mut self, parameters: &FormalParameters<'_>) {
+        for parameter in &parameters.items {
+            if let Some(initializer) = &parameter.initializer {
+                let target = self.target(parameter.span, &parameter.pattern, initializer);
+                self.analysis
+                    .parameter_targets
+                    .insert(span_key(parameter.span), target);
+            }
+            self.collect_binding_pattern(&parameter.pattern, true);
+        }
+        if let Some(rest) = &parameters.rest {
+            self.collect_binding_pattern(&rest.rest.argument, true);
+        }
+    }
+
+    fn has_binding_default(pattern: &BindingPattern<'_>) -> bool {
+        match pattern {
+            BindingPattern::AssignmentPattern(_) => true,
+            BindingPattern::ObjectPattern(object) => {
+                object
+                    .properties
+                    .iter()
+                    .any(|property| Self::has_binding_default(&property.value))
+                    || object
+                        .rest
+                        .as_ref()
+                        .is_some_and(|rest| Self::has_binding_default(&rest.argument))
+            }
+            BindingPattern::ArrayPattern(array) => {
+                array
+                    .elements
+                    .iter()
+                    .flatten()
+                    .any(Self::has_binding_default)
+                    || array
+                        .rest
+                        .as_ref()
+                        .is_some_and(|rest| Self::has_binding_default(&rest.argument))
+            }
+            BindingPattern::BindingIdentifier(_) => false,
+        }
+    }
+
+    fn exit_source_function(&mut self, span: Span) {
+        if self.source_sensitive_functions.contains(&span_key(span)) {
+            self.unsafe_function_depth -= 1;
+        }
+    }
+}
+
+impl<'a> Traverse<'a, ()> for DefaultCollector<'_> {
+    fn enter_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(node.span))
+        {
+            self.unsafe_function_depth += 1;
+            return;
+        }
+        if !self.unsafe_context() && node.body.is_some() {
+            self.collect_parameters(&node.params);
+        }
+    }
+
+    fn exit_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
+        self.exit_source_function(node.span);
+    }
+
+    fn enter_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(node.span))
+        {
+            self.unsafe_function_depth += 1;
+            return;
+        }
+        if !self.unsafe_context() {
+            self.collect_parameters(&node.params);
+        }
+    }
+
+    fn exit_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.exit_source_function(node.span);
+    }
+
+    fn enter_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth += 1;
+    }
+
+    fn exit_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth -= 1;
+    }
+
+    fn enter_variable_declaration(
+        &mut self,
+        node: &mut VariableDeclaration<'a>,
+        context: &mut TraverseCtx<'a, ()>,
+    ) {
+        if self.unsafe_context() {
+            return;
+        }
+        let has_default = node
+            .declarations
+            .iter()
+            .any(|declaration| Self::has_binding_default(&declaration.id));
+        if !has_default {
+            return;
+        }
+        if matches!(
+            context.ancestors().next(),
+            Some(Ancestor::ForStatementInit(_))
+        ) {
+            let (line, column) = line_and_utf16_column(self.source, node.span.start as usize);
+            self.analysis.limitations.push(CandidateLimitation {
+                id: stable_id(
+                    self.source,
+                    self.file,
+                    "dynamic-code",
+                    node.span,
+                    "for-init-default",
+                ),
+                kind: "dynamic-code".to_string(),
+                file: self.file.to_string(),
+                line,
+                column,
+                source: source_slice(self.source, node.span).to_string(),
+                reason: "destructuring defaults in a classic for initializer cannot yet be finalized without restructuring control flow".to_string(),
+            });
+            return;
+        }
+        for declaration in &node.declarations {
+            self.collect_binding_pattern(&declaration.id, false);
+        }
+    }
+}
+
+fn collect_default_branches<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    source: &str,
+    file: &str,
+    source_sensitive_functions: &HashSet<SpanKey>,
+) -> DefaultAnalysis {
+    let mut collector = DefaultCollector {
+        source,
+        file,
+        source_sensitive_functions,
+        unsafe_function_depth: 0,
+        with_depth: 0,
+        analysis: DefaultAnalysis::default(),
+    };
+    traverse_mut(&mut collector, allocator, program, Default::default(), ());
+    collector.analysis
 }
 
 struct OptionalCallCollector<'s> {

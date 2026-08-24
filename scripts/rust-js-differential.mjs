@@ -157,7 +157,7 @@ async function executeRustCandidate(testCase, candidate) {
   const vectors = [];
   const hits = [];
   const runtime = candidate.runtime;
-  if (!runtime?.coverageHit || !runtime?.mcdcBegin || !runtime?.mcdcCondition || !runtime?.mcdcEnd || !runtime?.mcdcEndV2 || !runtime?.selectionBegin || !runtime?.selectionRight || !runtime?.selectionEnd || !runtime?.optionalSelect || !runtime?.optionalCallBegin || !runtime?.optionalCallReached || !runtime?.optionalCallContinued || !runtime?.optionalCallEnd)
+  if (!runtime?.coverageHit || !runtime?.mcdcBegin || !runtime?.mcdcCondition || !runtime?.mcdcEnd || !runtime?.mcdcEndV2 || !runtime?.selectionBegin || !runtime?.selectionRight || !runtime?.selectionEnd || !runtime?.optionalSelect || !runtime?.optionalCallBegin || !runtime?.optionalCallReached || !runtime?.optionalCallContinued || !runtime?.optionalCallEnd || !runtime?.defaultSelected || !runtime?.defaultEntered)
     throw new Error(`${testCase.file}: missing Rust candidate runtime bindings`);
   const coverageHit = (id) => hits.push(id);
   const begin = (id, meta) => {
@@ -205,6 +205,21 @@ async function executeRustCandidate(testCase, candidate) {
     if (frame.reached) coverageHit(frame.continued ? frame.continuedId : frame.shortId);
     return value;
   };
+  const pendingDefaults = new Map();
+  const defaultSelected = (defaultId, value, inferredName) => {
+    pendingDefaults.set(defaultId, (pendingDefaults.get(defaultId) ?? 0) + 1);
+    if (inferredName && typeof value === "function" && value.name === "")
+      Object.defineProperty(value, "name", { value: inferredName, configurable: true });
+    return value;
+  };
+  const defaultEntered = (defaultId, providedId) => {
+    const pending = pendingDefaults.get(defaultId) ?? 0;
+    if (pending > 0) {
+      if (pending === 1) pendingDefaults.delete(defaultId);
+      else pendingDefaults.set(defaultId, pending - 1);
+      coverageHit(defaultId);
+    } else coverageHit(providedId);
+  };
   const recorder = (file, decisionIndex, encoded, value) => {
     if (file !== testCase.file) throw new Error(`unexpected probe file ${file}`);
     const decision = candidate.decisions[decisionIndex];
@@ -228,6 +243,8 @@ async function executeRustCandidate(testCase, candidate) {
     runtime.optionalCallReached,
     runtime.optionalCallContinued,
     runtime.optionalCallEnd,
+    runtime.defaultSelected,
+    runtime.defaultEntered,
     `"use strict";\n${candidate.code}\nreturn { run, observe: typeof observe === "function" ? observe : undefined };`,
   );
   const program = factory(
@@ -244,6 +261,8 @@ async function executeRustCandidate(testCase, candidate) {
     optionalCallReached,
     optionalCallContinued,
     optionalCallEnd,
+    defaultSelected,
+    defaultEntered,
   );
   try {
     const value = await program.run();

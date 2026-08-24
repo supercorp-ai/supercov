@@ -78,5 +78,17 @@
   {
     "file": "differential/optional-private-call.js",
     "source": "const effects = [];\nclass Example { value = 6; #present(argument) { effects.push(this instanceof Example ? 'receiver' : 'wrong'); return this.value + argument; } #absent; run() { return [this.#present?.(2), this.#absent?.(3)]; } }\nfunction run() { return new Example().run(); }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/parameter-defaults.js",
+    "source": "const effects = [];\nfunction mark(label, value) { effects.push(label); return value; }\nfunction choose({ value = mark('inner', 'inner') } = mark('outer', {}), callback = function () {}) { return [value, callback.name]; }\nfunction run() { return [choose(), choose({}), choose({ value: 'given' }, function named() {})]; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/local-defaults.js",
+    "source": "const effects = [];\nfunction mark(label, value) { effects.push(label); return value; }\nfunction bind(input) { const { value = mark('local', 'fallback'), callback = function () {} } = input; return [value, callback.name]; }\nfunction run() { return [bind({}), bind({ value: 'given', callback: function named() {} })]; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/for-of-defaults.js",
+    "source": "const effects = [];\nfunction mark(label, value) { effects.push(label); return value; }\nfunction run() { const values = []; for (const { value = mark('loop', 'fallback') } of [{}, { value: 'given' }]) values.push(value); return values; }\nfunction observe() { return effects; }\n"
   }
 ]
