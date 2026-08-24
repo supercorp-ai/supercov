@@ -11,17 +11,17 @@ use std::{
     path::Path,
 };
 
-use oxc_allocator::{Allocator, TakeIn};
+use oxc_allocator::{Allocator, CloneIn, TakeIn};
 use oxc_ast::{
     AstBuilder, NONE,
     ast::{
         Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
         AssignmentPattern, AssignmentTarget, BindingPattern, CallExpression, CatchClause,
         ChainExpression, Class, ComputedMemberExpression, ConditionalExpression, Declaration,
-        DoWhileStatement, Expression, ForInStatement, ForOfStatement, ForStatement,
-        ForStatementLeft, FormalParameter, FormalParameterKind, FormalParameters, Function,
-        FunctionBody, IfStatement, LogicalExpression, NewExpression, ObjectPropertyKind,
-        PrivateFieldExpression, Program, PropertyKey, PropertyKind, Statement,
+        DoWhileStatement, ExportDefaultDeclarationKind, Expression, ForInStatement, ForOfStatement,
+        ForStatement, ForStatementLeft, FormalParameter, FormalParameterKind, FormalParameters,
+        Function, FunctionBody, IfStatement, ImportOrExportKind, LogicalExpression, NewExpression,
+        ObjectPropertyKind, PrivateFieldExpression, Program, PropertyKey, PropertyKind, Statement,
         StaticMemberExpression, SwitchStatement, TryStatement, VariableDeclaration,
         VariableDeclarationKind, WhileStatement, WithStatement,
     },
@@ -1103,10 +1103,18 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         with_statements: safety.with_statements.clone(),
     };
     switch_transformer.visit_program(&mut parsed.program);
+    let mut route_transformer = RouteRequestPhaseTransformer {
+        ast,
+        file,
+        with_request_phase: with_request_phase.clone(),
+        used: false,
+        names: CandidateNames::new(source),
+    };
+    route_transformer.transform_program(&mut parsed.program);
     let mut request_transformer = RequestPhaseTransformer {
         ast,
         with_request_phase: with_request_phase.clone(),
-        used: false,
+        used: route_transformer.used,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
         with_statements: safety.with_statements.clone(),
     };
@@ -2808,6 +2816,289 @@ impl<'a> VisitMut<'a> for SwitchTransformer<'a, '_> {
     }
 }
 
+struct RouteRequestPhaseTransformer<'a, 's> {
+    ast: AstBuilder<'a>,
+    file: &'s str,
+    with_request_phase: String,
+    used: bool,
+    names: CandidateNames<'s>,
+}
+
+impl<'a> RouteRequestPhaseTransformer<'a, '_> {
+    fn is_remix_route(&self) -> bool {
+        self.file.starts_with("app/routes/")
+    }
+
+    fn is_next_route(&self) -> bool {
+        let path = Path::new(self.file);
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        let is_route_module = [
+            "route.js",
+            "route.jsx",
+            "route.ts",
+            "route.tsx",
+            "route.mjs",
+            "route.mts",
+            "route.cjs",
+            "route.cts",
+        ]
+        .contains(&name);
+        if !is_route_module {
+            return false;
+        }
+        let components = path
+            .components()
+            .filter_map(|component| component.as_os_str().to_str())
+            .collect::<Vec<_>>();
+        components
+            .windows(2)
+            .any(|window| window[0] == "app" && window[1] != name)
+    }
+
+    fn is_handler_name(&self, name: &str) -> bool {
+        (self.is_remix_route() && matches!(name, "loader" | "action"))
+            || (self.is_next_route()
+                && matches!(
+                    name,
+                    "GET" | "HEAD" | "POST" | "PUT" | "DELETE" | "PATCH" | "OPTIONS"
+                ))
+    }
+
+    fn identifier(&self, name: &str) -> Expression<'a> {
+        self.ast
+            .expression_identifier(Span::default(), self.ast.ident(name))
+    }
+
+    fn wrap_expression(&self, expression: Expression<'a>) -> Expression<'a> {
+        self.ast.expression_call(
+            Span::default(),
+            self.identifier(&self.with_request_phase),
+            NONE,
+            self.ast.vec1(Argument::from(expression)),
+            false,
+        )
+    }
+
+    fn wrapped_named_export(&self, exported_name: &str, original_name: &str) -> Statement<'a> {
+        Statement::ExportNamedDeclaration(self.ast.alloc_export_named_declaration(
+            Span::default(),
+            Some(self.ast.declaration_variable(
+                Span::default(),
+                VariableDeclarationKind::Const,
+                self.ast.vec1(self.ast.variable_declarator(
+                    Span::default(),
+                    VariableDeclarationKind::Const,
+                    self.ast.binding_pattern_binding_identifier(
+                        Span::default(),
+                        self.ast.ident(exported_name),
+                    ),
+                    NONE,
+                    Some(self.wrap_expression(self.identifier(original_name))),
+                    false,
+                )),
+                false,
+            )),
+            self.ast.vec(),
+            None,
+            ImportOrExportKind::Value,
+            NONE,
+        ))
+    }
+
+    fn transform_named_export(
+        &mut self,
+        mut export: oxc_allocator::Box<'a, oxc_ast::ast::ExportNamedDeclaration<'a>>,
+        output: &mut oxc_allocator::Vec<'a, Statement<'a>>,
+    ) {
+        if let Some(Declaration::VariableDeclaration(declaration)) = &mut export.declaration {
+            for declarator in &mut declaration.declarations {
+                let Some(name) = binding_identifier_name(&declarator.id) else {
+                    continue;
+                };
+                if !self.is_handler_name(&name) {
+                    continue;
+                }
+                if let Some(initializer) = &mut declarator.init {
+                    let original = initializer.take_in(self.ast.allocator);
+                    *initializer = self.wrap_expression(original);
+                    self.used = true;
+                }
+            }
+            output.push(Statement::ExportNamedDeclaration(export));
+            return;
+        }
+
+        if matches!(
+            export.declaration,
+            Some(Declaration::FunctionDeclaration(_))
+        ) {
+            let Some(Declaration::FunctionDeclaration(mut function)) = export.declaration.take()
+            else {
+                unreachable!();
+            };
+            let Some(exported_name) = function.id.as_ref().map(|id| id.name.to_string()) else {
+                output.push(Statement::FunctionDeclaration(function));
+                return;
+            };
+            if !self.is_handler_name(&exported_name) {
+                export.declaration = Some(Declaration::FunctionDeclaration(function));
+                output.push(Statement::ExportNamedDeclaration(export));
+                return;
+            }
+            let original_name = self
+                .names
+                .allocate(&format!("__supercov{exported_name}CoverageOriginal"));
+            function.id = Some(
+                self.ast
+                    .binding_identifier(Span::default(), self.ast.ident(&original_name)),
+            );
+            output.push(Statement::FunctionDeclaration(function));
+            output.push(self.wrapped_named_export(&exported_name, &original_name));
+            self.used = true;
+            return;
+        }
+
+        if export.source.is_none() {
+            output.push(Statement::ExportNamedDeclaration(export));
+            return;
+        }
+        let source = export
+            .source
+            .as_ref()
+            .expect("checked above")
+            .clone_in(self.ast.allocator);
+        let specifiers = export.specifiers.take_in(self.ast.allocator);
+        let mut untouched = self.ast.vec();
+        let mut handlers = Vec::new();
+        for specifier in specifiers {
+            let exported_name = specifier
+                .exported
+                .identifier_name()
+                .map(|name| name.to_string());
+            if exported_name
+                .as_deref()
+                .is_some_and(|name| self.is_handler_name(name))
+            {
+                handlers.push((exported_name.expect("checked above"), specifier));
+            } else {
+                untouched.push(specifier);
+            }
+        }
+        if handlers.is_empty() {
+            export.specifiers = untouched;
+            output.push(Statement::ExportNamedDeclaration(export));
+            return;
+        }
+        if !untouched.is_empty() {
+            output.push(Statement::ExportNamedDeclaration(
+                self.ast.alloc_export_named_declaration(
+                    export.span,
+                    None,
+                    untouched,
+                    Some(source.clone_in(self.ast.allocator)),
+                    export.export_kind,
+                    export.with_clause.take(),
+                ),
+            ));
+        }
+        for (exported_name, specifier) in handlers {
+            let original_name = self
+                .names
+                .allocate(&format!("__supercov{exported_name}CoverageOriginal"));
+            output.push(Statement::ImportDeclaration(
+                self.ast.alloc_import_declaration(
+                    Span::default(),
+                    Some(self.ast.vec1(
+                        self.ast.import_declaration_specifier_import_specifier(
+                            Span::default(),
+                            specifier.local,
+                            self.ast.binding_identifier(
+                                Span::default(),
+                                self.ast.ident(&original_name),
+                            ),
+                            ImportOrExportKind::Value,
+                        ),
+                    )),
+                    source.clone_in(self.ast.allocator),
+                    None,
+                    NONE,
+                    ImportOrExportKind::Value,
+                ),
+            ));
+            output.push(self.wrapped_named_export(&exported_name, &original_name));
+        }
+        self.used = true;
+    }
+
+    fn transform_default_export(
+        &mut self,
+        mut export: oxc_allocator::Box<'a, oxc_ast::ast::ExportDefaultDeclaration<'a>>,
+        output: &mut oxc_allocator::Vec<'a, Statement<'a>>,
+    ) {
+        if let ExportDefaultDeclarationKind::FunctionDeclaration(mut function) =
+            export.declaration.take_in(self.ast.allocator)
+        {
+            let original_name = self
+                .names
+                .allocate("__supercovHandleRequestCoverageOriginal");
+            function.id = Some(
+                self.ast
+                    .binding_identifier(Span::default(), self.ast.ident(&original_name)),
+            );
+            output.push(Statement::FunctionDeclaration(function));
+            output.push(Statement::ExportDefaultDeclaration(
+                self.ast.alloc_export_default_declaration(
+                    Span::default(),
+                    ExportDefaultDeclarationKind::from(
+                        self.wrap_expression(self.identifier(&original_name)),
+                    ),
+                ),
+            ));
+            self.used = true;
+            return;
+        }
+        if export.declaration.is_expression() {
+            let original = export
+                .declaration
+                .take_in(self.ast.allocator)
+                .into_expression();
+            export.declaration = ExportDefaultDeclarationKind::from(self.wrap_expression(original));
+            self.used = true;
+        }
+        output.push(Statement::ExportDefaultDeclaration(export));
+    }
+
+    fn transform_program(&mut self, program: &mut Program<'a>) {
+        let route_module = self.is_remix_route() || self.is_next_route();
+        let server_entry = self.file.starts_with("app/entry.server.")
+            && ["js", "jsx", "ts", "tsx", "mjs", "mts", "cjs", "cts"].contains(
+                &Path::new(self.file)
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or(""),
+            );
+        if !route_module && !server_entry {
+            return;
+        }
+        let original = program.body.take_in(self.ast.allocator);
+        let mut output = self.ast.vec_with_capacity(original.len() + 4);
+        for statement in original {
+            match statement {
+                Statement::ExportNamedDeclaration(export) if route_module => {
+                    self.transform_named_export(export, &mut output);
+                }
+                Statement::ExportDefaultDeclaration(export) if server_entry => {
+                    self.transform_default_export(export, &mut output);
+                }
+                statement => output.push(statement),
+            }
+        }
+        program.body = output;
+    }
+}
+
 struct RequestPhaseTransformer<'a> {
     ast: AstBuilder<'a>,
     with_request_phase: String,
@@ -3531,9 +3822,11 @@ impl DecisionCollector<'_> {
             kind: kind.to_string(),
         });
         self.decision_vector_counts.push(
-            (condition_spans.len() <= 6 && decision_conditions_are_transparent(test))
-                .then(|| reachable_vector_count(test, &condition_spans))
-                .unwrap_or(0),
+            if condition_spans.len() <= 6 && decision_conditions_are_transparent(test) {
+                reachable_vector_count(test, &condition_spans)
+            } else {
+                0
+            },
         );
     }
 }
@@ -5190,6 +5483,63 @@ mod tests {
                 .contains(&format!("{}(", runtime.mcdc_condition))
         );
         assert!(output.code.contains(&format!("{}(", runtime.mcdc_end)));
+    }
+
+    #[test]
+    fn wraps_framework_request_exports_without_changing_the_public_api() {
+        for (file, source, export_prefix) in [
+            (
+                "app/routes/example.ts",
+                "export const loader = async ({ request }) => request.url;",
+                "export const loader = ",
+            ),
+            (
+                "app/routes/example.ts",
+                "export async function action({ request }) { return request.method; }",
+                "export const action = ",
+            ),
+            (
+                "app/api/items/route.ts",
+                "export function GET(request) { return Response.json({ url: request.url }); }",
+                "export const GET = ",
+            ),
+            (
+                "app/routes/example.ts",
+                "export { generateAction as action } from './generateAction';",
+                "export const action = ",
+            ),
+            (
+                "app/entry.server.tsx",
+                "export default async function handleRequest(request) { return request.url; }",
+                "export default ",
+            ),
+        ] {
+            let output = instrument_candidate(source, file).unwrap();
+            let runtime = output.runtime.as_ref().expect("runtime binding");
+            assert!(
+                output
+                    .code
+                    .contains(&format!("{export_prefix}{}(", runtime.with_request_phase)),
+                "{file}: {}",
+                output.code
+            );
+            assert!(
+                output.code.contains(&format!(
+                    "withRequestPhase as {}",
+                    runtime.with_request_phase
+                )),
+                "{file}: {}",
+                output.code
+            );
+            let allocator = Allocator::default();
+            let reparsed = Parser::new(
+                &allocator,
+                &output.code,
+                SourceType::from_path(file).unwrap(),
+            )
+            .parse();
+            assert!(reparsed.errors.is_empty(), "{file}: {:?}", reparsed.errors);
+        }
     }
 
     #[test]

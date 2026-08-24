@@ -34,5 +34,25 @@
   {
     "file": "app/for.js",
     "source": "export function count(limit, enabled) {\n  let value = 0;\n  for (; value < limit && enabled; value++) work(value);\n  return value;\n}\n"
+  },
+  {
+    "file": "app/routes/request-variable.ts",
+    "source": "export const loader = async ({ request }) => request.url;\n"
+  },
+  {
+    "file": "app/routes/request-declaration.ts",
+    "source": "export async function action({ request }) { return request.method; }\n"
+  },
+  {
+    "file": "app/routes/request-reexport.ts",
+    "source": "export { generateAction as action, helper } from './handlers';\n"
+  },
+  {
+    "file": "app/api/items/route.ts",
+    "source": "export function GET(request) { return Response.json({ url: request.url }); }\n"
+  },
+  {
+    "file": "app/entry.server.tsx",
+    "source": "export default async function handleRequest(request) { return request.url; }\n"
   }
 ]
