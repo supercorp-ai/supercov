@@ -24,6 +24,16 @@ code; a compatibility sweep is in flight and Tier 1 (trust) still lands first.
    contract, analysis, MC/DC pair search and query surface are shared and are
    never rewritten per language; probe v2's ternary-vector/epoch model is language-neutral
    precisely to keep that true.
+   The ownership rule is stricter than merely moving hot paths: **everything
+   that can live in Rust does**. Target-language code is permitted only where
+   it must execute inside a runtime, browser, compiler/plugin API, test runner,
+   or assertion framework. Such shims may propagate context and append frozen
+   evidence records; they may not implement manifests, coverage arithmetic,
+   MC/DC solving, merging, persistence, querying, or policy. Ahead-of-run
+   source transformation also belongs in Rust whenever a sound parser exists;
+   runtime hooks remain thin loaders for dynamic/generated modules. This keeps
+   one correctness implementation and one performance profile across every
+   language rather than accumulating a Python product, an OCaml product, etc.
 4. **No resident processes — ever.** (User decision 2026-08-24; supersedes
    the earlier `supercov serve` proposal.) Every invocation is fire-and-
    forget; "no resident service" stays a product guarantee. Query latency is
@@ -165,11 +175,19 @@ miss blocks flipping any default.
   The oxc port has now begun as an explicitly incomplete differential
   candidate: Rust 1.93 pins oxc 0.133 (the newest compatible release; newer
   oxc releases require Rust 1.96), parses and regenerates JS/TS/JSX/TSX, and
-  emits exact `if`-decision metadata without probe insertion. A five-case
-  Babel/oxc corpus compares live outputs and has already forced two required
-  normalizations: transparent parenthesized expressions and Babel-compatible
-  UTF-16 offsets for stable IDs. The candidate always returns
-  `complete: false` and remains unreachable from the public CLI.
+  now performs the first real allocator-backed AST mutation. `if` predicates
+  through 32 conditions use function/program-local scratch bindings, preserve
+  each original leaf value and native short-circuit order, encode the exact
+  probe-v2 base-3 frame, and call an internal differential-only recorder.
+  Wider decisions remain unchanged with an explicit exact-v1-fallback
+  limitation. The live Babel/oxc gate now covers 169 exact `if` manifests,
+  four hand-authored value/effect/vector cases, and 160 deterministic nested
+  behavior programs. It found a third required parser normalization: redundant
+  outer parentheses belong to syntax but not Babel's decision metadata span.
+  Rust tests also lock name-collision handling, reparsing, and the wide-decision
+  refusal. Unported decisions, points, semantic-safety exclusions, registration
+  and evidence transport keep the candidate `complete: false`; it remains
+  unreachable from the public CLI.
 
 ## Non-goals and guardrails
 

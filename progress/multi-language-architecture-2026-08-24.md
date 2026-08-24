@@ -38,6 +38,35 @@ pair search, the query surface, waivers, the run store, `diff` — is shared
 and is never rewritten per language. Probe v2's per-decision bitmap model is
 deliberately language-neutral so that this stays true.
 
+## Rust ownership boundary
+
+Supercov has one engine, not one implementation per ecosystem. The default is
+Rust for discovery, isolated-workspace construction, ahead-of-run transforms,
+manifest generation, process supervision, evidence framing/compression,
+merging, attribution analysis, MC/DC pair search, indexing, querying, diffs,
+retention and every agent-facing response. This includes work that is merely
+"fast enough" in a target language: the reason to centralise it is correctness
+and maintainability as much as speed.
+
+A target-language component is justified only when it must run inside the host
+to access capabilities a static Rust process cannot observe safely:
+
+- module/import and dynamic-code hooks;
+- test, worker, retry and phase lifecycle callbacks;
+- async/task-local context propagation;
+- assertion-framework callbacks;
+- compiler or IR APIs that are only stable through that toolchain;
+- the allocation-free probe fast path itself.
+
+Those components are versioned shims over frozen contracts. They activate an
+epoch, update local probe state, and emit records; they do not calculate a
+coverage score or own a second report model. For languages that can be
+pre-instrumented in the isolated workspace, the Rust frontend does that work
+and the shim handles only modules generated or loaded after launch. If a host
+requires its native compiler library (a plausible OCaml frontend case), that
+adapter is treated like a compiler plugin feeding the Rust engine—not an
+excuse to fork analysis logic.
+
 ## Two tiers per language
 
 **Tier A — adapt.** Consume the language's native coverage instrumentation
@@ -175,6 +204,7 @@ goroutine-local problem for attribution entirely.
 | Rust | LLVM profdata via rustc coverage (MC/DC status: **spike S8**) | rung 1 with nextest, rung 2 with libtest shim | `assert!` macro shim; custom harness (`libtest-mimic`) | rustc MIR pass vs LLVM plugin — **ADR in S8** |
 | C/C++ | `-fcoverage-mcdc` profdata | rung 1 with ctest-per-process or `--gtest_filter` sharding | GoogleTest/Catch2 listener API (free), `<assert.h>` shim | LLVM pass |
 | Go | `go test -cover`, `GOCOVERDIR` | rung 1/2 (per-process binaries) | wrap `t.Error`/`t.Fatal` (explicit `T`) | source rewrite (Go's own coverage works this way) |
+| OCaml | native coverage adapter first; exact oracle selected by its spike | runner-dependent, declared before support | framework hooks/PPX assertion sites | compiler-libs/PPX frontend emitting probe v2, with all analysis in Rust |
 | JVM / Ruby / PHP | later; each has a mature bytecode or tracer hook | TBD | TBD | TBD |
 
 ## Ship gate: no language without its own oracle

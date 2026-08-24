@@ -6,13 +6,22 @@
 
 use std::{fmt::Write, path::Path};
 
-use oxc_allocator::Allocator;
-use oxc_ast::ast::{Expression, IfStatement};
-use oxc_ast_visit::{Visit, walk};
+use oxc_allocator::{Allocator, TakeIn};
+use oxc_ast::{
+    AstBuilder, NONE,
+    ast::{
+        Argument, AssignmentTarget, Expression, FunctionBody, IfStatement, Program, Statement,
+        VariableDeclarationKind,
+    },
+};
+use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
 use oxc_codegen::Codegen;
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType, Span};
-use oxc_syntax::operator::LogicalOperator;
+use oxc_syntax::{
+    number::NumberBase,
+    operator::{AssignmentOperator, LogicalOperator},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -36,7 +45,15 @@ pub struct CandidateOutput {
     pub supported_surface: String,
     pub code: String,
     pub decisions: Vec<CandidateDecision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<CandidateRuntime>,
     pub limitations: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateRuntime {
+    pub mcdc_end_v2: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,11 +90,366 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         supported_surface: "if-decision-manifest-v1".to_string(),
         code: generated,
         decisions: collector.decisions,
+        runtime: None,
         limitations: vec![
             "candidate emits metadata only; probe insertion is not implemented".to_string(),
             "only if-statement decision metadata is currently compared".to_string(),
         ],
     })
+}
+
+/// Instrument the first deliberately narrow Rust port slice.
+///
+/// The generated code is internal differential-test output, not a public
+/// runtime ABI. It instruments `if` predicates of at most 32 conditions with
+/// the frozen probe-v2 ternary frame while leaving every other coverage
+/// surface explicitly incomplete.
+pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput, CandidateError> {
+    let source_type = SourceType::from_path(Path::new(file))
+        .map_err(|error| CandidateError::UnknownSourceType(error.to_string()))?;
+    let allocator = Allocator::default();
+    let mut parsed = Parser::new(&allocator, source, source_type).parse();
+    if !parsed.errors.is_empty() {
+        return Err(CandidateError::Parse(
+            parsed
+                .errors
+                .into_iter()
+                .map(|error| format!("{error:?}"))
+                .collect(),
+        ));
+    }
+
+    let mut collector = DecisionCollector {
+        source,
+        file,
+        decisions: Vec::new(),
+    };
+    collector.visit_program(&parsed.program);
+
+    let mut names = CandidateNames::new(source);
+    let runtime_name = names.allocate("__supercovMcdcEndV2");
+    let ast = AstBuilder::new(&allocator);
+    let mut transformer = IfProbeV2Transformer {
+        ast,
+        file,
+        runtime_name: runtime_name.clone(),
+        names,
+        scope_declarations: Vec::new(),
+        decision_index: 0,
+        wider_decisions: 0,
+    };
+    transformer.visit_program(&mut parsed.program);
+
+    let mut limitations = vec![
+        "only if-statement decisions are instrumented".to_string(),
+        "coverage points, non-if decisions, branches, and runtime registration remain on the TypeScript reference"
+            .to_string(),
+        "with-environment and function-source semantic-safety exclusions are not yet ported"
+            .to_string(),
+        "candidate runtime binding is differential-only and is not exposed by the public CLI"
+            .to_string(),
+    ];
+    if transformer.wider_decisions > 0 {
+        limitations.push(format!(
+            "{} if decision(s) exceeded 32 conditions and require the exact v1 fallback",
+            transformer.wider_decisions
+        ));
+    }
+
+    Ok(CandidateOutput {
+        engine: "rust-oxc".to_string(),
+        complete: false,
+        supported_surface: "if-probe-v2-candidate".to_string(),
+        code: Codegen::new().build(&parsed.program).code,
+        decisions: collector.decisions,
+        runtime: Some(CandidateRuntime {
+            mcdc_end_v2: runtime_name,
+        }),
+        limitations,
+    })
+}
+
+struct CandidateNames<'s> {
+    source: &'s str,
+    allocated: Vec<String>,
+    suffix: usize,
+}
+
+impl<'s> CandidateNames<'s> {
+    fn new(source: &'s str) -> Self {
+        Self {
+            source,
+            allocated: Vec::new(),
+            suffix: 0,
+        }
+    }
+
+    fn allocate(&mut self, base: &str) -> String {
+        loop {
+            let candidate = if self.suffix == 0 {
+                base.to_string()
+            } else {
+                format!("{base}{}", self.suffix)
+            };
+            self.suffix += 1;
+            if !self.source.contains(&candidate) && !self.allocated.contains(&candidate) {
+                self.allocated.push(candidate.clone());
+                return candidate;
+            }
+        }
+    }
+}
+
+struct IfProbeV2Transformer<'a, 's> {
+    ast: AstBuilder<'a>,
+    file: &'s str,
+    runtime_name: String,
+    names: CandidateNames<'s>,
+    scope_declarations: Vec<Vec<String>>,
+    decision_index: usize,
+    wider_decisions: usize,
+}
+
+impl<'a> IfProbeV2Transformer<'a, '_> {
+    fn enter_declaration_scope(&mut self) {
+        self.scope_declarations.push(Vec::new());
+    }
+
+    fn leave_declaration_scope(&mut self) -> Vec<String> {
+        self.scope_declarations
+            .pop()
+            .expect("program/function scope stack must remain balanced")
+    }
+
+    fn allocate_scratch(&mut self, base: &str) -> String {
+        let name = self.names.allocate(base);
+        self.scope_declarations
+            .last_mut()
+            .expect("an if statement must be inside a program or function body")
+            .push(name.clone());
+        name
+    }
+
+    fn prepend_declarations(
+        &self,
+        names: Vec<String>,
+        statements: &mut oxc_allocator::Vec<'a, Statement<'a>>,
+    ) {
+        if names.is_empty() {
+            return;
+        }
+        let declarators = self.ast.vec_from_iter(names.into_iter().map(|name| {
+            self.ast.variable_declarator(
+                Span::default(),
+                VariableDeclarationKind::Let,
+                self.ast
+                    .binding_pattern_binding_identifier(Span::default(), self.ast.ident(&name)),
+                NONE,
+                None,
+                false,
+            )
+        }));
+        statements.insert(
+            0,
+            Statement::VariableDeclaration(self.ast.alloc_variable_declaration(
+                Span::default(),
+                VariableDeclarationKind::Let,
+                declarators,
+                false,
+            )),
+        );
+    }
+
+    fn identifier(&self, name: &str) -> Expression<'a> {
+        self.ast
+            .expression_identifier(Span::default(), self.ast.ident(name))
+    }
+
+    fn assignment_target(&self, name: &str) -> AssignmentTarget<'a> {
+        let target = self
+            .ast
+            .simple_assignment_target_assignment_target_identifier(
+                Span::default(),
+                self.ast.ident(name),
+            );
+        AssignmentTarget::from(target)
+    }
+
+    fn number(&self, value: u64) -> Expression<'a> {
+        self.ast.expression_numeric_literal(
+            Span::default(),
+            value as f64,
+            None,
+            NumberBase::Decimal,
+        )
+    }
+
+    fn instrument_condition(
+        &self,
+        expression: Expression<'a>,
+        frame_name: &str,
+        temporary_name: &str,
+        index: usize,
+    ) -> Expression<'a> {
+        let assign_value = self.ast.expression_assignment(
+            Span::default(),
+            AssignmentOperator::Assign,
+            self.assignment_target(temporary_name),
+            expression,
+        );
+        let weight = 3_u64.pow(index as u32);
+        let digit = self.ast.expression_conditional(
+            Span::default(),
+            self.identifier(temporary_name),
+            self.number(weight * 2),
+            self.number(weight),
+        );
+        let add_digit = self.ast.expression_assignment(
+            Span::default(),
+            AssignmentOperator::Addition,
+            self.assignment_target(frame_name),
+            digit,
+        );
+        self.ast.expression_sequence(
+            Span::default(),
+            self.ast
+                .vec_from_array([assign_value, add_digit, self.identifier(temporary_name)]),
+        )
+    }
+
+    fn instrument_conditions(
+        &self,
+        expression: &mut Expression<'a>,
+        frame_name: &str,
+        temporary_names: &[String],
+        next_index: &mut usize,
+    ) {
+        match expression {
+            Expression::ParenthesizedExpression(parenthesized) => self.instrument_conditions(
+                &mut parenthesized.expression,
+                frame_name,
+                temporary_names,
+                next_index,
+            ),
+            Expression::LogicalExpression(logical)
+                if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or) =>
+            {
+                self.instrument_conditions(
+                    &mut logical.left,
+                    frame_name,
+                    temporary_names,
+                    next_index,
+                );
+                self.instrument_conditions(
+                    &mut logical.right,
+                    frame_name,
+                    temporary_names,
+                    next_index,
+                );
+            }
+            Expression::UnaryExpression(unary)
+                if unary.operator.is_not() && has_compound_boolean_decision(&unary.argument) =>
+            {
+                self.instrument_conditions(
+                    &mut unary.argument,
+                    frame_name,
+                    temporary_names,
+                    next_index,
+                );
+            }
+            _ => {
+                let index = *next_index;
+                *next_index += 1;
+                let original = expression.take_in(self.ast.allocator);
+                *expression =
+                    self.instrument_condition(original, frame_name, &temporary_names[index], index);
+            }
+        }
+    }
+}
+
+impl<'a> VisitMut<'a> for IfProbeV2Transformer<'a, '_> {
+    fn visit_program(&mut self, program: &mut Program<'a>) {
+        self.enter_declaration_scope();
+        walk_mut::walk_program(self, program);
+        let declarations = self.leave_declaration_scope();
+        self.prepend_declarations(declarations, &mut program.body);
+    }
+
+    fn visit_function_body(&mut self, body: &mut FunctionBody<'a>) {
+        self.enter_declaration_scope();
+        walk_mut::walk_function_body(self, body);
+        let declarations = self.leave_declaration_scope();
+        self.prepend_declarations(declarations, &mut body.statements);
+    }
+
+    fn visit_if_statement(&mut self, statement: &mut IfStatement<'a>) {
+        let mut condition_spans = Vec::new();
+        collect_conditions(&statement.test, &mut condition_spans);
+        let condition_count = condition_spans.len();
+        let decision_index = self.decision_index;
+        self.decision_index += 1;
+
+        if condition_count <= 32 {
+            let frame_name = self.allocate_scratch("_supercovMcdcFrame");
+            let result_name = self.allocate_scratch("_supercovMcdcResult");
+            let temporary_names = (0..condition_count)
+                .map(|_| self.allocate_scratch("_supercovMcdcValue"))
+                .collect::<Vec<_>>();
+            let mut next_index = 0;
+            self.instrument_conditions(
+                &mut statement.test,
+                &frame_name,
+                &temporary_names,
+                &mut next_index,
+            );
+            debug_assert_eq!(next_index, condition_count);
+
+            let original = statement.test.take_in(self.ast.allocator);
+            let assign_frame = self.ast.expression_assignment(
+                Span::default(),
+                AssignmentOperator::Assign,
+                self.assignment_target(&frame_name),
+                self.number(0),
+            );
+            let assign_result = self.ast.expression_assignment(
+                Span::default(),
+                AssignmentOperator::Assign,
+                self.assignment_target(&result_name),
+                original,
+            );
+            let arguments = self.ast.vec_from_array([
+                Argument::from(self.ast.expression_string_literal(
+                    Span::default(),
+                    self.ast.str(self.file),
+                    None,
+                )),
+                Argument::from(self.number(decision_index as u64)),
+                Argument::from(self.identifier(&frame_name)),
+                Argument::from(self.identifier(&result_name)),
+            ]);
+            let record = self.ast.expression_call(
+                Span::default(),
+                self.identifier(&self.runtime_name),
+                NONE,
+                arguments,
+                false,
+            );
+            statement.test = self.ast.expression_sequence(
+                Span::default(),
+                self.ast.vec_from_array([
+                    assign_frame,
+                    assign_result,
+                    record,
+                    self.identifier(&result_name),
+                ]),
+            );
+        } else {
+            self.wider_decisions += 1;
+        }
+
+        walk_mut::walk_if_statement(self, statement);
+    }
 }
 
 struct DecisionCollector<'s> {
@@ -90,7 +462,10 @@ impl<'a> Visit<'a> for DecisionCollector<'_> {
     fn visit_if_statement(&mut self, statement: &IfStatement<'a>) {
         let mut condition_spans = Vec::new();
         collect_conditions(&statement.test, &mut condition_spans);
-        let span = statement.test.span();
+        // Babel treats redundant parentheses as parser metadata rather than
+        // part of the decision node. oxc preserves a ParenthesizedExpression,
+        // so normalize it here to keep locations and stable IDs parser-neutral.
+        let span = transparent_expression(&statement.test).span();
         let (line, column) = line_and_utf16_column(self.source, span.start as usize);
         self.decisions.push(CandidateDecision {
             id: stable_id(self.source, self.file, "decision", span, "if"),
@@ -105,6 +480,15 @@ impl<'a> Visit<'a> for DecisionCollector<'_> {
             kind: "if".to_string(),
         });
         walk::walk_if_statement(self, statement);
+    }
+}
+
+fn transparent_expression<'a>(expression: &'a Expression<'a>) -> &'a Expression<'a> {
+    match expression {
+        Expression::ParenthesizedExpression(parenthesized) => {
+            transparent_expression(&parenthesized.expression)
+        }
+        _ => expression,
     }
 }
 
@@ -206,6 +590,56 @@ mod tests {
             let reparsed = Parser::new(&allocator, &output.code, source_type).parse();
             assert!(reparsed.errors.is_empty(), "{file}: {:?}", reparsed.errors);
         }
+    }
+
+    #[test]
+    fn inserts_probe_v2_without_claiming_the_unported_surfaces() {
+        let output = instrument_candidate(SOURCE, "app/decide.ts").unwrap();
+        assert!(!output.complete);
+        assert_eq!(output.supported_surface, "if-probe-v2-candidate");
+        let runtime = output.runtime.expect("candidate runtime binding");
+        assert!(output.code.contains(&runtime.mcdc_end_v2));
+        assert!(output.code.contains("_supercovMcdcFrame"));
+        assert!(output.code.contains("_supercovMcdcResult"));
+        assert!(output.code.contains("+= _supercovMcdcValue"));
+        assert_eq!(output.decisions.len(), 1);
+
+        let allocator = Allocator::default();
+        let reparsed = Parser::new(
+            &allocator,
+            &output.code,
+            SourceType::from_path("app/decide.ts").unwrap(),
+        )
+        .parse();
+        assert!(reparsed.errors.is_empty(), "{:?}", reparsed.errors);
+    }
+
+    #[test]
+    fn allocates_runtime_and_scratch_names_away_from_user_bindings() {
+        let source = "const __supercovMcdcEndV2 = 1, _supercovMcdcFrame1 = 2;\nif (a && b) work();";
+        let output = instrument_candidate(source, "app/collisions.js").unwrap();
+        let runtime = output.runtime.expect("candidate runtime binding");
+        assert_ne!(runtime.mcdc_end_v2, "__supercovMcdcEndV2");
+        assert!(!output.code.contains("let _supercovMcdcFrame1,"));
+    }
+
+    #[test]
+    fn leaves_wider_decisions_explicitly_uninstrumented_for_exact_v1_fallback() {
+        let predicate = (0..33)
+            .map(|index| format!("c{index}"))
+            .collect::<Vec<_>>()
+            .join(" && ");
+        let source = format!("if ({predicate}) work();");
+        let output = instrument_candidate(&source, "app/wide.js").unwrap();
+        assert_eq!(output.decisions[0].conditions.len(), 33);
+        assert!(
+            output
+                .limitations
+                .iter()
+                .any(|limitation| limitation.contains("exact v1 fallback"))
+        );
+        let runtime = output.runtime.expect("candidate runtime binding");
+        assert!(!output.code.contains(&format!("{}(", runtime.mcdc_end_v2)));
     }
 
     #[test]

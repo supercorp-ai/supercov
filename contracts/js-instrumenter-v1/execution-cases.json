@@ -1,0 +1,18 @@
+[
+  {
+    "file": "differential/short-circuit.js",
+    "source": "const effects = [];\nfunction decide(a, b, c) {\n  if ((effects.push(`a:${a}`), a) && (effects.push(`b:${b}`), b) || (effects.push(`c:${c}`), c)) return 'yes';\n  return 'no';\n}\nfunction run() {\n  return [[false,false,false],[false,false,true],[true,false,false],[true,false,true],[true,true,false],[true,true,true]].map((args) => decide(...args));\n}\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/getters.js",
+    "source": "const effects = [];\nconst receiver = {\n  get left() { effects.push('left'); return 1; },\n  get right() { effects.push('right'); return 0; },\n  decide() {\n    if (this.left && this.right) return 'both';\n    return 'not-both';\n  }\n};\nfunction run() { return receiver.decide(); }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/recursion.js",
+    "source": "const effects = [];\nfunction descend(depth) {\n  if ((effects.push(`depth:${depth}`), depth > 0) && descend(depth - 1)) return depth < 3;\n  return depth === 0;\n}\nfunction run() { return descend(4); }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/negation.js",
+    "source": "const effects = [];\nfunction decide(a, b, c) {\n  if (!(a || (effects.push('b'), b)) && (effects.push('c'), c)) return 1;\n  return 0;\n}\nfunction run() { return [decide(false, false, true), decide(false, true, true), decide(true, false, true)]; }\nfunction observe() { return effects; }\n"
+  }
+]

@@ -1,7 +1,7 @@
 use std::{io::Read, process::ExitCode};
 
 use serde::Deserialize;
-use supercov_engine::js_instrumenter::analyze_candidate;
+use supercov_engine::js_instrumenter::instrument_candidate;
 
 #[derive(Deserialize)]
 struct Case {
@@ -24,7 +24,7 @@ fn main() -> ExitCode {
     };
     let mut outputs = Vec::with_capacity(cases.len());
     for case in cases {
-        match analyze_candidate(&case.source, &case.file) {
+        match instrument_candidate(&case.source, &case.file) {
             Ok(output) => outputs.push(output),
             Err(error) => {
                 eprintln!("{}: {error:?}", case.file);
