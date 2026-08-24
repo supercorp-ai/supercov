@@ -18,9 +18,10 @@ use oxc_ast::{
     ast::{
         Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentTarget,
         CallExpression, ConditionalExpression, Declaration, DoWhileStatement, Expression,
-        ForInStatement, ForOfStatement, ForStatement, Function, FunctionBody, IfStatement,
-        LogicalExpression, NewExpression, ObjectPropertyKind, Program, PropertyKey, PropertyKind,
-        Statement, VariableDeclarationKind, WhileStatement, WithStatement,
+        ForInStatement, ForOfStatement, ForStatement, FormalParameterKind, FormalParameters,
+        Function, FunctionBody, IfStatement, LogicalExpression, NewExpression, ObjectPropertyKind,
+        Program, PropertyKey, PropertyKind, Statement, VariableDeclarationKind, WhileStatement,
+        WithStatement,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -778,6 +779,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         names,
         scope_declarations: Vec::new(),
         decision_index: 0,
+        parameter_depth: 0,
         source_sensitive_functions: safety.source_sensitive_functions.clone(),
         with_statements: safety.with_statements.clone(),
     };
@@ -1259,6 +1261,7 @@ struct ControlProbeV2Transformer<'a, 's> {
     names: CandidateNames<'s>,
     scope_declarations: Vec<Vec<String>>,
     decision_index: usize,
+    parameter_depth: usize,
     source_sensitive_functions: HashSet<SpanKey>,
     with_statements: HashSet<SpanKey>,
 }
@@ -1267,6 +1270,7 @@ struct ControlProbeV2Transformer<'a, 's> {
 struct DecisionPlan {
     index: usize,
     condition_count: usize,
+    inline_frame: bool,
 }
 
 impl<'a> ControlProbeV2Transformer<'a, '_> {
@@ -1287,6 +1291,58 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
             .expect("a control decision must be inside a program or function body")
             .push(name.clone());
         name
+    }
+
+    fn scratch_for(&mut self, base: &str, inline: bool) -> String {
+        if inline {
+            self.names.allocate(base)
+        } else {
+            self.allocate_scratch(base)
+        }
+    }
+
+    fn wrap_inline_frame(&self, expression: Expression<'a>, names: &[String]) -> Expression<'a> {
+        let declarations = self.ast.vec_from_iter(names.iter().map(|name| {
+            self.ast.variable_declarator(
+                Span::default(),
+                VariableDeclarationKind::Let,
+                self.ast
+                    .binding_pattern_binding_identifier(Span::default(), self.ast.ident(name)),
+                NONE,
+                None,
+                false,
+            )
+        }));
+        let body = self.ast.alloc_function_body(
+            Span::default(),
+            self.ast.vec(),
+            self.ast.vec_from_array([
+                Statement::VariableDeclaration(self.ast.alloc_variable_declaration(
+                    Span::default(),
+                    VariableDeclarationKind::Let,
+                    declarations,
+                    false,
+                )),
+                self.ast.statement_return(Span::default(), Some(expression)),
+            ]),
+        );
+        let params = self.ast.alloc_formal_parameters(
+            Span::default(),
+            FormalParameterKind::ArrowFormalParameters,
+            self.ast.vec(),
+            NONE,
+        );
+        let arrow = self.ast.expression_arrow_function(
+            Span::default(),
+            false,
+            false,
+            NONE,
+            params,
+            NONE,
+            body,
+        );
+        self.ast
+            .expression_call(Span::default(), arrow, NONE, self.ast.vec(), false)
     }
 
     fn prepend_declarations(
@@ -1524,6 +1580,7 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
         let plan = DecisionPlan {
             index: self.decision_index,
             condition_count: condition_spans.len(),
+            inline_frame: self.parameter_depth > 0,
         };
         self.decision_index += 1;
         plan
@@ -1531,7 +1588,7 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
 
     fn apply_decision(&mut self, test: &mut Expression<'a>, plan: DecisionPlan) {
         if plan.condition_count > 32 {
-            let frame_name = self.allocate_scratch("_supercovMcdcFrame");
+            let frame_name = self.scratch_for("_supercovMcdcFrame", plan.inline_frame);
             let mut next_index = 0;
             self.instrument_conditions_v1(test, &frame_name, &mut next_index);
             debug_assert_eq!(next_index, plan.condition_count);
@@ -1564,17 +1621,22 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
                 ]),
                 false,
             );
-            *test = self.ast.expression_sequence(
+            let observed = self.ast.expression_sequence(
                 Span::default(),
                 self.ast.vec_from_array([assign_frame, end]),
             );
+            *test = if plan.inline_frame {
+                self.wrap_inline_frame(observed, &[frame_name])
+            } else {
+                observed
+            };
             return;
         }
 
-        let frame_name = self.allocate_scratch("_supercovMcdcFrame");
-        let result_name = self.allocate_scratch("_supercovMcdcResult");
+        let frame_name = self.scratch_for("_supercovMcdcFrame", plan.inline_frame);
+        let result_name = self.scratch_for("_supercovMcdcResult", plan.inline_frame);
         let temporary_names = (0..plan.condition_count)
-            .map(|_| self.allocate_scratch("_supercovMcdcValue"))
+            .map(|_| self.scratch_for("_supercovMcdcValue", plan.inline_frame))
             .collect::<Vec<_>>();
         let mut next_index = 0;
         self.instrument_conditions(test, &frame_name, &temporary_names, &mut next_index);
@@ -1610,7 +1672,7 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
             arguments,
             false,
         );
-        *test = self.ast.expression_sequence(
+        let observed = self.ast.expression_sequence(
             Span::default(),
             self.ast.vec_from_array([
                 assign_frame,
@@ -1619,6 +1681,13 @@ impl<'a> ControlProbeV2Transformer<'a, '_> {
                 self.identifier(&result_name),
             ]),
         );
+        *test = if plan.inline_frame {
+            let mut names = vec![frame_name, result_name];
+            names.extend(temporary_names);
+            self.wrap_inline_frame(observed, &names)
+        } else {
+            observed
+        };
     }
 }
 
@@ -1644,7 +1713,10 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         {
             return;
         }
+        let outer_parameter_depth = self.parameter_depth;
+        self.parameter_depth = 0;
         walk_mut::walk_function(self, function, flags);
+        self.parameter_depth = outer_parameter_depth;
     }
 
     fn visit_arrow_function_expression(&mut self, function: &mut ArrowFunctionExpression<'a>) {
@@ -1654,7 +1726,16 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
         {
             return;
         }
+        let outer_parameter_depth = self.parameter_depth;
+        self.parameter_depth = 0;
         walk_mut::walk_arrow_function_expression(self, function);
+        self.parameter_depth = outer_parameter_depth;
+    }
+
+    fn visit_formal_parameters(&mut self, parameters: &mut FormalParameters<'a>) {
+        self.parameter_depth += 1;
+        walk_mut::walk_formal_parameters(self, parameters);
+        self.parameter_depth -= 1;
     }
 
     fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {

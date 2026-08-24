@@ -38,5 +38,13 @@
   {
     "file": "differential/logical-value.js",
     "source": "const effects = [];\nfunction decide(left, right) { return left || (effects.push('right'), right); }\nfunction run() { return [decide('left', 'unused'), decide('', 'selected')]; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/parameter-decision.js",
+    "source": "const effects = [];\nfunction choose(value = typeof process === 'undefined' ? 'browser' : 'node') { effects.push(value); return value; }\nfunction run() { return [choose(), choose('provided')]; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/reentrant-parameter-decision.js",
+    "source": "const effects = [];\nlet depth = 0;\nfunction choose(value = ((depth++ === 0 ? choose() : true) && true) ? 'yes' : 'no') { effects.push(value); return value; }\nfunction run() { return choose(); }\nfunction observe() { return effects; }\n"
   }
 ]

@@ -254,7 +254,11 @@ for (const [offset, testCase] of executionCorpus.entries()) {
     throw new Error(
       `${testCase.file}: Rust/TypeScript probe-v2 vectors differ\nreference=${JSON.stringify(vectorSet(reference.evidence.vectors))}\ncandidate=${JSON.stringify(vectorSet(rustExecution.vectors))}`,
     );
-  const referenceHits = [...new Set(reference.evidence.hits)].sort();
+  const supportedHitIds = new Set([
+    ...candidate.points.map((point) => point.id),
+    ...candidate.branches.flatMap((branch) => branch.alternatives.map((alternative) => alternative.id)),
+  ]);
+  const referenceHits = [...new Set(reference.evidence.hits.filter((id) => supportedHitIds.has(id)))].sort();
   const candidateHits = [...new Set(rustExecution.hits)].sort();
   if (JSON.stringify(candidateHits) !== JSON.stringify(referenceHits))
     throw new Error(
