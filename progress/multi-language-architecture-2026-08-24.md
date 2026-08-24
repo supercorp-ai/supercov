@@ -56,6 +56,78 @@ Tier A is not a compromise on *data quality*; it is a compromise on *which
 execution models we can attribute*. That distinction is what makes shipping
 Tier A first honest rather than expedient.
 
+## Why Tier A first: it is Tier B's oracle
+
+Tier A looks like the shortcut and is the opposite. The master plan commits to
+the tsgo discipline of never validating a novel implementation against
+nothing. Our JS instrumenter is credible because we can always ask whether it
+agrees with a reference: Test262 for semantics, the independent Clang/LLVM
+oracle for MC/DC verdicts.
+
+So ask what a Rust MIR pass built *without* Tier A would be diffed against.
+Nothing. We would be shipping a novel MC/DC implementation for a language
+where we hold no reference output, and where we could not distinguish "our
+pass found a decision LLVM misses" from "our pass is wrong." That is the
+risky-big-bang this plan exists to forbid.
+
+Tier A produces that reference, which makes Tier B's acceptance gate
+checkable: **byte-identical structural verdicts against Tier A on the same
+code, with strictly better attribution.** Built in the other order, the
+reference would have to be validated against the very thing it is meant to
+validate.
+
+Of Tier A's components, exactly one is not reused:
+
+| Component | Reused by Tier B |
+| --- | --- |
+| Runner adapter (cargo/nextest/ctest/`go test` discovery, test identity) | fully |
+| Build integration (coverage build config, cargo/cmake plumbing, workspace isolation for non-JS projects) | fully — and the largest chunk |
+| Assertion linkage (framework listeners, macro/header shims) | fully — orthogonal to probe insertion |
+| Process-per-test orchestration and evidence merge | fully |
+| Equivalence-corpus harness | fully — *is* Tier B's gate |
+| profdata → evidence translator | no |
+
+Even the translator is not scaffolding. It is permanent, in three roles: the
+regression oracle for every future Tier B change (the role Clang plays for JS
+today), the fallback when our pass cannot build against a given LLVM/rustc
+version, and the only option for code we do not compile ourselves — prebuilt
+dependencies, build systems we do not control, and mixed-language projects
+where a pass cannot be inserted everywhere. Build it to production quality.
+
+### Tier A also decides whether Tier B is urgent
+
+Rung 1 is not degraded: process-per-test attribution is exact, and strictly
+better than our JS path because no interleaving exists to disambiguate. For a
+language whose ecosystem has standardised on process-per-test, Tier A is
+already full quality.
+
+Rust plausibly is that language — `cargo nextest` is process-per-test by
+architecture and widely adopted. If the ecosystem check shows most real Rust
+repositories run under nextest, then a MIR pass (months of work plus
+indefinite LLVM-cadence maintenance, S8) buys little beyond `cargo test`'s
+thread-based default. It may still be worth building for completeness, but
+that becomes a *measured* decision. C/C++ plausibly breaks the other way,
+since sharding GoogleTest across threads within one process is common. Which
+way each language falls is exactly what Tier A measures instead of guessing.
+
+## Guardrails for the tier ordering
+
+Tier A does actively harm Tier B if the ordering is allowed to leak
+LLVM's model into our own. Three rules prevent that:
+
+1. **Contracts are frozen from the JS reference implementation first**
+   (Phase 1). Tier A conforms to the contract; the contract never conforms to
+   LLVM. Where profdata cannot express something the contract requires, Tier A
+   degrades explicitly — it does not shrink the contract. Otherwise we would
+   permanently inherit LLVM's condition cap and its lack of per-test
+   attribution.
+2. **Tier A declares its attribution rung per runner, machine-checked.** A
+   thread-parallel in-process run reports aggregate attribution and says so;
+   it never presents aggregate evidence as per-test. Same discipline as the
+   `TEST_EVIDENCE_MISSING` diagnostic.
+3. **The translator ships as a supported component**, not as temporary
+   validation scaffolding, because it is permanent (above).
+
 ## The attribution ladder
 
 This is the load-bearing insight. Attribution quality is a property of the
@@ -174,10 +246,27 @@ for. No exceptions, including for demo purposes.
 
 ## Ordering
 
-Python first (already Phase 5 — largest agent-coded ecosystem, one adapter
-covers most of it, and the import-hook mechanism is de-risked by pytest
-itself). Then Rust Tier A → Rust Tier B, since the Rust community's
-process-per-test norm means Tier A already lands at rung 1. Then C/C++
-Tier A (GoogleTest's listener API delivers assertion linkage for free) →
-Tier B. Go after that. JVM/Ruby/PHP only once the shared core has absorbed
-four languages without accumulating per-language special cases in the engine.
+Language order: Python first (already Phase 5 — largest agent-coded
+ecosystem, one adapter covers most of it, and the import-hook mechanism is
+de-risked by pytest itself), then Rust, then C/C++, then Go. JVM/Ruby/PHP only
+once the shared core has absorbed four languages without accumulating
+per-language special cases in the engine.
+
+Within each language the sequence is *not* simply "Tier A then Tier B":
+
+1. **Shared plumbing** — build integration, runner adapter, test identity.
+   Reused by both tiers; the largest single chunk of work.
+2. **Assertion linkage** — framework listeners or macro/header shims. Done
+   here rather than with Tier B because it is orthogonal to probe insertion
+   and it is what makes Tier A genuinely full quality rather than
+   structural-only.
+3. **Tier A translator** — native coverage output into the frozen evidence
+   contract, with its attribution rung declared per runner.
+4. **Equivalence corpus green** — the ship gate. Support is not claimed
+   before this point.
+5. **Measure the ecosystem's actual execution models** via the standing
+   ecosystem check: what fraction of real repositories run process-per-test,
+   serial-in-process, or thread-parallel?
+6. **Prioritise Tier B from that measurement**, per language. Tier B is not an
+   automatic follow-on; it is a decision with evidence behind it, and its
+   acceptance gate is Tier A's own output.

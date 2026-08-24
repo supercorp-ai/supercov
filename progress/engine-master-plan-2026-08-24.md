@@ -118,11 +118,16 @@ miss blocks flipping any default.
   instrumentation (our probe-v2 form with task-local epochs) to reach parity
   under in-process parallelism. Full per-test attribution and assertion
   linkage are achievable in compiled languages — an earlier note claiming
-  otherwise described the cost-optimal path, not the ceiling. Gate per
-  language: a semantic-equivalence corpus of its own, an explicitly declared
-  attribution tier per runner, and enumerated limitations; a language whose
-  corpus is not green is a language we do not claim to support. Full design,
-  per-language matrix, attribution ladder and spikes S8–S10:
+  otherwise described the cost-optimal path, not the ceiling. Tier A is not a
+  stepping stone to discard: it is **Tier B's differential oracle** (Tier B's
+  gate is "identical structural verdicts vs Tier A, strictly better
+  attribution"), a permanent second evidence source for code we do not
+  compile ourselves, and the measurement that decides whether Tier B is
+  urgent for a given language at all. Gate per language: a
+  semantic-equivalence corpus of its own, an explicitly declared attribution
+  tier per runner, and enumerated limitations; a language whose corpus is not
+  green is a language we do not claim to support. Full design, per-language
+  matrix, attribution ladder, tier-ordering guardrails and spikes S8–S10:
   `progress/multi-language-architecture-2026-08-24.md`.
 
 ## Non-goals and guardrails
