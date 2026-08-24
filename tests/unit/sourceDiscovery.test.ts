@@ -37,6 +37,7 @@ describe("first-party source discovery", () => {
       "lib/helper.js": "export const helper = true",
       "src/index.test.ts": "test('root', () => {})",
       "tests/e2e.spec.ts": "test('e2e', () => {})",
+      "scripts/release.mjs": "export const release = true",
       "vite.config.ts": "export default {}",
       ".eslintrc.cjs": "module.exports = {}",
       ".graphqlrc.ts": "export default {}",
@@ -58,6 +59,11 @@ describe("first-party source discovery", () => {
       expect.arrayContaining([
         expect.objectContaining({ file: "orphan.ts", status: "ambiguous" }),
         expect.objectContaining({ file: "src/index.test.ts", status: "excluded" }),
+        expect.objectContaining({
+          file: "scripts/release.mjs",
+          status: "excluded",
+          reason: "conventional tool script",
+        }),
         expect.objectContaining({ file: "vite.config.ts", status: "excluded" }),
         expect.objectContaining({ file: ".eslintrc.cjs", status: "excluded" }),
         expect.objectContaining({ file: ".graphqlrc.ts", status: "excluded" }),

@@ -93,8 +93,10 @@ export function writeRunnerEvidence(
   identity: RunnerTestIdentity,
   status: TestAttemptStatus,
   scope: CoverageExecutionScope,
+  evidenceDirectoryOverride?: string,
 ): void {
-  const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
+  const evidenceDirectory =
+    evidenceDirectoryOverride ?? process.env["SUPERCOV_EVIDENCE_DIR"];
   if (!evidenceDirectory) return;
   const testFile = localFile(identity.file);
   const payload: McdcRawTestResult = {

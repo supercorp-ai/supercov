@@ -65,4 +65,16 @@ describe("exact smallest test-set solver", () => {
       "background/unattributed",
     );
   });
+
+  it("bounds an exact search before combinatorial suites can hang an agent", () => {
+    const report = createMcdcReport(manifest, [
+      result("admin", { values: [true, null], outcome: true }),
+      result("owner", { values: [false, true], outcome: true }),
+      result("both", { values: [true, null], outcome: true }),
+      result("neither", { values: [false, false], outcome: false }),
+    ]);
+    expect(() => minimumTestSet(report, 100, "mcdc", 1)).toThrow(
+      expect.objectContaining({ code: "MINIMIZATION_COMPLEXITY_LIMIT" }),
+    );
+  });
 });

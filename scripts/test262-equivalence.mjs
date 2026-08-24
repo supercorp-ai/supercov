@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { copyFileSync, cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, relative, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
@@ -30,6 +30,12 @@ if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1))
   throw new Error("--limit must be a positive integer");
 const keepTemporary = process.argv.includes("--keep-temp");
 const pathPattern = option("--pattern", "");
+
+if (!existsSync(resolve(test262Root, "test")) || !existsSync(resolve(test262Root, "harness"))) {
+  throw new Error(
+    `Test262 corpus not found at ${test262Root}. Clone tc39/test262 there, set TEST262_DIR, or pass --test262 <path>.`,
+  );
+}
 
 function walk(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {

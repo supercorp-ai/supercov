@@ -65,6 +65,7 @@ interface RuntimeState {
       records: Map<string, CoverageServerRecord>;
     }
   >;
+  persistedServerRecords: Set<string>;
   backgroundSequence: number;
   runtimeSnapshots: boolean;
 }
@@ -149,6 +150,7 @@ function createState(): RuntimeState {
     eventKeys: new Set(),
     bufferedAttempts: new Set(),
     serverBuffers: new Map(),
+    persistedServerRecords: new Set(),
     backgroundSequence: 0,
     runtimeSnapshots: false,
   };
@@ -298,6 +300,38 @@ function flushAllBufferedServerEvidence(): void {
     flushBufferedServerEvidence(buffered.scope);
 }
 
+/**
+ * Claim one immutable background record. Starting from the same sequence is
+ * intentional: a snapshotted process can be cloned with identical pid,
+ * environment and memory. O_EXCL makes the shared filesystem the allocator.
+ */
+export function writeExclusiveBackgroundRecord(
+  fs: Pick<FsBuiltin, "writeFileSync">,
+  runId: string,
+  writer: string,
+  initialSequence: number,
+  payload: string,
+): number {
+  let sequence = initialSequence;
+  for (let attempt = 0; attempt < 10_000; attempt += 1) {
+    const candidate = backgroundEvidencePath(
+      runId,
+      `${writer}-${sequence++}`,
+    );
+    try {
+      fs.writeFileSync(candidate, payload, { flag: "wx" });
+      return sequence;
+    } catch (error) {
+      if ((error as { code?: string }).code === "EEXIST") continue;
+      throw error;
+    }
+  }
+  throw Object.assign(
+    new Error("Could not allocate a collision-free Supercov background evidence record"),
+    { code: "SUPERCOV_BACKGROUND_COLLISION_LIMIT" },
+  );
+}
+
 if (!isBrowser) {
   const flushers = runtimeGlobal.__SUPERCOV_BUFFER_FLUSHERS__ ?? new Set();
   runtimeGlobal.__SUPERCOV_BUFFER_FLUSHERS__ = flushers;
@@ -341,6 +375,15 @@ function appendServer(record: CoverageServerRecord): void {
       state.serverBuffers.set(key, buffered);
       return;
     }
+    const deduplicationKey =
+      scope && serialized.phaseId
+        ? `${attemptKey(scope)}:${serverRecordKey(serialized)}`
+        : undefined;
+    if (
+      deduplicationKey &&
+      state.persistedServerRecords.has(deduplicationKey)
+    )
+      return;
     fs.mkdirSync(directory, { recursive: true });
     if (!path) {
       // A warm process can be snapshotted and cloned into many remote VMs.
@@ -352,25 +395,21 @@ function appendServer(record: CoverageServerRecord): void {
       const shard = process.env["SUPERCOV_EXECUTION_LOG_SHARD"] ?? "process";
       const writer = `${shard}-${process.pid}`;
       const payload = JSON.stringify(serialized) + "\n";
-      for (let attempt = 0; attempt < 10_000; attempt += 1) {
-        const candidate = backgroundEvidencePath(
-          runId,
-          `${writer}-${state.backgroundSequence++}`,
-        );
-        try {
-          fs.writeFileSync(candidate, payload, { flag: "wx" });
-          return;
-        } catch (error) {
-          if ((error as { code?: string }).code === "EEXIST") continue;
-          throw error;
-        }
-      }
+      state.backgroundSequence = writeExclusiveBackgroundRecord(
+        fs,
+        runId,
+        writer,
+        state.backgroundSequence,
+        payload,
+      );
       return;
     }
     fs.appendFileSync(
       path,
       JSON.stringify(serialized) + "\n",
     );
+    if (deduplicationKey)
+      state.persistedServerRecords.add(deduplicationKey);
   } catch {
     // The instrumented build must remain behaviorally identical if collection fails.
   }

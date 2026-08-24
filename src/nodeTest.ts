@@ -45,12 +45,16 @@ function wrappedRegistration(original: TestRegistration): TestRegistration {
     };
     const scope = runnerExecutionScope(identity);
     const options = testOptions(args, index);
+    const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
     const next = [...args];
     const execute = (
       callbackThis: unknown,
       context: TestContext,
       done?: (error?: Error) => void,
     ): unknown => {
+      // A test or its hooks may intentionally modify Supercov's public
+      // environment while testing integrations. Keep this attempt's transport
+      // destination fixed to the value present when the test was registered.
       beginBufferedServerEvidence(scope);
       let status: "passed" | "failed" | "skipped" = options?.skip || options?.todo
         ? "skipped"
@@ -74,7 +78,7 @@ function wrappedRegistration(original: TestRegistration): TestRegistration {
         if (emitted) return;
         emitted = true;
         flushBufferedServerEvidence(scope);
-        writeRunnerEvidence(identity, nextStatus, scope);
+        writeRunnerEvidence(identity, nextStatus, scope, evidenceDirectory);
       };
       try {
         if (callback.length >= 2) {

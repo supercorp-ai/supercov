@@ -410,6 +410,7 @@ export function minimumTestSet(
   report: McdcReport,
   target = 100,
   metric: QueryOptions["metric"] = "all",
+  maxStates = 5_000,
 ): MinimumTestSetResult {
   const unattributed = report.tests.filter(
     (test) =>
@@ -462,6 +463,22 @@ export function minimumTestSet(
     skippedByMetric: Map<MinimizeMetric, number>,
   ): void => {
     exploredStates += 1;
+    if (exploredStates > maxStates) {
+      throw new SupercovError(
+        "MINIMIZATION_COMPLEXITY_LIMIT",
+        `Exact minimization exceeded its ${maxStates.toLocaleString()}-state safety budget. Narrow the test view with --kind or --runner, or request a different target.`,
+        {
+          details: {
+            candidateTests: candidateTests.length,
+            obligations: obligations.length,
+            exploredStates,
+            maxStates,
+            target,
+            metric,
+          },
+        },
+      );
+    }
     if (selected.size >= best.size) return;
     const stateKey = `${[...selected].sort().join(",")}|${[...skipped].sort().join(",")}`;
     if (seen.has(stateKey)) return;

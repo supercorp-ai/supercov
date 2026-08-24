@@ -16,6 +16,7 @@ const SOURCE_PATTERN = /\.[cm]?[jt]sx?$/i;
 const DECLARATION_PATTERN = /\.d\.[cm]?ts$/i;
 const TEST_FILE_PATTERN = /(?:^|[/_.-])(?:test|spec)(?:[/_.-]|$)/i;
 const TEST_DIRECTORY_PATTERN = /(?:^|\/)(?:__tests__|test|tests|spec|specs|e2e|fixtures?|mocks?|__mocks__)(?:\/|$)/i;
+const TOOL_DIRECTORY_PATTERN = /(?:^|\/)(?:scripts)(?:\/|$)/i;
 const CONFIG_PATTERN = /(?:^|\/)(?:(?:babel|eslint|graphql|jest|next|nuxt|playwright|postcss|prettier|remix|rollup|stylelint|tailwind|tsup|vite|vitest|webpack)\.config\.[cm]?[jt]s|\.(?:babel|eslint|graphql|prettier|stylelint)rc\.[cm]?[jt]s)$/i;
 const GENERATED_DIRECTORIES = new Map<string, string>([
   [".git", "version-control metadata"],
@@ -221,6 +222,10 @@ export function discoverSourceScope(
     }
     if (TEST_DIRECTORY_PATTERN.test(file) || TEST_FILE_PATTERN.test(file)) {
       entries.push({ file, status: "excluded", reason: "test or fixture source", ...withPackage });
+      continue;
+    }
+    if (TOOL_DIRECTORY_PATTERN.test(file)) {
+      entries.push({ file, status: "excluded", reason: "conventional tool script", ...withPackage });
       continue;
     }
     if (CONFIG_PATTERN.test(file)) {

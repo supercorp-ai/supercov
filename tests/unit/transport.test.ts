@@ -1,4 +1,11 @@
-import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -10,6 +17,7 @@ import {
   mcdcBegin,
   mcdcCondition,
   mcdcEnd,
+  writeExclusiveBackgroundRecord,
   withCoverageCarrier,
   withRequestPhase,
 } from "../../src/runtime.ts";
@@ -287,5 +295,164 @@ describe("concurrent server evidence transport", () => {
         force: true,
       });
     }
+  });
+
+  it("de-duplicates explicit remote records within one test phase", () => {
+    const execution = scope(
+      `remote-dedup-${process.pid}-${Date.now()}`,
+      "remote-worker",
+      "remote-hot-loop",
+      0,
+    );
+    const meta: McdcDecisionMeta = {
+      id: "remote-decision",
+      file: "src/remote.ts",
+      line: 1,
+      column: 1,
+      source: "ready && enabled",
+      conditions: ["ready", "enabled"],
+      kind: "if",
+    };
+    try {
+      withCoverageCarrier(
+        { version: 1, scope: execution, phaseId: "explicit-action" },
+        () => {
+          for (let index = 0; index < 1_000; index += 1) {
+            coverageHit("remote-repeated-hit");
+            const frame = mcdcBegin(meta.id, meta);
+            mcdcCondition(frame, 0, true);
+            mcdcCondition(frame, 1, true);
+            mcdcEnd(frame, true);
+          }
+        },
+      );
+      const persisted = records(execution);
+      expect(persisted).toHaveLength(2);
+      expect(persisted.map((record) => record.type)).toEqual([
+        "hit",
+        "decision",
+      ]);
+      expect(persisted.every((record) => record.phaseId === "explicit-action")).toBe(true);
+    } finally {
+      rmSync(serverRunEvidenceDirectory(execution.runId), {
+        recursive: true,
+        force: true,
+      });
+    }
+  });
+
+  it("keeps the same remote hit across distinct explicit phases", () => {
+    const execution = scope(
+      `remote-phases-${process.pid}-${Date.now()}`,
+      "remote-worker",
+      "remote-phases",
+      0,
+    );
+    try {
+      for (const phaseId of ["action-one", "action-two"]) {
+        withCoverageCarrier({ version: 1, scope: execution, phaseId }, () => {
+          coverageHit("shared-phase-hit");
+          coverageHit("shared-phase-hit");
+        });
+      }
+      expect(records(execution)).toMatchObject([
+        { type: "hit", id: "shared-phase-hit", phaseId: "action-one" },
+        { type: "hit", id: "shared-phase-hit", phaseId: "action-two" },
+      ]);
+    } finally {
+      rmSync(serverRunEvidenceDirectory(execution.runId), {
+        recursive: true,
+        force: true,
+      });
+    }
+  });
+
+  it("preserves unphased repeats needed by timestamp attribution", () => {
+    const execution = scope(
+      `remote-unphased-${process.pid}-${Date.now()}`,
+      "remote-worker",
+      "remote-unphased",
+      0,
+    );
+    try {
+      withCoverageCarrier({ version: 1, scope: execution }, () => {
+        coverageHit("unphased-repeat");
+        coverageHit("unphased-repeat");
+      });
+      expect(records(execution)).toHaveLength(2);
+    } finally {
+      rmSync(serverRunEvidenceDirectory(execution.runId), {
+        recursive: true,
+        force: true,
+      });
+    }
+  });
+
+  it("allocates collision-free records for identical snapshot clones", () => {
+    const runId = `clone-collision-${process.pid}-${Date.now()}`;
+    const directory = resolve(serverRunEvidenceDirectory(runId), "background");
+    mkdirSync(directory, { recursive: true });
+    try {
+      for (let clone = 0; clone < 32; clone += 1) {
+        const next = writeExclusiveBackgroundRecord(
+          { writeFileSync },
+          runId,
+          "identical-pid-and-shard",
+          0,
+          `${JSON.stringify({ clone })}\n`,
+        );
+        expect(next).toBe(clone + 1);
+      }
+      const files = readdirSync(directory);
+      expect(files).toHaveLength(32);
+      const clones = files
+        .map((file) => JSON.parse(readFileSync(resolve(directory, file), "utf8")))
+        .map((record) => record.clone)
+        .sort((left, right) => left - right);
+      expect(clones).toEqual(Array.from({ length: 32 }, (_, index) => index));
+    } finally {
+      rmSync(serverRunEvidenceDirectory(runId), {
+        recursive: true,
+        force: true,
+      });
+    }
+  });
+
+  it("does not hide a background-record filesystem failure", () => {
+    const failure = Object.assign(new Error("disk unavailable"), { code: "ENOSPC" });
+    expect(() =>
+      writeExclusiveBackgroundRecord(
+        {
+          writeFileSync() {
+            throw failure;
+          },
+        },
+        "failed-run",
+        "writer",
+        0,
+        "{}\n",
+      ),
+    ).toThrow(failure);
+  });
+
+  it("reports exhaustion instead of claiming unwritten background evidence", () => {
+    let attempts = 0;
+    expect(() =>
+      writeExclusiveBackgroundRecord(
+        {
+          writeFileSync() {
+            attempts += 1;
+            throw Object.assign(new Error("already exists"), { code: "EEXIST" });
+          },
+        },
+        "exhausted-run",
+        "identical-writer",
+        0,
+        "{}\n",
+      ),
+    ).toThrow(
+      expect.objectContaining({ code: "SUPERCOV_BACKGROUND_COLLISION_LIMIT" }),
+    );
+    expect(attempts).toBe(10_000);
   });
 });
