@@ -99,6 +99,84 @@ const semanticCases: Array<{ name: string; source: string }> = [
     `,
   },
   {
+    name: "nested optional receivers preserve skipped keys, arguments, and exact this",
+    source: `
+      const effects = [];
+      const present = {
+        value: 8,
+        get method() {
+          effects.push("getter");
+          return function (argument) {
+            effects.push(["call", this === present, argument]);
+            return this.value + argument;
+          };
+        },
+      };
+      function key() { effects.push("key"); return "method"; }
+      function argument() { effects.push("argument"); return 2; }
+      function run() {
+        const skippedReceiver = null?.[key()]?.(argument());
+        const skippedMethod = ({ method: undefined })?.[key()]?.(argument());
+        const called = present?.[key()]?.(argument());
+        return { skippedReceiver, skippedMethod, called };
+      }
+      function observe() { return effects; }
+    `,
+  },
+  {
+    name: "optional super calls preserve receiver and chain continuation",
+    source: `
+      const effects = [];
+      class Parent {
+        method() {
+          effects.push(this instanceof Child ? "child" : "wrong");
+          return () => ({ value: 5 });
+        }
+      }
+      class Child extends Parent {
+        run() { return super.method?.()().value; }
+      }
+      function run() { return new Child().run(); }
+      function observe() { return effects; }
+    `,
+  },
+  {
+    name: "delete of an optional-call continuation preserves reference semantics",
+    source: `
+      const effects = [];
+      const target = { nested: { removable: 3 } };
+      const absent = { method: undefined };
+      const present = {
+        method() { effects.push("called"); return target.nested; },
+      };
+      function run() {
+        const skipped = delete absent.method?.().removable;
+        const removed = delete present.method?.().removable;
+        return { skipped, removed, remains: "removable" in target.nested };
+      }
+      function observe() { return effects; }
+    `,
+  },
+  {
+    name: "optional private method calls preserve brand and receiver semantics",
+    source: `
+      const effects = [];
+      class Example {
+        value = 6;
+        #present(argument) {
+          effects.push(this instanceof Example ? "receiver" : "wrong");
+          return this.value + argument;
+        }
+        #absent;
+        run() {
+          return [this.#present?.(2), this.#absent?.(3)];
+        }
+      }
+      function run() { return new Example().run(); }
+      function observe() { return effects; }
+    `,
+  },
+  {
     name: "direct function source coercion remains behaviorally identical",
     source: `
       const effects = [];

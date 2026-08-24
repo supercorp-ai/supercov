@@ -3,6 +3,7 @@ import type { TestContext, TestOptions } from "node:test";
 import {
   beginBufferedServerEvidence,
   flushBufferedServerEvidence,
+  takeNodeAssertionPhases,
   withCoverageCarrier,
 } from "./runtime.ts";
 import {
@@ -78,7 +79,13 @@ function wrappedRegistration(original: TestRegistration): TestRegistration {
         if (emitted) return;
         emitted = true;
         flushBufferedServerEvidence(scope);
-        writeRunnerEvidence(identity, nextStatus, scope, evidenceDirectory);
+        writeRunnerEvidence(
+          identity,
+          nextStatus,
+          scope,
+          evidenceDirectory,
+          takeNodeAssertionPhases(scope),
+        );
       };
       try {
         if (callback.length >= 2) {

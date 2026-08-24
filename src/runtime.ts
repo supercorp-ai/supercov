@@ -1,6 +1,7 @@
 import type {
   CoverageCarrier,
   CoverageExecutionScope,
+  CoveragePhase,
   CoverageRuntimeSnapshot,
   CoverageRuntimeEvent,
   CoverageServerRecord,
@@ -33,6 +34,13 @@ interface SelectionFrame {
   shortId: string;
   rightId: string;
   rightEvaluated: boolean;
+}
+
+interface OptionalCallFrame {
+  shortId: string;
+  continuedId: string;
+  reached: boolean;
+  continued: boolean;
 }
 
 interface TryFrame {
@@ -68,6 +76,10 @@ interface RuntimeState {
   persistedServerRecords: Set<string>;
   backgroundSequence: number;
   runtimeSnapshots: boolean;
+  assertionPhases: Map<
+    string,
+    { counter: number; phases: CoveragePhase[] }
+  >;
 }
 
 type McdcGlobal = typeof globalThis & {
@@ -153,6 +165,7 @@ function createState(): RuntimeState {
     persistedServerRecords: new Set(),
     backgroundSequence: 0,
     runtimeSnapshots: false,
+    assertionPhases: new Map(),
   };
   if (!isBrowser) return state;
   try {
@@ -453,6 +466,91 @@ export function withCoverageCarrier<T>(
     },
     callback,
   );
+}
+
+function assertionPhaseState(scope: CoverageExecutionScope): {
+  counter: number;
+  phases: CoveragePhase[];
+} {
+  const key = attemptKey(scope);
+  const existing = state.assertionPhases.get(key);
+  if (existing) return existing;
+  const created = { counter: 0, phases: [] as CoveragePhase[] };
+  state.assertionPhases.set(key, created);
+  return created;
+}
+
+function finishAssertionPhase(phase: CoveragePhase, error?: unknown): void {
+  phase.endedAtMs = Date.now();
+  phase.status = error === undefined ? "passed" : "failed";
+  if (error !== undefined)
+    phase.error = error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Execute an assertion and its argument evaluation under one explicit phase.
+ * The source transformer supplies the thunk so JavaScript does not evaluate
+ * assertion arguments before the phase exists. Builtin wrappers also call
+ * this as a fallback for dynamic assertion references.
+ */
+export function withNodeAssertionPhase<T>(
+  operation: string,
+  source: string | undefined,
+  callback: () => T,
+): T {
+  const context = currentRequestContext();
+  const scope = context.scope;
+  if (!scope) return callback();
+  const existing = context.phaseId
+    ? assertionPhaseState(scope).phases.find(
+        (phase) => phase.id === context.phaseId && phase.kind === "assertion",
+      )
+    : undefined;
+  if (existing) return callback();
+  const attempt = assertionPhaseState(scope);
+  const phase: CoveragePhase = {
+    id: `${scope.attemptId}:phase:${++attempt.counter}`,
+    kind: "assertion",
+    operation,
+    ...(source ? { source } : {}),
+    startedAtMs: Date.now(),
+  };
+  attempt.phases.push(phase);
+  try {
+    const result = withCoverageCarrier(
+      { version: 1, scope, phaseId: phase.id },
+      callback,
+    );
+    if (
+      result &&
+      typeof (result as unknown as PromiseLike<unknown>).then === "function"
+    )
+      return Promise.resolve(result).then(
+        (value) => {
+          finishAssertionPhase(phase);
+          return value;
+        },
+        (error: unknown) => {
+          finishAssertionPhase(phase, error);
+          throw error;
+        },
+      ) as T;
+    finishAssertionPhase(phase);
+    return result;
+  } catch (error) {
+    finishAssertionPhase(phase, error);
+    throw error;
+  }
+}
+
+/** Consume the assertion phases recorded for one exact runner attempt. */
+export function takeNodeAssertionPhases(
+  scope: CoverageExecutionScope,
+): CoveragePhase[] {
+  const key = attemptKey(scope);
+  const phases = state.assertionPhases.get(key)?.phases ?? [];
+  state.assertionPhases.delete(key);
+  return phases;
 }
 
 export function bindCoverageContext<T extends (...args: never[]) => unknown>(
@@ -763,6 +861,46 @@ export function optionalSelect<T>(
   value: T,
 ): T {
   coverageHit(value === null || value === undefined ? shortId : continuedId);
+  return value;
+}
+
+export function optionalCallBegin(
+  shortId: string,
+  continuedId: string,
+): OptionalCallFrame {
+  return { shortId, continuedId, reached: false, continued: false };
+}
+
+/** Mark callee-reference evaluation while returning its operand unchanged. */
+export function optionalCallReached<T>(
+  frame: OptionalCallFrame,
+  value: T,
+): T {
+  frame.reached = true;
+  return value;
+}
+
+const optionalCallEmptySpread = {
+  [Symbol.iterator](): Iterator<never> {
+    return {
+      next(): IteratorResult<never> {
+        return { done: true, value: undefined as never };
+      },
+    };
+  },
+};
+
+/** Native optional calls evaluate argument spreads only on continuation. */
+export function optionalCallContinued(
+  frame: OptionalCallFrame,
+): Iterable<never> {
+  frame.continued = true;
+  return optionalCallEmptySpread;
+}
+
+export function optionalCallEnd<T>(frame: OptionalCallFrame, value: T): T {
+  if (frame.reached)
+    coverageHit(frame.continued ? frame.continuedId : frame.shortId);
   return value;
 }
 

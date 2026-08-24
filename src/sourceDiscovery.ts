@@ -19,6 +19,7 @@ const TEST_DIRECTORY_PATTERN = /(?:^|\/)(?:__tests__|test|tests|spec|specs|e2e|f
 const TOOL_DIRECTORY_PATTERN = /(?:^|\/)(?:scripts)(?:\/|$)/i;
 const CONFIG_PATTERN = /(?:^|\/)(?:(?:babel|eslint|graphql|jest|next|nuxt|playwright|postcss|prettier|remix|rollup|stylelint|tailwind|tsup|vite|vitest|webpack)\.config\.[cm]?[jt]s|\.(?:babel|eslint|graphql|prettier|stylelint)rc\.[cm]?[jt]s)$/i;
 const GENERATED_DIRECTORIES = new Map<string, string>([
+  [".cache", "generated tool cache"],
   [".git", "version-control metadata"],
   [".next", "generated Next.js output"],
   [".nuxt", "generated Nuxt output"],

@@ -974,7 +974,6 @@ export function createMcdcReport(
         "all input values or semantic input partitions",
         "all execution paths or ordering/concurrency interleavings",
         "destructuring defaults in classic for initializers (reported as blockers when discovered)",
-        "optional calls through super",
         "the internal statements and decisions of runtime-generated eval/Function source",
         "mutation score or assertion fault-detection strength",
       ],

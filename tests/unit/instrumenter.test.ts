@@ -61,6 +61,27 @@ function executeInstrumented(source: string): {
     hits.push(value === null || value === undefined ? shortId : continuedId);
     return value;
   };
+  const optionalCallBegin = (shortId: string, continuedId: string) => ({
+    shortId,
+    continuedId,
+    reached: false,
+    continued: false,
+  });
+  const optionalCallReached = <T>(frame: { reached: boolean }, value: T): T => {
+    frame.reached = true;
+    return value;
+  };
+  const optionalCallContinued = (frame: { continued: boolean }): Iterable<never> => {
+    frame.continued = true;
+    return [];
+  };
+  const optionalCallEnd = <T>(
+    frame: { shortId: string; continuedId: string; reached: boolean; continued: boolean },
+    value: T,
+  ): T => {
+    if (frame.reached) hits.push(frame.continued ? frame.continuedId : frame.shortId);
+    return value;
+  };
   const defaultSelected = <T>(id: string, value: T): T => {
     pendingDefaults.set(id, (pendingDefaults.get(id) ?? 0) + 1);
     return value;
@@ -93,6 +114,10 @@ function executeInstrumented(source: string): {
     "__supercovSelectionRight",
     "__supercovSelectionEnd",
     "__supercovOptionalSelect",
+    "__supercovOptionalCallBegin",
+    "__supercovOptionalCallReached",
+    "__supercovOptionalCallContinued",
+    "__supercovOptionalCallEnd",
     "__supercovDefaultSelected",
     "__supercovDefaultEntered",
     "__supercovTryBegin",
@@ -111,6 +136,10 @@ function executeInstrumented(source: string): {
     selectionRight,
     selectionEnd,
     optionalSelect,
+    optionalCallBegin,
+    optionalCallReached,
+    optionalCallContinued,
+    optionalCallEnd,
     defaultSelected,
     defaultEntered,
     tryBegin,
@@ -223,11 +252,16 @@ describe("MC/DC instrumenter", () => {
       ),
     ).toBe(4);
     expect(optionalMethod.decide({ method: undefined }, undefined)).toBeUndefined();
-    expect(optionalMethod.manifest.limitations).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ kind: "semantic-safety" }),
-      ]),
+    const optionalCallBranch = optionalMethod.manifest.branches.find(
+      (branch) => branch.source.includes("method?.()"),
     );
+    expect(optionalCallBranch?.kind).toBe("optional-chain");
+    expect(optionalMethod.hits).toEqual(
+      expect.arrayContaining(
+        optionalCallBranch!.alternatives.map((item) => item.id),
+      ),
+    );
+    expect(optionalMethod.manifest.limitations ?? []).toHaveLength(0);
 
     const assignment = executeInstrumented(`
       function decide(left, right) {

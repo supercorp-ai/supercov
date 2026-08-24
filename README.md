@@ -43,8 +43,21 @@ The coverage engine has seven independent release gates:
 npm test
 npm run test:clang-mcdc
 npm run benchmark:check
-TEST262_DIR=/path/to/test262 npm run test:test262
+
+# One-time contributor setup. The corpus stays inside this checkout and is
+# ignored by Git because it is a large, reproducible test dependency.
+git clone --depth 1 https://github.com/tc39/test262.git .cache/test262
+
+# Uses .cache/test262 by default.
+npm run test:test262
 ```
+
+Test262 is TC39's conformance suite for ECMA-262, the JavaScript language
+specification. Supercov executes eligible tests both before and after
+instrumentation and rejects any semantic difference. The local clone is not
+part of the npm package or a coverage run and can be deleted and cloned again
+at any time. Contributors who already keep Test262 elsewhere can override the
+default with `TEST262_DIR=/path/to/test262` or `--test262 <path>`.
 
 The differential suite includes getters, proxies, optional calls and `this`,
 computed logical assignments, defaults, `try`/`catch`/`finally`, iterator

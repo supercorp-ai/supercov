@@ -46,6 +46,7 @@ describe("first-party source discovery", () => {
       "packages/ui/src/index.ts": "export const ui = true",
       "packages/ui/tests/ui.spec.ts": "test('ui', () => {})",
       "dist/generated.js": "export const generated = true",
+      ".cache/tool/generated.js": "export const cached = true",
     });
 
     const discovered = discoverSourceScope(root);
@@ -72,6 +73,9 @@ describe("first-party source discovery", () => {
     expect(discovered.limitations).toMatchObject([
       { kind: "source-scope", file: "orphan.ts" },
     ]);
+    expect(
+      discovered.scope.entries.some((entry) => entry.file.includes(".cache")),
+    ).toBe(false);
   });
 
   it("treats explicit roots as authoritative and explains files outside them", () => {

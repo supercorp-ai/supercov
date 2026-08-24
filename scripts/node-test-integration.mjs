@@ -23,4 +23,12 @@ if (tests.length !== 4 || tests.some((test) => test.provenance.runner !== "node:
   throw new Error(`expected four attributed node:test tests, received ${JSON.stringify(tests)}`);
 if (report.summary.conditionCoveragePct !== 100)
   throw new Error(`expected 100% MC/DC, received ${report.summary.conditionCoveragePct}%`);
-console.log(`[node:test] run ${runId}: four exact test scopes, 100% MC/DC`);
+if (report.phases.filter((phase) => phase.kind === "assertion").length !== 4)
+  throw new Error(`expected four native assertion phases, received ${JSON.stringify(report.phases)}`);
+if (report.lines.filter((line) => line.confidence.level === "asserted").length === 0)
+  throw new Error("expected node:assert argument execution to be assertion-attributed");
+if (report.decisions.some((decision) =>
+  decision.conditions.some((condition) => !condition.assertionCovered)
+))
+  throw new Error("expected every node:test MC/DC witness to be assertion-linked");
+console.log(`[node:test] run ${runId}: four exact test scopes, 100% assertion-linked MC/DC`);

@@ -1,13 +1,45 @@
-import Module, { register } from "node:module";
+import Module, { register, syncBuiltinESMExports } from "node:module";
 import { resolve } from "node:path";
 import { installLaunchSupervisor } from "./launchSupervisor.js";
 
 installLaunchSupervisor();
 
-if (process.env.SUPERCOV_DIRECT_INSTRUMENTATION === "1") {
-  globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.js");
-  process.__SUPERCOV_DIRECT_RUNTIME__ ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__;
-}
+// Assertion-call instrumentation also uses this runtime in test processes
+// whose application build is handled by Vite or another compiler. Loading it
+// for every isolated test launch keeps node:assert attribution runner-agnostic.
+globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.js");
+process.__SUPERCOV_DIRECT_RUNTIME__ ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__;
+
+// Workers are independent Node processes and an explicit `execArgv: []`
+// otherwise strips the preload that supplies the isolated runtime. Preserve
+// every user option while adding exactly one Supercov import.
+const workerThreads = Module._load("node:worker_threads", undefined, false);
+const NativeWorker = workerThreads.Worker;
+const registerArgument = `--import=${new URL("./register.mjs", import.meta.url).href}`;
+const appendRegister = values =>
+  values.some(value => value === registerArgument || value.includes("/.supercov/register.mjs"))
+    ? values
+    : [...values, registerArgument];
+workerThreads.Worker = class SupercovWorker extends NativeWorker {
+  constructor(filename, options = {}) {
+    const workerOptions = { ...options };
+    let workerEntrypoint = filename;
+    // Node currently records --import in an eval Worker's process.execArgv but
+    // does not execute the preload. Bootstrap the unchanged source after the
+    // register promise instead so eval workers receive the same runtime.
+    if (options.eval === true && typeof filename === "string") {
+      workerEntrypoint = `import(${JSON.stringify(new URL("./register.mjs", import.meta.url).href)}).then(() => {\n${filename}\n}).catch(error => queueMicrotask(() => { throw error; }));`;
+    }
+    // Omitted execArgv already inherits Node's internally validated parent
+    // flags. Only an explicit override needs the Supercov import restored.
+    if (options.eval !== true && options.execArgv !== undefined)
+      workerOptions.execArgv = appendRegister(options.execArgv);
+    super(workerEntrypoint, {
+      ...workerOptions,
+    });
+  }
+};
+syncBuiltinESMExports();
 
 // NODE_OPTIONS reaches commands launched through npm scripts. When that child
 // is Vitest, replace its config with our generated merging config before the
@@ -21,6 +53,8 @@ const generatedJestConfig = process.env.SUPERCOV_GENERATED_JEST_CONFIG;
 const entrypoint = process.argv[1]?.replaceAll("\\", "/") ?? "";
 const playwrightTarget = process.env.SUPERCOV_PLAYWRIGHT_MODULE;
 const nodeTestWrapper = new URL("./nodeTest.js", import.meta.url).href;
+const nodeAssertWrapper = new URL("./nodeAssert.js", import.meta.url).href;
+const nodeAssertStrictWrapper = new URL("./nodeAssertStrict.js", import.meta.url).href;
 const isPlaywrightEntrypoint =
   /\/(?:node_modules\/\.bin\/playwright|node_modules\/(?:@playwright\/test|playwright)\/(?:cli\.js|.*\/program\.js))$/.test(
     entrypoint,
@@ -151,6 +185,13 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1") {
   const projectRoot = process.env.SUPERCOV_PROJECT_ROOT?.replaceAll("\\", "/").replace(/\/$/, "");
   const nodeTestAdapter = await import(nodeTestWrapper);
   const cjsNodeTestAdapter = Object.assign(nodeTestAdapter.test, nodeTestAdapter);
+  const nodeAssertAdapter = await import(nodeAssertWrapper);
+  const cjsNodeAssertAdapter = Object.assign(nodeAssertAdapter.default, nodeAssertAdapter);
+  const nodeAssertStrictAdapter = await import(nodeAssertStrictWrapper);
+  const cjsNodeAssertStrictAdapter = Object.assign(
+    nodeAssertStrictAdapter.default,
+    nodeAssertStrictAdapter,
+  );
   const originalLoad = Module._load;
   Module._load = function supercovNodeTestLoad(request, parent, isMain) {
     const parentFile = parent?.filename?.replaceAll("\\", "/");
@@ -167,6 +208,13 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1") {
       console.error("[supercov] node:test CJS request", { parentFile, projectRoot, belongsToProject });
     if ((request === "node:test" || request === "test") && belongsToProject)
       return cjsNodeTestAdapter;
+    if (
+      ["assert", "node:assert", "assert/strict", "node:assert/strict"].includes(request) &&
+      belongsToProject
+    )
+      return request.endsWith("/strict")
+        ? cjsNodeAssertStrictAdapter
+        : cjsNodeAssertAdapter;
     return originalLoad.call(this, request, parent, isMain);
   };
 }

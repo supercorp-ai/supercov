@@ -22,6 +22,7 @@ import {
   writeInstrumentedBuildCache,
 } from "./buildCache.ts";
 import { instrumentDirectWorkspace } from "./directInstrumenter.ts";
+import { instrumentNodeAssertionsInWorkspace } from "./nodeAssertionInstrumenter.ts";
 import {
   acquireProjectLock,
   cachedWorkspacePath,
@@ -34,6 +35,7 @@ import {
   writeRunState,
 } from "./workspace.ts";
 import { agentFailureJson, SupercovError } from "./agentJson.ts";
+import { isolateCollectorRuntime } from "./runtimeIsolation.ts";
 
 interface ChildResult {
   status: number | null;
@@ -297,6 +299,9 @@ async function createCoverageRun(command: string[]): Promise<number> {
     for (const file of [
       "atomic.js",
       "launchSupervisor.js",
+      "nodeAssert.js",
+      "nodeAssertAdapter.js",
+      "nodeAssertStrict.js",
       "nodeTest.js",
       "playwright.js",
       "playwrightReporter.js",
@@ -313,8 +318,8 @@ async function createCoverageRun(command: string[]): Promise<number> {
     const generatedRuntime = resolve(generatedDirectory, "runtime.js");
     atomicWriteFileSync(
       generatedRuntime,
-      readFileSync(generatedRuntime, "utf8").replaceAll(
-        "__SUPERCOV_RUNTIME_INSTANCE__",
+      isolateCollectorRuntime(
+        readFileSync(generatedRuntime, "utf8"),
         `collector-${runId}`,
       ),
     );
@@ -326,6 +331,10 @@ async function createCoverageRun(command: string[]): Promise<number> {
         "selectionRight",
         "selectionEnd",
         "optionalSelect",
+        "optionalCallBegin",
+        "optionalCallReached",
+        "optionalCallContinued",
+        "optionalCallEnd",
         "defaultSelected",
         "defaultEntered",
         "tryBegin",
@@ -663,6 +672,14 @@ async function createCoverageRun(command: string[]): Promise<number> {
     if (buildResult.error) throw buildResult.error;
 
     if (buildResult.status === 0) {
+      const assertionCount = instrumentNodeAssertionsInWorkspace(
+        isolatedRoot,
+        project.sourceScope.entries.map((entry) => entry.file),
+      );
+      if (assertionCount > 0)
+        console.error(
+          `[supercov] attributed ${assertionCount} native node:assert call(s)`,
+        );
       updateRunState(root, runId, { status: "testing" });
       console.error(`[supercov] running in isolated workspace: ${command.join(" ")}`);
       phaseStarted = performance.now();

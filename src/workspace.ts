@@ -49,6 +49,7 @@ const TERMINAL = new Set<RunStateStatus>([
   "abandoned",
 ]);
 const ROOT_EXCLUSIONS = new Set([
+  ".cache",
   ".git",
   ".supercov",
   ".mcdc-pool",
@@ -62,6 +63,7 @@ const ROOT_EXCLUSIONS = new Set([
   "playwright-report",
   "test-results",
 ]);
+const NESTED_SUPERCOV_EXCLUSIONS = new Set([".supercov", ".mcdc-pool"]);
 
 function processExists(pid: number): boolean {
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
@@ -346,7 +348,11 @@ function copyTree(
 ): void {
   mkdirSync(destination, { recursive: true });
   for (const entry of readdirSync(source, { withFileTypes: true })) {
-    if (root && ROOT_EXCLUSIONS.has(entry.name)) continue;
+    if (
+      (root && ROOT_EXCLUSIONS.has(entry.name)) ||
+      NESTED_SUPERCOV_EXCLUSIONS.has(entry.name)
+    )
+      continue;
     const from = resolve(source, entry.name);
     const to = resolve(destination, entry.name);
     const stat = lstatSync(from);

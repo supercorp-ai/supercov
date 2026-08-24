@@ -21,6 +21,10 @@ const SELECTION_RIGHT = "__supercovSelectionRight";
 const SELECTION_END = "__supercovSelectionEnd";
 const WITH_REQUEST_PHASE = "__supercovWithRequestPhase";
 const OPTIONAL_SELECT = "__supercovOptionalSelect";
+const OPTIONAL_CALL_BEGIN = "__supercovOptionalCallBegin";
+const OPTIONAL_CALL_REACHED = "__supercovOptionalCallReached";
+const OPTIONAL_CALL_CONTINUED = "__supercovOptionalCallContinued";
+const OPTIONAL_CALL_END = "__supercovOptionalCallEnd";
 const DEFAULT_SELECTED = "__supercovDefaultSelected";
 const DEFAULT_ENTERED = "__supercovDefaultEntered";
 const TRY_BEGIN = "__supercovTryBegin";
@@ -175,6 +179,10 @@ function allocatedRuntimeNames(code: string): Record<string, string> {
     SELECTION_END,
     WITH_REQUEST_PHASE,
     OPTIONAL_SELECT,
+    OPTIONAL_CALL_BEGIN,
+    OPTIONAL_CALL_REACHED,
+    OPTIONAL_CALL_CONTINUED,
+    OPTIONAL_CALL_END,
     DEFAULT_SELECTED,
     DEFAULT_ENTERED,
     TRY_BEGIN,
@@ -339,6 +347,10 @@ export function instrumentMcdc(
   const SELECTION_END = names["__supercovSelectionEnd"]!;
   const WITH_REQUEST_PHASE = names["__supercovWithRequestPhase"]!;
   const OPTIONAL_SELECT = names["__supercovOptionalSelect"]!;
+  const OPTIONAL_CALL_BEGIN = names["__supercovOptionalCallBegin"]!;
+  const OPTIONAL_CALL_REACHED = names["__supercovOptionalCallReached"]!;
+  const OPTIONAL_CALL_CONTINUED = names["__supercovOptionalCallContinued"]!;
+  const OPTIONAL_CALL_END = names["__supercovOptionalCallEnd"]!;
   const DEFAULT_SELECTED = names["__supercovDefaultSelected"]!;
   const DEFAULT_ENTERED = names["__supercovDefaultEntered"]!;
   const TRY_BEGIN = names["__supercovTryBegin"]!;
@@ -502,50 +514,144 @@ export function instrumentMcdc(
         path.node.object,
       );
     },
+  });
+
+  interface OptionalCallSite {
+    node: t.OptionalCallExpression;
+    frame: t.Identifier;
+    shortId: string;
+    continuedId: string;
+  }
+  const optionalCallChains = new Map<
+    t.Expression,
+    { path: NodePath<t.Expression>; sites: OptionalCallSite[] }
+  >();
+  traverse(ast, {
     OptionalCallExpression(path) {
-      if (isUnsafeInstrumentationContext(path)) return;
-      if (!path.node.optional || !t.isExpression(path.node.callee)) return;
+      if (
+        isUnsafeInstrumentationContext(path) ||
+        !path.node.optional ||
+        !path.node.loc ||
+        !t.isExpression(path.node.callee)
+      )
+        return;
       const callee = path.node.callee;
-      if (t.isOptionalMemberExpression(callee)) {
-        if (path.node.loc) {
-          limitations.push({
-            id: stableId(file, "semantic-safety", path.node, "optional-chain-call"),
-            kind: "semantic-safety",
-            file,
-            line: path.node.loc.start.line,
-            column: path.node.loc.start.column + 1,
-            source: sourceFor(code, path.node),
-            reason:
-              "optional calls whose receiver is itself an optional chain are left native to preserve chain short-circuiting and method receiver semantics",
-          });
-        }
+      if (
+        t.isOptionalMemberExpression(callee) &&
+        t.isPrivateName(callee.property)
+      ) {
+        limitations.push({
+          id: stableId(file, "semantic-safety", path.node, "optional-private-call"),
+          kind: "semantic-safety",
+          file,
+          line: path.node.loc.start.line,
+          column: path.node.loc.start.column + 1,
+          source: sourceFor(code, path.node),
+          reason:
+            "optional private-method calls are left native because private names cannot be wrapped as computed reference keys",
+        });
         return;
       }
-      if (t.isMemberExpression(callee) || t.isOptionalMemberExpression(callee)) {
-        // Rewriting `object.method?.()` through `.call` preserves `this` for
-        // the immediate invocation but breaks the specification's optional
-        // chain continuation (`object.method?.()()`). Leave it native until a
-        // probe can preserve the chain's internal short-circuit target.
-        if (path.node.loc) {
-          limitations.push({
-            id: stableId(file, "semantic-safety", path.node, "optional-method-call"),
-            kind: "semantic-safety",
-            file,
-            line: path.node.loc.start.line,
-            column: path.node.loc.start.column + 1,
-            source: sourceFor(code, path.node),
-            reason:
-              "optional method calls are left native to preserve receiver and whole-chain short-circuit semantics",
-          });
-        }
-        return;
-      }
-      path.node.callee = instrumentOptionalOperand(
-        path as unknown as NodePath<t.Expression>,
-        callee,
-      );
+      let root = path as unknown as NodePath<t.Expression>;
+      while (
+        (root.parentPath.isOptionalCallExpression() &&
+          root.parentPath.node.callee === root.node) ||
+        (root.parentPath.isOptionalMemberExpression() &&
+          root.parentPath.node.object === root.node)
+      )
+        root = root.parentPath as unknown as NodePath<t.Expression>;
+      if (
+        root.parentPath.isUnaryExpression({ operator: "delete" }) &&
+        root.parentPath.node.argument === root.node
+      )
+        root = root.parentPath as unknown as NodePath<t.Expression>;
+      const id = stableId(file, "optional-chain", path.node, "call");
+      const shortId = `${id}:short`;
+      const continuedId = `${id}:continued`;
+      branches.push({
+        id,
+        kind: "optional-chain",
+        file,
+        line: path.node.loc.start.line,
+        column: path.node.loc.start.column + 1,
+        source: sourceFor(code, path.node),
+        alternatives: [
+          { id: shortId, label: "nullish / short-circuited" },
+          { id: continuedId, label: "non-nullish / continued" },
+        ],
+      });
+      const chain = optionalCallChains.get(root.node) ?? {
+        path: root,
+        sites: [],
+      };
+      chain.sites.push({
+        node: path.node,
+        frame: root.scope.generateUidIdentifier("optionalCall"),
+        shortId,
+        continuedId,
+      });
+      optionalCallChains.set(root.node, chain);
     },
   });
+  for (const chain of optionalCallChains.values()) {
+    for (const site of chain.sites) {
+      chain.path.scope.push({ id: t.cloneNode(site.frame), kind: "let" });
+      const callee = site.node.callee;
+      if (t.isMemberExpression(callee) || t.isOptionalMemberExpression(callee)) {
+        if (t.isPrivateName(callee.property)) {
+          if (t.isExpression(callee.object))
+            callee.object = t.callExpression(
+              t.identifier(OPTIONAL_CALL_REACHED),
+              [t.cloneNode(site.frame), callee.object],
+            );
+          continue;
+        }
+        const property = callee.computed
+          ? callee.property
+          : t.isIdentifier(callee.property)
+            ? t.stringLiteral(callee.property.name)
+            : callee.property;
+        callee.computed = true;
+        callee.property = t.callExpression(
+          t.identifier(OPTIONAL_CALL_REACHED),
+          [t.cloneNode(site.frame), property],
+        );
+      } else {
+        site.node.callee = t.callExpression(
+          t.identifier(OPTIONAL_CALL_REACHED),
+          [t.cloneNode(site.frame), callee],
+        );
+      }
+      site.node.arguments.unshift(
+        t.spreadElement(
+          t.callExpression(t.identifier(OPTIONAL_CALL_CONTINUED), [
+            t.cloneNode(site.frame),
+          ]),
+        ),
+      );
+    }
+    let measured = chain.path.node;
+    for (const site of [...chain.sites].reverse())
+      measured = t.callExpression(t.identifier(OPTIONAL_CALL_END), [
+        t.cloneNode(site.frame),
+        measured,
+      ]);
+    chain.path.replaceWith(
+      t.sequenceExpression([
+        ...chain.sites.map((site) =>
+          t.assignmentExpression(
+            "=",
+            t.cloneNode(site.frame),
+            t.callExpression(t.identifier(OPTIONAL_CALL_BEGIN), [
+              t.stringLiteral(site.shortId),
+              t.stringLiteral(site.continuedId),
+            ]),
+          ),
+        ),
+        measured,
+      ]),
+    );
+  }
 
   // Logical assignments have the same short/right split as value-selection
   // expressions, but wrapping only the RHS preserves one-time LHS evaluation.
@@ -1445,6 +1551,22 @@ export function instrumentMcdc(
           t.importSpecifier(
             t.identifier(OPTIONAL_SELECT),
             t.identifier("optionalSelect"),
+          ),
+          t.importSpecifier(
+            t.identifier(OPTIONAL_CALL_BEGIN),
+            t.identifier("optionalCallBegin"),
+          ),
+          t.importSpecifier(
+            t.identifier(OPTIONAL_CALL_REACHED),
+            t.identifier("optionalCallReached"),
+          ),
+          t.importSpecifier(
+            t.identifier(OPTIONAL_CALL_CONTINUED),
+            t.identifier("optionalCallContinued"),
+          ),
+          t.importSpecifier(
+            t.identifier(OPTIONAL_CALL_END),
+            t.identifier("optionalCallEnd"),
           ),
           t.importSpecifier(
             t.identifier(DEFAULT_SELECTED),

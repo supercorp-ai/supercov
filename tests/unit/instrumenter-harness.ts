@@ -15,6 +15,13 @@ interface SelectionFrame {
   rightEvaluated: boolean;
 }
 
+interface OptionalCallFrame {
+  shortId: string;
+  continuedId: string;
+  reached: boolean;
+  continued: boolean;
+}
+
 interface TryFrame {
   successId: string;
   catchId: string;
@@ -148,6 +155,36 @@ function runtimeBindings(
     );
     return value;
   };
+  const optionalCallBegin = (
+    shortId: string,
+    continuedId: string,
+  ): OptionalCallFrame => ({
+    shortId,
+    continuedId,
+    reached: false,
+    continued: false,
+  });
+  const optionalCallReached = <T>(frame: OptionalCallFrame, value: T): T => {
+    frame.reached = true;
+    return value;
+  };
+  const optionalCallContinued = (frame: OptionalCallFrame): Iterable<never> => {
+    frame.continued = true;
+    return {
+      [Symbol.iterator]() {
+        return {
+          next(): IteratorResult<never> {
+            return { done: true, value: undefined as never };
+          },
+        };
+      },
+    };
+  };
+  const optionalCallEnd = <T>(frame: OptionalCallFrame, value: T): T => {
+    if (frame.reached)
+      evidence.hits.push(frame.continued ? frame.continuedId : frame.shortId);
+    return value;
+  };
   const defaultSelected = <T>(
     id: string,
     value: T,
@@ -193,6 +230,10 @@ function runtimeBindings(
     selectionRight,
     selectionEnd,
     optionalSelect,
+    optionalCallBegin,
+    optionalCallReached,
+    optionalCallContinued,
+    optionalCallEnd,
     defaultSelected,
     defaultEntered,
     tryBegin,

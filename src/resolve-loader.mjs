@@ -56,6 +56,19 @@ export async function resolve(specifier, context, nextResolve) {
     };
   }
   if (
+    process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
+    ["assert", "node:assert", "assert/strict", "node:assert/strict"].includes(specifier) &&
+    belongsToProject(context.parentURL)
+  ) {
+    return {
+      url: new URL(
+        specifier.endsWith("/strict") ? "./nodeAssertStrict.js" : "./nodeAssert.js",
+        import.meta.url,
+      ).href,
+      shortCircuit: true,
+    };
+  }
+  if (
     process.env.SUPERCOV_INSIDE_PLAYWRIGHT === "1" &&
     TARGET &&
     REPLACEMENT &&

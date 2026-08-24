@@ -16,8 +16,13 @@ describe("run integrity", () => {
       mkdirSync(resolve(root, "app"));
       mkdirSync(resolve(root, "tests"));
       mkdirSync(resolve(root, "tool"));
+      mkdirSync(resolve(root, ".cache/test262/test"), { recursive: true });
       writeFileSync(resolve(root, "app/index.ts"), "export const value = 1;\n");
       writeFileSync(resolve(root, "tests/value.spec.ts"), "test('value', () => {});\n");
+      writeFileSync(
+        resolve(root, ".cache/test262/test/generated.test.js"),
+        "test('external corpus', () => {});\n",
+      );
       writeFileSync(resolve(root, "package.json"), '{"scripts":{"build":"vite build"}}\n');
       writeFileSync(resolve(root, "vite.config.ts"), "export default {};\n");
       writeFileSync(resolve(root, "tool/instrumenter.ts"), "export {};\n");

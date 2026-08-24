@@ -19,14 +19,22 @@ export const COVERAGE_INSTRUMENTER_VERSION = "2.0.0";
 const SOURCE_PATTERN = /\.[cm]?[jt]sx?$/;
 const TEST_PATTERN = /(?:^|[/_.-])(test|spec)(?:[/_.-]|$).*\.[cm]?[jt]sx?$/i;
 const SKIPPED_DIRECTORIES = new Set([
+  ".cache",
   ".git",
+  ".mcdc-pool",
+  ".next",
+  ".nuxt",
+  ".output",
   ".supercov",
   "build",
   "coverage",
   "dist",
   "node_modules",
+  "out",
+  "playwright-report",
   "results",
   "test-results",
+  "vendor",
 ]);
 
 function filesUnder(directory: string): string[] {
@@ -132,6 +140,9 @@ export function createRunIntegrity(
     "instrumenter.js",
     "launchSupervisor.js",
     "nodeTest.js",
+    "nodeAssert.js",
+    "nodeAssertAdapter.js",
+    "nodeAssertStrict.js",
     "playwright.js",
     "playwrightReporter.js",
     "project.js",

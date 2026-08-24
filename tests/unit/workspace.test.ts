@@ -53,6 +53,8 @@ afterEach(() => {
 describe("isolated run workspaces", () => {
   it("copies source but never copies or mutates ordinary build output", () => {
     const root = project();
+    mkdirSync(resolve(root, ".cache/tool"), { recursive: true });
+    writeFileSync(resolve(root, ".cache/tool/generated.js"), "cached\n");
     mkdirSync(resolve(root, "node_modules/example"), { recursive: true });
     writeFileSync(resolve(root, "node_modules/example/index.js"), "module\n");
     const workspace = prepareIsolatedWorkspace(root, "2026-01-01T00-00-00-000Z");
@@ -61,6 +63,7 @@ describe("isolated run workspaces", () => {
       "export const value = 1;\n",
     );
     expect(existsSync(resolve(workspace, "dist"))).toBe(false);
+    expect(existsSync(resolve(workspace, ".cache"))).toBe(false);
     mkdirSync(resolve(workspace, "dist"));
     writeFileSync(resolve(workspace, "dist/index.js"), "instrumented-build\n");
     expect(readFileSync(resolve(root, "dist/index.js"), "utf8")).toBe(
@@ -100,6 +103,26 @@ describe("isolated run workspaces", () => {
         entry.startsWith(`.${basename(root)}.`),
       ),
     ).toEqual([]);
+  });
+
+  it("never traverses nested Supercov run stores", () => {
+    const root = project();
+    mkdirSync(resolve(root, "packages/example/.supercov/cache"), {
+      recursive: true,
+    });
+    writeFileSync(
+      resolve(root, "packages/example/.supercov/cache/stale.json"),
+      "stale\n",
+    );
+    writeFileSync(resolve(root, "packages/example/source.ts"), "source\n");
+
+    const workspace = prepareCachedWorkspace(root);
+    expect(
+      readFileSync(resolve(workspace, "packages/example/source.ts"), "utf8"),
+    ).toBe("source\n");
+    expect(existsSync(resolve(workspace, "packages/example/.supercov"))).toBe(
+      false,
+    );
   });
 
   it("carries only explicitly selected build artifacts into a refreshed snapshot", () => {

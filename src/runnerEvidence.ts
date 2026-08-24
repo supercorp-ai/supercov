@@ -7,6 +7,7 @@ import { inferTestProvenance } from "./provenance.ts";
 import { serverEvidencePath } from "./transport.ts";
 import type {
   CoverageExecutionScope,
+  CoveragePhase,
   CoverageServerRecord,
   McdcRawTestResult,
   TestAttemptStatus,
@@ -94,6 +95,7 @@ export function writeRunnerEvidence(
   status: TestAttemptStatus,
   scope: CoverageExecutionScope,
   evidenceDirectoryOverride?: string,
+  phases: CoveragePhase[] = [],
 ): void {
   const evidenceDirectory =
     evidenceDirectoryOverride ?? process.env["SUPERCOV_EVIDENCE_DIR"];
@@ -112,6 +114,7 @@ export function writeRunnerEvidence(
       file: testFile,
       explicitKind: process.env["SUPERCOV_TEST_KIND"],
     }),
+    ...(phases.length > 0 ? { phases } : {}),
     runtime: [],
     browser: [],
     server: readScopedServerEvidence(scope),
