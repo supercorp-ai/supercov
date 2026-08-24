@@ -110,13 +110,9 @@ for (const [index, testCase] of allCases.entries()) {
     throw new Error(
       `${testCase.file}: Rust/TypeScript point mismatch\nreference=${JSON.stringify(referenceManifest.points)}\ncandidate=${JSON.stringify(candidate.points)}`,
     );
-  const candidateBranchIds = new Set(candidate.branches.map((branch) => branch.id));
-  const referenceLogicalBranches = referenceManifest.branches.filter((branch) =>
-    candidateBranchIds.has(branch.id),
-  );
-  if (JSON.stringify(candidate.branches) !== JSON.stringify(referenceLogicalBranches))
+  if (JSON.stringify(candidate.branches) !== JSON.stringify(referenceManifest.branches))
     throw new Error(
-      `${testCase.file}: Rust/TypeScript logical-value branch mismatch\nreference=${JSON.stringify(referenceLogicalBranches)}\ncandidate=${JSON.stringify(candidate.branches)}`,
+      `${testCase.file}: Rust/TypeScript complete branch-manifest mismatch\nreference=${JSON.stringify(referenceManifest.branches)}\ncandidate=${JSON.stringify(candidate.branches)}`,
     );
   const referenceLimitations = referenceManifest.limitations ?? [];
   if (JSON.stringify(candidate.coverageLimitations) !== JSON.stringify(referenceLimitations))
@@ -358,5 +354,5 @@ for (const [offset, testCase] of generatedCorpus.entries()) {
 }
 
 console.log(
-  `[rust-js-differential] ${allCases.length} oxc/Babel decisions, points, logical/optional-chain branches, and safety limitations match; ${executionCorpus.length} behavior/effect/vector/hit cases and ${generatedCorpus.length} generated behavior cases match`,
+  `[rust-js-differential] ${allCases.length} oxc/Babel decisions, points, complete branch manifests, and safety limitations match; ${executionCorpus.length} behavior/effect/vector/hit cases and ${generatedCorpus.length} generated behavior cases match`,
 );

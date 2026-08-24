@@ -102,5 +102,13 @@
   {
     "file": "differential/labeled-enumeration.js",
     "source": "const effects = [];\nfunction run() { let total = 0; outer: for (const row of [[1, 2], [3]]) { for (const value of row) { effects.push(value); total += value; if (value === 2) continue outer; } } return total; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/switch-no-match.js",
+    "source": "const effects = [];\nfunction discriminant(value) { effects.push('discriminant:' + value); return value; }\nfunction choose(value) { switch (discriminant(value)) { case 1: effects.push('one'); case 2: effects.push('two'); break; } return effects.length; }\nfunction run() { return [choose(1), choose(2), choose(3)]; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/switch-default.js",
+    "source": "const effects = [];\nfunction choose(value) { switch (value) { case 1: effects.push('one'); break; default: effects.push('default'); } return effects.length; }\nfunction run() { return [choose(1), choose(3)]; }\nfunction observe() { return effects; }\n"
   }
 ]

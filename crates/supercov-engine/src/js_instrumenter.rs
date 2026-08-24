@@ -23,8 +23,8 @@ use oxc_ast::{
         ForStatementLeft, FormalParameter, FormalParameterKind, FormalParameters, Function,
         FunctionBody, IfStatement, LogicalExpression, NewExpression, ObjectPropertyKind,
         PrivateFieldExpression, Program, PropertyKey, PropertyKind, Statement,
-        StaticMemberExpression, TryStatement, VariableDeclaration, VariableDeclarationKind,
-        WhileStatement, WithStatement,
+        StaticMemberExpression, SwitchStatement, TryStatement, VariableDeclaration,
+        VariableDeclarationKind, WhileStatement, WithStatement,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -744,12 +744,20 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         &collector.decision_logical_nodes,
         &safety.source_sensitive_functions,
     );
+    let switch_analysis = collect_switch_branches(
+        &allocator,
+        &mut parsed.program,
+        source,
+        file,
+        &safety.source_sensitive_functions,
+    );
     let mut branches = optional_analysis.branches;
     branches.extend(call_analysis.branches);
     branches.extend(assignment_analysis.branches);
     branches.extend(default_analysis.branches);
     branches.extend(extended_analysis.branches);
     branches.extend(logical_analysis.branches);
+    branches.extend(switch_analysis.branches);
     let generated = Codegen::new().build(&parsed.program).code;
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
@@ -857,12 +865,20 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         &collector.decision_logical_nodes,
         &safety.source_sensitive_functions,
     );
+    let switch_analysis = collect_switch_branches(
+        &allocator,
+        &mut parsed.program,
+        source,
+        file,
+        &safety.source_sensitive_functions,
+    );
     let mut branches = optional_analysis.branches;
     branches.extend(call_analysis.branches.clone());
     branches.extend(assignment_analysis.branches);
     branches.extend(default_analysis.branches.clone());
     branches.extend(extended_analysis.branches.clone());
     branches.extend(logical_analysis.branches);
+    branches.extend(switch_analysis.branches.clone());
 
     let mut names = CandidateNames::new(source);
     let coverage_hit = names.allocate("__supercovCoverageHit");
@@ -982,6 +998,15 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         with_statements: safety.with_statements.clone(),
     };
     logical_transformer.visit_program(&mut parsed.program);
+    let mut switch_transformer = SwitchTransformer {
+        ast,
+        coverage_hit: coverage_hit.clone(),
+        targets: switch_analysis.targets,
+        names: CandidateNames::new(source),
+        source_sensitive_functions: safety.source_sensitive_functions.clone(),
+        with_statements: safety.with_statements.clone(),
+    };
+    switch_transformer.visit_program(&mut parsed.program);
 
     let limitations = vec![
         "only if, ternary, while, do-while, and classic-for decisions are instrumented"
@@ -2143,6 +2168,7 @@ impl<'a> VisitMut<'a> for ExtendedTransformer<'a, '_> {
         match kind {
             ExtendedKind::Try => {
                 if let Some(target) = self.try_targets.remove(&key) {
+                    walk_mut::walk_statement(self, statement);
                     self.instrument_try(statement, target);
                 } else {
                     walk_mut::walk_statement(self, statement);
@@ -2150,6 +2176,7 @@ impl<'a> VisitMut<'a> for ExtendedTransformer<'a, '_> {
             }
             ExtendedKind::Loop => {
                 if let Some(target) = self.loop_targets.remove(&key) {
+                    walk_mut::walk_statement(self, statement);
                     self.instrument_loop(statement, target);
                 } else {
                     walk_mut::walk_statement(self, statement);
@@ -2408,6 +2435,178 @@ impl<'a> VisitMut<'a> for LogicalValueTransformer<'a, '_> {
             panic!("logical-value target must remain a logical expression");
         };
         *expression = self.instrument(logical, &short_id, &right_id);
+    }
+}
+
+struct SwitchTransformer<'a, 's> {
+    ast: AstBuilder<'a>,
+    coverage_hit: String,
+    targets: HashMap<SpanKey, SwitchTarget>,
+    names: CandidateNames<'s>,
+    source_sensitive_functions: HashSet<SpanKey>,
+    with_statements: HashSet<SpanKey>,
+}
+
+impl<'a> SwitchTransformer<'a, '_> {
+    fn identifier(&self, name: &str) -> Expression<'a> {
+        self.ast
+            .expression_identifier(Span::default(), self.ast.ident(name))
+    }
+
+    fn assignment_target(&self, name: &str) -> AssignmentTarget<'a> {
+        AssignmentTarget::from(
+            self.ast
+                .simple_assignment_target_assignment_target_identifier(
+                    Span::default(),
+                    self.ast.ident(name),
+                ),
+        )
+    }
+
+    fn probe(&self, id: &str) -> Statement<'a> {
+        self.ast.statement_expression(
+            Span::default(),
+            self.ast.expression_call(
+                Span::default(),
+                self.identifier(&self.coverage_hit),
+                NONE,
+                self.ast
+                    .vec1(Argument::from(self.ast.expression_string_literal(
+                        Span::default(),
+                        self.ast.str(id),
+                        None,
+                    ))),
+                false,
+            ),
+        )
+    }
+
+    fn target(statement: &Statement<'a>) -> Option<SpanKey> {
+        match statement {
+            Statement::SwitchStatement(node) => Some(span_key(node.span)),
+            Statement::LabeledStatement(node) => Self::target(&node.body),
+            _ => None,
+        }
+    }
+
+    fn inner_switch<'b>(statement: &'b mut Statement<'a>) -> Option<&'b mut SwitchStatement<'a>> {
+        match statement {
+            Statement::SwitchStatement(node) => Some(node),
+            Statement::LabeledStatement(node) => Self::inner_switch(&mut node.body),
+            _ => None,
+        }
+    }
+
+    fn entered_assignment(&self, entered: &str) -> Statement<'a> {
+        self.ast.statement_expression(
+            Span::default(),
+            self.ast.expression_assignment(
+                Span::default(),
+                AssignmentOperator::Assign,
+                self.assignment_target(entered),
+                self.ast.expression_boolean_literal(Span::default(), true),
+            ),
+        )
+    }
+
+    fn instrument(&mut self, statement: &mut Statement<'a>, target: &SwitchTarget) {
+        let entered = target
+            .no_match_id
+            .as_ref()
+            .map(|_| self.names.allocate("_supercovSwitchEntered"));
+        let node = Self::inner_switch(statement).expect("switch target must remain a switch");
+        for (index, case) in node.cases.iter_mut().enumerate() {
+            let probe = self.probe(
+                target
+                    .case_ids
+                    .get(index)
+                    .expect("switch case target count must remain stable"),
+            );
+            case.consequent.insert(0, probe);
+            if let Some(entered) = &entered {
+                case.consequent.insert(0, self.entered_assignment(entered));
+            }
+        }
+        let (Some(entered), Some(no_match_id)) = (entered, &target.no_match_id) else {
+            return;
+        };
+        let declaration =
+            Statement::VariableDeclaration(self.ast.alloc_variable_declaration(
+                Span::default(),
+                VariableDeclarationKind::Let,
+                self.ast.vec1(self.ast.variable_declarator(
+                    Span::default(),
+                    VariableDeclarationKind::Let,
+                    self.ast.binding_pattern_binding_identifier(
+                        Span::default(),
+                        self.ast.ident(&entered),
+                    ),
+                    NONE,
+                    Some(self.ast.expression_boolean_literal(Span::default(), false)),
+                    false,
+                )),
+                false,
+            ));
+        let original = statement.take_in(self.ast.allocator);
+        let no_match = self.ast.statement_if(
+            Span::default(),
+            self.ast.expression_unary(
+                Span::default(),
+                UnaryOperator::LogicalNot,
+                self.identifier(&entered),
+            ),
+            self.probe(no_match_id),
+            None,
+        );
+        *statement = self.ast.statement_block(
+            Span::default(),
+            self.ast.vec_from_array([declaration, original, no_match]),
+        );
+    }
+}
+
+impl<'a> VisitMut<'a> for SwitchTransformer<'a, '_> {
+    fn visit_function(&mut self, function: &mut Function<'a>, flags: ScopeFlags) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_function(self, function, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, function: &mut ArrowFunctionExpression<'a>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_arrow_function_expression(self, function);
+    }
+
+    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
+        if self.with_statements.contains(&span_key(statement.span)) {
+            return;
+        }
+        walk_mut::walk_with_statement(self, statement);
+    }
+
+    fn visit_statement(&mut self, statement: &mut Statement<'a>) {
+        let Some(key) = Self::target(statement) else {
+            walk_mut::walk_statement(self, statement);
+            return;
+        };
+        let Some(target) = self.targets.remove(&key) else {
+            walk_mut::walk_statement(self, statement);
+            return;
+        };
+        let has_no_match = target.no_match_id.is_some();
+        self.instrument(statement, &target);
+        if !has_no_match {
+            walk_mut::walk_statement(self, statement);
+        }
     }
 }
 
@@ -3097,7 +3296,19 @@ struct ExtendedAnalysis {
     loop_targets: HashMap<SpanKey, ExtendedTarget>,
 }
 
-struct ExtendedCollector<'s> {
+#[derive(Clone)]
+struct SwitchTarget {
+    case_ids: Vec<String>,
+    no_match_id: Option<String>,
+}
+
+#[derive(Default)]
+struct SwitchAnalysis {
+    branches: Vec<CandidateBranch>,
+    targets: HashMap<SpanKey, SwitchTarget>,
+}
+
+struct SwitchCollector<'s> {
     source: &'s str,
     file: &'s str,
     source_sensitive_functions: &'s HashSet<SpanKey>,
@@ -3105,6 +3316,170 @@ struct ExtendedCollector<'s> {
     with_depth: usize,
     suppressed_depth: usize,
     suppressed_nodes: Vec<bool>,
+    analysis: SwitchAnalysis,
+}
+
+impl SwitchCollector<'_> {
+    fn unsafe_context(&self) -> bool {
+        self.unsafe_function_depth > 0 || self.with_depth > 0
+    }
+
+    fn exit_source_function(&mut self, span: Span) {
+        if self.source_sensitive_functions.contains(&span_key(span)) {
+            self.unsafe_function_depth -= 1;
+        }
+    }
+}
+
+impl<'a> Traverse<'a, ()> for SwitchCollector<'_> {
+    fn enter_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(node.span))
+        {
+            self.unsafe_function_depth += 1;
+        }
+    }
+
+    fn exit_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
+        self.exit_source_function(node.span);
+    }
+
+    fn enter_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(node.span))
+        {
+            self.unsafe_function_depth += 1;
+        }
+    }
+
+    fn exit_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.exit_source_function(node.span);
+    }
+
+    fn enter_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth += 1;
+    }
+
+    fn exit_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth -= 1;
+    }
+
+    fn enter_switch_statement(
+        &mut self,
+        node: &mut SwitchStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        let has_default = node.cases.iter().any(|case| case.test.is_none());
+        let transformed = self.suppressed_depth == 0 && !self.unsafe_context();
+        let suppresses = transformed && !has_default;
+        self.suppressed_nodes.push(suppresses);
+        if suppresses {
+            self.suppressed_depth += 1;
+        }
+        if !transformed {
+            return;
+        }
+        let id = stable_id(self.source, self.file, "switch", node.span, "");
+        let mut case_ids = Vec::with_capacity(node.cases.len());
+        let mut alternatives = Vec::with_capacity(node.cases.len() + usize::from(!has_default));
+        for (index, case) in node.cases.iter().enumerate() {
+            let alternative_id = format!("{id}:case:{index}");
+            let label = case.test.as_ref().map_or_else(
+                || "default".to_string(),
+                |test| format!("case {}", source_slice(self.source, test.span())),
+            );
+            case_ids.push(alternative_id.clone());
+            alternatives.push(CandidateBranchAlternative {
+                id: alternative_id,
+                label,
+            });
+        }
+        let no_match_id = (!has_default).then(|| format!("{id}:no-match"));
+        if let Some(no_match_id) = &no_match_id {
+            alternatives.push(CandidateBranchAlternative {
+                id: no_match_id.clone(),
+                label: "no matching case".to_string(),
+            });
+        }
+        let (line, column) = line_and_utf16_column(self.source, node.span.start as usize);
+        self.analysis.branches.push(CandidateBranch {
+            id,
+            kind: "switch".to_string(),
+            file: self.file.to_string(),
+            line,
+            column,
+            source: source_slice(self.source, node.discriminant.span()).to_string(),
+            alternatives,
+        });
+        self.analysis.targets.insert(
+            span_key(node.span),
+            SwitchTarget {
+                case_ids,
+                no_match_id,
+            },
+        );
+    }
+
+    fn exit_switch_statement(
+        &mut self,
+        _node: &mut SwitchStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        if self
+            .suppressed_nodes
+            .pop()
+            .expect("switch collector stack must remain balanced")
+        {
+            self.suppressed_depth -= 1;
+        }
+    }
+}
+
+fn collect_switch_branches<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    source: &str,
+    file: &str,
+    source_sensitive_functions: &HashSet<SpanKey>,
+) -> SwitchAnalysis {
+    let mut collector = SwitchCollector {
+        source,
+        file,
+        source_sensitive_functions,
+        unsafe_function_depth: 0,
+        with_depth: 0,
+        suppressed_depth: 0,
+        suppressed_nodes: Vec::new(),
+        analysis: SwitchAnalysis::default(),
+    };
+    traverse_mut(&mut collector, allocator, program, Default::default(), ());
+    collector.analysis
+}
+
+struct ExtendedCollector<'s> {
+    source: &'s str,
+    file: &'s str,
+    source_sensitive_functions: &'s HashSet<SpanKey>,
+    unsafe_function_depth: usize,
+    with_depth: usize,
     analysis: ExtendedAnalysis,
 }
 
@@ -3114,9 +3489,7 @@ impl ExtendedCollector<'_> {
     }
 
     fn enter_try(&mut self, node: &TryStatement<'_>) {
-        let transformed =
-            self.suppressed_depth == 0 && !self.unsafe_context() && node.handler.is_some();
-        self.suppressed_nodes.push(transformed);
+        let transformed = !self.unsafe_context() && node.handler.is_some();
         if !transformed {
             return;
         }
@@ -3149,12 +3522,10 @@ impl ExtendedCollector<'_> {
                 second_id: catch_id,
             },
         );
-        self.suppressed_depth += 1;
     }
 
     fn enter_loop(&mut self, span: Span, right: &Expression<'_>, kind: &str) {
-        let transformed = self.suppressed_depth == 0 && !self.unsafe_context();
-        self.suppressed_nodes.push(transformed);
+        let transformed = !self.unsafe_context();
         if !transformed {
             return;
         }
@@ -3187,17 +3558,6 @@ impl ExtendedCollector<'_> {
                 second_id: entered_id,
             },
         );
-        self.suppressed_depth += 1;
-    }
-
-    fn leave_suppressible(&mut self) {
-        if self
-            .suppressed_nodes
-            .pop()
-            .expect("extended collector stack must remain balanced")
-        {
-            self.suppressed_depth -= 1;
-        }
     }
 
     fn exit_source_function(&mut self, span: Span) {
@@ -3271,7 +3631,6 @@ impl<'a> Traverse<'a, ()> for ExtendedCollector<'_> {
         _node: &mut TryStatement<'a>,
         _context: &mut TraverseCtx<'a, ()>,
     ) {
-        self.leave_suppressible();
     }
 
     fn enter_for_in_statement(
@@ -3287,7 +3646,6 @@ impl<'a> Traverse<'a, ()> for ExtendedCollector<'_> {
         _node: &mut ForInStatement<'a>,
         _context: &mut TraverseCtx<'a, ()>,
     ) {
-        self.leave_suppressible();
     }
 
     fn enter_for_of_statement(
@@ -3303,7 +3661,6 @@ impl<'a> Traverse<'a, ()> for ExtendedCollector<'_> {
         _node: &mut ForOfStatement<'a>,
         _context: &mut TraverseCtx<'a, ()>,
     ) {
-        self.leave_suppressible();
     }
 }
 
@@ -3320,8 +3677,6 @@ fn collect_extended_branches<'a>(
         source_sensitive_functions,
         unsafe_function_depth: 0,
         with_depth: 0,
-        suppressed_depth: 0,
-        suppressed_nodes: Vec::new(),
         analysis: ExtendedAnalysis::default(),
     };
     traverse_mut(&mut collector, allocator, program, Default::default(), ());

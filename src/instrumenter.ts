@@ -43,10 +43,13 @@ const LOOP_ENTERED = "__supercovLoopEntered";
 const LOOP_END = "__supercovLoopEnd";
 
 function isRequestHandlerName(file: string, name: string | undefined): boolean {
-  if (name === "loader" || name === "action") return /^app\/routes\//.test(file);
+  if (name === "loader" || name === "action")
+    return /^app\/routes\//.test(file);
   return (
     /(?:^|\/)app\/.*\/route\.[cm]?[jt]sx?$/.test(file) &&
-    ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"].includes(name ?? "")
+    ["GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"].includes(
+      name ?? "",
+    )
   );
 }
 
@@ -159,13 +162,18 @@ function probeV2ReachableVectorCount(
       return !evaluate(expression.argument, assignment, encoded);
 
     const index = indices.get(expression);
-    if (index === undefined) throw new Error("probe v2 condition index missing");
+    if (index === undefined)
+      throw new Error("probe v2 condition index missing");
     const value = (assignment & (1 << index)) !== 0;
     encoded.value += (value ? 2 : 1) * 3 ** index;
     return value;
   };
 
-  for (let assignment = 0; assignment < 2 ** conditions.length; assignment += 1) {
+  for (
+    let assignment = 0;
+    assignment < 2 ** conditions.length;
+    assignment += 1
+  ) {
     const encoded = { value: 0 };
     const outcome = evaluate(node, assignment, encoded);
     vectors.add(encoded.value * 2 + (outcome ? 1 : 0));
@@ -712,10 +720,7 @@ export function instrumentMcdc(
         const declaration = t.variableDeclaration("const", [
           t.variableDeclarator(
             t.cloneNode(epoch),
-            t.memberExpression(
-              t.identifier(CLOCK_V2),
-              t.identifier("epoch"),
-            ),
+            t.memberExpression(t.identifier(CLOCK_V2), t.identifier("epoch")),
           ),
         ]);
         generatedStatements.add(declaration);
@@ -887,7 +892,12 @@ export function instrumentMcdc(
         t.isPrivateName(callee.property)
       ) {
         limitations.push({
-          id: stableId(file, "semantic-safety", path.node, "optional-private-call"),
+          id: stableId(
+            file,
+            "semantic-safety",
+            path.node,
+            "optional-private-call",
+          ),
           kind: "semantic-safety",
           file,
           line: path.node.loc.start.line,
@@ -943,7 +953,10 @@ export function instrumentMcdc(
     for (const site of chain.sites) {
       chain.path.scope.push({ id: t.cloneNode(site.frame), kind: "let" });
       const callee = site.node.callee;
-      if (t.isMemberExpression(callee) || t.isOptionalMemberExpression(callee)) {
+      if (
+        t.isMemberExpression(callee) ||
+        t.isOptionalMemberExpression(callee)
+      ) {
         if (t.isPrivateName(callee.property)) {
           if (t.isExpression(callee.object))
             callee.object = t.callExpression(
@@ -1035,8 +1048,11 @@ export function instrumentMcdc(
             { id: rightId, label: "right evaluated / assigned" },
           ],
         });
-        const frameId = path.scope.generateUidIdentifier("supercovSelectionFrame");
-        const frameScope = path.scope.getFunctionParent() ?? path.scope.getProgramParent();
+        const frameId = path.scope.generateUidIdentifier(
+          "supercovSelectionFrame",
+        );
+        const frameScope =
+          path.scope.getFunctionParent() ?? path.scope.getProgramParent();
         frameScope.push({ id: t.cloneNode(frameId), kind: "let" });
         const assignFrame = t.assignmentExpression(
           "=",
@@ -1162,7 +1178,8 @@ export function instrumentMcdc(
             line: loc.start.line,
             column: loc.start.column + 1,
             source: sourceFor(code, node),
-            reason: "destructuring defaults in a classic for initializer cannot yet be finalized without restructuring control flow",
+            reason:
+              "destructuring defaults in a classic for initializer cannot yet be finalized without restructuring control flow",
           });
         }
         return;
@@ -1240,6 +1257,14 @@ export function instrumentMcdc(
 
   // Try/catch and enumeration loops use frames finalized in `finally`, so
   // return, break, continue, rejection, and throw paths remain observable.
+  const tryTargets = new WeakMap<
+    t.TryStatement,
+    { successId: string; catchId: string }
+  >();
+  const enumerationTargets = new WeakMap<
+    t.ForInStatement | t.ForOfStatement,
+    { zeroId: string; enteredId: string }
+  >();
   traverse(ast, {
     TryStatement(path) {
       if (isUnsafeInstrumentationContext(path)) return;
@@ -1260,37 +1285,11 @@ export function instrumentMcdc(
           { id: catchId, label: "catch entered" },
         ],
       });
-      const frameId = path.scope.generateUidIdentifier("supercovTryFrame");
-      const frameScope = path.scope.getFunctionParent() ?? path.scope.getProgramParent();
-      frameScope.push({ id: t.cloneNode(frameId), kind: "let" });
-      path.insertBefore(
-        t.expressionStatement(
-          t.assignmentExpression(
-            "=",
-            t.cloneNode(frameId),
-            t.callExpression(t.identifier(TRY_BEGIN), [
-              t.stringLiteral(successId),
-              t.stringLiteral(catchId),
-            ]),
-          ),
-        ),
-      );
-      node.handler.body.body.unshift(
-        t.expressionStatement(
-          t.callExpression(t.identifier(TRY_CATCH), [
-            t.cloneNode(frameId),
-            t.identifier("undefined"),
-          ]),
-        ),
-      );
-      const end = t.expressionStatement(
-        t.callExpression(t.identifier(TRY_END), [t.cloneNode(frameId)]),
-      );
-      if (node.finalizer) node.finalizer.body.unshift(end);
-      else node.finalizer = t.blockStatement([end]);
-      path.skip();
+      tryTargets.set(node, { successId, catchId });
     },
-    "ForInStatement|ForOfStatement"(path: NodePath<t.ForInStatement | t.ForOfStatement>) {
+    "ForInStatement|ForOfStatement"(
+      path: NodePath<t.ForInStatement | t.ForOfStatement>,
+    ) {
       if (isUnsafeInstrumentationContext(path)) return;
       const node = path.node;
       if (!node.loc) return;
@@ -1310,69 +1309,124 @@ export function instrumentMcdc(
           { id: enteredId, label: "one or more iterations" },
         ],
       });
-      const frameId = path.scope.generateUidIdentifier("supercovLoopFrame");
-      const frameScope = path.scope.getFunctionParent() ?? path.scope.getProgramParent();
-      frameScope.push({ id: t.cloneNode(frameId), kind: "let" });
-      const assignment = t.expressionStatement(
-        t.assignmentExpression(
-          "=",
-          t.cloneNode(frameId),
-          t.callExpression(t.identifier(LOOP_BEGIN), [
-            t.stringLiteral(zeroId),
-            t.stringLiteral(enteredId),
-          ]),
-        ),
-      );
-      const loop = t.cloneNode(node, true);
-      restoreClonedOffsets(node, loop);
-      loop.body = t.isBlockStatement(loop.body)
-        ? loop.body
-        : t.blockStatement([loop.body]);
-      loop.body.body.unshift(
-        t.expressionStatement(
-          probeVersion === 2
-            ? t.assignmentExpression(
-                "=",
-                t.memberExpression(
-                  t.cloneNode(frameId),
-                  t.identifier("entered"),
-                ),
-                t.booleanLiteral(true),
-              )
-            : t.callExpression(t.identifier(LOOP_ENTERED), [
-                t.cloneNode(frameId),
-              ]),
-        ),
-      );
-      let loopStatement: t.Statement = loop;
-      let replacementPath: NodePath<t.Statement> = path;
-      while (
-        replacementPath.parentPath?.isLabeledStatement() &&
-        replacementPath.parentPath.node.body === replacementPath.node
-      ) {
-        loopStatement = t.labeledStatement(
-          t.cloneNode(replacementPath.parentPath.node.label),
-          loopStatement,
-        );
-        replacementPath = replacementPath.parentPath;
-      }
-      const wrapped = t.tryStatement(
-        t.blockStatement([loopStatement]),
-        null,
-        t.blockStatement([
+      enumerationTargets.set(node, { zeroId, enteredId });
+    },
+  });
+
+  // Transform bottom-up after the denominator is frozen. This keeps nested
+  // try/loop nodes attached to the tree while they are rewritten; mutating an
+  // outer path first can leave a nested Babel path detached while still
+  // recording an obligation that can never emit evidence.
+  traverse(ast, {
+    TryStatement: {
+      exit(path) {
+        if (isUnsafeInstrumentationContext(path)) return;
+        const node = path.node;
+        const target = tryTargets.get(node);
+        if (!target || !node.handler) return;
+        const frameId = path.scope.generateUidIdentifier("supercovTryFrame");
+        const frameScope =
+          path.scope.getFunctionParent() ?? path.scope.getProgramParent();
+        frameScope.push({ id: t.cloneNode(frameId), kind: "let" });
+        path.insertBefore(
           t.expressionStatement(
-            t.callExpression(t.identifier(LOOP_END), [t.cloneNode(frameId)]),
+            t.assignmentExpression(
+              "=",
+              t.cloneNode(frameId),
+              t.callExpression(t.identifier(TRY_BEGIN), [
+                t.stringLiteral(target.successId),
+                t.stringLiteral(target.catchId),
+              ]),
+            ),
           ),
-        ]),
-      );
-      if (replacementPath === path) {
-        path.insertBefore(assignment);
-        path.replaceWith(wrapped);
+        );
+        node.handler.body.body.unshift(
+          t.expressionStatement(
+            t.callExpression(t.identifier(TRY_CATCH), [
+              t.cloneNode(frameId),
+              t.identifier("undefined"),
+            ]),
+          ),
+        );
+        const end = t.expressionStatement(
+          t.callExpression(t.identifier(TRY_END), [t.cloneNode(frameId)]),
+        );
+        if (node.finalizer) node.finalizer.body.unshift(end);
+        else node.finalizer = t.blockStatement([end]);
         path.skip();
-      } else {
-        replacementPath.replaceWith(t.blockStatement([assignment, wrapped]));
-        replacementPath.skip();
-      }
+      },
+    },
+    "ForInStatement|ForOfStatement": {
+      exit(path: NodePath<t.ForInStatement | t.ForOfStatement>) {
+        if (isUnsafeInstrumentationContext(path)) return;
+        const node = path.node;
+        const target = enumerationTargets.get(node);
+        if (!target) return;
+        const frameId = path.scope.generateUidIdentifier("supercovLoopFrame");
+        const frameScope =
+          path.scope.getFunctionParent() ?? path.scope.getProgramParent();
+        frameScope.push({ id: t.cloneNode(frameId), kind: "let" });
+        const assignment = t.expressionStatement(
+          t.assignmentExpression(
+            "=",
+            t.cloneNode(frameId),
+            t.callExpression(t.identifier(LOOP_BEGIN), [
+              t.stringLiteral(target.zeroId),
+              t.stringLiteral(target.enteredId),
+            ]),
+          ),
+        );
+        const loop = t.cloneNode(node, true);
+        restoreClonedOffsets(node, loop);
+        loop.body = t.isBlockStatement(loop.body)
+          ? loop.body
+          : t.blockStatement([loop.body]);
+        loop.body.body.unshift(
+          t.expressionStatement(
+            probeVersion === 2
+              ? t.assignmentExpression(
+                  "=",
+                  t.memberExpression(
+                    t.cloneNode(frameId),
+                    t.identifier("entered"),
+                  ),
+                  t.booleanLiteral(true),
+                )
+              : t.callExpression(t.identifier(LOOP_ENTERED), [
+                  t.cloneNode(frameId),
+                ]),
+          ),
+        );
+        let loopStatement: t.Statement = loop;
+        let replacementPath: NodePath<t.Statement> = path;
+        while (
+          replacementPath.parentPath?.isLabeledStatement() &&
+          replacementPath.parentPath.node.body === replacementPath.node
+        ) {
+          loopStatement = t.labeledStatement(
+            t.cloneNode(replacementPath.parentPath.node.label),
+            loopStatement,
+          );
+          replacementPath = replacementPath.parentPath;
+        }
+        const wrapped = t.tryStatement(
+          t.blockStatement([loopStatement]),
+          null,
+          t.blockStatement([
+            t.expressionStatement(
+              t.callExpression(t.identifier(LOOP_END), [t.cloneNode(frameId)]),
+            ),
+          ]),
+        );
+        if (replacementPath === path) {
+          path.insertBefore(assignment);
+          path.replaceWith(wrapped);
+          path.skip();
+        } else {
+          replacementPath.replaceWith(t.blockStatement([assignment, wrapped]));
+          replacementPath.skip();
+        }
+      },
     },
   });
 
@@ -1451,8 +1505,7 @@ export function instrumentMcdc(
         ? path.scope.parent
         : path.scope;
     const frameScope =
-      evaluationScope.getFunctionParent() ??
-      evaluationScope.getProgramParent();
+      evaluationScope.getFunctionParent() ?? evaluationScope.getProgramParent();
     const frameId = frameScope.generateUidIdentifier("supercovMcdcFrame");
     const useV2 =
       probeVersion === 2 &&
@@ -1466,8 +1519,7 @@ export function instrumentMcdc(
       ? frameScope.generateUidIdentifier("supercovMcdcResult")
       : undefined;
     const useDenseV2 =
-      useV2 &&
-      originalConditions.length <= PROBE_V2_DENSE_CONDITION_LIMIT;
+      useV2 && originalConditions.length <= PROBE_V2_DENSE_CONDITION_LIMIT;
     const useSaturatedV2 =
       useDenseV2 && isCoverageTransparentDecision(originalConditions);
     const originalDecision = useSaturatedV2
@@ -1481,9 +1533,8 @@ export function instrumentMcdc(
         : 0,
     );
     const decisionEpoch = inlineFrame ? undefined : epochForPath(path);
-    const localComplete = useSaturatedV2 && !inlineFrame
-      ? localDecisionForPath(path)
-      : undefined;
+    const localComplete =
+      useSaturatedV2 && !inlineFrame ? localDecisionForPath(path) : undefined;
     const vectorTemp = useDenseV2
       ? frameScope.generateUidIdentifier("supercovMcdcVector")
       : undefined;
@@ -1533,11 +1584,7 @@ export function instrumentMcdc(
         ]);
     const v2Tail: t.Expression[] = useV2
       ? [
-          t.assignmentExpression(
-            "=",
-            t.cloneNode(resultTemp!),
-            instrumented,
-          ),
+          t.assignmentExpression("=", t.cloneNode(resultTemp!), instrumented),
           ...(useDenseV2
             ? [
                 t.assignmentExpression(
@@ -1584,38 +1631,32 @@ export function instrumentMcdc(
             : [end]),
         ]
       : [end];
-    const observedDecision =
-      inlineFrame
-        ? t.callExpression(
-            t.arrowFunctionExpression(
-              [],
-              t.blockStatement([
-                t.variableDeclaration("let", [
-                  t.variableDeclarator(
-                    t.cloneNode(frameId),
-                    useV2 ? t.numericLiteral(0) : begin,
-                  ),
-                  ...conditionTemps.map((temporary) =>
-                    t.variableDeclarator(t.cloneNode(temporary)),
-                  ),
-                  ...(resultTemp
-                    ? [t.variableDeclarator(t.cloneNode(resultTemp))]
-                    : []),
-                  ...(vectorTemp
-                    ? [t.variableDeclarator(t.cloneNode(vectorTemp))]
-                    : []),
-                ]),
-                t.returnStatement(
-                  useV2 ? t.sequenceExpression(v2Tail) : end,
-                ),
-              ]),
-            ),
+    const observedDecision = inlineFrame
+      ? t.callExpression(
+          t.arrowFunctionExpression(
             [],
-          )
-        : t.sequenceExpression([
-            assignFrame,
-            ...(useV2 ? v2Tail : [end]),
-          ]);
+            t.blockStatement([
+              t.variableDeclaration("let", [
+                t.variableDeclarator(
+                  t.cloneNode(frameId),
+                  useV2 ? t.numericLiteral(0) : begin,
+                ),
+                ...conditionTemps.map((temporary) =>
+                  t.variableDeclarator(t.cloneNode(temporary)),
+                ),
+                ...(resultTemp
+                  ? [t.variableDeclarator(t.cloneNode(resultTemp))]
+                  : []),
+                ...(vectorTemp
+                  ? [t.variableDeclarator(t.cloneNode(vectorTemp))]
+                  : []),
+              ]),
+              t.returnStatement(useV2 ? t.sequenceExpression(v2Tail) : end),
+            ]),
+          ),
+          [],
+        )
+      : t.sequenceExpression([assignFrame, ...(useV2 ? v2Tail : [end])]);
     const completeCheck = useSaturatedV2
       ? t.binaryExpression(
           "===",
@@ -1626,10 +1667,7 @@ export function instrumentMcdc(
           ),
           decisionEpoch
             ? t.cloneNode(decisionEpoch)
-            : t.memberExpression(
-                t.identifier(CLOCK_V2),
-                t.identifier("epoch"),
-              ),
+            : t.memberExpression(t.identifier(CLOCK_V2), t.identifier("epoch")),
         )
       : undefined;
     const completeFastPath =
@@ -1851,7 +1889,8 @@ export function instrumentMcdc(
         line: path.node.loc.start.line,
         column: path.node.loc.start.column + 1,
         source: sourceFor(code, path.node),
-        reason: "eval-generated source has no stable pre-run coverage denominator",
+        reason:
+          "eval-generated source has no stable pre-run coverage denominator",
       });
     },
     NewExpression(path) {
@@ -1868,7 +1907,8 @@ export function instrumentMcdc(
         line: path.node.loc.start.line,
         column: path.node.loc.start.column + 1,
         source: sourceFor(code, path.node),
-        reason: "Function-generated source has no stable pre-run coverage denominator",
+        reason:
+          "Function-generated source has no stable pre-run coverage denominator",
       });
     },
   });
@@ -2019,7 +2059,8 @@ export function instrumentMcdc(
       if (isUnsafeInstrumentationContext(path)) return;
       const callee = path.node.callee;
       const property =
-        (t.isMemberExpression(callee) || t.isOptionalMemberExpression(callee)) &&
+        (t.isMemberExpression(callee) ||
+          t.isOptionalMemberExpression(callee)) &&
         !callee.computed &&
         t.isIdentifier(callee.property)
           ? callee.property.name
@@ -2027,13 +2068,21 @@ export function instrumentMcdc(
       const identifier = t.isIdentifier(callee) ? callee.name : property;
       let callbackIndex = -1;
       if (
-        (property === "on" || property === "once" || property === "addListener") &&
+        (property === "on" ||
+          property === "once" ||
+          property === "addListener") &&
         t.isStringLiteral(path.node.arguments[0]) &&
-        ["request", "upgrade", "connection"].includes(path.node.arguments[0].value)
+        ["request", "upgrade", "connection"].includes(
+          path.node.arguments[0].value,
+        )
       ) {
         callbackIndex = 1;
       } else if (identifier === "createServer") {
-        for (let index = path.node.arguments.length - 1; index >= 0; index -= 1) {
+        for (
+          let index = path.node.arguments.length - 1;
+          index >= 0;
+          index -= 1
+        ) {
           const argument = path.node.arguments[index];
           if (
             t.isFunctionExpression(argument) ||
