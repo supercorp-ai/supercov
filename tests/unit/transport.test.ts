@@ -27,12 +27,15 @@ import {
   COVERAGE_PHASE_COOKIE,
   COVERAGE_SCOPE_COOKIE,
   COVERAGE_SCOPE_HEADER,
+  decodeCoverageCarrier,
   decodeCoverageScope,
+  encodeCoverageCarrier,
   encodeCoverageScope,
   serverEvidencePath,
   serverRunEvidenceDirectory,
 } from "../../src/transport.ts";
 import type {
+  CoverageCarrier,
   CoverageExecutionScope,
   CoverageServerRecord,
   McdcDecisionMeta,
@@ -98,6 +101,55 @@ describe("concurrent server evidence transport", () => {
     expect(serverEvidencePath(execution)).toContain(
       "/run_with_spaces/worker_1/",
     );
+  });
+
+  it("rejects each malformed scope and carrier field independently", () => {
+    const valid = scope("run-1", "worker-1", "test one", 0);
+    const tampered = (key: string, value: string): string => {
+      const params = new URLSearchParams(encodeCoverageScope(valid));
+      params.set(key, value);
+      return params.toString();
+    };
+
+    expect(decodeCoverageScope(undefined)).toBeUndefined();
+    expect(decodeCoverageScope(encodeCoverageScope(valid))).toEqual(valid);
+    expect(decodeCoverageScope(tampered("v", "2"))).toBeUndefined();
+    expect(decodeCoverageScope(tampered("r", ""))).toBeUndefined();
+    expect(decodeCoverageScope(tampered("w", ""))).toBeUndefined();
+    expect(decodeCoverageScope(tampered("t", ""))).toBeUndefined();
+    expect(decodeCoverageScope(tampered("k", ""))).toBeUndefined();
+    expect(decodeCoverageScope(tampered("i", ""))).toBeUndefined();
+    expect(decodeCoverageScope(tampered("i", "../escape"))).toBeUndefined();
+    expect(decodeCoverageScope(tampered("a", "not-a-number"))).toBeUndefined();
+    expect(decodeCoverageScope(tampered("a", "0.5"))).toBeUndefined();
+    expect(decodeCoverageScope(tampered("a", "-1"))).toBeUndefined();
+
+    expect(decodeCoverageCarrier(undefined)).toBeUndefined();
+    expect(decodeCoverageCarrier("!!not-base64-json!!")).toBeUndefined();
+    expect(
+      decodeCoverageCarrier(
+        encodeCoverageCarrier({ version: 2 } as unknown as CoverageCarrier),
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeCoverageCarrier(
+        encodeCoverageCarrier({
+          version: 1,
+          scope: { ...valid, testKey: "../escape" },
+        }),
+      ),
+    ).toBeUndefined();
+    expect(
+      decodeCoverageCarrier(encodeCoverageCarrier({ version: 1, phaseId: "" })),
+    ).toBeUndefined();
+    expect(
+      decodeCoverageCarrier(
+        encodeCoverageCarrier({ version: 1, phaseId: "phase-1" }),
+      ),
+    ).toEqual({ version: 1, phaseId: "phase-1" });
+    expect(
+      decodeCoverageCarrier(encodeCoverageCarrier({ version: 1, scope: valid })),
+    ).toEqual({ version: 1, scope: valid });
   });
 
   it("keeps interleaved async requests in separate run/worker/test/retry files", async () => {

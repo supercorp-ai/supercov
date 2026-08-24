@@ -220,6 +220,75 @@ describe("MC/DC instrumenter", () => {
     );
   });
 
+  it("keeps nullish coalescing atomic instead of decomposing it", () => {
+    const lone = executeInstrumented(`
+      function decide(left, right) {
+        if (left ?? right) return 'yes';
+        return 'no';
+      }
+    `);
+    expect(lone.manifest.decisions).toHaveLength(1);
+    expect(lone.manifest.decisions[0]?.conditions).toEqual(["left ?? right"]);
+    expect(lone.decide(null, false)).toBe("no");
+    expect(lone.decide(null, true)).toBe("yes");
+    expect(lone.decide(false, true)).toBe("no");
+    expect(lone.vectors).toEqual([
+      { values: [false], outcome: false },
+      { values: [true], outcome: true },
+      { values: [false], outcome: false },
+    ]);
+
+    const compound = executeInstrumented(`
+      function decide(left, right) {
+        if ((left ?? right) && right) return 'yes';
+        return 'no';
+      }
+    `);
+    expect(compound.manifest.decisions).toHaveLength(1);
+    expect(compound.manifest.decisions[0]?.conditions).toHaveLength(2);
+    expect(compound.decide(null, false)).toBe("no");
+    expect(compound.decide(true, true)).toBe("yes");
+    expect(compound.vectors).toEqual([
+      { values: [false, null], outcome: false },
+      { values: [true, true], outcome: true },
+    ]);
+
+    const negated = executeInstrumented(`
+      function decide(left, right) {
+        if (!(left ?? right)) return 'yes';
+        return 'no';
+      }
+    `);
+    expect(negated.manifest.decisions).toHaveLength(1);
+    expect(negated.manifest.decisions[0]?.conditions).toEqual([
+      "!(left ?? right)",
+    ]);
+    expect(negated.decide(null, false)).toBe("yes");
+    expect(negated.decide(true, false)).toBe("no");
+    expect(negated.vectors).toEqual([
+      { values: [true], outcome: true },
+      { values: [false], outcome: false },
+    ]);
+
+    const negatedCompound = executeInstrumented(`
+      function decide(left, right) {
+        if (!(left || right)) return 'yes';
+        return 'no';
+      }
+    `);
+    expect(negatedCompound.manifest.decisions).toHaveLength(1);
+    expect(negatedCompound.manifest.decisions[0]?.conditions).toEqual([
+      "left",
+      "right",
+    ]);
+    expect(negatedCompound.decide(false, false)).toBe("yes");
+    expect(negatedCompound.decide(false, true)).toBe("no");
+    expect(negatedCompound.vectors).toEqual([
+      { values: [false, false], outcome: true },
+      { values: [false, true], outcome: false },
+    ]);
+  });
+
   it("measures optional links, logical assignments, and parameter defaults", () => {
     const optional = executeInstrumented(`
       function decide(left) {
@@ -340,6 +409,59 @@ describe("MC/DC instrumenter", () => {
       ]),
     );
     expect(dynamicEnvironment.manifest.decisions).toHaveLength(0);
+  });
+
+  it("classifies every source-coercion ancestor context explicitly", () => {
+    const coerced = [
+      `const value = "" + function () { return 1; };`,
+      `const value = other < function () { return 1; };`,
+      `const value = (function () { return 1; }).toString();`,
+      `const value = lookup[function () { return 1; }];`,
+      `const value = { [function () { return 1; }]: 1 };`,
+      `class Keys { [function () { return 1; }]() {} }`,
+      `class Fields { [function () { return 1; }] = 1; }`,
+      `const value = { [function () { return 1; }]() {} };`,
+      `const value = lookup?.[function () { return 1; }];`,
+      `const value = (function () { return 1; })?.toString();`,
+      `const value = String(flag ? function () { return 1; } : fallback);`,
+      `const value = String(flag ? fallback : function () { return 1; });`,
+      `const value = String(function () { return 1; } || flag);`,
+      `const value = String(flag || function () { return 1; });`,
+      `const value = String((0, function () { return 1; }));`,
+      `const value = String(target = function () { return 1; });`,
+      `const value = String(function () { return 1; } as unknown);`,
+      `const value = String(<any>function () { return 1; });`,
+      `const value = String((function () { return 1; })!);`,
+    ];
+    for (const source of coerced) {
+      const transformed = instrumentMcdc(source, "app/coerced.ts");
+      expect(transformed.manifest.limitations).toEqual([
+        expect.objectContaining({
+          kind: "semantic-safety",
+          reason: expect.stringContaining("Function source text"),
+        }),
+      ]);
+      expect(transformed.code).toMatch(/function \(\) \{\s*return 1;\s*\}/);
+    }
+
+    const consumed = [
+      `const value = [function () { return 1; }];`,
+      `const value = other === function () { return 1; };`,
+      `const value = (function () { return 1; }).name;`,
+      `const value = (function () { return 1; })[key];`,
+      `const value = String((function () { return 1; }, other));`,
+      `const value = String(function () { return 1; } ? left : right);`,
+      `const value = { plain: function () { return 1; } };`,
+      `const value = { [key]: function () { return 1; } };`,
+      `const value = (function () { return 1; })?.[key];`,
+    ];
+    for (const source of consumed) {
+      const transformed = instrumentMcdc(source, "app/consumed.ts");
+      expect(transformed.manifest.limitations ?? []).toHaveLength(0);
+      expect(
+        transformed.manifest.points.some((point) => point.kind === "function"),
+      ).toBe(true);
+    }
   });
 
   it("measures try/catch, zero/entered enumeration, and switch no-match", () => {

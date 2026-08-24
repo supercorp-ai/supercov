@@ -146,6 +146,52 @@ describe("isolated run workspaces", () => {
     expect(existsSync(resolve(workspace, "unselected.txt"))).toBe(false);
   });
 
+  it("refuses reuse paths and removals that leave the sandbox", () => {
+    const root = project();
+    mkdirSync(resolve(root, "node_modules/example"), { recursive: true });
+    writeFileSync(resolve(root, "node_modules/example/index.js"), "module\n");
+    const workspace = prepareCachedWorkspace(root);
+
+    for (const requested of ["../outside", ".", "missing-path"]) {
+      expect(() =>
+        prepareCachedWorkspace(root, { reusePaths: [requested] }),
+      ).toThrow(/Refusing to reuse unexpected build path/);
+    }
+
+    writeFileSync(resolve(workspace, "artifact.txt"), "artifact\n");
+    symlinkSync(
+      resolve(root, "package.json"),
+      resolve(workspace, "linked-entry"),
+    );
+    expect(() =>
+      prepareCachedWorkspace(root, { reusePaths: ["linked-entry"] }),
+    ).toThrow(/Unsupported reusable build entry/);
+
+    const copies: Array<[string, string]> = [];
+    prepareCachedWorkspace(root, {
+      reusePaths: ["artifact.txt"],
+      copyFile: (source, destination) => {
+        copies.push([source, destination]);
+        copyFileSync(source, destination);
+      },
+    });
+    expect(
+      copies.filter(
+        ([source]) => source === resolve(workspace, "artifact.txt"),
+      ),
+    ).toHaveLength(1);
+    expect(readFileSync(resolve(workspace, "artifact.txt"), "utf8")).toBe(
+      "artifact\n",
+    );
+
+    expect(() => removeIsolatedWorkspace(root, "..")).toThrow(
+      /Refusing to remove unexpected workspace path/,
+    );
+    expect(() => removeIsolatedWorkspace(root, "")).toThrow(
+      /Refusing to remove unexpected workspace path/,
+    );
+  });
+
   it("recovers every interrupted cache publication boundary", () => {
     const root = project();
     const workspace = prepareCachedWorkspace(root);
