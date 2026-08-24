@@ -62,6 +62,26 @@ function sourceFor(code: string, node: t.Node): string {
   return generate(node).code;
 }
 
+function restoreClonedOffsets(original: t.Node, clone: t.Node): void {
+  clone.start = original.start;
+  clone.end = original.end;
+  const keys = t.VISITOR_KEYS[original.type] ?? [];
+  for (const key of keys) {
+    const originalChild = (original as unknown as Record<string, unknown>)[key];
+    const clonedChild = (clone as unknown as Record<string, unknown>)[key];
+    if (Array.isArray(originalChild) && Array.isArray(clonedChild)) {
+      for (let index = 0; index < originalChild.length; index += 1) {
+        const sourceNode = originalChild[index];
+        const targetNode = clonedChild[index];
+        if (t.isNode(sourceNode) && t.isNode(targetNode))
+          restoreClonedOffsets(sourceNode, targetNode);
+      }
+    } else if (t.isNode(originalChild) && t.isNode(clonedChild)) {
+      restoreClonedOffsets(originalChild, clonedChild);
+    }
+  }
+}
+
 function stableId(
   file: string,
   kind: string,
@@ -1304,6 +1324,7 @@ export function instrumentMcdc(
         ),
       );
       const loop = t.cloneNode(node, true);
+      restoreClonedOffsets(node, loop);
       loop.body = t.isBlockStatement(loop.body)
         ? loop.body
         : t.blockStatement([loop.body]);

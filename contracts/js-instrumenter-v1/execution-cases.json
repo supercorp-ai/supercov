@@ -90,5 +90,17 @@
   {
     "file": "differential/for-of-defaults.js",
     "source": "const effects = [];\nfunction mark(label, value) { effects.push(label); return value; }\nfunction run() { const values = []; for (const { value = mark('loop', 'fallback') } of [{}, { value: 'given' }]) values.push(value); return values; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/try-catch-finally.js",
+    "source": "const effects = [];\nfunction choose(mode) { try { effects.push('try:' + mode); if (mode === 'throw') throw new TypeError('boom'); if (mode === 'return') return 'returned'; return 'normal'; } catch (error) { effects.push('catch:' + error.name); return 'caught'; } finally { effects.push('finally:' + mode); } }\nfunction run() { return [choose('normal'), choose('return'), choose('throw')]; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/enumeration-loops.js",
+    "source": "const effects = [];\nfunction fallback() { effects.push('fallback'); return 10; }\nfunction run() { let total = 0; for (const key in {}) total += key.length; for (const key in { a: 1, bb: 2 }) { if (key === 'a') continue; total += key.length; } for (const [value = fallback()] of [[], [2], []]) { total += value; if (total > 20) break; } return total; }\nfunction observe() { return effects; }\n"
+  },
+  {
+    "file": "differential/labeled-enumeration.js",
+    "source": "const effects = [];\nfunction run() { let total = 0; outer: for (const row of [[1, 2], [3]]) { for (const value of row) { effects.push(value); total += value; if (value === 2) continue outer; } } return total; }\nfunction observe() { return effects; }\n"
   }
 ]

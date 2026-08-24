@@ -524,6 +524,18 @@ describe("MC/DC instrumenter", () => {
     );
   });
 
+  it("keeps distinct stable IDs for decisions cloned inside enumeration loops", () => {
+    const transformed = instrumentMcdc(
+      `for (const value of values) { if (value) first(); if (other) second(); }`,
+      "app/loop-decisions.ts",
+    );
+    expect(transformed.manifest.decisions.map((decision) => decision.source)).toEqual([
+      "value",
+      "other",
+    ]);
+    expect(new Set(transformed.manifest.decisions.map((decision) => decision.id)).size).toBe(2);
+  });
+
   it("blocks completeness when dynamic source is discovered", () => {
     const transformed = instrumentMcdc(
       `function decide(source) { return eval(source); }`,

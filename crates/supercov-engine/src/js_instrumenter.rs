@@ -17,13 +17,14 @@ use oxc_ast::{
     AstBuilder, NONE,
     ast::{
         Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
-        AssignmentPattern, AssignmentTarget, BindingPattern, CallExpression, ChainExpression,
-        ComputedMemberExpression, ConditionalExpression, Declaration, DoWhileStatement, Expression,
-        ForInStatement, ForOfStatement, ForStatement, ForStatementLeft, FormalParameter,
-        FormalParameterKind, FormalParameters, Function, FunctionBody, IfStatement,
-        LogicalExpression, NewExpression, ObjectPropertyKind, PrivateFieldExpression, Program,
-        PropertyKey, PropertyKind, Statement, StaticMemberExpression, VariableDeclaration,
-        VariableDeclarationKind, WhileStatement, WithStatement,
+        AssignmentPattern, AssignmentTarget, BindingPattern, CallExpression, CatchClause,
+        ChainExpression, ComputedMemberExpression, ConditionalExpression, Declaration,
+        DoWhileStatement, Expression, ForInStatement, ForOfStatement, ForStatement,
+        ForStatementLeft, FormalParameter, FormalParameterKind, FormalParameters, Function,
+        FunctionBody, IfStatement, LogicalExpression, NewExpression, ObjectPropertyKind,
+        PrivateFieldExpression, Program, PropertyKey, PropertyKind, Statement,
+        StaticMemberExpression, TryStatement, VariableDeclaration, VariableDeclarationKind,
+        WhileStatement, WithStatement,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -118,6 +119,12 @@ pub struct CandidateRuntime {
     pub optional_call_end: String,
     pub default_selected: String,
     pub default_entered: String,
+    pub try_begin: String,
+    pub try_catch: String,
+    pub try_end: String,
+    pub loop_begin: String,
+    pub loop_entered: String,
+    pub loop_end: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -722,6 +729,13 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         file,
         &safety.source_sensitive_functions,
     );
+    let extended_analysis = collect_extended_branches(
+        &allocator,
+        &mut parsed.program,
+        source,
+        file,
+        &safety.source_sensitive_functions,
+    );
     let logical_analysis = collect_logical_value_branches(
         &allocator,
         &mut parsed.program,
@@ -734,6 +748,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
     branches.extend(call_analysis.branches);
     branches.extend(assignment_analysis.branches);
     branches.extend(default_analysis.branches);
+    branches.extend(extended_analysis.branches);
     branches.extend(logical_analysis.branches);
     let generated = Codegen::new().build(&parsed.program).code;
     Ok(CandidateOutput {
@@ -827,6 +842,13 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         file,
         &safety.source_sensitive_functions,
     );
+    let extended_analysis = collect_extended_branches(
+        &allocator,
+        &mut parsed.program,
+        source,
+        file,
+        &safety.source_sensitive_functions,
+    );
     let logical_analysis = collect_logical_value_branches(
         &allocator,
         &mut parsed.program,
@@ -839,6 +861,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     branches.extend(call_analysis.branches.clone());
     branches.extend(assignment_analysis.branches);
     branches.extend(default_analysis.branches.clone());
+    branches.extend(extended_analysis.branches.clone());
     branches.extend(logical_analysis.branches);
 
     let mut names = CandidateNames::new(source);
@@ -857,6 +880,12 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     let optional_call_end = names.allocate("__supercovOptionalCallEnd");
     let default_selected = names.allocate("__supercovDefaultSelected");
     let default_entered = names.allocate("__supercovDefaultEntered");
+    let try_begin = names.allocate("__supercovTryBegin");
+    let try_catch = names.allocate("__supercovTryCatch");
+    let try_end = names.allocate("__supercovTryEnd");
+    let loop_begin = names.allocate("__supercovLoopBegin");
+    let loop_entered = names.allocate("__supercovLoopEntered");
+    let loop_end = names.allocate("__supercovLoopEnd");
     let ast = AstBuilder::new(&allocator);
     let mut statement_transformer = StatementProbeTransformer {
         ast,
@@ -908,6 +937,22 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         with_statements: safety.with_statements.clone(),
     };
     default_transformer.visit_program(&mut parsed.program);
+    let mut extended_transformer = ExtendedTransformer {
+        ast,
+        try_begin: try_begin.clone(),
+        try_catch: try_catch.clone(),
+        try_end: try_end.clone(),
+        loop_begin: loop_begin.clone(),
+        loop_entered: loop_entered.clone(),
+        loop_end: loop_end.clone(),
+        try_targets: extended_analysis.try_targets,
+        loop_targets: extended_analysis.loop_targets,
+        names: CandidateNames::new(source),
+        scope_declarations: Vec::new(),
+        source_sensitive_functions: safety.source_sensitive_functions.clone(),
+        with_statements: safety.with_statements.clone(),
+    };
+    extended_transformer.visit_program(&mut parsed.program);
     let mut transformer = ControlProbeV2Transformer {
         ast,
         file,
@@ -970,6 +1015,12 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
             optional_call_end,
             default_selected,
             default_entered,
+            try_begin,
+            try_catch,
+            try_end,
+            loop_begin,
+            loop_entered,
+            loop_end,
         }),
         coverage_limitations: {
             let mut limitations = safety.semantic_limitations;
@@ -1807,6 +1858,304 @@ impl<'a> VisitMut<'a> for DefaultTransformer<'a> {
             return;
         }
         walk_mut::walk_with_statement(self, statement);
+    }
+}
+
+enum ExtendedKind {
+    Try,
+    Loop,
+}
+
+struct ExtendedTransformer<'a, 's> {
+    ast: AstBuilder<'a>,
+    try_begin: String,
+    try_catch: String,
+    try_end: String,
+    loop_begin: String,
+    loop_entered: String,
+    loop_end: String,
+    try_targets: HashMap<SpanKey, ExtendedTarget>,
+    loop_targets: HashMap<SpanKey, ExtendedTarget>,
+    names: CandidateNames<'s>,
+    scope_declarations: Vec<Vec<String>>,
+    source_sensitive_functions: HashSet<SpanKey>,
+    with_statements: HashSet<SpanKey>,
+}
+
+impl<'a> ExtendedTransformer<'a, '_> {
+    fn identifier(&self, name: &str) -> Expression<'a> {
+        self.ast
+            .expression_identifier(Span::default(), self.ast.ident(name))
+    }
+
+    fn assignment_target(&self, name: &str) -> AssignmentTarget<'a> {
+        AssignmentTarget::from(
+            self.ast
+                .simple_assignment_target_assignment_target_identifier(
+                    Span::default(),
+                    self.ast.ident(name),
+                ),
+        )
+    }
+
+    fn string_argument(&self, value: &str) -> Argument<'a> {
+        Argument::from(self.ast.expression_string_literal(
+            Span::default(),
+            self.ast.str(value),
+            None,
+        ))
+    }
+
+    fn call(&self, name: &str, arguments: oxc_allocator::Vec<'a, Argument<'a>>) -> Expression<'a> {
+        self.ast.expression_call(
+            Span::default(),
+            self.identifier(name),
+            NONE,
+            arguments,
+            false,
+        )
+    }
+
+    fn call_statement(
+        &self,
+        name: &str,
+        arguments: oxc_allocator::Vec<'a, Argument<'a>>,
+    ) -> Statement<'a> {
+        self.ast
+            .statement_expression(Span::default(), self.call(name, arguments))
+    }
+
+    fn enter_scope(&mut self) {
+        self.scope_declarations.push(Vec::new());
+    }
+
+    fn leave_scope(&mut self, statements: &mut oxc_allocator::Vec<'a, Statement<'a>>) {
+        let names = self
+            .scope_declarations
+            .pop()
+            .expect("extended scope stack must remain balanced");
+        if names.is_empty() {
+            return;
+        }
+        let declarations = self.ast.vec_from_iter(names.into_iter().map(|name| {
+            self.ast.variable_declarator(
+                Span::default(),
+                VariableDeclarationKind::Let,
+                self.ast
+                    .binding_pattern_binding_identifier(Span::default(), self.ast.ident(&name)),
+                NONE,
+                None,
+                false,
+            )
+        }));
+        statements.insert(
+            0,
+            Statement::VariableDeclaration(self.ast.alloc_variable_declaration(
+                Span::default(),
+                VariableDeclarationKind::Let,
+                declarations,
+                false,
+            )),
+        );
+    }
+
+    fn scratch(&mut self, base: &str) -> String {
+        let name = self.names.allocate(base);
+        self.scope_declarations
+            .last_mut()
+            .expect("extended branch must be inside a program or function")
+            .push(name.clone());
+        name
+    }
+
+    fn target(statement: &Statement<'a>) -> Option<(ExtendedKind, SpanKey)> {
+        match statement {
+            Statement::TryStatement(node) => Some((ExtendedKind::Try, span_key(node.span))),
+            Statement::ForInStatement(node) => Some((ExtendedKind::Loop, span_key(node.span))),
+            Statement::ForOfStatement(node) => Some((ExtendedKind::Loop, span_key(node.span))),
+            Statement::LabeledStatement(node) => Self::target(&node.body),
+            _ => None,
+        }
+    }
+
+    fn inner_try<'b>(statement: &'b mut Statement<'a>) -> Option<&'b mut TryStatement<'a>> {
+        match statement {
+            Statement::TryStatement(node) => Some(node),
+            Statement::LabeledStatement(node) => Self::inner_try(&mut node.body),
+            _ => None,
+        }
+    }
+
+    fn inner_loop_body<'b>(statement: &'b mut Statement<'a>) -> Option<&'b mut Statement<'a>> {
+        match statement {
+            Statement::ForInStatement(node) => Some(&mut node.body),
+            Statement::ForOfStatement(node) => Some(&mut node.body),
+            Statement::LabeledStatement(node) => Self::inner_loop_body(&mut node.body),
+            _ => None,
+        }
+    }
+
+    fn prepend(body: &mut Statement<'a>, entry: Statement<'a>, ast: AstBuilder<'a>) {
+        if let Statement::BlockStatement(block) = body {
+            block.body.insert(0, entry);
+            return;
+        }
+        let original = body.take_in(ast.allocator);
+        *body = ast.statement_block(Span::default(), ast.vec_from_array([entry, original]));
+    }
+
+    fn begin_assignment(&self, frame: &str, begin: &str, target: &ExtendedTarget) -> Statement<'a> {
+        let call = self.call(
+            begin,
+            self.ast.vec_from_array([
+                self.string_argument(&target.first_id),
+                self.string_argument(&target.second_id),
+            ]),
+        );
+        self.ast.statement_expression(
+            Span::default(),
+            self.ast.expression_assignment(
+                Span::default(),
+                AssignmentOperator::Assign,
+                self.assignment_target(frame),
+                call,
+            ),
+        )
+    }
+
+    fn instrument_try(&mut self, statement: &mut Statement<'a>, target: ExtendedTarget) {
+        let frame = self.scratch("_supercovTryFrame");
+        let assignment = self.begin_assignment(&frame, &self.try_begin, &target);
+        let node = Self::inner_try(statement).expect("try target must remain a try statement");
+        node.handler
+            .as_mut()
+            .expect("try coverage requires a catch handler")
+            .body
+            .body
+            .insert(
+                0,
+                self.call_statement(
+                    &self.try_catch,
+                    self.ast.vec_from_array([
+                        Argument::from(self.identifier(&frame)),
+                        Argument::from(self.identifier("undefined")),
+                    ]),
+                ),
+            );
+        let end = self.call_statement(
+            &self.try_end,
+            self.ast.vec1(Argument::from(self.identifier(&frame))),
+        );
+        if let Some(finalizer) = &mut node.finalizer {
+            finalizer.body.insert(0, end);
+        } else {
+            node.finalizer = Some(
+                self.ast
+                    .alloc_block_statement(Span::default(), self.ast.vec1(end)),
+            );
+        }
+        let original = statement.take_in(self.ast.allocator);
+        *statement = self.ast.statement_block(
+            Span::default(),
+            self.ast.vec_from_array([assignment, original]),
+        );
+    }
+
+    fn instrument_loop(&mut self, statement: &mut Statement<'a>, target: ExtendedTarget) {
+        let frame = self.scratch("_supercovLoopFrame");
+        let assignment = self.begin_assignment(&frame, &self.loop_begin, &target);
+        let entered = self.call_statement(
+            &self.loop_entered,
+            self.ast.vec1(Argument::from(self.identifier(&frame))),
+        );
+        Self::prepend(
+            Self::inner_loop_body(statement).expect("loop target must remain an enumeration loop"),
+            entered,
+            self.ast,
+        );
+        let original = statement.take_in(self.ast.allocator);
+        let end = self.call_statement(
+            &self.loop_end,
+            self.ast.vec1(Argument::from(self.identifier(&frame))),
+        );
+        let wrapped = self.ast.statement_try(
+            Span::default(),
+            self.ast
+                .block_statement(Span::default(), self.ast.vec1(original)),
+            None::<oxc_allocator::Box<'a, CatchClause<'a>>>,
+            Some(
+                self.ast
+                    .block_statement(Span::default(), self.ast.vec1(end)),
+            ),
+        );
+        *statement = self.ast.statement_block(
+            Span::default(),
+            self.ast.vec_from_array([assignment, wrapped]),
+        );
+    }
+}
+
+impl<'a> VisitMut<'a> for ExtendedTransformer<'a, '_> {
+    fn visit_program(&mut self, program: &mut Program<'a>) {
+        self.enter_scope();
+        walk_mut::walk_program(self, program);
+        self.leave_scope(&mut program.body);
+    }
+
+    fn visit_function_body(&mut self, body: &mut FunctionBody<'a>) {
+        self.enter_scope();
+        walk_mut::walk_function_body(self, body);
+        self.leave_scope(&mut body.statements);
+    }
+
+    fn visit_function(&mut self, function: &mut Function<'a>, flags: ScopeFlags) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_function(self, function, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, function: &mut ArrowFunctionExpression<'a>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_arrow_function_expression(self, function);
+    }
+
+    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
+        if self.with_statements.contains(&span_key(statement.span)) {
+            return;
+        }
+        walk_mut::walk_with_statement(self, statement);
+    }
+
+    fn visit_statement(&mut self, statement: &mut Statement<'a>) {
+        let Some((kind, key)) = Self::target(statement) else {
+            walk_mut::walk_statement(self, statement);
+            return;
+        };
+        match kind {
+            ExtendedKind::Try => {
+                if let Some(target) = self.try_targets.remove(&key) {
+                    self.instrument_try(statement, target);
+                } else {
+                    walk_mut::walk_statement(self, statement);
+                }
+            }
+            ExtendedKind::Loop => {
+                if let Some(target) = self.loop_targets.remove(&key) {
+                    self.instrument_loop(statement, target);
+                } else {
+                    walk_mut::walk_statement(self, statement);
+                }
+            }
+        }
     }
 }
 
@@ -2733,6 +3082,250 @@ struct DefaultAnalysis {
     parameter_targets: HashMap<SpanKey, DefaultTarget>,
     binding_targets: HashMap<SpanKey, DefaultTarget>,
     limitations: Vec<CandidateLimitation>,
+}
+
+#[derive(Clone)]
+struct ExtendedTarget {
+    first_id: String,
+    second_id: String,
+}
+
+#[derive(Default)]
+struct ExtendedAnalysis {
+    branches: Vec<CandidateBranch>,
+    try_targets: HashMap<SpanKey, ExtendedTarget>,
+    loop_targets: HashMap<SpanKey, ExtendedTarget>,
+}
+
+struct ExtendedCollector<'s> {
+    source: &'s str,
+    file: &'s str,
+    source_sensitive_functions: &'s HashSet<SpanKey>,
+    unsafe_function_depth: usize,
+    with_depth: usize,
+    suppressed_depth: usize,
+    suppressed_nodes: Vec<bool>,
+    analysis: ExtendedAnalysis,
+}
+
+impl ExtendedCollector<'_> {
+    fn unsafe_context(&self) -> bool {
+        self.unsafe_function_depth > 0 || self.with_depth > 0
+    }
+
+    fn enter_try(&mut self, node: &TryStatement<'_>) {
+        let transformed =
+            self.suppressed_depth == 0 && !self.unsafe_context() && node.handler.is_some();
+        self.suppressed_nodes.push(transformed);
+        if !transformed {
+            return;
+        }
+        let id = stable_id(self.source, self.file, "try-catch", node.span, "");
+        let success_id = format!("{id}:success");
+        let catch_id = format!("{id}:catch");
+        let (line, column) = line_and_utf16_column(self.source, node.span.start as usize);
+        self.analysis.branches.push(CandidateBranch {
+            id,
+            kind: "try-catch".to_string(),
+            file: self.file.to_string(),
+            line,
+            column,
+            source: "try / catch".to_string(),
+            alternatives: vec![
+                CandidateBranchAlternative {
+                    id: success_id.clone(),
+                    label: "try completed without catch".to_string(),
+                },
+                CandidateBranchAlternative {
+                    id: catch_id.clone(),
+                    label: "catch entered".to_string(),
+                },
+            ],
+        });
+        self.analysis.try_targets.insert(
+            span_key(node.span),
+            ExtendedTarget {
+                first_id: success_id,
+                second_id: catch_id,
+            },
+        );
+        self.suppressed_depth += 1;
+    }
+
+    fn enter_loop(&mut self, span: Span, right: &Expression<'_>, kind: &str) {
+        let transformed = self.suppressed_depth == 0 && !self.unsafe_context();
+        self.suppressed_nodes.push(transformed);
+        if !transformed {
+            return;
+        }
+        let id = stable_id(self.source, self.file, kind, span, "");
+        let zero_id = format!("{id}:zero");
+        let entered_id = format!("{id}:entered");
+        let (line, column) = line_and_utf16_column(self.source, span.start as usize);
+        self.analysis.branches.push(CandidateBranch {
+            id,
+            kind: kind.to_string(),
+            file: self.file.to_string(),
+            line,
+            column,
+            source: source_slice(self.source, right.span()).to_string(),
+            alternatives: vec![
+                CandidateBranchAlternative {
+                    id: zero_id.clone(),
+                    label: "zero iterations".to_string(),
+                },
+                CandidateBranchAlternative {
+                    id: entered_id.clone(),
+                    label: "one or more iterations".to_string(),
+                },
+            ],
+        });
+        self.analysis.loop_targets.insert(
+            span_key(span),
+            ExtendedTarget {
+                first_id: zero_id,
+                second_id: entered_id,
+            },
+        );
+        self.suppressed_depth += 1;
+    }
+
+    fn leave_suppressible(&mut self) {
+        if self
+            .suppressed_nodes
+            .pop()
+            .expect("extended collector stack must remain balanced")
+        {
+            self.suppressed_depth -= 1;
+        }
+    }
+
+    fn exit_source_function(&mut self, span: Span) {
+        if self.source_sensitive_functions.contains(&span_key(span)) {
+            self.unsafe_function_depth -= 1;
+        }
+    }
+}
+
+impl<'a> Traverse<'a, ()> for ExtendedCollector<'_> {
+    fn enter_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(node.span))
+        {
+            self.unsafe_function_depth += 1;
+        }
+    }
+
+    fn exit_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
+        self.exit_source_function(node.span);
+    }
+
+    fn enter_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(node.span))
+        {
+            self.unsafe_function_depth += 1;
+        }
+    }
+
+    fn exit_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.exit_source_function(node.span);
+    }
+
+    fn enter_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth += 1;
+    }
+
+    fn exit_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth -= 1;
+    }
+
+    fn enter_try_statement(
+        &mut self,
+        node: &mut TryStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.enter_try(node);
+    }
+
+    fn exit_try_statement(
+        &mut self,
+        _node: &mut TryStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.leave_suppressible();
+    }
+
+    fn enter_for_in_statement(
+        &mut self,
+        node: &mut ForInStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.enter_loop(node.span, &node.right, "for-in");
+    }
+
+    fn exit_for_in_statement(
+        &mut self,
+        _node: &mut ForInStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.leave_suppressible();
+    }
+
+    fn enter_for_of_statement(
+        &mut self,
+        node: &mut ForOfStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.enter_loop(node.span, &node.right, "for-of");
+    }
+
+    fn exit_for_of_statement(
+        &mut self,
+        _node: &mut ForOfStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.leave_suppressible();
+    }
+}
+
+fn collect_extended_branches<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    source: &str,
+    file: &str,
+    source_sensitive_functions: &HashSet<SpanKey>,
+) -> ExtendedAnalysis {
+    let mut collector = ExtendedCollector {
+        source,
+        file,
+        source_sensitive_functions,
+        unsafe_function_depth: 0,
+        with_depth: 0,
+        suppressed_depth: 0,
+        suppressed_nodes: Vec::new(),
+        analysis: ExtendedAnalysis::default(),
+    };
+    traverse_mut(&mut collector, allocator, program, Default::default(), ());
+    collector.analysis
 }
 
 struct DefaultCollector<'s> {
