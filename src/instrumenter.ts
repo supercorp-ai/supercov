@@ -23,6 +23,7 @@ const FILE_V2 = "__supercovProbeFileV2";
 const CLOCK_V2 = "__supercovProbeClockV2";
 const HITS_V2 = "__supercovProbeHitsV2";
 const DECISIONS_V2 = "__supercovProbeDecisionsV2";
+const COMPLETE_V2 = "__supercovProbeCompleteV2";
 const SELECTION_BEGIN = "__supercovSelectionBegin";
 const SELECTION_RIGHT = "__supercovSelectionRight";
 const SELECTION_END = "__supercovSelectionEnd";
@@ -106,6 +107,106 @@ function collectConditions(
     return;
   }
   conditions.push(node);
+}
+
+function probeV2ReachableVectorCount(
+  node: t.Expression,
+  conditions: t.Expression[],
+): number {
+  const indices = new WeakMap<t.Expression, number>();
+  for (const [index, condition] of conditions.entries())
+    indices.set(condition, index);
+  const vectors = new Set<number>();
+
+  const evaluate = (
+    expression: t.Expression,
+    assignment: number,
+    encoded: { value: number },
+  ): boolean => {
+    if (
+      t.isLogicalExpression(expression) &&
+      (expression.operator === "&&" || expression.operator === "||")
+    ) {
+      const left = evaluate(expression.left, assignment, encoded);
+      return expression.operator === "&&"
+        ? left && evaluate(expression.right, assignment, encoded)
+        : left || evaluate(expression.right, assignment, encoded);
+    }
+    if (
+      t.isUnaryExpression(expression, { operator: "!" }) &&
+      hasCompoundBooleanDecision(expression.argument)
+    )
+      return !evaluate(expression.argument, assignment, encoded);
+
+    const index = indices.get(expression);
+    if (index === undefined) throw new Error("probe v2 condition index missing");
+    const value = (assignment & (1 << index)) !== 0;
+    encoded.value += (value ? 2 : 1) * 3 ** index;
+    return value;
+  };
+
+  for (let assignment = 0; assignment < 2 ** conditions.length; assignment += 1) {
+    const encoded = { value: 0 };
+    const outcome = evaluate(node, assignment, encoded);
+    vectors.add(encoded.value * 2 + (outcome ? 1 : 0));
+  }
+  return vectors.size;
+}
+
+function markDecisionLogicalNodes(
+  node: t.Expression,
+  decisions: WeakSet<t.LogicalExpression>,
+): void {
+  if (
+    t.isLogicalExpression(node) &&
+    (node.operator === "&&" || node.operator === "||")
+  ) {
+    decisions.add(node);
+    markDecisionLogicalNodes(node.left, decisions);
+    markDecisionLogicalNodes(node.right, decisions);
+    return;
+  }
+  if (
+    t.isUnaryExpression(node, { operator: "!" }) &&
+    hasCompoundBooleanDecision(node.argument)
+  )
+    markDecisionLogicalNodes(node.argument, decisions);
+}
+
+function hasNestedCoverageSurface(node: t.Node): boolean {
+  let found = false;
+  const visit = (candidate: t.Node): void => {
+    if (found) return;
+    if (
+      t.isLogicalExpression(candidate) ||
+      t.isConditionalExpression(candidate) ||
+      t.isOptionalMemberExpression(candidate) ||
+      t.isOptionalCallExpression(candidate) ||
+      t.isFunction(candidate) ||
+      t.isClassExpression(candidate) ||
+      (t.isAssignmentExpression(candidate) &&
+        ["&&=", "||=", "??="].includes(candidate.operator))
+    ) {
+      found = true;
+      return;
+    }
+    for (const key of t.VISITOR_KEYS[candidate.type] ?? []) {
+      const child = (candidate as unknown as Record<string, unknown>)[key];
+      if (Array.isArray(child)) {
+        for (const item of child)
+          if (item && typeof item === "object" && "type" in item)
+            visit(item as t.Node);
+      } else if (child && typeof child === "object" && "type" in child) {
+        visit(child as t.Node);
+      }
+    }
+  };
+  visit(node);
+  return found;
+}
+
+function isCoverageTransparentDecision(conditions: t.Expression[]): boolean {
+  return conditions.every((condition) => !hasNestedCoverageSurface(condition));
 }
 
 function instrumentConditions(
@@ -242,6 +343,7 @@ function hitStatement(
     clock: t.Identifier;
     hitEpochs: t.Identifier;
     pointIndex: number;
+    epoch?: t.Identifier;
   },
 ): t.ExpressionStatement {
   if (v2) {
@@ -250,18 +352,16 @@ function hitStatement(
     return t.expressionStatement(
       t.logicalExpression(
         "||",
-        t.logicalExpression(
-          "&&",
-          t.memberExpression(t.cloneNode(clock), t.identifier("fast")),
-          t.binaryExpression(
-            "===",
-            t.memberExpression(
-              t.cloneNode(v2.hitEpochs),
-              t.numericLiteral(v2.pointIndex),
-              true,
-            ),
-            t.memberExpression(t.cloneNode(clock), t.identifier("epoch")),
+        t.binaryExpression(
+          "===",
+          t.memberExpression(
+            t.cloneNode(v2.hitEpochs),
+            t.numericLiteral(v2.pointIndex),
+            true,
           ),
+          v2.epoch
+            ? t.cloneNode(v2.epoch)
+            : t.memberExpression(t.cloneNode(clock), t.identifier("epoch")),
         ),
         t.callExpression(t.identifier(hitRuntimeName), [
           t.cloneNode(fileState),
@@ -288,6 +388,7 @@ function allocatedRuntimeNames(code: string): Record<string, string> {
     CLOCK_V2,
     HITS_V2,
     DECISIONS_V2,
+    COMPLETE_V2,
     SELECTION_BEGIN,
     SELECTION_RIGHT,
     SELECTION_END,
@@ -473,6 +574,7 @@ export function instrumentMcdc(
   const CLOCK_V2 = names["__supercovProbeClockV2"]!;
   const HITS_V2 = names["__supercovProbeHitsV2"]!;
   const DECISIONS_V2 = names["__supercovProbeDecisionsV2"]!;
+  const COMPLETE_V2 = names["__supercovProbeCompleteV2"]!;
   const probeVersion = options.probeVersion ?? 1;
   const SELECTION_BEGIN = names["__supercovSelectionBegin"]!;
   const SELECTION_RIGHT = names["__supercovSelectionRight"]!;
@@ -504,6 +606,7 @@ export function instrumentMcdc(
     plugins: parserPlugins,
   });
   const decisions: McdcDecisionMeta[] = [];
+  const decisionVectorCounts: number[] = [];
   const points: CoveragePointMeta[] = [];
   const branches: CoverageBranchMeta[] = [];
   const limitations: CoverageLimitation[] = [];
@@ -558,6 +661,85 @@ export function instrumentMcdc(
   const isUnsafeInstrumentationContext = (path: NodePath): boolean =>
     isWithinSourceSensitiveFunction(path) || isInsideWithStatement(path);
 
+  // A synchronous function cannot suspend while its body is executing. A
+  // nested coverage scope restores the caller's epoch before returning, so
+  // interior probes can compare against one scalar captured at entry instead
+  // of repeatedly loading the shared clock object. Async functions and
+  // generators deliberately keep the shared clock: either may resume under a
+  // later attribution epoch. Parameter initializers also use the shared clock
+  // because they execute before this body-local declaration.
+  const functionEpochs = new WeakMap<t.Function, t.Identifier>();
+  const functionDecisionCaches = new WeakMap<
+    t.Function,
+    { bits: t.Identifier; next: number }
+  >();
+  const decisionCacheDeclarations: Array<{
+    body: t.BlockStatement;
+    bits: t.Identifier;
+  }> = [];
+  if (probeVersion === 2) {
+    traverse(ast, {
+      Function(path) {
+        const node = path.node;
+        if (
+          node.async ||
+          node.generator ||
+          !t.isBlockStatement(node.body) ||
+          isUnsafeInstrumentationContext(path)
+        )
+          return;
+        const epoch = path.scope.generateUidIdentifier("supercovEpoch");
+        const declaration = t.variableDeclaration("const", [
+          t.variableDeclarator(
+            t.cloneNode(epoch),
+            t.memberExpression(
+              t.identifier(CLOCK_V2),
+              t.identifier("epoch"),
+            ),
+          ),
+        ]);
+        generatedStatements.add(declaration);
+        node.body.body.unshift(declaration);
+        functionEpochs.set(node, epoch);
+      },
+    });
+  }
+  const functionOwnerForPath = (
+    path: NodePath,
+  ): NodePath<t.Function> | undefined => {
+    const owner = path.findParent((parent) => parent.isFunction());
+    return owner?.isFunction() ? owner : undefined;
+  };
+  const epochForPath = (path: NodePath): t.Identifier | undefined => {
+    const owner = functionOwnerForPath(path);
+    return owner ? functionEpochs.get(owner.node) : undefined;
+  };
+  const localDecisionForPath = (
+    path: NodePath,
+  ): { bits: t.Identifier; mask: number } | undefined => {
+    const owner = functionOwnerForPath(path);
+    if (
+      !owner ||
+      !functionEpochs.has(owner.node) ||
+      !t.isBlockStatement(owner.node.body)
+    )
+      return undefined;
+    let cache = functionDecisionCaches.get(owner.node);
+    if (!cache) {
+      cache = {
+        bits: owner.scope.generateUidIdentifier("supercovComplete"),
+        next: 0,
+      };
+      functionDecisionCaches.set(owner.node, cache);
+      decisionCacheDeclarations.push({
+        body: owner.node.body,
+        bits: cache.bits,
+      });
+    }
+    const bit = cache.next++;
+    return bit < 30 ? { bits: cache.bits, mask: 2 ** bit } : undefined;
+  };
+
   // Record executable statements before adding any instrumentation statements.
   traverse(ast, {
     Statement(path) {
@@ -589,6 +771,7 @@ export function instrumentMcdc(
               clock: t.identifier(CLOCK_V2),
               hitEpochs: t.identifier(HITS_V2),
               pointIndex: points.length - 1,
+              epoch: epochForPath(path),
             }
           : undefined,
       );
@@ -1119,9 +1302,18 @@ export function instrumentMcdc(
         : t.blockStatement([loop.body]);
       loop.body.body.unshift(
         t.expressionStatement(
-          t.callExpression(t.identifier(LOOP_ENTERED), [
-            t.cloneNode(frameId),
-          ]),
+          probeVersion === 2
+            ? t.assignmentExpression(
+                "=",
+                t.memberExpression(
+                  t.cloneNode(frameId),
+                  t.identifier("entered"),
+                ),
+                t.booleanLiteral(true),
+              )
+            : t.callExpression(t.identifier(LOOP_ENTERED), [
+                t.cloneNode(frameId),
+              ]),
         ),
       );
       let loopStatement: t.Statement = loop;
@@ -1248,6 +1440,22 @@ export function instrumentMcdc(
     const useDenseV2 =
       useV2 &&
       originalConditions.length <= PROBE_V2_DENSE_CONDITION_LIMIT;
+    const useSaturatedV2 =
+      useDenseV2 && isCoverageTransparentDecision(originalConditions);
+    const originalDecision = useSaturatedV2
+      ? t.cloneNode(path.node, true)
+      : undefined;
+    if (originalDecision)
+      markDecisionLogicalNodes(originalDecision, decisionLogicalNodes);
+    decisionVectorCounts.push(
+      useSaturatedV2
+        ? probeV2ReachableVectorCount(path.node, originalConditions)
+        : 0,
+    );
+    const decisionEpoch = inlineFrame ? undefined : epochForPath(path);
+    const localComplete = useSaturatedV2 && !inlineFrame
+      ? localDecisionForPath(path)
+      : undefined;
     const vectorTemp = useDenseV2
       ? frameScope.generateUidIdentifier("supercovMcdcVector")
       : undefined;
@@ -1323,28 +1531,23 @@ export function instrumentMcdc(
                 ),
                 t.logicalExpression(
                   "||",
-                  t.logicalExpression(
-                    "&&",
+                  t.binaryExpression(
+                    "===",
                     t.memberExpression(
-                      t.identifier(CLOCK_V2),
-                      t.identifier("fast"),
-                    ),
-                    t.binaryExpression(
-                      "===",
                       t.memberExpression(
-                        t.memberExpression(
-                          t.identifier(DECISIONS_V2),
-                          t.numericLiteral(decisionIndex),
-                          true,
-                        ),
-                        t.cloneNode(vectorTemp!),
+                        t.identifier(DECISIONS_V2),
+                        t.numericLiteral(decisionIndex),
                         true,
                       ),
-                      t.memberExpression(
-                        t.identifier(CLOCK_V2),
-                        t.identifier("epoch"),
-                      ),
+                      t.cloneNode(vectorTemp!),
+                      true,
                     ),
+                    decisionEpoch
+                      ? t.cloneNode(decisionEpoch)
+                      : t.memberExpression(
+                          t.identifier(CLOCK_V2),
+                          t.identifier("epoch"),
+                        ),
                   ),
                   end,
                 ),
@@ -1353,7 +1556,7 @@ export function instrumentMcdc(
             : [end]),
         ]
       : [end];
-    path.replaceWith(
+    const observedDecision =
       inlineFrame
         ? t.callExpression(
             t.arrowFunctionExpression(
@@ -1384,7 +1587,55 @@ export function instrumentMcdc(
         : t.sequenceExpression([
             assignFrame,
             ...(useV2 ? v2Tail : [end]),
-          ]),
+          ]);
+    const completeCheck = useSaturatedV2
+      ? t.binaryExpression(
+          "===",
+          t.memberExpression(
+            t.identifier(COMPLETE_V2),
+            t.numericLiteral(decisionIndex),
+            true,
+          ),
+          decisionEpoch
+            ? t.cloneNode(decisionEpoch)
+            : t.memberExpression(
+                t.identifier(CLOCK_V2),
+                t.identifier("epoch"),
+              ),
+        )
+      : undefined;
+    const completeFastPath =
+      completeCheck && localComplete
+        ? t.logicalExpression(
+            "||",
+            t.binaryExpression(
+              "!==",
+              t.binaryExpression(
+                "&",
+                t.cloneNode(localComplete.bits),
+                t.numericLiteral(localComplete.mask),
+              ),
+              t.numericLiteral(0),
+            ),
+            t.logicalExpression(
+              "&&",
+              completeCheck,
+              t.assignmentExpression(
+                "|=",
+                t.cloneNode(localComplete.bits),
+                t.numericLiteral(localComplete.mask),
+              ),
+            ),
+          )
+        : completeCheck;
+    path.replaceWith(
+      useSaturatedV2
+        ? t.conditionalExpression(
+            completeFastPath!,
+            originalDecision!,
+            observedDecision,
+          )
+        : observedDecision,
     );
     path.skip();
   };
@@ -1783,6 +2034,16 @@ export function instrumentMcdc(
     },
   });
 
+  // Decision cache identifiers are discovered during instrumentation. Insert
+  // their declarations only after all source traversals so no live NodePath is
+  // shifted while a source statement is being rewritten.
+  for (const { body, bits } of decisionCacheDeclarations)
+    body.body.unshift(
+      t.variableDeclaration("let", [
+        t.variableDeclarator(t.cloneNode(bits), t.numericLiteral(0)),
+      ]),
+    );
+
   const manifest: CoverageManifest = {
     decisions,
     points,
@@ -1893,6 +2154,7 @@ export function instrumentMcdc(
                   t.valueToNode({
                     decisions,
                     pointIds: points.map((point) => point.id),
+                    decisionVectorCounts,
                   }),
                 ]),
               ),
@@ -1915,6 +2177,13 @@ export function instrumentMcdc(
                 t.memberExpression(
                   t.identifier(FILE_V2),
                   t.identifier("decisionEpochs"),
+                ),
+              ),
+              t.variableDeclarator(
+                t.identifier(COMPLETE_V2),
+                t.memberExpression(
+                  t.identifier(FILE_V2),
+                  t.identifier("decisionCompleteEpochs"),
                 ),
               ),
             ]),

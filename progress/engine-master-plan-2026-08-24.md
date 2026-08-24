@@ -36,7 +36,8 @@ code; a compatibility sweep is in flight and Tier 1 (trust) still lands first.
    MCP, if ever shipped, is a thin optional wrapper spawned and owned by the
    agent harness over the same CLI semantics — never an engine assumption.
 5. **Probe architecture v2** — the real performance ceiling is instrumented
-   runtime overhead, which no engine rewrite touches. Target ≤1.05x. The
+   runtime overhead, which no engine rewrite touches. Architecture gate
+   ≤1.10x; post-architecture optimization target ≤1.05x. The
    frozen design uses base-3 decision frames (`unreached/false/true`),
    file-local numeric point indices, dense vector epochs for ordinary
    decisions, and per-attempt/phase epoch short-circuiting so hot loops enter
@@ -78,7 +79,7 @@ rewrite from "risky big bang" into "make the diff zero, then flip."
 | 500-file transform (median) | ~1,008 ms (Babel) | ≤50 ms |
 | 50k-file monorepo transform | ~100 s extrapolated | ≤5 s |
 | CLI query total (start + index open) | ~100–300 ms | ≤15 ms (Rust + mmap index) |
-| Instrumented runtime overhead | 1.14x synthetic | ≤1.05x |
+| Instrumented runtime overhead | ~1.04–1.06x pinned realistic | ≤1.10x architecture; ≤1.05x optimization |
 | Evidence analysis, 25 MB raw | ~2 s cold | ≤200 ms cold |
 | Engine binary (compressed) | n/a (needs Node) | ≤15 MB/platform |
 | Workspace prep, 500 files | ~78 ms (clonefile) | unchanged (already floor) |
@@ -101,7 +102,9 @@ miss blocks flipping any default.
 - **Phase 2: probe architecture v2 on the TS engine.** Done before the port
   so Rust targets final evidence semantics instead of porting twice. Gate:
   identical MC/DC verdicts across Test262 corpus + full fixture matrix,
-  overhead ≤1.05x, self-dogfood diff shows no lost attribution.
+  overhead ≤1.10x, self-dogfood diff shows no lost attribution. Reaching
+  ≤1.05x is deliberately deferred until the architecture and Rust parity are
+  established.
 - **Phase 3: Rust instrumenter crate (oxc).** Shipped inside the npm package
   as an optional napi addon behind `SUPERCOV_ENGINE=rust`; TS instrumenter
   remains default. Gate: Test262 corpus green, byte-identical manifests vs TS
@@ -151,9 +154,13 @@ miss blocks flipping any default.
   failures. A later dense-vector runtime fast path does not change source
   condition evaluation, but the full on-demand corpus should be rerun at the
   final Phase-2 fingerprint before promotion.
-- Runtime stress improved from roughly 164 ms (v1) to roughly 2 ms (v2) for
-  250,000 attributed empty-loop iterations. The pinned realistic workload is
-  currently about 1.14x, so the ≤1.05x default-flip gate remains open.
+- Runtime stress improved from roughly 164 ms (v1) to roughly 1–2 ms (v2) for
+  250,000 attributed empty-loop iterations. Dense decisions now become a
+  direct evaluation path after every structurally reachable vector has been
+  observed in the current attribution epoch; complex conditions with nested
+  coverage obligations deliberately do not use this shortcut. The corrected
+  15-sample alternating benchmark measures about 1.04–1.06x on the pinned
+  realistic workload, inside the user-approved ≤1.10x architecture gate.
 - Rust now parses the same probe contract and decodes the same golden vectors.
   It is still a contract/differential candidate; the oxc AST port must not
   begin until Phase 2's performance and full fixture/self-dogfood gates close.

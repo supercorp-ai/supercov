@@ -81,6 +81,39 @@ describe("probe v2", () => {
     expect(transformed.code).toContain("mcdcCondition as");
   });
 
+  it("saturates a dense decision only after every reachable vector in the epoch", () => {
+    const transformed = instrumentMcdc(
+      "function decide(a,b,c) { if ((a && b) || c) return 1; return 0; }",
+      "app/saturated.ts",
+      { probeVersion: 2 },
+    );
+    expect(transformed.code).toContain("decisionVectorCounts: [5]");
+
+    resetCoverage();
+    const file = registerProbeV2({
+      decisions: [{
+        ...decision,
+        source: "(a && b) || c",
+        conditions: ["a", "b", "c"],
+      }],
+      pointIds: [],
+      decisionVectorCounts: [5],
+    });
+    const epoch = file.clock.epoch;
+    for (const [encoded, outcome] of [
+      [10, false],
+      [19, true],
+      [14, false],
+      [23, true],
+      [8, true],
+    ] as const)
+      mcdcEndV2(file, 0, encoded, outcome);
+    expect(file.decisionCompleteEpochs[0]).toStrictEqual(epoch);
+
+    resetCoverage();
+    expect(file.decisionCompleteEpochs[0] === file.clock.epoch).toStrictEqual(false);
+  });
+
   it("re-registers decision state lazily after a per-test reset", () => {
     resetCoverage();
     const file = registerProbeV2({ decisions: [decision], pointIds: [] });

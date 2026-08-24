@@ -36,6 +36,10 @@ export interface ProbeV2FileState {
   clock: { epoch: number; fast: boolean };
   hitEpochs: Uint32Array;
   decisionEpochs: Array<Uint32Array | Map<number, number>>;
+  decisionVectorCounts: number[];
+  decisionObservationEpochs: Uint32Array;
+  decisionObservationCounts: Uint16Array;
+  decisionCompleteEpochs: Uint32Array;
 }
 
 interface SelectionFrame {
@@ -190,7 +194,7 @@ function createState(): RuntimeState {
     runtimeSnapshots: false,
     assertionPhases: new Map(),
     probeV2Files: new Set(),
-    probeV2Clock: { epoch: 1, fast: false },
+    probeV2Clock: { epoch: Number.NaN, fast: false },
     probeV2ContextEpochs: new Map(),
     probeV2NextEpoch: 1,
     probeV2HookInstalled: false,
@@ -269,6 +273,9 @@ function activateProbeV2Key(key: string, force = false): number {
       state.probeV2ContextEpochs.clear();
       for (const file of state.probeV2Files) {
         file.hitEpochs.fill(0);
+        file.decisionObservationEpochs.fill(0);
+        file.decisionObservationCounts.fill(0);
+        file.decisionCompleteEpochs.fill(0);
         for (const vectors of file.decisionEpochs) {
           if (vectors instanceof Uint32Array) vectors.fill(0);
           else vectors.clear();
@@ -1005,6 +1012,7 @@ export function coverageHit(id: string): void {
 export function registerProbeV2(definition: {
   decisions: McdcDecisionMeta[];
   pointIds: string[];
+  decisionVectorCounts?: number[];
 }): ProbeV2FileState {
   const file: ProbeV2FileState = {
     decisions: definition.decisions,
@@ -1016,6 +1024,12 @@ export function registerProbeV2(definition: {
         ? new Uint32Array(2 * 3 ** meta.conditions.length)
         : new Map<number, number>()
     ),
+    decisionVectorCounts: definition.decisions.map(
+      (_, index) => definition.decisionVectorCounts?.[index] ?? 0,
+    ),
+    decisionObservationEpochs: new Uint32Array(definition.decisions.length),
+    decisionObservationCounts: new Uint16Array(definition.decisions.length),
+    decisionCompleteEpochs: new Uint32Array(definition.decisions.length),
   };
   state.probeV2Files.add(file);
   for (const meta of definition.decisions) {
@@ -1037,12 +1051,18 @@ export function registerProbeV2(definition: {
 export function coverageHitV2(file: ProbeV2FileState, index: number): void {
   const id = file.pointIds[index];
   if (!id) return;
-  if (!file.clock.fast)
+  const fallbackEpoch = !file.clock.fast;
+  const previousEpoch = file.clock.epoch;
+  if (fallbackEpoch)
     activateProbeV2Context(currentRequestContext());
-  const epoch = file.clock.epoch;
-  if (file.hitEpochs[index] === epoch) return;
-  file.hitEpochs[index] = epoch;
-  coverageHit(id);
+  try {
+    const epoch = file.clock.epoch;
+    if (file.hitEpochs[index] === epoch) return;
+    file.hitEpochs[index] = epoch;
+    coverageHit(id);
+  } finally {
+    if (fallbackEpoch) file.clock.epoch = previousEpoch;
+  }
 }
 
 /** Decode the exact v1 masking vector from the allocation-free base-3 frame. */
@@ -1081,26 +1101,44 @@ export function mcdcEndV2<T>(
   const outcome = Boolean(value);
   const vectorIndex = encoded * 2 + (outcome ? 1 : 0);
   if (!Number.isSafeInteger(vectorIndex)) return value;
-  if (!file.clock.fast)
+  const fallbackEpoch = !file.clock.fast;
+  const previousEpoch = file.clock.epoch;
+  if (fallbackEpoch)
     activateProbeV2Context(currentRequestContext());
-  const epoch = file.clock.epoch;
-  const seen = file.decisionEpochs[decisionIndex];
-  if (!seen) return value;
-  if (seen instanceof Uint32Array) {
-    if (seen[vectorIndex] === epoch) return value;
-    seen[vectorIndex] = epoch;
-  } else {
-    if (seen.get(vectorIndex) === epoch) return value;
-    seen.set(vectorIndex, epoch);
+  try {
+    const epoch = file.clock.epoch;
+    const seen = file.decisionEpochs[decisionIndex];
+    if (!seen) return value;
+    if (seen instanceof Uint32Array) {
+      if (seen[vectorIndex] === epoch) return value;
+      seen[vectorIndex] = epoch;
+    } else {
+      if (seen.get(vectorIndex) === epoch) return value;
+      seen.set(vectorIndex, epoch);
+    }
+    const expectedCount = file.decisionVectorCounts[decisionIndex] ?? 0;
+    if (expectedCount > 0) {
+      if (file.decisionObservationEpochs[decisionIndex] !== epoch) {
+        file.decisionObservationEpochs[decisionIndex] = epoch;
+        file.decisionObservationCounts[decisionIndex] = 0;
+      }
+      const observedCount =
+        (file.decisionObservationCounts[decisionIndex] ?? 0) + 1;
+      file.decisionObservationCounts[decisionIndex] = observedCount;
+      if (observedCount >= expectedCount)
+        file.decisionCompleteEpochs[decisionIndex] = epoch;
+    }
+    if (!state.decisions.has(meta.id))
+      state.decisions.set(meta.id, { meta, vectors: new Map() });
+    const vector = decodeProbeV2Vector(
+      meta.conditions.length,
+      encoded,
+      outcome,
+    );
+    return vector ? mcdcEnd({ meta, values: vector.values }, value) : value;
+  } finally {
+    if (fallbackEpoch) file.clock.epoch = previousEpoch;
   }
-  if (!state.decisions.has(meta.id))
-    state.decisions.set(meta.id, { meta, vectors: new Map() });
-  const vector = decodeProbeV2Vector(
-    meta.conditions.length,
-    encoded,
-    outcome,
-  );
-  return vector ? mcdcEnd({ meta, values: vector.values }, value) : value;
 }
 
 export function selectionBegin(

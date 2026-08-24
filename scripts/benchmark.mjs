@@ -80,7 +80,7 @@ const implementations = {
   loopBegin: "function(){return {};}",
   loopEntered: "function(){}",
   loopEnd: "function(){}",
-  registerProbeV2: "function(definition){return Object.assign(definition,{clock:{epoch:1,fast:true},hitEpochs:new Uint32Array(definition.pointIds.length),decisionEpochs:definition.decisions.map(function(meta){return meta.conditions.length<=6?new Uint32Array(2*3**meta.conditions.length):new Map();})});}",
+  registerProbeV2: "function(definition){return Object.assign(definition,{clock:{epoch:1,fast:true},hitEpochs:new Uint32Array(definition.pointIds.length),decisionEpochs:definition.decisions.map(function(meta){return meta.conditions.length<=6?new Uint32Array(2*3**meta.conditions.length):new Map();}),decisionCompleteEpochs:new Uint32Array(definition.decisions.length)});}",
   coverageHitV2: "function(){}",
   mcdcEndV2: "function(file,index,encoded,value){return value;}",
 };
@@ -202,23 +202,41 @@ const realisticRuntimeSource = `
 `;
 const realisticOriginal = new Function(`${realisticRuntimeSource}\nreturn run;`)();
 const realisticCollectorV2 = compileCollectorRuntime(2, realisticRuntimeSource);
-realisticOriginal(1);
+const realisticRounds = 100;
+const realisticSamples = 15;
+realisticOriginal(25);
 collectorRuntime.resetCoverage();
 collectorRuntime.withCoverageCarrier(
   { version: 1, scope: benchmarkScope },
-  () => realisticCollectorV2(1),
+  () => realisticCollectorV2(25),
 );
-collectorRuntime.resetCoverage();
-const realisticOriginalMs = median(timed(() => realisticOriginal(10), 7));
-const realisticCollectorV2Ms = median(
-  timed(
-    () => collectorRuntime.withCoverageCarrier(
+const realisticOriginalDurations = [];
+const realisticCollectorDurations = [];
+const timeOne = (callback) => {
+  const started = performance.now();
+  callback();
+  return performance.now() - started;
+};
+const runRealisticCollector = () =>
+  collectorRuntime.withCoverageCarrier(
       { version: 1, scope: benchmarkScope },
-      () => realisticCollectorV2(10),
-    ),
-    7,
-  ),
-);
+      () => realisticCollectorV2(realisticRounds),
+  );
+for (let index = 0; index < realisticSamples; index += 1) {
+  if (index % 2 === 0) {
+    realisticOriginalDurations.push(
+      timeOne(() => realisticOriginal(realisticRounds)),
+    );
+    realisticCollectorDurations.push(timeOne(runRealisticCollector));
+  } else {
+    realisticCollectorDurations.push(timeOne(runRealisticCollector));
+    realisticOriginalDurations.push(
+      timeOne(() => realisticOriginal(realisticRounds)),
+    );
+  }
+}
+const realisticOriginalMs = median(realisticOriginalDurations);
+const realisticCollectorV2Ms = median(realisticCollectorDurations);
 collectorRuntime.resetCoverage();
 const realisticProbeV2Overhead =
   realisticCollectorV2Ms / Math.max(realisticOriginalMs, 0.001);
@@ -255,7 +273,7 @@ console.log(`[benchmark] transform median=${transformMedian.toFixed(1)}ms p95=${
 console.log(`[benchmark] output expansion=${expansion.toFixed(2)}x; runtime overhead v1=${runtimeOverhead.toFixed(2)}x v2=${probeV2RuntimeOverhead.toFixed(2)}x`);
 console.log(`[benchmark] collector hot-loop overhead v1=${collectorOverheadV1.toFixed(2)}x v2=${collectorOverheadV2.toFixed(2)}x`);
 console.log(`[benchmark] attributed collector original=${originalRuntime.toFixed(2)}ms v1=${scopedCollectorRuntimeV1.toFixed(2)}ms (${scopedCollectorOverheadV1.toFixed(2)}x) v2=${scopedCollectorRuntimeV2.toFixed(2)}ms (${scopedCollectorOverheadV2.toFixed(2)}x)`);
-console.log(`[benchmark] realistic attributed v2 original=${realisticOriginalMs.toFixed(2)}ms instrumented=${realisticCollectorV2Ms.toFixed(2)}ms overhead=${realisticProbeV2Overhead.toFixed(2)}x`);
+console.log(`[benchmark] realistic attributed steady-state v2 original=${realisticOriginalMs.toFixed(2)}ms instrumented=${realisticCollectorV2Ms.toFixed(2)}ms overhead=${realisticProbeV2Overhead.toFixed(2)}x samples=${realisticSamples}`);
 console.log(`[benchmark] workspace median=${workspaceMedian.toFixed(1)}ms p95=${workspaceP95.toFixed(1)}ms files=${budget.workspaceFiles}`);
 
 const failures = [];
@@ -267,6 +285,8 @@ if (expansion > budget.outputExpansionRatioMax)
   failures.push(`output expansion ${expansion.toFixed(2)}x > ${budget.outputExpansionRatioMax}x`);
 if (runtimeOverhead > budget.runtimeOverheadRatioMax)
   failures.push(`runtime overhead ${runtimeOverhead.toFixed(2)}x > ${budget.runtimeOverheadRatioMax}x`);
+if (realisticProbeV2Overhead > budget.realisticProbeV2OverheadRatioMax)
+  failures.push(`realistic probe v2 overhead ${realisticProbeV2Overhead.toFixed(2)}x > ${budget.realisticProbeV2OverheadRatioMax}x`);
 if (workspaceMedian > budget.workspaceMedianMsMax)
   failures.push(`workspace median ${workspaceMedian.toFixed(1)}ms > ${budget.workspaceMedianMsMax}ms`);
 if (workspaceP95 > budget.workspaceP95MsMax)

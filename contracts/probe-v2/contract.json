@@ -17,10 +17,9 @@
   "attributionEpoch": ["run", "worker", "test", "retry", "phase"],
   "fallback": "resolve-context-per-probe",
   "promotion": {
-    "realisticMedianRuntimeRatioMax": 1.05,
+    "realisticMedianRuntimeRatioMax": 1.1,
     "semanticEquivalenceRequired": true,
     "manifestParityRequired": true,
     "evidenceParityRequired": true
   }
 }
-

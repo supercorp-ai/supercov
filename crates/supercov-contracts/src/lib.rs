@@ -212,6 +212,6 @@ mod tests {
                 .javascript_maximum_encoded_conditions,
             PROBE_V2_JS_MAX_CONDITIONS
         );
-        assert_eq!(contract.promotion.realistic_median_runtime_ratio_max, 1.05);
+        assert_eq!(contract.promotion.realistic_median_runtime_ratio_max, 1.10);
     }
 }

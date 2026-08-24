@@ -54,7 +54,7 @@ Probe v2 cannot become the default until all of these pass:
 3. Interleaved async attempts, retries, phases, browser workers, and cloned
    processes retain exact attribution.
 4. No supported decision silently falls outside the denominator.
-5. Median runtime overhead is at most 1.05x on the pinned realistic benchmark;
+5. Median runtime overhead is at most 1.10x on the pinned realistic benchmark;
    the adversarial empty hot loop is reported in absolute time as a separate
-   stress metric rather than disguised as a representative ratio.
-
+   stress metric rather than disguised as a representative ratio. The tighter
+   1.05x target is deferred optimization work, not an architecture gate.

@@ -232,6 +232,7 @@ function runtimeBindings(
     registerProbeV2: (definition: {
       decisions: McdcDecisionMeta[];
       pointIds: string[];
+      decisionVectorCounts?: number[];
     }) => ({
       ...definition,
       clock: { epoch: 1, fast: false },
@@ -241,6 +242,7 @@ function runtimeBindings(
           ? new Uint32Array(2 * 3 ** meta.conditions.length)
           : new Map<number, number>()
       ),
+      decisionCompleteEpochs: new Uint32Array(definition.decisions.length),
     }),
     coverageHitV2: (
       file: { pointIds: string[] },
