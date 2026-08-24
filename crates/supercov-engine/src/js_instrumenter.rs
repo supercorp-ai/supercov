@@ -19,8 +19,8 @@ use oxc_ast::{
         Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentTarget,
         CallExpression, ConditionalExpression, Declaration, DoWhileStatement, Expression,
         ForInStatement, ForOfStatement, ForStatement, Function, FunctionBody, IfStatement,
-        NewExpression, ObjectPropertyKind, Program, PropertyKey, PropertyKind, Statement,
-        VariableDeclarationKind, WhileStatement, WithStatement,
+        LogicalExpression, NewExpression, ObjectPropertyKind, Program, PropertyKey, PropertyKind,
+        Statement, VariableDeclarationKind, WhileStatement, WithStatement,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -64,6 +64,25 @@ pub struct CandidatePoint {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CandidateBranchAlternative {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateBranch {
+    pub id: String,
+    pub kind: String,
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub source: String,
+    pub alternatives: Vec<CandidateBranchAlternative>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CandidateOutput {
     pub engine: String,
     pub complete: bool,
@@ -71,6 +90,7 @@ pub struct CandidateOutput {
     pub code: String,
     pub decisions: Vec<CandidateDecision>,
     pub points: Vec<CandidatePoint>,
+    pub branches: Vec<CandidateBranch>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<CandidateRuntime>,
     pub coverage_limitations: Vec<CandidateLimitation>,
@@ -85,6 +105,9 @@ pub struct CandidateRuntime {
     pub mcdc_condition: String,
     pub mcdc_end: String,
     pub mcdc_end_v2: String,
+    pub selection_begin: String,
+    pub selection_right: String,
+    pub selection_end: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -639,10 +662,19 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         source,
         file,
         decisions: Vec::new(),
+        decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
         with_statements: &safety.with_statements,
     };
     collector.visit_program(&parsed.program);
+    let branch_analysis = collect_logical_value_branches(
+        &allocator,
+        &mut parsed.program,
+        source,
+        file,
+        &collector.decision_logical_nodes,
+        &safety.source_sensitive_functions,
+    );
     let generated = Codegen::new().build(&parsed.program).code;
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
@@ -651,6 +683,7 @@ pub fn analyze_candidate(source: &str, file: &str) -> Result<CandidateOutput, Ca
         code: generated,
         decisions: collector.decisions,
         points: point_analysis.points,
+        branches: branch_analysis.branches,
         runtime: None,
         coverage_limitations: safety.limitations,
         limitations: vec![
@@ -695,10 +728,19 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         source,
         file,
         decisions: Vec::new(),
+        decision_logical_nodes: HashSet::new(),
         source_sensitive_functions: &safety.source_sensitive_functions,
         with_statements: &safety.with_statements,
     };
     collector.visit_program(&parsed.program);
+    let branch_analysis = collect_logical_value_branches(
+        &allocator,
+        &mut parsed.program,
+        source,
+        file,
+        &collector.decision_logical_nodes,
+        &safety.source_sensitive_functions,
+    );
 
     let mut names = CandidateNames::new(source);
     let coverage_hit = names.allocate("__supercovCoverageHit");
@@ -706,6 +748,9 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     let mcdc_condition = names.allocate("__supercovMcdcCondition");
     let mcdc_end = names.allocate("__supercovMcdcEnd");
     let mcdc_end_v2 = names.allocate("__supercovMcdcEndV2");
+    let selection_begin = names.allocate("__supercovSelectionBegin");
+    let selection_right = names.allocate("__supercovSelectionRight");
+    let selection_end = names.allocate("__supercovSelectionEnd");
     let ast = AstBuilder::new(&allocator);
     let mut statement_transformer = StatementProbeTransformer {
         ast,
@@ -737,11 +782,23 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         with_statements: safety.with_statements.clone(),
     };
     transformer.visit_program(&mut parsed.program);
+    let mut logical_transformer = LogicalValueTransformer {
+        ast,
+        selection_begin: selection_begin.clone(),
+        selection_right: selection_right.clone(),
+        selection_end: selection_end.clone(),
+        names: CandidateNames::new(source),
+        scope_declarations: Vec::new(),
+        targets: branch_analysis.logical_targets,
+        source_sensitive_functions: safety.source_sensitive_functions.clone(),
+        with_statements: safety.with_statements.clone(),
+    };
+    logical_transformer.visit_program(&mut parsed.program);
 
     let limitations = vec![
         "only if, ternary, while, do-while, and classic-for decisions are instrumented"
             .to_string(),
-        "value branches, extended branch obligations, and runtime registration remain on the TypeScript reference"
+        "remaining value/extended branch obligations and runtime registration remain on the TypeScript reference"
             .to_string(),
         "candidate runtime binding is differential-only and is not exposed by the public CLI"
             .to_string(),
@@ -749,16 +806,20 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
         complete: false,
-        supported_surface: "point-control-decision-probe-candidate".to_string(),
+        supported_surface: "point-control-logical-value-probe-candidate".to_string(),
         code: Codegen::new().build(&parsed.program).code,
         decisions: collector.decisions,
         points: point_analysis.points,
+        branches: branch_analysis.branches,
         runtime: Some(CandidateRuntime {
             coverage_hit,
             mcdc_begin,
             mcdc_condition,
             mcdc_end,
             mcdc_end_v2,
+            selection_begin,
+            selection_right,
+            selection_end,
         }),
         coverage_limitations: safety.limitations,
         limitations,
@@ -967,6 +1028,192 @@ impl<'a> VisitMut<'a> for FunctionProbeTransformer<'a> {
             }
         }
         walk_mut::walk_arrow_function_expression(self, function);
+    }
+}
+
+struct LogicalValueTransformer<'a, 's> {
+    ast: AstBuilder<'a>,
+    selection_begin: String,
+    selection_right: String,
+    selection_end: String,
+    names: CandidateNames<'s>,
+    scope_declarations: Vec<Vec<String>>,
+    targets: HashMap<SpanKey, (String, String)>,
+    source_sensitive_functions: HashSet<SpanKey>,
+    with_statements: HashSet<SpanKey>,
+}
+
+impl<'a> LogicalValueTransformer<'a, '_> {
+    fn identifier(&self, name: &str) -> Expression<'a> {
+        self.ast
+            .expression_identifier(Span::default(), self.ast.ident(name))
+    }
+
+    fn assignment_target(&self, name: &str) -> AssignmentTarget<'a> {
+        AssignmentTarget::from(
+            self.ast
+                .simple_assignment_target_assignment_target_identifier(
+                    Span::default(),
+                    self.ast.ident(name),
+                ),
+        )
+    }
+
+    fn call(&self, name: &str, arguments: oxc_allocator::Vec<'a, Argument<'a>>) -> Expression<'a> {
+        self.ast.expression_call(
+            Span::default(),
+            self.identifier(name),
+            NONE,
+            arguments,
+            false,
+        )
+    }
+
+    fn string_argument(&self, value: &str) -> Argument<'a> {
+        Argument::from(self.ast.expression_string_literal(
+            Span::default(),
+            self.ast.str(value),
+            None,
+        ))
+    }
+
+    fn enter_scope(&mut self) {
+        self.scope_declarations.push(Vec::new());
+    }
+
+    fn leave_scope(&mut self, statements: &mut oxc_allocator::Vec<'a, Statement<'a>>) {
+        let names = self
+            .scope_declarations
+            .pop()
+            .expect("logical-value scope stack must remain balanced");
+        if names.is_empty() {
+            return;
+        }
+        let declarations = self.ast.vec_from_iter(names.into_iter().map(|name| {
+            self.ast.variable_declarator(
+                Span::default(),
+                VariableDeclarationKind::Let,
+                self.ast
+                    .binding_pattern_binding_identifier(Span::default(), self.ast.ident(&name)),
+                NONE,
+                None,
+                false,
+            )
+        }));
+        statements.insert(
+            0,
+            Statement::VariableDeclaration(self.ast.alloc_variable_declaration(
+                Span::default(),
+                VariableDeclarationKind::Let,
+                declarations,
+                false,
+            )),
+        );
+    }
+
+    fn scratch(&mut self) -> String {
+        let name = self.names.allocate("_supercovSelectionFrame");
+        self.scope_declarations
+            .last_mut()
+            .expect("logical expression must be inside a program or function")
+            .push(name.clone());
+        name
+    }
+
+    fn instrument(
+        &mut self,
+        logical: oxc_allocator::Box<'a, LogicalExpression<'a>>,
+        short_id: &str,
+        right_id: &str,
+    ) -> Expression<'a> {
+        let logical = logical.unbox();
+        let frame = self.scratch();
+        let begin = self.call(
+            &self.selection_begin,
+            self.ast.vec_from_array([
+                self.string_argument(short_id),
+                self.string_argument(right_id),
+            ]),
+        );
+        let assign = self.ast.expression_assignment(
+            Span::default(),
+            AssignmentOperator::Assign,
+            self.assignment_target(&frame),
+            begin,
+        );
+        let right = self.call(
+            &self.selection_right,
+            self.ast.vec_from_array([
+                Argument::from(self.identifier(&frame)),
+                Argument::from(logical.right),
+            ]),
+        );
+        let selection =
+            self.ast
+                .expression_logical(Span::default(), logical.left, logical.operator, right);
+        let end = self.call(
+            &self.selection_end,
+            self.ast.vec_from_array([
+                Argument::from(self.identifier(&frame)),
+                Argument::from(selection),
+            ]),
+        );
+        self.ast
+            .expression_sequence(Span::default(), self.ast.vec_from_array([assign, end]))
+    }
+}
+
+impl<'a> VisitMut<'a> for LogicalValueTransformer<'a, '_> {
+    fn visit_program(&mut self, program: &mut Program<'a>) {
+        self.enter_scope();
+        walk_mut::walk_program(self, program);
+        self.leave_scope(&mut program.body);
+    }
+
+    fn visit_function_body(&mut self, body: &mut FunctionBody<'a>) {
+        self.enter_scope();
+        walk_mut::walk_function_body(self, body);
+        self.leave_scope(&mut body.statements);
+    }
+
+    fn visit_function(&mut self, function: &mut Function<'a>, flags: ScopeFlags) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_function(self, function, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, function: &mut ArrowFunctionExpression<'a>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(function.span))
+        {
+            return;
+        }
+        walk_mut::walk_arrow_function_expression(self, function);
+    }
+
+    fn visit_with_statement(&mut self, statement: &mut WithStatement<'a>) {
+        if self.with_statements.contains(&span_key(statement.span)) {
+            return;
+        }
+        walk_mut::walk_with_statement(self, statement);
+    }
+
+    fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        let key = span_key(expression.span());
+        walk_mut::walk_expression(self, expression);
+        let Some((short_id, right_id)) = self.targets.remove(&key) else {
+            return;
+        };
+        let original = expression.take_in(self.ast.allocator);
+        let Expression::LogicalExpression(logical) = original else {
+            panic!("logical-value target must remain a logical expression");
+        };
+        *expression = self.instrument(logical, &short_id, &right_id);
     }
 }
 
@@ -1472,6 +1719,7 @@ struct DecisionCollector<'s> {
     source: &'s str,
     file: &'s str,
     decisions: Vec<CandidateDecision>,
+    decision_logical_nodes: HashSet<SpanKey>,
     source_sensitive_functions: &'s HashSet<SpanKey>,
     with_statements: &'s HashSet<SpanKey>,
 }
@@ -1480,6 +1728,7 @@ impl DecisionCollector<'_> {
     fn record_decision(&mut self, test: &Expression<'_>, kind: &str) {
         let mut condition_spans = Vec::new();
         collect_conditions(test, &mut condition_spans);
+        collect_decision_logical_nodes(test, &mut self.decision_logical_nodes);
         // Babel treats redundant parentheses as parser metadata rather than
         // part of the decision node. oxc preserves a ParenthesizedExpression,
         // so normalize it here to keep locations and stable IDs parser-neutral.
@@ -1498,6 +1747,167 @@ impl DecisionCollector<'_> {
             kind: kind.to_string(),
         });
     }
+}
+
+fn collect_decision_logical_nodes(expression: &Expression<'_>, nodes: &mut HashSet<SpanKey>) {
+    match expression {
+        Expression::ParenthesizedExpression(parenthesized) => {
+            collect_decision_logical_nodes(&parenthesized.expression, nodes);
+        }
+        Expression::LogicalExpression(logical)
+            if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or) =>
+        {
+            nodes.insert(span_key(logical.span));
+            collect_decision_logical_nodes(&logical.left, nodes);
+            collect_decision_logical_nodes(&logical.right, nodes);
+        }
+        Expression::UnaryExpression(unary)
+            if unary.operator.is_not() && has_compound_boolean_decision(&unary.argument) =>
+        {
+            collect_decision_logical_nodes(&unary.argument, nodes);
+        }
+        _ => {}
+    }
+}
+
+#[derive(Default)]
+struct LogicalBranchAnalysis {
+    branches: Vec<CandidateBranch>,
+    logical_targets: HashMap<SpanKey, (String, String)>,
+}
+
+struct LogicalBranchCollector<'s> {
+    source: &'s str,
+    file: &'s str,
+    decision_logical_nodes: &'s HashSet<SpanKey>,
+    source_sensitive_functions: &'s HashSet<SpanKey>,
+    unsafe_function_depth: usize,
+    with_depth: usize,
+    analysis: LogicalBranchAnalysis,
+}
+
+impl LogicalBranchCollector<'_> {
+    fn exit_source_function(&mut self, span: Span) {
+        if self.source_sensitive_functions.contains(&span_key(span)) {
+            self.unsafe_function_depth -= 1;
+        }
+    }
+}
+
+impl<'a> Traverse<'a, ()> for LogicalBranchCollector<'_> {
+    fn enter_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(node.span))
+        {
+            self.unsafe_function_depth += 1;
+        }
+    }
+
+    fn exit_function(&mut self, node: &mut Function<'a>, _context: &mut TraverseCtx<'a, ()>) {
+        self.exit_source_function(node.span);
+    }
+
+    fn enter_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        if self
+            .source_sensitive_functions
+            .contains(&span_key(node.span))
+        {
+            self.unsafe_function_depth += 1;
+        }
+    }
+
+    fn exit_arrow_function_expression(
+        &mut self,
+        node: &mut ArrowFunctionExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.exit_source_function(node.span);
+    }
+
+    fn enter_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth += 1;
+    }
+
+    fn exit_with_statement(
+        &mut self,
+        _node: &mut WithStatement<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.with_depth -= 1;
+    }
+
+    fn exit_logical_expression(
+        &mut self,
+        node: &mut LogicalExpression<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        if self.unsafe_function_depth > 0
+            || self.with_depth > 0
+            || self.decision_logical_nodes.contains(&span_key(node.span))
+        {
+            return;
+        }
+        let operator = match node.operator {
+            LogicalOperator::And => "&&",
+            LogicalOperator::Or => "||",
+            LogicalOperator::Coalesce => "??",
+        };
+        let id = stable_id(self.source, self.file, "logical-value", node.span, operator);
+        let short_id = format!("{id}:short");
+        let right_id = format!("{id}:right");
+        let (line, column) = line_and_utf16_column(self.source, node.span.start as usize);
+        self.analysis
+            .logical_targets
+            .insert(span_key(node.span), (short_id.clone(), right_id.clone()));
+        self.analysis.branches.push(CandidateBranch {
+            id,
+            kind: "logical-value".to_string(),
+            file: self.file.to_string(),
+            line,
+            column,
+            source: source_slice(self.source, node.span).to_string(),
+            alternatives: vec![
+                CandidateBranchAlternative {
+                    id: short_id,
+                    label: "short-circuit / left selected".to_string(),
+                },
+                CandidateBranchAlternative {
+                    id: right_id,
+                    label: "right evaluated / selected".to_string(),
+                },
+            ],
+        });
+    }
+}
+
+fn collect_logical_value_branches<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    source: &str,
+    file: &str,
+    decision_logical_nodes: &HashSet<SpanKey>,
+    source_sensitive_functions: &HashSet<SpanKey>,
+) -> LogicalBranchAnalysis {
+    let mut collector = LogicalBranchCollector {
+        source,
+        file,
+        decision_logical_nodes,
+        source_sensitive_functions,
+        unsafe_function_depth: 0,
+        with_depth: 0,
+        analysis: LogicalBranchAnalysis::default(),
+    };
+    traverse_mut(&mut collector, allocator, program, Default::default(), ());
+    collector.analysis
 }
 
 impl<'a> Visit<'a> for DecisionCollector<'_> {
@@ -1702,7 +2112,7 @@ mod tests {
         assert!(!output.complete);
         assert_eq!(
             output.supported_surface,
-            "point-control-decision-probe-candidate"
+            "point-control-logical-value-probe-candidate"
         );
         let runtime = output.runtime.expect("candidate runtime binding");
         assert!(output.code.contains(&runtime.mcdc_end_v2));
