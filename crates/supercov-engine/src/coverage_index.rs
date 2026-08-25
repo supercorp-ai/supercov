@@ -22,6 +22,7 @@ pub const SECTION_FILE_GAPS: u32 = 11;
 pub const SECTION_DECISION_GAPS: u32 = 12;
 pub const SECTION_DIMENSIONS: u32 = 13;
 pub const SECTION_PROJECTIONS: u32 = 14;
+pub const SECTION_SCOPE_ENTRIES: u32 = 15;
 
 const STRING_RECORD_SIZE: usize = 16;
 const SUMMARY_RECORD_SIZE: usize = 176;
@@ -29,6 +30,7 @@ const FILE_GAP_RECORD_SIZE: usize = 176;
 const DECISION_GAP_RECORD_SIZE: usize = 96;
 const DIMENSION_RECORD_SIZE: usize = 192;
 const PROJECTION_RECORD_SIZE: usize = 512;
+const SCOPE_ENTRY_RECORD_SIZE: usize = 96;
 const NO_STRING: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -408,6 +410,18 @@ pub struct IndexedProjection {
     pub source_scope: Option<IndexedSourceScope>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedScopeEntry {
+    pub file: String,
+    pub status: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_root: Option<String>,
+    pub measurement_limitations: usize,
+    pub limitation_kinds: Vec<String>,
+}
+
 #[derive(Default)]
 struct MutableFileGap {
     uncovered_lines: usize,
@@ -748,8 +762,13 @@ fn projection_record(
 
     let scope = view.scope.as_ref();
     let scope_mode = scope
-        .and_then(|value| value.get("mode"))
-        .and_then(serde_json::Value::as_str);
+        .map(|value| {
+            value
+                .get("mode")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(CoverageIndexError::InvalidRecord("source-scope mode"))
+        })
+        .transpose()?;
     record[2] = u8::from(scope_mode.is_some());
     put_u32(
         &mut record,
@@ -757,13 +776,21 @@ fn projection_record(
         scope_mode.map_or(Ok(NO_STRING), |value| strings.intern(value))?,
     );
     let roots = scope
-        .and_then(|value| value.get("roots"))
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
+        .map(|value| {
+            value
+                .get("roots")
+                .and_then(serde_json::Value::as_array)
+                .ok_or(CoverageIndexError::InvalidRecord("source-scope roots"))?
+                .iter()
+                .map(|root| {
+                    root.as_str()
+                        .map(str::to_owned)
+                        .ok_or(CoverageIndexError::InvalidRecord("source-scope root"))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
     let (roots_offset, roots_count) = relations.push(roots, strings)?;
     put_u64(&mut record, 24, roots_offset);
     put_u32(
@@ -1002,6 +1029,82 @@ fn projection_record(
     Ok(record)
 }
 
+fn scope_entry_records(
+    view_id: CoverageViewId,
+    view: &CoverageView,
+    strings: &mut StringTable,
+) -> Result<Vec<[u8; SCOPE_ENTRY_RECORD_SIZE]>, CoverageIndexError> {
+    let Some(scope) = &view.scope else {
+        return Ok(Vec::new());
+    };
+    let entries = scope
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(CoverageIndexError::InvalidRecord("source-scope entries"))?;
+    let mut limitations = BTreeMap::<&str, (usize, u32)>::new();
+    for limitation in &view.limitations {
+        let Some((file, kind)) = limitation_kind(limitation) else {
+            return Err(CoverageIndexError::InvalidRecord("coverage limitation"));
+        };
+        let value = limitations.entry(file).or_default();
+        value.0 += 1;
+        value.1 |= match kind {
+            "dynamic-code" => 1,
+            "semantic-safety" => 2,
+            "source-scope" => 4,
+            _ => {
+                return Err(CoverageIndexError::InvalidRecord(
+                    "coverage limitation kind",
+                ));
+            }
+        };
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            let file = entry
+                .get("file")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(CoverageIndexError::InvalidRecord("source-scope file"))?;
+            let status = entry
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(CoverageIndexError::InvalidRecord("source-scope status"))?;
+            let reason = entry
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .ok_or(CoverageIndexError::InvalidRecord("source-scope reason"))?;
+            let package_root = entry
+                .get("packageRoot")
+                .map(|value| {
+                    value.as_str().ok_or(CoverageIndexError::InvalidRecord(
+                        "source-scope package root",
+                    ))
+                })
+                .transpose()?;
+            let mut record = [0_u8; SCOPE_ENTRY_RECORD_SIZE];
+            record[0] = view_id as u8;
+            record[1] = match status {
+                "included" => 0,
+                "excluded" => 1,
+                "ambiguous" => 2,
+                _ => return Err(CoverageIndexError::InvalidRecord("source-scope status")),
+            };
+            put_u32(&mut record, 4, strings.intern(file)?);
+            put_u32(&mut record, 8, strings.intern(reason)?);
+            put_u32(
+                &mut record,
+                12,
+                package_root.map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+            );
+            let (count, mask) = limitations.get(file).copied().unwrap_or_default();
+            put_u64(&mut record, 16, usize_u64(count)?);
+            put_u32(&mut record, 24, mask);
+            Ok(record)
+        })
+        .collect()
+}
+
 pub fn coverage_index_sections(
     report: &CoverageReport,
 ) -> Result<Vec<QueryIndexSection>, CoverageIndexError> {
@@ -1017,6 +1120,7 @@ pub fn coverage_index_sections(
     let mut decision_gaps = Vec::new();
     let mut dimensions = Vec::new();
     let mut projection_records = Vec::new();
+    let mut scope_entries = Vec::new();
     for (id, view) in views {
         summaries.extend_from_slice(&summary_record(id, view, &mut strings)?);
         projection_records.extend_from_slice(&projection_record(
@@ -1028,6 +1132,9 @@ pub fn coverage_index_sections(
             &mut strings,
             &mut relations,
         )?);
+        for entry in scope_entry_records(id, view, &mut strings)? {
+            scope_entries.extend_from_slice(&entry);
+        }
         for value in &view.coverage_by_kind {
             dimensions.extend_from_slice(&dimension_record(
                 id,
@@ -1125,6 +1232,12 @@ pub fn coverage_index_sections(
             count: usize_u64(projection_records.len() / PROJECTION_RECORD_SIZE)?,
             bytes: projection_records,
         },
+        QueryIndexSection {
+            kind: SECTION_SCOPE_ENTRIES,
+            record_size: SCOPE_ENTRY_RECORD_SIZE as u32,
+            count: usize_u64(scope_entries.len() / SCOPE_ENTRY_RECORD_SIZE)?,
+            bytes: scope_entries,
+        },
     ])
 }
 
@@ -1141,6 +1254,7 @@ impl<'a> CoverageIndex<'a> {
             (SECTION_DECISION_GAPS, DECISION_GAP_RECORD_SIZE),
             (SECTION_DIMENSIONS, DIMENSION_RECORD_SIZE),
             (SECTION_PROJECTIONS, PROJECTION_RECORD_SIZE),
+            (SECTION_SCOPE_ENTRIES, SCOPE_ENTRY_RECORD_SIZE),
         ] {
             if index.descriptor(kind)?.record_size as usize != size {
                 return Err(CoverageIndexError::InvalidRecord("record size"));
@@ -1615,6 +1729,60 @@ impl<'a> CoverageIndex<'a> {
             });
         }
         Ok(values)
+    }
+
+    pub fn scope_entries(
+        &self,
+        view: CoverageViewId,
+    ) -> Result<Vec<IndexedScopeEntry>, CoverageIndexError> {
+        let descriptor = self.index.descriptor(SECTION_SCOPE_ENTRIES)?;
+        let mut entries = Vec::new();
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_SCOPE_ENTRIES, index)?;
+            if CoverageViewId::try_from(record[0])? != view {
+                continue;
+            }
+            if record[2..4].iter().any(|byte| *byte != 0)
+                || record[28..].iter().any(|byte| *byte != 0)
+            {
+                return Err(CoverageIndexError::InvalidRecord(
+                    "source-scope reserved bytes",
+                ));
+            }
+            let status = match record[1] {
+                0 => "included",
+                1 => "excluded",
+                2 => "ambiguous",
+                _ => return Err(CoverageIndexError::InvalidRecord("source-scope status")),
+            };
+            let measurement_limitations = usize::try_from(get_u64(record, 16)?)
+                .map_err(|_| CoverageIndexError::SizeOverflow)?;
+            let mask = get_u32(record, 24)?;
+            if mask & !7 != 0 || (measurement_limitations == 0) != (mask == 0) {
+                return Err(CoverageIndexError::InvalidRecord(
+                    "source-scope limitation annotation",
+                ));
+            }
+            let mut limitation_kinds = Vec::new();
+            for (bit, kind) in [
+                (1, "dynamic-code"),
+                (2, "semantic-safety"),
+                (4, "source-scope"),
+            ] {
+                if mask & bit != 0 {
+                    limitation_kinds.push(kind.into());
+                }
+            }
+            entries.push(IndexedScopeEntry {
+                file: self.string(get_u32(record, 4)?)?,
+                status: status.into(),
+                reason: self.string(get_u32(record, 8)?)?,
+                package_root: self.optional_string(get_u32(record, 12)?)?,
+                measurement_limitations,
+                limitation_kinds,
+            });
+        }
+        Ok(entries)
     }
 
     pub fn snapshot(&self) -> Result<IndexedCoverageSnapshot, CoverageIndexError> {

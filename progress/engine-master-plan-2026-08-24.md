@@ -401,6 +401,12 @@ miss blocks flipping any default.
   both provenance-filtered and passed-only views. Strict relation-range
   validation caught a scope-root-count/summary-flag layout overlap during the
   differential; the fixed-width layout was corrected before publication.
+  `coverage scope` now reads typed scope-entry records with strict file/status/
+  reason/package-root validation, limitation counts and kind masks. It
+  preserves ambiguous/included/excluded ordering, roots, aggregate counts,
+  measurement status and pagination byte-for-byte on real scoped archives;
+  malformed source-scope or limitation shapes fail index construction rather
+  than silently disappearing from the completeness model.
   Full condition/vector/test/phase detail sections and the rest of the query
   surface remain before this path can replace the shipped query engine.
 

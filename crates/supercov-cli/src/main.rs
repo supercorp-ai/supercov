@@ -8,9 +8,10 @@ use supercov_engine::{
     coverage_query::{
         CoverageDimensionQueryData, CoverageDimensionQueryOptions, CoverageFileDecisionsOptions,
         CoverageFileQueryData, CoverageFileQueryOptions, CoverageQueryFilters,
-        CoverageSummaryQueryOptions, DecisionSort, MinimizeMetric, MinimumTestSetRequest,
-        coverage_dimension_query, coverage_file_decisions_query, coverage_file_query,
-        coverage_summary_query, minimum_test_set_for_request,
+        CoverageScopeQueryOptions, CoverageSummaryQueryOptions, DecisionSort, MinimizeMetric,
+        MinimumTestSetRequest, coverage_dimension_query, coverage_file_decisions_query,
+        coverage_file_query, coverage_scope_query, coverage_summary_query,
+        minimum_test_set_for_request,
     },
     coverage_report::{
         ArchiveReportRequest, CoverageReportRequest, analyze_coverage_archive,
@@ -113,7 +114,7 @@ fn query_index_files() -> ExitCode {
     let gaps_only = match request.command.as_str() {
         "files" => Some(false),
         "gaps" => Some(true),
-        "file-decisions" | "kinds" | "runners" | "summary" => None,
+        "file-decisions" | "kinds" | "runners" | "summary" | "scope" => None,
         _ => {
             eprintln!("[supercov] unsupported indexed query");
             return ExitCode::from(2);
@@ -168,6 +169,22 @@ fn query_index_files() -> ExitCode {
             )
             .map_err(|error| format!("{error:?}"))?;
             return agent_json::success("coverage.summary", &data, None)
+                .map_err(|error| format!("response exceeds {} bytes", error.max_bytes));
+        }
+        if request.command == "scope" {
+            let (data, page) = coverage_scope_query(
+                &index,
+                CoverageScopeQueryOptions {
+                    run: &request.run_id,
+                    view,
+                    kind: request.kind.as_deref(),
+                    runner: request.runner.as_deref(),
+                    offset: request.offset,
+                    limit: request.limit,
+                },
+            )
+            .map_err(|error| format!("{error:?}"))?;
+            return agent_json::success("coverage.scope", &data, Some(&page))
                 .map_err(|error| format!("response exceeds {} bytes", error.max_bytes));
         }
         if request.command == "kinds" || request.command == "runners" {

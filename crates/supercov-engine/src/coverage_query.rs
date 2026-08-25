@@ -14,7 +14,7 @@ use crate::{
     coverage_index::{
         CoverageDimension, CoverageIndex, CoverageIndexError, CoverageViewId, IndexedDecisionGap,
         IndexedDimensionCoverage, IndexedFileGap, IndexedMeasurement, IndexedOutcomeCounts,
-        IndexedSourceScope, IndexedSummaryConfidence,
+        IndexedScopeEntry, IndexedSourceScope, IndexedSummaryConfidence,
     },
     coverage_report::{
         CoverageReportRequest, CoverageView, ReportError, TransportStats, analyze_coverage_results,
@@ -103,6 +103,7 @@ pub enum QueryError {
     Index(CoverageIndexError),
     InvalidPagination,
     InvalidRecordSelection,
+    ScopeUnavailable,
 }
 
 impl From<ReportError> for QueryError {
@@ -207,6 +208,92 @@ pub struct CoverageSummaryQueryOptions<'a> {
     pub valid: bool,
     pub stale: bool,
     pub stale_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScopeCounts {
+    pub included: usize,
+    pub excluded: usize,
+    pub ambiguous: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageScopeData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub mode: String,
+    pub roots: Vec<String>,
+    pub counts: ScopeCounts,
+    pub measurement: IndexedMeasurement,
+    pub entries: Vec<IndexedScopeEntry>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CoverageScopeQueryOptions<'a> {
+    pub run: &'a str,
+    pub view: CoverageViewId,
+    pub kind: Option<&'a str>,
+    pub runner: Option<&'a str>,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+pub fn coverage_scope_query(
+    index: &CoverageIndex<'_>,
+    options: CoverageScopeQueryOptions<'_>,
+) -> Result<(CoverageScopeData, AgentPagination), QueryError> {
+    if options.limit == 0 {
+        return Err(QueryError::InvalidPagination);
+    }
+    let projection = index.projection(options.view, options.kind, options.runner)?;
+    let scope = projection
+        .source_scope
+        .ok_or(QueryError::ScopeUnavailable)?;
+    let mut entries = index.scope_entries(options.view)?;
+    entries.sort_by(|left, right| {
+        let rank = |status: &str| match status {
+            "ambiguous" => 0,
+            "included" => 1,
+            "excluded" => 2,
+            _ => 3,
+        };
+        rank(&left.status)
+            .cmp(&rank(&right.status))
+            .then_with(|| left.file.cmp(&right.file))
+    });
+    let total = entries.len();
+    let selected = entries
+        .into_iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .collect::<Vec<_>>();
+    let returned = selected.len();
+    Ok((
+        CoverageScopeData {
+            run: options.run.into(),
+            filters: CoverageQueryFilters {
+                outcome: match options.view {
+                    CoverageViewId::All => "all",
+                    CoverageViewId::Passed => "passed",
+                    CoverageViewId::Failed => "failed",
+                }
+                .into(),
+                kind: options.kind.map(str::to_owned),
+                runner: options.runner.map(str::to_owned),
+            },
+            mode: scope.mode,
+            roots: scope.roots,
+            counts: ScopeCounts {
+                included: scope.included,
+                excluded: scope.excluded,
+                ambiguous: scope.ambiguous,
+            },
+            measurement: projection.measurement,
+            entries: selected,
+        },
+        pagination(options.offset, options.limit, returned, total),
+    ))
 }
 
 pub fn coverage_summary_query(

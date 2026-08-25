@@ -320,6 +320,40 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
     summaryReference.stdout,
     `${fixture}: indexed summary JSON differs`,
   );
+
+  if (expected.scope) {
+    const scopeReference = spawnSync(
+      process.execPath,
+      [
+        resolve(root, 'bin/supercov.js'),
+        'runs', runId, 'coverage', 'scope',
+        '--filter', 'all', '--limit', '2', '--offset', '1', '--json',
+      ],
+      {
+        cwd: resolve(root, 'tests/fixtures', fixture),
+        encoding: 'utf8',
+        maxBuffer: 128 * 1024 * 1024,
+      },
+    );
+    assert.equal(scopeReference.status, 0, `${fixture}: ${scopeReference.stderr || scopeReference.stdout}`);
+    const scopeRust = spawnSync(binary, ['__query-index-files'], {
+      cwd: root,
+      input: JSON.stringify({
+        archivePath,
+        runId,
+        generatedAt,
+        filter: 'all',
+        command: 'scope',
+        metric: 'all',
+        offset: 1,
+        limit: 2,
+      }),
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024 * 1024,
+    });
+    assert.equal(scopeRust.status, 0, `${fixture}: ${scopeRust.stderr || scopeRust.stdout}`);
+    assert.equal(scopeRust.stdout, scopeReference.stdout, `${fixture}: indexed scope JSON differs`);
+  }
 }
 
 const indexed = spawnSync(binary, ['__roundtrip-query-index'], {
@@ -334,5 +368,5 @@ const indexDifference = firstDifference(indexedActual, indexExpected);
 assert.equal(indexDifference, undefined, `typed index: ${JSON.stringify(indexDifference)}`);
 
 console.log(
-  `[rust-archive-differential] ${fixtures.length} real archives have exact report plus typed mmap summary, file-gap, provenance, dimension, and decision-group query parity`,
+  `[rust-archive-differential] ${fixtures.length} real archives have exact report plus typed mmap summary, scope, file-gap, provenance, dimension, and decision-group query parity`,
 );
