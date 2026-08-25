@@ -2,6 +2,7 @@
 
 use std::{
     ffi::OsString,
+    fs::OpenOptions,
     io::{self, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
@@ -81,6 +82,9 @@ pub struct CommandSpec {
     /// `None` inherits the supervisor environment. `Some` clears it first and
     /// installs exactly these values.
     pub environment: Option<Vec<(OsString, OsString)>>,
+    /// When set, stdout and stderr are merged into this newly-created file.
+    /// The orchestration layer owns publication and cleanup of the file.
+    pub captured_output: Option<PathBuf>,
 }
 
 impl CommandSpec {
@@ -92,9 +96,29 @@ impl CommandSpec {
         command
             .args(&self.arguments)
             .current_dir(&self.cwd)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+            .stdin(Stdio::inherit());
+        if let Some(path) = &self.captured_output {
+            let output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(|source| SupervisionError::PlatformOperation {
+                    operation: "create captured process output",
+                    source,
+                })?;
+            let errors =
+                output
+                    .try_clone()
+                    .map_err(|source| SupervisionError::PlatformOperation {
+                        operation: "clone captured process output",
+                        source,
+                    })?;
+            command
+                .stdout(Stdio::from(output))
+                .stderr(Stdio::from(errors));
+        } else {
+            command.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        }
         if let Some(environment) = &self.environment {
             command.env_clear().envs(environment.iter().cloned());
         }
@@ -635,12 +659,16 @@ fn exit_parts(status: ExitStatus) -> (Option<i32>, Option<i32>) {
 
 fn write_diagnostic(child: &Child, started: Instant, writer: &mut dyn Write) {
     let tree = descendant_process_tree(child.id());
-    let _ = writeln!(
-        writer,
-        "{}",
-        format_process_diagnostic(child.id(), started.elapsed(), &tree)
-    )
-    .and_then(|_| writer.flush());
+    let diagnostic = format_process_diagnostic(child.id(), started.elapsed(), &tree);
+    let verbose = std::env::var("SUPERCOV_VERBOSE")
+        .or_else(|_| std::env::var("SUPERCOV_DEBUG"))
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
+    let diagnostic = if verbose {
+        diagnostic.as_str()
+    } else {
+        diagnostic.lines().next().unwrap_or(diagnostic.as_str())
+    };
+    let _ = writeln!(writer, "{}", diagnostic).and_then(|_| writer.flush());
 }
 
 #[cfg(unix)]
@@ -945,6 +973,7 @@ mod tests {
             arguments: vec!["-c".into(), "exit 7".into()],
             cwd: root,
             environment: None,
+            captured_output: None,
         };
         let mut diagnostics = Vec::new();
         let result =
@@ -962,6 +991,7 @@ mod tests {
             arguments: vec!["/D".into(), "/S".into(), "/C".into(), "exit /b 7".into()],
             cwd: std::env::current_dir().unwrap(),
             environment: None,
+            captured_output: None,
         };
         let mut diagnostics = Vec::new();
         let result =
@@ -980,6 +1010,7 @@ mod tests {
             arguments: vec!["-c".into(), "while :; do sleep 1; done".into()],
             cwd: root,
             environment: None,
+            captured_output: None,
         };
         let mut diagnostics = Vec::new();
         let result = supervise_command(
@@ -1040,6 +1071,7 @@ mod tests {
             ],
             cwd: root,
             environment: Some(environment),
+            captured_output: None,
         };
         let mut diagnostics = Vec::new();
         let result = supervise_command(
@@ -1134,6 +1166,7 @@ mod tests {
             arguments: vec!["-c".into(), "sleep 0.05; exit 0".into()],
             cwd: std::env::current_dir().unwrap(),
             environment: None,
+            captured_output: None,
         };
         let result = supervise_command(
             &spec,

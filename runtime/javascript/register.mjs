@@ -16,7 +16,9 @@ installLaunchSupervisor();
 // run and periodically reports public active-resource types. This deliberately
 // uses no Unix signal: a launch tree may contain uninstrumented Node children,
 // and signalling one would terminate a healthy command by default.
-if (!process.__SUPERCOV_DIAGNOSTIC_REPORTER__) {
+const verboseDiagnostics = [process.env.SUPERCOV_VERBOSE, process.env.SUPERCOV_DEBUG]
+    .some(value => value === "1" || value === "true" || value === "yes");
+if (verboseDiagnostics && !process.__SUPERCOV_DIAGNOSTIC_REPORTER__) {
     process.__SUPERCOV_DIAGNOSTIC_REPORTER__ = true;
     const ownerFile = process.env.SUPERCOV_DIAGNOSTIC_OWNER_FILE;
     let ownerDescriptor;

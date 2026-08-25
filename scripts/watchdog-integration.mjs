@@ -31,6 +31,7 @@ try {
       env: {
         ...process.env,
         SUPERCOV_RUST_BINARY: rustBinary,
+        SUPERCOV_VERBOSE: "1",
         SUPERCOV_DIAGNOSTIC_INTERVAL_MS: "50",
         SUPERCOV_COMMAND_TIMEOUT_MS: "220",
       },

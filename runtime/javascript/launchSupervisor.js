@@ -16,6 +16,7 @@ const patchedBuilders = new WeakSet();
 const exportedValues = new WeakSet();
 const capabilityProxies = new WeakMap();
 const importedCapabilityProxies = new WeakMap();
+const importedMemberProxies = new WeakMap();
 let installed = false;
 let remoteLaunchSequence = 0;
 function executionLogPath(path) {
@@ -227,6 +228,43 @@ function wrapResult(value, mapping) {
         return value.then((result) => wrapCapabilityObject(result, mapping));
     return wrapCapabilityObject(value, mapping);
 }
+
+// A Proxy `get` trap must return the exact value of a non-configurable,
+// non-writable own data property (and `undefined` for a non-configurable
+// accessor without a getter). Constructors commonly expose `prototype` this
+// way. Returning another capability proxy is a TypeError before user code can
+// run, as seen with PrismaSessionStorage during an Essential Apps VM bake.
+function fixedProxyValue(target, property) {
+    const descriptor = Reflect.getOwnPropertyDescriptor(target, property);
+    if (!descriptor || descriptor.configurable)
+        return { fixed: false };
+    if ("value" in descriptor && !descriptor.writable)
+        return { fixed: true, value: descriptor.value };
+    if (!("value" in descriptor) && descriptor.get === undefined)
+        return { fixed: true, value: undefined };
+    return { fixed: false };
+}
+
+function wrapImportedMember(member, receiver, invoke) {
+    let members = importedMemberProxies.get(receiver);
+    if (!members) {
+        members = new WeakMap();
+        importedMemberProxies.set(receiver, members);
+    }
+    const cached = members.get(member);
+    if (cached)
+        return cached;
+    const proxy = new Proxy(member, {
+        apply(target, _thisArgument, args) {
+            return invoke(target, receiver, args);
+        },
+        construct(target, args, newTarget) {
+            return wrapImportedCapability(Reflect.construct(target, args, newTarget));
+        },
+    });
+    members.set(member, proxy);
+    return proxy;
+}
 /**
  * A remote SDK can hide its first executable launch inside a configuration
  * callback (for example an image warmup hook). Decorate callbacks in ordinary
@@ -287,6 +325,9 @@ export function wrapCapabilityObject(value, mapping) {
         return cached;
     const proxy = new Proxy(object, {
         get(target, property) {
+            const fixed = fixedProxyValue(target, property);
+            if (fixed.fixed)
+                return fixed.value;
             // Use the real target as the receiver so SDK getters backed by private
             // fields keep their brand check. Method calls are likewise bound below.
             const member = Reflect.get(target, property, target);
@@ -362,10 +403,13 @@ export function wrapImportedCapability(value) {
     };
     const proxy = new Proxy(object, {
         get(target, property) {
+            const fixed = fixedProxyValue(target, property);
+            if (fixed.fixed)
+                return fixed.value;
             const member = Reflect.get(target, property, target);
             if (typeof member !== "function")
                 return wrapImportedCapability(member);
-            return (...args) => invoke(member, target, args);
+            return wrapImportedMember(member, target, invoke);
         },
         ...(typeof value === "function"
             ? {

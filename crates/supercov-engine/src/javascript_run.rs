@@ -187,9 +187,28 @@ fn supervision_options() -> Result<SupervisionOptions, String> {
     })
 }
 
+fn remove_derived_pnpm_config(environment: &mut BTreeMap<OsString, OsString>) {
+    // `npx supercov` is itself launched by npm, which exports project `.npmrc`
+    // keys as `npm_config_*`. pnpm-only keys then make every nested npm process
+    // print a second set of "Unknown env config" warnings. They have no npm
+    // semantics (npm 11 reports them as unknown), so do not leak those derived
+    // environment aliases into the user's already-configured test command.
+    const PNPM_ONLY_NPM_CONFIG: &[&str] = &[
+        "npm_config_auto_install_peers",
+        "npm_config_enable_pre_post_scripts",
+        "npm_config_shamefully_hoist",
+    ];
+    environment.retain(|key, _| {
+        let key = key.to_string_lossy().to_ascii_lowercase();
+        !PNPM_ONLY_NPM_CONFIG.contains(&key.as_str())
+    });
+}
+
 fn environment_with(values: BTreeMap<String, String>) -> Vec<(OsString, OsString)> {
     let mut environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
+    remove_derived_pnpm_config(&mut environment);
     for (key, value) in values {
+        environment.retain(|existing, _| !existing.to_string_lossy().eq_ignore_ascii_case(&key));
         environment.insert(key.into(), value.into());
     }
     environment.into_iter().collect()
@@ -417,10 +436,13 @@ pub fn run_direct_javascript(
                 OsString::from("--"),
                 OsString::from("--config"),
                 OsString::from(".supercov/vite.config.mjs"),
+                OsString::from("--logLevel"),
+                OsString::from("error"),
             ]);
         }
         let mut build_overrides = overrides.clone();
         build_overrides.insert("NODE_ENV".into(), "production".into());
+        build_overrides.insert("npm_config_loglevel".into(), "error".into());
         let build_environment = environment_with(build_overrides);
         vec![ExecutionPhase {
             name: "build".into(),
@@ -430,6 +452,11 @@ pub fn run_direct_javascript(
                 arguments,
                 cwd: workspace.clone(),
                 environment: Some(build_environment),
+                captured_output: Some(
+                    workspace
+                        .join(".supercov")
+                        .join(format!("build-output-{run_id}.log")),
+                ),
             },
         }]
     } else {
@@ -445,6 +472,7 @@ pub fn run_direct_javascript(
                 arguments: request.command[1..].iter().map(OsString::from).collect(),
                 cwd: workspace.clone(),
                 environment: Some(environment_with(overrides)),
+                captured_output: None,
             },
         },
     };
@@ -623,4 +651,33 @@ pub fn run_direct_javascript(
         recovered_runs,
         metadata,
     })
+}
+
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+
+    #[test]
+    fn nested_npm_drops_only_pnpm_derived_environment_aliases() {
+        let mut environment = BTreeMap::from([
+            ("npm_config_auto_install_peers".into(), "true".into()),
+            ("NPM_CONFIG_SHAMEFULLY_HOIST".into(), "true".into()),
+            (
+                "npm_config_registry".into(),
+                "https://registry.npmjs.org".into(),
+            ),
+            ("USER_VALUE".into(), "kept".into()),
+        ]);
+        remove_derived_pnpm_config(&mut environment);
+        assert_eq!(
+            environment,
+            BTreeMap::from([
+                ("USER_VALUE".into(), "kept".into()),
+                (
+                    "npm_config_registry".into(),
+                    "https://registry.npmjs.org".into()
+                ),
+            ])
+        );
+    }
 }

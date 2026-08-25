@@ -3,7 +3,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::{Command, ExitCode, Stdio},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -806,6 +806,7 @@ fn supervise() -> ExitCode {
         arguments: arguments.into_iter().skip(1).collect(),
         cwd,
         environment: None,
+        captured_output: None,
     };
     let mut stderr = std::io::stderr().lock();
     match supercov_engine::process_supervision::supervise_command(
@@ -924,7 +925,25 @@ fn spawn_trash_sweeper(root: &Path) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let _ = command.spawn();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let Ok(mut child) = command.spawn() else {
+        return;
+    };
+    // Most sweeps complete in a few milliseconds. Give that fast path a
+    // bounded opportunity to finish so a command launched immediately after
+    // Supercov cannot discover copied config files in deferred trash. Slow
+    // filesystems remain asynchronous, and the independent process group lets
+    // the best-effort child survive the parent CLI exiting on Unix.
+    for _ in 0..10 {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
 }
 
 fn sweep_trash() -> ExitCode {

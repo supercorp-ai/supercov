@@ -10,6 +10,8 @@ import {
   discoverWorkspaceMapping,
   guestCoverageEnvironment,
   scopeCapabilityCache,
+  wrapCapabilityObject,
+  wrapImportedCapability,
 } from "../../runtime/javascript/launchSupervisor.js";
 
 test("coverage scopes round-trip without losing worker, retry, or phase identity", () => {
@@ -74,4 +76,31 @@ test("remote launch mapping is provider-neutral and scopes reusable snapshots", 
   });
   assert.equal(environment.SUPERCOV_PROJECT_ROOT, "/guest/workspace");
   assert.match(environment.NODE_OPTIONS, /\/guest\/workspace\/\.supercov\/register\.mjs/);
+});
+
+test("capability proxies preserve frozen constructor and export properties", () => {
+  class PrismaSessionStorage {}
+  const wrappedConstructor = wrapImportedCapability(PrismaSessionStorage);
+  assert.equal(wrappedConstructor.prototype, PrismaSessionStorage.prototype);
+  assert.ok(new wrappedConstructor() instanceof PrismaSessionStorage);
+
+  class RestResource {}
+  const exports = wrapImportedCapability({ RestResource });
+  assert.equal(exports.RestResource, exports.RestResource);
+  class Product extends exports.RestResource {}
+  assert.ok(new Product() instanceof RestResource);
+
+  const capability = {};
+  const fixed = () => "fixed";
+  Object.defineProperty(capability, "fixed", {
+    configurable: false,
+    enumerable: true,
+    writable: false,
+    value: fixed,
+  });
+  const wrappedCapability = wrapCapabilityObject(capability, {
+    hostRoot: "/host/project",
+    guestRoot: "/guest/workspace",
+  });
+  assert.equal(wrappedCapability.fixed, fixed);
 });

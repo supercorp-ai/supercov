@@ -453,29 +453,15 @@ const CAPABILITY_IMPORT_EXCLUSIONS: &[&str] =
     &["@jest/globals", "@playwright/test", "playwright", "vitest"];
 
 fn capability_source_candidate(source: &str) -> bool {
-    const SHAPES: &[&str] = &[
-        "hostPath",
-        "guestPath",
-        "mount",
-        "snapshot",
-        "createPool",
-        "acquire",
-        "container",
-        "machine",
-        "sandbox",
-    ];
-    if SHAPES.iter().any(|shape| source.contains(shape)) {
-        return true;
-    }
-    ["exec", "execute", "launch", "spawn"].iter().any(|method| {
-        source
-            .match_indices(&format!(".{method}"))
-            .any(|(index, _)| {
-                source[index + method.len() + 1..]
-                    .trim_start()
-                    .starts_with('(')
-            })
-    })
+    // A capability wrapper is useful only when an argument can establish a
+    // host/guest workspace mapping. Generic words such as `snapshot`,
+    // `machine`, `acquire` and `spawn` are common in tests and application
+    // code; treating any of them as sufficient wrapped unrelated framework
+    // registration functions and changed their captured callsite.
+    ["hostPath", "guestPath", "hostRoot", "guestRoot", "mounts"]
+        .iter()
+        .any(|shape| source.contains(shape))
+        || (source.contains("source") && source.contains("target") && source.contains("/workspace"))
 }
 
 fn excluded_capability_import(source: &str, wrapper: &str) -> bool {
@@ -6665,6 +6651,25 @@ mod tests {
         .unwrap();
         assert_eq!(output.code, source);
         assert_eq!(output.capability_imports, 0);
+    }
+
+    #[test]
+    fn test_snapshot_apis_are_not_mistaken_for_remote_workspace_capabilities() {
+        let source = concat!(
+            "import { test, expect } from '@example/test-admin';\n",
+            "test('visual snapshot', async ({ page }) => {\n",
+            "  expect(await page.screenshot()).toMatchSnapshot('screen.png');\n",
+            "});\n",
+        );
+        let output = instrument_node_assertion_phases_with_runtime_hooks(
+            source,
+            "tests/visual.spec.ts",
+            &[],
+            Some("../.supercov/launchSupervisor.js"),
+        )
+        .unwrap();
+        assert_eq!(output.capability_imports, 0);
+        assert!(!output.code.contains("wrapImportedCapability"));
     }
 
     #[test]

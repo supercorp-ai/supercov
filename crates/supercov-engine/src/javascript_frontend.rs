@@ -606,6 +606,7 @@ fn write_vite_config(
            const relocateOutput = output => output ? ({{ ...output, dir: output.dir ? relocate(output.dir, 'Rollup output') : output.dir, file: output.file ? relocate(output.file, 'Rollup output') : output.file }}) : output;\n\
            const rollupOutput = config.build?.rollupOptions?.output;\n\
            const safe = {{ ...config,\n\
+             logLevel: ['1', 'true', 'yes'].includes(process.env.SUPERCOV_VERBOSE ?? process.env.SUPERCOV_DEBUG ?? '') ? config.logLevel : 'error',\n\
              cacheDir: resolve(isolatedRoot, '.supercov/vite-cache'),\n\
              build: {{ ...config.build, outDir: relocate(config.build?.outDir ?? 'dist', 'Vite build output'), rollupOptions: {{ ...config.build?.rollupOptions, output: Array.isArray(rollupOutput) ? rollupOutput.map(relocateOutput) : relocateOutput(rollupOutput) }} }},\n\
            }};\n\
@@ -900,6 +901,11 @@ mod tests {
         assert!(prepared.preload_path.is_file());
         assert!(prepared.playwright_config_path.is_file());
         assert!(prepared.vite_config_path.is_file());
+        assert!(
+            fs::read_to_string(&prepared.vite_config_path)
+                .unwrap()
+                .contains("logLevel: ['1', 'true', 'yes'].includes")
+        );
         assert!(prepared.vitest_config_path.is_file());
         assert_eq!(prepared.assertion_calls, 0);
         fs::remove_dir_all(source_root).unwrap();

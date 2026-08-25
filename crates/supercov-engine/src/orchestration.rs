@@ -4,7 +4,12 @@
 //! commands. This layer owns ordering, fail-fast behavior, timings and the
 //! single persistent signal guard across every external phase.
 
-use std::{io::Write, time::Instant};
+use std::{
+    fs::{self, File},
+    io::{Read, Seek, SeekFrom, Write},
+    path::Path,
+    time::Instant,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -82,6 +87,39 @@ fn duration_milliseconds(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+const CAPTURED_OUTPUT_LIMIT: u64 = 1024 * 1024;
+
+fn verbose_output() -> bool {
+    std::env::var("SUPERCOV_VERBOSE")
+        .or_else(|_| std::env::var("SUPERCOV_DEBUG"))
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+}
+
+fn publish_captured_output(path: &Path, phase: &str, failed: bool, writer: &mut dyn Write) {
+    if failed || verbose_output() {
+        let result = (|| -> std::io::Result<()> {
+            let mut file = File::open(path)?;
+            let length = file.metadata()?.len();
+            if length > CAPTURED_OUTPUT_LIMIT {
+                file.seek(SeekFrom::End(-(CAPTURED_OUTPUT_LIMIT as i64)))?;
+                writeln!(
+                    writer,
+                    "[supercov] {phase} output truncated to the final {} bytes",
+                    CAPTURED_OUTPUT_LIMIT
+                )?;
+            }
+            let mut buffer = Vec::with_capacity(length.min(CAPTURED_OUTPUT_LIMIT) as usize);
+            file.read_to_end(&mut buffer)?;
+            writer.write_all(&buffer)?;
+            writer.flush()
+        })();
+        if let Err(error) = result {
+            let _ = writeln!(writer, "[supercov] could not read {phase} output: {error}");
+        }
+    }
+    let _ = fs::remove_file(path);
+}
+
 fn validate(plan: &ExecutionPlan) -> Result<(), OrchestrationError> {
     if plan.test.kind != PhaseKind::Test {
         return Err(OrchestrationError::InvalidPlan(
@@ -122,8 +160,19 @@ pub fn execute_plan(
     for phase in plan.preparation.iter().chain(std::iter::once(&plan.test)) {
         before_phase(phase, writer)?;
         let started = Instant::now();
-        let result = supervisor.supervise(&phase.command, options, writer)?;
+        let result = match supervisor.supervise(&phase.command, options, writer) {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(path) = &phase.command.captured_output {
+                    publish_captured_output(path, &phase.name, true, writer);
+                }
+                return Err(error.into());
+            }
+        };
         let exit_code = result.exit_code();
+        if let Some(path) = &phase.command.captured_output {
+            publish_captured_output(path, &phase.name, exit_code != 0, writer);
+        }
         let interrupted_signal = result.interrupted_signal;
         executions.push(PhaseExecution {
             name: phase.name.clone(),
@@ -183,6 +232,7 @@ mod tests {
                 arguments: vec![OsString::from("-c"), OsString::from(script)],
                 cwd: root.into(),
                 environment: None,
+                captured_output: None,
             },
         }
     }
@@ -252,6 +302,51 @@ mod tests {
         );
         assert!(matches!(result, Err(OrchestrationError::InvalidPlan(_))));
         assert!(!root.join("incorrectly-started").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_preparation_is_quiet_but_failed_output_is_retained() {
+        let root = temporary();
+        let successful_log = root.join("successful.log");
+        let mut successful = shell(&root, "build", "printf noisy-success");
+        successful.command.captured_output = Some(successful_log.clone());
+        let mut writer = Vec::new();
+        let result = execute_plan(
+            &ExecutionPlan {
+                preparation: vec![successful],
+                test: shell(&root, "test", "exit 0"),
+            },
+            SupervisionOptions::default(),
+            &mut writer,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert!(writer.is_empty());
+        assert!(!successful_log.exists());
+
+        let failed_log = root.join("failed.log");
+        let mut failed = shell(&root, "build", "printf useful-failure; exit 7");
+        failed.command.captured_output = Some(failed_log.clone());
+        let result = execute_plan(
+            &ExecutionPlan {
+                preparation: vec![failed],
+                test: shell(&root, "test", "exit 0"),
+            },
+            SupervisionOptions::default(),
+            &mut writer,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(result.exit_code, 7);
+        assert!(
+            String::from_utf8(writer)
+                .unwrap()
+                .contains("useful-failure")
+        );
+        assert!(!failed_log.exists());
         fs::remove_dir_all(root).unwrap();
     }
 }
