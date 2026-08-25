@@ -928,6 +928,10 @@ miss blocks flipping any default.
   reports spawn errors before asserting an exit status. Five native targets
   completed their full artifact path before the Windows-only bare-`npm` spawn
   exposed this harness bug; the run was cancelled immediately after diagnosis.
+  Node 24 also refuses to execute `npm.cmd` directly, so the final harness uses
+  the Windows command interpreter explicitly. A Windows npm preflight now runs
+  before native compilation so package-manager invocation can no longer waste
+  a five-minute binary build before failing.
   The release workflow now calls that complete native matrix, downloads and
   revalidates the aggregate release set, publishes all eight exact-version
   platform packages first, and publishes the primary package only after every

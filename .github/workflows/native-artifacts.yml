@@ -42,6 +42,9 @@ jobs:
       - run: npm run build
       - name: Read package version
         run: node -e "require('node:fs').appendFileSync(process.env.GITHUB_ENV, 'SUPERCOV_VERSION=' + require('./package.json').version + '\n')"
+      - name: Verify Windows npm command invocation before compiling
+        if: runner.os == 'Windows'
+        run: node scripts/native-package-integration.mjs --npm-preflight
       - name: Build native binary
         if: matrix.musl != true
         run: cargo build --release --target ${{ matrix.target }} -p supercov
