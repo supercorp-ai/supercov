@@ -115,10 +115,47 @@ for context in sorted(data.measured_contexts()):
     })
 data.set_query_contexts(None)
 
-outcomes = []
+journal = []
 for filename in sorted(glob.glob(args.outcomes)):
     with Path(filename).open(encoding="utf-8") as stream:
-        outcomes.extend(json.loads(line) for line in stream if line.strip())
+        journal.extend(json.loads(line) for line in stream if line.strip())
+
+starts = {
+    (
+        record["workerId"],
+        record["testId"],
+        record["retry"],
+        record["phase"],
+    ): record
+    for record in journal
+    if record["outcome"] == "started"
+}
+outcomes = [
+    record
+    for record in journal
+    if record["outcome"] != "started" and not record.get("workerCrash", False)
+]
+for crash in (record for record in journal if record.get("workerCrash", False)):
+    matching = [
+        start
+        for key, start in starts.items()
+        if key[:3]
+        == (crash["workerId"], crash["testId"], crash["retry"])
+    ]
+    if not matching:
+        raise RuntimeError(
+            "crashed worker did not leave an active pytest phase: "
+            f"{crash['workerId']} {crash['testId']} retry {crash['retry']}"
+        )
+    outcomes.append({
+        "runId": crash["runId"],
+        "workerId": crash["workerId"],
+        "testId": crash["testId"],
+        "retry": crash["retry"],
+        "phase": matching[-1]["phase"],
+        "outcome": crash["outcome"],
+        "wasXfail": False,
+    })
 
 output = {
     "schemaVersion": 1,

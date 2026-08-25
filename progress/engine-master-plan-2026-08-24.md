@@ -944,8 +944,8 @@ miss blocks flipping any default.
   passed-only retains only the terminal ordinary pass. This work also corrected
   a shared analyzer defect: setup-only/background-only confidence now follows
   observed phase kinds whenever phase evidence exists, rather than a synthetic
-  result role. Broader xdist scheduling, worker-crash, path/package, and low-
-  level execution-surface cases are still open. Retry attribution is now
+  result role. Broader xdist scheduling, path/package, and low-level
+  execution-surface cases are still open. Retry attribution is now
   proven in both serial pytest and two-worker xdist using the real
   pytest-rerunfailures 16.6 lifecycle: `item.execution_count` identifies the
   active attempt before setup/call/teardown, and `report.rerun` identifies the
@@ -967,6 +967,14 @@ miss blocks flipping any default.
   identity exists. Raw `_thread`/native-created threads and low-level
   `os.system`/spawn/exec/fork/forkserver paths remain blocking, explicitly
   declared structural limitations rather than hidden attribution claims.
+  An xdist worker-crash matrix now proves a crash followed by a successful
+  retry on a replacement worker. The generated hook durably journals phase
+  starts, enables coverage.py's documented `_exit` save patch, and joins the
+  controller's synthetic crash report to the last exact worker/test/retry/
+  phase. Pre-crash coverage stays failed-only; the replacement worker's
+  terminal retry alone verifies passed coverage; the logical test is flaky.
+  SIGKILL and equivalent uncatchable termination cannot flush coverage.py's
+  in-memory observations and remain a separate blocking structural limitation.
 - Shared analysis no longer hardcodes the JavaScript coverage-model label for
   every language. `CoverageReportRequest` now carries an optional strict
   `CoverageModelDeclaration`; absent declarations retain the byte-compatible

@@ -153,6 +153,7 @@ def _start_owned_coverage():
         context=f"supercov-worker-v1:{WORKER_ID}",
         plugins=[_register_context_plugin],
     )
+    owned.set_option("run:patch", ["_exit"])
     owned.start()
     return owned
 
@@ -226,6 +227,18 @@ def _switch(item, phase: str) -> None:
     # process-startup hook and reads this exact parent phase from the generated
     # run configuration. Environment inheritance is the process boundary.
     _configure_subprocess_context(context)
+    _append_journal(
+        {
+            "runId": RUN_ID,
+            "workerId": WORKER_ID,
+            "testId": item.nodeid,
+            "retry": _retry_from_item(item),
+            "phase": phase,
+            "outcome": "started",
+            "wasXfail": False,
+        },
+        WORKER_ID,
+    )
 
 
 def pytest_runtest_setup(item):
@@ -242,8 +255,29 @@ def pytest_runtest_teardown(item):
 
 def pytest_runtest_logreport(report):
     if _IS_XDIST_CONTROLLER:
+        if report.when != "???":
+            return
+        node = getattr(report, "node", None)
+        gateway = getattr(node, "gateway", None)
+        worker_id = getattr(gateway, "id", None)
+        failures_db = getattr(getattr(node, "config", None), "failures_db", None)
+        if not worker_id or failures_db is None:
+            raise RuntimeError("Supercov could not identify a crashed xdist worker")
+        retry = max(int(failures_db.get_test_failures(report.nodeid)) - 1, 0)
+        _append_journal(
+            {
+                "runId": RUN_ID,
+                "workerId": worker_id,
+                "testId": report.nodeid,
+                "retry": retry,
+                "phase": "unknown",
+                "outcome": report.outcome,
+                "wasXfail": False,
+                "workerCrash": True,
+            },
+            "controller",
+        )
         return
-    path = OUTCOME_BASE.with_name(f"{OUTCOME_BASE.name}.{WORKER_ID}.jsonl")
     record = {
         "runId": RUN_ID,
         "workerId": WORKER_ID,
@@ -253,6 +287,12 @@ def pytest_runtest_logreport(report):
         "outcome": report.outcome,
         "wasXfail": bool(getattr(report, "wasxfail", False)),
     }
+
+    _append_journal(record, WORKER_ID)
+
+
+def _append_journal(record, worker_id: str) -> None:
+    path = OUTCOME_BASE.with_name(f"{OUTCOME_BASE.name}.{worker_id}.jsonl")
     with path.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
 

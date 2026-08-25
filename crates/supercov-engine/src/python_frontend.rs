@@ -34,6 +34,7 @@ const MCDC_LIMITATION: &str = "python-mcdc-unavailable";
 const COLUMN_LIMITATION: &str = "python-column-location-unavailable";
 const LOW_LEVEL_THREAD_LIMITATION: &str = "python-low-level-thread-context-unavailable";
 const LOW_LEVEL_PROCESS_LIMITATION: &str = "python-low-level-process-coverage-unavailable";
+const HARD_KILL_LIMITATION: &str = "python-hard-kill-evidence-unflushable";
 
 fn python_coverage_model() -> CoverageModelDeclaration {
     CoverageModelDeclaration {
@@ -51,6 +52,7 @@ fn python_coverage_model() -> CoverageModelDeclaration {
             "causal linkage to individual actions or passing assertions".into(),
             "causal test context for raw _thread or native-extension-created threads".into(),
             "child coverage outside Python subprocess.Popen and multiprocessing spawn adapters".into(),
+            "in-memory coverage observations lost to SIGKILL or equivalent uncatchable termination".into(),
             "all input values, semantic partitions, paths, or concurrency interleavings".into(),
             "mutation score or assertion fault-detection strength".into(),
         ],
@@ -609,6 +611,15 @@ pub fn import_python_coverage_json(
             "source": "",
             "reason": "low-level os spawn, exec, system, fork, and forkserver surfaces are not yet proven by the Python child-process adapter"
         }),
+        json!({
+            "id": HARD_KILL_LIMITATION,
+            "kind": "semantic-safety",
+            "file": export.files[0].path,
+            "line": 1,
+            "column": 1,
+            "source": "",
+            "reason": "coverage.py stores observations in worker memory, so SIGKILL and equivalent uncatchable termination cannot flush pre-crash evidence"
+        }),
     ];
 
     let manifest_files = export
@@ -811,6 +822,7 @@ pub fn import_python_coverage_json(
         }],
         structural_limitations: vec![
             COLUMN_LIMITATION.into(),
+            HARD_KILL_LIMITATION.into(),
             LOW_LEVEL_PROCESS_LIMITATION.into(),
             LOW_LEVEL_THREAD_LIMITATION.into(),
             MCDC_LIMITATION.into(),
@@ -857,6 +869,8 @@ mod tests {
         include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-retry.json");
     const CONCURRENCY_GOLDEN: &[u8] =
         include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-concurrency.json");
+    const WORKER_CRASH_GOLDEN: &[u8] =
+        include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-worker-crash.json");
 
     #[test]
     fn imports_the_coverage_py_oracle_without_inventing_assertion_or_mcdc_facts() {
@@ -893,7 +907,7 @@ mod tests {
                 .iter()
                 .any(|item| item.contains("MC/DC"))
         );
-        assert_eq!(report.view.limitations.len(), 4);
+        assert_eq!(report.view.limitations.len(), 5);
         assert_eq!(
             report
                 .view
@@ -1163,6 +1177,58 @@ mod tests {
         assert_eq!(
             lines_for("test_starts_an_async_task_that_outlives_the_test"),
             BTreeSet::from([10, 11])
+        );
+    }
+
+    #[test]
+    fn joins_xdist_worker_crash_evidence_to_the_exact_rerun_attempt() {
+        let imported = import_python_coverage_json(
+            WORKER_CRASH_GOLDEN,
+            "python-tier-a-worker-crash1",
+            "2026-08-25T00:00:00.000Z",
+            Some(0),
+        )
+        .unwrap();
+        let report = analyze_frontend_results(&imported.declaration, &imported.request).unwrap();
+        assert_eq!(
+            (
+                report.view.summary.lines.covered,
+                report.view.summary.branches.covered,
+                report.filters.passed.summary.lines.covered,
+                report.filters.passed.summary.branches.covered,
+                report.filters.failed.summary.lines.covered,
+                report.filters.failed.summary.branches.covered,
+            ),
+            (6, 3, 3, 2, 2, 1)
+        );
+        let attempts = imported
+            .request
+            .raw_results
+            .iter()
+            .filter(|result| result.role == "test")
+            .map(|result| {
+                (
+                    (
+                        result.scope.as_ref().unwrap().worker_id.as_str(),
+                        result.retry.unwrap(),
+                    ),
+                    result.status.as_deref().unwrap(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            attempts,
+            BTreeMap::from([(("gw0", 0), "failed"), (("gw1", 1), "passed")])
+        );
+        assert_eq!(
+            report
+                .view
+                .tests
+                .iter()
+                .find(|test| test.role == "test")
+                .unwrap()
+                .outcome,
+            "flaky"
         );
     }
 

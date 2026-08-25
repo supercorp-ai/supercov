@@ -92,6 +92,22 @@ fork, and forkserver launch paths, are carried as blocking structural
 limitations. They must receive independent adapters and crash matrices before
 those limitations can be removed.
 
+## Proven worker crash and recovery
+
+A real xdist worker now exits through `os._exit(17)` during its call phase and
+is retried successfully on a replacement worker. The generated plugin writes
+durable phase-start journal records before user code, enables coverage.py's
+documented `_exit` patch so the dying worker saves its in-memory observations,
+and joins xdist's controller-side synthetic crash report to the most recent
+exact worker/test/retry/phase. Attempt zero remains failed-only coverage;
+attempt one alone verifies passed coverage; the combined outcome is flaky.
+
+This does not make uncatchable process death lossless. `SIGKILL` and equivalent
+termination cannot execute coverage.py's save path, so the Tier-A frontend
+declares `python-hard-kill-evidence-unflushable` as a blocking structural
+limitation. Removing it requires an owned streaming probe transport, not a
+claim that in-process state survived.
+
 ## Public-API basis
 
 - [`Coverage.analysis2`](https://coverage.readthedocs.io/en/7.13.5/api_coverage.html#coverage.Coverage.analysis2)
