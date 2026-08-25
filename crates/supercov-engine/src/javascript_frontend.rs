@@ -162,11 +162,36 @@ fn unique() -> String {
     )
 }
 
+#[cfg(not(windows))]
+fn create_directory_all(path: &Path) -> Result<(), JavascriptFrontendError> {
+    fs::create_dir_all(path).map_err(|source| io_error(path, source))
+}
+
+#[cfg(windows)]
+fn create_directory_all(path: &Path) -> Result<(), JavascriptFrontendError> {
+    const ATTEMPTS: usize = 11;
+    for attempt in 0..ATTEMPTS {
+        match fs::create_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(source)
+                if source.kind() == io::ErrorKind::PermissionDenied && attempt + 1 < ATTEMPTS =>
+            {
+                // Windows scanners and just-closed directory handles can
+                // transiently reject creation of a brand-new path. Retry the
+                // exact owned path; never broaden or redirect the target.
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(source) => return Err(io_error(path, source)),
+        }
+    }
+    unreachable!("the final directory-creation attempt always returns")
+}
+
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), JavascriptFrontendError> {
     let parent = path
         .parent()
         .ok_or_else(|| JavascriptFrontendError::UnsafeSourcePath(path.display().to_string()))?;
-    fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+    create_directory_all(parent)?;
     let temporary = parent.join(format!(".supercov-write-{}", unique()));
     let result = (|| {
         let mut output = OpenOptions::new()
@@ -249,7 +274,7 @@ fn copy_runtime(
     generated: &Path,
     collector_id: &str,
 ) -> Result<(), JavascriptFrontendError> {
-    fs::create_dir_all(generated).map_err(|source| io_error(generated, source))?;
+    create_directory_all(generated)?;
     atomic_write(
         &generated.join("package.json"),
         b"{\"private\":true,\"type\":\"module\"}\n",
