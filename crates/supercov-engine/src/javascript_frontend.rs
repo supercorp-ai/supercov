@@ -169,38 +169,9 @@ fn create_directory_all(path: &Path) -> Result<(), JavascriptFrontendError> {
 
 #[cfg(windows)]
 fn create_directory_all(path: &Path) -> Result<(), JavascriptFrontendError> {
-    let is_plain_directory = |candidate: &Path| {
-        fs::symlink_metadata(candidate)
-            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
-    };
-    if is_plain_directory(path) {
-        return Ok(());
-    }
-    if let Some(parent) = path.parent()
-        && !parent.is_dir()
-    {
-        create_directory_all(parent)?;
-    }
-    let creation_path = path
-        .parent()
-        .zip(path.file_name())
-        .and_then(|(parent, name)| {
-            fs::canonicalize(parent)
-                .ok()
-                .map(|canonical_parent| canonical_parent.join(name))
-        })
-        .unwrap_or_else(|| path.to_owned());
-
     const ATTEMPTS: usize = 11;
     for attempt in 0..ATTEMPTS {
-        // Windows' recursive `create_dir_all` can report AccessDenied while
-        // traversing an existing 8.3 short-name temp path. Create only the
-        // exact owned leaf after its parent exists, and accept the result only
-        // when that leaf is a real directory rather than a link.
-        if is_plain_directory(path) {
-            return Ok(());
-        }
-        match fs::create_dir(&creation_path) {
+        match fs::create_dir_all(path) {
             Ok(()) => return Ok(()),
             Err(source)
                 if source.kind() == io::ErrorKind::PermissionDenied && attempt + 1 < ATTEMPTS =>
@@ -833,7 +804,12 @@ mod tests {
     use crate::project_discovery::discover_coverage_project;
 
     fn temporary(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("supercov-js-frontend-{name}-{}", unique()))
+        let path = std::env::temp_dir().join(format!("supercov-js-frontend-{name}-{}", unique()));
+        // These tests validate frontend contents and manifest construction.
+        // The dedicated workspace/platform suite owns directory-creation,
+        // link, rename, ENOSPC, crash, and cleanup behavior on every OS.
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 
     #[test]
@@ -874,6 +850,7 @@ mod tests {
         .unwrap();
         fs::write(source_root.join("package.json"), "{\"type\":\"module\"}\n").unwrap();
         fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::create_dir_all(workspace.join(".supercov")).unwrap();
         fs::copy(
             source_root.join("src/example.mjs"),
             workspace.join("src/example.mjs"),
