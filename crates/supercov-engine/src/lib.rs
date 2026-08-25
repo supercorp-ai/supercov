@@ -15,6 +15,7 @@ pub mod indexed_query;
 pub mod integrity;
 pub mod js_instrumenter;
 pub mod lifecycle;
+pub mod orchestration;
 pub mod probe_v2;
 pub mod process_supervision;
 pub mod project_discovery;

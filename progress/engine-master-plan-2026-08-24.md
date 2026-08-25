@@ -600,6 +600,21 @@ miss blocks flipping any default.
   launch interception remains a runtime shim; provider-neutral local process
   ownership no longer needs to remain JavaScript after build orchestration is
   wired.
+- Language-neutral external-phase orchestration is now Rust-owned as well. A
+  frontend supplies explicit preparation/build commands and exactly one
+  terminal test command; Rust validates that plan before spawning, invokes a
+  lifecycle observer before each phase, records each phase's typed result and
+  monotonic duration, and stops before the test on any failed preparation or
+  build. One `ProcessSupervisor` and one saved/restored signal guard span the
+  complete plan, closing the otherwise dangerous gap where a SIGTERM could
+  arrive after the build exited but before the test spawned. This deliberately
+  does not move JavaScript config/runtime generation into a generic process
+  abstraction: the frontend shim still prepares unavoidable Playwright,
+  Vitest, node:test and remote-capability hooks, while Rust owns when and how
+  every resulting command runs. The next integration slice must feed the
+  discovered JavaScript project, workspace, Rust instrumenter and generated
+  shim assets into this plan, then compare a complete private Rust run against
+  the reference fixtures before any public selector is enabled.
 
 ## Non-goals and guardrails
 

@@ -404,100 +404,141 @@ fn write_diagnostic(child: &Child, started: Instant, writer: &mut dyn Write) {
 }
 
 #[cfg(unix)]
-pub fn supervise_command(
-    spec: &CommandSpec,
-    options: SupervisionOptions,
-    writer: &mut dyn Write,
-) -> Result<SupervisedResult, SupervisionError> {
-    if options.diagnostic_interval.is_zero() || options.termination_grace.is_zero() {
-        return Err(SupervisionError::InvalidMilliseconds {
-            name: "process supervision interval".into(),
-        });
-    }
-    if options.timeout.is_some_and(|timeout| timeout.is_zero()) {
-        return Err(SupervisionError::InvalidMilliseconds {
-            name: "SUPERCOV_COMMAND_TIMEOUT_MS".into(),
-        });
-    }
-    let signals = SignalFlags::install()?;
-    let mut command = spec.command()?;
-    let mut child = command.spawn().map_err(|source| SupervisionError::Spawn {
-        program: spec.program.clone(),
-        source,
-    })?;
-    let started = Instant::now();
-    let mut next_diagnostic = started + options.diagnostic_interval;
-    let timeout_at = options.timeout.map(|timeout| started + timeout);
-    let mut termination: Option<(Instant, Option<ForwardedSignal>)> = None;
-    let mut timed_out = false;
-    let mut interrupted_signal = None;
-    let mut escalated = false;
+pub struct ProcessSupervisor {
+    signals: SignalFlags,
+}
 
-    loop {
-        let status = match child.try_wait() {
-            Ok(status) => status,
-            Err(error) => {
-                signal_process_group(&mut child, libc::SIGKILL);
-                let _ = child.wait();
-                return Err(SupervisionError::Wait(error));
-            }
-        };
-        if let Some(status) = status {
-            let (status, signal) = exit_parts(status);
-            return Ok(SupervisedResult {
-                status,
-                signal,
-                timed_out,
-                interrupted_signal,
+#[cfg(unix)]
+impl ProcessSupervisor {
+    pub fn new() -> Result<Self, SupervisionError> {
+        Ok(Self {
+            signals: SignalFlags::install()?,
+        })
+    }
+
+    pub fn supervise(
+        &self,
+        spec: &CommandSpec,
+        options: SupervisionOptions,
+        writer: &mut dyn Write,
+    ) -> Result<SupervisedResult, SupervisionError> {
+        if options.diagnostic_interval.is_zero() || options.termination_grace.is_zero() {
+            return Err(SupervisionError::InvalidMilliseconds {
+                name: "process supervision interval".into(),
             });
         }
-        let now = Instant::now();
-        if termination.is_none()
-            && let Some(signal) = signals.received()
-        {
-            interrupted_signal = Some(signal);
-            signal_process_group(&mut child, signal.raw());
-            termination = Some((now, Some(signal)));
+        if options.timeout.is_some_and(|timeout| timeout.is_zero()) {
+            return Err(SupervisionError::InvalidMilliseconds {
+                name: "SUPERCOV_COMMAND_TIMEOUT_MS".into(),
+            });
         }
-        if termination.is_none() && timeout_at.is_some_and(|deadline| now >= deadline) {
-            timed_out = true;
-            let _ = writeln!(
+        if let Some(signal) = self.signals.received() {
+            return Ok(SupervisedResult {
+                status: None,
+                signal: Some(signal.raw()),
+                timed_out: false,
+                interrupted_signal: Some(signal),
+            });
+        }
+        let mut command = spec.command()?;
+        let mut child = command.spawn().map_err(|source| SupervisionError::Spawn {
+            program: spec.program.clone(),
+            source,
+        })?;
+        let started = Instant::now();
+        let mut next_diagnostic = started + options.diagnostic_interval;
+        let timeout_at = options.timeout.map(|timeout| started + timeout);
+        let mut termination: Option<(Instant, Option<ForwardedSignal>)> = None;
+        let mut timed_out = false;
+        let mut interrupted_signal = None;
+        let mut escalated = false;
+
+        loop {
+            let status = match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    signal_process_group(&mut child, libc::SIGKILL);
+                    let _ = child.wait();
+                    return Err(SupervisionError::Wait(error));
+                }
+            };
+            if let Some(status) = status {
+                let (status, signal) = exit_parts(status);
+                return Ok(SupervisedResult {
+                    status,
+                    signal,
+                    timed_out,
+                    interrupted_signal,
+                });
+            }
+            let now = Instant::now();
+            if termination.is_none()
+                && let Some(signal) = self.signals.received()
+            {
+                interrupted_signal = Some(signal);
+                signal_process_group(&mut child, signal.raw());
+                termination = Some((now, Some(signal)));
+            }
+            if termination.is_none() && timeout_at.is_some_and(|deadline| now >= deadline) {
+                timed_out = true;
+                let _ = writeln!(
                 writer,
                 "[supercov] command exceeded SUPERCOV_COMMAND_TIMEOUT_MS={}; terminating process group",
                 options.timeout.expect("timeout deadline").as_millis()
             )
             .and_then(|_| writer.flush());
-            signal_process_group(&mut child, libc::SIGTERM);
-            termination = Some((now, None));
-            write_diagnostic(&child, started, writer);
-        }
-        if now >= next_diagnostic && !timed_out {
-            write_diagnostic(&child, started, writer);
-            while next_diagnostic <= now {
-                next_diagnostic += options.diagnostic_interval;
+                signal_process_group(&mut child, libc::SIGTERM);
+                termination = Some((now, None));
+                write_diagnostic(&child, started, writer);
             }
+            if now >= next_diagnostic && !timed_out {
+                write_diagnostic(&child, started, writer);
+                while next_diagnostic <= now {
+                    next_diagnostic += options.diagnostic_interval;
+                }
+            }
+            if !escalated
+                && termination.is_some_and(|(terminated_at, _)| {
+                    now.duration_since(terminated_at) >= options.termination_grace
+                })
+            {
+                signal_process_group(&mut child, libc::SIGKILL);
+                escalated = true;
+            }
+            thread::sleep(POLL_INTERVAL);
         }
-        if !escalated
-            && termination.is_some_and(|(terminated_at, _)| {
-                now.duration_since(terminated_at) >= options.termination_grace
-            })
-        {
-            signal_process_group(&mut child, libc::SIGKILL);
-            escalated = true;
-        }
-        thread::sleep(POLL_INTERVAL);
     }
 }
 
 #[cfg(not(unix))]
+pub struct ProcessSupervisor;
+
+#[cfg(not(unix))]
+impl ProcessSupervisor {
+    pub fn new() -> Result<Self, SupervisionError> {
+        Err(SupervisionError::UnsupportedPlatform(
+            "Windows Job Objects are required before enabling the Rust supervisor",
+        ))
+    }
+
+    pub fn supervise(
+        &self,
+        _spec: &CommandSpec,
+        _options: SupervisionOptions,
+        _writer: &mut dyn Write,
+    ) -> Result<SupervisedResult, SupervisionError> {
+        Err(SupervisionError::UnsupportedPlatform(
+            "Windows Job Objects are required before enabling the Rust supervisor",
+        ))
+    }
+}
+
 pub fn supervise_command(
-    _spec: &CommandSpec,
-    _options: SupervisionOptions,
-    _writer: &mut dyn Write,
+    spec: &CommandSpec,
+    options: SupervisionOptions,
+    writer: &mut dyn Write,
 ) -> Result<SupervisedResult, SupervisionError> {
-    Err(SupervisionError::UnsupportedPlatform(
-        "Windows Job Objects are required before enabling the Rust supervisor",
-    ))
+    ProcessSupervisor::new()?.supervise(spec, options, writer)
 }
 
 #[cfg(test)]
