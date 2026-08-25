@@ -311,6 +311,8 @@ pub struct CoverageSummaryData {
     pub complete: bool,
     pub coverage: CoverageSummary,
     pub measurement: IndexedMeasurement,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waivers: Option<crate::coverage_waivers::CoverageWaiverSummary>,
     pub coverage_by_kind: Vec<IndexedDimensionCoverage>,
     pub coverage_by_runner: Vec<IndexedDimensionCoverage>,
     pub attribution: crate::coverage_index::IndexedAttribution,
@@ -933,6 +935,10 @@ pub struct CoverageDecisionCondition {
     pub witness: Option<[crate::coverage_analysis::McdcVector; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub witness_tests: Option<[Vec<String>; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waived: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiver_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1066,6 +1072,24 @@ fn selected_decision(
     }
 }
 
+/// Reconstruct the exact decision view used by provenance-filtered queries.
+/// Mutable project policy such as reviewed waivers can then be evaluated
+/// without contaminating the immutable query index.
+pub fn filtered_decisions(
+    index: &CoverageIndex<'_>,
+    view: CoverageViewId,
+    kind: Option<&str>,
+    runner: Option<&str>,
+) -> Result<Vec<crate::coverage_report::DecisionResult>, QueryError> {
+    let tests = index.test_summaries(view)?;
+    let selected = selected_test_ids(&tests, kind, runner)?;
+    index
+        .decision_details(view)?
+        .into_iter()
+        .map(|decision| Ok(selected_decision(decision, selected.as_ref())))
+        .collect()
+}
+
 pub fn coverage_decision_query(
     index: &CoverageIndex<'_>,
     options: CoverageDecisionQueryOptions<'_>,
@@ -1153,6 +1177,8 @@ pub fn coverage_decision_query(
             assertion_covered: selected.is_none().then_some(condition.assertion_covered),
             witness: condition.witness.clone(),
             witness_tests: condition.witness_tests.clone(),
+            waived: None,
+            waiver_reason: None,
         })
         .collect::<Vec<_>>();
     let tests = filtered
@@ -1242,6 +1268,12 @@ pub struct CoverageMcdcObligation {
     pub column: usize,
     pub decision: String,
     pub missing_condition: String,
+    #[serde(skip)]
+    pub condition_index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waived: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiver_reason: Option<String>,
     pub observed_vectors: Vec<String>,
     pub other_coverage: CoverageOtherCoverage,
 }
@@ -1529,6 +1561,9 @@ pub fn coverage_file_detail_query(
                 column: original.meta.column,
                 decision: original.meta.source.clone(),
                 missing_condition: condition.source.clone(),
+                condition_index: condition.index,
+                waived: None,
+                waiver_reason: None,
                 observed_vectors: filtered
                     .vector_observations
                     .iter()
@@ -2008,6 +2043,7 @@ pub fn coverage_summary_query(
         complete,
         coverage: projection.summary,
         measurement: projection.measurement.clone(),
+        waivers: None,
         coverage_by_kind,
         coverage_by_runner,
         attribution: projection.attribution,
@@ -2079,6 +2115,8 @@ pub struct CoverageFileDecisionsOptions<'a> {
     pub kind: Option<&'a str>,
     pub runner: Option<&'a str>,
     pub file: &'a str,
+    pub waived_by_decision:
+        Option<&'a BTreeMap<String, BTreeMap<usize, crate::coverage_waivers::CoverageWaiver>>>,
     pub sort: DecisionSort,
     pub offset: usize,
     pub limit: usize,
@@ -2162,7 +2200,12 @@ pub fn coverage_file_decisions_query(
     if options.limit == 0 {
         return Err(QueryError::InvalidPagination);
     }
-    let all = index.decision_gaps(options.view, options.kind, options.runner, options.file)?;
+    let mut all = index.decision_gaps(options.view, options.kind, options.runner, options.file)?;
+    if let Some(waived) = options.waived_by_decision {
+        for decision in &mut all {
+            decision.waived_conditions = waived.get(&decision.id).map_or(0, BTreeMap::len);
+        }
+    }
     if (options.kind.is_some() || options.runner.is_some()) && all.is_empty() {
         // A file with no decisions is valid, so consult the file projection to
         // distinguish it from a nonexistent test provenance projection.

@@ -530,11 +530,16 @@ miss blocks flipping any default.
   projects and deliberately omit every old JSON/binary cache, proving first-
   query reconstruction rather than accidentally accepting historical output.
   Query execution is now path-independent engine code; storage policy remains
-  solely in `run_store`. Public CLI routing remains gated on dynamic waiver
-  overlays and human-output parity. Waivers must not be baked into the
-  disposable evidence index because `supercov.waivers.json` is mutable project
-  policy rather than run evidence; the Rust query layer must evaluate and
-  annotate them at read time.
+  solely in `run_store`. Reviewed MC/DC waivers are likewise Rust-owned and
+  remain a dynamic overlay: strict v1 parsing, ECMAScript-whitespace source
+  matching, ID/line/positional selection, first-waiver ownership, applied,
+  contradicted and unmatched classifications all run at read time, never enter
+  evidence or disposable-index identity, and never mutate raw totals. An
+  independently missing real-fixture condition proves byte-identical waiver
+  summary, file inventory, grouped-decision sorting/counts, file obligations
+  and condition detail. Public CLI routing now remains gated on current-
+  project integrity wiring, structured public argument errors and human-output
+  parity—not missing coverage semantics.
 
 ## Non-goals and guardrails
 

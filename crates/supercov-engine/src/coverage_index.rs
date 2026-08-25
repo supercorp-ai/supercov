@@ -299,6 +299,8 @@ pub struct IndexedFileGap {
     pub covered_by_other_tests: IndexedGapDimensions,
     pub uncovered_everywhere: IndexedGapDimensions,
     pub score: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waived_mcdc_conditions: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2374,6 +2376,7 @@ impl<'a> CoverageIndex<'a> {
                 uncovered_functions,
                 missing_branches,
                 missing_mcdc_conditions,
+                waived_mcdc_conditions: None,
                 measurement_limitations,
                 limitation_kinds,
                 covered_by_other_tests: IndexedGapDimensions {

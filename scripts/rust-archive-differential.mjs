@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync as nativeSpawnSync } from 'node:child_process';
@@ -767,6 +767,91 @@ const indexedActual = JSON.parse(indexed.stdout);
 const indexDifference = firstDifference(indexedActual, indexExpected);
 assert.equal(indexDifference, undefined, `typed index: ${JSON.stringify(indexDifference)}`);
 
+// Waivers are mutable query policy: they must overlay an already-built index
+// without changing evidence/index identity or raw measured totals.
+{
+  let waiverCase;
+  for (const fixture of fixtures) {
+    for (const archive of archivesForFixture(fixture)) {
+      const report = analyzeCoverageArchive(archive.archivePath, {
+        runId: archive.id,
+        generatedAt,
+      });
+      const candidate = report.decisions.flatMap((decision) =>
+        decision.conditions.map((condition) => ({ decision, condition })),
+      ).find(({ condition }) => !condition.covered);
+      if (candidate) {
+        waiverCase = { fixture, ...archive, ...candidate };
+        break;
+      }
+    }
+    if (waiverCase) break;
+  }
+  assert.ok(waiverCase, 'waiver differential needs one uncovered condition');
+  const { id: runId, archivePath, decision, condition } = waiverCase;
+  const project = storedProjectForArchive(archivePath);
+  writeFileSync(
+    resolve(project, 'supercov.waivers.json'),
+    JSON.stringify({
+      version: 1,
+      waivers: [{
+        file: decision.meta.file,
+        decision: decision.meta.id,
+        condition: `C${condition.index + 1}`,
+        reason: 'independent waiver differential',
+      }],
+    }),
+  );
+  for (const scenario of [
+    { child: undefined, request: { command: 'summary' } },
+    { child: 'files', request: { command: 'files' } },
+    {
+      child: ['file', decision.meta.file, '--group', 'decision'],
+      request: { command: 'file-decisions', file: decision.meta.file, sort: 'location' },
+    },
+    {
+      child: ['file', decision.meta.file],
+      request: { command: 'file-detail', file: decision.meta.file },
+    },
+    {
+      child: ['decision', decision.meta.id],
+      request: { command: 'decision', selector: decision.meta.id },
+    },
+  ]) {
+    const child = scenario.child === undefined
+      ? []
+      : Array.isArray(scenario.child) ? scenario.child : [scenario.child];
+    const reference = nativeSpawnSync(
+      process.execPath,
+      [resolve(root, 'bin/supercov.js'), 'runs', runId, 'coverage', ...child, '--json'],
+      { cwd: project, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 },
+    );
+    assert.equal(reference.status, 0, reference.stderr || reference.stdout);
+    const envelope = JSON.parse(reference.stdout);
+    const rust = nativeSpawnSync(binary, ['__query-stored-run'], {
+      cwd: root,
+      input: JSON.stringify({
+        root: project,
+        query: {
+          runId,
+          filter: 'all',
+          metric: 'all',
+          offset: 0,
+          limit: 20,
+          valid: envelope.data.valid,
+          stale: envelope.data.stale,
+          staleReasons: envelope.data.staleReasons,
+          ...scenario.request,
+        },
+      }),
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024 * 1024,
+    });
+    assert.equal(rust.status, 0, rust.stderr || rust.stdout);
+    assert.equal(rust.stdout, reference.stdout, `waiver ${scenario.request.command} JSON differs`);
+  }
+}
+
 console.log(
-  `[rust-archive-differential] ${fixtures.length} real archive families have exact report plus typed mmap summary, scope, file-gap, provenance, dimension, decision detail/group, minimization, diff, and bidirectional attribution query parity`,
+  `[rust-archive-differential] ${fixtures.length} real archive families have exact report plus typed mmap summary, scope, file-gap, provenance, dimension, decision detail/group, minimization, diff, waiver-overlay, and bidirectional attribution query parity`,
 );

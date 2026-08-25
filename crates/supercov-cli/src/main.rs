@@ -23,7 +23,7 @@ use supercov_engine::{
     evidence_archive::{
         EvidenceArchiveEntry, EvidenceArchiveSource, collect_sources, write_archive,
     },
-    indexed_query::{IndexedQueryRequest, NewerQuery, execute_indexed_query},
+    indexed_query::{IndexedQueryRequest, NewerQuery, execute_indexed_query_with_waivers},
     js_instrumenter::instrument_candidate,
     query_index::{QueryIndex, QueryIndexIdentity, write_query_index},
     run_store::{StoredRun, discover_runs, open_or_rebuild_query_index, select_run},
@@ -122,6 +122,20 @@ fn query_stored_run() -> ExitCode {
         request.query.run_id.clone_from(&run.id);
         let container = open_or_rebuild_query_index(run).map_err(|error| error.to_string())?;
         let index = CoverageIndex::new(&container).map_err(|error| error.to_string())?;
+        let waiver_source = supercov_engine::coverage_waivers::read_coverage_waivers(&request.root)
+            .map_err(|error| error.to_string())?;
+        let waiver_evaluation = if let Some(source) = waiver_source.as_ref() {
+            let decisions = supercov_engine::coverage_query::filtered_decisions(
+                &index,
+                request.query.view()?,
+                request.query.kind.as_deref(),
+                request.query.runner.as_deref(),
+            )
+            .map_err(|error| format!("{error:?}"))?;
+            Some(supercov_engine::coverage_waivers::evaluate_coverage_waivers(&decisions, source))
+        } else {
+            None
+        };
         let report = if request.query.command == "minimize" {
             Some(analyze_stored_run(run)?)
         } else {
@@ -148,7 +162,13 @@ fn query_stored_run() -> ExitCode {
         } else {
             None
         };
-        execute_indexed_query(&index, report.as_ref(), &request.query, newer_query)
+        execute_indexed_query_with_waivers(
+            &index,
+            report.as_ref(),
+            &request.query,
+            newer_query,
+            waiver_evaluation.as_ref(),
+        )
     })();
     match result {
         Ok(output) => {
@@ -597,6 +617,7 @@ fn query_index_files() -> ExitCode {
                     kind: request.kind.as_deref(),
                     runner: request.runner.as_deref(),
                     file,
+                    waived_by_decision: None,
                     sort: request.sort.unwrap_or(DecisionSort::Location),
                     offset: request.offset,
                     limit: request.limit,

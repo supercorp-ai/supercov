@@ -21,6 +21,7 @@ use crate::{
         coverage_test_query,
     },
     coverage_report::CoverageReport,
+    coverage_waivers::CoverageWaiverEvaluation,
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -91,6 +92,16 @@ pub fn execute_indexed_query(
     request: &IndexedQueryRequest,
     newer: Option<NewerQuery<'_>>,
 ) -> Result<String, String> {
+    execute_indexed_query_with_waivers(index, report, request, newer, None)
+}
+
+pub fn execute_indexed_query_with_waivers(
+    index: &CoverageIndex<'_>,
+    report: Option<&CoverageReport>,
+    request: &IndexedQueryRequest,
+    newer: Option<NewerQuery<'_>>,
+    waivers: Option<&CoverageWaiverEvaluation>,
+) -> Result<String, String> {
     let view = request.view()?;
     let gaps_only = match request.command.as_str() {
         "files" => Some(false),
@@ -147,7 +158,7 @@ pub fn execute_indexed_query(
     }
 
     if request.command == "summary" {
-        let data = coverage_summary_query(
+        let mut data = coverage_summary_query(
             index,
             CoverageSummaryQueryOptions {
                 run: &request.run_id,
@@ -160,6 +171,10 @@ pub fn execute_indexed_query(
             },
         )
         .map_err(|error| format!("{error:?}"))?;
+        if let Some(waivers) = waivers {
+            data.waivers =
+                Some(waivers.summary(data.coverage.covered_conditions, data.coverage.conditions));
+        }
         return response("coverage.summary", &data, None);
     }
 
@@ -230,7 +245,7 @@ pub fn execute_indexed_query(
             .selector
             .as_deref()
             .ok_or_else(|| "indexed decision query requires a selector".to_owned())?;
-        let (data, page) = coverage_decision_query(
+        let (mut data, page) = coverage_decision_query(
             index,
             CoverageDecisionQueryOptions {
                 run: &request.run_id,
@@ -243,6 +258,20 @@ pub fn execute_indexed_query(
             },
         )
         .map_err(|error| format!("{error:?}"))?;
+        if let Some(waivers) = waivers
+            && let crate::coverage_query::CoverageDecisionData::Detail(detail) = &mut data
+        {
+            for decision in &mut detail.decisions {
+                if let Some(conditions) = waivers.waived_by_decision.get(&decision.meta.id) {
+                    for condition in &mut decision.conditions {
+                        if let Some(waiver) = conditions.get(&condition.index) {
+                            condition.waived = Some(true);
+                            condition.waiver_reason = Some(waiver.reason.clone());
+                        }
+                    }
+                }
+            }
+        }
         return response("coverage.decision", &data, Some(&page));
     }
 
@@ -251,7 +280,7 @@ pub fn execute_indexed_query(
             .file
             .as_deref()
             .ok_or_else(|| "indexed file query requires a file".to_owned())?;
-        let (data, page) = coverage_file_detail_query(
+        let (mut data, page) = coverage_file_detail_query(
             index,
             CoverageFileDetailOptions {
                 run: &request.run_id,
@@ -265,6 +294,24 @@ pub fn execute_indexed_query(
             },
         )
         .map_err(|error| format!("{error:?}"))?;
+        if let Some(waivers) = waivers {
+            data.counts.waived_mcdc_conditions = waivers
+                .applied_by_file
+                .get(&data.file)
+                .copied()
+                .unwrap_or(0);
+            for obligation in &mut data.obligations {
+                if let crate::coverage_query::CoverageFileObligation::Mcdc(obligation) = obligation
+                    && let Some(waiver) = waivers
+                        .waived_by_decision
+                        .get(&obligation.id)
+                        .and_then(|conditions| conditions.get(&obligation.condition_index))
+                {
+                    obligation.waived = Some(true);
+                    obligation.waiver_reason = Some(waiver.reason.clone());
+                }
+            }
+        }
         return response("coverage.file", &data, Some(&page));
     }
 
@@ -315,6 +362,7 @@ pub fn execute_indexed_query(
                 kind: request.kind.as_deref(),
                 runner: request.runner.as_deref(),
                 file,
+                waived_by_decision: waivers.map(|waivers| &waivers.waived_by_decision),
                 sort: request.sort.unwrap_or(DecisionSort::Location),
                 offset: request.offset,
                 limit: request.limit,
@@ -324,7 +372,7 @@ pub fn execute_indexed_query(
         return response("coverage.file", &data, Some(&page));
     }
 
-    let query = coverage_file_query(
+    let mut query = coverage_file_query(
         index,
         CoverageFileQueryOptions {
             run: &request.run_id,
@@ -338,6 +386,16 @@ pub fn execute_indexed_query(
         },
     )
     .map_err(|error| format!("{error:?}"))?;
+    if let Some(waivers) = waivers {
+        let rows = match &mut query.data {
+            CoverageFileQueryData::Files(data) => &mut data.files,
+            CoverageFileQueryData::Gaps(data) => &mut data.gaps,
+        };
+        for row in rows {
+            row.waived_mcdc_conditions =
+                Some(waivers.applied_by_file.get(&row.file).copied().unwrap_or(0));
+        }
+    }
     let command = if gaps_only == Some(true) {
         "coverage.gaps"
     } else {
