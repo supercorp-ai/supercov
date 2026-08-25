@@ -9,12 +9,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    agent_json::pagination,
     coverage_analysis::{CoverageSummary, is_independence_pair},
+    coverage_index::{CoverageIndex, CoverageIndexError, CoverageViewId, IndexedFileGap},
     coverage_report::{
         CoverageReportRequest, CoverageView, ReportError, analyze_coverage_results,
         coverage_summary_for_tests,
     },
 };
+use supercov_contracts::AgentPagination;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -75,7 +78,7 @@ pub fn minimum_test_set_for_request(
     )
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub enum QueryError {
     InvalidTarget(f64),
     UnattributedEvidence,
@@ -93,12 +96,133 @@ pub enum QueryError {
         metric: MinimizeMetric,
     },
     Analysis(ReportError),
+    Index(CoverageIndexError),
+    InvalidPagination,
 }
 
 impl From<ReportError> for QueryError {
     fn from(value: ReportError) -> Self {
         Self::Analysis(value)
     }
+}
+
+impl From<CoverageIndexError> for QueryError {
+    fn from(value: CoverageIndexError) -> Self {
+        Self::Index(value)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageQueryFilters {
+    pub outcome: String,
+    pub kind: Option<String>,
+    pub runner: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageFilesData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub metric: MinimizeMetric,
+    pub files: Vec<IndexedFileGap>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageGapsData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub metric: MinimizeMetric,
+    pub gaps: Vec<IndexedFileGap>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoverageFileQueryData {
+    Files(CoverageFilesData),
+    Gaps(CoverageGapsData),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoverageFileQueryResult {
+    pub data: CoverageFileQueryData,
+    pub pagination: AgentPagination,
+}
+
+fn gap_metric_value(gap: &IndexedFileGap, metric: MinimizeMetric) -> usize {
+    match metric {
+        MinimizeMetric::All => gap.score,
+        MinimizeMetric::Lines => gap.uncovered_lines,
+        MinimizeMetric::Statements => gap.uncovered_statements,
+        MinimizeMetric::Functions => gap.uncovered_functions,
+        MinimizeMetric::Branches => gap.missing_branches,
+        MinimizeMetric::Mcdc => gap.missing_mcdc_conditions,
+    }
+}
+
+pub fn coverage_file_query(
+    index: &CoverageIndex<'_>,
+    run: &str,
+    view: CoverageViewId,
+    metric: MinimizeMetric,
+    gaps_only: bool,
+    offset: usize,
+    limit: usize,
+) -> Result<CoverageFileQueryResult, QueryError> {
+    if limit == 0 {
+        return Err(QueryError::InvalidPagination);
+    }
+    let mut files = index.file_gaps(view)?;
+    if gaps_only {
+        files.retain(|gap| gap_metric_value(gap, metric) > 0 || gap.measurement_limitations > 0);
+    }
+    files.sort_by(|left, right| {
+        gap_metric_value(right, metric)
+            .cmp(&gap_metric_value(left, metric))
+            .then_with(|| {
+                right
+                    .measurement_limitations
+                    .cmp(&left.measurement_limitations)
+            })
+            .then_with(|| left.file.cmp(&right.file))
+    });
+    let total = files.len();
+    let page = files
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let page_info = pagination(offset, limit, page.len(), total);
+    let filters = CoverageQueryFilters {
+        outcome: match view {
+            CoverageViewId::All => "all",
+            CoverageViewId::Passed => "passed",
+            CoverageViewId::Failed => "failed",
+        }
+        .into(),
+        kind: None,
+        runner: None,
+    };
+    let data = if gaps_only {
+        CoverageFileQueryData::Gaps(CoverageGapsData {
+            run: run.into(),
+            filters,
+            metric,
+            gaps: page,
+        })
+    } else {
+        CoverageFileQueryData::Files(CoverageFilesData {
+            run: run.into(),
+            filters,
+            metric,
+            files: page,
+        })
+    };
+    Ok(CoverageFileQueryResult {
+        data,
+        pagination: page_info,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -642,7 +766,7 @@ mod tests {
             },
         );
         aggregate.role = "background".into();
-        assert_eq!(
+        assert!(matches!(
             minimum_test_set(
                 &report(vec![aggregate]).view,
                 100.0,
@@ -650,7 +774,7 @@ mod tests {
                 5_000,
             ),
             Err(QueryError::UnattributedEvidence)
-        );
+        ));
     }
 
     #[test]

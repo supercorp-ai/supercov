@@ -367,6 +367,18 @@ miss blocks flipping any default.
   unattributed evidence and combinatorial-budget failure. The remaining query
   work is the typed mmap column layer and the complete summary/files/file/
   decision/covers/test/diff agent surface.
+- The typed mmap layer now stores interned UTF-8 strings, complete structural
+  summaries and per-file gap arithmetic for all, terminal-passed and failed
+  views as fixed little-endian records—not JSON report blobs. Readers validate
+  record widths, reserved fields, references, UTF-8, view cardinality,
+  decision/count ordering, limitation masks and recomputed gap scores. Five
+  real immutable fixture archives require exact round trips for every summary
+  and file gap. More importantly, the first production query operators now
+  read only these columns: `coverage files` and `coverage gaps` produce
+  byte-identical frozen agent-JSON envelopes across Playwright, `node:test`,
+  esbuild, webpack and SWC with varied outcome filters, metrics, pagination
+  offsets and limits. Test-kind/runner projections and obligation-detail
+  sections remain before this path can replace the shipped query engine.
 
 ## Non-goals and guardrails
 

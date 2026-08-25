@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { isDeepStrictEqual } from 'node:util';
 
 import { analyzeCoverageArchive } from '../dist/runAnalysis.js';
+import { fileGaps } from '../dist/query.js';
 
 const root = resolve(import.meta.dirname, '..');
 const binary = resolve(root, 'target/debug/supercov');
@@ -57,7 +58,25 @@ function firstDifference(left, right, path = '$') {
   return { path, left, right };
 }
 
-for (const fixture of fixtures) {
+const indexRequests = [];
+const indexExpected = [];
+function indexedFiles(view) {
+  return fileGaps(view).map((gap) => ({
+    file: gap.file,
+    uncoveredLines: gap.uncoveredLines,
+    uncoveredStatements: gap.uncoveredStatements,
+    uncoveredFunctions: gap.uncoveredFunctions,
+    missingBranches: gap.missingBranches,
+    missingMcdcConditions: gap.missingMcdcConditions,
+    measurementLimitations: gap.measurementLimitations,
+    limitationKinds: gap.limitationKinds,
+    coveredByOtherTests: gap.coveredByOtherTests,
+    uncoveredEverywhere: gap.uncoveredEverywhere,
+    score: gap.score,
+  }));
+}
+
+for (const [fixtureIndex, fixture] of fixtures.entries()) {
   const { id: runId, archivePath } = newestArchive(fixture);
   const expected = JSON.parse(
     JSON.stringify(analyzeCoverageArchive(archivePath, { runId, generatedAt })),
@@ -72,8 +91,76 @@ for (const fixture of fixtures) {
   const actual = JSON.parse(child.stdout);
   const difference = firstDifference(actual, expected);
   assert.equal(difference, undefined, `${fixture}: ${JSON.stringify(difference)}`);
+  indexRequests.push({ archivePath, runId, generatedAt });
+  indexExpected.push({
+    allSummary: expected.summary,
+    passedSummary: expected.filters.passed.summary,
+    failedSummary: expected.filters.failed.summary,
+    allFiles: indexedFiles(expected),
+    passedFiles: indexedFiles(expected.filters.passed),
+    failedFiles: indexedFiles(expected.filters.failed),
+  });
+
+  const command = fixtureIndex % 2 === 0 ? 'files' : 'gaps';
+  const filter = ['all', 'passed', 'failed'][fixtureIndex % 3];
+  const metric = ['all', 'lines', 'branches', 'mcdc', 'functions'][fixtureIndex];
+  const limit = 2;
+  const offset = fixtureIndex % 2;
+  const referenceQuery = spawnSync(
+    process.execPath,
+    [
+      resolve(root, 'bin/supercov.js'),
+      'runs',
+      runId,
+      'coverage',
+      command,
+      '--filter',
+      filter,
+      '--metric',
+      metric,
+      '--limit',
+      String(limit),
+      '--offset',
+      String(offset),
+      '--json',
+    ],
+    {
+      cwd: resolve(root, 'tests/fixtures', fixture),
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024 * 1024,
+    },
+  );
+  assert.equal(referenceQuery.status, 0, `${fixture}: ${referenceQuery.stderr || referenceQuery.stdout}`);
+  const rustQuery = spawnSync(binary, ['__query-index-files'], {
+    cwd: root,
+    input: JSON.stringify({
+      archivePath,
+      runId,
+      generatedAt,
+      filter,
+      command,
+      metric,
+      offset,
+      limit,
+    }),
+    encoding: 'utf8',
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  assert.equal(rustQuery.status, 0, `${fixture}: ${rustQuery.stderr || rustQuery.stdout}`);
+  assert.equal(rustQuery.stdout, referenceQuery.stdout, `${fixture}: indexed ${command} JSON differs`);
 }
 
+const indexed = spawnSync(binary, ['__roundtrip-query-index'], {
+  cwd: root,
+  input: JSON.stringify(indexRequests),
+  encoding: 'utf8',
+  maxBuffer: 128 * 1024 * 1024,
+});
+assert.equal(indexed.status, 0, indexed.stderr || indexed.stdout);
+const indexedActual = JSON.parse(indexed.stdout);
+const indexDifference = firstDifference(indexedActual, indexExpected);
+assert.equal(indexDifference, undefined, `typed index: ${JSON.stringify(indexDifference)}`);
+
 console.log(
-  `[rust-archive-differential] ${fixtures.length} real immutable fixture archives have exact report, transport, attribution, outcome, and filter parity`,
+  `[rust-archive-differential] ${fixtures.length} real immutable fixture archives have exact report and typed mmap summary/file-gap parity`,
 );

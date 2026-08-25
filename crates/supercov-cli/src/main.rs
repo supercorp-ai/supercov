@@ -1,9 +1,14 @@
-use std::{io::Read, path::PathBuf, process::ExitCode, time::Instant};
+use std::{fs, io::Read, path::PathBuf, process::ExitCode, time::Instant};
 
 use serde::{Deserialize, Serialize};
 use supercov_engine::{
+    agent_json,
     coverage_analysis::{CoverageCoreInput, analyze_core},
-    coverage_query::{MinimumTestSetRequest, minimum_test_set_for_request},
+    coverage_index::{CoverageIndex, coverage_index_sections},
+    coverage_query::{
+        CoverageFileQueryData, MinimizeMetric, MinimumTestSetRequest, coverage_file_query,
+        minimum_test_set_for_request,
+    },
     coverage_report::{
         ArchiveReportRequest, CoverageReportRequest, analyze_coverage_archive,
         analyze_coverage_results,
@@ -12,6 +17,7 @@ use supercov_engine::{
         EvidenceArchiveEntry, EvidenceArchiveSource, collect_sources, write_archive,
     },
     js_instrumenter::instrument_candidate,
+    query_index::{QueryIndex, QueryIndexIdentity, write_query_index},
 };
 
 const HELP: &str = "Rust candidate for the frozen Supercov engine contract v1.\n\
@@ -44,6 +50,8 @@ fn main() -> ExitCode {
         Some("__analyze-coverage-results") => analyze_coverage_report(),
         Some("__analyze-evidence-archive") => analyze_evidence_archive(),
         Some("__minimum-test-set") => minimum_test_sets(),
+        Some("__roundtrip-query-index") => roundtrip_query_indexes(),
+        Some("__query-index-files") => query_index_files(),
         Some("__benchmark-js-transform") => benchmark_js_transform(),
         Some("__pack-evidence") => pack_evidence(),
         Some(command) => {
@@ -53,6 +61,189 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IndexedFileQueryRequest {
+    archive_path: PathBuf,
+    run_id: String,
+    generated_at: String,
+    filter: String,
+    command: String,
+    metric: MinimizeMetric,
+    offset: usize,
+    limit: usize,
+}
+
+fn query_index_files() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let request: IndexedFileQueryRequest = match serde_json::from_str(&input) {
+        Ok(request) => request,
+        Err(error) => {
+            eprintln!("[supercov] invalid Rust indexed query input: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let view = match request.filter.as_str() {
+        "all" => supercov_engine::coverage_index::CoverageViewId::All,
+        "passed" => supercov_engine::coverage_index::CoverageViewId::Passed,
+        "failed" => supercov_engine::coverage_index::CoverageViewId::Failed,
+        _ => {
+            eprintln!("[supercov] invalid coverage filter");
+            return ExitCode::from(2);
+        }
+    };
+    let gaps_only = match request.command.as_str() {
+        "files" => false,
+        "gaps" => true,
+        _ => {
+            eprintln!("[supercov] indexed query must be files or gaps");
+            return ExitCode::from(2);
+        }
+    };
+    let archive_request = ArchiveReportRequest {
+        archive_path: request.archive_path.clone(),
+        run_id: request.run_id.clone(),
+        generated_at: request.generated_at,
+        integrity: None,
+        test_exit_code: Default::default(),
+    };
+    let report = match analyze_coverage_archive(&archive_request) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("[supercov] invalid coverage archive: {error:?}");
+            return ExitCode::from(2);
+        }
+    };
+    let root = std::env::temp_dir().join(format!("supercov-indexed-query-{}", std::process::id()));
+    if let Err(error) = fs::create_dir_all(&root) {
+        eprintln!("[supercov] failed to create indexed query directory: {error}");
+        return ExitCode::from(2);
+    }
+    let path = root.join("query-index.v1.bin");
+    let identity = QueryIndexIdentity {
+        evidence_sha256: [1; 32],
+        evidence_bytes: fs::metadata(&request.archive_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0),
+        analysis_sha256: [2; 32],
+        producer_sha256: [3; 32],
+        archive_schema_version: 2,
+    };
+    let result = (|| -> Result<String, String> {
+        let sections = coverage_index_sections(&report).map_err(|error| error.to_string())?;
+        write_query_index(&sections, &identity, &path).map_err(|error| error.to_string())?;
+        let container = QueryIndex::open(&path, &identity).map_err(|error| error.to_string())?;
+        let index = CoverageIndex::new(&container).map_err(|error| error.to_string())?;
+        let query = coverage_file_query(
+            &index,
+            &request.run_id,
+            view,
+            request.metric,
+            gaps_only,
+            request.offset,
+            request.limit,
+        )
+        .map_err(|error| format!("{error:?}"))?;
+        let command = if gaps_only {
+            "coverage.gaps"
+        } else {
+            "coverage.files"
+        };
+        match query.data {
+            CoverageFileQueryData::Files(data) => {
+                agent_json::success(command, &data, Some(&query.pagination))
+            }
+            CoverageFileQueryData::Gaps(data) => {
+                agent_json::success(command, &data, Some(&query.pagination))
+            }
+        }
+        .map_err(|error| format!("response exceeds {} bytes", error.max_bytes))
+    })();
+    let _ = fs::remove_dir_all(&root);
+    match result {
+        Ok(output) => {
+            print!("{output}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[supercov] indexed query failed: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn roundtrip_query_indexes() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let requests: Vec<ArchiveReportRequest> = match serde_json::from_str(&input) {
+        Ok(requests) => requests,
+        Err(error) => {
+            eprintln!("[supercov] invalid Rust query-index input: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let root = std::env::temp_dir().join(format!(
+        "supercov-query-index-roundtrip-{}",
+        std::process::id()
+    ));
+    if let Err(error) = fs::create_dir_all(&root) {
+        eprintln!("[supercov] failed to create query-index test directory: {error}");
+        return ExitCode::from(2);
+    }
+    let result = (|| -> Result<Vec<_>, String> {
+        let mut snapshots = Vec::with_capacity(requests.len());
+        for (index, request) in requests.iter().enumerate() {
+            let report = analyze_coverage_archive(request)
+                .map_err(|error| format!("invalid coverage archive: {error:?}"))?;
+            let seed = u8::try_from(index % 251).unwrap_or(0);
+            let identity = QueryIndexIdentity {
+                evidence_sha256: [seed; 32],
+                evidence_bytes: fs::metadata(&request.archive_path)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+                analysis_sha256: [seed.wrapping_add(1); 32],
+                producer_sha256: [seed.wrapping_add(2); 32],
+                archive_schema_version: 2,
+            };
+            let path = root.join(format!("{index}.bin"));
+            let sections = coverage_index_sections(&report).map_err(|error| error.to_string())?;
+            write_query_index(&sections, &identity, &path).map_err(|error| error.to_string())?;
+            let container =
+                QueryIndex::open(&path, &identity).map_err(|error| error.to_string())?;
+            snapshots.push(
+                CoverageIndex::new(&container)
+                    .and_then(|index| index.snapshot())
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        Ok(snapshots)
+    })();
+    let _ = fs::remove_dir_all(&root);
+    let snapshots = match result {
+        Ok(snapshots) => snapshots,
+        Err(error) => {
+            eprintln!("[supercov] query-index roundtrip failed: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(error) = serde_json::to_writer(std::io::stdout(), &snapshots) {
+        eprintln!("[supercov] failed to write Rust query-index output: {error}");
+        return ExitCode::from(2);
+    }
+    ExitCode::SUCCESS
 }
 
 fn minimum_test_sets() -> ExitCode {
