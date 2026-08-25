@@ -53,12 +53,8 @@ jobs:
       # does not repeat the full local release and oracle suites.
       - run: npm run build
       - name: Revalidate and publish every exact-version native package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           node scripts/verify-native-release-set.mjs native-release
           node scripts/publish-native-release.mjs native-release
       - name: Publish the primary package only after every native package exists
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --ignore-scripts --access public
