@@ -96,5 +96,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: npm run test:filesystem
+      - run: npm run test:rust-platform

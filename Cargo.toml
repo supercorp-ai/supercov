@@ -36,6 +36,7 @@ supercov-contracts = { path = "crates/supercov-contracts" }
 supercov-engine = { path = "crates/supercov-engine" }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
+windows-sys = "0.61.2"
 
 [profile.release]
 codegen-units = 1

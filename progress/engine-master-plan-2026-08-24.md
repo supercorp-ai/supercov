@@ -557,9 +557,11 @@ miss blocks flipping any default.
   ancestor is checked for links before create/rename/delete; a regression with
   a linked `.supercov/evidence` proves external user data is untouched. Rust
   and TypeScript have exact differential results for prune, clean, dry-run,
-  active-run preservation, cache policy and dead-run recovery. Windows process
-  liveness/Job-object behavior remains explicitly gated on the Windows spike;
-  it is not silently claimed by this Unix-validated checkpoint.
+  active-run preservation, cache policy and dead-run recovery. The Windows
+  process-ownership implementation now exists and cross-compiles with warnings
+  denied; actual Windows runtime and NTFS crash behavior remain explicitly
+  gated on the configured compatibility-matrix run rather than being inferred
+  from a cross-target build.
 - Phase 4 now also owns isolated workspace and stable build-cache publication.
   The Rust layer performs deterministic tree copies with clonefile/FICLONE
   fallback through `reflink-copy`, excludes only the frozen generated-output
@@ -596,11 +598,20 @@ miss blocks flipping any default.
   and cannot alter or orphan the command. A black-box Node parent/grandchild
   regression proves full-tree cooperative signal delivery, while another
   proves invalid configuration cannot spawn and diagnostics never expose a
-  private argument. Windows deliberately returns unsupported until the Job
-  Object spike and CI gate land. The unavoidable JavaScript capability/remote
-  launch interception remains a runtime shim; provider-neutral local process
-  ownership no longer needs to remain JavaScript after build orchestration is
-  wired.
+  private argument. Windows now closes the pre-assignment escape race by
+  creating every command suspended, assigning it to a private Job Object with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and only then resuming its primary
+  thread. Console control events provide cooperative interruption while
+  `TerminateJobObject` is the grace-period authority; dropping the supervisor
+  is the crash-safe full-tree boundary. Windows-only tests cover ordinary exit
+  propagation and a parent/descendant timeout escape attempt, and the existing
+  filesystem matrix now builds the Rust binary and runs the Rust platform gate
+  on Windows, macOS, and Linux. The Windows code and tests cross-compile under
+  MSVC with clippy warnings denied; the first real Windows Actions result is
+  still a release gate, not silently treated as green locally. The unavoidable
+  JavaScript capability/remote launch interception remains a runtime shim;
+  provider-neutral local process ownership no longer needs to remain
+  JavaScript after build orchestration is wired.
 - Language-neutral external-phase orchestration is now Rust-owned as well. A
   frontend supplies explicit preparation/build commands and exactly one
   terminal test command; Rust validates that plan before spawning, invokes a
@@ -736,8 +747,9 @@ miss blocks flipping any default.
   TypeScript/reference tests, type checking, clippy with warnings denied, all
   generated/real differential models, and direct Node, Vitest, Playwright,
   Vite, esbuild, tsc, webpack, and SWC integrations. Remaining atomic-cutover
-  blockers are now narrower: run the Windows Job-object and APFS/NTFS crash/filesystem
-  matrices; require a sustained zero-unexplained-diff release window; then
+  blockers are now narrower: execute and pass the newly wired Windows Job-
+  object plus APFS/NTFS crash/filesystem matrices; require a sustained zero-
+  unexplained-diff release window; then
   delete the TypeScript instrumenter, analyzer, discovery, orchestration,
   persistence/query implementations and Babel engine dependencies in the same
   consolidation. Only unavoidable Node/browser/test-runner collectors and
@@ -819,8 +831,11 @@ miss blocks flipping any default.
   yarn scripts receive both generated runner configs because the top-level
   command cannot soundly predict a later runner process. The complete
   `npm run test:rust` and `npm run test:rust-engine` gates pass after these
-  changes. Remaining cutover blockers are native platform packaging, Windows
-  Job-object and APFS/NTFS crash/filesystem matrices, sustained zero-unexplained-
+  changes. Windows Job Object ownership is now implemented without a child-
+  escape window and the three-OS compatibility workflow runs the Rust platform
+  tests; the MSVC target cross-build and clippy gate pass locally. Remaining
+  cutover blockers are a real green Windows/macOS/Linux matrix (including the
+  APFS/NTFS crash cases), native platform packaging, sustained zero-unexplained-
   diff releases, and then the one atomic deletion of the TypeScript engine and
   Babel engine dependencies. Language/runtime collectors remain; duplicate
   engine implementations do not.

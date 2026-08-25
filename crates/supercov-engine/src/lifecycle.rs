@@ -173,6 +173,8 @@ pub(crate) fn sync_directory(path: &Path) -> Result<(), LifecycleError> {
     File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(|source| io_error(path, source))?;
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 

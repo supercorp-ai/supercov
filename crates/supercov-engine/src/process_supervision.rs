@@ -32,6 +32,10 @@ pub enum SupervisionError {
     },
     Wait(io::Error),
     Signal(io::Error),
+    PlatformOperation {
+        operation: &'static str,
+        source: io::Error,
+    },
     UnsupportedPlatform(&'static str),
 }
 
@@ -55,6 +59,9 @@ impl std::fmt::Display for SupervisionError {
             Self::Wait(error) => write!(formatter, "could not wait for test command: {error}"),
             Self::Signal(error) => {
                 write!(formatter, "could not install signal forwarding: {error}")
+            }
+            Self::PlatformOperation { operation, source } => {
+                write!(formatter, "could not {operation}: {source}")
             }
             Self::UnsupportedPlatform(reason) => write!(
                 formatter,
@@ -95,6 +102,14 @@ impl CommandSpec {
         {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            use windows_sys::Win32::System::Threading::{
+                CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED,
+            };
+            command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED);
         }
         Ok(command)
     }
@@ -369,6 +384,231 @@ extern "C" fn record_signal(signal: i32) {
     RECEIVED_SIGNAL.store(signal, Ordering::SeqCst);
 }
 
+#[cfg(windows)]
+struct SignalFlags {
+    _exclusive: MutexGuard<'static, ()>,
+}
+
+#[cfg(windows)]
+impl SignalFlags {
+    fn install() -> Result<Self, SupervisionError> {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+
+        let exclusive = SIGNAL_HANDLER_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        RECEIVED_SIGNAL.store(0, Ordering::SeqCst);
+        // SAFETY: `record_console_signal` has the required system ABI and
+        // remains installed only while this guard is alive.
+        if unsafe { SetConsoleCtrlHandler(Some(record_console_signal), 1) } == 0 {
+            return Err(SupervisionError::Signal(io::Error::last_os_error()));
+        }
+        Ok(Self {
+            _exclusive: exclusive,
+        })
+    }
+
+    fn received(&self) -> Option<ForwardedSignal> {
+        match RECEIVED_SIGNAL.swap(0, Ordering::SeqCst) {
+            2 => Some(ForwardedSignal::Sigint),
+            15 => Some(ForwardedSignal::Sigterm),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SignalFlags {
+    fn drop(&mut self) {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+
+        // SAFETY: removes exactly the handler installed by `install`.
+        let _ = unsafe { SetConsoleCtrlHandler(Some(record_console_signal), 0) };
+        RECEIVED_SIGNAL.store(0, Ordering::SeqCst);
+    }
+}
+
+#[cfg(windows)]
+static SIGNAL_HANDLER_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(windows)]
+static RECEIVED_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+#[cfg(windows)]
+unsafe extern "system" fn record_console_signal(control: u32) -> i32 {
+    use windows_sys::Win32::System::Console::{
+        CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+    };
+
+    match control {
+        CTRL_C_EVENT | CTRL_BREAK_EVENT => {
+            RECEIVED_SIGNAL.store(2, Ordering::SeqCst);
+            1
+        }
+        CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
+            RECEIVED_SIGNAL.store(15, Ordering::SeqCst);
+            1
+        }
+        _ => 0,
+    }
+}
+
+#[cfg(windows)]
+struct JobHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl JobHandle {
+    fn new() -> Result<Self, SupervisionError> {
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+
+        // SAFETY: null security attributes and name create one private job.
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if handle.is_null() {
+            return Err(SupervisionError::PlatformOperation {
+                operation: "create a Windows Job Object",
+                source: io::Error::last_os_error(),
+            });
+        }
+        let job = Self(handle);
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: the buffer is a live value of the exact information class
+        // and length requested by SetInformationJobObject.
+        if unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )
+        } == 0
+        {
+            return Err(SupervisionError::PlatformOperation {
+                operation: "configure Windows Job Object containment",
+                source: io::Error::last_os_error(),
+            });
+        }
+        Ok(job)
+    }
+
+    fn assign(&self, child: &Child) -> Result<(), SupervisionError> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+
+        // SAFETY: Child owns a live process handle with the rights granted by
+        // CreateProcess; the job handle stays live for the complete plan.
+        if unsafe { AssignProcessToJobObject(self.0, child.as_raw_handle().cast()) } == 0 {
+            return Err(SupervisionError::PlatformOperation {
+                operation: "assign the suspended command to its Windows Job Object",
+                source: io::Error::last_os_error(),
+            });
+        }
+        Ok(())
+    }
+
+    fn terminate(&self) {
+        use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+        // SAFETY: the handle owns this invocation's process tree. Failure can
+        // only mean the tree has already exited, so termination is best effort.
+        let _ = unsafe { TerminateJobObject(self.0, 1) };
+    }
+}
+
+#[cfg(windows)]
+impl Drop for JobHandle {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE makes this the final, crash-safe
+        // containment boundary for descendants that outlive their root.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+#[cfg(windows)]
+fn resume_suspended_process(pid: u32) -> Result<(), SupervisionError> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First,
+                Thread32Next,
+            },
+            Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+        },
+    };
+
+    // The stdlib exposes the process handle but not CreateProcess's primary
+    // thread handle. Starting suspended, assigning the job, then resuming the
+    // process-owned thread from a ToolHelp snapshot closes the escape race.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(SupervisionError::PlatformOperation {
+            operation: "enumerate the suspended command threads",
+            source: io::Error::last_os_error(),
+        });
+    }
+    struct Snapshot(windows_sys::Win32::Foundation::HANDLE);
+    impl Drop for Snapshot {
+        fn drop(&mut self) {
+            let _ = unsafe { CloseHandle(self.0) };
+        }
+    }
+    let _snapshot = Snapshot(snapshot);
+    let mut entry = THREADENTRY32 {
+        dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+        ..Default::default()
+    };
+    if unsafe { Thread32First(snapshot, &raw mut entry) } == 0 {
+        return Err(SupervisionError::PlatformOperation {
+            operation: "read the suspended command thread snapshot",
+            source: io::Error::last_os_error(),
+        });
+    }
+    loop {
+        if entry.th32OwnerProcessID == pid {
+            let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+            if thread.is_null() {
+                return Err(SupervisionError::PlatformOperation {
+                    operation: "open the suspended command's primary thread",
+                    source: io::Error::last_os_error(),
+                });
+            }
+            // SAFETY: the handle identifies a suspended thread owned by the
+            // just-created process and is closed immediately after resuming.
+            let resumed = unsafe { ResumeThread(thread) };
+            let resume_error = (resumed == u32::MAX).then(io::Error::last_os_error);
+            let _ = unsafe { CloseHandle(thread) };
+            if let Some(source) = resume_error {
+                return Err(SupervisionError::PlatformOperation {
+                    operation: "resume the contained command",
+                    source,
+                });
+            }
+            return Ok(());
+        }
+        entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+        if unsafe { Thread32Next(snapshot, &raw mut entry) } == 0 {
+            break;
+        }
+    }
+    Err(SupervisionError::PlatformOperation {
+        operation: "locate the suspended command's primary thread",
+        source: io::Error::new(io::ErrorKind::NotFound, "process thread was absent"),
+    })
+}
+
+#[cfg(windows)]
+fn forward_windows_control(child: &Child) {
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+    // CREATE_NEW_PROCESS_GROUP makes the child's PID its console group ID.
+    // Some non-console commands reject the event; the grace-period Job Object
+    // termination remains authoritative in that case.
+    let _ = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id()) };
+}
+
 #[cfg(unix)]
 fn signal_process_group(child: &mut Child, signal: i32) {
     let pid = child.id() as i32;
@@ -510,14 +750,133 @@ impl ProcessSupervisor {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub struct ProcessSupervisor {
+    signals: SignalFlags,
+    job: JobHandle,
+}
+
+#[cfg(windows)]
+impl ProcessSupervisor {
+    pub fn new() -> Result<Self, SupervisionError> {
+        Ok(Self {
+            signals: SignalFlags::install()?,
+            job: JobHandle::new()?,
+        })
+    }
+
+    pub fn supervise(
+        &self,
+        spec: &CommandSpec,
+        options: SupervisionOptions,
+        writer: &mut dyn Write,
+    ) -> Result<SupervisedResult, SupervisionError> {
+        if options.diagnostic_interval.is_zero() || options.termination_grace.is_zero() {
+            return Err(SupervisionError::InvalidMilliseconds {
+                name: "process supervision interval".into(),
+            });
+        }
+        if options.timeout.is_some_and(|timeout| timeout.is_zero()) {
+            return Err(SupervisionError::InvalidMilliseconds {
+                name: "SUPERCOV_COMMAND_TIMEOUT_MS".into(),
+            });
+        }
+        if let Some(signal) = self.signals.received() {
+            return Ok(SupervisedResult {
+                status: None,
+                signal: None,
+                timed_out: false,
+                interrupted_signal: Some(signal),
+            });
+        }
+        let mut command = spec.command()?;
+        let mut child = command.spawn().map_err(|source| SupervisionError::Spawn {
+            program: spec.program.clone(),
+            source,
+        })?;
+        if let Err(error) = self.job.assign(&child) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        if let Err(error) = resume_suspended_process(child.id()) {
+            self.job.terminate();
+            let _ = child.wait();
+            return Err(error);
+        }
+        let started = Instant::now();
+        let mut next_diagnostic = started + options.diagnostic_interval;
+        let timeout_at = options.timeout.map(|timeout| started + timeout);
+        let mut termination: Option<Instant> = None;
+        let mut timed_out = false;
+        let mut interrupted_signal = None;
+        let mut escalated = false;
+
+        loop {
+            let status = match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    self.job.terminate();
+                    let _ = child.wait();
+                    return Err(SupervisionError::Wait(error));
+                }
+            };
+            if let Some(status) = status {
+                let (status, signal) = exit_parts(status);
+                return Ok(SupervisedResult {
+                    status,
+                    signal,
+                    timed_out,
+                    interrupted_signal,
+                });
+            }
+            let now = Instant::now();
+            if termination.is_none()
+                && let Some(signal) = self.signals.received()
+            {
+                interrupted_signal = Some(signal);
+                forward_windows_control(&child);
+                termination = Some(now);
+            }
+            if termination.is_none() && timeout_at.is_some_and(|deadline| now >= deadline) {
+                timed_out = true;
+                let _ = writeln!(
+                    writer,
+                    "[supercov] command exceeded SUPERCOV_COMMAND_TIMEOUT_MS={}; terminating process group",
+                    options.timeout.expect("timeout deadline").as_millis()
+                )
+                .and_then(|_| writer.flush());
+                forward_windows_control(&child);
+                termination = Some(now);
+                write_diagnostic(&child, started, writer);
+            }
+            if now >= next_diagnostic && !timed_out {
+                write_diagnostic(&child, started, writer);
+                while next_diagnostic <= now {
+                    next_diagnostic += options.diagnostic_interval;
+                }
+            }
+            if !escalated
+                && termination.is_some_and(|terminated_at| {
+                    now.duration_since(terminated_at) >= options.termination_grace
+                })
+            {
+                self.job.terminate();
+                escalated = true;
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 pub struct ProcessSupervisor;
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl ProcessSupervisor {
     pub fn new() -> Result<Self, SupervisionError> {
         Err(SupervisionError::UnsupportedPlatform(
-            "Windows Job Objects are required before enabling the Rust supervisor",
+            "this target has no process-tree containment implementation",
         ))
     }
 
@@ -528,7 +887,7 @@ impl ProcessSupervisor {
         _writer: &mut dyn Write,
     ) -> Result<SupervisedResult, SupervisionError> {
         Err(SupervisionError::UnsupportedPlatform(
-            "Windows Job Objects are required before enabling the Rust supervisor",
+            "this target has no process-tree containment implementation",
         ))
     }
 }
@@ -595,6 +954,23 @@ mod tests {
         assert!(diagnostics.is_empty());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn returns_the_windows_child_status_without_a_default_timeout() {
+        let spec = CommandSpec {
+            program: "cmd.exe".into(),
+            arguments: vec!["/D".into(), "/S".into(), "/C".into(), "exit /b 7".into()],
+            cwd: std::env::current_dir().unwrap(),
+            environment: None,
+        };
+        let mut diagnostics = Vec::new();
+        let result =
+            supervise_command(&spec, SupervisionOptions::default(), &mut diagnostics).unwrap();
+        assert_eq!(result.exit_code(), 7);
+        assert!(!result.timed_out);
+        assert!(diagnostics.is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn explicit_timeout_reports_and_returns_124() {
@@ -621,6 +997,119 @@ mod tests {
         assert!(result.timed_out);
         assert!(diagnostics.contains("command still running after"));
         assert!(diagnostics.contains("SUPERCOV_COMMAND_TIMEOUT_MS=70"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn timeout_terminates_the_complete_windows_job() {
+        use std::{
+            fs,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "supercov-windows-job-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        struct RemoveOnDrop(PathBuf);
+        impl Drop for RemoveOnDrop {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = RemoveOnDrop(root.clone());
+        let ready = root.join("descendant-ready");
+        let marker = root.join("descendant-survived");
+        let mut environment = std::env::vars_os().collect::<Vec<_>>();
+        environment.extend([
+            ("SUPERCOV_WINDOWS_PARENT_HELPER".into(), "1".into()),
+            ("SUPERCOV_WINDOWS_READY".into(), ready.as_os_str().into()),
+            ("SUPERCOV_WINDOWS_MARKER".into(), marker.as_os_str().into()),
+        ]);
+        let spec = CommandSpec {
+            program: std::env::current_exe().unwrap().into_os_string(),
+            arguments: vec![
+                "--ignored".into(),
+                "windows_timeout_parent_helper".into(),
+                "--nocapture".into(),
+            ],
+            cwd: root,
+            environment: Some(environment),
+        };
+        let mut diagnostics = Vec::new();
+        let result = supervise_command(
+            &spec,
+            SupervisionOptions {
+                diagnostic_interval: Duration::from_secs(60),
+                timeout: Some(Duration::from_millis(750)),
+                termination_grace: Duration::from_millis(50),
+            },
+            &mut diagnostics,
+        )
+        .unwrap();
+
+        assert!(result.timed_out);
+        assert_eq!(result.exit_code(), COMMAND_TIMEOUT_EXIT_CODE);
+        assert!(
+            ready.exists(),
+            "the helper did not prove that its descendant started before timeout"
+        );
+        thread::sleep(Duration::from_millis(1_700));
+        assert!(
+            !marker.exists(),
+            "a descendant escaped the Windows Job Object after timeout"
+        );
+        assert!(
+            String::from_utf8(diagnostics)
+                .unwrap()
+                .contains("terminating process group")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "subprocess helper for timeout_terminates_the_complete_windows_job"]
+    fn windows_timeout_parent_helper() {
+        use std::fs;
+
+        if std::env::var_os("SUPERCOV_WINDOWS_PARENT_HELPER").is_none() {
+            return;
+        }
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "windows_timeout_marker_helper", "--nocapture"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        fs::write(
+            std::env::var_os("SUPERCOV_WINDOWS_READY").unwrap(),
+            child.id().to_string(),
+        )
+        .unwrap();
+        child.wait().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "subprocess helper for timeout_terminates_the_complete_windows_job"]
+    fn windows_timeout_marker_helper() {
+        use std::fs;
+
+        if std::env::var_os("SUPERCOV_WINDOWS_PARENT_HELPER").is_none() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(1_500));
+        fs::write(
+            std::env::var_os("SUPERCOV_WINDOWS_MARKER").unwrap(),
+            b"escaped",
+        )
+        .unwrap();
     }
 
     #[cfg(unix)]
