@@ -169,18 +169,29 @@ fn create_directory_all(path: &Path) -> Result<(), JavascriptFrontendError> {
 
 #[cfg(windows)]
 fn create_directory_all(path: &Path) -> Result<(), JavascriptFrontendError> {
+    let is_plain_directory = |candidate: &Path| {
+        fs::symlink_metadata(candidate)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+    };
+    if is_plain_directory(path) {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent()
+        && !parent.is_dir()
+    {
+        create_directory_all(parent)?;
+    }
+
     const ATTEMPTS: usize = 11;
     for attempt in 0..ATTEMPTS {
-        // `create_dir_all` can report AccessDenied for an already-created
-        // directory while Windows inspection software holds a parent handle.
-        // Check the exact non-link postcondition before asking the OS to
-        // create it again. A link or non-directory remains an error.
-        if fs::symlink_metadata(path)
-            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
-        {
+        // Windows' recursive `create_dir_all` can report AccessDenied while
+        // traversing an existing 8.3 short-name temp path. Create only the
+        // exact owned leaf after its parent exists, and accept the result only
+        // when that leaf is a real directory rather than a link.
+        if is_plain_directory(path) {
             return Ok(());
         }
-        match fs::create_dir_all(path) {
+        match fs::create_dir(path) {
             Ok(()) => return Ok(()),
             Err(source)
                 if source.kind() == io::ErrorKind::PermissionDenied && attempt + 1 < ATTEMPTS =>
