@@ -17,7 +17,7 @@ jobs:
       contents: read
 
   publish:
-    needs: [release-check, native-artifacts]
+    needs: native-artifacts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
