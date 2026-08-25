@@ -628,8 +628,13 @@ miss blocks flipping any default.
   generated modules/scripts now use one explicit direct-runtime global instead
   of virtual/legacy bindings, and persisted-run queries derive validity from
   the test exit code rather than defaulting it to false. This remains private:
-  CJS assertion bindings, node:test `expect`, build-tool frontends, full
-  reference differentials and cross-platform crash/filesystem gates still
+  A second black-box case now proves the same complete structural result for
+  CommonJS plus top-level `require` assertion bindings. Its module-export
+  assignment is correctly retained as background/setup execution: the all-
+  evidence view is structurally complete while the passed-test-only view does
+  not falsely attribute module initialization to a test assertion. Nested or
+  shadowed CJS assertion bindings, node:test `expect`, build-tool frontends,
+  full reference differentials and cross-platform crash/filesystem gates still
   block any selector or TypeScript-engine deletion.
 
 ## Non-goals and guardrails

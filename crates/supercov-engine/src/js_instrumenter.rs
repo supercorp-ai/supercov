@@ -456,6 +456,26 @@ fn canonical_assert_module(value: &str) -> Option<String> {
     })
 }
 
+fn required_assert_module(expression: &Expression<'_>) -> Option<String> {
+    if let Expression::CallExpression(call) = expression
+        && matches!(&call.callee, Expression::Identifier(identifier) if identifier.name == "require")
+        && let [Argument::StringLiteral(module)] = call.arguments.as_slice()
+    {
+        return canonical_assert_module(module.value.as_str());
+    }
+    if let Expression::StaticMemberExpression(member) = expression
+        && member.property.name == "strict"
+        && let Some(module) = required_assert_module(&member.object)
+    {
+        return Some(if module == "node:assert" {
+            "node:assert/strict".into()
+        } else {
+            module
+        });
+    }
+    None
+}
+
 #[derive(Default)]
 struct NodeAssertionBindings {
     objects: HashMap<String, String>,
@@ -465,38 +485,72 @@ struct NodeAssertionBindings {
 fn node_assertion_bindings(program: &Program<'_>) -> NodeAssertionBindings {
     let mut bindings = NodeAssertionBindings::default();
     for statement in &program.body {
-        let Statement::ImportDeclaration(declaration) = statement else {
-            continue;
-        };
-        let Some(module) = canonical_assert_module(declaration.source.value.as_str()) else {
-            continue;
-        };
-        for specifier in declaration.specifiers.iter().flatten() {
-            match specifier {
-                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                    bindings
-                        .objects
-                        .insert(specifier.local.name.to_string(), module.clone());
-                }
-                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                    bindings
-                        .objects
-                        .insert(specifier.local.name.to_string(), module.clone());
-                }
-                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-                    let imported = specifier.imported.name().to_string();
-                    if imported == "strict" {
-                        bindings.objects.insert(
-                            specifier.local.name.to_string(),
-                            "node:assert/strict".into(),
-                        );
-                    } else if NODE_ASSERT_METHODS.contains(&imported.as_str()) {
-                        bindings.direct.insert(
-                            specifier.local.name.to_string(),
-                            format!("{module}.{imported}"),
-                        );
+        if let Statement::ImportDeclaration(declaration) = statement
+            && let Some(module) = canonical_assert_module(declaration.source.value.as_str())
+        {
+            for specifier in declaration.specifiers.iter().flatten() {
+                match specifier {
+                    ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                        bindings
+                            .objects
+                            .insert(specifier.local.name.to_string(), module.clone());
+                    }
+                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                        bindings
+                            .objects
+                            .insert(specifier.local.name.to_string(), module.clone());
+                    }
+                    ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                        let imported = specifier.imported.name().to_string();
+                        if imported == "strict" {
+                            bindings.objects.insert(
+                                specifier.local.name.to_string(),
+                                "node:assert/strict".into(),
+                            );
+                        } else if NODE_ASSERT_METHODS.contains(&imported.as_str()) {
+                            bindings.direct.insert(
+                                specifier.local.name.to_string(),
+                                format!("{module}.{imported}"),
+                            );
+                        }
                     }
                 }
+            }
+            continue;
+        }
+        let Statement::VariableDeclaration(declaration) = statement else {
+            continue;
+        };
+        for declarator in &declaration.declarations {
+            let Some(module) = declarator.init.as_ref().and_then(required_assert_module) else {
+                continue;
+            };
+            match &declarator.id {
+                BindingPattern::BindingIdentifier(identifier) => {
+                    bindings
+                        .objects
+                        .insert(identifier.name.to_string(), module.clone());
+                }
+                BindingPattern::ObjectPattern(pattern) => {
+                    for property in &pattern.properties {
+                        let Some(imported) = property.key.static_name() else {
+                            continue;
+                        };
+                        let BindingPattern::BindingIdentifier(local) = &property.value else {
+                            continue;
+                        };
+                        if imported == "strict" {
+                            bindings
+                                .objects
+                                .insert(local.name.to_string(), "node:assert/strict".into());
+                        } else if NODE_ASSERT_METHODS.contains(&imported.as_ref()) {
+                            bindings
+                                .direct
+                                .insert(local.name.to_string(), format!("{module}.{imported}"));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -659,8 +713,8 @@ impl<'a> VisitMut<'a> for NodeAssertionTransformer<'a> {
 }
 
 /// Attribute native ESM node:assert calls by opening the assertion phase
-/// before argument evaluation. CJS require bindings and node:test `expect`
-/// remain explicit blockers for the private vertical slice.
+/// before argument evaluation. node:test `expect` remains an explicit blocker
+/// for the private vertical slice.
 pub fn instrument_node_assertion_phases(
     source: &str,
     file: &str,
@@ -6255,6 +6309,20 @@ mod tests {
         let output = instrument_node_assertion_phases(source, "tests/value.test.mjs").unwrap();
         assert_eq!(output.assertions, 0);
         assert_eq!(output.code, source);
+    }
+
+    #[test]
+    fn native_commonjs_assertion_bindings_are_attributed() {
+        let source = concat!(
+            "const assert = require('node:assert/strict');\n",
+            "const { ok: verify } = require('assert');\n",
+            "assert.equal(value(), 1);\n",
+            "verify(other());\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/value.test.cjs").unwrap();
+        assert_eq!(output.assertions, 2);
+        assert!(output.code.contains("node:assert/strict.equal"));
+        assert!(output.code.contains("node:assert.ok"));
     }
 
     #[test]

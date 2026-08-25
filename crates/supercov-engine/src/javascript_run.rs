@@ -247,6 +247,10 @@ pub fn run_direct_javascript(
             directory: evidence_directory,
             prefix: None,
         },
+        EvidenceArchiveSource::Directory {
+            directory: server_evidence_root.join(&run_id),
+            prefix: Some("server".into()),
+        },
     ])
     .map_err(|error| error.to_string())?;
     let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
