@@ -12,6 +12,16 @@ const registry = JSON.parse(
   readFileSync(resolve(repository, "npm/native-targets.json"), "utf8"),
 );
 
+assert.deepEqual(
+  mainPackage.optionalDependencies,
+  Object.fromEntries(
+    registry.targets
+      .map(target => [target.package, mainPackage.version])
+      .sort(([left], [right]) => left.localeCompare(right)),
+  ),
+  "primary package optionalDependencies must contain every exact-version native package",
+);
+
 function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }

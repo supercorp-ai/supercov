@@ -1,6 +1,7 @@
 name: Native artifact matrix
 
 on:
+  workflow_call:
   workflow_dispatch:
 
 permissions:

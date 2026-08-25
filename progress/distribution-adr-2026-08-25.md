@@ -34,7 +34,7 @@ maturin `bindings = "bin"`; it does not rebuild the analyzer in Python. A
 future cargo-dist-versus-handwritten release-pipeline choice may change release
 orchestration, not artifact identity or package contracts.
 
-The initial artifact workflow is manual-only so ordinary commits consume no
+The artifact workflow is manual-only on its own so ordinary commits consume no
 eight-platform build minutes. It uses GitHub's native macOS arm64/x64, Linux
 arm64/x64, and Windows arm64/x64 hosted runners; each Linux architecture also
 builds its musl target. This avoids treating cross-compilation as native runtime
@@ -53,6 +53,16 @@ assembled from a partial or mixed-version matrix. It also reads each npm
 tarball directly and verifies its packed manifest selectors, executable path,
 binary size, binary digest and POSIX execute bit rather than trusting detached
 checksum metadata alone.
+
+The tag-only release workflow invokes this artifact workflow as a reusable
+gate. It publishes every verified platform tarball before the primary package,
+whose exact `optionalDependencies` are machine-checked against the target
+registry. Partial native publication is harmless because no primary package
+can reference it; partial primary publication is structurally impossible.
+Initial publication of each new unscoped platform name requires an npm
+credential authorized to create packages. Once claimed, each package should be
+migrated to the same GitHub OIDC trusted publisher as the primary package and
+the bootstrap credential removed.
 
 ## Gates
 

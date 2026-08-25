@@ -14,6 +14,10 @@ jobs:
   release-check:
     runs-on: ubuntu-latest
     steps:
+      - name: Require a release tag
+        env:
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+        run: test "$RELEASE_REF_TYPE" = tag
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
@@ -27,6 +31,14 @@ jobs:
       - run: npx playwright install --with-deps chromium firefox webkit
       - run: npm run test:fixture
       - run: npm run test:rust-fixture
+
+  native-artifacts:
+    needs: release-check
+    uses: ./.github/workflows/native-artifacts.yml
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
 
   test262:
     name: Test262 ${{ matrix.shard }}/16
@@ -56,7 +68,7 @@ jobs:
         run: node scripts/test262-equivalence.mjs --engine rust --test262 .test262 --shard ${{ matrix.shard }}/16 --minimum 1000
 
   publish:
-    needs: [release-check, test262]
+    needs: [release-check, test262, native-artifacts]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -66,14 +78,26 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
       - name: Require a matching version tag
-        if: github.ref_type == 'tag'
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: node -e 'const version = require("./package.json").version; if (process.env.RELEASE_TAG !== "v" + version) { console.error(`Expected tag v${version}, received ${process.env.RELEASE_TAG}`); process.exit(1); }'
+      - uses: actions/download-artifact@v8
+        with:
+          name: supercov-native-release-set
+          path: native-release
       - run: npm ci
       # All release, oracle, fixture, and Test262 gates completed in the jobs
       # this job needs. Build the exact tarball inputs here, then suppress npm's
       # lifecycle scripts so `prepublishOnly` does not repeat the LLVM-dependent
       # release gate on a runner where LLVM was deliberately not installed.
       - run: npm run build
-      - run: npm publish --ignore-scripts
+      - name: Revalidate and publish every exact-version native package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          node scripts/verify-native-release-set.mjs native-release
+          node scripts/publish-native-release.mjs native-release
+      - name: Publish the primary package only after every native package exists
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --ignore-scripts --access public

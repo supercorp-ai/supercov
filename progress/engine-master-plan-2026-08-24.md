@@ -890,6 +890,16 @@ miss blocks flipping any default.
   it independently checks every packed npm manifest and embedded binary.
   It is deliberately not triggered by ordinary pushes
   so this groundwork consumes no Actions minutes until explicitly requested.
+  The release workflow now calls that complete native matrix, downloads and
+  revalidates the aggregate release set, publishes all eight exact-version
+  platform packages first, and publishes the primary package only after every
+  platform publication succeeds. The primary `0.0.10` candidate declares all
+  eight packages as exact optional dependencies. Manual branch dispatch is
+  rejected before expensive release work; only a matching version tag may
+  publish. A local Apple arm64 packed install of the `0.0.10` candidate is
+  green. Initial publication of the unclaimed platform package names still
+  needs one npm credential with new-package authority; existing `supercov`
+  OIDC trust cannot authorize names that do not yet exist.
   The
   distribution ADR explicitly rejects WASI as an unsound fallback for a CLI
   that owns processes/signals/filesystem transactions. Platform packages are
@@ -897,7 +907,8 @@ miss blocks flipping any default.
   checkpoint. The native matrix is defined but has not yet produced a real
   hosted-run green result; the attestation step is wired but therefore has not
   yet produced signed provenance. Initial npm package claims,
-  coordinated publication, GitHub artifacts, PyPI/Homebrew/cargo-binstall/opam
+  hosted matrix proof, initial package-name claims, GitHub Releases,
+  PyPI/Homebrew/cargo-binstall/opam
   and C-compatible wrappers remain Phase 5 gates.
 - The shared producer boundary was first frozen independently as
   `contracts/frontend-v1`. The first real Python spike exposed that v1 had no

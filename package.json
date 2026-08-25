@@ -1,6 +1,6 @@
 {
   "name": "supercov",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "description": "Zero-edit, runner-aware coverage completeness for JavaScript test suites",
   "license": "MIT",
   "repository": {
@@ -63,6 +63,16 @@
     "@babel/parser": "^8.0.4",
     "@babel/traverse": "^8.0.4",
     "@babel/types": "^8.0.4"
+  },
+  "optionalDependencies": {
+    "supercov-darwin-arm64": "0.0.10",
+    "supercov-darwin-x64": "0.0.10",
+    "supercov-linux-arm64-gnu": "0.0.10",
+    "supercov-linux-arm64-musl": "0.0.10",
+    "supercov-linux-x64-gnu": "0.0.10",
+    "supercov-linux-x64-musl": "0.0.10",
+    "supercov-win32-arm64": "0.0.10",
+    "supercov-win32-x64": "0.0.10"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.55.0",
