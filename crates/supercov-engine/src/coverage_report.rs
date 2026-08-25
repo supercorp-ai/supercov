@@ -879,7 +879,7 @@ fn confidence_for(
     asserted_phase_ids: &BTreeSet<String>,
 ) -> CoverageConfidence {
     let test_ids = test_ids.into_iter().collect::<BTreeSet<_>>();
-    let _phase_ids = phase_ids.into_iter().collect::<BTreeSet<_>>();
+    let phase_ids = phase_ids.into_iter().collect::<BTreeSet<_>>();
     let explicit_phase_ids = explicit_phase_ids.into_iter().collect::<BTreeSet<_>>();
     let asserted_phases = explicit_phase_ids
         .iter()
@@ -897,6 +897,17 @@ fn confidence_for(
         .iter()
         .filter_map(|id| tests.get(id).map(|test| test.role.as_str()))
         .collect::<Vec<_>>();
+    let phase_kinds = phase_ids
+        .iter()
+        .filter_map(|id| phases.get(id).map(|phase| phase.phase.kind.as_str()))
+        .collect::<Vec<_>>();
+    let only = |phase_kind: &str, role: &str| {
+        if phase_kinds.is_empty() {
+            !roles.is_empty() && roles.iter().all(|value| *value == role)
+        } else {
+            phase_kinds.iter().all(|value| *value == phase_kind)
+        }
+    };
     let has_action = explicit_phase_ids.iter().any(|id| {
         phases
             .get(id)
@@ -921,8 +932,8 @@ fn confidence_for(
         .collect::<BTreeSet<_>>();
     CoverageConfidence {
         level: level.into(),
-        setup_only: !roles.is_empty() && roles.iter().all(|role| *role == "setup"),
-        background_only: !roles.is_empty() && roles.iter().all(|role| *role == "background"),
+        setup_only: only("setup", "setup"),
+        background_only: only("background", "background"),
         asserted: !asserted_tests.is_empty(),
         tests: sorted(&test_ids),
         asserted_tests: sorted(&asserted_tests),

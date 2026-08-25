@@ -45,6 +45,22 @@ Background or unparseable contexts remain explicit background/unattributed
 evidence and are excluded from passed-only per-test confidence. They are not
 dropped.
 
+## Proven pytest outcomes
+
+The checked-in `pytest-outcomes.json` golden is produced by a real pytest run
+containing an ordinary pass, ordinary failure, skip, expected failure, setup
+failure, and teardown failure. Collection begins when the generated plugin is
+imported, before fixture/conftest imports, rather than waiting until
+`pytest_configure`. The xdist controller stops and discards that early
+collector once its role is known.
+
+The importer reproduces coverage.py's 11/12 executable lines and 7/8 branch
+arcs exactly. Passed-only coverage contains only the terminal ordinary pass;
+xfail, failures, skips, and background imports cannot verify it. Setup-only
+confidence is derived from the actual setup phase rather than a guessed test
+role. Retry identity, crashed workers, subprocesses, threads, and async
+execution remain explicit open gates.
+
 ## Public-API basis
 
 - [`Coverage.analysis2`](https://coverage.readthedocs.io/en/7.13.5/api_coverage.html#coverage.Coverage.analysis2)

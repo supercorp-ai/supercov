@@ -923,9 +923,9 @@ miss blocks flipping any default.
   columns are blocking structural limitations, never zero-sized success. The
   producer contract, fixture, golden export, architectural decision and public
   API sources are recorded in `contracts/python-coverage-v1` and
-  `progress/python-tier-a-spike-2026-08-25.md`. Public CLI execution, xdist and
-  subprocess matrices, archive v3/model migration, owned Python MC/DC probes,
-  packaging and broad dogfood remain unfinished gates. The next private step
+  `progress/python-tier-a-spike-2026-08-25.md`. Public CLI execution,
+  subprocess matrices, owned Python MC/DC probes, packaging and broad dogfood
+  remain unfinished gates. The next private step
   has proven a real two-worker pytest-xdist run: the generated plugin starts a
   separate coverage.py collector in each worker, uses a run-unique suffixed
   data file plus static worker context, leaves the controller uninstrumented,
@@ -933,8 +933,19 @@ miss blocks flipping any default.
   without deleting them; the golden import preserves both worker identities,
   both background import contexts and exact per-test arcs. Rust now requires
   the real supervised test exit code rather than manufacturing success and
-  preserves pytest expected-failure semantics. Broader xdist scheduling,
-  worker crash, retry and subprocess cases are still open.
+  preserves pytest expected-failure semantics. A second checked-in real-pytest
+  matrix now covers ordinary pass/fail/skip, xfail, setup failure and teardown
+  failure. Starting collection at plugin import (the earliest `-p` boundary)
+  captures conftest imports that `pytest_configure` necessarily misses, while
+  the xdist controller still stops and discards its collector once identified.
+  Background imports remain visible in the all-evidence view but have unknown
+  verdict and cannot verify passed-only coverage. The matrix reconstructs the
+  coverage.py oracle exactly at 11/12 executable lines and 7/8 branch arcs;
+  passed-only retains only the terminal ordinary pass. This work also corrected
+  a shared analyzer defect: setup-only/background-only confidence now follows
+  observed phase kinds whenever phase evidence exists, rather than a synthetic
+  result role. Broader xdist scheduling, worker crash, retry, subprocess,
+  thread and async cases are still open.
 - Shared analysis no longer hardcodes the JavaScript coverage-model label for
   every language. `CoverageReportRequest` now carries an optional strict
   `CoverageModelDeclaration`; absent declarations retain the byte-compatible

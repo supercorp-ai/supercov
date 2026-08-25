@@ -15,19 +15,12 @@ _OWNED_COVERAGE = None
 _IS_XDIST_CONTROLLER = False
 
 
-def pytest_configure(config):
-    global _IS_XDIST_CONTROLLER, _OWNED_COVERAGE
-    workers = getattr(config.option, "numprocesses", None)
-    _IS_XDIST_CONTROLLER = WORKER_ID == "main" and workers not in (None, 0, "0")
-    if _IS_XDIST_CONTROLLER:
-        return
-    if coverage.Coverage.current() is not None:
-        return
+def _start_owned_coverage():
     if not DATA_FILE or not SOURCE:
         raise RuntimeError(
             "Supercov pytest hook requires SUPERCOV_PYTHON_DATA and SUPERCOV_PYTHON_SOURCE"
         )
-    _OWNED_COVERAGE = coverage.Coverage(
+    owned = coverage.Coverage(
         data_file=DATA_FILE,
         data_suffix=True,
         branch=True,
@@ -35,7 +28,26 @@ def pytest_configure(config):
         config_file=False,
         context=f"supercov-worker-v1:{WORKER_ID}",
     )
-    _OWNED_COVERAGE.start()
+    owned.start()
+    return owned
+
+
+if coverage.Coverage.current() is None:
+    _OWNED_COVERAGE = _start_owned_coverage()
+
+
+def pytest_configure(config):
+    global _IS_XDIST_CONTROLLER, _OWNED_COVERAGE
+    workers = getattr(config.option, "numprocesses", None)
+    _IS_XDIST_CONTROLLER = WORKER_ID == "main" and workers not in (None, 0, "0")
+    if _IS_XDIST_CONTROLLER:
+        if _OWNED_COVERAGE is not None:
+            _OWNED_COVERAGE.stop()
+            _OWNED_COVERAGE = None
+        return
+    if coverage.Coverage.current() is not None:
+        return
+    _OWNED_COVERAGE = _start_owned_coverage()
 
 
 def pytest_unconfigure(config):

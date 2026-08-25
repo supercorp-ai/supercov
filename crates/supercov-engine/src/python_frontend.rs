@@ -692,8 +692,8 @@ pub fn import_python_coverage_json(
             test_file: None,
             title: None,
             retry: Some(0),
-            status: Some("passed".into()),
-            expected_status: Some("passed".into()),
+            status: Some("unknown".into()),
+            expected_status: None,
             flaky: false,
             provenance: TestProvenance {
                 runner: export.runner.clone(),
@@ -818,6 +818,8 @@ mod tests {
         include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-basic.json");
     const XDIST_GOLDEN: &[u8] =
         include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-xdist.json");
+    const OUTCOMES_GOLDEN: &[u8] =
+        include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-outcomes.json");
 
     #[test]
     fn imports_the_coverage_py_oracle_without_inventing_assertion_or_mcdc_facts() {
@@ -930,6 +932,76 @@ mod tests {
                 .filter(|result| result.role == "background")
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn filters_real_pytest_outcomes_without_verifying_background_or_xfail() {
+        let imported = import_python_coverage_json(
+            OUTCOMES_GOLDEN,
+            "python-tier-a-outcomes2",
+            "2026-08-25T00:00:00.000Z",
+            Some(1),
+        )
+        .unwrap();
+        let report = analyze_frontend_results(&imported.declaration, &imported.request).unwrap();
+        assert_eq!(
+            (
+                report.view.summary.lines.covered,
+                report.view.summary.lines.total,
+                report.view.summary.branches.covered,
+                report.view.summary.branches.total,
+            ),
+            (11, 12, 7, 8)
+        );
+        assert_eq!(
+            (
+                report.filters.passed.summary.lines.covered,
+                report.filters.passed.summary.branches.covered,
+                report.filters.failed.summary.lines.covered,
+                report.filters.failed.summary.branches.covered,
+            ),
+            (3, 2, 7, 5)
+        );
+        assert!(!report.execution.as_ref().unwrap().valid);
+        let outcomes = report
+            .view
+            .tests
+            .iter()
+            .filter(|test| test.role == "test")
+            .fold(BTreeMap::<&str, usize>::new(), |mut counts, test| {
+                *counts.entry(&test.outcome).or_default() += 1;
+                counts
+            });
+        assert_eq!(
+            outcomes,
+            BTreeMap::from([("failed", 3), ("passed", 1), ("skipped", 2)])
+        );
+        assert!(
+            report
+                .filters
+                .passed
+                .tests
+                .iter()
+                .all(|test| !test.name.contains("expected_failure"))
+        );
+        assert!(
+            report
+                .filters
+                .passed
+                .tests
+                .iter()
+                .all(|test| test.role != "background")
+        );
+        assert!(
+            report
+                .view
+                .lines
+                .iter()
+                .find(|line| line.line == 5)
+                .unwrap()
+                .confidence
+                .setup_only
         );
     }
 
