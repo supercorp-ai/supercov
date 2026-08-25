@@ -115,7 +115,7 @@ pub struct AgentPagination {
 }
 
 pub fn registry() -> Result<ContractRegistry, serde_json::Error> {
-    serde_json::from_str(include_str!("../../../contracts/v1/contract.json"))
+    serde_json::from_str(include_str!("../assets/v1/contract.json"))
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -158,7 +158,7 @@ pub struct ProbeV2Promotion {
 }
 
 pub fn probe_v2_contract() -> Result<ProbeV2Contract, serde_json::Error> {
-    serde_json::from_str(include_str!("../../../contracts/probe-v2/contract.json"))
+    serde_json::from_str(include_str!("../assets/probe-v2/contract.json"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -200,7 +200,7 @@ pub struct LanguageFrontendRequirements {
 
 pub fn language_frontend_protocol_contract()
 -> Result<LanguageFrontendProtocolContract, serde_json::Error> {
-    serde_json::from_str(include_str!("../../../contracts/frontend-v2/contract.json"))
+    serde_json::from_str(include_str!("../assets/frontend-v2/contract.json"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -221,9 +221,7 @@ pub struct PythonCoverageImportContract {
 
 pub fn python_coverage_import_contract() -> Result<PythonCoverageImportContract, serde_json::Error>
 {
-    serde_json::from_str(include_str!(
-        "../../../contracts/python-coverage-v1/contract.json"
-    ))
+    serde_json::from_str(include_str!("../assets/python-coverage-v1/contract.json"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -242,7 +240,7 @@ pub struct EvidenceV3Contract {
 }
 
 pub fn evidence_v3_contract() -> Result<EvidenceV3Contract, serde_json::Error> {
-    serde_json::from_str(include_str!("../../../contracts/evidence-v3/contract.json"))
+    serde_json::from_str(include_str!("../assets/evidence-v3/contract.json"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -871,8 +869,8 @@ mod tests {
     #[test]
     fn checked_in_frontend_examples_are_strict_and_valid() {
         for source in [
-            include_str!("../../../contracts/frontend-v2/examples/javascript-mixed-runners.json"),
-            include_str!("../../../contracts/frontend-v2/examples/python-pytest-xdist.json"),
+            include_str!("../assets/frontend-v2/examples/javascript-mixed-runners.json"),
+            include_str!("../assets/frontend-v2/examples/python-pytest-xdist.json"),
         ] {
             let declaration: FrontendRunDeclaration = serde_json::from_str(source).unwrap();
             validate_frontend_run_declaration(&declaration).unwrap();

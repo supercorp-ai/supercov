@@ -35,7 +35,8 @@ use crate::{
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DirectJavascriptRunRequest {
     pub root: PathBuf,
-    pub runtime_root: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_root: Option<PathBuf>,
     pub command: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
@@ -214,7 +215,7 @@ fn node_options(preload: &Path) -> String {
 /// treat failure as "staleness unavailable", matching the frozen CLI contract.
 pub fn current_javascript_integrity(
     root: &Path,
-    runtime_root: &Path,
+    runtime_root: Option<&Path>,
     command: &[String],
 ) -> Result<RunIntegrity, String> {
     let environment = std::env::vars().collect::<BTreeMap<_, _>>();
@@ -225,18 +226,13 @@ pub fn current_javascript_integrity(
 
 fn javascript_integrity_for_project(
     root: &Path,
-    runtime_root: &Path,
+    runtime_root: Option<&Path>,
     project: &crate::project_discovery::CoverageProject,
 ) -> Result<RunIntegrity, String> {
-    create_run_integrity(
-        root,
-        project,
-        &FrontendIntegrityInputs::javascript(
-            runtime_root.to_owned(),
-            javascript_runtime_files(runtime_root),
-        ),
-    )
-    .map_err(|error| error.to_string())
+    let frontend = runtime_root.map_or_else(FrontendIntegrityInputs::embedded_javascript, |root| {
+        FrontendIntegrityInputs::javascript(root.to_owned(), javascript_runtime_files(root))
+    });
+    create_run_integrity(root, project, &frontend).map_err(|error| error.to_string())
 }
 
 /// Execute one JavaScript suite with every language-neutral stage owned by
@@ -254,8 +250,11 @@ pub fn run_direct_javascript(
     let initialization_started = Instant::now();
     let root = fs::canonicalize(&request.root)
         .map_err(|error| format!("{}: {error}", request.root.display()))?;
-    let runtime_root = fs::canonicalize(&request.runtime_root)
-        .map_err(|error| format!("{}: {error}", request.runtime_root.display()))?;
+    let runtime_root = request
+        .runtime_root
+        .as_ref()
+        .map(|path| fs::canonicalize(path).map_err(|error| format!("{}: {error}", path.display())))
+        .transpose()?;
     let nonce = now_nonce();
     let run_id = request
         .run_id
@@ -289,7 +288,7 @@ pub fn run_direct_javascript(
     let environment = std::env::vars().collect::<BTreeMap<_, _>>();
     let project = discover_coverage_project(&root, &environment, &request.command)
         .map_err(|error| error.to_string())?;
-    let integrity = javascript_integrity_for_project(&root, &runtime_root, &project)?;
+    let integrity = javascript_integrity_for_project(&root, runtime_root.as_deref(), &project)?;
     let initialization_ms = elapsed_ms(initialization_started);
 
     let workspace_started = Instant::now();
@@ -322,8 +321,9 @@ pub fn run_direct_javascript(
 
     let adapter_started = Instant::now();
     let collector_id = format!("collector-{}", integrity.fingerprint.execution);
-    let frontend = prepare_javascript_frontend(&workspace, &project, &runtime_root, &collector_id)
-        .map_err(|error| error.to_string())?;
+    let frontend =
+        prepare_javascript_frontend(&workspace, &project, runtime_root.as_deref(), &collector_id)
+            .map_err(|error| error.to_string())?;
     let adapter_setup_ms = elapsed_ms(adapter_started);
 
     let evidence_relative = format!(".supercov/evidence/{run_id}");

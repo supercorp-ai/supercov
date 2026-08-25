@@ -139,7 +139,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             actual,
-            include_str!("../../../tests/golden/agent-success.json")
+            include_str!("../test-assets/agent/agent-success.json")
         );
     }
 
@@ -152,10 +152,7 @@ mod tests {
             Some(&page),
         )
         .unwrap();
-        assert_eq!(
-            actual,
-            include_str!("../../../tests/golden/agent-page.json")
-        );
+        assert_eq!(actual, include_str!("../test-assets/agent/agent-page.json"));
     }
 
     #[test]
@@ -171,7 +168,7 @@ mod tests {
         );
         assert_eq!(
             actual,
-            include_str!("../../../tests/golden/agent-error.json")
+            include_str!("../test-assets/agent/agent-error.json")
         );
     }
 

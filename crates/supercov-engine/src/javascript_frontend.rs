@@ -125,6 +125,29 @@ pub fn javascript_runtime_files(runtime_root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
+    match name {
+        "atomic.js" => Some(include_bytes!("../runtime/atomic.js")),
+        "launchSupervisor.js" => Some(include_bytes!("../runtime/launchSupervisor.js")),
+        "nodeAssert.js" => Some(include_bytes!("../runtime/nodeAssert.js")),
+        "nodeAssertAdapter.js" => Some(include_bytes!("../runtime/nodeAssertAdapter.js")),
+        "nodeAssertStrict.js" => Some(include_bytes!("../runtime/nodeAssertStrict.js")),
+        "nodeTest.js" => Some(include_bytes!("../runtime/nodeTest.js")),
+        "playwright.js" => Some(include_bytes!("../runtime/playwright.js")),
+        "playwrightReporter.js" => Some(include_bytes!("../runtime/playwrightReporter.js")),
+        "provenance.js" => Some(include_bytes!("../runtime/provenance.js")),
+        "register.mjs" => Some(include_bytes!("../runtime/register.mjs")),
+        "resolve-loader.mjs" => Some(include_bytes!("../runtime/resolve-loader.mjs")),
+        "runnerEvidence.js" => Some(include_bytes!("../runtime/runnerEvidence.js")),
+        "runtime.js" => Some(include_bytes!("../runtime/runtime.js")),
+        "transport.js" => Some(include_bytes!("../runtime/transport.js")),
+        "types.js" => Some(include_bytes!("../runtime/types.js")),
+        "vitest.js" => Some(include_bytes!("../runtime/vitest.js")),
+        "vitestReporter.js" => Some(include_bytes!("../runtime/vitestReporter.js")),
+        _ => None,
+    }
+}
+
 fn unique() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -201,7 +224,7 @@ fn isolate_runtime(source: &str, collector_id: &str) -> Result<String, Javascrip
 }
 
 fn copy_runtime(
-    runtime_root: &Path,
+    runtime_root: Option<&Path>,
     generated: &Path,
     collector_id: &str,
 ) -> Result<(), JavascriptFrontendError> {
@@ -211,9 +234,17 @@ fn copy_runtime(
         b"{\"private\":true,\"type\":\"module\"}\n",
     )?;
     for name in RUNTIME_FILES {
-        let source_path = runtime_root.join(name);
         let destination = generated.join(name);
-        let bytes = fs::read(&source_path).map_err(|source| io_error(&source_path, source))?;
+        let (bytes, source_path) = if let Some(runtime_root) = runtime_root {
+            let source_path = runtime_root.join(name);
+            let bytes = fs::read(&source_path).map_err(|source| io_error(&source_path, source))?;
+            (bytes, source_path)
+        } else {
+            let bytes = embedded_runtime(name)
+                .expect("every declared runtime file must have an embedded asset")
+                .to_vec();
+            (bytes, PathBuf::from(format!("embedded:{name}")))
+        };
         if *name == "runtime.js" {
             let text = String::from_utf8(bytes).map_err(|source| {
                 io_error(
@@ -554,7 +585,7 @@ export function supercovViteInstrumentation(root) {\n\
 pub fn prepare_javascript_frontend(
     workspace: &Path,
     project: &CoverageProject,
-    runtime_root: &Path,
+    runtime_root: Option<&Path>,
     collector_id: &str,
 ) -> Result<PreparedJavascriptFrontend, JavascriptFrontendError> {
     let generated = workspace.join(".supercov");
@@ -763,7 +794,8 @@ mod tests {
         .unwrap();
         let original = fs::read_to_string(source_root.join("src/example.mjs")).unwrap();
         let prepared =
-            prepare_javascript_frontend(&workspace, &project, &runtime, "collector-test").unwrap();
+            prepare_javascript_frontend(&workspace, &project, Some(&runtime), "collector-test")
+                .unwrap();
         assert_eq!(
             fs::read_to_string(source_root.join("src/example.mjs")).unwrap(),
             original
@@ -782,5 +814,18 @@ mod tests {
         fs::remove_dir_all(source_root).unwrap();
         fs::remove_dir_all(workspace).unwrap();
         fs::remove_dir_all(runtime).unwrap();
+    }
+
+    #[test]
+    fn embedded_runtime_contains_every_declared_shim() {
+        for name in RUNTIME_FILES {
+            let bytes = embedded_runtime(name).unwrap();
+            assert!(!bytes.is_empty(), "embedded runtime is empty: {name}");
+        }
+        assert!(
+            std::str::from_utf8(embedded_runtime("runtime.js").unwrap())
+                .unwrap()
+                .contains(RUNTIME_INSTANCE_MARKER)
+        );
     }
 }

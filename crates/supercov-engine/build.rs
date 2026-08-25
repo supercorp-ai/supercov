@@ -19,7 +19,7 @@ fn collect_files(path: &Path, files: &mut Vec<PathBuf>) {
     for entry in entries {
         if entry.is_dir() {
             collect_files(&entry, files);
-        } else if entry.extension().is_some_and(|extension| extension == "rs") {
+        } else if entry.is_file() {
             files.push(entry);
         }
     }
@@ -51,17 +51,10 @@ fn digest_files(files: &[PathBuf], workspace_root: &Path) -> String {
 fn main() {
     let crate_root =
         PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
-    let workspace_root = crate_root.join("../..");
-    let contracts_root = crate_root.join("../supercov-contracts");
     let mut files = Vec::new();
     collect_files(&crate_root.join("src"), &mut files);
-    collect_files(&contracts_root.join("src"), &mut files);
-    files.extend([
-        crate_root.join("build.rs"),
-        crate_root.join("Cargo.toml"),
-        contracts_root.join("Cargo.toml"),
-        workspace_root.join("Cargo.lock"),
-    ]);
+    collect_files(&crate_root.join("runtime"), &mut files);
+    files.extend([crate_root.join("build.rs"), crate_root.join("Cargo.toml")]);
     files.sort();
     files.dedup();
 
@@ -70,18 +63,19 @@ fn main() {
     }
     println!(
         "cargo:rustc-env=SUPERCOV_ENGINE_SOURCE_SHA256={}",
-        digest_files(&files, &workspace_root)
+        digest_files(&files, &crate_root)
     );
     let javascript_frontend = [
         crate_root.join("src/js_instrumenter.rs"),
         crate_root.join("src/probe_v2.rs"),
-        contracts_root.join("src/lib.rs"),
         crate_root.join("Cargo.toml"),
-        contracts_root.join("Cargo.toml"),
-        workspace_root.join("Cargo.lock"),
     ];
+    let mut javascript_frontend = javascript_frontend.to_vec();
+    collect_files(&crate_root.join("runtime"), &mut javascript_frontend);
+    javascript_frontend.sort();
+    javascript_frontend.dedup();
     println!(
         "cargo:rustc-env=SUPERCOV_JS_FRONTEND_SOURCE_SHA256={}",
-        digest_files(&javascript_frontend, &workspace_root)
+        digest_files(&javascript_frontend, &crate_root)
     );
 }

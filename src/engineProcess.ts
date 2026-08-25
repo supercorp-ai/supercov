@@ -16,7 +16,7 @@ export function requireRustEngineBinary(): string {
   const binary = rustEngineBinaryPath();
   if (!existsSync(binary))
     throw new Error(
-      `Rust engine candidate binary not found at ${binary}. Build it with cargo build -p supercov-cli or set SUPERCOV_RUST_BINARY.`,
+      `Rust engine candidate binary not found at ${binary}. Build it with cargo build -p supercov or set SUPERCOV_RUST_BINARY.`,
     );
   return binary;
 }

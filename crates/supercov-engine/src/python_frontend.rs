@@ -861,20 +861,19 @@ mod tests {
         frontend_protocol::{analyze_frontend_results, validate_frontend_report_request},
     };
 
-    const GOLDEN: &[u8] =
-        include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-basic.json");
+    const GOLDEN: &[u8] = include_bytes!("../test-assets/python-coverage-v1/pytest-basic.json");
     const XDIST_GOLDEN: &[u8] =
-        include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-xdist.json");
+        include_bytes!("../test-assets/python-coverage-v1/pytest-xdist.json");
     const OUTCOMES_GOLDEN: &[u8] =
-        include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-outcomes.json");
+        include_bytes!("../test-assets/python-coverage-v1/pytest-outcomes.json");
     const RETRY_GOLDEN: &[u8] =
-        include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-retry.json");
+        include_bytes!("../test-assets/python-coverage-v1/pytest-retry.json");
     const CONCURRENCY_GOLDEN: &[u8] =
-        include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-concurrency.json");
+        include_bytes!("../test-assets/python-coverage-v1/pytest-concurrency.json");
     const WORKER_CRASH_GOLDEN: &[u8] =
-        include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-worker-crash.json");
+        include_bytes!("../test-assets/python-coverage-v1/pytest-worker-crash.json");
     const PATHS_GOLDEN: &[u8] =
-        include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-paths.json");
+        include_bytes!("../test-assets/python-coverage-v1/pytest-paths.json");
 
     #[test]
     fn imports_the_coverage_py_oracle_without_inventing_assertion_or_mcdc_facts() {

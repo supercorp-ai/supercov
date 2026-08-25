@@ -60,7 +60,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: cargo build --release -p supercov-cli
+      - run: cargo build --release -p supercov
       - name: Require semantic equivalence across the Test262 shard
         env:
           SUPERCOV_ENGINE: rust

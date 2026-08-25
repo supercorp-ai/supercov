@@ -44,6 +44,18 @@ impl FrontendIntegrityInputs {
             engine_execution_sha256: env!("SUPERCOV_ENGINE_SOURCE_SHA256").into(),
         }
     }
+
+    pub fn embedded_javascript() -> Self {
+        Self {
+            language: "javascript".into(),
+            version: "javascript-v1".into(),
+            root: PathBuf::from("."),
+            instrumenter_files: Vec::new(),
+            execution_files: Vec::new(),
+            engine_instrumenter_sha256: env!("SUPERCOV_JS_FRONTEND_SOURCE_SHA256").into(),
+            engine_execution_sha256: env!("SUPERCOV_ENGINE_SOURCE_SHA256").into(),
+        }
+    }
 }
 
 #[derive(Debug)]

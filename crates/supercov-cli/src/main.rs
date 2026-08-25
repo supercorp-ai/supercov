@@ -152,12 +152,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let Some(runtime_root) = resolve_runtime_root(&root) else {
-        eprintln!(
-            "[supercov] could not locate the JavaScript runtime; set SUPERCOV_RUNTIME_ROOT to the packaged runtime directory"
-        );
-        return ExitCode::from(2);
-    };
+    let runtime_root = resolve_runtime_root(&root);
     let (run_id, started_at) = match public_timestamp() {
         Ok(timestamp) => timestamp,
         Err(error) => {
@@ -365,8 +360,13 @@ fn resolve_runtime_root(root: &Path) -> Option<PathBuf> {
 }
 
 fn current_javascript_integrity(root: &Path) -> Option<supercov_engine::run_store::RunIntegrity> {
-    let runtime_root = resolve_runtime_root(root)?;
-    supercov_engine::javascript_run::current_javascript_integrity(root, &runtime_root, &[]).ok()
+    let runtime_root = resolve_runtime_root(root);
+    supercov_engine::javascript_run::current_javascript_integrity(
+        root,
+        runtime_root.as_deref(),
+        &[],
+    )
+    .ok()
 }
 
 enum PublicQueryOutput {

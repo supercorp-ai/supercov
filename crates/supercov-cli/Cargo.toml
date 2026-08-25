@@ -1,11 +1,14 @@
 [package]
-name = "supercov-cli"
+name = "supercov"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+description = "Zero-configuration, runner-aware structural and MC/DC coverage"
+keywords = ["coverage", "testing", "mcdc", "cli"]
+categories = ["command-line-utilities", "development-tools::testing"]
+publish = ["crates-io"]
 
 [[bin]]
 name = "supercov"

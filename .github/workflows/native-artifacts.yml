@@ -43,10 +43,10 @@ jobs:
         run: node -e "require('node:fs').appendFileSync(process.env.GITHUB_ENV, 'SUPERCOV_VERSION=' + require('./package.json').version + '\n')"
       - name: Build native binary
         if: matrix.musl != true
-        run: cargo build --release --target ${{ matrix.target }} -p supercov-cli
+        run: cargo build --release --target ${{ matrix.target }} -p supercov
       - name: Build static musl binary
         if: matrix.musl
-        run: cargo build --config 'target.${{ matrix.target }}.linker="musl-gcc"' --release --target ${{ matrix.target }} -p supercov-cli
+        run: cargo build --config 'target.${{ matrix.target }}.linker="musl-gcc"' --release --target ${{ matrix.target }} -p supercov
       - name: Packed install and real Rust run
         if: matrix.packedInstall
         run: node scripts/native-package-integration.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }}

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.10,<2"]
+build-backend = "maturin"
+
+[project]
+name = "supercov"
+dynamic = ["version"]
+description = "Zero-configuration, runner-aware structural and MC/DC coverage"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+keywords = ["coverage", "testing", "mcdc", "cli"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Rust",
+  "Topic :: Software Development :: Testing",
+]
+
+[project.urls]
+Homepage = "https://github.com/supercorp-ai/supercov"
+Repository = "https://github.com/supercorp-ai/supercov"
+Issues = "https://github.com/supercorp-ai/supercov/issues"
+
+[tool.maturin]
+bindings = "bin"
+manifest-path = "crates/supercov-cli/Cargo.toml"
+strip = true

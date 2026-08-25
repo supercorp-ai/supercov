@@ -5,7 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish = false
+description = "Rust instrumentation, evidence, attribution, and query engine for Supercov"
+keywords = ["coverage", "testing", "mcdc", "instrumentation"]
+categories = ["development-tools::testing"]
+publish = ["crates-io"]
 
 [features]
 default = []

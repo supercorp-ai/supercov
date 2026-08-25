@@ -58,7 +58,7 @@ mod tests {
     #[test]
     fn matches_every_language_neutral_contract_vector() {
         let fixtures: Vec<Fixture> =
-            serde_json::from_str(include_str!("../../../contracts/probe-v2/vectors.json"))
+            serde_json::from_str(include_str!("../test-assets/probe-v2/vectors.json"))
                 .expect("probe vectors must be valid JSON");
         for fixture in fixtures {
             let expected = DecisionVector {
