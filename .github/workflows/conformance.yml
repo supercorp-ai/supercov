@@ -34,4 +34,4 @@ jobs:
         env:
           SUPERCOV_ENGINE: rust
           SUPERCOV_RUST_BINARY: ${{ github.workspace }}/target/release/supercov
-        run: node scripts/test262-equivalence.mjs --test262 .test262 --shard ${{ matrix.shard }}/16 --minimum 1000
+        run: node scripts/test262-equivalence.mjs --engine rust --test262 .test262 --shard ${{ matrix.shard }}/16 --minimum 1000

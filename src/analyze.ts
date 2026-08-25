@@ -576,7 +576,8 @@ export function createMcdcReport(
   ): CoverageConfidence => {
     const tests = [...new Set(testIds)].sort();
     const phases = [...new Set(phaseIds)];
-    const assertedPhases = [...new Set(explicitPhaseIds)].filter((id) =>
+    const explicitPhases = [...new Set(explicitPhaseIds)];
+    const assertedPhases = explicitPhases.filter((id) =>
       assertedPhaseIds.has(id),
     );
     const assertedTests = [
@@ -592,7 +593,10 @@ export function createMcdcReport(
     const roles = tests
       .map((id) => testsById.get(id)?.role)
       .filter((value): value is MutableTestCoverage["role"] => Boolean(value));
-    const hasAction = phases.some(
+    // Timestamp overlap is useful as a diagnostic correlation, but is not a
+    // causal link. Both action and assertion confidence require a propagated
+    // phase identity; otherwise runtime speed alone could change confidence.
+    const hasAction = explicitPhases.some(
       (id) => phasesById.get(id)?.phase.kind === "action",
     );
     const level: CoverageConfidence["level"] =

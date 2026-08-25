@@ -126,5 +126,9 @@
   {
     "file": "differential/script-await-identifier.js",
     "source": "var await = 42;\nfunction run() { return await; }\n"
+  },
+  {
+    "file": "differential/expression-arrow-parameter-defaults.ts",
+    "source": "const effects = [];\nconst choose = ({ value = (effects.push('default'), 'fallback') } = {}) => value;\nfunction run() { return [choose(), choose({}), choose({ value: 'given' })]; }\nfunction observe() { return effects; }\n"
   }
 ]

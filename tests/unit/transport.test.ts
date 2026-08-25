@@ -26,6 +26,7 @@ import {
 import {
   COVERAGE_PHASE_HEADER,
   COVERAGE_PHASE_COOKIE,
+  COVERAGE_CARRIER_ENV,
   COVERAGE_SCOPE_COOKIE,
   COVERAGE_SCOPE_HEADER,
   decodeCoverageCarrier,
@@ -268,6 +269,100 @@ describe("concurrent server evidence transport", () => {
           type: "hit",
           id: "websocket-hit",
           phaseId: phase,
+          scope: { attemptId: execution.attemptId },
+        },
+      ]);
+    } finally {
+      rmSync(serverRunEvidenceDirectory(execution.runId), {
+        recursive: true,
+        force: true,
+      });
+    }
+  });
+
+  it("keeps unscoped health requests out of the launching test", () => {
+    const execution = scope(
+      `health-boundary-${process.pid}-${Date.now()}`,
+      "worker-1",
+      "launches-server",
+      0,
+    );
+    const previousCarrier = process.env[COVERAGE_CARRIER_ENV];
+    const previousRun = process.env.SUPERCOV_RUN_ID;
+    process.env[COVERAGE_CARRIER_ENV] = encodeCoverageCarrier({
+      version: 1,
+      scope: execution,
+    });
+    process.env.SUPERCOV_RUN_ID = execution.runId;
+    const healthHandler = withRequestPhase(
+      (request: { headers: Headers }) => {
+        coverageHit("health-request-hit");
+        return request;
+      },
+    );
+
+    try {
+      healthHandler({ headers: new Headers({ accept: "*/*" }) });
+      flushBufferedBackgroundEvidence(execution.runId);
+      expect(existsSync(serverEvidencePath(execution))).toBe(false);
+      const directory = resolve(
+        serverRunEvidenceDirectory(execution.runId),
+        "background",
+      );
+      const background = readdirSync(directory).flatMap((file) =>
+        readFileSync(resolve(directory, file), "utf8")
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as CoverageServerRecord),
+      );
+      expect(background).toContainEqual(
+        expect.objectContaining({
+          type: "hit",
+          id: "health-request-hit",
+        }),
+      );
+      expect(
+        background.find(
+          (record) =>
+            record.type === "hit" && record.id === "health-request-hit",
+        )?.scope,
+      ).toBeUndefined();
+    } finally {
+      if (previousCarrier === undefined)
+        delete process.env[COVERAGE_CARRIER_ENV];
+      else process.env[COVERAGE_CARRIER_ENV] = previousCarrier;
+      if (previousRun === undefined) delete process.env.SUPERCOV_RUN_ID;
+      else process.env.SUPERCOV_RUN_ID = previousRun;
+      rmSync(serverRunEvidenceDirectory(execution.runId), {
+        recursive: true,
+        force: true,
+      });
+    }
+  });
+
+  it("inherits explicit request scope in nested framework callbacks", () => {
+    const execution = scope(
+      `nested-request-${process.pid}-${Date.now()}`,
+      "worker-1",
+      "nested-framework-handler",
+      0,
+    );
+    const inner = withRequestPhase(() => coverageHit("nested-request-hit"));
+    const outer = withRequestPhase((request: { headers: Headers }) => {
+      inner();
+      return request;
+    });
+
+    try {
+      outer({
+        headers: new Headers({
+          [COVERAGE_SCOPE_HEADER]: encodeCoverageScope(execution),
+        }),
+      });
+      expect(records(execution)).toMatchObject([
+        {
+          type: "hit",
+          id: "nested-request-hit",
           scope: { attemptId: execution.attemptId },
         },
       ]);

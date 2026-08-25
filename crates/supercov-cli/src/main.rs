@@ -1,6 +1,6 @@
-use std::{io::Read, path::PathBuf, process::ExitCode};
+use std::{io::Read, path::PathBuf, process::ExitCode, time::Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use supercov_engine::{
     evidence_archive::{
         EvidenceArchiveEntry, EvidenceArchiveSource, collect_sources, write_archive,
@@ -34,6 +34,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("__instrument-js") => instrument_js(),
+        Some("__benchmark-js-transform") => benchmark_js_transform(),
         Some("__pack-evidence") => pack_evidence(),
         Some(command) => {
             eprintln!(
@@ -42,6 +43,50 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TransformBenchmarkResult {
+    files: usize,
+    duration_ns: u128,
+}
+
+/// Development-only measurement boundary for the frozen Phase 3 transform
+/// gate. Input decoding and output transport are measured separately by the
+/// caller; this reports only parse -> transform -> codegen engine time.
+fn benchmark_js_transform() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let cases: Vec<InstrumentCase> = match serde_json::from_str(&input) {
+        Ok(cases) => cases,
+        Err(error) => {
+            eprintln!("[supercov] invalid Rust benchmark input: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let files = cases.len();
+    let started = Instant::now();
+    for case in cases {
+        if let Err(error) = instrument_candidate(&case.source, &case.file) {
+            eprintln!("[supercov] {}: {error:?}", case.file);
+            return ExitCode::from(2);
+        }
+    }
+    let result = TransformBenchmarkResult {
+        files,
+        duration_ns: started.elapsed().as_nanos(),
+    };
+    if let Err(error) = serde_json::to_writer(std::io::stdout(), &result) {
+        eprintln!("[supercov] failed to write Rust benchmark output: {error}");
+        return ExitCode::from(2);
+    }
+    ExitCode::SUCCESS
 }
 
 fn stdin() -> Result<String, String> {

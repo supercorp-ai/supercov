@@ -135,7 +135,7 @@ describe("coverage measurement limitations", () => {
         status: "passed" as const,
       },
     ];
-    const lost = createMcdcReport(manifest, [
+    const empty = createMcdcReport(manifest, [
       {
         testId: "lost-test",
         test: "loses its evidence",
@@ -147,11 +147,11 @@ describe("coverage measurement limitations", () => {
         server: [],
       },
     ]);
-    expect(coverageDiagnostics(lost)).toMatchObject([
+    expect(coverageDiagnostics(empty)).toMatchObject([
       {
         code: "TEST_EVIDENCE_MISSING",
-        severity: "error",
-        message: expect.stringContaining("loses its evidence"),
+        severity: "warning",
+        message: expect.stringContaining("static or uninstrumented data"),
       },
     ]);
 

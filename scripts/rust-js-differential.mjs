@@ -116,8 +116,8 @@ for (const [index, testCase] of allCases.entries()) {
   const referenceManifest = instrumentMcdc(testCase.source, testCase.file).manifest;
   const reference = referenceManifest.decisions;
   const candidate = outputs[index];
-  if (candidate.complete !== false)
-    throw new Error(`${testCase.file}: partial Rust slice claimed completeness`);
+  if (candidate.complete !== true || candidate.limitations.length !== 0)
+    throw new Error(`${testCase.file}: complete Rust instrumenter contract was not declared`);
   if (JSON.stringify(candidate.decisions) !== JSON.stringify(reference))
     throw new Error(
       `${testCase.file}: Rust/TypeScript decision mismatch\nreference=${JSON.stringify(reference)}\ncandidate=${JSON.stringify(candidate.decisions)}`,
@@ -170,7 +170,7 @@ async function executeRustCandidate(testCase, candidate) {
   const hits = [];
   const registrations = [];
   const runtime = candidate.runtime;
-  if (!runtime?.coverageHit || !runtime?.mcdcBegin || !runtime?.mcdcCondition || !runtime?.mcdcEnd || !runtime?.registerProbeV2 || !runtime?.mcdcEndV2 || !runtime?.coverageHitV2 || !runtime?.probeFileV2 || !runtime?.selectionBegin || !runtime?.selectionRight || !runtime?.selectionEnd || !runtime?.withRequestPhase || !runtime?.optionalSelect || !runtime?.optionalCallBegin || !runtime?.optionalCallReached || !runtime?.optionalCallContinued || !runtime?.optionalCallEnd || !runtime?.defaultSelected || !runtime?.defaultEntered || !runtime?.tryBegin || !runtime?.tryCatch || !runtime?.tryEnd || !runtime?.loopBegin || !runtime?.loopEntered || !runtime?.loopEnd)
+  if (!runtime?.coverageHit || !runtime?.mcdcBegin || !runtime?.mcdcCondition || !runtime?.mcdcEnd || !runtime?.registerProbeV2 || !runtime?.mcdcEndV2 || !runtime?.coverageHitV2 || !runtime?.probeFileV2 || !runtime?.selectionBegin || !runtime?.selectionRight || !runtime?.selectionEnd || !runtime?.parenthesizedAssignmentValue || !runtime?.withRequestPhase || !runtime?.optionalSelect || !runtime?.optionalCallBegin || !runtime?.optionalCallReached || !runtime?.optionalCallContinued || !runtime?.optionalCallEnd || !runtime?.defaultSelected || !runtime?.defaultEntered || !runtime?.tryBegin || !runtime?.tryCatch || !runtime?.tryEnd || !runtime?.loopBegin || !runtime?.loopEntered || !runtime?.loopEnd)
     throw new Error(`${testCase.file}: missing Rust candidate runtime bindings`);
   const coverageHit = (id) => hits.push(id);
   const registerProbeV2 = (definition) => {
@@ -209,6 +209,22 @@ async function executeRustCandidate(testCase, candidate) {
   };
   const selectionEnd = (frame, value) => {
     coverageHit(frame.evaluatedRight ? frame.rightId : frame.shortId);
+    return value;
+  };
+  let hostCandidate;
+  (hostCandidate) = function () {};
+  const hostNamesParenthesizedAssignments = hostCandidate.name === "hostCandidate";
+  const parenthesizedAssignmentValue = (value, inferredName) => {
+    if (
+      hostNamesParenthesizedAssignments &&
+      inferredName &&
+      typeof value === "function" &&
+      value.name === ""
+    )
+      Object.defineProperty(value, "name", {
+        value: inferredName,
+        configurable: true,
+      });
     return value;
   };
   const withRequestPhase = (handler) => handler;
@@ -293,6 +309,7 @@ async function executeRustCandidate(testCase, candidate) {
     runtime.selectionBegin,
     runtime.selectionRight,
     runtime.selectionEnd,
+    runtime.parenthesizedAssignmentValue,
     runtime.withRequestPhase,
     runtime.optionalSelect,
     runtime.optionalCallBegin,
@@ -320,6 +337,7 @@ async function executeRustCandidate(testCase, candidate) {
     selectionBegin,
     selectionRight,
     selectionEnd,
+    parenthesizedAssignmentValue,
     withRequestPhase,
     optionalSelect,
     optionalCallBegin,

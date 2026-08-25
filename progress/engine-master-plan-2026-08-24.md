@@ -163,7 +163,7 @@ miss blocks flipping any default.
   matrix, attribution ladder, tier-ordering guardrails and spikes S8–S10:
   `progress/multi-language-architecture-2026-08-24.md`.
 
-## Checkpoint — 2026-08-24 complete Rust JS instrumenter candidate
+## Checkpoint — 2026-08-25 Phase 3 Rust JS instrumenter complete
 
 - Phase 0 findings, Phase 1's five frozen v1 contracts, black-box harness,
   probe-v2 contract, and Rust workspace are committed. Published v1
@@ -192,8 +192,8 @@ miss blocks flipping any default.
   source-map destinations have dedicated regression handling. The 64,171-
   comment Mozilla staging stress file transforms and runs in about 1.6s after
   eliminating quadratic comment editing and line/column lookup.
-- The live Babel/oxc differential gate covers 237 exact decision/point/branch/
-  limitation manifests, 32 hand-authored behavior/effect/vector/hit cases,
+- The live Babel/oxc differential gate covers 240 exact decision/point/branch/
+  limitation manifests, 33 hand-authored behavior/effect/vector/hit cases,
   and 160 deterministic generated programs. Rust and TypeScript also produce
   byte-identical archived manifests and exact summary/files/gaps JSON for a
   mixed Vitest + two-worker Playwright production run, including request,
@@ -207,6 +207,15 @@ miss blocks flipping any default.
   timing measured 598.54s baseline execution, 14.67s Rust transformation, and
   454.59s instrumented execution; this conformance workload shows no gross
   runtime regression, though it is not the realistic overhead benchmark.
+  The harness now obtains results through a dedicated machine channel and
+  rejects incomplete, crashed, or console-contaminated result streams. Its
+  default, CI, conformance, and release invocations all name Rust explicitly;
+  TypeScript can be selected only as a diagnostic reference.
+- The release transform gate now measures 500 distinct files inside the Rust
+  engine rather than timing the legacy Babel transformer over one concatenated
+  source. Current measurements are 25.60 ms median and 30.12 ms p95, with a
+  2.56 s linear 50,000-file projection. The temporary Node/JSON migration
+  boundary measures 54.96 ms median and is intentionally removed in Phase 4.
 - The private production selector batches an entire direct workspace or Vite
   inventory through one Rust child and includes the Rust binary fingerprint in
   run/build integrity. The Rust child is excluded from application child-
@@ -238,11 +247,26 @@ miss blocks flipping any default.
   contract rather than merely producing the same aggregate score.
 - Supercov self-dogfood now compares large archives in memory-bounded child
   processes rather than retaining two expanded archives and reports at once.
-  The current 180-test runs have identical obligations, outcomes, background
-  evidence, and all evidence outside exactly four tests that intentionally
-  execute the selected outer engine. Those tests execute `src/instrumenter.ts`
-  under the shipped engine and `src/engineInstrumenter.ts` under Rust, so their
-  different implementation-file coverage is required rather than waived.
+  The current 186-test TypeScript-reference run
+  `2026-08-25T00-29-05-152Z` and Rust run
+  `2026-08-25T00-30-26-768Z` both pass. They have identical 1,427 decisions,
+  1,953 conditions, 551 covered conditions, outcomes, and MC/DC. The only
+  diff is 19 line/branch observations in `engineInstrumenter`,
+  `engineProcess`, and `engineEvidence`, which deliberately execute different
+  outer-engine implementations. Rust completed the tests in 14.7 s versus
+  54.8 s for the recursively instrumented TypeScript reference.
+- Assertion phases without measured application evidence are now reported as
+  an ambiguity warning, not falsely asserted to be transport loss. Static
+  contract/data tests can legitimately have no application probe. Corrupt
+  evidence and explicit transport failures remain errors. Unscoped health and
+  readiness requests also form an attribution boundary instead of inheriting
+  the launching test, while nested callbacks with explicit request scope
+  retain that scope. Timestamp-only correlation remains diagnostic and cannot
+  upgrade action/assertion confidence.
+- The release contract audit also corrected a stale fixture golden that counted
+  an exported function declaration as both an executable statement and a
+  function entry. The frozen denominator has three real statements plus one
+  function obligation; an explicit model regression prevents double-counting.
 - A watchdog regression exposed why implementation parity is insufficient:
   the old parent sent SIGUSR2 to every Node descendant after 60 seconds, which
   could terminate a healthy unpreloaded test child. Diagnostics are now
@@ -269,17 +293,22 @@ miss blocks flipping any default.
   transaction recovery and hung-process watchdog paths before the Firefox and
   WebKit reruns, so engine selection is covered under failure supervision as
   well as normal completion.
-- Phase 3 is not promoted yet. Supercov dogfood and the six ordinary fixture
-  shapes are now green under semantic comparison, including retries, crashes,
-  async context, concurrency, and multiple workers. Remaining gates include
-  the complete browser/Node syntax matrix and Essential SEO dogfood, followed
-  by an audit that classifies every TypeScript/Rust deviation against the
-  independent correctness hierarchy rather than forcing blind equivalence.
-  `complete: false` is therefore still deliberate. Phase 4's engine shell now
-  owns frozen probe/agent-JSON contract slices and evidence packing/strict
-  reading. Discovery, workspace, supervision, analysis, solving, indexing,
-  querying, and lifecycle are still owned by TypeScript and are the next port
-  after Phase 3 closes.
+- Phase 3 is promoted. The independent syntax matrix is green for 43 cases on
+  Node 22, Node 24, Chromium, Firefox, and WebKit. Essential SEO Rust dogfood
+  run `2026-08-25T00-25-52-427Z` passed all 30 offline tests; a preceding VM
+  snapshot tar race failed before test execution and the retry isolated that
+  failure to Supermachine's bake path. The six production fixture shapes,
+  retries, crashes, async context, concurrency, multi-worker attribution,
+  complete Test262 corpus, MC/DC oracle, self-dogfood, and transform budgets
+  are green. Every observed TypeScript/Rust deviation is either normalized
+  execution identity/timing, proven same-engine workload nondeterminism, or
+  the expected execution of different outer-engine implementation files.
+  `instrument_candidate` now declares the complete
+  `complete-js-instrumenter-v1` contract with no port-progress limitations.
+  Rust selection remains private because the product engine shell is not yet
+  complete. Phase 4 already owns frozen probe/agent-JSON contract slices and
+  evidence packing/strict reading; discovery, workspace, supervision,
+  analysis, solving, indexing, querying, and lifecycle are the next Rust ports.
 
 ## Non-goals and guardrails
 

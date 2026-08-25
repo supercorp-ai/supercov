@@ -213,6 +213,24 @@ describe("MC/DC instrumenter", () => {
     );
   });
 
+  it("does not double-count an exported function as a statement and function", () => {
+    const transformed = instrumentMcdc(
+      `
+        export function accessLevel(isMember, isOwner) {
+          if (isMember && isOwner) return "owner";
+          return "visitor";
+        }
+      `,
+      "src/decision.js",
+    );
+    expect(
+      transformed.manifest.points.filter((point) => point.kind === "statement"),
+    ).toHaveLength(3);
+    expect(
+      transformed.manifest.points.filter((point) => point.kind === "function"),
+    ).toHaveLength(1);
+  });
+
   it("records an atomic negation rather than its inner operand", () => {
     const { decide, vectors } = executeInstrumented(`
       function decide(value, expected) {
@@ -939,6 +957,45 @@ describe("MC/DC instrumenter", () => {
         },
       ],
     );
+    expect(report.points[0]?.confidence).toMatchObject({
+      level: "executed",
+      asserted: false,
+    });
+  });
+
+  it("does not promote timestamp-fallback evidence to action confidence", () => {
+    const point = {
+      id: "fallback-action-only",
+      kind: "statement" as const,
+      file: "app/action.ts",
+      line: 1,
+      column: 1,
+      source: "handle();",
+    };
+    const report = createMcdcReport(
+      { decisions: [], points: [point], branches: [] },
+      [
+        {
+          testId: "test",
+          test: "test",
+          phases: [
+            {
+              id: "action",
+              kind: "action",
+              operation: "page.click",
+              startedAtMs: 100,
+              endedAtMs: 110,
+              status: "passed",
+            },
+          ],
+          browser: [],
+          server: [
+            { type: "hit", id: point.id, timestampMs: 105 },
+          ],
+        },
+      ],
+    );
+    expect(report.points[0]?.phases).toEqual(["action"]);
     expect(report.points[0]?.confidence).toMatchObject({
       level: "executed",
       asserted: false,

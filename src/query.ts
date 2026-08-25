@@ -765,9 +765,11 @@ export function coverageDiagnostics(
 }> {
   const observed = attribution(report, selected);
   const diagnostics: ReturnType<typeof coverageDiagnostics> = [];
-  // A test that opened assertion phases but attributed no coverage at all is
-  // the signature of lost evidence transport, not of a test that touched no
-  // measured source: the phases prove the adapter instrumented its attempt.
+  // Assertion phases prove that the runner adapter observed the attempt, but
+  // they do not prove that the test executed measured application source. A
+  // contract/static-data assertion can legitimately have no coverage. Keep
+  // this visible as an ambiguity warning; only explicit corrupt transport is
+  // strong enough to claim evidence loss as an error.
   const emptyEvidenceTests = report.tests.filter(
     (test) =>
       (test.role ?? "test") === "test" &&
@@ -780,10 +782,11 @@ export function coverageDiagnostics(
   if (emptyEvidenceTests.length > 0) {
     diagnostics.push({
       code: "TEST_EVIDENCE_MISSING",
-      severity: "error",
+      severity: "warning",
       message:
         `${emptyEvidenceTests.length} test(s) recorded assertion phases but attributed zero coverage evidence; ` +
-        `their execution was lost in evidence transport. First: ${emptyEvidenceTests[0]!.name}`,
+        `this is valid for assertions over static or uninstrumented data, but may otherwise indicate missing probe transport. ` +
+        `First: ${emptyEvidenceTests[0]!.name}`,
     });
   }
   if ((report.transport?.corruptRecords ?? 0) > 0) {

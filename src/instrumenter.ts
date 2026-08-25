@@ -1115,7 +1115,6 @@ export function instrumentMcdc(
   traverse(ast, {
     Function(path) {
       if (isUnsafeInstrumentationContext(path)) return;
-      if (!t.isBlockStatement(path.node.body)) return;
       const entries: t.Statement[] = [];
       const visitPattern = (pattern: t.Node): void => {
         if (t.isTSParameterProperty(pattern)) {
@@ -1172,7 +1171,18 @@ export function instrumentMcdc(
         }
       };
       for (const parameter of path.node.params) visitPattern(parameter);
-      path.node.body.body.unshift(...entries);
+      if (entries.length === 0) return;
+      if (t.isBlockStatement(path.node.body)) {
+        path.node.body.body.unshift(...entries);
+        return;
+      }
+      if (!path.isArrowFunctionExpression())
+        throw new Error("Only arrow functions may have expression bodies");
+      const value = path.node.body;
+      path.node.body = t.blockStatement([
+        ...entries,
+        t.returnStatement(value),
+      ]);
     },
   });
 

@@ -26,6 +26,18 @@ function run(arguments_, extraEnvironment = {}) {
     );
 }
 
+function runNode(arguments_, extraEnvironment = {}) {
+  const result = spawnSync(process.execPath, arguments_, {
+    stdio: "inherit",
+    env: { ...rustEnvironment, ...extraEnvironment },
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0)
+    throw new Error(
+      `${process.execPath} ${arguments_.join(" ")} failed with exit ${result.status ?? "signal"}`,
+    );
+}
+
 // Chromium exercises every adapter/build fixture. Firefox and WebKit rerun
 // the mixed Vitest + two-worker Playwright fixture, including user contexts,
 // popup frames, service workers, WebSockets, and request attribution.
@@ -38,7 +50,8 @@ for (const browser of ["firefox", "webkit"]) {
     { SUPERCOV_BROWSER: browser },
   );
 }
+runNode(["scripts/rust-syntax-matrix.mjs"]);
 
 console.log(
-  "[rust-fixture-matrix] Rust engine passed the adapter matrix in Chromium, Firefox, and WebKit",
+  "[rust-fixture-matrix] Rust engine passed the adapter and independent syntax matrices in Node, Chromium, Firefox, and WebKit",
 );

@@ -16,6 +16,25 @@ function option(name, fallback) {
   return index >= 0 ? process.argv[index + 1] : fallback;
 }
 
+const conformanceEngine = option(
+  "--engine",
+  process.env.SUPERCOV_ENGINE ?? "rust",
+);
+if (conformanceEngine !== "rust" && conformanceEngine !== "typescript")
+  throw new Error("--engine must be either rust or typescript");
+// engineInstrumenter reads this lazily at the instrumentation boundary. Make
+// the authoritative conformance default explicit inside the harness so local,
+// CI, and release invocations cannot silently exercise different engines.
+process.env.SUPERCOV_ENGINE = conformanceEngine;
+if (conformanceEngine === "rust" && !process.env.SUPERCOV_RUST_BINARY) {
+  process.env.SUPERCOV_RUST_BINARY = resolve(
+    option(
+      "--rust-binary",
+      `target/release/supercov${process.platform === "win32" ? ".exe" : ""}`,
+    ),
+  );
+}
+
 const test262Root = resolve(
   option("--test262", process.env.TEST262_DIR ?? ".cache/test262"),
 );
@@ -115,6 +134,7 @@ function runtimePrelude(transformed) {
     selectionBegin: "function(){return {};}",
     selectionRight: "function(frame,value,name){if(name&&typeof value==='function'&&value.name==='')Object.defineProperty(value,'name',{value:name,configurable:true});return value;}",
     selectionEnd: "function(frame,value){return value;}",
+    parenthesizedAssignmentValue: "function(value,name){let candidate;(candidate)=function(){};if(candidate.name==='candidate'&&name&&typeof value==='function'&&value.name==='')Object.defineProperty(value,'name',{value:name,configurable:true});return value;}",
     optionalSelect: "function(shortId,continuedId,value){return value;}",
     optionalCallBegin: "function(shortId,continuedId){return {shortId:shortId,continuedId:continuedId,reached:false,continued:false};}",
     optionalCallReached: "function(frame,value){frame.reached=true;return value;}",
@@ -169,6 +189,10 @@ function runtimePrelude(transformed) {
 
 function runHarness(input) {
   const binary = resolve(temporaryHarnessRunnerRoot, "bin/run.js");
+  const machineResultPath = resolve(
+    temporary,
+    `harness-results-${++harnessRunSequence}.jsonl`,
+  );
   const result = spawnSync(
     process.execPath,
     [
@@ -184,6 +208,7 @@ function runHarness(input) {
       maxBuffer: 1024 * 1024 * 256,
       env: {
         ...process.env,
+        SUPERCOV_TEST262_RESULTS: machineResultPath,
         NODE_PATH: [resolve("node_modules"), process.env.NODE_PATH]
           .filter(Boolean)
           .join(delimiter),
@@ -191,15 +216,43 @@ function runHarness(input) {
     },
   );
   if (result.error) throw result.error;
-  const records = [...result.stdout.matchAll(/^(PASS|FAIL)\s+(.+)$/gm)].map(
-    ([, status, file]) => ({ pass: status === "PASS", file }),
-  );
-  if (records.length === 0) {
+  if (!existsSync(machineResultPath)) {
     throw new Error(
       `Test262 harness failed (${result.status ?? "signal"}):\n${result.stderr}\n${result.stdout}`,
     );
   }
-  return records;
+  const machineRecords = readFileSync(machineResultPath, "utf8")
+    .trimEnd()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const completion = machineRecords.at(-1);
+  const records = machineRecords.slice(0, -1);
+  const reportedTotal = completion?.end === true ? completion.total : undefined;
+  if (
+    result.status !== 0 ||
+    reportedTotal === undefined ||
+    reportedTotal !== records.length ||
+    records.some(
+      (record) =>
+        typeof record.file !== "string" || typeof record.pass !== "boolean",
+    )
+  ) {
+    throw new Error(
+      `Test262 harness ended before publishing a complete result set ` +
+        `(status=${result.status ?? "signal"}, signal=${result.signal ?? "none"}, ` +
+        `records=${records.length}, reported=${reportedTotal ?? "missing"}):\n` +
+        `${result.stderr}\n${result.stdout.slice(-8_192)}`,
+    );
+  }
+  const failures = new Map();
+  for (const record of records.filter((entry) => !entry.pass)) {
+    const key = resultKey(record);
+    const messages = failures.get(key) ?? [];
+    messages.push(`${record.scenario ?? "unknown scenario"}: ${record.message}`);
+    failures.set(key, messages);
+  }
+  return { records, failures };
 }
 
 function resultKey(record) {
@@ -234,6 +287,7 @@ const originalRoot = resolve(temporary, "original/test");
 const instrumentedRoot = resolve(temporary, "instrumented/test");
 const temporaryHarnessRoot = resolve(temporary, "harness");
 const temporaryHarnessRunnerRoot = resolve(temporary, "test262-harness");
+let harnessRunSequence = 0;
 
 try {
   cpSync(resolve("node_modules/test262-harness"), temporaryHarnessRunnerRoot, {
@@ -251,6 +305,53 @@ try {
       "      // Supercov: skip reporter-only recompilation after execution.",
     ),
   );
+  const reporterPath = resolve(
+    temporaryHarnessRunnerRoot,
+    "lib/reporters/simple.js",
+  );
+  const reporterSource = readFileSync(reporterPath, "utf8");
+  const reporterPatches = [
+    [
+      "const saveCompiledTest = require('../saveCompiledTest');",
+      "const saveCompiledTest = require('../saveCompiledTest');\n" +
+        "const fs = require('fs');\n" +
+        "const machineResultPath = process.env.SUPERCOV_TEST262_RESULTS;",
+    ],
+    [
+      "  let lastPassed = true;",
+      "  let lastPassed = true;\n  const machineResults = [];",
+    ],
+    [
+      "    passed++;\n\n    clearPassed();",
+      "    passed++;\n" +
+        "    machineResults.push({ pass: true, file: test.file, scenario: test.scenario });\n\n" +
+        "    clearPassed();",
+    ],
+    [
+      "    failed++;\n    clearPassed();",
+      "    failed++;\n" +
+        "    machineResults.push({ pass: false, file: test.file, scenario: test.scenario, message: String(test.result && test.result.message) });\n" +
+        "    clearPassed();",
+    ],
+    [
+      "  results.on('end', function () {\n    clearPassed();",
+      "  results.on('end', function () {\n" +
+        "    if (machineResultPath) {\n" +
+        "      const records = machineResults.concat([{ end: true, total: passed + failed }]);\n" +
+        "      fs.writeFileSync(machineResultPath, records.map(JSON.stringify).join('\\n') + '\\n');\n" +
+        "    }\n" +
+        "    clearPassed();",
+    ],
+  ];
+  let patchedReporterSource = reporterSource;
+  for (const [needle, replacement] of reporterPatches) {
+    if (!patchedReporterSource.includes(needle))
+      throw new Error(
+        "Installed Test262 simple reporter no longer matches the validated machine-channel patch",
+      );
+    patchedReporterSource = patchedReporterSource.replace(needle, replacement);
+  }
+  writeFileSync(reporterPath, patchedReporterSource);
   const sourceHarnessRoot = resolve(test262Root, "harness");
   for (const source of walk(sourceHarnessRoot)) {
     const destination = resolve(temporaryHarnessRoot, relative(sourceHarnessRoot, source));
@@ -269,7 +370,8 @@ try {
   }
 
   const baselineStarted = performance.now();
-  const originalResults = runHarness(resolve(originalRoot, "**/*.js"));
+  const originalRun = runHarness(resolve(originalRoot, "**/*.js"));
+  const originalResults = originalRun.records;
   const baselineDurationMs = performance.now() - baselineStarted;
   const baselinePasses = new Map();
   for (const record of originalResults.filter((item) => item.pass)) {
@@ -311,7 +413,7 @@ try {
   };
 
   const transformationStarted = performance.now();
-  if (process.env.SUPERCOV_ENGINE === "rust") {
+  if (conformanceEngine === "rust") {
     const batchSize = Math.max(1, Number(process.env.SUPERCOV_TEST262_BATCH ?? 128));
     for (let offset = 0; offset < baselineTests.length; offset += batchSize) {
       const batch = baselineTests.slice(offset, offset + batchSize);
@@ -358,9 +460,10 @@ try {
   const transformationDurationMs = performance.now() - transformationStarted;
 
   const instrumentedStarted = performance.now();
-  const instrumentedResults = baselineFiles.size
+  const instrumentedRun = baselineFiles.size
     ? runHarness(resolve(instrumentedRoot, "**/*.js"))
-    : [];
+    : { records: [], failures: new Map() };
+  const instrumentedResults = instrumentedRun.records;
   const instrumentedDurationMs = performance.now() - instrumentedStarted;
   const instrumentedPasses = new Map();
   for (const record of instrumentedResults.filter((item) => item.pass)) {
@@ -374,7 +477,11 @@ try {
     if (actualPasses < expectedPasses) {
       semanticFailures.push({
         test: key,
-        error: `${actualPasses}/${expectedPasses} baseline-passing scenario(s) still pass after instrumentation`,
+        error:
+          `${actualPasses}/${expectedPasses} baseline-passing scenario(s) still pass after instrumentation` +
+          (instrumentedRun.failures.get(key)?.length
+            ? `; ${instrumentedRun.failures.get(key).join(" | ")}`
+            : ""),
       });
     }
   }
@@ -390,7 +497,9 @@ try {
   });
   const revision =
     revisionResult.status === 0 ? revisionResult.stdout.trim() : "unknown";
-  console.log(`[test262] revision=${revision} shard=${shardText}`);
+  console.log(
+    `[test262] engine=${conformanceEngine} revision=${revision} shard=${shardText}`,
+  );
   console.log(
     `[test262] selected files=${selected.length}; baseline passing scenarios=${baselinePassingScenarios}; baseline unsupported/failed scenarios=${baselineFailed}`,
   );

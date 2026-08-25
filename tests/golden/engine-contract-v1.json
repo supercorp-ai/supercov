@@ -44,7 +44,7 @@
       "coveredConditions": 2,
       "conditionCoveragePct": 100,
       "lines": { "covered": 3, "total": 3, "percentage": 100 },
-      "statements": { "covered": 4, "total": 4, "percentage": 100 },
+      "statements": { "covered": 3, "total": 3, "percentage": 100 },
       "functions": { "covered": 1, "total": 1, "percentage": 100 },
       "branches": { "covered": 2, "total": 2, "percentage": 100 },
       "decisionOutcomes": { "covered": 2, "total": 2, "percentage": 100 },

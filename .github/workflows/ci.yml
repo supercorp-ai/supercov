@@ -30,9 +30,16 @@ jobs:
           path: .test262
       - name: Test262 semantic-equivalence smoke gate
         env:
-          SUPERCOV_ENGINE: rust
-          SUPERCOV_RUST_BINARY: ${{ github.workspace }}/target/debug/supercov
-        run: node scripts/test262-equivalence.mjs --test262 .test262 --limit 250 --minimum 200
+          SUPERCOV_RUST_BINARY: ${{ github.workspace }}/target/release/supercov
+        run: node scripts/test262-equivalence.mjs --engine rust --test262 .test262 --limit 250 --minimum 200
       - run: npx playwright install --with-deps chromium firefox webkit
       - run: npm run test:fixture
       - run: npm run test:rust-fixture
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Require Rust syntax equivalence on the oldest supported Node
+        env:
+          SUPERCOV_RUST_BINARY: ${{ github.workspace }}/target/release/supercov
+        run: node scripts/rust-syntax-matrix.mjs --runtime node

@@ -901,9 +901,11 @@ function requestHeaders(
     : undefined;
 }
 
-function requestCoverageContext(value: unknown): CoverageRequestContext {
+function requestCoverageContext(
+  value: unknown,
+): CoverageRequestContext | undefined {
   const headers = requestHeaders(value);
-  if (!headers) return {};
+  if (!headers) return undefined;
   const rawCookie = headers.get("cookie");
   const cookies = new Map<string, string>();
   if (typeof rawCookie === "string") {
@@ -946,18 +948,27 @@ export function withRequestPhase<T extends (...args: never[]) => unknown>(
   ): ReturnType<T> {
     const requestContext = args
       .map((argument) => requestCoverageContext(argument))
-      .find((context) => context.scope || context.phaseId) ?? {};
-    const inheritedContext = currentRequestContext();
+      .find(
+        (context): context is CoverageRequestContext => context !== undefined,
+      );
+    // A recognized HTTP/WebSocket request is a context boundary even when it
+    // carries no Supercov headers or cookies. In particular, health/readiness
+    // requests must not inherit the SUPERCOV_CONTEXT of the process that
+    // happened to launch a long-lived application server. Inner framework
+    // callbacks with no request argument still inherit the surrounding
+    // AsyncLocalStorage context.
+    const inheritedContext =
+      requestContext === undefined ? currentRequestContext() : {};
     const context = {
-      ...(requestContext.scope ?? inheritedContext.scope
-        ? { scope: requestContext.scope ?? inheritedContext.scope }
+      ...(requestContext?.scope ?? inheritedContext.scope
+        ? { scope: requestContext?.scope ?? inheritedContext.scope }
         : {}),
-      ...(requestContext.phaseId ?? inheritedContext.phaseId
-        ? { phaseId: requestContext.phaseId ?? inheritedContext.phaseId }
+      ...(requestContext?.phaseId ?? inheritedContext.phaseId
+        ? { phaseId: requestContext?.phaseId ?? inheritedContext.phaseId }
         : {}),
     };
     const invoke = () => Reflect.apply(handler, this, args) as ReturnType<T>;
-    return context.scope || context.phaseId
+    return requestContext !== undefined || context.scope || context.phaseId
       ? serverPhaseStorage.run(context, () =>
           withProbeV2Context(context, invoke)
         )
@@ -1156,6 +1167,26 @@ function applyInferredName<T>(value: T, inferredName?: string): T {
     });
   }
   return value;
+}
+
+// ECMAScript does not infer a name through a parenthesized assignment target,
+// but JavaScriptCore historically does. oxc cannot retain those parentheses in
+// its assignment-target AST. Detect the executing host once so instrumentation
+// preserves the application's real behavior instead of normalizing it to one
+// engine's interpretation.
+const hostNamesParenthesizedAssignments = (() => {
+  let candidate: (() => void) | undefined;
+  (candidate) = function () {};
+  return candidate.name === "candidate";
+})();
+
+export function parenthesizedAssignmentValue<T>(
+  value: T,
+  inferredName: string,
+): T {
+  return hostNamesParenthesizedAssignments
+    ? applyInferredName(value, inferredName)
+    : value;
 }
 
 export function selectionRight<T>(

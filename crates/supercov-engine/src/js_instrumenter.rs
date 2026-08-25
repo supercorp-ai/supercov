@@ -370,6 +370,7 @@ pub struct CandidateRuntime {
     pub selection_begin: String,
     pub selection_right: String,
     pub selection_end: String,
+    pub parenthesized_assignment_value: String,
     pub with_request_phase: String,
     pub optional_select: String,
     pub optional_call_begin: String,
@@ -916,6 +917,7 @@ fn expression_is_anonymous_definition(expression: &Expression<'_>) -> bool {
 
 struct AssignmentNameSafetyTransformer<'a> {
     ast: AstBuilder<'a>,
+    parenthesized_assignment_value: String,
 }
 
 impl<'a> VisitMut<'a> for AssignmentNameSafetyTransformer<'a> {
@@ -924,24 +926,29 @@ impl<'a> VisitMut<'a> for AssignmentNameSafetyTransformer<'a> {
         let AssignmentTarget::AssignmentTargetIdentifier(identifier) = &assignment.left else {
             return;
         };
-        if assignment.operator != AssignmentOperator::Assign
+        if !(assignment.operator == AssignmentOperator::Assign || assignment.operator.is_logical())
             || assignment.span.start == identifier.span.start
             || !expression_is_anonymous_definition(&assignment.right)
         {
             return;
         }
         let right = assignment.right.take_in(self.ast.allocator);
-        assignment.right = self.ast.expression_sequence(
+        assignment.right = self.ast.expression_call(
             Span::default(),
+            self.ast.expression_identifier(
+                Span::default(),
+                self.ast.ident(&self.parenthesized_assignment_value),
+            ),
+            NONE,
             self.ast.vec_from_array([
-                self.ast.expression_numeric_literal(
+                Argument::from(right),
+                Argument::from(self.ast.expression_string_literal(
                     Span::default(),
-                    0.0,
+                    identifier.name,
                     None,
-                    NumberBase::Decimal,
-                ),
-                right,
+                )),
             ]),
+            false,
         );
     }
 }
@@ -1164,12 +1171,10 @@ fn json_expression<'a>(ast: AstBuilder<'a>, value: &serde_json::Value) -> Expres
     }
 }
 
-/// Instrument the first deliberately narrow Rust port slice.
-///
-/// The generated code is internal differential-test output, not a public
-/// runtime ABI. It instruments control predicates of at most 32 conditions
-/// with the frozen probe-v2 ternary frame while leaving every other coverage
-/// surface explicitly incomplete.
+/// Instrument JavaScript with the complete frozen v1 denominator and probe-v2
+/// runtime ABI. The source-transform contract is complete and independently
+/// conformance-tested; selection of the Rust engine remains private until the
+/// Phase 4 CLI/orchestration cutover is complete.
 pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput, CandidateError> {
     let source_type = SourceType::from_path(Path::new(file))
         .map_err(|error| CandidateError::UnknownSourceType(error.to_string()))?;
@@ -1277,6 +1282,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     let selection_begin = names.allocate("__supercovSelectionBegin");
     let selection_right = names.allocate("__supercovSelectionRight");
     let selection_end = names.allocate("__supercovSelectionEnd");
+    let parenthesized_assignment_value = names.allocate("__supercovParenthesizedAssignmentValue");
     let with_request_phase = names.allocate("__supercovWithRequestPhase");
     let optional_select = names.allocate("__supercovOptionalSelect");
     let optional_call_begin = names.allocate("__supercovOptionalCallBegin");
@@ -1292,7 +1298,10 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     let loop_entered = names.allocate("__supercovLoopEntered");
     let loop_end = names.allocate("__supercovLoopEnd");
     let ast = AstBuilder::new(&allocator);
-    let mut assignment_name_safety = AssignmentNameSafetyTransformer { ast };
+    let mut assignment_name_safety = AssignmentNameSafetyTransformer {
+        ast,
+        parenthesized_assignment_value: parenthesized_assignment_value.clone(),
+    };
     assignment_name_safety.visit_program(&mut parsed.program);
     let point_indices = point_analysis
         .points
@@ -1493,6 +1502,10 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         ("selectionBegin", &selection_begin),
         ("selectionRight", &selection_right),
         ("selectionEnd", &selection_end),
+        (
+            "parenthesizedAssignmentValue",
+            &parenthesized_assignment_value,
+        ),
         ("optionalSelect", &optional_select),
         ("optionalCallBegin", &optional_call_begin),
         ("optionalCallReached", &optional_call_reached),
@@ -1568,17 +1581,12 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
         );
     }
 
-    let limitations = vec![
-        "production evidence archive conformance remains to be proven across independent contracts and regression references"
-            .to_string(),
-        "candidate runtime registration is differential-only and is not exposed by the public CLI"
-            .to_string(),
-    ];
+    let limitations = Vec::new();
     let (code, map) = generate_candidate(&parsed.program, file)?;
     Ok(CandidateOutput {
         engine: "rust-oxc".to_string(),
-        complete: false,
-        supported_surface: "complete-js-manifest-and-differential-probes-candidate".to_string(),
+        complete: true,
+        supported_surface: "complete-js-instrumenter-v1".to_string(),
         code,
         map,
         decisions: collector.decisions,
@@ -1596,6 +1604,7 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
             selection_begin,
             selection_right,
             selection_end,
+            parenthesized_assignment_value,
             with_request_phase,
             optional_select,
             optional_call_begin,
@@ -5915,13 +5924,11 @@ mod tests {
     }
 
     #[test]
-    fn inserts_probe_v2_without_claiming_the_unported_surfaces() {
+    fn exposes_the_complete_probe_v2_instrumenter_contract() {
         let output = instrument_candidate(SOURCE, "app/decide.ts").unwrap();
-        assert!(!output.complete);
-        assert_eq!(
-            output.supported_surface,
-            "complete-js-manifest-and-differential-probes-candidate"
-        );
+        assert!(output.complete);
+        assert!(output.limitations.is_empty());
+        assert_eq!(output.supported_surface, "complete-js-instrumenter-v1");
         let runtime = output.runtime.expect("candidate runtime binding");
         assert!(output.code.contains(&runtime.mcdc_end_v2));
         assert!(output.code.contains("_supercovMcdcFrame"));

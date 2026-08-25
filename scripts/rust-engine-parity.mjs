@@ -20,6 +20,9 @@ const binary =
 const candidateRust =
   process.env.SUPERCOV_PARITY_CANDIDATE !== "typescript-reference-repeat";
 const temporary = mkdtempSync(resolve(repository, ".rust-engine-parity-"));
+const keepTemporary = process.env.SUPERCOV_PARITY_KEEP_TEMP === "1";
+if (keepTemporary)
+  console.error(`[rust-engine-parity] preserving diagnostics at ${temporary}`);
 const builtInFixtures = [
   { name: "playwright", directory: "generic-playwright" },
   { name: "node-test", directory: "generic-node" },
@@ -485,10 +488,11 @@ try {
       : `[rust-engine-parity] ${fixture.name}: exact manifest, evidence, report, attribution, outcome, confidence, and query parity`);
   }
 } finally {
-  rmSync(temporary, {
-    recursive: true,
-    force: true,
-    maxRetries: 20,
-    retryDelay: 25,
-  });
+  if (!keepTemporary)
+    rmSync(temporary, {
+      recursive: true,
+      force: true,
+      maxRetries: 20,
+      retryDelay: 25,
+    });
 }
