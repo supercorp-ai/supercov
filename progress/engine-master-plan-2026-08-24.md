@@ -1190,6 +1190,14 @@ miss blocks flipping any default.
   milestone is semantics-preserving Python probe insertion, followed by the
   stdlib dynamic-import hook and generated pytest context feeding evidence v3;
   coverage.py remains development-only.
+- Rust-language coverage work started on 2026-08-26 with the accepted private
+  architecture in `progress/rust-frontend-adr-2026-08-26.md`. The first owned
+  path is a lossless, ahead-of-run source frontend plus a generated std-only
+  probe runtime and one supervised process per discovered libtest case. This
+  provides exact cross-thread/async/workspace attribution on stable Cargo
+  without consuming rustc/LLVM profiles. Compiler-generated macros, const,
+  no_std, doctests and generated source remain explicit release blockers, not
+  silently missing denominator. Supercov itself is the first dogfood target.
 
 ## Non-goals and guardrails
 
