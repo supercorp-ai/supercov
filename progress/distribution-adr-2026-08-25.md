@@ -47,12 +47,16 @@ orchestration, not artifact identity or package contracts.
 The Rust CLI now embeds every unavoidable JavaScript runtime collector, so a
 Cargo- or wheel-installed executable completes a JavaScript coverage run with
 no adjacent npm `dist` directory. A functional macOS arm64 PyPI wheel was built,
-metadata-checked and installed into a fresh virtual environment. The exact
-PyPI name `supercov` is not currently claimable: PyPI has an existing active
-project record with no public releases whose owner is not the authenticated
-Supercorp account. Uploads correctly fail with 403. A PyPI transfer request or
-owner cooperation is therefore a distribution gate; a 404 JSON response must
-not be interpreted as name availability.
+metadata-checked and installed into a fresh virtual environment. It is
+published as `supercov-cli 0.0.10`, while the installed binary and product name
+remain `supercov`; a clean `uvx --from supercov-cli==0.0.10 supercov` registry
+install completed a real coverage run. The exact PyPI name `supercov` is not
+currently claimable: PyPI has an existing active project record with no public
+releases whose owner is not the authenticated Supercorp account. Uploads
+correctly fail with 403. A PyPI transfer request or owner cooperation is
+therefore a distribution gate; a 404 JSON response must not be interpreted as
+name availability. If the canonical name is transferred, `supercov-cli`
+becomes a compatibility package directing new installations to `supercov`.
 
 The artifact workflow is manual-only on its own so ordinary commits consume no
 eight-platform build minutes. It uses GitHub's native macOS arm64/x64, Linux

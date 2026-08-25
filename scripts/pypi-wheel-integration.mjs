@@ -15,6 +15,7 @@ import { spawnSync } from "node:child_process";
 
 const repository = resolve(import.meta.dirname, "..");
 const version = JSON.parse(readFileSync(resolve(repository, "package.json"))).version;
+const wheelDistribution = "supercov_cli";
 const temporary = mkdtempSync(resolve(tmpdir(), "supercov-pypi-wheel-"));
 
 function run(program, args, options = {}) {
@@ -26,9 +27,13 @@ function run(program, args, options = {}) {
 try {
   const wheelDirectory = resolve(repository, "target", "wheels");
   const wheels = readdirSync(wheelDirectory).filter(
-    (entry) => entry.startsWith(`supercov-${version}-`) && entry.endsWith(".whl"),
+    (entry) => entry.startsWith(`${wheelDistribution}-${version}-`) && entry.endsWith(".whl"),
   );
-  assert.equal(wheels.length, 1, `expected one supercov ${version} wheel, found ${wheels}`);
+  assert.equal(
+    wheels.length,
+    1,
+    `expected one supercov-cli ${version} wheel, found ${wheels}`,
+  );
 
   const environment = { ...process.env };
   delete environment.SUPERCOV_RUNTIME_ROOT;

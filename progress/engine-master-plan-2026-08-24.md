@@ -910,10 +910,15 @@ miss blocks flipping any default.
   exact-version Cargo graph (`supercov` → `supercov-engine` →
   `supercov-contracts`) was published at `0.0.10`; a clean install from
   crates.io completed a real run. A maturin `bindings = "bin"` macOS arm64
-  wheel likewise passed metadata checks and a clean-venv real run. PyPI's
-  `supercov` name is nevertheless owned by a pre-existing release-less active
-  project, so the authenticated Supercorp account receives 403 and must pursue
-  a project transfer rather than falsely treating JSON 404 as availability.
+  wheel likewise passed metadata checks and a clean-venv real run. The
+  functional wheel was published as `supercov-cli 0.0.10`; a fresh
+  registry-backed `uvx --from supercov-cli==0.0.10 supercov` invocation
+  completed a real coverage run. The executable and product remain `supercov`.
+  PyPI's exact `supercov` project name is nevertheless owned by a pre-existing
+  release-less active project, so the authenticated Supercorp account receives
+  403 and must pursue a project transfer rather than falsely treating JSON 404
+  as availability. After transfer, `supercov-cli` remains only as a
+  compatibility distribution.
   The native npm matrix is defined but has not yet produced a real
   hosted-run green result; the attestation step is wired but therefore has not
   yet produced signed provenance. Initial npm package claims,

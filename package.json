@@ -52,6 +52,7 @@
     "test:rust-platform": "cargo test --workspace && cargo build -p supercov && node scripts/rust-process-supervision.mjs && node scripts/workspace-crash-integration.mjs --engine rust",
     "test:native-package": "npm run build && cargo build --release -p supercov && node scripts/native-package-integration.mjs && node scripts/native-release-set-integration.mjs",
     "test:pypi-wheel": "node scripts/pypi-wheel-integration.mjs",
+    "test:pypi-registry": "node scripts/pypi-registry-integration.mjs",
     "test:rust-syntax": "npm run build && cargo build -p supercov && node scripts/rust-syntax-matrix.mjs",
     "test:rust-fixture": "npm run build && cargo build -p supercov && node scripts/rust-fixture-matrix.mjs",
     "test:clang-mcdc": "node scripts/clang-mcdc-oracle.mjs",
