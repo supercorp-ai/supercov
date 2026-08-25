@@ -236,6 +236,43 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
     decisionReference.stdout,
     `${fixture}: indexed file decision-group JSON differs`,
   );
+
+  const dimensionCommand = fixtureIndex % 2 === 0 ? 'kinds' : 'runners';
+  const dimensionReference = spawnSync(
+    process.execPath,
+    [
+      resolve(root, 'bin/supercov.js'),
+      'runs', runId, 'coverage', dimensionCommand,
+      '--filter', filter, '--limit', '1', '--json',
+    ],
+    {
+      cwd: resolve(root, 'tests/fixtures', fixture),
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024 * 1024,
+    },
+  );
+  assert.equal(dimensionReference.status, 0, `${fixture}: ${dimensionReference.stderr || dimensionReference.stdout}`);
+  const dimensionRust = spawnSync(binary, ['__query-index-files'], {
+    cwd: root,
+    input: JSON.stringify({
+      archivePath,
+      runId,
+      generatedAt,
+      filter,
+      command: dimensionCommand,
+      metric: 'all',
+      offset: 0,
+      limit: 1,
+    }),
+    encoding: 'utf8',
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  assert.equal(dimensionRust.status, 0, `${fixture}: ${dimensionRust.stderr || dimensionRust.stdout}`);
+  assert.equal(
+    dimensionRust.stdout,
+    dimensionReference.stdout,
+    `${fixture}: indexed ${dimensionCommand} JSON differs`,
+  );
 }
 
 const indexed = spawnSync(binary, ['__roundtrip-query-index'], {
@@ -250,5 +287,5 @@ const indexDifference = firstDifference(indexedActual, indexExpected);
 assert.equal(indexDifference, undefined, `typed index: ${JSON.stringify(indexDifference)}`);
 
 console.log(
-  `[rust-archive-differential] ${fixtures.length} real archives have exact report plus typed mmap summary, file-gap, provenance-filter, and decision-group query parity`,
+  `[rust-archive-differential] ${fixtures.length} real archives have exact report plus typed mmap file-gap, provenance, dimension, and decision-group query parity`,
 );

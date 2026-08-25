@@ -216,6 +216,7 @@ pub struct CoverageCoreInput {
 pub struct CoverageCount {
     pub covered: usize,
     pub total: usize,
+    #[serde(serialize_with = "serialize_javascript_number")]
     pub percentage: f64,
 }
 
@@ -227,6 +228,7 @@ pub struct CoverageSummary {
     pub covered_decisions: usize,
     pub conditions: usize,
     pub covered_conditions: usize,
+    #[serde(serialize_with = "serialize_javascript_number")]
     pub condition_coverage_pct: f64,
     pub lines: CoverageCount,
     pub statements: CoverageCount,
@@ -238,6 +240,20 @@ pub struct CoverageSummary {
     pub coverage_complete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completeness_blocked: Option<bool>,
+}
+
+/// `JSON.stringify` emits integer-valued Numbers without a trailing `.0`.
+/// Agent output is a frozen byte contract, so match that representation while
+/// retaining floating-point arithmetic internally.
+fn serialize_javascript_number<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if value.is_finite() && value.fract() == 0.0 && *value >= 0.0 && *value <= u64::MAX as f64 {
+        serializer.serialize_u64(*value as u64)
+    } else {
+        serializer.serialize_f64(*value)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

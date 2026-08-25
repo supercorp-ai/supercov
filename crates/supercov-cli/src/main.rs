@@ -6,9 +6,10 @@ use supercov_engine::{
     coverage_analysis::{CoverageCoreInput, analyze_core},
     coverage_index::{CoverageIndex, coverage_index_sections},
     coverage_query::{
-        CoverageFileDecisionsOptions, CoverageFileQueryData, CoverageFileQueryOptions,
-        DecisionSort, MinimizeMetric, MinimumTestSetRequest, coverage_file_decisions_query,
-        coverage_file_query, minimum_test_set_for_request,
+        CoverageDimensionQueryData, CoverageDimensionQueryOptions, CoverageFileDecisionsOptions,
+        CoverageFileQueryData, CoverageFileQueryOptions, CoverageQueryFilters, DecisionSort,
+        MinimizeMetric, MinimumTestSetRequest, coverage_dimension_query,
+        coverage_file_decisions_query, coverage_file_query, minimum_test_set_for_request,
     },
     coverage_report::{
         ArchiveReportRequest, CoverageReportRequest, analyze_coverage_archive,
@@ -108,7 +109,7 @@ fn query_index_files() -> ExitCode {
     let gaps_only = match request.command.as_str() {
         "files" => Some(false),
         "gaps" => Some(true),
-        "file-decisions" => None,
+        "file-decisions" | "kinds" | "runners" => None,
         _ => {
             eprintln!("[supercov] unsupported indexed query");
             return ExitCode::from(2);
@@ -148,7 +149,45 @@ fn query_index_files() -> ExitCode {
         write_query_index(&sections, &identity, &path).map_err(|error| error.to_string())?;
         let container = QueryIndex::open(&path, &identity).map_err(|error| error.to_string())?;
         let index = CoverageIndex::new(&container).map_err(|error| error.to_string())?;
-        if gaps_only.is_none() {
+        if request.command == "kinds" || request.command == "runners" {
+            let dimension = if request.command == "kinds" {
+                supercov_engine::coverage_index::CoverageDimension::Kind
+            } else {
+                supercov_engine::coverage_index::CoverageDimension::Runner
+            };
+            let filters = CoverageQueryFilters {
+                outcome: request.filter.clone(),
+                kind: request.kind.clone(),
+                runner: request.runner.clone(),
+            };
+            let (data, page) = coverage_dimension_query(
+                &index,
+                CoverageDimensionQueryOptions {
+                    run: &request.run_id,
+                    view,
+                    dimension,
+                    filters,
+                    offset: request.offset,
+                    limit: request.limit,
+                },
+            )
+            .map_err(|error| format!("{error:?}"))?;
+            let command = if request.command == "kinds" {
+                "coverage.kinds"
+            } else {
+                "coverage.runners"
+            };
+            return match data {
+                CoverageDimensionQueryData::Kinds(data) => {
+                    agent_json::success(command, &data, Some(&page))
+                }
+                CoverageDimensionQueryData::Runners(data) => {
+                    agent_json::success(command, &data, Some(&page))
+                }
+            }
+            .map_err(|error| format!("response exceeds {} bytes", error.max_bytes));
+        }
+        if request.command == "file-decisions" {
             let file = request
                 .file
                 .as_deref()

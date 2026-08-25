@@ -386,6 +386,12 @@ miss blocks flipping any default.
   agent-oriented `coverage file --group decision` query, with exact
   per-projection witness recomputation, location/missing ordering, totals and
   pagination; its live JSON is byte-identical across that archive matrix.
+  Typed provenance-dimension records now power `coverage kinds` and
+  `coverage runners`, including each dimension's independently recomputed
+  structural summary and stable pagination. Their byte-level gate uncovered
+  and fixed a Rust/JavaScript representation difference: integer-valued
+  percentages now serialize as JSON integers (`100`, not `100.0`) everywhere
+  in Rust agent output, preserving the frozen JSON byte contract centrally.
   Full condition/vector/test/phase detail sections and the rest of the query
   surface remain before this path can replace the shipped query engine.
 

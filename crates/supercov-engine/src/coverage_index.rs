@@ -19,11 +19,13 @@ pub const SECTION_STRINGS: u32 = 2;
 pub const SECTION_VIEW_SUMMARIES: u32 = 10;
 pub const SECTION_FILE_GAPS: u32 = 11;
 pub const SECTION_DECISION_GAPS: u32 = 12;
+pub const SECTION_DIMENSIONS: u32 = 13;
 
 const STRING_RECORD_SIZE: usize = 16;
 const SUMMARY_RECORD_SIZE: usize = 176;
 const FILE_GAP_RECORD_SIZE: usize = 176;
 const DECISION_GAP_RECORD_SIZE: usize = 96;
+const DIMENSION_RECORD_SIZE: usize = 192;
 const NO_STRING: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -261,6 +263,24 @@ pub struct IndexedDecisionGap {
     pub missing_conditions: usize,
     pub waived_conditions: usize,
     pub source: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverageDimension {
+    Kind = 0,
+    Runner = 1,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedDimensionCoverage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
+    pub tests: usize,
+    pub setups: usize,
+    pub summary: CoverageSummary,
 }
 
 #[derive(Default)]
@@ -516,6 +536,68 @@ fn decision_gap_record(
     Ok(record)
 }
 
+fn put_summary_payload(
+    record: &mut [u8],
+    flags_offset: usize,
+    base: usize,
+    summary: &CoverageSummary,
+) -> Result<(), CoverageIndexError> {
+    record[flags_offset] = u8::from(summary.coverage_complete);
+    record[flags_offset + 1] = match summary.completeness_blocked {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    };
+    for (index, value) in [
+        summary.decisions,
+        summary.executed_decisions,
+        summary.covered_decisions,
+        summary.conditions,
+        summary.covered_conditions,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        put_u64(record, base + index * 8, usize_u64(value)?);
+    }
+    for (index, count) in [
+        &summary.lines,
+        &summary.statements,
+        &summary.functions,
+        &summary.branches,
+        &summary.decision_outcomes,
+        &summary.condition_outcomes,
+        &summary.value_selections,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        put_count(record, base + 40 + index * 16, count)?;
+    }
+    Ok(())
+}
+
+fn dimension_record(
+    view_id: CoverageViewId,
+    dimension: CoverageDimension,
+    value: &crate::coverage_report::DimensionCoverage,
+    strings: &mut StringTable,
+) -> Result<[u8; DIMENSION_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; DIMENSION_RECORD_SIZE];
+    record[0] = view_id as u8;
+    record[1] = dimension as u8;
+    let name = match dimension {
+        CoverageDimension::Kind => value.kind.as_deref(),
+        CoverageDimension::Runner => value.runner.as_deref(),
+    }
+    .ok_or(CoverageIndexError::InvalidRecord("dimension name"))?;
+    put_u32(&mut record, 4, strings.intern(name)?);
+    put_u64(&mut record, 8, usize_u64(value.tests)?);
+    put_u64(&mut record, 16, usize_u64(value.setups)?);
+    put_summary_payload(&mut record, 24, 32, &value.summary)?;
+    Ok(record)
+}
+
 pub fn coverage_index_sections(
     report: &CoverageReport,
 ) -> Result<Vec<QueryIndexSection>, CoverageIndexError> {
@@ -528,8 +610,25 @@ pub fn coverage_index_sections(
     let mut summaries = Vec::with_capacity(views.len() * SUMMARY_RECORD_SIZE);
     let mut gaps = Vec::new();
     let mut decision_gaps = Vec::new();
+    let mut dimensions = Vec::new();
     for (id, view) in views {
         summaries.extend_from_slice(&summary_record(id, view, &mut strings)?);
+        for value in &view.coverage_by_kind {
+            dimensions.extend_from_slice(&dimension_record(
+                id,
+                CoverageDimension::Kind,
+                value,
+                &mut strings,
+            )?);
+        }
+        for value in &view.coverage_by_runner {
+            dimensions.extend_from_slice(&dimension_record(
+                id,
+                CoverageDimension::Runner,
+                value,
+                &mut strings,
+            )?);
+        }
         for decision in &view.decisions {
             decision_gaps.extend_from_slice(&decision_gap_record(
                 id,
@@ -588,6 +687,12 @@ pub fn coverage_index_sections(
             count: usize_u64(decision_gaps.len() / DECISION_GAP_RECORD_SIZE)?,
             bytes: decision_gaps,
         },
+        QueryIndexSection {
+            kind: SECTION_DIMENSIONS,
+            record_size: DIMENSION_RECORD_SIZE as u32,
+            count: usize_u64(dimensions.len() / DIMENSION_RECORD_SIZE)?,
+            bytes: dimensions,
+        },
     ])
 }
 
@@ -602,6 +707,7 @@ impl<'a> CoverageIndex<'a> {
             (SECTION_VIEW_SUMMARIES, SUMMARY_RECORD_SIZE),
             (SECTION_FILE_GAPS, FILE_GAP_RECORD_SIZE),
             (SECTION_DECISION_GAPS, DECISION_GAP_RECORD_SIZE),
+            (SECTION_DIMENSIONS, DIMENSION_RECORD_SIZE),
         ] {
             if index.descriptor(kind)?.record_size as usize != size {
                 return Err(CoverageIndexError::InvalidRecord("record size"));
@@ -865,6 +971,47 @@ impl<'a> CoverageIndex<'a> {
         Ok(decisions)
     }
 
+    pub fn dimensions(
+        &self,
+        view: CoverageViewId,
+        dimension: CoverageDimension,
+    ) -> Result<Vec<IndexedDimensionCoverage>, CoverageIndexError> {
+        let descriptor = self.index.descriptor(SECTION_DIMENSIONS)?;
+        let mut values = Vec::new();
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_DIMENSIONS, index)?;
+            if CoverageViewId::try_from(record[0])? != view {
+                continue;
+            }
+            let record_dimension = match record[1] {
+                0 => CoverageDimension::Kind,
+                1 => CoverageDimension::Runner,
+                _ => return Err(CoverageIndexError::InvalidRecord("dimension type")),
+            };
+            if record_dimension != dimension {
+                continue;
+            }
+            if record[26..32].iter().any(|byte| *byte != 0)
+                || record[184..].iter().any(|byte| *byte != 0)
+            {
+                return Err(CoverageIndexError::InvalidRecord(
+                    "dimension reserved bytes",
+                ));
+            }
+            let name = self.string(get_u32(record, 4)?)?;
+            values.push(IndexedDimensionCoverage {
+                kind: (dimension == CoverageDimension::Kind).then(|| name.clone()),
+                runner: (dimension == CoverageDimension::Runner).then_some(name),
+                tests: usize::try_from(get_u64(record, 8)?)
+                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                setups: usize::try_from(get_u64(record, 16)?)
+                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                summary: decode_summary(record, 24, 32)?,
+            });
+        }
+        Ok(values)
+    }
+
     pub fn snapshot(&self) -> Result<IndexedCoverageSnapshot, CoverageIndexError> {
         Ok(IndexedCoverageSnapshot {
             all_summary: self.summary(CoverageViewId::All)?,
@@ -883,6 +1030,61 @@ fn bool_field(value: u8) -> Result<bool, CoverageIndexError> {
         1 => Ok(true),
         _ => Err(CoverageIndexError::InvalidRecord("boolean")),
     }
+}
+
+fn decode_summary(
+    record: &[u8],
+    flags_offset: usize,
+    base: usize,
+) -> Result<CoverageSummary, CoverageIndexError> {
+    let number = |offset: usize| -> Result<usize, CoverageIndexError> {
+        usize::try_from(get_u64(record, offset)?).map_err(|_| CoverageIndexError::SizeOverflow)
+    };
+    let count = |offset: usize| -> Result<CoverageCount, CoverageIndexError> {
+        let covered = number(offset)?;
+        let total = number(offset + 8)?;
+        if covered > total {
+            return Err(CoverageIndexError::InvalidRecord("covered exceeds total"));
+        }
+        Ok(CoverageCount {
+            covered,
+            total,
+            percentage: percentage(covered, total),
+        })
+    };
+    let decisions = number(base)?;
+    let executed_decisions = number(base + 8)?;
+    let covered_decisions = number(base + 16)?;
+    let conditions = number(base + 24)?;
+    let covered_conditions = number(base + 32)?;
+    if covered_decisions > executed_decisions
+        || executed_decisions > decisions
+        || covered_conditions > conditions
+    {
+        return Err(CoverageIndexError::InvalidRecord("summary count ordering"));
+    }
+    Ok(CoverageSummary {
+        decisions,
+        executed_decisions,
+        covered_decisions,
+        conditions,
+        covered_conditions,
+        condition_coverage_pct: percentage(covered_conditions, conditions),
+        lines: count(base + 40)?,
+        statements: count(base + 56)?,
+        functions: count(base + 72)?,
+        branches: count(base + 88)?,
+        decision_outcomes: count(base + 104)?,
+        condition_outcomes: count(base + 120)?,
+        value_selections: count(base + 136)?,
+        coverage_complete: bool_field(record[flags_offset])?,
+        completeness_blocked: match record[flags_offset + 1] {
+            0 => None,
+            1 => Some(false),
+            2 => Some(true),
+            _ => return Err(CoverageIndexError::InvalidRecord("optional boolean")),
+        },
+    })
 }
 
 fn percentage(covered: usize, total: usize) -> f64 {

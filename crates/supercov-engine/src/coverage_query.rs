@@ -12,7 +12,8 @@ use crate::{
     agent_json::pagination,
     coverage_analysis::{CoverageSummary, is_independence_pair},
     coverage_index::{
-        CoverageIndex, CoverageIndexError, CoverageViewId, IndexedDecisionGap, IndexedFileGap,
+        CoverageDimension, CoverageIndex, CoverageIndexError, CoverageViewId, IndexedDecisionGap,
+        IndexedDimensionCoverage, IndexedFileGap,
     },
     coverage_report::{
         CoverageReportRequest, CoverageView, ReportError, analyze_coverage_results,
@@ -141,6 +142,28 @@ pub struct CoverageGapsData {
     pub gaps: Vec<IndexedFileGap>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageKindsData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub kinds: Vec<IndexedDimensionCoverage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageRunnersData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub runners: Vec<IndexedDimensionCoverage>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CoverageDimensionQueryData {
+    Kinds(CoverageKindsData),
+    Runners(CoverageRunnersData),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum CoverageFileQueryData {
     Files(CoverageFilesData),
@@ -192,6 +215,54 @@ pub struct CoverageFileDecisionsOptions<'a> {
     pub sort: DecisionSort,
     pub offset: usize,
     pub limit: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct CoverageDimensionQueryOptions<'a> {
+    pub run: &'a str,
+    pub view: CoverageViewId,
+    pub dimension: CoverageDimension,
+    pub filters: CoverageQueryFilters,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+pub fn coverage_dimension_query(
+    index: &CoverageIndex<'_>,
+    options: CoverageDimensionQueryOptions<'_>,
+) -> Result<(CoverageDimensionQueryData, AgentPagination), QueryError> {
+    let CoverageDimensionQueryOptions {
+        run,
+        view,
+        dimension,
+        filters,
+        offset,
+        limit,
+    } = options;
+    if limit == 0 {
+        return Err(QueryError::InvalidPagination);
+    }
+    let values = index.dimensions(view, dimension)?;
+    let total = values.len();
+    let selected = values
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let returned = selected.len();
+    let data = match dimension {
+        CoverageDimension::Kind => CoverageDimensionQueryData::Kinds(CoverageKindsData {
+            run: run.into(),
+            filters,
+            kinds: selected,
+        }),
+        CoverageDimension::Runner => CoverageDimensionQueryData::Runners(CoverageRunnersData {
+            run: run.into(),
+            filters,
+            runners: selected,
+        }),
+    };
+    Ok((data, pagination(offset, limit, returned, total)))
 }
 
 #[derive(Debug, Clone, Copy)]
