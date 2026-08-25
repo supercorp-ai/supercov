@@ -951,6 +951,11 @@ miss blocks flipping any default.
   Windows gate; `0.0.11` intentionally advertises only the six fully validated
   macOS/Linux targets. The reusable release gate can also verify a complete
   prior artifact set without rebuilding any target.
+  Registry publication is independently resumable: it checks each exact
+  package/version before publishing, verifies an existing identity, and skips
+  it. An expired OTP or interrupted bootstrap therefore cannot turn a partial
+  first-time platform claim into another artifact build or an unrecoverable
+  release script failure.
   The release workflow now calls that complete native matrix, downloads and
   revalidates the aggregate release set, publishes all eight exact-version
   platform packages first, and publishes the primary package only after every
