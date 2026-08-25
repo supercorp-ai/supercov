@@ -10,6 +10,7 @@ pub mod coverage_report;
 pub mod evidence_archive;
 pub mod js_instrumenter;
 pub mod probe_v2;
+pub mod query_index;
 
 pub use supercov_contracts::CONTRACT_VERSION;
 

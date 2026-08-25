@@ -343,6 +343,18 @@ miss blocks flipping any default.
   across Rust/compiler layouts and 34% smaller than rkyv. Its section layout,
   checked arithmetic, corruption corpus, immutable publication and rebuild-on-
   version-mismatch rules are now Phase 4 implementation requirements.
+- The production Rust crate now implements the selected index container rather
+  than retaining the benchmark as an aspiration: a 4 KiB authenticated v1
+  header binds evidence hash/length, archive schema, analysis identity and
+  producer ABI; a checked section directory uses fixed little-endian widths;
+  and every read authenticates each touched 64 KiB page before returning bytes.
+  Publication uses unique temporary files, `fsync`, and atomic rename; readers
+  reject symlinks, stale identities, malformed record shapes, overflow, bounds,
+  overlapping regions and corrupt pages. Tests prove old mappings survive an
+  atomic replacement and invalid inputs leave no published artifact. The typed
+  coverage sections and agent query operators are the next layer; the shipped
+  TypeScript gzipped-JSON cache remains in place until that layer reaches the
+  same black-box query gates.
 
 ## Non-goals and guardrails
 
