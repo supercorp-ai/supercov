@@ -530,7 +530,7 @@ pub fn recover_cached_workspace(
             }
         }
     }
-    previous.sort_by(|left, right| right.0.cmp(&left.0));
+    previous.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     let mut restored = false;
     if fs::symlink_metadata(&workspace).is_err()
         && let Some((_, newest)) = previous.first()

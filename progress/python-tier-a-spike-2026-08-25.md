@@ -154,7 +154,12 @@ the owned Rust transformer and Supercov runtime.
 
 ## Separate product gates
 
-- Rust-owned Python parser/transformer and complete obligation manifest.
+- Rust-owned Python parser/transformer and complete obligation manifest. The
+  parser and first private denominator builder are now implemented with exact
+  Ruff byte ranges and stable Supercov IDs. It currently covers statements,
+  functions/lambdas, boolean control decisions, logical short-circuiting,
+  comprehensions, loops, match/no-match, guards and try/except. Transformation
+  and owned observations remain open, so this is not public Python support.
 - Supercov-owned probe-v2 runtime with no third-party dependency.
 - Automatically injected stdlib-only dynamic-import and pytest lifecycle
   adapters; the existing test command remains unchanged.

@@ -40,7 +40,7 @@ jobs:
       # Install matrix targets into the same pinned compiler Cargo selects via
       # rust-toolchain.toml. Installing them into a moving `stable` toolchain
       # leaves the pinned compiler without its target standard library.
-      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
       - name: Install musl linker

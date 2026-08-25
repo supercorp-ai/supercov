@@ -1179,11 +1179,17 @@ miss blocks flipping any default.
   the plan and must pass on a real Windows host before Windows binaries are
   claimed or published.
 - Python has a strict language-frontend contract, independent coverage.py/
-  pytest oracle fixtures and private evidence-v3 analysis, but no public owned
-  Python instrumenter yet. Public runs remain JavaScript/TypeScript only. The
-  next language milestone is Supercov-owned Python obligations, probes,
-  dynamic-import hook and pytest context emitted directly into the shared Rust
-  engine; coverage.py remains development-only.
+  pytest oracle fixtures and private evidence-v3 analysis. The first
+  Supercov-owned denominator implementation now lives in Rust and uses exact,
+  pinned Ruff parser/AST/text-range crates (`0.0.10`) to discover stable
+  statement, function, decision and branch obligations for current Python
+  syntax. This required intentionally raising the pinned Rust MSRV/toolchain to
+  1.95. The implementation remains private and emits a blocking readiness
+  limitation: it does not yet transform source or inject owned probes. Public
+  runs therefore remain JavaScript/TypeScript only. The next language
+  milestone is semantics-preserving Python probe insertion, followed by the
+  stdlib dynamic-import hook and generated pytest context feeding evidence v3;
+  coverage.py remains development-only.
 
 ## Non-goals and guardrails
 
