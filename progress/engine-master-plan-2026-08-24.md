@@ -885,8 +885,13 @@ miss blocks flipping any default.
   yet produced signed provenance. Initial npm package claims,
   coordinated publication, GitHub artifacts, PyPI/Homebrew/cargo-binstall/opam
   and C-compatible wrappers remain Phase 5 gates.
-- The shared producer boundary is now frozen independently as
-  `contracts/frontend-v1`. A language frontend contributes a complete
+- The shared producer boundary was first frozen independently as
+  `contracts/frontend-v1`. The first real Python spike exposed that v1 had no
+  honest phase kind for ordinary test-body execution: mapping pytest's `call`
+  phase to `assertion` would overclaim causality, while `background` would lose
+  exact test attribution. V1 remains immutable and checked in; the current
+  `contracts/frontend-v2` adds only the `test` transition and records the
+  reason for the version change. A language frontend contributes a complete
   obligation manifest, normalized observations, run/worker/test/retry/phase
   identity and action/assertion transitions only to its declared precision,
   plus explicit limitations. Rust retains manifest merging, validation,
@@ -896,12 +901,31 @@ miss blocks flipping any default.
   duplicate or inconsistent limitations, unexplained precision downgrades,
   impossible exact causal linkage and exact test causality from parallel-
   unattributed execution. Python and LLVM adapters must pass this contract
-  unchanged; neither adapter has started yet. A Rust analyzer-entry validator
+  unchanged. A Rust analyzer-entry validator
   now additionally binds a declaration to the manifest's exact limitation-ID
   set and observed runner set, verifies exact test/scope/retry identities, and
   rejects illegal, duplicate, unresolved or cyclic phase transitions before
   coverage analysis. The declaration is not added to frozen v2 archives yet;
-  that requires an explicit archive-schema migration with the first adapter.
+  that requires an explicit archive-schema migration before an adapter can be
+  publicly enabled.
+- The private Python Tier-A adapter has started. A checked-in pytest fixture
+  runs under coverage.py 7.15.4, exports through documented `Coverage` and
+  `CoverageData` APIs, and differentially reconstructs 10/12 executable lines
+  and 6/8 branch arcs in the shared Rust analyzer. The importer rejects unknown
+  fields, malformed line partitions, source/path drift, run/context/outcome
+  inconsistencies, unattributed executed facts and non-branch measurement. It
+  preserves import-time module execution as background rather than dropping
+  it. A Python 3.14 run also proved that coverage.py's `sys.monitoring` core
+  warns dynamic contexts can be incomplete; exact attribution is therefore
+  accepted only from explicitly selected `ctrace` or `pytrace` collection.
+  Pytest setup/call/teardown phases are exact, but action and individual
+  assertion linkage are explicitly unavailable. MC/DC vectors and exact
+  columns are blocking structural limitations, never zero-sized success. The
+  producer contract, fixture, golden export, architectural decision and public
+  API sources are recorded in `contracts/python-coverage-v1` and
+  `progress/python-tier-a-spike-2026-08-25.md`. Public CLI execution, xdist and
+  subprocess matrices, archive v3/model migration, owned Python MC/DC probes,
+  packaging and broad dogfood remain unfinished gates.
 
 ## Non-goals and guardrails
 

@@ -23,7 +23,7 @@ pub const COMMAND_TERMINATION_GRACE_MS: u64 = 5_000;
 pub const PROBE_V2_VERSION: u32 = 2;
 pub const PROBE_V2_RADIX: u32 = 3;
 pub const PROBE_V2_JS_MAX_CONDITIONS: usize = 32;
-pub const LANGUAGE_FRONTEND_PROTOCOL_VERSION: u32 = 1;
+pub const LANGUAGE_FRONTEND_PROTOCOL_VERSION: u32 = 2;
 
 pub const ERROR_CODES: &[&str] = &[
     "AMBIGUOUS_SELECTOR",
@@ -197,7 +197,30 @@ pub struct LanguageFrontendRequirements {
 
 pub fn language_frontend_protocol_contract()
 -> Result<LanguageFrontendProtocolContract, serde_json::Error> {
-    serde_json::from_str(include_str!("../../../contracts/frontend-v1/contract.json"))
+    serde_json::from_str(include_str!("../../../contracts/frontend-v2/contract.json"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PythonCoverageImportContract {
+    pub schema_version: u32,
+    pub status: String,
+    pub producer: String,
+    pub supported_collector_cores_for_exact_contexts: Vec<String>,
+    pub requires_branch_measurement: bool,
+    pub database_access: String,
+    pub frontend_computes_verdicts: bool,
+    pub unknown_fields_fatal: bool,
+    pub preserve_unrecognized_contexts_as_background: bool,
+    pub mcdc_availability: String,
+    pub column_locations: String,
+}
+
+pub fn python_coverage_import_contract() -> Result<PythonCoverageImportContract, serde_json::Error>
+{
+    serde_json::from_str(include_str!(
+        "../../../contracts/python-coverage-v1/contract.json"
+    ))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,6 +252,7 @@ pub enum AttributionPrecision {
 #[serde(rename_all = "kebab-case")]
 pub enum FrontendTransitionKind {
     Setup,
+    Test,
     Action,
     Assertion,
     Teardown,
@@ -677,6 +701,7 @@ mod tests {
             contract.transition_kinds,
             [
                 FrontendTransitionKind::Setup,
+                FrontendTransitionKind::Test,
                 FrontendTransitionKind::Action,
                 FrontendTransitionKind::Assertion,
                 FrontendTransitionKind::Teardown,
@@ -824,8 +849,8 @@ mod tests {
     #[test]
     fn checked_in_frontend_examples_are_strict_and_valid() {
         for source in [
-            include_str!("../../../contracts/frontend-v1/examples/javascript-mixed-runners.json"),
-            include_str!("../../../contracts/frontend-v1/examples/python-pytest-xdist.json"),
+            include_str!("../../../contracts/frontend-v2/examples/javascript-mixed-runners.json"),
+            include_str!("../../../contracts/frontend-v2/examples/python-pytest-xdist.json"),
         ] {
             let declaration: FrontendRunDeclaration = serde_json::from_str(source).unwrap();
             validate_frontend_run_declaration(&declaration).unwrap();
@@ -834,5 +859,30 @@ mod tests {
                 serde_json::to_value(declaration).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn python_coverage_import_contract_keeps_the_oracle_at_the_fact_boundary() {
+        let contract = python_coverage_import_contract().unwrap();
+        assert_eq!(contract.schema_version, 1);
+        assert_eq!(contract.status, "private-spike");
+        assert_eq!(contract.producer, "coverage.py");
+        assert_eq!(
+            contract.supported_collector_cores_for_exact_contexts,
+            ["ctrace", "pytrace"]
+        );
+        assert!(contract.requires_branch_measurement);
+        assert_eq!(contract.database_access, "forbidden");
+        assert!(!contract.frontend_computes_verdicts);
+        assert!(contract.unknown_fields_fatal);
+        assert!(contract.preserve_unrecognized_contexts_as_background);
+        assert_eq!(
+            contract.mcdc_availability,
+            "unavailable-with-blocking-limitation"
+        );
+        assert_eq!(
+            contract.column_locations,
+            "unavailable-with-blocking-limitation"
+        );
     }
 }

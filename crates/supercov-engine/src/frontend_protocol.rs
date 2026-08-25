@@ -189,7 +189,7 @@ fn require_exact_identities(
     for phase in &raw.phases {
         if !matches!(
             phase.kind.as_str(),
-            "setup" | "action" | "assertion" | "teardown" | "background"
+            "setup" | "test" | "action" | "assertion" | "teardown" | "background"
         ) {
             return Err(FrontendProtocolError::InvalidPhaseKind(phase.kind.clone()));
         }

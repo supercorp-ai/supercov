@@ -22,6 +22,7 @@ pub mod orchestration;
 pub mod probe_v2;
 pub mod process_supervision;
 pub mod project_discovery;
+pub mod python_frontend;
 pub mod query_index;
 pub mod run_query;
 pub mod run_store;
