@@ -43,6 +43,7 @@ pub struct RustFrontendRun {
     pub request: CoverageReportRequest,
     pub exit_code: i32,
     pub artifacts: usize,
+    pub artifact_files: Vec<PathBuf>,
     pub build_ms: f64,
     pub execution_ms: f64,
 }
@@ -671,6 +672,10 @@ pub fn run_prepared_rust_tests(
         },
         exit_code: overall_exit,
         artifacts: artifacts.len(),
+        artifact_files: artifacts
+            .iter()
+            .map(|artifact| artifact.executable.clone())
+            .collect(),
         build_ms,
         execution_ms: execution_started.elapsed().as_secs_f64() * 1000.0,
     })

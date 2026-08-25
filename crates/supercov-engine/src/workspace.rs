@@ -113,7 +113,7 @@ fn project_name(root: &Path) -> Result<&std::ffi::OsStr, WorkspaceError> {
 }
 
 pub fn workspace_container(root: &Path) -> PathBuf {
-    root.join("supercov")
+    root.join(".supercov/cache")
 }
 
 pub fn cached_workspace_path(root: &Path) -> Result<PathBuf, WorkspaceError> {
@@ -152,7 +152,7 @@ fn ensure_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
         }
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir(&container).map_err(|source| io_error(&container, source))?;
+            fs::create_dir_all(&container).map_err(|source| io_error(&container, source))?;
         }
         Err(source) => return Err(io_error(&container, source)),
     }

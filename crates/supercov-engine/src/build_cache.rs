@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn writes_reads_and_rejects_incomplete_exact_cache_metadata() {
         let root = temporary();
-        let workspace = root.join("supercov/workspace/project");
+        let workspace = root.join(".supercov/cache/workspace/project");
         fs::create_dir_all(workspace.join(".supercov")).unwrap();
         fs::create_dir_all(workspace.join("dist")).unwrap();
         fs::write(workspace.join("dist/app.js"), "built").unwrap();

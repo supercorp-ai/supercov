@@ -57,6 +57,28 @@ Cargo cache/stable workspace plus reductions in transformation, process and
 archive overhead; no performance claim should use a warm baseline against a
 fresh Supercov target.
 
+An exact-input stable workspace prototype on 2026-08-26 moved all generated
+state under `.supercov/cache/workspace/<project>` and authenticated the input
+fingerprint, transformed sources, toolchain, command and emitted libtest
+artifacts before reuse. This removed the repeated transformation and Cargo
+compile, but did not satisfy the release gate:
+
+- fair clean/clean copies: ordinary 24.87s, Supercov 34.06s = **1.37x**;
+- fair warm/warm copies: ordinary 2.74s, Supercov 11.11s = **4.05x**;
+- warm Supercov internals: 1.70s cache authentication, 0.25s setup, 0.78s
+  Cargo validation, 4.72s exact process-per-test execution, 1.55s archive
+  publication, plus cache publication and lifecycle overhead.
+
+The old top-level `supercov/workspace/` location was self-invalidating when
+dogfooding this repository because it appeared to be project input. New state
+must remain inside `.supercov`; marked old workspace stores are migrated to
+deferred trash. The remaining gap is architectural rather than a build-cache
+problem: exact attribution needs an owned in-process libtest context carrier,
+and evidence must be buffered/encoded without expanding and compressing the
+same repeated identities per test. Process-per-test remains the correctness
+fallback until the in-process path passes the same attribution and crash
+gates.
+
 ## Product boundary
 
 Rust user runs are measured only by Supercov-owned probes. `rustc -C

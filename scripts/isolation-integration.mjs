@@ -83,7 +83,7 @@ async function verifyUncatchableCacheRecovery() {
     const projectBefore = snapshot(crashRoot);
     const expectedCache = resolve(
       crashRoot,
-      "supercov/workspace",
+      ".supercov/cache/workspace",
       basename(crashRoot),
     );
     const cacheParent = resolve(expectedCache, "..");
@@ -176,7 +176,7 @@ const workRoot = resolve(root, ".supercov/work");
 const runsBefore = new Set(existsSync(workRoot) ? readdirSync(workRoot) : []);
 const expectedCache = resolve(
   root,
-  "supercov/workspace/generic-playwright",
+  ".supercov/cache/workspace/generic-playwright",
 );
 
 const child = spawn(

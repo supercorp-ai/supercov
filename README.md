@@ -195,7 +195,7 @@ producing a plausible but invalid aggregate.
 For a JavaScript or TypeScript project, the CLI:
 
 1. refreshes a stable isolated source namespace under
-   `supercov/workspace/<project>/`, links the existing
+   `.supercov/cache/workspace/<project>/`, links the existing
    dependency tree, and creates generated runner configuration and build output
    only there; file data uses copy-on-write reflinks where the filesystem
    supports them, and falls back to copying where it does not; the stable path
@@ -228,7 +228,7 @@ For a JavaScript or TypeScript project, the CLI:
    rebuilt afterward.
 
 Only the Supercov-owned `.supercov/` run store and marker-protected
-`supercov/workspace/` cache are modified in the user's checkout. A user-created
+`.supercov/cache/workspace/` cache are modified in the user's checkout. A user-created
 `supercov/` directory without Supercov's ownership marker is never treated as
 storage. A per-project lock rejects overlapping runs before either can build. Run state is durably written
 through preparing/building/testing/publishing phases; SIGINT, SIGTERM,

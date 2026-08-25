@@ -107,7 +107,7 @@ try {
   const before = snapshot(root);
   const workspace = resolve(
     root,
-    "supercov/workspace",
+    ".supercov/cache/workspace",
     basename(root),
   );
   const cacheParent = resolve(workspace, "..");

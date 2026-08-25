@@ -29,6 +29,7 @@ pub mod query_index;
 pub mod run_merge;
 pub mod run_query;
 pub mod run_store;
+pub mod rust_build_cache;
 pub mod rust_instrumenter;
 pub mod rust_project;
 pub mod rust_run;
