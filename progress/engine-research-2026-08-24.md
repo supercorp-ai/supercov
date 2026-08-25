@@ -50,14 +50,17 @@ order-preserving rewrites, not off-the-shelf transforms. **Implication:**
 Phase 3 starts with a spike (S1) porting the three hairiest instrumenter
 features before committing.
 
-### 5. napi-rs v3: platform packages + WASI fallback is a solved pattern
+### 5. napi-rs v3: platform packages are solved; WASI is not a full-CLI fallback
 Per-target binaries as scoped `optionalDependencies` with an automatic
 `wasm32-wasip1-threads` fallback for platforms without prebuilds, plus
 version-mismatch guards in the loader. Known footgun: a `wasm-runtime`
 release once broke `npm ci` — pin the fallback chain exactly.
-**Implication:** npm distribution for the Phase-3 instrumenter addon and the
-Phase-4/5 engine binary is copy-paste engineering, including exotic-platform
-coverage via WASI.
+**Implication:** npm distribution for the Phase-4/5 engine binary can reuse the
+platform-package and version-guard pattern. The WASI part applies only to a
+pure transform/addon surface: the full Supercov CLI owns arbitrary child
+processes, signals, filesystem transactions and mmap indexes, which Node WASI
+cannot implement equivalently. The CLI therefore fails honestly on an
+unsupported target rather than silently losing supervision guarantees.
 
 ### 6. cargo-dist: alive, but decide with an ADR
 Actively maintained (0.32.0, May 2026); Astral forked it for uv and their
@@ -93,9 +96,9 @@ rkyv both work; SQLite is likely overkill. Settle by benchmark spike (S2).
   check input; build it with pinned SHAs and cached clones from day one.
 - Probe v2 adopts the LLVM bitmap model with epoch-swapped buffers for
   attribution; vector reconstruction moves offline into analysis.
-- Distribution: napi platform-package pattern (with WASI fallback) for npm;
-  maturin bin wheels for PyPI; cargo-dist vs hand-rolled decided by ADR in
-  Phase 5.
+- Distribution: napi platform-package pattern for npm; no unsound WASI fallback
+  for the process-owning CLI; maturin bin wheels for PyPI; cargo-dist vs hand-
+  rolled decided by ADR in Phase 5.
 
 ## Open spikes (each blocks the phase it feeds)
 
