@@ -62,6 +62,21 @@ try {
   const platformPack = JSON.parse(
     run("npm", ["pack", "--ignore-scripts", "--json"], { cwd: packageRoot }),
   )[0].filename;
+  const artifactMetadata = resolve(temporary, `${target.package}.checksums.json`);
+  run(process.execPath, [
+    resolve(repository, "scripts/native-artifact-check.mjs"),
+    "--target", target.rustTarget,
+    "--binary", resolve(packageRoot, "bin", target.executable),
+    "--tarball", resolve(packageRoot, platformPack),
+    "--out", artifactMetadata,
+  ]);
+  const artifact = JSON.parse(readFileSync(artifactMetadata, "utf8"));
+  assert.equal(artifact.schemaVersion, 2);
+  assert.equal(artifact.package, target.package);
+  assert.equal(
+    artifact.version,
+    JSON.parse(readFileSync(resolve(repository, "package.json"))).version,
+  );
 
   const mainRoot = resolve(temporary, "main");
   cpSync(resolve(repository, "bin"), resolve(mainRoot, "bin"), { recursive: true });

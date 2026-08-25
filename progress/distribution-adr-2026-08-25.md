@@ -46,6 +46,13 @@ the workflow's short-lived OIDC identity; private repositories use GitHub's
 private Sigstore instance. Verification is therefore tied to repository,
 workflow, commit and triggering event rather than to a long-lived signing key:
 <https://docs.github.com/en/actions/concepts/security/artifact-attestations>.
+An aggregate job downloads all eight independently built artifacts and refuses
+to form a release set unless every target, version, size and SHA-256 digest
+matches the frozen registry. This prevents a primary-package release from being
+assembled from a partial or mixed-version matrix. It also reads each npm
+tarball directly and verifies its packed manifest selectors, executable path,
+binary size, binary digest and POSIX execute bit rather than trusting detached
+checksum metadata alone.
 
 ## Gates
 

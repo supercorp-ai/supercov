@@ -871,6 +871,9 @@ miss blocks flipping any default.
   the compressed-size gate, records binary/tarball SHA-256 digests and uploads
   the generated artifacts. Every npm tarball also receives GitHub artifact-
   attestation build provenance from the workflow's ephemeral OIDC identity.
+  A final aggregate job accepts only a complete eight-package, single-version
+  release set whose tarball sizes and SHA-256 digests match each native job;
+  it independently checks every packed npm manifest and embedded binary.
   It is deliberately not triggered by ordinary pushes
   so this groundwork consumes no Actions minutes until explicitly requested.
   The

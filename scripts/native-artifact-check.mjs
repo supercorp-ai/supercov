@@ -2,8 +2,14 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+
+const repository = resolve(import.meta.dirname, "..");
+const mainPackage = JSON.parse(readFileSync(resolve(repository, "package.json"), "utf8"));
+const registry = JSON.parse(
+  readFileSync(resolve(repository, "npm/native-targets.json"), "utf8"),
+);
 
 function option(name) {
   const index = process.argv.indexOf(name);
@@ -17,6 +23,14 @@ const output = option("--out");
 if (!rustTarget || !binary || !tarball || !output) {
   throw new Error("usage: native-artifact-check.mjs --target <target> --binary <path> --tarball <path> --out <json>");
 }
+const target = registry.targets.find(candidate => candidate.rustTarget === rustTarget);
+assert(target, `unknown native Rust target: ${rustTarget}`);
+assert.equal(basename(binary), target.executable, `${rustTarget} executable name`);
+assert.equal(
+  basename(tarball),
+  `${target.package}-${mainPackage.version}.tgz`,
+  `${rustTarget} npm tarball name`,
+);
 assert(statSync(binary).isFile(), `binary is not a regular file: ${binary}`);
 assert(statSync(tarball).isFile(), `tarball is not a regular file: ${tarball}`);
 const help = spawnSync(resolve(binary), ["help"], { encoding: "utf8" });
@@ -32,16 +46,22 @@ function digest(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 const result = {
-  schemaVersion: 1,
+  schemaVersion: 2,
+  package: target.package,
+  version: mainPackage.version,
   rustTarget,
+  platform: target.platform,
+  arch: target.arch,
+  ...(target.libc ? { libc: target.libc } : {}),
+  executable: target.executable,
   binary: {
-    file: resolve(binary),
+    file: basename(binary),
     bytes: binaryBytes.byteLength,
     gzipBytes: compressedBytes,
     sha256: digest(binary),
   },
   npmTarball: {
-    file: resolve(tarball),
+    file: basename(tarball),
     bytes: statSync(tarball).size,
     sha256: digest(tarball),
   },
