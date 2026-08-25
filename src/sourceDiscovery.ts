@@ -21,6 +21,7 @@ const TOOL_DIRECTORY_PATTERN = /(?:^|\/)(?:scripts)(?:\/|$)/i;
 // "<tool>.config.*" follows the same convention (tsdown, lint-staged, ...)
 // and is tool configuration, not application source.
 const CONFIG_PATTERN = /(?:^|\/)(?:(?:babel|eslint|graphql|jest|next|nuxt|playwright|postcss|prettier|remix|rollup|stylelint|tailwind|tsup|vite|vitest|webpack)\.config\.[cm]?[jt]s|\.(?:babel|eslint|graphql|prettier|stylelint)rc\.[cm]?[jt]s)$|^[^/]+\.config\.[cm]?[jt]s$/i;
+const ROOT_BUILD_SCRIPT_PATTERN = /^(?:build|gulpfile|gruntfile)\.[cm]?[jt]sx?$/i;
 const GENERATED_DIRECTORIES = new Map<string, string>([
   [".cache", "generated tool cache"],
   [".git", "version-control metadata"],
@@ -237,7 +238,7 @@ export function discoverSourceScope(
       entries.push({ file, status: "excluded", reason: "conventional tool script", ...withPackage });
       continue;
     }
-    if (CONFIG_PATTERN.test(file)) {
+    if (CONFIG_PATTERN.test(file) || ROOT_BUILD_SCRIPT_PATTERN.test(file)) {
       entries.push({ file, status: "excluded", reason: "build/test/tool configuration", ...withPackage });
       continue;
     }

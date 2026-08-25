@@ -740,6 +740,7 @@ impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
         };
         if let Some(operation) = operation {
             let mut unsafe_argument = AwaitYieldScanner::default();
+            unsafe_argument.visit_expression(&call.callee);
             for argument in &call.arguments {
                 unsafe_argument.visit_argument(argument);
             }
@@ -6446,6 +6447,17 @@ mod tests {
             "export async function check() { assert.equal(await value(), 1); }\n",
         );
         let output = instrument_node_assertion_phases(source, "tests/value.test.mjs").unwrap();
+        assert_eq!(output.assertions, 0);
+        assert_eq!(output.code, source);
+    }
+
+    #[test]
+    fn matcher_assertion_phase_never_moves_receiver_await_into_a_sync_callback() {
+        let source = concat!(
+            "import { expect, test } from '@playwright/test';\n",
+            "test('value', async () => { expect(await value()).toBe(1); });\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/value.spec.mjs").unwrap();
         assert_eq!(output.assertions, 0);
         assert_eq!(output.code, source);
     }

@@ -683,10 +683,64 @@ miss blocks flipping any default.
   loader relocation, exact assertion attribution, and full persisted coverage;
   an independent esbuild fixture proves the same contract when the runtime is
   bundled into output. Neither fixture changes source or normal build output,
-  and both record build/test durations separately. Webpack/SWC and other real
-  compiler matrices, full Test262 and browser matrices, dogfood parity, and
-  cross-platform crash/filesystem gates still block any public selector or
-  TypeScript-engine deletion.
+  and both record build/test durations separately. The same unmodified generic
+  path now runs real webpack and SWC fixtures: both preserve source, publish a
+  valid measurement-complete run, retain four passed `node:test` attempts and
+  reconstruct 100% line/branch/MC/DC with assertion-linked obligations. This
+  exposed a source-scope defect rather than a compiler special case: a root
+  `build.*`, `gulpfile.*`, or `gruntfile.*` is build/tool configuration, not an
+  ambiguous product file. Rust owns that correction and an independent test;
+  the temporary TypeScript reference was aligned only so the live
+  differential continues to diagnose unexplained changes.
+- The authoritative conformance and browser gates were rerun after the pure
+  Rust shell landed. Node 22, Node 24, Chromium, Firefox, and WebKit each pass
+  all 43 syntax/runtime cases. The monolithic pinned Test262 invocation at
+  revision `3655e746...` selected 41,593 files and observed 65,051
+  baseline-passing scenarios, with zero Rust transform failures and zero
+  semantic-equivalence failures. Its measured durations were 595.04 s for the
+  original baseline, 17.05 s for Rust transformation, and 453.79 s for the
+  instrumented corpus. This compares observable program behavior directly;
+  it does not treat the TypeScript engine as the semantic oracle.
+- Pure Rust-shell self-dogfood now runs the repository's native `node:test`
+  command without the product TypeScript CLI. Run
+  `rust-self-dogfood-2026-08-25T` passed all 188 tests, recorded 788 assertion
+  calls, and published 394 evidence entries (40.7 MB raw, 2.53 MB compressed).
+  It exposed a correctness bug that fixture-only probe observations could
+  expand and overwrite the supposedly frozen manifest. The analyzer now
+  treats the manifest as the sole denominator: out-of-scope synthetic
+  observations are ignored, while an in-scope unknown decision or metadata
+  mismatch is a hard error. Independent regressions cover all three cases.
+  The repaired archived run is valid and queryable at 52.98% lines, 40.77%
+  branches, and 28.30% MC/DC; structural completeness is false only because
+  the current tests do not execute every declared obligation.
+- Essential SEO also runs end to end through the private Rust shell with no
+  Supermachine/provider special case. Run
+  `rust-essential-seo-dogfood-2026-08-25c` built the isolated Remix/Vite app,
+  launched the existing opaque offline command, passed all 30 Playwright E2E
+  tests, packed 90 evidence entries, and served the stored run through the
+  Rust mmap query path. Its report is valid and measurement-complete across
+  154 included source files with zero ambiguous files, limitations, or corrupt
+  records: 49.20% lines, 32.79% branches, and 12.88% MC/DC, including 1,130
+  assertion-linked lines. A fully cold Supermachine layer rebuild took 317.5 s;
+  the ready-pool suite took 38.1 s. Rust initialization, workspace preparation,
+  adapter setup, instrumented build, and evidence publication measured 0.16 s,
+  0.14 s, 5.00 s, 3.05 s, and 0.55 s respectively. The run also found and
+  fixed an assertion-transform semantic hazard: a matcher such as
+  `expect(await value()).toBe(...)` can never move its receiver `await` into a
+  synchronous attribution callback. Such sites remain honestly
+  execution-covered instead of receiving false assertion attribution.
+- The current full checkpoint is green: 101 Rust engine tests, 188
+  TypeScript/reference tests, type checking, clippy with warnings denied, all
+  generated/real differential models, and direct Node, Vitest, Playwright,
+  Vite, esbuild, tsc, webpack, and SWC integrations. Remaining atomic-cutover
+  blockers are now narrower: route the public CLI/human and structured error
+  surfaces directly into the Rust shell; finish current-project/public run
+  lifecycle wiring; run the Windows Job-object and APFS/NTFS crash/filesystem
+  matrices; require a sustained zero-unexplained-diff release window; then
+  delete the TypeScript instrumenter, analyzer, discovery, orchestration,
+  persistence/query implementations and Babel engine dependencies in the same
+  consolidation. Only unavoidable Node/browser/test-runner collectors and
+  runtime shims survive.
 
 ## Non-goals and guardrails
 

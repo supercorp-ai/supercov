@@ -506,12 +506,22 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReportError {
     Analysis(AnalysisError),
+    DecisionAnalysis {
+        decision_id: String,
+        error: AnalysisError,
+    },
     InvalidEvent(String),
     InvalidServerRecord(String),
     InvalidArchive(String),
     MissingManifest,
-    InvalidJson { path: String, reason: String },
-    ScopeMismatch { expected: String, actual: String },
+    InvalidJson {
+        path: String,
+        reason: String,
+    },
+    ScopeMismatch {
+        expected: String,
+        actual: String,
+    },
     NoEvidence(String),
 }
 
@@ -862,11 +872,29 @@ pub fn create_coverage_view(
     generated_at: &str,
 ) -> Result<CoverageView, ReportError> {
     let mut decision_metadata = manifest.decisions.clone();
-    let mut decision_indexes = decision_metadata
+    let decision_indexes = decision_metadata
         .iter()
         .enumerate()
         .map(|(index, meta)| (meta.id.clone(), index))
         .collect::<HashMap<_, _>>();
+    let manifest_files = manifest
+        .decisions
+        .iter()
+        .map(|meta| meta.file.clone())
+        .chain(manifest.points.iter().map(|meta| meta.file.clone()))
+        .chain(manifest.branches.iter().map(|meta| meta.file.clone()))
+        .chain(
+            manifest
+                .scope
+                .as_ref()
+                .and_then(|scope| scope.get("entries"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|entry| entry.get("status").and_then(Value::as_str) == Some("included"))
+                .filter_map(|entry| entry.get("file").and_then(Value::as_str).map(str::to_owned)),
+        )
+        .collect::<BTreeSet<_>>();
     let mut vectors_by_decision = HashMap::<String, Vec<MutableObservation>>::new();
     let mut vector_indexes = HashMap::<String, HashMap<String, usize>>::new();
     let mut tests_by_decision = HashMap::<String, BTreeSet<String>>::new();
@@ -940,11 +968,20 @@ pub fn create_coverage_view(
         let snapshots = raw.runtime.iter().chain(&raw.browser);
         for snapshot in snapshots {
             for decision in &snapshot.decisions {
-                if let Some(index) = decision_indexes.get(&decision.meta.id).copied() {
-                    decision_metadata[index] = decision.meta.clone();
-                } else {
-                    decision_indexes.insert(decision.meta.id.clone(), decision_metadata.len());
-                    decision_metadata.push(decision.meta.clone());
+                let Some(index) = decision_indexes.get(&decision.meta.id).copied() else {
+                    if manifest_files.contains(&decision.meta.file) {
+                        return Err(ReportError::InvalidServerRecord(format!(
+                            "decision {} is absent from the frozen manifest",
+                            decision.meta.id
+                        )));
+                    }
+                    continue;
+                };
+                if decision_metadata[index] != decision.meta {
+                    return Err(ReportError::InvalidServerRecord(format!(
+                        "decision {} metadata differs from the frozen manifest",
+                        decision.meta.id
+                    )));
                 }
                 for vector in &decision.vectors {
                     let key = vector_key(vector);
@@ -1055,11 +1092,20 @@ pub fn create_coverage_view(
                     .vector
                     .as_ref()
                     .ok_or_else(|| ReportError::InvalidServerRecord("missing vector".into()))?;
-                if let Some(index) = decision_indexes.get(&meta.id).copied() {
-                    decision_metadata[index] = meta.clone();
-                } else {
-                    decision_indexes.insert(meta.id.clone(), decision_metadata.len());
-                    decision_metadata.push(meta.clone());
+                let Some(index) = decision_indexes.get(&meta.id).copied() else {
+                    if manifest_files.contains(&meta.file) {
+                        return Err(ReportError::InvalidServerRecord(format!(
+                            "decision {} is absent from the frozen manifest",
+                            meta.id
+                        )));
+                    }
+                    continue;
+                };
+                if decision_metadata[index] != *meta {
+                    return Err(ReportError::InvalidServerRecord(format!(
+                        "decision {} metadata differs from the frozen manifest",
+                        meta.id
+                    )));
                 }
                 let key = vector_key(vector);
                 let indexes = vector_indexes.entry(meta.id.clone()).or_default();
@@ -1193,7 +1239,13 @@ pub fn create_coverage_view(
             .iter()
             .map(|observation| observation.vector.clone())
             .collect::<Vec<_>>();
-        let witnesses = find_witnesses_for_conditions(&vectors, meta.conditions.len())?;
+        let witnesses =
+            find_witnesses_for_conditions(&vectors, meta.conditions.len()).map_err(|error| {
+                ReportError::DecisionAnalysis {
+                    decision_id: meta.id.clone(),
+                    error,
+                }
+            })?;
         let mut conditions = Vec::with_capacity(meta.conditions.len());
         for (index, source) in meta.conditions.iter().enumerate() {
             let witness = witnesses[index].map(|witness| {
@@ -1837,6 +1889,101 @@ mod tests {
         assert_eq!(view.summary.conditions, 2);
         assert_eq!(view.summary.covered_conditions, 0);
         assert_eq!(view.decisions[0].conditions.len(), 2);
+    }
+
+    #[test]
+    fn frozen_manifest_ignores_out_of_scope_synthetic_decisions() {
+        let manifest = CoverageManifest {
+            decisions: vec![DecisionMeta {
+                id: "application-decision".into(),
+                file: "src/app.js".into(),
+                line: 1,
+                column: 0,
+                source: "left && right".into(),
+                conditions: vec!["left".into(), "right".into()],
+                kind: "if".into(),
+            }],
+            points: vec![],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+        };
+        let mut attempt = raw("test", 0, "passed", &[]);
+        attempt.runtime[0].decisions.push(DecisionSnapshot {
+            meta: DecisionMeta {
+                id: "synthetic-fixture".into(),
+                file: "fixtures/generated.js".into(),
+                line: 1,
+                column: 0,
+                source: "a && b && c".into(),
+                conditions: vec!["a".into(), "b".into(), "c".into()],
+                kind: "if".into(),
+            },
+            vectors: vec![McdcVector {
+                values: vec![Some(true), Some(true), Some(true)],
+                outcome: true,
+            }],
+        });
+
+        let view = create_coverage_view(&manifest, &[attempt], "time").unwrap();
+        assert_eq!(view.decisions.len(), 1);
+        assert_eq!(view.decisions[0].meta.id, "application-decision");
+        assert!(view.decisions[0].vectors.is_empty());
+    }
+
+    #[test]
+    fn frozen_manifest_rejects_in_scope_unknown_or_changed_decisions() {
+        let expected = DecisionMeta {
+            id: "application-decision".into(),
+            file: "src/app.js".into(),
+            line: 1,
+            column: 0,
+            source: "left && right".into(),
+            conditions: vec!["left".into(), "right".into()],
+            kind: "if".into(),
+        };
+        let manifest = CoverageManifest {
+            decisions: vec![expected.clone()],
+            points: vec![],
+            branches: vec![],
+            limitations: vec![],
+            scope: Some(serde_json::json!({
+                "entries": [{ "file": "src/empty.js", "status": "included" }]
+            })),
+        };
+        let vector = McdcVector {
+            values: vec![Some(true), Some(true)],
+            outcome: true,
+        };
+
+        let mut unknown = raw("test", 0, "passed", &[]);
+        unknown.runtime[0].decisions.push(DecisionSnapshot {
+            meta: DecisionMeta {
+                id: "unknown-decision".into(),
+                file: "src/empty.js".into(),
+                ..expected.clone()
+            },
+            vectors: vec![vector.clone()],
+        });
+        assert!(matches!(
+            create_coverage_view(&manifest, &[unknown], "time"),
+            Err(ReportError::InvalidServerRecord(reason))
+                if reason.contains("absent from the frozen manifest")
+        ));
+
+        let mut changed = raw("test", 0, "passed", &[]);
+        changed.runtime[0].decisions.push(DecisionSnapshot {
+            meta: DecisionMeta {
+                source: "left || right".into(),
+                ..expected
+            },
+            vectors: vec![vector],
+        });
+        assert!(matches!(
+            create_coverage_view(&manifest, &[changed], "time"),
+            Err(ReportError::InvalidServerRecord(reason))
+                if reason.contains("differs from the frozen manifest")
+        ));
     }
 
     #[test]

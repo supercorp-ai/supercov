@@ -259,7 +259,11 @@ fn config_file(file: &str) -> bool {
             || DOT_CONFIG_TOOLS
                 .iter()
                 .any(|tool| name.starts_with(&format!(".{tool}rc.")))
-            || (!lower.contains('/') && name.contains(".config.")))
+            || (!lower.contains('/')
+                && (name.contains(".config.")
+                    || name.starts_with("build.")
+                    || name.starts_with("gulpfile.")
+                    || name.starts_with("gruntfile."))))
 }
 
 fn read_directory(path: &Path) -> Result<Vec<fs::DirEntry>, SourceDiscoveryError> {
@@ -706,6 +710,7 @@ mod tests {
                 ("tests/e2e.spec.ts", "test('e2e', () => {})"),
                 ("scripts/release.mjs", "export const release = true"),
                 ("vite.config.ts", "export default {}"),
+                ("build.mjs", "export default async function build() {}"),
                 (".eslintrc.cjs", "module.exports = {}"),
                 (".graphqlrc.ts", "export default {}"),
                 ("orphan.ts", "export const missed = true"),
@@ -728,6 +733,10 @@ mod tests {
         assert_eq!(
             entry(&discovered, "scripts/release.mjs").reason,
             "conventional tool script"
+        );
+        assert_eq!(
+            entry(&discovered, "build.mjs").reason,
+            "build/test/tool configuration"
         );
         assert_eq!(
             entry(&discovered, "packages/ui/src/index.ts").package_root,
