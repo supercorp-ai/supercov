@@ -169,7 +169,7 @@ fn create_directory_all(path: &Path) -> Result<(), JavascriptFrontendError> {
 
 #[cfg(windows)]
 fn create_directory_all(path: &Path) -> Result<(), JavascriptFrontendError> {
-    const ATTEMPTS: usize = 11;
+    const ATTEMPTS: usize = 51;
     for attempt in 0..ATTEMPTS {
         match fs::create_dir_all(path) {
             Ok(()) => return Ok(()),
@@ -178,8 +178,11 @@ fn create_directory_all(path: &Path) -> Result<(), JavascriptFrontendError> {
             {
                 // Windows scanners and just-closed directory handles can
                 // transiently reject creation of a brand-new path. Retry the
-                // exact owned path; never broaden or redirect the target.
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                // exact owned path; never broaden or redirect the target. The
+                // capped backoff tolerates multi-second antivirus holds while
+                // adding no delay to the normal first-attempt path.
+                let delay_ms = 20_u64.saturating_mul((attempt + 1) as u64).min(100);
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
             }
             Err(source) => return Err(io_error(path, source)),
         }
