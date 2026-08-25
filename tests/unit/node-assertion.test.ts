@@ -38,7 +38,7 @@ describe("native node:assert attribution", () => {
     expect(transformed.code).toBe(source);
   });
 
-  it("wraps imported expect matchers only in native node:test files", () => {
+  it("wraps contextual node:test and lexical Vitest expect matchers", () => {
     const source = `
       import { test } from "node:test";
       import { expect as verify } from "../support/expect.js";
@@ -51,8 +51,23 @@ describe("native node:assert attribution", () => {
     expect(transformed.assertions).toBe(1);
     expect(transformed.code).toContain("expect.not.toEqual");
 
+    const vitest = instrumentNodeAssertionPhases(
+      `import { expect, test } from "vitest"; test("example", () => expect(value()).toBe(2));`,
+      "tests/example.test.js",
+    );
+    expect(vitest.assertions).toBe(1);
+    expect(vitest.code).toContain("expect.toBe");
+
+    const playwright = instrumentNodeAssertionPhases(
+      `import { expect, test } from "@acme/test"; test("example", () => expect(value()).toBe(2));`,
+      "tests/example.test.js",
+      ["@acme/test"],
+    );
+    expect(playwright.assertions).toBe(1);
+    expect(playwright.code).toContain("expect.toBe");
+
     const unrelated = instrumentNodeAssertionPhases(
-      source.replace("node:test", "vitest"),
+      `import { test } from "vitest"; import { expect } from "../support/expect.js"; test("example", () => expect(value()).toBe(2));`,
       "tests/example.test.js",
     );
     expect(unrelated.assertions).toBe(0);

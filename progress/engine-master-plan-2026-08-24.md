@@ -578,8 +578,9 @@ miss blocks flipping any default.
   tests additionally make the project lock and unchanged-source guarantees
   explicit. Windows junction behavior, copy fallback faults, ENOSPC and
   SIGKILL-equivalent integration remain gated on the cross-platform filesystem
-  matrix rather than being inferred from Unix parity. Public execution remains
-  disabled until process supervision owns the frozen contract end to end.
+  matrix rather than being inferred from Unix parity. Public execution is now
+  available only through the explicit migration selector; it cannot become the
+  default until the remaining platform gates close.
 - The POSIX process-supervision contract is now implemented in Rust behind a
   private black-box surface. Commands start in a dedicated process group with
   inherited stdio and no runner-specific argument changes; positive-integer
@@ -665,11 +666,13 @@ miss blocks flipping any default.
   cannot collide with Playwright action/assertion phases. This closes the
   direct Playwright runner boundary.
 - Rust now owns the first complete build-backed browser execution as well.
-  For Vite projects it emits virtual-runtime imports during the ahead-of-run
-  Rust transform, writes a minimal generated Vite config whose only Supercov
-  plugin resolves that frozen runtime ABI, confines cache/Rollup/build outputs
-  to the isolated workspace, and runs build then test under one Rust process
-  supervisor. The browser black-box fixture builds a real page, starts the
+  Vite project source remains byte-for-byte untouched in the isolated copy.
+  Rust freezes an immutable per-file transform map keyed by original-source
+  SHA-256, and a minimal generated Vite plugin returns only the matching Rust
+  code/source map while resolving the isolated application-runtime ABI. A hash
+  mismatch is a hard error rather than silently instrumenting changed source.
+  Cache/Rollup/build outputs remain confined to the isolated workspace, and
+  build then test run under one Rust process supervisor. The browser black-box fixture builds a real page, starts the
   project's unchanged Vite preview command through Playwright `webServer`,
   runs four cases in two workers, collects non-empty frame snapshots with
   explicit action phases, and reconstructs 100% line/branch/MC/DC plus exact
@@ -733,9 +736,7 @@ miss blocks flipping any default.
   TypeScript/reference tests, type checking, clippy with warnings denied, all
   generated/real differential models, and direct Node, Vitest, Playwright,
   Vite, esbuild, tsc, webpack, and SWC integrations. Remaining atomic-cutover
-  blockers are now narrower: route the public CLI/human and structured error
-  surfaces directly into the Rust shell; finish current-project/public run
-  lifecycle wiring; run the Windows Job-object and APFS/NTFS crash/filesystem
+  blockers are now narrower: run the Windows Job-object and APFS/NTFS crash/filesystem
   matrices; require a sustained zero-unexplained-diff release window; then
   delete the TypeScript instrumenter, analyzer, discovery, orchestration,
   persistence/query implementations and Babel engine dependencies in the same
@@ -781,6 +782,48 @@ miss blocks flipping any default.
   intentional old-engine fingerprint reason. Both human and JSON query slices
   are active in the private Rust candidate; the npm wrapper remains on the
   shipped engine until wrapped execution and platform gates close.
+- Public wrapped execution now enters Rust through
+  `SUPERCOV_ENGINE=rust npx supercov -- <command>`; the default npm path remains
+  TypeScript and there is still no permanent product selector. Rust generates
+  exact UTC run identities, discovers/fingerprints the current project,
+  prepares and instruments the isolated workspace, supervises build plus test,
+  packs and atomically publishes evidence, renders progress/timings, and
+  returns the original child exit. Failed suites publish their useful evidence
+  with a failed terminal lifecycle state. SIGHUP/SIGINT/SIGTERM are forwarded
+  to the complete process group, return 129/130/143, publish no misleading run,
+  release the project lock, and leave only the small recoverable terminal
+  state. RAII cleanup removes transient evidence and copied source on every
+  return path; abandoned runs are recovered before new work starts. A public
+  black-box test covers empty command, success, failure, source isolation,
+  durable evidence, diagnostics, lock cleanup, and SIGINT.
+- Runner identity and assertion attribution now survive the public build-tool
+  path rather than merely the private direct fixtures. Assertion-only Rust
+  transforms emit inline source maps, Node runs with source-map support, and
+  node:test registration columns are canonicalized to the source line because
+  Babel, esbuild, SWC and TypeScript disagree on mapped call-expression
+  columns. Vitest lexical `expect` calls remain ahead-of-run transformed;
+  Playwright's project-discovered assertion module uses a static fallback plus
+  an assertion-phase bridge. The bridge creates one Playwright phase before
+  assertion arguments execute and reuses that same ID for matcher/browser
+  work, preserving both synchronous coverage causality and action linkage
+  without duplicate phases. The temporary TypeScript reference was aligned to
+  this independently tested contract so this accuracy improvement is not hidden
+  by parity normalization.
+- Whole-engine public parity is green across the mixed Playwright/Vitest,
+  native node:test, esbuild, webpack, SWC and Next.js fixtures: exact frozen
+  manifest, evidence semantics, report, per-test attribution, outcomes,
+  confidence, and human/JSON queries. Probe v2 deliberately removes three
+  duplicate server records in the mixed fixture while retaining the identical
+  unique hit/vector set; the comparator permits only this strict multiset
+  reduction and still rejects any missing unique observation. Nested npm/pnpm/
+  yarn scripts receive both generated runner configs because the top-level
+  command cannot soundly predict a later runner process. The complete
+  `npm run test:rust` and `npm run test:rust-engine` gates pass after these
+  changes. Remaining cutover blockers are native platform packaging, Windows
+  Job-object and APFS/NTFS crash/filesystem matrices, sustained zero-unexplained-
+  diff releases, and then the one atomic deletion of the TypeScript engine and
+  Babel engine dependencies. Language/runtime collectors remain; duplicate
+  engine implementations do not.
 
 ## Non-goals and guardrails
 

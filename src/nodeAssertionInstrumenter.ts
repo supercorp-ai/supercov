@@ -96,9 +96,18 @@ export interface NodeAssertionInstrumentationResult {
 export function instrumentNodeAssertionPhases(
   code: string,
   file: string,
+  extraExpectModules: string[] = [],
 ): NodeAssertionInstrumentationResult {
   const mayUseNodeAssert = /(?:node:)?assert(?:\/strict)?["']/.test(code);
-  const mayUseNodeExpect = /["']node:test["']/.test(code) && /\bexpect\b/.test(code);
+  const mayUseContextualExpect =
+    /["']node:test["']/.test(code) && /\bexpect\b/.test(code);
+  const lexicalExpectModules = new Set(["vitest", ...extraExpectModules]);
+  const mayUseLexicalExpect =
+    /\bexpect\b/.test(code) &&
+    [...lexicalExpectModules].some(
+      (module) => code.includes(`"${module}"`) || code.includes(`'${module}'`),
+    );
+  const mayUseNodeExpect = mayUseContextualExpect || mayUseLexicalExpect;
   if (!mayUseNodeAssert && !mayUseNodeExpect)
     return { code, assertions: 0 };
   const plugins: ParserPlugin[] = [
@@ -122,6 +131,14 @@ export function instrumentNodeAssertionPhases(
       const importedModule = moduleName(path.node.source);
       if (!importedModule) {
         if (!mayUseNodeExpect) return;
+        if (
+          !mayUseContextualExpect &&
+          !(
+            t.isStringLiteral(path.node.source) &&
+            lexicalExpectModules.has(path.node.source.value)
+          )
+        )
+          return;
         for (const specifier of path.node.specifiers) {
           if (
             t.isImportSpecifier(specifier) &&
@@ -295,13 +312,18 @@ export function instrumentNodeAssertionPhases(
 export function instrumentNodeAssertionsInWorkspace(
   root: string,
   files: string[],
+  extraExpectModules: string[] = [],
 ): number {
   let assertions = 0;
   for (const file of files) {
     const path = resolve(root, file);
     if (!existsSync(path)) continue;
     const code = readFileSync(path, "utf8");
-    const transformed = instrumentNodeAssertionPhases(code, file);
+    const transformed = instrumentNodeAssertionPhases(
+      code,
+      file,
+      extraExpectModules,
+    );
     if (transformed.assertions === 0) continue;
     atomicWriteFileSync(path, transformed.code);
     assertions += transformed.assertions;

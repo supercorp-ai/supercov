@@ -1,7 +1,7 @@
-//! First private end-to-end Rust-owned JavaScript execution path.
+//! Rust-owned JavaScript execution for the explicit migration candidate.
 //!
-//! This intentionally supports only direct source-executing suites while the
-//! Rust frontend gates are incomplete. It is not a public engine selector.
+//! The npm default remains the shipped TypeScript engine until the platform
+//! and sustained-parity gates authorize one atomic cutover.
 
 use std::{
     collections::BTreeMap,
@@ -18,12 +18,15 @@ use crate::{
     integrity::{FrontendIntegrityInputs, create_run_integrity},
     javascript_frontend::{javascript_runtime_files, prepare_javascript_frontend},
     lifecycle::{
-        ProjectLock, RunState, RunStateStatus, finalize_published_run, publish_run,
-        remove_stored_tree_deferred, update_run_state, write_run_state,
+        ProjectLock, RunState, RunStateStatus, finalize_published_run, interrupt_run_state,
+        publish_run, recover_abandoned_runs, remove_stored_tree_deferred, update_run_state,
+        write_run_state,
     },
-    orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
-    process_supervision::{CommandSpec, SupervisionOptions},
-    project_discovery::{BuildAdapter, command_uses_tool, discover_coverage_project},
+    orchestration::{ExecutionPhase, ExecutionPlan, OrchestrationError, PhaseKind, execute_plan},
+    process_supervision::{
+        CommandSpec, ForwardedSignal, SupervisionOptions, positive_milliseconds,
+    },
+    project_discovery::{BuildAdapter, discover_coverage_project},
     run_store::{RawEvidenceMetadata, RunIntegrity, RunMetadata, RunTimings},
     workspace::{prepare_cached_workspace, prune_cached_workspace_sources},
 };
@@ -48,7 +51,106 @@ pub struct DirectJavascriptRunResult {
     pub workspace: PathBuf,
     pub exit_code: i32,
     pub assertion_calls: usize,
+    pub recovered_runs: Vec<String>,
     pub metadata: RunMetadata,
+}
+
+#[derive(Debug)]
+pub enum DirectJavascriptRunError {
+    Interrupted {
+        signal: ForwardedSignal,
+        exit_code: i32,
+        timings: RunTimings,
+        total_ms: f64,
+    },
+    Failed(String),
+}
+
+impl std::fmt::Display for DirectJavascriptRunError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Interrupted { signal, .. } => {
+                write!(formatter, "interrupted by {}", signal_name(*signal))
+            }
+            Self::Failed(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for DirectJavascriptRunError {}
+
+impl From<String> for DirectJavascriptRunError {
+    fn from(value: String) -> Self {
+        Self::Failed(value)
+    }
+}
+
+fn signal_name(signal: ForwardedSignal) -> &'static str {
+    match signal {
+        ForwardedSignal::Sighup => "SIGHUP",
+        ForwardedSignal::Sigint => "SIGINT",
+        ForwardedSignal::Sigterm => "SIGTERM",
+    }
+}
+
+struct RunCleanup {
+    root: PathBuf,
+    run_id: String,
+    started_at: String,
+    lock: ProjectLock,
+    workspace: Option<PathBuf>,
+    state_written: bool,
+    terminal_recorded: bool,
+}
+
+impl RunCleanup {
+    fn lock(&self) -> &ProjectLock {
+        &self.lock
+    }
+
+    fn set_workspace(&mut self, workspace: PathBuf) {
+        self.workspace = Some(workspace);
+    }
+
+    fn mark_state_written(&mut self) {
+        self.state_written = true;
+    }
+
+    fn mark_terminal(&mut self) {
+        self.terminal_recorded = true;
+    }
+}
+
+impl Drop for RunCleanup {
+    fn drop(&mut self) {
+        if self.state_written && !self.terminal_recorded {
+            let _ = update_run_state(
+                &self.root,
+                &self.run_id,
+                RunStateStatus::Failed,
+                &self.started_at,
+                Some("Rust run exited before reaching a terminal lifecycle state".into()),
+            );
+        }
+        if let Some(workspace) = &self.workspace {
+            let _ = remove_stored_tree_deferred(
+                &self.root,
+                &workspace.join(".supercov/evidence").join(&self.run_id),
+            );
+            let _ = remove_stored_tree_deferred(
+                &self.root,
+                &workspace
+                    .join(".supercov/server-evidence")
+                    .join(&self.run_id),
+            );
+            let keep_workspace =
+                std::env::var("SUPERCOV_KEEP_WORKSPACE").is_ok_and(|value| !value.is_empty());
+            if !keep_workspace {
+                let _ = prune_cached_workspace_sources(&self.root, &self.lock);
+            }
+        }
+        let _ = self.lock.release();
+    }
 }
 
 fn now_nonce() -> u128 {
@@ -62,6 +164,30 @@ fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
 }
 
+fn rounded_millisecond(value: f64) -> f64 {
+    (value * 10.0).round() / 10.0
+}
+
+fn supervision_options() -> Result<SupervisionOptions, String> {
+    let defaults = SupervisionOptions::default();
+    Ok(SupervisionOptions {
+        diagnostic_interval: positive_milliseconds(
+            std::env::var("SUPERCOV_DIAGNOSTIC_INTERVAL_MS")
+                .ok()
+                .as_deref(),
+            "SUPERCOV_DIAGNOSTIC_INTERVAL_MS",
+        )
+        .map_err(|error| error.to_string())?
+        .unwrap_or(defaults.diagnostic_interval),
+        timeout: positive_milliseconds(
+            std::env::var("SUPERCOV_COMMAND_TIMEOUT_MS").ok().as_deref(),
+            "SUPERCOV_COMMAND_TIMEOUT_MS",
+        )
+        .map_err(|error| error.to_string())?,
+        termination_grace: defaults.termination_grace,
+    })
+}
+
 fn environment_with(values: BTreeMap<String, String>) -> Vec<(OsString, OsString)> {
     let mut environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
     for (key, value) in values {
@@ -73,6 +199,7 @@ fn environment_with(values: BTreeMap<String, String>) -> Vec<(OsString, OsString
 fn node_options(preload: &Path) -> String {
     [
         std::env::var("NODE_OPTIONS").ok(),
+        Some("--enable-source-maps".into()),
         Some(format!("--import={}", preload.display())),
     ]
     .into_iter()
@@ -112,15 +239,16 @@ fn javascript_integrity_for_project(
     .map_err(|error| error.to_string())
 }
 
-/// Execute one direct JavaScript suite with every language-neutral stage owned
-/// by Rust. Errors are intentionally rendered at this private boundary; public
-/// activation will expose stable structured error codes.
+/// Execute one JavaScript suite with every language-neutral stage owned by
+/// Rust. Target-language runtime and runner adapters remain generated shims.
 pub fn run_direct_javascript(
     request: &DirectJavascriptRunRequest,
     diagnostics: &mut dyn std::io::Write,
-) -> Result<DirectJavascriptRunResult, String> {
+) -> Result<DirectJavascriptRunResult, DirectJavascriptRunError> {
     if request.command.is_empty() {
-        return Err("test command must not be empty".into());
+        return Err(DirectJavascriptRunError::Failed(
+            "test command must not be empty".into(),
+        ));
     }
     let total_started = Instant::now();
     let initialization_started = Instant::now();
@@ -137,8 +265,27 @@ pub fn run_direct_javascript(
         .started_at
         .clone()
         .unwrap_or_else(|| format!("unix-ms-{nonce}"));
-    let mut lock =
+    let lock =
         ProjectLock::acquire(&root, &run_id, &started_at).map_err(|error| error.to_string())?;
+    let mut cleanup = RunCleanup {
+        root: root.clone(),
+        run_id: run_id.clone(),
+        started_at: started_at.clone(),
+        lock,
+        workspace: None,
+        state_written: false,
+        terminal_recorded: false,
+    };
+    let recovered_runs =
+        recover_abandoned_runs(&root, &started_at).map_err(|error| error.to_string())?;
+    if !recovered_runs.is_empty() {
+        writeln!(
+            diagnostics,
+            "[supercov] recovered abandoned run(s): {}",
+            recovered_runs.join(", ")
+        )
+        .map_err(|error| error.to_string())?;
+    }
     let environment = std::env::vars().collect::<BTreeMap<_, _>>();
     let project = discover_coverage_project(&root, &environment, &request.command)
         .map_err(|error| error.to_string())?;
@@ -147,8 +294,16 @@ pub fn run_direct_javascript(
 
     let workspace_started = Instant::now();
     let workspace =
-        prepare_cached_workspace(&root, &lock, &[]).map_err(|error| error.to_string())?;
+        prepare_cached_workspace(&root, cleanup.lock(), &[]).map_err(|error| error.to_string())?;
+    cleanup.set_workspace(workspace.clone());
     let workspace_preparation_ms = elapsed_ms(workspace_started);
+    writeln!(
+        diagnostics,
+        "[supercov] instrumenting isolated workspace {}",
+        workspace.display()
+    )
+    .map_err(|error| error.to_string())?;
+    cleanup.mark_state_written();
     write_run_state(
         &root,
         &RunState {
@@ -170,8 +325,6 @@ pub fn run_direct_javascript(
     let frontend = prepare_javascript_frontend(&workspace, &project, &runtime_root, &collector_id)
         .map_err(|error| error.to_string())?;
     let adapter_setup_ms = elapsed_ms(adapter_started);
-    update_run_state(&root, &run_id, RunStateStatus::Testing, &started_at, None)
-        .map_err(|error| error.to_string())?;
 
     let evidence_relative = format!(".supercov/evidence/{run_id}");
     let evidence_directory = workspace.join(&evidence_relative);
@@ -191,6 +344,13 @@ pub fn run_direct_javascript(
             integrity.fingerprint.execution.clone(),
         ),
         (
+            "SUPERCOV_EXECUTION_LOG".into(),
+            evidence_directory
+                .join("execution.jsonl")
+                .display()
+                .to_string(),
+        ),
+        (
             "SUPERCOV_MANIFEST".into(),
             frontend.manifest_path.display().to_string(),
         ),
@@ -208,42 +368,39 @@ pub fn run_direct_javascript(
             root.display().to_string(),
         ),
     ]);
-    if project.vitest_config.is_some() || command_uses_tool(&root, &request.command, "vitest") {
-        overrides.insert(
-            "SUPERCOV_GENERATED_VITEST_CONFIG".into(),
-            frontend.vitest_config_path.display().to_string(),
-        );
-    }
-    if project.playwright_config.is_some()
-        || command_uses_tool(&root, &request.command, "playwright")
+    // A wrapped npm/pnpm/yarn script can launch either runner several process
+    // generations later. The preload is the discovery boundary, so always
+    // provide both generated configs; each runner ignores the unrelated one.
+    overrides.insert(
+        "SUPERCOV_GENERATED_VITEST_CONFIG".into(),
+        frontend.vitest_config_path.display().to_string(),
+    );
+    overrides.insert(
+        "SUPERCOV_GENERATED_PLAYWRIGHT_CONFIG".into(),
+        frontend.playwright_config_path.display().to_string(),
+    );
+    overrides.insert(
+        "SUPERCOV_PLAYWRIGHT_MODULE".into(),
+        project.playwright_module.clone(),
+    );
+    overrides.insert(
+        "SUPERCOV_PLAYWRIGHT_TEST_EXPORT".into(),
+        project.playwright_test_export.clone(),
+    );
+    overrides.insert(
+        "SUPERCOV_PLAYWRIGHT_WRAPPER".into(),
+        "./.supercov/playwright.js".into(),
+    );
+    if let Some(original) = project
+        .playwright_config
+        .as_ref()
+        .and_then(|path| path.strip_prefix(&root).ok())
+        .map(|path| workspace.join(path))
     {
         overrides.insert(
-            "SUPERCOV_GENERATED_PLAYWRIGHT_CONFIG".into(),
-            frontend.playwright_config_path.display().to_string(),
+            "SUPERCOV_ORIGINAL_PLAYWRIGHT_CONFIG".into(),
+            original.display().to_string(),
         );
-        overrides.insert(
-            "SUPERCOV_PLAYWRIGHT_MODULE".into(),
-            project.playwright_module.clone(),
-        );
-        overrides.insert(
-            "SUPERCOV_PLAYWRIGHT_TEST_EXPORT".into(),
-            project.playwright_test_export.clone(),
-        );
-        overrides.insert(
-            "SUPERCOV_PLAYWRIGHT_WRAPPER".into(),
-            "./.supercov/playwright.js".into(),
-        );
-        if let Some(original) = project
-            .playwright_config
-            .as_ref()
-            .and_then(|path| path.strip_prefix(&root).ok())
-            .map(|path| workspace.join(path))
-        {
-            overrides.insert(
-                "SUPERCOV_ORIGINAL_PLAYWRIGHT_CONFIG".into(),
-                original.display().to_string(),
-            );
-        }
     }
     overrides.extend(project.build_environment.clone());
     let preparation = if project.build_adapter != BuildAdapter::Direct {
@@ -287,23 +444,56 @@ pub fn run_direct_javascript(
             },
         },
     };
-    let execution = match execute_plan(
-        &plan,
-        SupervisionOptions::default(),
-        diagnostics,
-        |_| Ok(()),
-    ) {
+    let options = supervision_options()?;
+    let execution = match execute_plan(&plan, options, diagnostics, |phase, diagnostics| {
+        let status = if phase.kind == PhaseKind::Test {
+            if frontend.assertion_calls > 0 {
+                writeln!(
+                    diagnostics,
+                    "[supercov] attributed {} native node:assert call(s)",
+                    frontend.assertion_calls
+                )
+                .map_err(|error| OrchestrationError::PhaseSetup {
+                    phase: phase.name.clone(),
+                    reason: error.to_string(),
+                })?;
+            }
+            writeln!(
+                diagnostics,
+                "[supercov] running in isolated workspace: {}",
+                request.command.join(" ")
+            )
+            .map_err(|error| OrchestrationError::PhaseSetup {
+                phase: phase.name.clone(),
+                reason: error.to_string(),
+            })?;
+            RunStateStatus::Testing
+        } else {
+            RunStateStatus::Building
+        };
+        update_run_state(&root, &run_id, status, &started_at, None).map_err(|error| {
+            OrchestrationError::PhaseSetup {
+                phase: phase.name.clone(),
+                reason: error.to_string(),
+            }
+        })?;
+        Ok(())
+    }) {
         Ok(execution) => execution,
         Err(error) => {
             let message = error.to_string();
-            let _ = update_run_state(
+            let state_updated = update_run_state(
                 &root,
                 &run_id,
                 RunStateStatus::Failed,
                 &started_at,
                 Some(message.clone()),
-            );
-            return Err(message);
+            )
+            .is_ok();
+            if state_updated {
+                cleanup.mark_terminal();
+            }
+            return Err(message.into());
         }
     };
     let instrumented_build_ms = execution
@@ -316,6 +506,24 @@ pub fn run_direct_javascript(
         .iter()
         .find(|phase| phase.kind == PhaseKind::Test)
         .map_or(0.0, |phase| phase.duration_ms as f64);
+    if let Some(signal) = execution.interrupted_signal {
+        interrupt_run_state(&root, &run_id, &started_at, signal_name(signal))
+            .map_err(|error| error.to_string())?;
+        cleanup.mark_terminal();
+        return Err(DirectJavascriptRunError::Interrupted {
+            signal,
+            exit_code: execution.exit_code,
+            timings: RunTimings {
+                initialization_ms: rounded_millisecond(initialization_ms),
+                workspace_preparation_ms: rounded_millisecond(workspace_preparation_ms),
+                adapter_setup_ms: rounded_millisecond(adapter_setup_ms),
+                instrumented_build_ms: rounded_millisecond(instrumented_build_ms),
+                test_command_ms: rounded_millisecond(test_command_ms),
+                evidence_publication_ms: 0.0,
+            },
+            total_ms: rounded_millisecond(elapsed_ms(total_started)),
+        });
+    }
     update_run_state(
         &root,
         &run_id,
@@ -351,17 +559,17 @@ pub fn run_direct_javascript(
     remove_stored_tree_deferred(&root, &server_evidence_root).map_err(|error| error.to_string())?;
     let evidence_publication_ms = elapsed_ms(publication_started);
     let timings = RunTimings {
-        initialization_ms,
-        workspace_preparation_ms,
-        adapter_setup_ms,
-        instrumented_build_ms,
-        test_command_ms,
-        evidence_publication_ms,
+        initialization_ms: rounded_millisecond(initialization_ms),
+        workspace_preparation_ms: rounded_millisecond(workspace_preparation_ms),
+        adapter_setup_ms: rounded_millisecond(adapter_setup_ms),
+        instrumented_build_ms: rounded_millisecond(instrumented_build_ms),
+        test_command_ms: rounded_millisecond(test_command_ms),
+        evidence_publication_ms: rounded_millisecond(evidence_publication_ms),
     };
     let metadata = RunMetadata {
         id: run_id.clone(),
         started_at: started_at.clone(),
-        duration_ms: elapsed_ms(total_started),
+        duration_ms: rounded_millisecond(elapsed_ms(total_started)),
         command: request.command.clone(),
         test_exit_code: Some(execution.exit_code),
         integrity,
@@ -381,17 +589,22 @@ pub fn run_direct_javascript(
     };
     let run_directory =
         publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;
-    update_run_state(&root, &run_id, RunStateStatus::Complete, &started_at, None)
+    let terminal_status = if execution.exit_code == 0 {
+        RunStateStatus::Complete
+    } else {
+        RunStateStatus::Failed
+    };
+    update_run_state(&root, &run_id, terminal_status, &started_at, None)
         .map_err(|error| error.to_string())?;
-    prune_cached_workspace_sources(&root, &lock).map_err(|error| error.to_string())?;
     finalize_published_run(&root, &run_id).map_err(|error| error.to_string())?;
-    lock.release().map_err(|error| error.to_string())?;
+    cleanup.mark_terminal();
     Ok(DirectJavascriptRunResult {
         run_id,
         run_directory,
         workspace,
         exit_code: execution.exit_code,
         assertion_calls: frontend.assertion_calls,
+        recovered_runs,
         metadata,
     })
 }

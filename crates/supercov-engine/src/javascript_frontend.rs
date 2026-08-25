@@ -14,6 +14,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
     js_instrumenter::{
@@ -107,6 +108,14 @@ pub struct PreparedJavascriptFrontend {
     pub vite_config_path: PathBuf,
     pub vitest_config_path: PathBuf,
     pub assertion_calls: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ViteTransform {
+    source_sha256: String,
+    code: String,
+    map: Option<serde_json::Value>,
 }
 
 pub fn javascript_runtime_files(runtime_root: &Path) -> Vec<PathBuf> {
@@ -215,6 +224,10 @@ fn copy_runtime(
             atomic_write(
                 &destination,
                 isolate_runtime(&text, collector_id)?.as_bytes(),
+            )?;
+            atomic_write(
+                &generated.join("applicationRuntime.js"),
+                isolate_runtime(&text, &format!("{collector_id}-application"))?.as_bytes(),
             )?;
         } else {
             atomic_write(&destination, &bytes)?;
@@ -332,12 +345,14 @@ fn write_vitest_config(
         "import {{ loadConfigFromFile, mergeConfig }} from 'vite';\n\
          import {{ resolve }} from 'node:path';\n\
          import SupercovVitestReporter from './vitestReporter.js';\n\
+         import {{ supercovViteInstrumentation }} from './viteInstrumentation.mjs';\n\
          const discoveredConfig = {original};\n\
          export default async function supercovVitestConfig(env) {{\n\
            const originalPath = process.env.SUPERCOV_ORIGINAL_VITEST_CONFIG || discoveredConfig;\n\
            const loaded = originalPath ? await loadConfigFromFile(env, originalPath, process.cwd()) : undefined;\n\
            const config = mergeConfig(loaded?.config ?? {{}}, {{\n\
              cacheDir: resolve(process.cwd(), '.supercov/vitest-cache'),\n\
+             plugins: [supercovViteInstrumentation(process.cwd())],\n\
              test: {{ setupFiles: [resolve(process.cwd(), '.supercov/vitest.js')], maxConcurrency: 1 }},\n\
            }});\n\
            const configuredReporters = loaded?.config?.test?.reporters;\n\
@@ -475,6 +490,7 @@ fn write_vite_config(
     let source = format!(
         "import {{ loadConfigFromFile, mergeConfig }} from 'vite';\n\
          import {{ isAbsolute, relative, resolve }} from 'node:path';\n\
+         import {{ supercovViteInstrumentation }} from './viteInstrumentation.mjs';\n\
          export default async function supercovViteConfig(env) {{\n\
            const isolatedRoot = {workspace};\n\
            const loaded = await loadConfigFromFile(env, undefined, isolatedRoot);\n\
@@ -487,21 +503,50 @@ fn write_vite_config(
            }};\n\
            const relocateOutput = output => output ? ({{ ...output, dir: output.dir ? relocate(output.dir, 'Rollup output') : output.dir, file: output.file ? relocate(output.file, 'Rollup output') : output.file }}) : output;\n\
            const rollupOutput = config.build?.rollupOptions?.output;\n\
-           const runtimePath = resolve(isolatedRoot, '.supercov/runtime.js');\n\
-           const runtimePlugin = {{\n\
-             name: 'supercov-rust-runtime',\n\
-             enforce: 'pre',\n\
-             resolveId(id) {{ return id === 'virtual:supercov-runtime' ? runtimePath : null; }},\n\
-           }};\n\
            const safe = {{ ...config,\n\
              cacheDir: resolve(isolatedRoot, '.supercov/vite-cache'),\n\
              build: {{ ...config.build, outDir: relocate(config.build?.outDir ?? 'dist', 'Vite build output'), rollupOptions: {{ ...config.build?.rollupOptions, output: Array.isArray(rollupOutput) ? rollupOutput.map(relocateOutput) : relocateOutput(rollupOutput) }} }},\n\
            }};\n\
-           return mergeConfig(safe, {{ plugins: [runtimePlugin] }});\n\
+           return mergeConfig(safe, {{ plugins: [supercovViteInstrumentation(isolatedRoot)] }});\n\
          }}\n"
     );
     atomic_write(&path, source.as_bytes())?;
     Ok(path)
+}
+
+fn write_vite_transforms(
+    generated: &Path,
+    transforms: &BTreeMap<String, ViteTransform>,
+) -> Result<(), JavascriptFrontendError> {
+    let mut payload = serde_json::to_vec(transforms).map_err(JavascriptFrontendError::Serialize)?;
+    payload.push(b'\n');
+    atomic_write(&generated.join("vite-transforms.json"), &payload)?;
+    let adapter = "import { createHash } from 'node:crypto';\n\
+import { readFileSync } from 'node:fs';\n\
+import { relative, resolve, sep } from 'node:path';\n\
+const transforms = JSON.parse(readFileSync(new URL('./vite-transforms.json', import.meta.url), 'utf8'));\n\
+const sha256 = value => createHash('sha256').update(value).digest('hex');\n\
+export function supercovViteInstrumentation(root) {\n\
+  const runtimePath = resolve(root, '.supercov/applicationRuntime.js');\n\
+  return {\n\
+    name: 'supercov-rust-instrumentation',\n\
+    enforce: 'pre',\n\
+    resolveId(id) { return id === 'virtual:supercov-runtime' ? runtimePath : null; },\n\
+    transform(code, rawId) {\n\
+      const id = rawId.split('?')[0] ?? rawId;\n\
+      const local = relative(root, id).split(sep).join('/');\n\
+      const transformed = transforms[local];\n\
+      if (!transformed) return null;\n\
+      if (sha256(code) !== transformed.sourceSha256)\n\
+        throw new Error('Supercov source changed before Rust instrumentation: ' + local);\n\
+      return { code: transformed.code, map: transformed.map ?? null };\n\
+    },\n\
+  };\n\
+}\n";
+    atomic_write(
+        &generated.join("viteInstrumentation.mjs"),
+        adapter.as_bytes(),
+    )
 }
 
 /// Prepare the complete JavaScript frontend inside an isolated workspace.
@@ -523,6 +568,7 @@ pub fn prepare_javascript_frontend(
     let mut points = BTreeMap::new();
     let mut branches = BTreeMap::new();
     let mut limitations = BTreeMap::new();
+    let mut vite_transforms = BTreeMap::new();
     for limitation in &project.source_limitations {
         limitations.insert(limitation.id.clone(), limitation_from_source(limitation));
     }
@@ -552,7 +598,18 @@ pub fn prepare_javascript_frontend(
                 );
             }
         }
-        atomic_write(&path, output.code.as_bytes())?;
+        if project.build_adapter == BuildAdapter::Vite {
+            vite_transforms.insert(
+                file.clone(),
+                ViteTransform {
+                    source_sha256: format!("{:x}", Sha256::digest(source.as_bytes())),
+                    code: output.code.clone(),
+                    map: output.map.clone(),
+                },
+            );
+        } else {
+            atomic_write(&path, output.code.as_bytes())?;
+        }
         for value in output.decisions {
             decisions.insert(value.id.clone(), value);
         }
@@ -566,6 +623,7 @@ pub fn prepare_javascript_frontend(
             limitations.insert(value.id.clone(), value);
         }
     }
+    write_vite_transforms(&generated, &vite_transforms)?;
 
     let mut assertion_calls = 0;
     for entry in &project.source_scope.entries {
@@ -582,7 +640,9 @@ pub fn prepare_javascript_frontend(
             file: entry.file.clone(),
             source,
         })?;
-        if output.assertions > 0 {
+        let coverage_transformed_by_vite = project.build_adapter == BuildAdapter::Vite
+            && project.source_files.contains(&entry.file);
+        if output.assertions > 0 && !coverage_transformed_by_vite {
             atomic_write(&path, output.code.as_bytes())?;
             assertion_calls += output.assertions;
         }

@@ -1,15 +1,37 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const cli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
+const runtime = fileURLToPath(new URL("../dist", import.meta.url));
+const rustBinary =
+  process.env["SUPERCOV_RUST_BINARY"] ??
+  fileURLToPath(
+    new URL(
+      `../target/debug/supercov${process.platform === "win32" ? ".exe" : ""}`,
+      import.meta.url,
+    ),
+  );
+const useRust = process.env["SUPERCOV_ENGINE"] === "rust";
+if (useRust && !existsSync(rustBinary)) {
+  console.error(
+    `[supercov] Rust engine candidate binary not found at ${rustBinary}. Build it with cargo build -p supercov-cli or set SUPERCOV_RUST_BINARY.`,
+  );
+  process.exit(1);
+}
 const child = spawn(
-  process.execPath,
-  [cli, ...process.argv.slice(2)],
+  useRust ? rustBinary : process.execPath,
+  [...(useRust ? [] : [cli]), ...process.argv.slice(2)],
   {
     stdio: "inherit",
-    env: process.env,
+    env: {
+      ...process.env,
+      ...(useRust && !process.env["SUPERCOV_RUNTIME_ROOT"]
+        ? { SUPERCOV_RUNTIME_ROOT: runtime }
+        : {}),
+    },
   },
 );
 

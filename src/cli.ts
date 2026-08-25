@@ -781,6 +781,7 @@ async function createCoverageRun(command: string[]): Promise<number> {
       const assertionCount = instrumentNodeAssertionsInWorkspace(
         isolatedRoot,
         project.sourceScope.entries.map((entry) => entry.file),
+        [project.playwrightModule],
       );
       if (assertionCount > 0)
         console.error(

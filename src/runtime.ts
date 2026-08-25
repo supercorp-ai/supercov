@@ -117,6 +117,11 @@ type McdcGlobal = typeof globalThis & {
     testId: string,
     phaseId?: string,
   ) => void;
+  __SUPERCOV_ASSERTION_PHASE_BRIDGE__?: <T>(
+    operation: string,
+    source: string | undefined,
+    callback: () => T,
+  ) => { handled: boolean; value?: T };
 };
 
 interface CoverageRequestContext {
@@ -738,6 +743,12 @@ export function withNodeAssertionPhase<T>(
       )
     : undefined;
   if (existing) return callback();
+  const bridged = runtimeGlobal.__SUPERCOV_ASSERTION_PHASE_BRIDGE__?.(
+    operation,
+    source,
+    callback,
+  );
+  if (bridged?.handled) return bridged.value as T;
   const attempt = assertionPhaseState(scope);
   const phase: CoveragePhase = {
     id: `${scope.attemptId}:assertion:${++attempt.counter}`,

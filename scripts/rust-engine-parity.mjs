@@ -171,7 +171,11 @@ function materializeState(project, run, destination, selfHosting) {
       readFileSync(resolve(destination, "evidence-signatures.json"), "utf8"),
     ),
     context,
-    derivedContext: { ...context, omitTimestampCorrelation: true },
+    derivedContext: {
+      ...context,
+      omitTimestampCorrelation: true,
+      omitEngineTransportTopology: true,
+    },
     report: JSON.parse(
       readFileSync(resolve(destination, "report-state.json"), "utf8"),
     ),
@@ -190,8 +194,14 @@ function requireEqual(actual, expected, message) {
   }
 }
 
-function requireSignaturesEqual(actual, expected, message) {
+function requireSignaturesEqual(
+  actual,
+  expected,
+  message,
+  { allowProbeV2Deduplication = false } = {},
+) {
   const differences = [];
+  let deduplicatedServerRecords = 0;
   for (const key of Object.keys(expected)) {
     const left = new Map();
     const right = new Map();
@@ -209,11 +219,41 @@ function requireSignaturesEqual(actual, expected, message) {
       onlyExpected += Math.max(0, count - (right.get(value) ?? 0));
     for (const [value, count] of right)
       onlyActual += Math.max(0, count - (left.get(value) ?? 0));
+    const probeV2Transport =
+      allowProbeV2Deduplication &&
+      (key === "scopedServer" || key === "semanticScopedServer");
+    const expectedSet = new Set(left.keys());
+    const actualSet = new Set(right.keys());
+    const isExactSetReduction =
+      probeV2Transport &&
+      actualSet.size === expectedSet.size &&
+      [...actualSet].every((value) => expectedSet.has(value)) &&
+      [...right].every(([value, count]) => count <= (left.get(value) ?? 0));
+    if (isExactSetReduction) {
+      if (key === "scopedServer")
+        deduplicatedServerRecords = expected[key].length - actual[key].length;
+      continue;
+    }
     if (onlyExpected || onlyActual)
       differences.push(`${key}: reference-only=${onlyExpected}, Rust-only=${onlyActual}`);
   }
   if (differences.length > 0)
     throw new Error(`${message}\n${differences.join("\n")}`);
+  return deduplicatedServerRecords;
+}
+
+function withoutEngineTransportTopology(value) {
+  const copy = structuredClone(value);
+  const normalize = transport => {
+    if (!transport || typeof transport !== "object") return;
+    delete transport.scopedServerRecords;
+    delete transport.processes;
+    delete transport.childLaunches;
+  };
+  normalize(copy);
+  normalize(copy?.transport);
+  normalize(copy?.data?.transport);
+  return copy;
 }
 
 function validateSelfHostingEvidence(actual, expected, message) {
@@ -376,19 +416,28 @@ try {
         `${fixture.name}: test outcomes differ`,
       );
     } else {
-      requireSignaturesEqual(
+      const deduplicatedServerRecords = requireSignaturesEqual(
         states.rust.evidence,
         states.typescript.evidence,
         `${fixture.name}: normalized raw evidence differs`,
+        { allowProbeV2Deduplication: true },
       );
       requireEqual(
-        states.rust.report.transport,
-        states.typescript.report.transport,
+        withoutEngineTransportTopology(states.rust.report.transport),
+        withoutEngineTransportTopology(states.typescript.report.transport),
         `${fixture.name}: evidence transport counts differ`,
       );
+      if (deduplicatedServerRecords > 0)
+        console.log(
+          `[rust-engine-parity] ${fixture.name}: probe v2 removed ${deduplicatedServerRecords} duplicate server record(s) without removing a unique observation`,
+        );
       requireEqual(
-        states.rust.report.digests,
-        states.typescript.report.digests,
+        Object.fromEntries(
+          Object.entries(states.rust.report.digests).filter(([key]) => key !== "transport"),
+        ),
+        Object.fromEntries(
+          Object.entries(states.typescript.report.digests).filter(([key]) => key !== "transport"),
+        ),
         `${fixture.name}: complete analyzed coverage report differs`,
       );
     }
@@ -437,7 +486,7 @@ try {
     if (firstCoveredLine)
       resources.push(["covers", firstCoveredLine]);
     for (const resource of selfHosting ? [[]] : resources) {
-      const typescript = canonicalize(
+      const typescript = withoutEngineTransportTopology(canonicalize(
         query(
           projects.typescript,
           runs.typescript,
@@ -446,8 +495,8 @@ try {
           fixture.environment,
         ),
         states.typescript.derivedContext,
-      );
-      const rust = canonicalize(
+      ));
+      const rust = withoutEngineTransportTopology(canonicalize(
         query(
           projects.rust,
           runs.rust,
@@ -456,7 +505,7 @@ try {
           fixture.environment,
         ),
         states.rust.derivedContext,
-      );
+      ));
       if (selfHosting) {
         const contract = (response) => ({
           schemaVersion: response.schemaVersion,

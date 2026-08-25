@@ -43,6 +43,12 @@ function wrappedRegistration(original: TestRegistration): TestRegistration {
       runner: "node:test",
       name: testName(args, callback),
       ...location,
+      // Source-map producers disagree about whether a call expression maps to
+      // its first token or the first token on its source line. The line and
+      // dynamic test name are stable across ahead-of-run and build-tool
+      // transforms; the mapped column is not. Canonicalize it so the same test
+      // keeps one identity when esbuild, Babel, SWC, or TypeScript rewrites it.
+      ...(location.line === undefined ? {} : { column: 1 }),
     };
     const scope = runnerExecutionScope(identity);
     const options = testOptions(args, index);

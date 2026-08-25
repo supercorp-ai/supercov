@@ -12,6 +12,7 @@ use std::{
     sync::Arc,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use oxc_allocator::{Allocator, CloneIn, TakeIn};
 use oxc_ast::{
     AstBuilder, NONE,
@@ -615,7 +616,7 @@ fn node_assertion_bindings(
         bindings: NodeAssertionBindings::default(),
         scoping,
         allow_contextual_expect,
-        expect_modules: ["vitest", "@jest/globals", "expect", "@playwright/test"]
+        expect_modules: ["vitest", "@jest/globals", "expect"]
             .into_iter()
             .map(str::to_owned)
             .chain(extra_expect_modules.iter().cloned())
@@ -904,7 +905,21 @@ pub fn instrument_node_assertion_phases_with_expect_modules(
         sites: collector.sites,
     }
     .visit_program(&mut parsed.program);
-    let (code, _) = generate_candidate(&parsed.program, file)?;
+    let (mut code, map) = generate_candidate(&parsed.program, file)?;
+    let mut map = map.expect("assertion source maps are enabled");
+    // An inline map is resolved relative to the transformed file itself. The
+    // code generator receives a project-relative path for manifest identity,
+    // but retaining that full path here would resolve `tests/a.js` from
+    // `tests/a.js` as `tests/tests/a.js`. Assertion-only transforms replace
+    // the file in place, so its basename is the exact source-map reference.
+    map["sources"] = serde_json::json!([Path::new(file)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(file)]);
+    let map = serde_json::to_vec(&map).expect("source-map values always serialize");
+    code.push_str("\n//# sourceMappingURL=data:application/json;base64,");
+    BASE64_STANDARD.encode_string(map, &mut code);
+    code.push('\n');
     Ok(NodeAssertionInstrumentation { code, assertions })
 }
 
@@ -6513,7 +6528,7 @@ mod tests {
     }
 
     #[test]
-    fn vitest_expect_matchers_are_attributed_without_node_test_markers() {
+    fn vitest_expect_matchers_are_attributed_by_the_static_frontend() {
         let source = concat!(
             "import { expect, test } from 'vitest';\n",
             "test('value', () => expect(value()).toBe(1));\n",
@@ -6524,14 +6539,14 @@ mod tests {
     }
 
     #[test]
-    fn playwright_expect_matchers_are_attributed_without_runner_global_state() {
+    fn playwright_expect_matchers_are_left_to_the_runner_adapter() {
         let source = concat!(
             "import { expect, test } from '@playwright/test';\n",
             "test('value', () => expect(value()).toBe(1));\n",
         );
         let output = instrument_node_assertion_phases(source, "tests/value.spec.mjs").unwrap();
-        assert_eq!(output.assertions, 1);
-        assert!(output.code.contains("expect.toBe"));
+        assert_eq!(output.assertions, 0);
+        assert_eq!(output.code, source);
     }
 
     #[test]

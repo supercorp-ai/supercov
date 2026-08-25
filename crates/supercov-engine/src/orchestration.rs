@@ -37,6 +37,7 @@ pub struct ExecutionPlan {
 #[derive(Debug)]
 pub enum OrchestrationError {
     InvalidPlan(String),
+    PhaseSetup { phase: String, reason: String },
     Supervision(SupervisionError),
 }
 
@@ -44,6 +45,9 @@ impl std::fmt::Display for OrchestrationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidPlan(reason) => write!(formatter, "invalid execution plan: {reason}"),
+            Self::PhaseSetup { phase, reason } => {
+                write!(formatter, "could not prepare {phase} phase: {reason}")
+            }
             Self::Supervision(error) => write!(formatter, "{error}"),
         }
     }
@@ -108,7 +112,7 @@ pub fn execute_plan(
     plan: &ExecutionPlan,
     options: SupervisionOptions,
     writer: &mut dyn Write,
-    mut before_phase: impl FnMut(&ExecutionPhase) -> Result<(), OrchestrationError>,
+    mut before_phase: impl FnMut(&ExecutionPhase, &mut dyn Write) -> Result<(), OrchestrationError>,
 ) -> Result<ExecutionResult, OrchestrationError> {
     validate(plan)?;
     // One guard spans every external phase. Signals received after a build
@@ -116,7 +120,7 @@ pub fn execute_plan(
     let supervisor = ProcessSupervisor::new()?;
     let mut executions = Vec::new();
     for phase in plan.preparation.iter().chain(std::iter::once(&plan.test)) {
-        before_phase(phase)?;
+        before_phase(phase, writer)?;
         let started = Instant::now();
         let result = supervisor.supervise(&phase.command, options, writer)?;
         let exit_code = result.exit_code();
@@ -197,7 +201,7 @@ mod tests {
             &plan,
             SupervisionOptions::default(),
             &mut Vec::new(),
-            |phase| {
+            |phase, _| {
                 seen.push(phase.kind);
                 Ok(())
             },
@@ -222,7 +226,7 @@ mod tests {
             &plan,
             SupervisionOptions::default(),
             &mut Vec::new(),
-            |_| Ok(()),
+            |_, _| Ok(()),
         )
         .unwrap();
         assert_eq!(result.exit_code, 7);
@@ -244,7 +248,7 @@ mod tests {
             &plan,
             SupervisionOptions::default(),
             &mut Vec::new(),
-            |_| Ok(()),
+            |_, _| Ok(()),
         );
         assert!(matches!(result, Err(OrchestrationError::InvalidPlan(_))));
         assert!(!root.join("incorrectly-started").exists());

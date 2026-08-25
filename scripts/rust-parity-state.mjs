@@ -55,6 +55,7 @@ if (mode === "evidence") {
   );
   context.attempts = new Map(savedContext.attempts);
   context.omitTimestampCorrelation = true;
+  context.omitEngineTransportTopology = true;
   const report = analyzeCoverageArchive(resolve(runDirectory, "evidence.raw.gz"), {
     runId: run,
     testExitCode: metadata.testExitCode,

@@ -418,6 +418,22 @@ pub fn update_run_state(
     Ok(state)
 }
 
+pub fn interrupt_run_state(
+    root: &Path,
+    id: &str,
+    updated_at: &str,
+    signal: &str,
+) -> Result<RunState, LifecycleError> {
+    let mut state = read_state(root, id)?
+        .ok_or_else(|| LifecycleError::InvalidState(format!("state is missing for {id}")))?;
+    state.status = RunStateStatus::Interrupted;
+    state.updated_at = updated_at.into();
+    state.signal = Some(signal.into());
+    state.error = Some(format!("Interrupted by {signal}"));
+    write_run_state(root, &state)?;
+    Ok(state)
+}
+
 #[cfg(unix)]
 fn process_exists(pid: u32) -> bool {
     if pid == 0 || pid > libc::pid_t::MAX as u32 {

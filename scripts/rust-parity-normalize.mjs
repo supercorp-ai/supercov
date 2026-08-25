@@ -60,7 +60,12 @@ function omitted(context, key) {
   return Boolean(
     (key && omittedDynamicKeys.has(key)) ||
       (context.omitTimestampCorrelation && key === "phases") ||
+      (context.omitTimestampCorrelation && key === "explicitPhases") ||
       (context.omitTimestampCorrelation && key === "totalPhases") ||
+      (context.omitEngineTransportTopology &&
+        (key === "processes" ||
+          key === "childLaunches" ||
+          key === "scopedServerRecords")) ||
       (context.omitTimestampCorrelation &&
         (key === "browserFallback" || key === "serverFallback")),
   );

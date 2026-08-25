@@ -157,26 +157,31 @@ for (const args of [
 }
 
 const playwrightFixture = resolve(root, 'tests/fixtures/generic-playwright');
-invoke('rust', ['runs', 'latest', 'coverage', '--json'], playwrightFixture);
+// Keep this differential pinned to an immutable TypeScript-reference run.
+// Whole-engine parity and local dogfood legitimately append newer Rust runs to
+// the same fixture store, so `latest` would make the staleness assertion depend
+// on which integration happened to execute first.
+const playwrightRun = '2026-08-25T00-24-00-002Z';
+invoke('rust', ['runs', playwrightRun, 'coverage', '--json'], playwrightFixture);
 exactExceptEngineIdentity(
-  ['runs', 'latest', 'coverage', '--filter', 'failed', '--json'],
+  ['runs', playwrightRun, 'coverage', '--filter', 'failed', '--json'],
   playwrightFixture,
 );
 for (const args of [
-  ['runs', 'latest', 'coverage', 'gaps', '--json'],
-  ['runs', 'latest', 'coverage', 'scope', '--json'],
-  ['runs', 'latest', 'coverage', 'file', 'server.mjs', '--json'],
-  ['runs', 'latest', 'coverage', 'test', 'a', '--limit', '3', '--json'],
+  ['runs', playwrightRun, 'coverage', 'gaps', '--json'],
+  ['runs', playwrightRun, 'coverage', 'scope', '--json'],
+  ['runs', playwrightRun, 'coverage', 'file', 'server.mjs', '--json'],
+  ['runs', playwrightRun, 'coverage', 'test', 'a', '--limit', '3', '--json'],
 ]) exact(args, playwrightFixture);
 humanExceptEngineIdentity(
-  ['runs', 'latest', 'coverage', '--filter', 'failed'],
+  ['runs', playwrightRun, 'coverage', '--filter', 'failed'],
   playwrightFixture,
 );
 for (const args of [
-  ['runs', 'latest', 'coverage', 'gaps'],
-  ['runs', 'latest', 'coverage', 'scope'],
-  ['runs', 'latest', 'coverage', 'file', 'server.mjs'],
-  ['runs', 'latest', 'coverage', 'test', 'a', '--limit', '3'],
+  ['runs', playwrightRun, 'coverage', 'gaps'],
+  ['runs', playwrightRun, 'coverage', 'scope'],
+  ['runs', playwrightRun, 'coverage', 'file', 'server.mjs'],
+  ['runs', playwrightRun, 'coverage', 'test', 'a', '--limit', '3'],
 ]) exactHuman(args, playwrightFixture);
 
 console.log('[rust-query-differential] public hierarchy, exact human/JSON rendering, pagination, resources, filters, selectors, minimization, diff, and structured errors');

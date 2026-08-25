@@ -41,6 +41,7 @@ use supercov_engine::{
         open_or_rebuild_query_index, select_run,
     },
 };
+use time::{OffsetDateTime, macros::format_description};
 
 mod human_query;
 mod public_query;
@@ -71,6 +72,7 @@ fn main() -> ExitCode {
             );
             ExitCode::SUCCESS
         }
+        Some("--") => public_coverage_run(arguments.collect()),
         Some("__instrument-js") => instrument_js(),
         Some("__analyze-coverage-core") => analyze_coverage_core(),
         Some("__analyze-coverage-results") => analyze_coverage_report(),
@@ -97,6 +99,112 @@ fn main() -> ExitCode {
                 "[supercov] Rust engine candidate is not ready for `{command}`; use the currently shipped engine while the Rust contract gates are incomplete"
             );
             ExitCode::from(2)
+        }
+    }
+}
+
+const PUBLIC_TIMESTAMP_FORMAT: &[time::format_description::BorrowedFormatItem<'static>] =
+    format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z");
+
+fn public_timestamp() -> Result<(String, String), String> {
+    let started_at = OffsetDateTime::now_utc()
+        .format(PUBLIC_TIMESTAMP_FORMAT)
+        .map_err(|error| format!("could not generate the run timestamp: {error}"))?;
+    let run_id = started_at.replace([':', '.'], "-");
+    Ok((run_id, started_at))
+}
+
+fn javascript_number(value: f64) -> String {
+    let rounded = (value * 10.0).round() / 10.0;
+    if rounded.fract() == 0.0 {
+        format!("{rounded:.0}")
+    } else {
+        format!("{rounded:.1}")
+    }
+}
+
+fn format_run_timings(timings: &supercov_engine::run_store::RunTimings, total_ms: f64) -> String {
+    format!(
+        "initialization={}ms workspace={}ms setup={}ms build={}ms tests={}ms evidence={}ms total={}ms",
+        javascript_number(timings.initialization_ms),
+        javascript_number(timings.workspace_preparation_ms),
+        javascript_number(timings.adapter_setup_ms),
+        javascript_number(timings.instrumented_build_ms),
+        javascript_number(timings.test_command_ms),
+        javascript_number(timings.evidence_publication_ms),
+        javascript_number(total_ms),
+    )
+}
+
+fn process_exit_code(code: i32) -> ExitCode {
+    ExitCode::from(u8::try_from(code).unwrap_or(1))
+}
+
+fn public_coverage_run(command: Vec<String>) -> ExitCode {
+    if command.is_empty() {
+        eprintln!("Usage: supercov -- <test command>");
+        return ExitCode::from(2);
+    }
+    let root = match std::env::current_dir() {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("[supercov] could not resolve the current directory: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let Some(runtime_root) = resolve_runtime_root(&root) else {
+        eprintln!(
+            "[supercov] could not locate the JavaScript runtime; set SUPERCOV_RUNTIME_ROOT to the packaged runtime directory"
+        );
+        return ExitCode::from(2);
+    };
+    let (run_id, started_at) = match public_timestamp() {
+        Ok(timestamp) => timestamp,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    spawn_trash_sweeper(&root);
+    let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
+        root: root.clone(),
+        runtime_root,
+        command,
+        run_id: Some(run_id),
+        started_at: Some(started_at),
+    };
+    let mut diagnostics = std::io::stderr().lock();
+    let result = supercov_engine::javascript_run::run_direct_javascript(&request, &mut diagnostics);
+    spawn_trash_sweeper(&root);
+    match result {
+        Ok(result) => {
+            println!(
+                "[coverage] evidence: {}",
+                result.run_directory.join("evidence.raw.gz").display()
+            );
+            if let Some(timings) = &result.metadata.timings {
+                eprintln!(
+                    "[supercov] timings {}",
+                    format_run_timings(timings, result.metadata.duration_ms)
+                );
+            }
+            process_exit_code(result.exit_code)
+        }
+        Err(supercov_engine::javascript_run::DirectJavascriptRunError::Interrupted {
+            exit_code,
+            timings,
+            total_ms,
+            ..
+        }) => {
+            eprintln!(
+                "[supercov] timings {}",
+                format_run_timings(&timings, total_ms)
+            );
+            process_exit_code(exit_code)
+        }
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            ExitCode::from(1)
         }
     }
 }

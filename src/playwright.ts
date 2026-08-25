@@ -298,8 +298,13 @@ class CoveragePhaseController {
     return phase;
   }
 
-  beginAssertion(operation: string): CoveragePhase {
-    const phase = this.createPhase("assertion", operation, this.lastActionId);
+  beginAssertion(operation: string, source = callerSource()): CoveragePhase {
+    const phase = this.createPhase(
+      "assertion",
+      operation,
+      this.lastActionId,
+      source,
+    );
     this.activePhaseId = phase.id;
     // Playwright queues browser protocol commands in order. Starting this
     // evaluation before an async locator assertion is sufficient to tag its
@@ -387,8 +392,8 @@ class CoveragePhaseController {
     kind: CoveragePhase["kind"],
     operation: string,
     causedByPhaseId?: string,
+    source = callerSource(),
   ): CoveragePhase {
-    const source = callerSource();
     const phase: CoveragePhase = {
       id: `${this.scope.attemptId}:phase:${++this.counter}`,
       kind,
@@ -593,6 +598,7 @@ class CoveragePhaseController {
 }
 
 let activeController: CoveragePhaseController | undefined;
+let bridgedAssertionDepth = 0;
 const controllers = new Map<string, CoveragePhaseController>();
 const directRuntime = () =>
   (
@@ -600,9 +606,63 @@ const directRuntime = () =>
       __SUPERCOV_DIRECT_RUNTIME__?: {
         activateCoverageScope(scope?: CoverageExecutionScope): void;
         takeNodeAssertionPhases(scope: CoverageExecutionScope): CoveragePhase[];
+        withCoverageCarrier<T>(
+          carrier: { version: 1; scope: CoverageExecutionScope; phaseId: string },
+          callback: () => T,
+        ): T;
       };
     }
   ).__SUPERCOV_DIRECT_RUNTIME__;
+
+(
+  globalThis as typeof globalThis & {
+    __SUPERCOV_ASSERTION_PHASE_BRIDGE__?: <T>(
+      operation: string,
+      source: string | undefined,
+      callback: () => T,
+    ) => { handled: boolean; value?: T };
+  }
+).__SUPERCOV_ASSERTION_PHASE_BRIDGE__ = <T>(
+  operation: string,
+  source: string | undefined,
+  callback: () => T,
+): { handled: boolean; value?: T } => {
+  const controller = activeController;
+  const runtime = directRuntime();
+  if (!controller || !runtime) return { handled: false };
+  const phase = controller.beginAssertion(operation, source);
+  bridgedAssertionDepth += 1;
+  try {
+    const value = runtime.withCoverageCarrier(
+      { version: 1, scope: controller.scope, phaseId: phase.id },
+      callback,
+    );
+    bridgedAssertionDepth -= 1;
+    if (
+      value &&
+      typeof (value as unknown as PromiseLike<unknown>).then === "function"
+    )
+      return {
+        handled: true,
+        value: Promise.resolve(value).then(
+          (resolved) => {
+            controller.finish(phase);
+            return resolved;
+          },
+          (error: unknown) => {
+            controller.finish(phase, error);
+            throw error;
+          },
+        ) as T,
+      };
+    controller.finish(phase);
+    return { handled: true, value };
+  } catch (error) {
+    bridgedAssertionDepth -= 1;
+    controller.finish(phase, error);
+    throw error;
+  }
+};
 
 function activeCoverageHeaders(): Record<string, string> | undefined {
   const controller = activeController;
@@ -780,7 +840,9 @@ function wrapMatchers<T extends object>(matchers: T, path = "expect"): T {
       if (typeof value !== "function") return value;
       return (...args: unknown[]) => {
         const controller = activeController;
-        const phase = controller?.beginAssertion(`${path}.${name}`);
+        const phase = bridgedAssertionDepth === 0
+          ? controller?.beginAssertion(`${path}.${name}`)
+          : undefined;
         try {
           const result = Reflect.apply(
             value as (...innerArgs: unknown[]) => unknown,
@@ -886,6 +948,38 @@ function readServerRecords(
   } catch {
     return [];
   }
+}
+
+function phaseSourceLine(source?: string): string | undefined {
+  return source?.replace(/:\d+$/, "");
+}
+
+/**
+ * Playwright's redirected `expect` is the preferred assertion boundary, but
+ * its transform loader can bypass Node's resolve hook for project-owned
+ * fixture modules. The ahead-of-run frontend therefore keeps a lexical
+ * fallback. If both paths observe the same assertion, retain the richer
+ * Playwright phase (including action causality) exactly once.
+ */
+function mergeCollectedPhases(
+  controllerPhases: CoveragePhase[],
+  fallbackPhases: CoveragePhase[],
+): CoveragePhase[] {
+  const observed = new Map<string, number>();
+  for (const phase of controllerPhases) {
+    if (phase.kind !== "assertion") continue;
+    const key = `${phase.operation}\0${phaseSourceLine(phase.source) ?? ""}`;
+    observed.set(key, (observed.get(key) ?? 0) + 1);
+  }
+  const remaining = fallbackPhases.filter((phase) => {
+    if (phase.kind !== "assertion") return true;
+    const key = `${phase.operation}\0${phaseSourceLine(phase.source) ?? ""}`;
+    const count = observed.get(key) ?? 0;
+    if (count === 0) return true;
+    observed.set(key, count - 1);
+    return false;
+  });
+  return [...controllerPhases, ...remaining];
 }
 
 const instrumentedTest = base.extend<{ mcdcAutoCollect: void }>({
@@ -1024,10 +1118,10 @@ const instrumentedTest = base.extend<{ mcdcAutoCollect: void }>({
             project: testInfo.project.name,
             explicitKind: process.env["SUPERCOV_TEST_KIND"],
           }),
-          phases: [
-            ...(controller?.phases ?? []),
-            ...(directRuntime()?.takeNodeAssertionPhases(scope) ?? []),
-          ],
+          phases: mergeCollectedPhases(
+            controller?.phases ?? [],
+            directRuntime()?.takeNodeAssertionPhases(scope) ?? [],
+          ),
           browser,
           server,
         };
