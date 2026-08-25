@@ -467,6 +467,26 @@ miss blocks flipping any default.
   JavaScript UTF-16 order so non-BMP paths cannot create cross-engine drift.
   The remaining run-list/integrity/lifecycle agent surfaces remain
   before this path can replace the shipped query engine.
+- Phase 4 now owns strict persisted-run discovery and the disposable index
+  lifecycle in Rust. `run.json` is deserialized into a closed schema; IDs,
+  SHA-256 fingerprints, Git revisions, archive schema/format/name/count and
+  compressed length are validated; and run-store, run-directory, metadata and
+  evidence symlinks are refused. Inventory returns valid runs and separately
+  sorted rejection diagnostics, so one corrupt historical entry can no longer
+  disappear silently or hide healthy runs. Exact/prefix/latest selection and
+  stale-reason ordering match the frozen contract. Query-index identities now
+  bind the actual evidence hash and length plus a deterministic compile-time
+  fingerprint of the Rust engine/contracts source and Cargo lock, rather than
+  the temporary harness constants. A query opens an existing mmap index only
+  after authenticating every page and validating every typed section; stale,
+  corrupt, truncated or linked indexes are reconstructed from authoritative
+  evidence and atomically replaced. Evidence is hashed again around analysis
+  and publication so a mixed-generation index is never accepted. Real fixture
+  tests prove first-build/reuse/corruption repair, and a symlink attack test
+  proves replacement leaves the linked user file untouched. Run-list output,
+  current-project fingerprint creation, pruning/retention and atomic run
+  publication still have to move into Rust before lifecycle ownership is
+  complete.
 
 ## Non-goals and guardrails
 

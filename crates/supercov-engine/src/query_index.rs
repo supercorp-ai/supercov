@@ -445,6 +445,16 @@ impl QueryIndex {
             .ok_or(QueryIndexError::MissingSection(kind))
     }
 
+    /// Authenticate every section page before a disposable index is accepted.
+    pub fn verify_all(&self) -> Result<(), QueryIndexError> {
+        for descriptor in &self.descriptors {
+            for page in 0..descriptor.digest_count as usize {
+                self.verify_page(*descriptor, page)?;
+            }
+        }
+        Ok(())
+    }
+
     fn verify_page(
         &self,
         descriptor: SectionDescriptor,
