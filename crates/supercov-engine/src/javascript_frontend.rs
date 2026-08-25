@@ -211,14 +211,22 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), JavascriptFrontendEr
     let parent = path
         .parent()
         .ok_or_else(|| JavascriptFrontendError::UnsafeSourcePath(path.display().to_string()))?;
-    create_directory_all(parent)?;
     let temporary = parent.join(format!(".supercov-write-{}", unique()));
     let result = (|| {
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .map_err(|source| io_error(&temporary, source))?;
+        let open = || {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+        };
+        let mut output = match open() {
+            Ok(output) => output,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                create_directory_all(parent)?;
+                open().map_err(|source| io_error(&temporary, source))?
+            }
+            Err(source) => return Err(io_error(&temporary, source)),
+        };
         output
             .write_all(contents)
             .and_then(|_| output.sync_all())
