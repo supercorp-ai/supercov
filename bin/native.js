@@ -10,14 +10,14 @@ const mainPackage = JSON.parse(
 );
 
 const packages = new Map([
-  ["darwin-arm64", ["supercov-darwin-arm64", "supercov"]],
-  ["darwin-x64", ["supercov-darwin-x64", "supercov"]],
-  ["linux-arm64-gnu", ["supercov-linux-arm64-gnu", "supercov"]],
-  ["linux-x64-gnu", ["supercov-linux-x64-gnu", "supercov"]],
-  ["linux-arm64-musl", ["supercov-linux-arm64-musl", "supercov"]],
-  ["linux-x64-musl", ["supercov-linux-x64-musl", "supercov"]],
-  ["win32-arm64", ["supercov-win32-arm64", "supercov.exe"]],
-  ["win32-x64", ["supercov-win32-x64", "supercov.exe"]],
+  ["darwin-arm64", ["@supercov/cli-darwin-arm64", "supercov"]],
+  ["darwin-x64", ["@supercov/cli-darwin-x64", "supercov"]],
+  ["linux-arm64-gnu", ["@supercov/cli-linux-arm64-gnu", "supercov"]],
+  ["linux-x64-gnu", ["@supercov/cli-linux-x64-gnu", "supercov"]],
+  ["linux-arm64-musl", ["@supercov/cli-linux-arm64-musl", "supercov"]],
+  ["linux-x64-musl", ["@supercov/cli-linux-x64-musl", "supercov"]],
+  ["win32-arm64", ["@supercov/cli-win32-arm64", "supercov.exe"]],
+  ["win32-x64", ["@supercov/cli-win32-x64", "supercov.exe"]],
 ]);
 
 function linuxLibc() {

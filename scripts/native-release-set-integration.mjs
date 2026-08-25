@@ -4,6 +4,10 @@ import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writ
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import {
+  nativeChecksumName,
+  nativeTarballName,
+} from "./native-package-names.mjs";
 
 const repository = resolve(import.meta.dirname, "..");
 const temporary = mkdtempSync(resolve(tmpdir(), "supercov-native-release-set-"));
@@ -14,17 +18,17 @@ const registry = JSON.parse(
 function digest(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
-function verify() {
+function verify(directory = temporary) {
   return spawnSync(
     process.execPath,
-    [resolve(repository, "scripts/verify-native-release-set.mjs"), temporary],
+    [resolve(repository, "scripts/verify-native-release-set.mjs"), directory],
     { cwd: repository, encoding: "utf8" },
   );
 }
 
 try {
   for (const [index, target] of registry.targets.entries()) {
-    const tarballName = `${target.package}-${version}.tgz`;
+    const tarballName = nativeTarballName(target.package, version);
     const binary = resolve(temporary, `binary-${index}`, target.executable);
     mkdirSync(resolve(binary, ".."), { recursive: true });
     const bytes = Buffer.from(`deterministic native binary ${index}\n`);
@@ -55,7 +59,7 @@ try {
     assert.equal(packed.status, 0, packed.stderr || packed.stdout);
     const tarball = resolve(temporary, tarballName);
     writeFileSync(
-      resolve(temporary, `${target.package}.checksums.json`),
+      resolve(temporary, nativeChecksumName(target.package)),
       `${JSON.stringify({
         schemaVersion: 2,
         package: target.package,
@@ -85,7 +89,28 @@ try {
   assert.equal(releaseSet.version, version);
   assert.equal(releaseSet.packages.length, registry.targets.length);
 
-  const damaged = resolve(temporary, `${registry.targets[0].package}-${version}.tgz`);
+  const repackaged = resolve(temporary, "repackaged");
+  const repackage = spawnSync(
+    process.execPath,
+    [
+      resolve(repository, "scripts/repackage-native-release.mjs"),
+      temporary,
+      repackaged,
+    ],
+    { cwd: repository, encoding: "utf8" },
+  );
+  assert.equal(repackage.status, 0, repackage.stderr || repackage.stdout);
+  const validRepackaged = verify(repackaged);
+  assert.equal(
+    validRepackaged.status,
+    0,
+    validRepackaged.stderr || validRepackaged.stdout,
+  );
+
+  const damaged = resolve(
+    temporary,
+    nativeTarballName(registry.targets[0].package, version),
+  );
   writeFileSync(damaged, "damaged");
   const invalid = verify();
   assert.notEqual(invalid.status, 0);

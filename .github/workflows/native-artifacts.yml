@@ -7,7 +7,7 @@ on:
         description: Exact native target matrix to build for this invocation
         required: false
         type: string
-        default: '{"include":[{"runner":"macos-15","target":"aarch64-apple-darwin","package":"supercov-darwin-arm64","executable":"supercov","packedInstall":true},{"runner":"macos-15-intel","target":"x86_64-apple-darwin","package":"supercov-darwin-x64","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","package":"supercov-linux-arm64-gnu","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","package":"supercov-linux-x64-gnu","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","package":"supercov-linux-arm64-musl","executable":"supercov","musl":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","package":"supercov-linux-x64-musl","executable":"supercov","musl":true}]}'
+        default: '{"include":[{"runner":"macos-15","target":"aarch64-apple-darwin","package":"@supercov/cli-darwin-arm64","artifact":"supercov-cli-darwin-arm64","executable":"supercov","packedInstall":true},{"runner":"macos-15-intel","target":"x86_64-apple-darwin","package":"@supercov/cli-darwin-x64","artifact":"supercov-cli-darwin-x64","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","package":"@supercov/cli-linux-arm64-gnu","artifact":"supercov-cli-linux-arm64-gnu","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","package":"@supercov/cli-linux-x64-gnu","artifact":"supercov-cli-linux-x64-gnu","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","package":"@supercov/cli-linux-arm64-musl","artifact":"supercov-cli-linux-arm64-musl","executable":"supercov","musl":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","package":"@supercov/cli-linux-x64-musl","artifact":"supercov-cli-linux-x64-musl","executable":"supercov","musl":true}]}'
       build-targets:
         description: Build selected targets; false verifies only reused artifacts
         required: false
@@ -69,13 +69,13 @@ jobs:
         # repository shorthand. `./` makes this unambiguously local.
         run: npm pack ./native-dist/${{ matrix.package }} --pack-destination native-dist --ignore-scripts
       - name: Validate binary, size gate, and checksums
-        run: node scripts/native-artifact-check.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --tarball native-dist/${{ matrix.package }}-${{ env.SUPERCOV_VERSION }}.tgz --out native-dist/${{ matrix.package }}.checksums.json
+        run: node scripts/native-artifact-check.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --tarball native-dist/${{ matrix.artifact }}-${{ env.SUPERCOV_VERSION }}.tgz --out native-dist/${{ matrix.artifact }}.checksums.json
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.package }}
+          name: ${{ matrix.artifact }}
           path: |
-            native-dist/${{ matrix.package }}-${{ env.SUPERCOV_VERSION }}.tgz
-            native-dist/${{ matrix.package }}.checksums.json
+            native-dist/${{ matrix.artifact }}-${{ env.SUPERCOV_VERSION }}.tgz
+            native-dist/${{ matrix.artifact }}.checksums.json
           if-no-files-found: error
 
   release-set:
@@ -102,12 +102,18 @@ jobs:
           pattern: supercov-*
           path: native-release
           merge-multiple: true
-      - run: node scripts/verify-native-release-set.mjs native-release
+      - name: Repackage a previously validated unscoped release set
+        if: inputs.reuse-run-id != ''
+        run: node scripts/repackage-native-release.mjs native-release native-release-ready
+      - name: Use newly built scoped packages directly
+        if: inputs.reuse-run-id == ''
+        run: mv native-release native-release-ready
+      - run: node scripts/verify-native-release-set.mjs native-release-ready
       - uses: actions/upload-artifact@v7
         with:
           name: supercov-native-release-set
           path: |
-            native-release/*.tgz
-            native-release/*.checksums.json
-            native-release/release-set.json
+            native-release-ready/*.tgz
+            native-release-ready/*.checksums.json
+            native-release-ready/release-set.json
           if-no-files-found: error

@@ -4,6 +4,7 @@ import { gzipSync } from "node:zlib";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { nativeTarballName } from "./native-package-names.mjs";
 
 const repository = resolve(import.meta.dirname, "..");
 const mainPackage = JSON.parse(readFileSync(resolve(repository, "package.json"), "utf8"));
@@ -28,7 +29,7 @@ assert(target, `unknown native Rust target: ${rustTarget}`);
 assert.equal(basename(binary), target.executable, `${rustTarget} executable name`);
 assert.equal(
   basename(tarball),
-  `${target.package}-${mainPackage.version}.tgz`,
+  nativeTarballName(target.package, mainPackage.version),
   `${rustTarget} npm tarball name`,
 );
 assert(statSync(binary).isFile(), `binary is not a regular file: ${binary}`);

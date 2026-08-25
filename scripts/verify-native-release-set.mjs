@@ -3,6 +3,10 @@ import { createHash } from "node:crypto";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { gunzipSync } from "node:zlib";
+import {
+  nativeChecksumName,
+  nativeTarballName,
+} from "./native-package-names.mjs";
 
 const repository = resolve(import.meta.dirname, "..");
 const directory = resolve(process.argv[2] ?? "native-release");
@@ -60,9 +64,9 @@ function tarEntries(path) {
 
 const packages = [];
 for (const target of registry.targets) {
-  const tarballName = `${target.package}-${mainPackage.version}.tgz`;
+  const tarballName = nativeTarballName(target.package, mainPackage.version);
   const tarball = resolve(directory, tarballName);
-  const checksumPath = resolve(directory, `${target.package}.checksums.json`);
+  const checksumPath = resolve(directory, nativeChecksumName(target.package));
   assert(statSync(tarball).isFile(), `missing native tarball: ${tarballName}`);
   assert(
     statSync(checksumPath).isFile(),

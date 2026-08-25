@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "targets": [
-    { "rustTarget": "aarch64-apple-darwin", "package": "supercov-darwin-arm64", "platform": "darwin", "arch": "arm64", "executable": "supercov" },
-    { "rustTarget": "x86_64-apple-darwin", "package": "supercov-darwin-x64", "platform": "darwin", "arch": "x64", "executable": "supercov" },
-    { "rustTarget": "aarch64-unknown-linux-gnu", "package": "supercov-linux-arm64-gnu", "platform": "linux", "arch": "arm64", "libc": "gnu", "executable": "supercov" },
-    { "rustTarget": "x86_64-unknown-linux-gnu", "package": "supercov-linux-x64-gnu", "platform": "linux", "arch": "x64", "libc": "gnu", "executable": "supercov" },
-    { "rustTarget": "aarch64-unknown-linux-musl", "package": "supercov-linux-arm64-musl", "platform": "linux", "arch": "arm64", "libc": "musl", "executable": "supercov" },
-    { "rustTarget": "x86_64-unknown-linux-musl", "package": "supercov-linux-x64-musl", "platform": "linux", "arch": "x64", "libc": "musl", "executable": "supercov" }
+    { "rustTarget": "aarch64-apple-darwin", "package": "@supercov/cli-darwin-arm64", "platform": "darwin", "arch": "arm64", "executable": "supercov" },
+    { "rustTarget": "x86_64-apple-darwin", "package": "@supercov/cli-darwin-x64", "platform": "darwin", "arch": "x64", "executable": "supercov" },
+    { "rustTarget": "aarch64-unknown-linux-gnu", "package": "@supercov/cli-linux-arm64-gnu", "platform": "linux", "arch": "arm64", "libc": "gnu", "executable": "supercov" },
+    { "rustTarget": "x86_64-unknown-linux-gnu", "package": "@supercov/cli-linux-x64-gnu", "platform": "linux", "arch": "x64", "libc": "gnu", "executable": "supercov" },
+    { "rustTarget": "aarch64-unknown-linux-musl", "package": "@supercov/cli-linux-arm64-musl", "platform": "linux", "arch": "arm64", "libc": "musl", "executable": "supercov" },
+    { "rustTarget": "x86_64-unknown-linux-musl", "package": "@supercov/cli-linux-x64-musl", "platform": "linux", "arch": "x64", "libc": "musl", "executable": "supercov" }
   ]
 }

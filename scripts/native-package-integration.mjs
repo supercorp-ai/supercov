@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { nativePackageFor } from "../bin/native.js";
+import { nativeChecksumName } from "./native-package-names.mjs";
 
 const repository = resolve(import.meta.dirname, "..");
 
@@ -78,7 +79,7 @@ try {
   const platformPack = JSON.parse(
     runNpm(["pack", "--ignore-scripts", "--json"], { cwd: packageRoot }),
   )[0].filename;
-  const artifactMetadata = resolve(temporary, `${target.package}.checksums.json`);
+  const artifactMetadata = resolve(temporary, nativeChecksumName(target.package));
   run(process.execPath, [
     resolve(repository, "scripts/native-artifact-check.mjs"),
     "--target", target.rustTarget,

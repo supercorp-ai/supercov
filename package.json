@@ -74,12 +74,12 @@
     "@babel/types": "^8.0.4"
   },
   "optionalDependencies": {
-    "supercov-darwin-arm64": "0.0.11",
-    "supercov-darwin-x64": "0.0.11",
-    "supercov-linux-arm64-gnu": "0.0.11",
-    "supercov-linux-arm64-musl": "0.0.11",
-    "supercov-linux-x64-gnu": "0.0.11",
-    "supercov-linux-x64-musl": "0.0.11"
+    "@supercov/cli-darwin-arm64": "0.0.11",
+    "@supercov/cli-darwin-x64": "0.0.11",
+    "@supercov/cli-linux-arm64-gnu": "0.0.11",
+    "@supercov/cli-linux-arm64-musl": "0.0.11",
+    "@supercov/cli-linux-x64-gnu": "0.0.11",
+    "@supercov/cli-linux-x64-musl": "0.0.11"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.55.0",
