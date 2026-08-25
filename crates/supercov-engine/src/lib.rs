@@ -13,6 +13,8 @@ pub mod coverage_waivers;
 pub mod evidence_archive;
 pub mod indexed_query;
 pub mod integrity;
+pub mod javascript_frontend;
+pub mod javascript_run;
 pub mod js_instrumenter;
 pub mod lifecycle;
 pub mod orchestration;

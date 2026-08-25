@@ -21,10 +21,11 @@ use oxc_ast::{
         ChainElement, ChainExpression, Class, ComputedMemberExpression, ConditionalExpression,
         Declaration, DoWhileStatement, ExportDefaultDeclarationKind, Expression, ForInStatement,
         ForOfStatement, ForStatement, ForStatementLeft, FormalParameter, FormalParameterKind,
-        FormalParameters, Function, FunctionBody, IfStatement, ImportOrExportKind,
-        LogicalExpression, NewExpression, ObjectPropertyKind, PrivateFieldExpression, Program,
-        PropertyKey, PropertyKind, Statement, StaticMemberExpression, SwitchStatement,
-        TryStatement, VariableDeclaration, VariableDeclarationKind, WhileStatement, WithStatement,
+        FormalParameters, Function, FunctionBody, IfStatement, ImportDeclarationSpecifier,
+        ImportOrExportKind, LogicalExpression, NewExpression, ObjectPropertyKind,
+        PrivateFieldExpression, Program, PropertyKey, PropertyKind, Statement,
+        StaticMemberExpression, SwitchStatement, TryStatement, VariableDeclaration,
+        VariableDeclarationKind, WhileStatement, WithStatement,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -404,6 +405,313 @@ pub enum CandidateError {
     UnknownSourceType(String),
     Parse(Vec<String>),
     CommentPreservation { expected: usize, actual: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeBinding {
+    Differential,
+    DirectGlobal,
+}
+
+const NODE_ASSERT_MODULES: &[&str] = &[
+    "assert",
+    "assert/strict",
+    "node:assert",
+    "node:assert/strict",
+];
+const NODE_ASSERT_METHODS: &[&str] = &[
+    "deepEqual",
+    "deepStrictEqual",
+    "doesNotMatch",
+    "doesNotReject",
+    "doesNotThrow",
+    "equal",
+    "fail",
+    "ifError",
+    "match",
+    "notDeepEqual",
+    "notDeepStrictEqual",
+    "notEqual",
+    "notStrictEqual",
+    "ok",
+    "partialDeepStrictEqual",
+    "rejects",
+    "strictEqual",
+    "throws",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeAssertionInstrumentation {
+    pub code: String,
+    pub assertions: usize,
+}
+
+fn canonical_assert_module(value: &str) -> Option<String> {
+    NODE_ASSERT_MODULES.contains(&value).then(|| {
+        if value.starts_with("node:") {
+            value.into()
+        } else {
+            format!("node:{value}")
+        }
+    })
+}
+
+#[derive(Default)]
+struct NodeAssertionBindings {
+    objects: HashMap<String, String>,
+    direct: HashMap<String, String>,
+}
+
+fn node_assertion_bindings(program: &Program<'_>) -> NodeAssertionBindings {
+    let mut bindings = NodeAssertionBindings::default();
+    for statement in &program.body {
+        let Statement::ImportDeclaration(declaration) = statement else {
+            continue;
+        };
+        let Some(module) = canonical_assert_module(declaration.source.value.as_str()) else {
+            continue;
+        };
+        for specifier in declaration.specifiers.iter().flatten() {
+            match specifier {
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    bindings
+                        .objects
+                        .insert(specifier.local.name.to_string(), module.clone());
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    bindings
+                        .objects
+                        .insert(specifier.local.name.to_string(), module.clone());
+                }
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                    let imported = specifier.imported.name().to_string();
+                    if imported == "strict" {
+                        bindings.objects.insert(
+                            specifier.local.name.to_string(),
+                            "node:assert/strict".into(),
+                        );
+                    } else if NODE_ASSERT_METHODS.contains(&imported.as_str()) {
+                        bindings.direct.insert(
+                            specifier.local.name.to_string(),
+                            format!("{module}.{imported}"),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    bindings
+}
+
+struct NodeAssertionSiteCollector<'s> {
+    source: &'s str,
+    file: &'s str,
+    bindings: &'s NodeAssertionBindings,
+    sites: HashMap<SpanKey, (String, String)>,
+}
+
+#[derive(Default)]
+struct AwaitYieldScanner {
+    found: bool,
+}
+
+impl<'a> Visit<'a> for AwaitYieldScanner {
+    fn visit_await_expression(&mut self, _expression: &oxc_ast::ast::AwaitExpression<'a>) {
+        self.found = true;
+    }
+
+    fn visit_yield_expression(&mut self, _expression: &oxc_ast::ast::YieldExpression<'a>) {
+        self.found = true;
+    }
+
+    fn visit_function(&mut self, _function: &Function<'a>, _flags: ScopeFlags) {}
+
+    fn visit_arrow_function_expression(&mut self, _function: &ArrowFunctionExpression<'a>) {}
+}
+
+impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        let operation = match &call.callee {
+            Expression::Identifier(identifier) => self
+                .bindings
+                .direct
+                .get(identifier.name.as_str())
+                .cloned()
+                .or_else(|| {
+                    self.bindings
+                        .objects
+                        .get(identifier.name.as_str())
+                        .map(|module| format!("{module}.ok"))
+                }),
+            Expression::StaticMemberExpression(member) => {
+                let Expression::Identifier(object) = &member.object else {
+                    walk::walk_call_expression(self, call);
+                    return;
+                };
+                self.bindings
+                    .objects
+                    .get(object.name.as_str())
+                    .filter(|_| NODE_ASSERT_METHODS.contains(&member.property.name.as_str()))
+                    .map(|module| format!("{module}.{}", member.property.name))
+            }
+            _ => None,
+        };
+        if let Some(operation) = operation {
+            let mut unsafe_argument = AwaitYieldScanner::default();
+            for argument in &call.arguments {
+                unsafe_argument.visit_argument(argument);
+            }
+            if unsafe_argument.found {
+                walk::walk_call_expression(self, call);
+                return;
+            }
+            let (line, column) = line_and_utf16_column(self.source, call.span.start as usize);
+            self.sites.insert(
+                span_key(call.span),
+                (operation, format!("{}:{line}:{column}", self.file)),
+            );
+        }
+        walk::walk_call_expression(self, call);
+    }
+}
+
+struct NodeAssertionTransformer<'a> {
+    ast: AstBuilder<'a>,
+    sites: HashMap<SpanKey, (String, String)>,
+}
+
+impl<'a> NodeAssertionTransformer<'a> {
+    fn wrap(&self, original: Expression<'a>, operation: &str, source: &str) -> Expression<'a> {
+        let runtime = Expression::StaticMemberExpression(
+            self.ast.alloc_static_member_expression(
+                Span::default(),
+                self.ast
+                    .expression_identifier(Span::default(), self.ast.ident("globalThis")),
+                self.ast.identifier_name(
+                    Span::default(),
+                    self.ast.ident("__SUPERCOV_DIRECT_RUNTIME__"),
+                ),
+                false,
+            ),
+        );
+        let helper = Expression::StaticMemberExpression(
+            self.ast.alloc_static_member_expression(
+                Span::default(),
+                runtime,
+                self.ast
+                    .identifier_name(Span::default(), self.ast.ident("withNodeAssertionPhase")),
+                false,
+            ),
+        );
+        let parameters = self.ast.alloc_formal_parameters(
+            Span::default(),
+            FormalParameterKind::ArrowFormalParameters,
+            self.ast.vec(),
+            NONE,
+        );
+        let body = self.ast.alloc_function_body(
+            Span::default(),
+            self.ast.vec(),
+            self.ast
+                .vec1(self.ast.statement_return(Span::default(), Some(original))),
+        );
+        let callback = self.ast.expression_arrow_function(
+            Span::default(),
+            false,
+            false,
+            NONE,
+            parameters,
+            NONE,
+            body,
+        );
+        self.ast.expression_call(
+            Span::default(),
+            helper,
+            NONE,
+            self.ast.vec_from_array([
+                Argument::from(self.ast.expression_string_literal(
+                    Span::default(),
+                    self.ast.str(operation),
+                    None,
+                )),
+                Argument::from(self.ast.expression_string_literal(
+                    Span::default(),
+                    self.ast.str(source),
+                    None,
+                )),
+                Argument::from(callback),
+            ]),
+            false,
+        )
+    }
+}
+
+impl<'a> VisitMut<'a> for NodeAssertionTransformer<'a> {
+    fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        let key = span_key(expression.span());
+        walk_mut::walk_expression(self, expression);
+        let Some((operation, source)) = self.sites.remove(&key) else {
+            return;
+        };
+        let original = expression.take_in(self.ast.allocator);
+        *expression = self.wrap(original, &operation, &source);
+    }
+}
+
+/// Attribute native ESM node:assert calls by opening the assertion phase
+/// before argument evaluation. CJS require bindings and node:test `expect`
+/// remain explicit blockers for the private vertical slice.
+pub fn instrument_node_assertion_phases(
+    source: &str,
+    file: &str,
+) -> Result<NodeAssertionInstrumentation, CandidateError> {
+    if !source.contains("assert") {
+        return Ok(NodeAssertionInstrumentation {
+            code: source.into(),
+            assertions: 0,
+        });
+    }
+    let source_type = SourceType::from_path(Path::new(file))
+        .map_err(|error| CandidateError::UnknownSourceType(error.to_string()))?;
+    let allocator = Allocator::default();
+    let mut parsed = Parser::new(&allocator, source, source_type).parse();
+    if !parsed.errors.is_empty() {
+        return Err(CandidateError::Parse(
+            parsed
+                .errors
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect(),
+        ));
+    }
+    let bindings = node_assertion_bindings(&parsed.program);
+    if bindings.objects.is_empty() && bindings.direct.is_empty() {
+        return Ok(NodeAssertionInstrumentation {
+            code: source.into(),
+            assertions: 0,
+        });
+    }
+    let mut collector = NodeAssertionSiteCollector {
+        source,
+        file,
+        bindings: &bindings,
+        sites: HashMap::new(),
+    };
+    collector.visit_program(&parsed.program);
+    let assertions = collector.sites.len();
+    if assertions == 0 {
+        return Ok(NodeAssertionInstrumentation {
+            code: source.into(),
+            assertions: 0,
+        });
+    }
+    NodeAssertionTransformer {
+        ast: AstBuilder::new(&allocator),
+        sites: collector.sites,
+    }
+    .visit_program(&mut parsed.program);
+    let (code, _) = generate_candidate(&parsed.program, file)?;
+    Ok(NodeAssertionInstrumentation { code, assertions })
 }
 
 type SpanKey = (u32, u32);
@@ -1176,6 +1484,25 @@ fn json_expression<'a>(ast: AstBuilder<'a>, value: &serde_json::Value) -> Expres
 /// conformance-tested; selection of the Rust engine remains private until the
 /// Phase 4 CLI/orchestration cutover is complete.
 pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput, CandidateError> {
+    instrument_candidate_with_binding(source, file, RuntimeBinding::Differential)
+}
+
+/// Emit code for an isolated source-executing workspace. Unlike the migration
+/// differential form, this has no virtual module dependency: the generated
+/// Node preload installs the frozen runtime on this global before user modules
+/// evaluate.
+pub fn instrument_direct_candidate(
+    source: &str,
+    file: &str,
+) -> Result<CandidateOutput, CandidateError> {
+    instrument_candidate_with_binding(source, file, RuntimeBinding::DirectGlobal)
+}
+
+fn instrument_candidate_with_binding(
+    source: &str,
+    file: &str,
+    runtime_binding: RuntimeBinding,
+) -> Result<CandidateOutput, CandidateError> {
     let source_type = SourceType::from_path(Path::new(file))
         .map_err(|error| CandidateError::UnknownSourceType(error.to_string()))?;
     let allocator = Allocator::default();
@@ -1523,14 +1850,21 @@ pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput,
     if uses_request_phase {
         runtime_imports.insert(10, ("withRequestPhase", &with_request_phase));
     }
-    if parsed.program.source_type.is_script() {
+    if runtime_binding == RuntimeBinding::DirectGlobal || parsed.program.source_type.is_script() {
         let declarators =
             ast.vec_from_iter(runtime_imports.into_iter().map(|(imported, local)| {
                 let global_runtime =
                     Expression::StaticMemberExpression(ast.alloc_static_member_expression(
                         Span::default(),
                         ast.expression_identifier(Span::default(), ast.ident("globalThis")),
-                        ast.identifier_name(Span::default(), ast.ident("__supercovRuntime")),
+                        ast.identifier_name(
+                            Span::default(),
+                            ast.ident(if runtime_binding == RuntimeBinding::DirectGlobal {
+                                "__SUPERCOV_DIRECT_RUNTIME__"
+                            } else {
+                                "__supercovRuntime"
+                            }),
+                        ),
                         false,
                     ));
                 let runtime_helper =
@@ -5878,6 +6212,49 @@ mod tests {
             let reparsed = Parser::new(&allocator, &output.code, source_type).parse();
             assert!(reparsed.errors.is_empty(), "{file}: {:?}", reparsed.errors);
         }
+    }
+
+    #[test]
+    fn direct_runtime_mode_has_no_virtual_module_or_legacy_global() {
+        for file in ["src/module.mjs", "src/script.cjs"] {
+            let output = instrument_direct_candidate(
+                "export const selected = value => value ? 1 : 0;",
+                file,
+            )
+            .unwrap();
+            assert!(
+                output
+                    .code
+                    .contains("globalThis.__SUPERCOV_DIRECT_RUNTIME__")
+            );
+            assert!(!output.code.contains("virtual:supercov-runtime"));
+            assert!(!output.code.contains("globalThis.__supercovRuntime"));
+        }
+    }
+
+    #[test]
+    fn native_assertion_arguments_execute_inside_the_assertion_phase() {
+        let source = concat!(
+            "import assert from 'node:assert/strict';\n",
+            "assert.equal(value(), 1);\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/value.test.mjs").unwrap();
+        assert_eq!(output.assertions, 1);
+        assert!(output.code.contains("withNodeAssertionPhase"));
+        assert!(output.code.contains("node:assert/strict.equal"));
+        assert!(output.code.contains("tests/value.test.mjs:2:1"));
+        assert!(output.code.contains("assert.equal(value(), 1)"));
+    }
+
+    #[test]
+    fn native_assertion_phase_never_moves_await_into_a_sync_callback() {
+        let source = concat!(
+            "import assert from 'node:assert/strict';\n",
+            "export async function check() { assert.equal(await value(), 1); }\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/value.test.mjs").unwrap();
+        assert_eq!(output.assertions, 0);
+        assert_eq!(output.code, source);
     }
 
     #[test]

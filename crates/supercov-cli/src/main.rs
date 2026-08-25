@@ -73,6 +73,7 @@ fn main() -> ExitCode {
         Some("__lifecycle") => lifecycle(),
         Some("__workspace") => workspace(),
         Some("__supervise") => supervise(),
+        Some("__run-js-direct") => run_js_direct(),
         Some("__sweep-trash") => sweep_trash(),
         Some("__benchmark-js-transform") => benchmark_js_transform(),
         Some("__pack-evidence") => pack_evidence(),
@@ -80,6 +81,41 @@ fn main() -> ExitCode {
             eprintln!(
                 "[supercov] Rust engine candidate is not ready for `{command}`; use the currently shipped engine while the Rust contract gates are incomplete"
             );
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_js_direct() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let request: supercov_engine::javascript_run::DirectJavascriptRunRequest =
+        match serde_json::from_str(&input) {
+            Ok(request) => request,
+            Err(error) => {
+                eprintln!("[supercov] invalid direct JavaScript run input: {error}");
+                return ExitCode::from(2);
+            }
+        };
+    let mut diagnostics = std::io::stderr().lock();
+    match supercov_engine::javascript_run::run_direct_javascript(&request, &mut diagnostics) {
+        Ok(result) => match serde_json::to_string(&result) {
+            Ok(output) => {
+                println!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("[supercov] failed to serialize direct JavaScript run: {error}");
+                ExitCode::from(2)
+            }
+        },
+        Err(error) => {
+            eprintln!("[supercov] direct JavaScript run failed: {error}");
             ExitCode::from(2)
         }
     }
@@ -374,6 +410,10 @@ fn query_stored_run() -> ExitCode {
         let run = select_run(&inventory, Some(&request.query.run_id))
             .map_err(|error| error.to_string())?;
         request.query.run_id.clone_from(&run.id);
+        request
+            .query
+            .valid
+            .get_or_insert(run.metadata.test_exit_code == Some(0));
         let container = open_or_rebuild_query_index(run).map_err(|error| error.to_string())?;
         let index = CoverageIndex::new(&container).map_err(|error| error.to_string())?;
         let waiver_source = supercov_engine::coverage_waivers::read_coverage_waivers(&request.root)

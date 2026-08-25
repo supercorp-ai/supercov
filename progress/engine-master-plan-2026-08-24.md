@@ -609,12 +609,28 @@ miss blocks flipping any default.
   complete plan, closing the otherwise dangerous gap where a SIGTERM could
   arrive after the build exited but before the test spawned. This deliberately
   does not move JavaScript config/runtime generation into a generic process
-  abstraction: the frontend shim still prepares unavoidable Playwright,
+  abstraction: the frontend shim still contains unavoidable Playwright,
   Vitest, node:test and remote-capability hooks, while Rust owns when and how
-  every resulting command runs. The next integration slice must feed the
-  discovered JavaScript project, workspace, Rust instrumenter and generated
-  shim assets into this plan, then compare a complete private Rust run against
-  the reference fixtures before any public selector is enabled.
+  every resulting command runs.
+- The first private Rust-owned execution is now complete for a direct
+  `node:test` project. Rust discovers the project, fingerprints source/tests/
+  dependencies/configuration/frontend artifacts, prepares the isolated stable
+  workspace, instruments application source with a direct runtime ABI,
+  instruments native ESM `node:assert` argument evaluation for exact assertion
+  phases, emits the complete sorted manifest, supervises the test command,
+  packs the frozen evidence archive, atomically publishes immutable run
+  metadata, prunes copied source and serves the persisted run through the Rust
+  mmap query index. The black-box fixture proves four concurrent test scopes,
+  100% line/branch/MC/DC, all three executable lines and both MC/DC conditions
+  assertion-linked, no fallback attribution, a valid/complete passed view,
+  unchanged project source and no retained raw-evidence directory in the
+  shared workspace. This integration exposed and fixed two real boundaries:
+  generated modules/scripts now use one explicit direct-runtime global instead
+  of virtual/legacy bindings, and persisted-run queries derive validity from
+  the test exit code rather than defaulting it to false. This remains private:
+  CJS assertion bindings, node:test `expect`, build-tool frontends, full
+  reference differentials and cross-platform crash/filesystem gates still
+  block any selector or TypeScript-engine deletion.
 
 ## Non-goals and guardrails
 
