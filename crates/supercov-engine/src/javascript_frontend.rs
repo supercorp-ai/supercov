@@ -181,6 +181,15 @@ fn create_directory_all(path: &Path) -> Result<(), JavascriptFrontendError> {
     {
         create_directory_all(parent)?;
     }
+    let creation_path = path
+        .parent()
+        .zip(path.file_name())
+        .and_then(|(parent, name)| {
+            fs::canonicalize(parent)
+                .ok()
+                .map(|canonical_parent| canonical_parent.join(name))
+        })
+        .unwrap_or_else(|| path.to_owned());
 
     const ATTEMPTS: usize = 11;
     for attempt in 0..ATTEMPTS {
@@ -191,7 +200,7 @@ fn create_directory_all(path: &Path) -> Result<(), JavascriptFrontendError> {
         if is_plain_directory(path) {
             return Ok(());
         }
-        match fs::create_dir(path) {
+        match fs::create_dir(&creation_path) {
             Ok(()) => return Ok(()),
             Err(source)
                 if source.kind() == io::ErrorKind::PermissionDenied && attempt + 1 < ATTEMPTS =>
