@@ -741,6 +741,14 @@ miss blocks flipping any default.
   persistence/query implementations and Babel engine dependencies in the same
   consolidation. Only unavoidable Node/browser/test-runner collectors and
   runtime shims survive.
+- Public cutover wiring has started with the lifecycle commands. The Rust
+  binary now identifies itself honestly as a private differential candidate,
+  parses `prune`/`clean` plus `--keep`/`--dry-run` directly, invokes the
+  Rust-owned locked lifecycle, and reproduces the frozen human summaries and
+  exit-2 argument failures. Live dry runs against the real Supercov store were
+  byte-identical to the temporary TypeScript CLI for both commands. This does
+  not flip the npm wrapper or authorize engine deletion; public run/query,
+  structured-error, native packaging, and cross-platform gates remain.
 
 ## Non-goals and guardrails
 

@@ -35,8 +35,7 @@ use supercov_engine::{
     run_store::{StoredRun, discover_runs, open_or_rebuild_query_index, select_run},
 };
 
-const HELP: &str = "Rust candidate for the frozen Supercov engine contract v1.\n\
-This binary is a contract shell, not yet a coverage engine.\n\
+const HELP: &str = "Supercov coverage engine (Rust differential candidate).\n\
 \n\
 Reference-engine UX:\n\
   supercov -- <test command>\n\
@@ -77,6 +76,8 @@ fn main() -> ExitCode {
         Some("__sweep-trash") => sweep_trash(),
         Some("__benchmark-js-transform") => benchmark_js_transform(),
         Some("__pack-evidence") => pack_evidence(),
+        Some("prune") => cleanup_command("prune", arguments.collect()),
+        Some("clean") => cleanup_command("clean", arguments.collect()),
         Some(command) => {
             eprintln!(
                 "[supercov] Rust engine candidate is not ready for `{command}`; use the currently shipped engine while the Rust contract gates are incomplete"
@@ -84,6 +85,115 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn parse_cleanup_options(command: &str, arguments: &[String]) -> Result<(usize, bool), String> {
+    let mut keep = 20;
+    let mut dry_run = false;
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        if argument == "--dry-run" {
+            dry_run = true;
+        } else if argument == "--keep" {
+            index += 1;
+            let Some(value) = arguments.get(index) else {
+                return Err("--keep must be a non-negative integer".into());
+            };
+            keep = value
+                .parse::<usize>()
+                .map_err(|_| "--keep must be a non-negative integer".to_owned())?;
+        } else {
+            return Err(format!("Unknown {command} option: {argument}"));
+        }
+        index += 1;
+    }
+    Ok((keep, dry_run))
+}
+
+fn cleanup_summary(
+    command: &str,
+    keep: usize,
+    dry_run: bool,
+    result: &supercov_engine::lifecycle::CleanupResult,
+) -> String {
+    if command == "prune" {
+        format!(
+            "[supercov] {} {} stored run(s), {} terminal/orphan work director{}, and {} loose evidence director{}; keeping {} newest run(s) and preserving the shared cache",
+            if dry_run { "would remove" } else { "removed" },
+            result.removed_runs.len(),
+            result.removed_workspaces.len(),
+            if result.removed_workspaces.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            result.removed_evidence.len(),
+            if result.removed_evidence.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            keep,
+        )
+    } else {
+        format!(
+            "[supercov] {} {} stored run(s), {} per-run workspace(s), and {} isolated build cache; keeping {} newest run(s)",
+            if dry_run { "would remove" } else { "removed" },
+            result.removed_runs.len(),
+            result.removed_workspaces.len(),
+            if result.removed_build_cache {
+                "the"
+            } else {
+                "no"
+            },
+            keep,
+        )
+    }
+}
+
+fn cleanup_command(command: &str, arguments: Vec<String>) -> ExitCode {
+    let (keep, dry_run) = match parse_cleanup_options(command, &arguments) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let root = match std::env::current_dir() {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("[supercov] could not resolve the current directory: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    spawn_trash_sweeper(&root);
+    let options = supercov_engine::lifecycle::CleanupOptions { keep, dry_run };
+    let updated_at = format!(
+        "unix-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+    let result = if command == "prune" {
+        supercov_engine::lifecycle::prune_storage(&root, options, &updated_at)
+    } else {
+        supercov_engine::lifecycle::clean_storage(&root, options, &updated_at)
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("[supercov] {command} failed: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    spawn_trash_sweeper(&root);
+    println!("{}", cleanup_summary(command, keep, dry_run, &result));
+    for id in result.removed_runs {
+        println!("{id}");
+    }
+    ExitCode::SUCCESS
 }
 
 fn run_js_direct() -> ExitCode {
@@ -1346,11 +1456,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shell_is_explicitly_not_a_false_coverage_implementation() {
-        assert!(HELP.contains("not yet a coverage engine"));
+    fn shell_reports_its_private_differential_readiness_honestly() {
+        assert!(HELP.contains("Rust differential candidate"));
         assert_eq!(
             supercov_engine::READINESS,
-            supercov_engine::EngineReadiness::ContractShell
+            supercov_engine::EngineReadiness::DifferentialCandidate
+        );
+    }
+
+    #[test]
+    fn cleanup_options_preserve_the_frozen_cli_contract() {
+        assert_eq!(parse_cleanup_options("prune", &[]).unwrap(), (20, false));
+        assert_eq!(
+            parse_cleanup_options("clean", &["--keep".into(), "0".into(), "--dry-run".into()])
+                .unwrap(),
+            (0, true)
+        );
+        assert_eq!(
+            parse_cleanup_options("prune", &["--keep".into()]).unwrap_err(),
+            "--keep must be a non-negative integer"
+        );
+        assert_eq!(
+            parse_cleanup_options("clean", &["--unknown".into()]).unwrap_err(),
+            "Unknown clean option: --unknown"
+        );
+        let result = supercov_engine::lifecycle::CleanupResult {
+            removed_runs: vec!["run-1".into(), "run-0".into()],
+            removed_workspaces: vec!["run-1".into()],
+            removed_evidence: vec![],
+            removed_build_cache: false,
+        };
+        assert_eq!(
+            cleanup_summary("prune", 20, true, &result),
+            "[supercov] would remove 2 stored run(s), 1 terminal/orphan work directory, and 0 loose evidence directories; keeping 20 newest run(s) and preserving the shared cache"
+        );
+        assert_eq!(
+            cleanup_summary("clean", 0, false, &result),
+            "[supercov] removed 2 stored run(s), 1 per-run workspace(s), and no isolated build cache; keeping 0 newest run(s)"
         );
     }
 }
