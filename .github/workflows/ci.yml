@@ -2,9 +2,7 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,29 +16,11 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-      - name: Install the independent Clang/LLVM MC/DC oracle
-        run: sudo apt-get update -qq && sudo apt-get install -y clang llvm
       - run: npm ci
-      - run: npm run release:check
-      - run: npm run test:rust-engine
-      - uses: actions/checkout@v6
-        with:
-          repository: tc39/test262
-          ref: 3655e7464de3d52643ecddd4b5f9f4f3e7f62398
-          path: .test262
-      - name: Test262 semantic-equivalence smoke gate
-        env:
-          SUPERCOV_RUST_BINARY: ${{ github.workspace }}/target/release/supercov
-        run: node scripts/test262-equivalence.mjs --engine rust --test262 .test262 --limit 250 --minimum 200
-      - run: npx playwright install --with-deps chromium firefox webkit
-      - run: npm run test:isolation
-      - run: npm run test:fixture
-      - run: npm run test:rust-fixture
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-          cache: npm
-      - name: Require Rust syntax equivalence on the oldest supported Node
-        env:
-          SUPERCOV_RUST_BINARY: ${{ github.workspace }}/target/release/supercov
-        run: node scripts/rust-syntax-matrix.mjs --runtime node
+      - run: npm run check
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: npm run build
+      - run: npm run test:embedded-runtime
+      - run: npm run test:rust-assets

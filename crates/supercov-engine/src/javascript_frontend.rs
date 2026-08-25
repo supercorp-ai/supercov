@@ -813,7 +813,7 @@ mod tests {
         // semantic fixtures in Cargo's ignored target tree so hosted-runner
         // policies on the system temporary directory cannot affect them.
         fs::create_dir_all(&path).unwrap();
-        path
+        fs::canonicalize(path).unwrap()
     }
 
     #[test]

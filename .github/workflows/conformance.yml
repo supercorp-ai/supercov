@@ -1,8 +1,6 @@
 name: Full Test262 Conformance
 
 on:
-  schedule:
-    - cron: "41 2 * * 0"
   workflow_dispatch:
 
 permissions:

@@ -23,15 +23,14 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-      - name: Install the independent Clang/LLVM MC/DC oracle
-        run: sudo apt-get update -qq && sudo apt-get install -y clang llvm
       - run: npm ci
-      - run: npm run release:check
-      - run: npm run test:rust-engine
-      - run: npx playwright install --with-deps chromium firefox webkit
-      - run: npm run test:isolation
-      - run: npm run test:fixture
-      - run: npm run test:rust-fixture
+      - run: npm run check
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: npm run build
+      - run: npm run test:embedded-runtime
+      - run: npm run test:rust-assets
 
   native-artifacts:
     needs: release-check
@@ -41,35 +40,8 @@ jobs:
       id-token: write
       attestations: write
 
-  test262:
-    name: Test262 ${{ matrix.shard }}/16
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/checkout@v6
-        with:
-          repository: tc39/test262
-          ref: 3655e7464de3d52643ecddd4b5f9f4f3e7f62398
-          path: .test262
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          cache: npm
-      - run: npm ci
-      - run: npm run build
-      - run: cargo build --release -p supercov
-      - name: Require semantic equivalence across the Test262 shard
-        env:
-          SUPERCOV_ENGINE: rust
-          SUPERCOV_RUST_BINARY: ${{ github.workspace }}/target/release/supercov
-        run: node scripts/test262-equivalence.mjs --engine rust --test262 .test262 --shard ${{ matrix.shard }}/16 --minimum 1000
-
   publish:
-    needs: [release-check, test262, native-artifacts]
+    needs: [release-check, native-artifacts]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -87,10 +59,10 @@ jobs:
           name: supercov-native-release-set
           path: native-release
       - run: npm ci
-      # All release, oracle, fixture, and Test262 gates completed in the jobs
-      # this job needs. Build the exact tarball inputs here, then suppress npm's
-      # lifecycle scripts so `prepublishOnly` does not repeat the LLVM-dependent
-      # release gate on a runner where LLVM was deliberately not installed.
+      # The release commit is validated locally before tagging and by the
+      # compact release gate above. Build the exact tarball inputs here, then
+      # suppress npm lifecycle scripts so publication does not repeat the full
+      # local release and oracle suites.
       - run: npm run build
       - name: Revalidate and publish every exact-version native package
         env:

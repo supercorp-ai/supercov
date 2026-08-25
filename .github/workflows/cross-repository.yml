@@ -1,8 +1,6 @@
 name: Cross-repository evaluation
 
 on:
-  schedule:
-    - cron: "23 4 * * 2"
   workflow_dispatch:
 
 permissions:

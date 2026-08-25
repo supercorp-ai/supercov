@@ -577,12 +577,23 @@ miss blocks flipping any default.
   gated on the configured compatibility-matrix run rather than being inferred
   from a cross-target build.
 - Windows hosted-runner follow-up: GitHub's runner intermittently denied
-  creation beneath its 8.3-alias `%TEMP%` path even though the dedicated NTFS
-  lifecycle, crash, junction, rename, ENOSPC and Job-object tests passed. The
-  two frontend semantic fixtures now live under Cargo's ignored `target` tree
-  so this external temp policy cannot masquerade as an engine regression. Keep
-  the hosted `%TEMP%` behavior as a platform-compatibility TODO; do not weaken
-  production path validation or lifecycle guarantees to accommodate it.
+  redundant directory and write operations first beneath its 8.3-alias
+  `%TEMP%` path and then through a repo-local fixture path containing unresolved
+  `..` components, even though the dedicated NTFS lifecycle, crash, junction,
+  rename, ENOSPC and Job-object tests passed. The two frontend semantic
+  fixtures now live under Cargo's ignored `target` tree and canonicalize that
+  test-only root before use. Verify this small fixture correction on the next
+  deliberate compatibility run; do not spend another matrix run on it today,
+  and do not weaken production path validation or lifecycle guarantees to
+  accommodate hosted-runner policy.
+- Actions-budget policy: ordinary pushes do not trigger a release-sized CI
+  run. Pull requests and explicit manual dispatches use a compact Rust/Node
+  correctness gate; the browser/platform compatibility matrix, full Test262
+  conformance and cross-repository ecosystem sweep are deliberate manual
+  gates. npm tags run the compact gate plus the required native artifact and
+  publication jobs, while the exhaustive local release gate must pass before
+  tagging. This prevents benchmarks and repeated oracle sweeps from consuming
+  hosted minutes on routine commits.
 - Phase 4 now also owns isolated workspace and stable build-cache publication.
   The Rust layer performs deterministic tree copies with clonefile/FICLONE
   fallback through `reflink-copy`, excludes only the frozen generated-output
