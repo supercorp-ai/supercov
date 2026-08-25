@@ -487,6 +487,14 @@ miss blocks flipping any default.
   current-project fingerprint creation, pruning/retention and atomic run
   publication still have to move into Rust before lifecycle ownership is
   complete.
+  The typed `runs` operator is now also implemented over that inventory. It
+  paginates metadata without triggering analysis, reads all/passed/failed
+  percentages only from an already authenticated binary index, treats a bad
+  disposable index as "not indexed" without mutating it, and reports stored-
+  versus-current stale reasons in frozen order. Its agent data and pagination
+  use the shared bounded JSON contract. Production CLI routing remains gated
+  on Rust current-project fingerprint discovery; until then the operator is a
+  tested engine layer rather than a partially exposed command.
 
 ## Non-goals and guardrails
 

@@ -13,6 +13,7 @@ pub mod evidence_archive;
 pub mod js_instrumenter;
 pub mod probe_v2;
 pub mod query_index;
+pub mod run_query;
 pub mod run_store;
 
 pub use supercov_contracts::CONTRACT_VERSION;

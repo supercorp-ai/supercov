@@ -488,6 +488,17 @@ fn open_validated_query_index(
     Ok(index)
 }
 
+/// Open an existing valid index without triggering analysis or publication.
+pub fn open_existing_query_index(run: &StoredRun) -> Result<Option<QueryIndex>, RunIndexError> {
+    match fs::symlink_metadata(&run.query_index_path) {
+        Ok(_) => {
+            open_validated_query_index(&run.query_index_path, &query_index_identity(run)?).map(Some)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(RunStoreError::Io(error).into()),
+    }
+}
+
 /// Open a valid disposable index or atomically reconstruct it from evidence.
 ///
 /// `evidence.raw.gz` remains authoritative. Any stale, truncated, linked or
