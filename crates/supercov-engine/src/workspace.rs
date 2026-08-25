@@ -208,10 +208,23 @@ fn inside(root: &Path, path: &Path) -> bool {
         })
 }
 
-fn copy_file(source: &Path, destination: &Path) -> Result<(), WorkspaceError> {
-    reflink_copy::reflink_or_copy(source, destination)
-        .map(|_| ())
-        .map_err(|source_error| io_error(destination, source_error))
+trait WorkspaceOperations {
+    fn copy_file(&mut self, source: &Path, destination: &Path) -> Result<(), WorkspaceError>;
+    fn rename(&mut self, source: &Path, destination: &Path) -> Result<(), WorkspaceError>;
+}
+
+struct SystemWorkspaceOperations;
+
+impl WorkspaceOperations for SystemWorkspaceOperations {
+    fn copy_file(&mut self, source: &Path, destination: &Path) -> Result<(), WorkspaceError> {
+        reflink_copy::reflink_or_copy(source, destination)
+            .map(|_| ())
+            .map_err(|source_error| io_error(destination, source_error))
+    }
+
+    fn rename(&mut self, source: &Path, destination: &Path) -> Result<(), WorkspaceError> {
+        atomic_rename(source, destination).map_err(WorkspaceError::from)
+    }
 }
 
 #[cfg(unix)]
@@ -222,20 +235,50 @@ fn create_link(target: &Path, destination: &Path, _directory: bool) -> io::Resul
 #[cfg(windows)]
 fn create_link(target: &Path, destination: &Path, directory: bool) -> io::Result<()> {
     if directory {
-        std::os::windows::fs::symlink_dir(target, destination)
+        // Junctions work on ordinary NTFS installations without requiring
+        // Developer Mode or SeCreateSymbolicLinkPrivilege. This is the common
+        // path for dependency mounts and internal directory links. A project
+        // may still live on a non-NTFS/network filesystem where junctions are
+        // unavailable but unprivileged symlinks are enabled, so preserve that
+        // valid fallback instead of assuming one Windows filesystem.
+        match junction::create(target, destination) {
+            Ok(()) => Ok(()),
+            Err(junction_error) => {
+                let _ = fs::remove_dir(destination);
+                std::os::windows::fs::symlink_dir(target, destination).map_err(
+                    |symlink_error| {
+                        io::Error::new(
+                            symlink_error.kind(),
+                            format!(
+                                "junction creation failed ({junction_error}); directory symlink fallback failed ({symlink_error})"
+                            ),
+                        )
+                    },
+                )
+            }
+        }
     } else {
+        // A project that already contains a file symlink necessarily runs in
+        // an environment capable of creating one. Do not silently copy it:
+        // that can change Node realpath/module-identity semantics.
         std::os::windows::fs::symlink_file(target, destination)
     }
 }
 
-fn copy_tree(
+#[derive(Clone, Copy)]
+struct CopyRoots<'a> {
+    source: &'a Path,
+    destination: &'a Path,
+    final_destination: &'a Path,
+    canonical_source: &'a Path,
+}
+
+fn copy_tree<Operations: WorkspaceOperations>(
     source: &Path,
     destination: &Path,
-    source_root: &Path,
-    destination_root: &Path,
-    final_destination_root: &Path,
-    canonical_source_root: &Path,
+    roots: CopyRoots<'_>,
     root_level: bool,
+    operations: &mut Operations,
 ) -> Result<(), WorkspaceError> {
     fs::create_dir_all(destination).map_err(|source| io_error(destination, source))?;
     let mut entries = fs::read_dir(source)
@@ -260,15 +303,7 @@ fn copy_tree(
         }
         let to = destination.join(&name);
         if metadata.file_type().is_dir() {
-            copy_tree(
-                &from,
-                &to,
-                source_root,
-                destination_root,
-                final_destination_root,
-                canonical_source_root,
-                false,
-            )?;
+            copy_tree(&from, &to, roots, false, operations)?;
         } else if metadata.file_type().is_symlink() {
             let link = fs::read_link(&from).map_err(|error| io_error(&from, error))?;
             let unresolved_target = if link.is_absolute() {
@@ -284,8 +319,8 @@ fn copy_tree(
             })?;
             let canonical_target =
                 fs::canonicalize(&from).map_err(|error| io_error(&from, error))?;
-            if !inside(source_root, &lexical_target)
-                || !inside(canonical_source_root, &canonical_target)
+            if !inside(roots.source, &lexical_target)
+                || !inside(roots.canonical_source, &canonical_target)
             {
                 return Err(WorkspaceError::EscapingLink {
                     path: from,
@@ -293,13 +328,13 @@ fn copy_tree(
                 });
             }
             let local_target = lexical_target
-                .strip_prefix(source_root)
+                .strip_prefix(roots.source)
                 .map_err(|_| WorkspaceError::UnsafePath(lexical_target.clone()))?;
-            let relocated = destination_root.join(local_target);
+            let relocated = roots.destination.join(local_target);
             let target_metadata = fs::metadata(&canonical_target)
                 .map_err(|error| io_error(&canonical_target, error))?;
             let isolated_link = if cfg!(windows) && target_metadata.is_dir() {
-                final_destination_root.join(local_target)
+                roots.final_destination.join(local_target)
             } else if link.is_absolute() {
                 pathdiff(&to, &relocated)?
             } else {
@@ -308,7 +343,7 @@ fn copy_tree(
             create_link(&isolated_link, &to, target_metadata.is_dir())
                 .map_err(|error| io_error(&to, error))?;
         } else if metadata.file_type().is_file() {
-            copy_file(&from, &to)?;
+            operations.copy_file(&from, &to)?;
         } else {
             return Err(WorkspaceError::UnsupportedEntry(from));
         }
@@ -340,7 +375,13 @@ fn pathdiff(from: &Path, to: &Path) -> Result<PathBuf, WorkspaceError> {
     Ok(relative)
 }
 
-fn link_node_modules(root: &Path, workspace: &Path) -> Result<(), WorkspaceError> {
+fn link_node_modules<Operations: WorkspaceOperations>(
+    root: &Path,
+    workspace: &Path,
+    operations: &mut Operations,
+) -> Result<(), WorkspaceError> {
+    #[cfg(unix)]
+    let _ = &operations;
     let source = root.join("node_modules");
     let source_metadata = match fs::symlink_metadata(&source) {
         Ok(metadata) => metadata,
@@ -360,11 +401,29 @@ fn link_node_modules(root: &Path, workspace: &Path) -> Result<(), WorkspaceError
     for entry in entries {
         let target = entry.path();
         let to = destination.join(entry.file_name());
-        let directory = entry
-            .file_type()
-            .map_err(|error| io_error(&target, error))?
-            .is_dir();
-        create_link(&target, &to, directory).map_err(|error| io_error(&to, error))?;
+        #[cfg(unix)]
+        create_link(&target, &to, false).map_err(|error| io_error(&to, error))?;
+        #[cfg(windows)]
+        {
+            let file_type = entry
+                .file_type()
+                .map_err(|error| io_error(&target, error))?;
+            let resolved = if file_type.is_symlink() {
+                fs::canonicalize(&target).map_err(|error| io_error(&target, error))?
+            } else {
+                target.clone()
+            };
+            let metadata = fs::metadata(&resolved).map_err(|error| io_error(&resolved, error))?;
+            if metadata.is_dir() {
+                create_link(&resolved, &to, true).map_err(|error| io_error(&to, error))?;
+            } else if metadata.is_file() {
+                // Top-level node_modules metadata files are cheap to copy and a
+                // link would unnecessarily require Windows symlink privileges.
+                operations.copy_file(&resolved, &to)?;
+            } else {
+                return Err(WorkspaceError::UnsupportedEntry(target));
+            }
+        }
     }
     Ok(())
 }
@@ -383,19 +442,23 @@ pub fn prepare_isolated_workspace(
     lock: &ProjectLock,
 ) -> Result<PathBuf, WorkspaceError> {
     require_lock(root, lock)?;
+    let mut operations = SystemWorkspaceOperations;
     let workspace = isolated_workspace_path(root, run_id)?;
     remove_stored_tree_deferred(root, &workspace)?;
     let canonical_root = fs::canonicalize(root).map_err(|error| io_error(root, error))?;
     copy_tree(
         root,
         &workspace,
-        root,
-        &workspace,
-        &workspace,
-        &canonical_root,
+        CopyRoots {
+            source: root,
+            destination: &workspace,
+            final_destination: &workspace,
+            canonical_source: &canonical_root,
+        },
         true,
+        &mut operations,
     )?;
-    link_node_modules(root, &workspace)?;
+    link_node_modules(root, &workspace, &mut operations)?;
     Ok(workspace)
 }
 
@@ -512,6 +575,16 @@ pub fn prepare_cached_workspace(
     lock: &ProjectLock,
     reuse_paths: &[PathBuf],
 ) -> Result<PathBuf, WorkspaceError> {
+    let mut operations = SystemWorkspaceOperations;
+    prepare_cached_workspace_with_operations(root, lock, reuse_paths, &mut operations)
+}
+
+fn prepare_cached_workspace_with_operations<Operations: WorkspaceOperations>(
+    root: &Path,
+    lock: &ProjectLock,
+    reuse_paths: &[PathBuf],
+    operations: &mut Operations,
+) -> Result<PathBuf, WorkspaceError> {
     require_lock(root, lock)?;
     ensure_container(root)?;
     recover_cached_workspace(root, lock)?;
@@ -523,13 +596,16 @@ pub fn prepare_cached_workspace(
         copy_tree(
             root,
             &staging,
-            root,
-            &staging,
-            &workspace,
-            &canonical_root,
+            CopyRoots {
+                source: root,
+                destination: &staging,
+                final_destination: &workspace,
+                canonical_source: &canonical_root,
+            },
             true,
+            operations,
         )?;
-        link_node_modules(root, &staging)?;
+        link_node_modules(root, &staging, operations)?;
         for requested in reuse_paths {
             let from = checked_reuse_path(&workspace, requested)?;
             let to = staging.join(requested);
@@ -540,30 +616,33 @@ pub fn prepare_cached_workspace(
                 copy_tree(
                     &from,
                     &to,
-                    &workspace,
-                    &staging,
-                    &workspace,
-                    &canonical_workspace,
+                    CopyRoots {
+                        source: &workspace,
+                        destination: &staging,
+                        final_destination: &workspace,
+                        canonical_source: &canonical_workspace,
+                    },
                     false,
+                    operations,
                 )?;
             } else if metadata.file_type().is_file() {
                 fs::create_dir_all(to.parent().expect("reuse parent"))
                     .map_err(|error| io_error(&to, error))?;
-                copy_file(&from, &to)?;
+                operations.copy_file(&from, &to)?;
             } else {
                 return Err(WorkspaceError::UnsupportedEntry(from));
             }
         }
         let mut moved_previous = false;
         if fs::symlink_metadata(&workspace).is_ok() {
-            atomic_rename(&workspace, &previous)?;
+            operations.rename(&workspace, &previous)?;
             moved_previous = true;
         }
-        if let Err(error) = atomic_rename(&staging, &workspace) {
+        if let Err(error) = operations.rename(&staging, &workspace) {
             if moved_previous && fs::symlink_metadata(&workspace).is_err() {
-                let _ = atomic_rename(&previous, &workspace);
+                let _ = operations.rename(&previous, &workspace);
             }
-            return Err(error.into());
+            return Err(error);
         }
         if fs::symlink_metadata(&previous).is_ok() {
             remove_stored_tree_deferred(root, &previous)?;
@@ -631,6 +710,62 @@ pub fn prune_cached_workspace_sources(
 mod tests {
     use super::*;
 
+    struct OrdinaryCopyOperations;
+
+    impl WorkspaceOperations for OrdinaryCopyOperations {
+        fn copy_file(&mut self, source: &Path, destination: &Path) -> Result<(), WorkspaceError> {
+            fs::copy(source, destination)
+                .map(|_| ())
+                .map_err(|error| io_error(destination, error))
+        }
+
+        fn rename(&mut self, source: &Path, destination: &Path) -> Result<(), WorkspaceError> {
+            atomic_rename(source, destination).map_err(WorkspaceError::from)
+        }
+    }
+
+    struct FaultOperations {
+        copy_count: usize,
+        fail_copy_at: Option<usize>,
+        rename_count: usize,
+        fail_rename_at: Option<usize>,
+    }
+
+    impl WorkspaceOperations for FaultOperations {
+        fn copy_file(&mut self, source: &Path, destination: &Path) -> Result<(), WorkspaceError> {
+            self.copy_count += 1;
+            if self.fail_copy_at == Some(self.copy_count) {
+                return Err(io_error(
+                    destination,
+                    io::Error::new(io::ErrorKind::StorageFull, "injected disk full"),
+                ));
+            }
+            SystemWorkspaceOperations.copy_file(source, destination)
+        }
+
+        fn rename(&mut self, source: &Path, destination: &Path) -> Result<(), WorkspaceError> {
+            self.rename_count += 1;
+            if self.fail_rename_at == Some(self.rename_count) {
+                return Err(io_error(
+                    destination,
+                    io::Error::other("injected publication rename failure"),
+                ));
+            }
+            SystemWorkspaceOperations.rename(source, destination)
+        }
+    }
+
+    fn transaction_debris(root: &Path) -> Vec<String> {
+        let workspace = cached_workspace_path(root).unwrap();
+        let prefix = format!(".{}.", project_name(root).unwrap().to_string_lossy());
+        fs::read_dir(workspace.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(&prefix))
+            .collect()
+    }
+
     fn project() -> PathBuf {
         let root = std::env::temp_dir().join(format!("supercov-workspace-rust-{}", unique()));
         fs::create_dir_all(root.join("src")).unwrap();
@@ -681,6 +816,96 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn ordinary_copy_fallback_preserves_workspace_semantics() {
+        let root = project();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let mut operations = OrdinaryCopyOperations;
+        let workspace =
+            prepare_cached_workspace_with_operations(&root, &lock, &[], &mut operations).unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/index.js")).unwrap(),
+            "one"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("src/index.js")).unwrap(),
+            "one"
+        );
+        assert!(transaction_debris(&root).is_empty());
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn enospc_during_copy_preserves_the_complete_generation() {
+        let root = project();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+        fs::write(workspace.join("generation"), "complete").unwrap();
+        fs::write(root.join("src/index.js"), "new source").unwrap();
+        let mut operations = FaultOperations {
+            copy_count: 0,
+            fail_copy_at: Some(1),
+            rename_count: 0,
+            fail_rename_at: None,
+        };
+        let error = prepare_cached_workspace_with_operations(&root, &lock, &[], &mut operations)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            WorkspaceError::Io { ref source, .. }
+                if source.kind() == io::ErrorKind::StorageFull
+        ));
+        assert_eq!(
+            fs::read_to_string(workspace.join("generation")).unwrap(),
+            "complete"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/index.js")).unwrap(),
+            "one"
+        );
+        assert!(transaction_debris(&root).is_empty());
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_publication_rename_restores_the_complete_generation() {
+        let root = project();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+        fs::write(workspace.join("generation"), "complete").unwrap();
+        fs::write(root.join("src/index.js"), "new source").unwrap();
+        let mut operations = FaultOperations {
+            copy_count: 0,
+            fail_copy_at: None,
+            rename_count: 0,
+            fail_rename_at: Some(2),
+        };
+        let error = prepare_cached_workspace_with_operations(&root, &lock, &[], &mut operations)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            WorkspaceError::Io { ref source, .. }
+                if source.kind() == io::ErrorKind::Other
+        ));
+        assert_eq!(
+            operations.rename_count, 3,
+            "prior generation was not restored"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("generation")).unwrap(),
+            "complete"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/index.js")).unwrap(),
+            "one"
+        );
+        assert!(transaction_debris(&root).is_empty());
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn relocates_internal_links_and_rejects_external_links() {
@@ -710,6 +935,51 @@ mod tests {
         lock.release().unwrap();
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(external).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn relocates_internal_junctions_without_symlink_privileges() {
+        let root = project();
+        fs::create_dir_all(root.join("shared")).unwrap();
+        fs::write(root.join("shared/value"), "inside").unwrap();
+        junction::create(root.join("shared"), root.join("linked-shared")).unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+        let isolated_link = workspace.join("linked-shared");
+        assert!(junction::exists(&isolated_link).unwrap());
+        assert_eq!(
+            fs::canonicalize(junction::get_target(&isolated_link).unwrap()).unwrap(),
+            fs::canonicalize(workspace.join("shared")).unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(isolated_link.join("value")).unwrap(),
+            "inside"
+        );
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mounts_node_modules_with_junctions_and_copies_metadata_files() {
+        let root = project();
+        fs::create_dir_all(root.join("node_modules/example")).unwrap();
+        fs::write(root.join("node_modules/example/index.js"), "module").unwrap();
+        fs::write(root.join("node_modules/.package-lock.json"), "lock").unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+        let package = workspace.join("node_modules/example");
+        assert!(junction::exists(&package).unwrap());
+        assert_eq!(
+            fs::canonicalize(junction::get_target(&package).unwrap()).unwrap(),
+            fs::canonicalize(root.join("node_modules/example")).unwrap()
+        );
+        let metadata = workspace.join("node_modules/.package-lock.json");
+        assert!(fs::symlink_metadata(&metadata).unwrap().is_file());
+        assert_eq!(fs::read_to_string(metadata).unwrap(), "lock");
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

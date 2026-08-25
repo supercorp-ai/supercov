@@ -17,6 +17,37 @@ import { basename, relative, resolve } from "node:path";
 
 const toolRoot = resolve(".");
 const cli = resolve(toolRoot, "dist/cli.js");
+const rustBinary = resolve(
+  toolRoot,
+  `target/debug/supercov${process.platform === "win32" ? ".exe" : ""}`,
+);
+const engineFlag = process.argv.indexOf("--engine");
+const engine = engineFlag === -1 ? "reference" : process.argv[engineFlag + 1];
+if (!new Set(["reference", "rust"]).has(engine))
+  throw new Error("--engine must be reference or rust");
+
+function launch(commandArguments, options = {}) {
+  const executable = engine === "rust" ? rustBinary : process.execPath;
+  const arguments_ = [
+    ...(engine === "rust" ? [] : [cli]),
+    "--",
+    ...commandArguments,
+  ];
+  return {
+    executable,
+    arguments_,
+    options: {
+      ...options,
+      env: {
+        ...process.env,
+        ...(engine === "rust"
+          ? { SUPERCOV_RUNTIME_ROOT: resolve(toolRoot, "dist") }
+          : {}),
+        ...options.env,
+      },
+    },
+  };
+}
 
 function snapshot(root) {
   const files = [];
@@ -76,10 +107,14 @@ try {
   const marker = resolve(workspace, "previous-generation.txt");
   writeFileSync(marker, "last complete generation\n");
 
+  const crashedLaunch = launch([process.execPath, "test.mjs"], {
+    cwd: root,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   const child = spawn(
-    process.execPath,
-    [cli, "--", process.execPath, "test.mjs"],
-    { cwd: root, stdio: ["ignore", "pipe", "pipe"] },
+    crashedLaunch.executable,
+    crashedLaunch.arguments_,
+    crashedLaunch.options,
   );
   let output = "";
   child.stdout.on("data", (chunk) => (output += chunk.toString()));
@@ -125,10 +160,15 @@ try {
   if (!existsSync(resolve(root, ".supercov/locks/active.json")))
     throw new Error("forced termination unexpectedly ran cooperative cleanup");
 
+  const recoveredLaunch = launch([process.execPath, "test.mjs"], {
+    cwd: root,
+    encoding: "utf8",
+    stdio: "pipe",
+  });
   const recovered = spawnSync(
-    process.execPath,
-    [cli, "--", process.execPath, "test.mjs"],
-    { cwd: root, encoding: "utf8", stdio: "pipe" },
+    recoveredLaunch.executable,
+    recoveredLaunch.arguments_,
+    recoveredLaunch.options,
   );
   if (recovered.status !== 0)
     throw new Error(
@@ -154,7 +194,9 @@ try {
     throw new Error("recovered run retained loose evidence");
   if (statSync(resolve(run, "evidence.raw.gz")).size === 0)
     throw new Error("recovered run published an empty evidence archive");
-  console.log(`[filesystem] crash recovery passed on ${process.platform}`);
+  console.log(
+    `[filesystem] ${engine} crash recovery passed on ${process.platform}`,
+  );
 } finally {
   rmSync(root, { recursive: true, force: true });
 }

@@ -578,9 +578,22 @@ miss blocks flipping any default.
   modes, exclusions and link targets for isolated copies, cached refresh,
   artifact reuse, pruning and interrupted publication; the independent Rust
   tests additionally make the project lock and unchanged-source guarantees
-  explicit. Windows junction behavior, copy fallback faults, ENOSPC and
-  SIGKILL-equivalent integration remain gated on the cross-platform filesystem
-  matrix rather than being inferred from Unix parity. Public execution is now
+  explicit. The public Rust engine now has a real SIGKILL-equivalent crash test:
+  it is killed while cache staging and the live lock are both present, the last
+  complete generation must survive, the next Rust invocation must recover and
+  publish, and the source-project hash inventory must remain unchanged. That
+  test passes on APFS and is part of the three-OS Rust platform gate. Windows
+  dependency-directory mounts and relocated internal directory links now use
+  NTFS junctions rather than privileged symbolic links; ordinary top-level
+  dependency metadata files are isolated copies. Windows-only Rust tests verify
+  both behaviors without Developer Mode. The Rust workspace now also has a
+  private operation boundary used to force the ordinary-copy backend, ENOSPC
+  on an in-progress staging copy, and failure of the second publication rename.
+  All three tests prove source immutability, prior-generation survival,
+  transaction cleanup, and (for rename failure) restoration through the third
+  rename; they run on every platform rather than existing only in the
+  TypeScript reference suite. Actual NTFS execution remains open until the
+  matrix runs and is not inferred from Unix parity. Public execution is now
   available only through the explicit migration selector; it cannot become the
   default until the remaining platform gates close.
 - The POSIX process-supervision contract is now implemented in Rust behind a
@@ -833,9 +846,12 @@ miss blocks flipping any default.
   `npm run test:rust` and `npm run test:rust-engine` gates pass after these
   changes. Windows Job Object ownership is now implemented without a child-
   escape window and the three-OS compatibility workflow runs the Rust platform
-  tests; the MSVC target cross-build and clippy gate pass locally. Remaining
-  cutover blockers are a real green Windows/macOS/Linux matrix (including the
-  APFS/NTFS crash cases), native platform packaging, sustained zero-unexplained-
+  tests; the MSVC target cross-build and clippy gate pass locally. Rust-engine
+  mid-publication kill/recovery is green on APFS, and NTFS directory mounts no
+  longer depend on privileged symlink creation. Remaining cutover blockers are
+  a real green Windows/macOS/Linux matrix (including NTFS crash, junction, copy-
+  fallback, injected rename and ENOSPC cases), native platform packaging,
+  sustained zero-unexplained-
   diff releases, and then the one atomic deletion of the TypeScript engine and
   Babel engine dependencies. Language/runtime collectors remain; duplicate
   engine implementations do not.

@@ -30,6 +30,7 @@ supercov-contracts.workspace = true
 sysinfo.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+junction.workspace = true
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Security",
