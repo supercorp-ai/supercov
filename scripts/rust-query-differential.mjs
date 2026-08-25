@@ -7,18 +7,18 @@ const fixture = resolve(root, 'tests/fixtures/generic-webpack');
 const binary = resolve(root, 'target/debug/supercov');
 const reference = resolve(root, 'dist/cli.js');
 
-function invoke(engine, args) {
+function invoke(engine, args, cwd = fixture) {
   const child = engine === 'rust'
-    ? spawnSync(binary, args, { cwd: fixture, encoding: 'utf8' })
-    : spawnSync(process.execPath, [reference, ...args], { cwd: fixture, encoding: 'utf8' });
+    ? spawnSync(binary, args, { cwd, encoding: 'utf8' })
+    : spawnSync(process.execPath, [reference, ...args], { cwd, encoding: 'utf8' });
   assert.ok(child.stdout.endsWith('\n'), `${engine} must emit one newline-terminated JSON object`);
   assert.equal(child.stderr, '', `${engine} JSON diagnostics must not leak to stderr: ${child.stderr}`);
   return { status: child.status, stdout: child.stdout, value: JSON.parse(child.stdout) };
 }
 
-function exact(args) {
-  const expected = invoke('typescript', args);
-  const actual = invoke('rust', args);
+function exact(args, cwd = fixture) {
+  const expected = invoke('typescript', args, cwd);
+  const actual = invoke('rust', args, cwd);
   assert.equal(actual.status, expected.status, args.join(' '));
   assert.equal(actual.stdout, expected.stdout, args.join(' '));
 }
@@ -39,13 +39,49 @@ function withoutEngineIdentity(value) {
   return normalized;
 }
 
-function exactExceptEngineIdentity(args) {
-  const expected = invoke('typescript', args);
-  const actual = invoke('rust', args);
+function exactExceptEngineIdentity(args, cwd = fixture) {
+  const expected = invoke('typescript', args, cwd);
+  const actual = invoke('rust', args, cwd);
   assert.equal(actual.status, expected.status, args.join(' '));
   assert.deepEqual(
     withoutEngineIdentity(actual.value),
     withoutEngineIdentity(expected.value),
+    args.join(' '),
+  );
+}
+
+function invokeHuman(engine, args, cwd = fixture) {
+  const child = engine === 'rust'
+    ? spawnSync(binary, args, { cwd, encoding: 'utf8' })
+    : spawnSync(process.execPath, [reference, ...args], { cwd, encoding: 'utf8' });
+  return { status: child.status, stdout: child.stdout, stderr: child.stderr };
+}
+
+function exactHuman(args, cwd = fixture) {
+  const expected = invokeHuman('typescript', args, cwd);
+  const actual = invokeHuman('rust', args, cwd);
+  assert.equal(actual.status, expected.status, args.join(' '));
+  assert.equal(actual.stdout, expected.stdout, args.join(' '));
+  // A stored run produced by the former engine necessarily has a different
+  // instrumenter/configuration identity under Rust. Both engines must warn;
+  // the reason text itself is independently validated by integrity tests.
+  assert.match(expected.stderr, /^\[supercov\] stale run /);
+  assert.match(actual.stderr, /^\[supercov\] stale run /);
+}
+
+function normalizedHumanIdentity(output) {
+  return output
+    .replace(/  STALE \([^\n]*\)/g, '')
+    .replace(/ \[STALE: [^\]]*\]/g, '');
+}
+
+function humanExceptEngineIdentity(args, cwd = fixture) {
+  const expected = invokeHuman('typescript', args, cwd);
+  const actual = invokeHuman('rust', args, cwd);
+  assert.equal(actual.status, expected.status, args.join(' '));
+  assert.equal(
+    normalizedHumanIdentity(actual.stdout),
+    normalizedHumanIdentity(expected.stdout),
     args.join(' '),
   );
 }
@@ -93,4 +129,54 @@ for (const args of [
   ['diff', older, '--json'],
 ]) exact(args);
 
-console.log('[rust-query-differential] public hierarchy, JSON, pagination, resources, filters, selectors, minimization, diff, and structured errors');
+humanExceptEngineIdentity(['runs']);
+humanExceptEngineIdentity(['runs', 'latest', 'coverage']);
+for (const args of [
+  ['runs', 'latest', 'coverage', 'files'],
+  ['runs', 'latest', 'coverage', 'gaps'],
+  ['runs', 'latest', 'coverage', 'kinds'],
+  ['runs', 'latest', 'coverage', 'runners'],
+  ['runs', 'latest', 'coverage', 'scope'],
+  ['runs', 'latest', 'coverage', 'file', 'src/permission.js'],
+  ['runs', 'latest', 'coverage', 'file', 'src/permission.js', '--group', 'decision'],
+  ['runs', 'latest', 'coverage', 'decision', 'c6612c395bd5925b'],
+  ['runs', 'latest', 'coverage', 'covers', 'src/permission.js:2'],
+  ['runs', 'latest', 'coverage', 'test', 'admin'],
+  ['runs', 'latest', 'coverage', 'minimize'],
+  ['diff', older, newer],
+]) exactHuman(args);
+
+for (const args of [
+  ['runs', 'run-1', 'gaps'],
+  ['runs', 'latest', 'coverage', 'nope'],
+  ['diff', older],
+]) {
+  const expected = invokeHuman('typescript', args);
+  const actual = invokeHuman('rust', args);
+  assert.deepEqual(actual, expected, args.join(' '));
+}
+
+const playwrightFixture = resolve(root, 'tests/fixtures/generic-playwright');
+invoke('rust', ['runs', 'latest', 'coverage', '--json'], playwrightFixture);
+exactExceptEngineIdentity(
+  ['runs', 'latest', 'coverage', '--filter', 'failed', '--json'],
+  playwrightFixture,
+);
+for (const args of [
+  ['runs', 'latest', 'coverage', 'gaps', '--json'],
+  ['runs', 'latest', 'coverage', 'scope', '--json'],
+  ['runs', 'latest', 'coverage', 'file', 'server.mjs', '--json'],
+  ['runs', 'latest', 'coverage', 'test', 'a', '--limit', '3', '--json'],
+]) exact(args, playwrightFixture);
+humanExceptEngineIdentity(
+  ['runs', 'latest', 'coverage', '--filter', 'failed'],
+  playwrightFixture,
+);
+for (const args of [
+  ['runs', 'latest', 'coverage', 'gaps'],
+  ['runs', 'latest', 'coverage', 'scope'],
+  ['runs', 'latest', 'coverage', 'file', 'server.mjs'],
+  ['runs', 'latest', 'coverage', 'test', 'a', '--limit', '3'],
+]) exactHuman(args, playwrightFixture);
+
+console.log('[rust-query-differential] public hierarchy, exact human/JSON rendering, pagination, resources, filters, selectors, minimization, diff, and structured errors');

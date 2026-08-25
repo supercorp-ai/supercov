@@ -29,17 +29,22 @@ use supercov_engine::{
     evidence_archive::{
         EvidenceArchiveEntry, EvidenceArchiveSource, collect_sources, write_archive,
     },
-    indexed_query::{IndexedQueryRequest, NewerQuery, execute_indexed_query_with_waivers},
+    indexed_query::{
+        IndexedQueryOutput, IndexedQueryRequest, NewerQuery, execute_indexed_query_with_waivers,
+        query_indexed_with_waivers,
+    },
     js_instrumenter::instrument_candidate,
     query_index::{QueryIndex, QueryIndexIdentity, write_query_index},
-    run_query::run_list_query,
+    run_query::{RunListData, run_list_query},
     run_store::{
         RunStoreError, StoredRun, compare_run_integrity, discover_runs,
         open_or_rebuild_query_index, select_run,
     },
 };
 
+mod human_query;
 mod public_query;
+use human_query::render_human;
 use public_query::{PublicQueryInvocation, parse_public_query};
 
 const HELP: &str = "Supercov coverage engine (Rust differential candidate).\n\
@@ -256,10 +261,50 @@ fn current_javascript_integrity(root: &Path) -> Option<supercov_engine::run_stor
     supercov_engine::javascript_run::current_javascript_integrity(root, &runtime_root, &[]).ok()
 }
 
-fn execute_public_query_json(
+enum PublicQueryOutput {
+    Runs {
+        data: RunListData,
+        pagination: supercov_contracts::AgentPagination,
+    },
+    Coverage {
+        output: IndexedQueryOutput,
+        warnings: Vec<String>,
+    },
+}
+
+impl PublicQueryOutput {
+    fn agent_json(&self) -> Result<String, agent_json::AgentError> {
+        match self {
+            Self::Runs { data, pagination } => agent_json::success("runs", data, Some(pagination))
+                .map_err(|error| {
+                    supercov_engine::indexed_query::IndexedQueryError::ResponseTooLarge(error)
+                        .agent_error()
+                }),
+            Self::Coverage { output, .. } => {
+                output.agent_json().map_err(|error| error.agent_error())
+            }
+        }
+    }
+}
+
+struct PublicQueryExecutionError {
+    error: Box<agent_json::AgentError>,
+    warnings: Vec<String>,
+}
+
+impl From<agent_json::AgentError> for PublicQueryExecutionError {
+    fn from(error: agent_json::AgentError) -> Self {
+        Self {
+            error: Box::new(error),
+            warnings: Vec::new(),
+        }
+    }
+}
+
+fn execute_public_query(
     root: &Path,
-    invocation: PublicQueryInvocation,
-) -> Result<String, agent_json::AgentError> {
+    invocation: &PublicQueryInvocation,
+) -> Result<PublicQueryOutput, PublicQueryExecutionError> {
     match invocation {
         PublicQueryInvocation::Runs {
             filter,
@@ -275,17 +320,18 @@ fn execute_public_query_json(
                 _ => unreachable!("public parser validates coverage filters"),
             };
             let current = current_javascript_integrity(root);
-            let (data, page) = run_list_query(&inventory, current.as_ref(), view, offset, limit);
-            agent_json::success("runs", &data, Some(&page)).map_err(|error| {
-                supercov_engine::indexed_query::IndexedQueryError::ResponseTooLarge(error)
-                    .agent_error()
+            let (data, page) = run_list_query(&inventory, current.as_ref(), view, *offset, *limit);
+            Ok(PublicQueryOutput::Runs {
+                data,
+                pagination: page,
             })
         }
         PublicQueryInvocation::Coverage {
-            mut request,
+            request,
             newer_run_id,
             ..
         } => {
+            let mut request = (**request).clone();
             let inventory = discover_runs(root).map_err(run_store_agent_error)?;
             let run =
                 select_run(&inventory, Some(&request.run_id)).map_err(run_store_agent_error)?;
@@ -293,77 +339,116 @@ fn execute_public_query_json(
             request
                 .valid
                 .get_or_insert(run.metadata.test_exit_code == Some(0));
-            if let Some(current) = current_javascript_integrity(root) {
-                let comparison = compare_run_integrity(Some(&run.metadata.integrity), &current);
+            let current = current_javascript_integrity(root);
+            let mut warnings = Vec::new();
+            if let Some(current) = current.as_ref() {
+                let comparison = compare_run_integrity(Some(&run.metadata.integrity), current);
                 request.stale.get_or_insert(comparison.stale);
-                request.stale_reasons.get_or_insert(comparison.reasons);
+                request
+                    .stale_reasons
+                    .get_or_insert_with(|| comparison.reasons.clone());
+                if comparison.stale {
+                    warnings.push(format!(
+                        "[supercov] stale run {}: {}",
+                        run.id,
+                        comparison.reasons.join(", ")
+                    ));
+                }
             }
-            let container = open_or_rebuild_query_index(run).map_err(|error| {
-                internal_agent_error(format!("Failed to open coverage index: {error}"))
-            })?;
-            let index = CoverageIndex::new(&container).map_err(|error| {
-                internal_agent_error(format!("Failed to read coverage index: {error}"))
-            })?;
-            let waiver_source = supercov_engine::coverage_waivers::read_coverage_waivers(root)
-                .map_err(|error| {
-                    internal_agent_error(format!("Failed to read coverage waivers: {error}"))
+            let result = (|| -> Result<IndexedQueryOutput, agent_json::AgentError> {
+                let container = open_or_rebuild_query_index(run).map_err(|error| {
+                    internal_agent_error(format!("Failed to open coverage index: {error}"))
                 })?;
-            let waiver_evaluation = if let Some(source) = waiver_source.as_ref() {
-                let decisions = supercov_engine::coverage_query::filtered_decisions(
-                    &index,
-                    request.view().map_err(|error| error.agent_error())?,
-                    request.kind.as_deref(),
-                    request.runner.as_deref(),
-                )
-                .map_err(|error| {
-                    supercov_engine::indexed_query::IndexedQueryError::Query(error).agent_error()
+                let index = CoverageIndex::new(&container).map_err(|error| {
+                    internal_agent_error(format!("Failed to read coverage index: {error}"))
                 })?;
-                Some(
-                    supercov_engine::coverage_waivers::evaluate_coverage_waivers(
-                        &decisions, source,
-                    ),
-                )
-            } else {
-                None
-            };
-            let report = if request.command == "minimize" {
-                Some(
-                    analyze_stored_run(run)
-                        .map_err(|error| internal_agent_error(error.to_string()))?,
-                )
-            } else {
-                None
-            };
+                let waiver_source = supercov_engine::coverage_waivers::read_coverage_waivers(root)
+                    .map_err(|error| {
+                        internal_agent_error(format!("Failed to read coverage waivers: {error}"))
+                    })?;
+                let waiver_evaluation = if let Some(source) = waiver_source.as_ref() {
+                    let decisions = supercov_engine::coverage_query::filtered_decisions(
+                        &index,
+                        request.view().map_err(|error| error.agent_error())?,
+                        request.kind.as_deref(),
+                        request.runner.as_deref(),
+                    )
+                    .map_err(|error| {
+                        supercov_engine::indexed_query::IndexedQueryError::Query(error)
+                            .agent_error()
+                    })?;
+                    Some(
+                        supercov_engine::coverage_waivers::evaluate_coverage_waivers(
+                            &decisions, source,
+                        ),
+                    )
+                } else {
+                    None
+                };
+                let report = if request.command == "minimize" {
+                    Some(
+                        analyze_stored_run(run)
+                            .map_err(|error| internal_agent_error(error.to_string()))?,
+                    )
+                } else {
+                    None
+                };
 
-            let newer_container;
-            let newer_index;
-            let newer_query = if request.command == "diff" {
-                let selector = newer_run_id.as_deref().ok_or_else(|| {
-                    supercov_engine::indexed_query::IndexedQueryError::MissingNewerRun.agent_error()
-                })?;
-                let newer_run =
-                    select_run(&inventory, Some(selector)).map_err(run_store_agent_error)?;
-                newer_container = open_or_rebuild_query_index(newer_run).map_err(|error| {
-                    internal_agent_error(format!("Failed to open newer coverage index: {error}"))
-                })?;
-                newer_index = CoverageIndex::new(&newer_container).map_err(|error| {
-                    internal_agent_error(format!("Failed to read newer coverage index: {error}"))
-                })?;
-                Some(NewerQuery {
-                    run_id: &newer_run.id,
-                    index: &newer_index,
+                let newer_container;
+                let newer_index;
+                let newer_query = if request.command == "diff" {
+                    let selector = newer_run_id.as_deref().ok_or_else(|| {
+                        supercov_engine::indexed_query::IndexedQueryError::MissingNewerRun
+                            .agent_error()
+                    })?;
+                    let newer_run =
+                        select_run(&inventory, Some(selector)).map_err(run_store_agent_error)?;
+                    if let Some(current) = current.as_ref() {
+                        let comparison =
+                            compare_run_integrity(Some(&newer_run.metadata.integrity), current);
+                        if comparison.stale {
+                            warnings.push(format!(
+                                "[supercov] stale run {}: {}",
+                                newer_run.id,
+                                comparison.reasons.join(", ")
+                            ));
+                        }
+                    }
+                    newer_container = open_or_rebuild_query_index(newer_run).map_err(|error| {
+                        internal_agent_error(format!(
+                            "Failed to open newer coverage index: {error}"
+                        ))
+                    })?;
+                    newer_index = CoverageIndex::new(&newer_container).map_err(|error| {
+                        internal_agent_error(format!(
+                            "Failed to read newer coverage index: {error}"
+                        ))
+                    })?;
+                    Some(NewerQuery {
+                        run_id: &newer_run.id,
+                        index: &newer_index,
+                    })
+                } else {
+                    None
+                };
+                query_indexed_with_waivers(
+                    &index,
+                    report.as_ref(),
+                    &request,
+                    newer_query,
+                    waiver_evaluation.as_ref(),
+                )
+                .map_err(|error| error.agent_error())
+            })();
+            result
+                .map(|output| PublicQueryOutput::Coverage {
+                    output,
+                    warnings: warnings.clone(),
                 })
-            } else {
-                None
-            };
-            execute_indexed_query_with_waivers(
-                &index,
-                report.as_ref(),
-                &request,
-                newer_query,
-                waiver_evaluation.as_ref(),
-            )
-            .map_err(|error| error.agent_error())
+                .map_err(|error| PublicQueryExecutionError {
+                    error: Box::new(error),
+                    warnings,
+                })
         }
     }
 }
@@ -391,12 +476,6 @@ fn public_query_command(command: &str, arguments: Vec<String>) -> ExitCode {
             ..
         } => (*json, agent_command.clone()),
     };
-    if !json_output {
-        eprintln!(
-            "[supercov] Rust human query rendering is not active yet; use the shipped CLI while exact text parity is being verified"
-        );
-        return ExitCode::from(2);
-    }
     let root = match std::env::current_dir() {
         Ok(root) => root,
         Err(error) => {
@@ -406,13 +485,40 @@ fn public_query_command(command: &str, arguments: Vec<String>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match execute_public_query_json(&root, invocation) {
+    match execute_public_query(&root, &invocation) {
+        Ok(output) if json_output => match output.agent_json() {
+            Ok(output) => {
+                print!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                print!("{}", agent_json::failure(Some(&agent_command), &error));
+                ExitCode::from(2)
+            }
+        },
         Ok(output) => {
-            print!("{output}");
+            if let PublicQueryOutput::Coverage { warnings, .. } = &output {
+                for warning in warnings {
+                    eprintln!("{warning}");
+                }
+            }
+            println!("{}", render_human(&invocation, &output));
             ExitCode::SUCCESS
         }
-        Err(error) => {
-            print!("{}", agent_json::failure(Some(&agent_command), &error));
+        Err(failure) => {
+            if !json_output {
+                for warning in &failure.warnings {
+                    eprintln!("{warning}");
+                }
+            }
+            if json_output {
+                print!(
+                    "{}",
+                    agent_json::failure(Some(&agent_command), &failure.error)
+                );
+            } else {
+                eprintln!("[supercov] {}", failure.error.message);
+            }
             ExitCode::from(2)
         }
     }

@@ -769,9 +769,18 @@ miss blocks flipping any default.
   TypeScript implementation was corrected and independently regressed instead
   of teaching Rust the bug. Integral timing metadata now uses JavaScript-number
   serialization, closing the last otherwise-spurious JSON byte difference.
-  Human rendering is the next public query slice; until it passes exact text
-  differentials, the candidate refuses non-JSON queries and the npm wrapper
-  remains on the shipped engine.
+  Human rendering now uses the same typed `IndexedQueryOutput` enum as JSON—no
+  serialization round-trip and no second query implementation. Every summary,
+  inventory, gap, dimension, scope, grouped/file detail, decision, cover,
+  test, minimization and diff variant reproduces the frozen text, pagination
+  command and warning/error behavior. Black-box tests cover both the complete
+  webpack run and the mixed-outcome Playwright run with blocking source-scope
+  limitations; a live Essential SEO comparison additionally exercised large
+  uncovered-obligation pages, decision sorting, exact test detail and subset
+  minimization without a difference. The only normalized text remains the
+  intentional old-engine fingerprint reason. Both human and JSON query slices
+  are active in the private Rust candidate; the npm wrapper remains on the
+  shipped engine until wrapped execution and platform gates close.
 
 ## Non-goals and guardrails
 

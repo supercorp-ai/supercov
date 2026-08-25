@@ -4,22 +4,25 @@
 //! is deliberately unaware of paths. Both archive differential tests and the
 //! persisted-run CLI therefore exercise exactly the same query operators.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::{
     agent_json::{self, ResponseTooLarge},
     coverage_index::{CoverageDimension, CoverageIndex, CoverageViewId},
     coverage_query::{
-        CoverageCoversQueryOptions, CoverageDecisionQueryOptions, CoverageDiffQueryOptions,
-        CoverageDimensionQueryData, CoverageDimensionQueryOptions, CoverageFileDecisionsOptions,
-        CoverageFileDetailOptions, CoverageFileQueryData, CoverageFileQueryOptions,
-        CoverageMinimizeQueryOptions, CoverageQueryFilters, CoverageScopeQueryOptions,
-        CoverageSummaryQueryOptions, CoverageTestQueryOptions, DecisionSort, MinimizeMetric,
-        QueryError, coverage_covers_query, coverage_decision_query, coverage_diff_query,
-        coverage_dimension_query, coverage_file_decisions_query, coverage_file_detail_query,
-        coverage_file_query, coverage_minimize_query, coverage_scope_query, coverage_summary_query,
-        coverage_test_query,
+        CoverageCoversData, CoverageCoversQueryOptions, CoverageDecisionData,
+        CoverageDecisionQueryOptions, CoverageDiffData, CoverageDiffQueryOptions,
+        CoverageDimensionQueryData, CoverageDimensionQueryOptions, CoverageFileDecisionsData,
+        CoverageFileDecisionsOptions, CoverageFileDetailData, CoverageFileDetailOptions,
+        CoverageFileQueryData, CoverageFileQueryOptions, CoverageFilesData, CoverageGapsData,
+        CoverageKindsData, CoverageMinimizeData, CoverageMinimizeQueryOptions,
+        CoverageQueryFilters, CoverageRunnersData, CoverageScopeData, CoverageScopeQueryOptions,
+        CoverageSummaryData, CoverageSummaryQueryOptions, CoverageTestData,
+        CoverageTestQueryOptions, DecisionSort, MinimizeMetric, QueryError, coverage_covers_query,
+        coverage_decision_query, coverage_diff_query, coverage_dimension_query,
+        coverage_file_decisions_query, coverage_file_detail_query, coverage_file_query,
+        coverage_minimize_query, coverage_scope_query, coverage_summary_query, coverage_test_query,
     },
     coverage_report::CoverageReport,
     coverage_waivers::CoverageWaiverEvaluation,
@@ -312,12 +315,39 @@ pub struct NewerQuery<'a> {
     pub index: &'a CoverageIndex<'a>,
 }
 
-fn response<T: serde::Serialize>(
-    command: &str,
-    data: &T,
-    page: Option<&supercov_contracts::AgentPagination>,
-) -> Result<String, IndexedQueryError> {
-    Ok(agent_json::success(command, data, page)?)
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum IndexedQueryData {
+    Summary(Box<CoverageSummaryData>),
+    Scope(Box<CoverageScopeData>),
+    Covers(Box<CoverageCoversData>),
+    Test(Box<CoverageTestData>),
+    Decision(Box<CoverageDecisionData>),
+    FileDetail(Box<CoverageFileDetailData>),
+    FileDecisions(Box<CoverageFileDecisionsData>),
+    Kinds(Box<CoverageKindsData>),
+    Runners(Box<CoverageRunnersData>),
+    Files(Box<CoverageFilesData>),
+    Gaps(Box<CoverageGapsData>),
+    Minimize(Box<CoverageMinimizeData>),
+    Diff(Box<CoverageDiffData>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexedQueryOutput {
+    pub command: &'static str,
+    pub data: IndexedQueryData,
+    pub pagination: Option<supercov_contracts::AgentPagination>,
+}
+
+impl IndexedQueryOutput {
+    pub fn agent_json(&self) -> Result<String, IndexedQueryError> {
+        Ok(agent_json::success(
+            self.command,
+            &self.data,
+            self.pagination.as_ref(),
+        )?)
+    }
 }
 
 /// Execute a frozen agent query against an already authenticated index.
@@ -330,7 +360,7 @@ pub fn execute_indexed_query(
     request: &IndexedQueryRequest,
     newer: Option<NewerQuery<'_>>,
 ) -> Result<String, IndexedQueryError> {
-    execute_indexed_query_with_waivers(index, report, request, newer, None)
+    query_indexed(index, report, request, newer)?.agent_json()
 }
 
 pub fn execute_indexed_query_with_waivers(
@@ -340,6 +370,25 @@ pub fn execute_indexed_query_with_waivers(
     newer: Option<NewerQuery<'_>>,
     waivers: Option<&CoverageWaiverEvaluation>,
 ) -> Result<String, IndexedQueryError> {
+    query_indexed_with_waivers(index, report, request, newer, waivers)?.agent_json()
+}
+
+pub fn query_indexed(
+    index: &CoverageIndex<'_>,
+    report: Option<&CoverageReport>,
+    request: &IndexedQueryRequest,
+    newer: Option<NewerQuery<'_>>,
+) -> Result<IndexedQueryOutput, IndexedQueryError> {
+    query_indexed_with_waivers(index, report, request, newer, None)
+}
+
+pub fn query_indexed_with_waivers(
+    index: &CoverageIndex<'_>,
+    report: Option<&CoverageReport>,
+    request: &IndexedQueryRequest,
+    newer: Option<NewerQuery<'_>>,
+    waivers: Option<&CoverageWaiverEvaluation>,
+) -> Result<IndexedQueryOutput, IndexedQueryError> {
     let view = request.view()?;
     let gaps_only = match request.command.as_str() {
         "files" => Some(false),
@@ -368,7 +417,11 @@ pub fn execute_indexed_query_with_waivers(
                 limit: request.limit,
             },
         )?;
-        return response("diff", &data, Some(&page));
+        return Ok(IndexedQueryOutput {
+            command: "diff",
+            data: IndexedQueryData::Diff(Box::new(data)),
+            pagination: Some(page),
+        });
     }
 
     if request.command == "minimize" {
@@ -392,7 +445,11 @@ pub fn execute_indexed_query_with_waivers(
                 limit: request.limit,
             },
         )?;
-        return response("coverage.minimize", &data, Some(&page));
+        return Ok(IndexedQueryOutput {
+            command: "coverage.minimize",
+            data: IndexedQueryData::Minimize(Box::new(data)),
+            pagination: Some(page),
+        });
     }
 
     if request.command == "summary" {
@@ -412,7 +469,11 @@ pub fn execute_indexed_query_with_waivers(
             data.waivers =
                 Some(waivers.summary(data.coverage.covered_conditions, data.coverage.conditions));
         }
-        return response("coverage.summary", &data, None);
+        return Ok(IndexedQueryOutput {
+            command: "coverage.summary",
+            data: IndexedQueryData::Summary(Box::new(data)),
+            pagination: None,
+        });
     }
 
     if request.command == "scope" {
@@ -427,7 +488,11 @@ pub fn execute_indexed_query_with_waivers(
                 limit: request.limit,
             },
         )?;
-        return response("coverage.scope", &data, Some(&page));
+        return Ok(IndexedQueryOutput {
+            command: "coverage.scope",
+            data: IndexedQueryData::Scope(Box::new(data)),
+            pagination: Some(page),
+        });
     }
 
     if request.command == "covers" {
@@ -451,7 +516,11 @@ pub fn execute_indexed_query_with_waivers(
                 limit: request.limit,
             },
         )?;
-        return response("coverage.covers", &data, Some(&page));
+        return Ok(IndexedQueryOutput {
+            command: "coverage.covers",
+            data: IndexedQueryData::Covers(Box::new(data)),
+            pagination: Some(page),
+        });
     }
 
     if request.command == "test" {
@@ -471,7 +540,11 @@ pub fn execute_indexed_query_with_waivers(
                 limit: request.limit,
             },
         )?;
-        return response("coverage.test", &data, Some(&page));
+        return Ok(IndexedQueryOutput {
+            command: "coverage.test",
+            data: IndexedQueryData::Test(Box::new(data)),
+            pagination: Some(page),
+        });
     }
 
     if request.command == "decision" {
@@ -505,7 +578,11 @@ pub fn execute_indexed_query_with_waivers(
                 }
             }
         }
-        return response("coverage.decision", &data, Some(&page));
+        return Ok(IndexedQueryOutput {
+            command: "coverage.decision",
+            data: IndexedQueryData::Decision(Box::new(data)),
+            pagination: Some(page),
+        });
     }
 
     if request.command == "file-detail" {
@@ -544,7 +621,11 @@ pub fn execute_indexed_query_with_waivers(
                 }
             }
         }
-        return response("coverage.file", &data, Some(&page));
+        return Ok(IndexedQueryOutput {
+            command: "coverage.file",
+            data: IndexedQueryData::FileDetail(Box::new(data)),
+            pagination: Some(page),
+        });
     }
 
     if request.command == "kinds" || request.command == "runners" {
@@ -574,10 +655,18 @@ pub fn execute_indexed_query_with_waivers(
         } else {
             "coverage.runners"
         };
-        return match data {
-            CoverageDimensionQueryData::Kinds(data) => response(command, &data, Some(&page)),
-            CoverageDimensionQueryData::Runners(data) => response(command, &data, Some(&page)),
-        };
+        return Ok(match data {
+            CoverageDimensionQueryData::Kinds(data) => IndexedQueryOutput {
+                command,
+                data: IndexedQueryData::Kinds(Box::new(data)),
+                pagination: Some(page),
+            },
+            CoverageDimensionQueryData::Runners(data) => IndexedQueryOutput {
+                command,
+                data: IndexedQueryData::Runners(Box::new(data)),
+                pagination: Some(page),
+            },
+        });
     }
 
     if request.command == "file-decisions" {
@@ -599,7 +688,11 @@ pub fn execute_indexed_query_with_waivers(
                 limit: request.limit,
             },
         )?;
-        return response("coverage.file", &data, Some(&page));
+        return Ok(IndexedQueryOutput {
+            command: "coverage.file",
+            data: IndexedQueryData::FileDecisions(Box::new(data)),
+            pagination: Some(page),
+        });
     }
 
     let mut query = coverage_file_query(
@@ -630,10 +723,18 @@ pub fn execute_indexed_query_with_waivers(
     } else {
         "coverage.files"
     };
-    match query.data {
-        CoverageFileQueryData::Files(data) => response(command, &data, Some(&query.pagination)),
-        CoverageFileQueryData::Gaps(data) => response(command, &data, Some(&query.pagination)),
-    }
+    Ok(match query.data {
+        CoverageFileQueryData::Files(data) => IndexedQueryOutput {
+            command,
+            data: IndexedQueryData::Files(Box::new(data)),
+            pagination: Some(query.pagination),
+        },
+        CoverageFileQueryData::Gaps(data) => IndexedQueryOutput {
+            command,
+            data: IndexedQueryData::Gaps(Box::new(data)),
+            pagination: Some(query.pagination),
+        },
+    })
 }
 
 #[cfg(test)]
