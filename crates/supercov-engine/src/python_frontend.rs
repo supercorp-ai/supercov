@@ -21,15 +21,35 @@ use supercov_contracts::{
 use crate::{
     coverage_analysis::PointKind,
     coverage_report::{
-        BranchAlternativeMeta, BranchMeta, CoverageManifest, CoveragePhase, CoverageReportRequest,
-        ExecutionScope, ExitCodeInput, PointMeta, RawTestResult, RuntimeEvent, RuntimeSnapshot,
-        TestProvenance,
+        BranchAlternativeMeta, BranchMeta, CoverageManifest, CoverageModelDeclaration,
+        CoveragePhase, CoverageReportRequest, ExecutionScope, ExitCodeInput, PointMeta,
+        RawTestResult, RuntimeEvent, RuntimeSnapshot, TestProvenance,
     },
 };
 
 pub const PYTHON_COVERAGE_IMPORT_SCHEMA_VERSION: u32 = 1;
 const MCDC_LIMITATION: &str = "python-mcdc-unavailable";
 const COLUMN_LIMITATION: &str = "python-column-location-unavailable";
+
+fn python_coverage_model() -> CoverageModelDeclaration {
+    CoverageModelDeclaration {
+        variant: "python-native-branch".into(),
+        name: "python-coverage-py-tier-a-v1".into(),
+        completeness_meaning: "Every executable statement and branch arc reported by the coverage.py oracle was observed; MC/DC, exact columns, assertion strength and product correctness remain separate limitations.".into(),
+        measured: vec![
+            "coverage.py executable statement lines".into(),
+            "coverage.py branch arcs".into(),
+            "pytest worker, test, retry and setup/test/teardown phase identity".into(),
+        ],
+        not_measured: vec![
+            "atomic condition outcomes and masking MC/DC independence".into(),
+            "exact source columns for statement and branch obligations".into(),
+            "causal linkage to individual actions or passing assertions".into(),
+            "all input values, semantic partitions, paths, or concurrency interleavings".into(),
+            "mutation score or assertion fault-detection strength".into(),
+        ],
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -743,6 +763,7 @@ pub fn import_python_coverage_json(
             },
             raw_results,
             generated_at: generated_at.into(),
+            coverage_model: Some(python_coverage_model()),
             integrity: None,
             test_exit_code: ExitCodeInput::Present(test_exit_code),
         },
@@ -785,6 +806,15 @@ mod tests {
             (6, 8)
         );
         assert_eq!(report.view.summary.decisions, 0);
+        assert_eq!(report.view.variant, "python-native-branch");
+        assert!(
+            report
+                .view
+                .model
+                .not_measured
+                .iter()
+                .any(|item| item.contains("MC/DC"))
+        );
         assert_eq!(report.view.limitations.len(), 2);
         assert_eq!(
             report

@@ -935,6 +935,17 @@ miss blocks flipping any default.
   the real supervised test exit code rather than manufacturing success and
   preserves pytest expected-failure semantics. Broader xdist scheduling,
   worker crash, retry and subprocess cases are still open.
+- Shared analysis no longer hardcodes the JavaScript coverage-model label for
+  every language. `CoverageReportRequest` now carries an optional strict
+  `CoverageModelDeclaration`; absent declarations retain the byte-compatible
+  JavaScript masking-short-circuit model, while the private Python importer
+  selects `python-native-branch` and names only coverage.py executable
+  statements, branch arcs and pytest identities as measured. Atomic-condition
+  outcomes, MC/DC, exact columns and action/assertion causality are listed as
+  unmeasured and remain blocking manifest limitations. This is currently an
+  in-memory analyzer contract only. It is intentionally not smuggled into
+  frozen evidence v2; archive v3 must make the frontend declaration and model
+  mandatory and retain a dual reader for historical JavaScript runs.
 
 ## Non-goals and guardrails
 

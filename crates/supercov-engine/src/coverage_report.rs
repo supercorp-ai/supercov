@@ -402,6 +402,16 @@ pub struct CoverageModel {
     pub not_measured: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoverageModelDeclaration {
+    pub variant: String,
+    pub name: String,
+    pub completeness_meaning: String,
+    pub measured: Vec<String>,
+    pub not_measured: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoverageView {
@@ -471,6 +481,8 @@ pub struct CoverageReportRequest {
     pub manifest: CoverageManifest,
     pub raw_results: Vec<RawTestResult>,
     pub generated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_model: Option<CoverageModelDeclaration>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub integrity: Option<Value>,
     #[serde(default, deserialize_with = "deserialize_exit_code")]
@@ -698,8 +710,9 @@ pub fn failed_coverage_results(raw_results: &[RawTestResult]) -> Vec<RawTestResu
         .collect()
 }
 
-fn coverage_model() -> CoverageModel {
-    CoverageModel {
+fn javascript_coverage_model() -> CoverageModelDeclaration {
+    CoverageModelDeclaration {
+        variant: "masking-short-circuit".into(),
         name: "coverage-completeness-v2".into(),
         completeness_meaning: "Every obligation in the measured model was observed by at least one existing test; test assertions and product correctness are separate assumptions.".into(),
         measured: [
@@ -870,6 +883,20 @@ pub fn create_coverage_view(
     manifest: &CoverageManifest,
     raw_results: &[RawTestResult],
     generated_at: &str,
+) -> Result<CoverageView, ReportError> {
+    create_coverage_view_with_model(
+        manifest,
+        raw_results,
+        generated_at,
+        &javascript_coverage_model(),
+    )
+}
+
+fn create_coverage_view_with_model(
+    manifest: &CoverageManifest,
+    raw_results: &[RawTestResult],
+    generated_at: &str,
+    coverage_model: &CoverageModelDeclaration,
 ) -> Result<CoverageView, ReportError> {
     let mut decision_metadata = manifest.decisions.clone();
     let decision_indexes = decision_metadata
@@ -1611,9 +1638,14 @@ pub fn create_coverage_view(
 
     Ok(CoverageView {
         generated_at: generated_at.into(),
-        variant: "masking-short-circuit".into(),
+        variant: coverage_model.variant.clone(),
         scope: manifest.scope.clone(),
-        model: coverage_model(),
+        model: CoverageModel {
+            name: coverage_model.name.clone(),
+            completeness_meaning: coverage_model.completeness_meaning.clone(),
+            measured: coverage_model.measured.clone(),
+            not_measured: coverage_model.not_measured.clone(),
+        },
         integrity: None,
         limitations: manifest.limitations.clone(),
         transport: None,
@@ -1647,20 +1679,25 @@ pub fn analyze_coverage_results(
     if request.raw_results.is_empty() {
         return Err(ReportError::NoEvidence(request.run_id.clone()));
     }
-    let view = create_coverage_view(
+    let default_model = javascript_coverage_model();
+    let coverage_model = request.coverage_model.as_ref().unwrap_or(&default_model);
+    let view = create_coverage_view_with_model(
         &request.manifest,
         &request.raw_results,
         &request.generated_at,
+        coverage_model,
     )?;
-    let passed = create_coverage_view(
+    let passed = create_coverage_view_with_model(
         &request.manifest,
         &passing_coverage_results(&request.raw_results),
         &request.generated_at,
+        coverage_model,
     )?;
-    let failed = create_coverage_view(
+    let failed = create_coverage_view_with_model(
         &request.manifest,
         &failed_coverage_results(&request.raw_results),
         &request.generated_at,
+        coverage_model,
     )?;
     let execution = match request.test_exit_code {
         ExitCodeInput::Missing => None,
@@ -1809,6 +1846,7 @@ pub fn analyze_coverage_archive(
         manifest,
         raw_results,
         generated_at: request.generated_at.clone(),
+        coverage_model: None,
         integrity: request.integrity.clone(),
         test_exit_code: request.test_exit_code.clone(),
     })?;
@@ -2045,6 +2083,7 @@ mod tests {
             manifest,
             raw_results: vec![failed, passed, expected],
             generated_at: "time".into(),
+            coverage_model: None,
             integrity: None,
             test_exit_code: ExitCodeInput::Missing,
         };

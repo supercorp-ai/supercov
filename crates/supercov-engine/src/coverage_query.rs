@@ -2866,6 +2866,7 @@ mod tests {
             },
             raw_results: std::mem::take(&mut results),
             generated_at: "time".into(),
+            coverage_model: None,
             integrity: None,
             test_exit_code: ExitCodeInput::Present(Some(0)),
         })

@@ -425,6 +425,7 @@ mod tests {
                 server: vec![],
             }],
             generated_at: "2026-08-25T00:00:00.000Z".into(),
+            coverage_model: None,
             integrity: None,
             test_exit_code: ExitCodeInput::Present(Some(0)),
         }

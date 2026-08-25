@@ -3580,6 +3580,7 @@ mod tests {
                 server: Vec::new(),
             }],
             generated_at: "time".into(),
+            coverage_model: None,
             integrity: None,
             test_exit_code: ExitCodeInput::Present(Some(0)),
         })
