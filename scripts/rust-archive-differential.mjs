@@ -400,6 +400,44 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
     `${fixture}: indexed summary JSON differs`,
   );
 
+  const reachableLineTarget = Math.min(50, expected.summary.lines.percentage);
+  if (reachableLineTarget > 0) {
+    const minimizeReference = spawnSync(
+      process.execPath,
+      [
+        resolve(root, 'bin/supercov.js'),
+        'runs', runId, 'coverage', 'minimize',
+        '--filter', 'all', '--metric', 'lines', '--target', String(reachableLineTarget),
+        '--limit', '1', '--json',
+      ],
+      {
+        cwd: resolve(root, 'tests/fixtures', fixture),
+        encoding: 'utf8',
+        maxBuffer: 128 * 1024 * 1024,
+      },
+    );
+    assert.equal(minimizeReference.status, 0, `${fixture}: ${minimizeReference.stderr || minimizeReference.stdout}`);
+    const minimizeRust = spawnSync(binary, ['__query-index-files'], {
+      cwd: root,
+      input: JSON.stringify({
+        archivePath,
+        runId,
+        generatedAt,
+        filter: 'all',
+        command: 'minimize',
+        metric: 'lines',
+        target: reachableLineTarget,
+        maxStates: 5000,
+        offset: 0,
+        limit: 1,
+      }),
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024 * 1024,
+    });
+    assert.equal(minimizeRust.status, 0, `${fixture}: ${minimizeRust.stderr || minimizeRust.stdout}`);
+    assert.equal(minimizeRust.stdout, minimizeReference.stdout, `${fixture}: indexed minimize JSON differs`);
+  }
+
   if (expected.scope) {
     const scopeReference = spawnSync(
       process.execPath,
@@ -647,5 +685,5 @@ const indexDifference = firstDifference(indexedActual, indexExpected);
 assert.equal(indexDifference, undefined, `typed index: ${JSON.stringify(indexDifference)}`);
 
 console.log(
-  `[rust-archive-differential] ${fixtures.length} real archives have exact report plus typed mmap summary, scope, file-gap, provenance, dimension, decision detail/group, and bidirectional attribution query parity`,
+  `[rust-archive-differential] ${fixtures.length} real archives have exact report plus typed mmap summary, scope, file-gap, provenance, dimension, decision detail/group, minimization, and bidirectional attribution query parity`,
 );

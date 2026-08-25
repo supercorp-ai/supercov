@@ -8,12 +8,13 @@ use supercov_engine::{
     coverage_query::{
         CoverageCoversQueryOptions, CoverageDecisionQueryOptions, CoverageDimensionQueryData,
         CoverageDimensionQueryOptions, CoverageFileDecisionsOptions, CoverageFileDetailOptions,
-        CoverageFileQueryData, CoverageFileQueryOptions, CoverageQueryFilters,
-        CoverageScopeQueryOptions, CoverageSummaryQueryOptions, CoverageTestQueryOptions,
-        DecisionSort, MinimizeMetric, MinimumTestSetRequest, coverage_covers_query,
-        coverage_decision_query, coverage_dimension_query, coverage_file_decisions_query,
-        coverage_file_detail_query, coverage_file_query, coverage_scope_query,
-        coverage_summary_query, coverage_test_query, minimum_test_set_for_request,
+        CoverageFileQueryData, CoverageFileQueryOptions, CoverageMinimizeQueryOptions,
+        CoverageQueryFilters, CoverageScopeQueryOptions, CoverageSummaryQueryOptions,
+        CoverageTestQueryOptions, DecisionSort, MinimizeMetric, MinimumTestSetRequest,
+        coverage_covers_query, coverage_decision_query, coverage_dimension_query,
+        coverage_file_decisions_query, coverage_file_detail_query, coverage_file_query,
+        coverage_minimize_query, coverage_scope_query, coverage_summary_query, coverage_test_query,
+        minimum_test_set_for_request,
     },
     coverage_report::{
         ArchiveReportRequest, CoverageReportRequest, analyze_coverage_archive,
@@ -89,6 +90,8 @@ struct IndexedFileQueryRequest {
     stale_reasons: Option<Vec<String>>,
     offset: usize,
     limit: usize,
+    target: Option<f64>,
+    max_states: Option<usize>,
 }
 
 fn query_index_files() -> ExitCode {
@@ -119,7 +122,7 @@ fn query_index_files() -> ExitCode {
         "files" => Some(false),
         "gaps" => Some(true),
         "file-decisions" | "kinds" | "runners" | "summary" | "scope" | "covers" | "test"
-        | "decision" | "file-detail" => None,
+        | "decision" | "file-detail" | "minimize" => None,
         _ => {
             eprintln!("[supercov] unsupported indexed query");
             return ExitCode::from(2);
@@ -159,6 +162,30 @@ fn query_index_files() -> ExitCode {
         write_query_index(&sections, &identity, &path).map_err(|error| error.to_string())?;
         let container = QueryIndex::open(&path, &identity).map_err(|error| error.to_string())?;
         let index = CoverageIndex::new(&container).map_err(|error| error.to_string())?;
+        if request.command == "minimize" {
+            let coverage_view = match view {
+                supercov_engine::coverage_index::CoverageViewId::All => &report.view,
+                supercov_engine::coverage_index::CoverageViewId::Passed => &report.filters.passed,
+                supercov_engine::coverage_index::CoverageViewId::Failed => &report.filters.failed,
+            };
+            let (data, page) = coverage_minimize_query(
+                coverage_view,
+                CoverageMinimizeQueryOptions {
+                    run: &request.run_id,
+                    view_id: view,
+                    kind: request.kind.as_deref(),
+                    runner: request.runner.as_deref(),
+                    target: request.target.unwrap_or(100.0),
+                    metric: request.metric,
+                    max_states: request.max_states.unwrap_or(5_000),
+                    offset: request.offset,
+                    limit: request.limit,
+                },
+            )
+            .map_err(|error| format!("{error:?}"))?;
+            return agent_json::success("coverage.minimize", &data, Some(&page))
+                .map_err(|error| format!("response exceeds {} bytes", error.max_bytes));
+        }
         if request.command == "summary" {
             let data = coverage_summary_query(
                 &index,

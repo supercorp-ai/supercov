@@ -40,6 +40,7 @@ pub enum MinimizeMetric {
 #[serde(rename_all = "camelCase")]
 pub struct MinimumTestSetResult {
     pub optimal: bool,
+    #[serde(serialize_with = "crate::coverage_analysis::serialize_javascript_number")]
     pub target: f64,
     pub metric: MinimizeMetric,
     pub selected: Vec<String>,
@@ -82,6 +83,133 @@ pub fn minimum_test_set_for_request(
         request.metric,
         request.max_states,
     )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CoverageMinimizedTest {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    pub runner: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageMinimizeData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub optimal: bool,
+    #[serde(serialize_with = "crate::coverage_analysis::serialize_javascript_number")]
+    pub target: f64,
+    pub metric: MinimizeMetric,
+    pub selected: Vec<String>,
+    pub expanded: Vec<String>,
+    pub summary: CoverageSummary,
+    pub explored_states: usize,
+    pub selected_count: usize,
+    pub total_candidate_tests: usize,
+    pub tests: Vec<CoverageMinimizedTest>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CoverageMinimizeQueryOptions<'a> {
+    pub run: &'a str,
+    pub view_id: CoverageViewId,
+    pub kind: Option<&'a str>,
+    pub runner: Option<&'a str>,
+    pub target: f64,
+    pub metric: MinimizeMetric,
+    pub max_states: usize,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+pub fn coverage_minimize_query(
+    view: &CoverageView,
+    options: CoverageMinimizeQueryOptions<'_>,
+) -> Result<(CoverageMinimizeData, AgentPagination), QueryError> {
+    if options.limit == 0 {
+        return Err(QueryError::InvalidPagination);
+    }
+    let selected_ids = if options.kind.is_none() && options.runner.is_none() {
+        None
+    } else {
+        let ids = view
+            .tests
+            .iter()
+            .filter(|test| {
+                options.kind.is_none_or(|kind| test.provenance.kind == kind)
+                    && options
+                        .runner
+                        .is_none_or(|runner| test.provenance.runner == runner)
+            })
+            .map(|test| test.id.clone())
+            .collect::<BTreeSet<_>>();
+        if ids.is_empty() {
+            return Err(QueryError::InvalidRecordSelection);
+        }
+        Some(ids)
+    };
+    let mut solver_view = view.clone();
+    if let Some(selected) = &selected_ids {
+        solver_view.tests.retain(|test| selected.contains(&test.id));
+    }
+    let minimized = minimum_test_set(
+        &solver_view,
+        options.target,
+        options.metric,
+        options.max_states,
+    )?;
+    let selected_details = minimized
+        .selected
+        .iter()
+        .map(|id| {
+            let test = view
+                .tests
+                .iter()
+                .find(|test| test.id == *id)
+                .ok_or(QueryError::InvalidRecordSelection)?;
+            Ok(CoverageMinimizedTest {
+                id: id.clone(),
+                name: test.name.clone(),
+                file: test.file.clone(),
+                runner: test.provenance.runner.clone(),
+                kind: test.provenance.kind.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, QueryError>>()?;
+    let total = selected_details.len();
+    let tests = selected_details
+        .iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let returned = tests.len();
+    let total_candidate_tests = solver_view
+        .tests
+        .iter()
+        .filter(|test| test.role == "test")
+        .count();
+    Ok((
+        CoverageMinimizeData {
+            run: options.run.into(),
+            filters: query_filters(options.view_id, options.kind, options.runner),
+            optimal: minimized.optimal,
+            target: minimized.target,
+            metric: minimized.metric,
+            selected: minimized.selected,
+            expanded: minimized.expanded,
+            summary: minimized.summary,
+            explored_states: minimized.explored_states,
+            selected_count: total,
+            total_candidate_tests,
+            tests,
+        },
+        pagination(options.offset, options.limit, returned, total),
+    ))
 }
 
 #[derive(Debug)]

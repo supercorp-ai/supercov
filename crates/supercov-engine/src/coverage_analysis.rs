@@ -245,7 +245,7 @@ pub struct CoverageSummary {
 /// `JSON.stringify` emits integer-valued Numbers without a trailing `.0`.
 /// Agent output is a frozen byte contract, so match that representation while
 /// retaining floating-point arithmetic internally.
-fn serialize_javascript_number<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
+pub(crate) fn serialize_javascript_number<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {

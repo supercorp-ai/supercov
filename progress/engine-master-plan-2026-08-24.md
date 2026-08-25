@@ -449,7 +449,16 @@ miss blocks flipping any default.
   and the `all`/lines/branches/MC/DC/functions metric selections. Independent
   records preserve limitation id/kind/location/source/reason and point source/
   test relations, including files that sit outside the measured denominator.
-  The remaining diff/run/minimize/integrity/lifecycle agent surfaces remain
+  The exact Rust smallest-test-set solver now also owns the complete
+  `coverage minimize` agent surface. Outcome/provenance selection constrains
+  candidates without shrinking the obligation denominator; the response
+  preserves selected and setup-expanded IDs, exact recomputed summaries,
+  explored-state accounting, candidate counts, per-test provenance and stable
+  pagination. Its JSON is byte-identical on all five real archive families in
+  addition to the 120 generated mixed-obligation solver models. Integer-valued
+  targets use the shared JavaScript-number serializer, preventing `50.0` from
+  silently breaking the frozen byte contract.
+  The remaining diff/run/integrity/lifecycle agent surfaces remain
   before this path can replace the shipped query engine.
 
 ## Non-goals and guardrails
