@@ -885,6 +885,18 @@ miss blocks flipping any default.
   yet produced signed provenance. Initial npm package claims,
   coordinated publication, GitHub artifacts, PyPI/Homebrew/cargo-binstall/opam
   and C-compatible wrappers remain Phase 5 gates.
+- The shared producer boundary is now frozen independently as
+  `contracts/frontend-v1`. A language frontend contributes a complete
+  obligation manifest, normalized observations, run/worker/test/retry/phase
+  identity and action/assertion transitions only to its declared precision,
+  plus explicit limitations. Rust retains manifest merging, validation,
+  attribution, analysis, persistence and every query. Attribution is declared
+  per actual runner and execution model rather than optimistically per
+  language. Strict Rust types reject unknown fields, invalid identities,
+  duplicate or inconsistent limitations, unexplained precision downgrades,
+  impossible exact causal linkage and exact test causality from parallel-
+  unattributed execution. Python and LLVM adapters must pass this contract
+  unchanged; neither adapter has started yet.
 
 ## Non-goals and guardrails
 

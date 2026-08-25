@@ -38,6 +38,18 @@ pair search, the query surface, waivers, the run store, `diff` — is shared
 and is never rewritten per language. Probe v2's per-decision bitmap model is
 deliberately language-neutral so that this stays true.
 
+This boundary is now executable rather than prose-only in
+`contracts/frontend-v1`. Each frontend emits one contribution with a complete
+manifest plus one capability declaration for every runner actually observed
+in that run. Structural limitations are frontend-wide; attribution
+limitations are runner-specific. Any non-exact identity axis requires an
+explicit limitation, and parallel-unattributed execution cannot claim exact
+test/action/assertion causality. The Rust contracts crate rejects malformed or
+internally impossible declarations. Wiring declarations and their referenced
+manifest limitations into archive analysis begins with the first Python/LLVM
+adapter; both must use this exact protocol rather than introducing ecosystem-
+specific report models.
+
 ## Rust ownership boundary
 
 Supercov has one engine, not one implementation per ecosystem. The default is

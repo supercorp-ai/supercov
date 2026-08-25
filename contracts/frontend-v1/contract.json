@@ -1,0 +1,28 @@
+{
+  "frontendProtocolVersion": 1,
+  "status": "frozen",
+  "manifestModel": "coverage-manifest-v1",
+  "observationModel": "evidence-schema-v2",
+  "probeModel": "ternary-decision-v2",
+  "identityAxes": ["run", "worker", "test", "retry", "phase"],
+  "transitionKinds": ["setup", "action", "assertion", "teardown", "background"],
+  "structuralSources": ["owned-probes", "native-import", "mixed"],
+  "executionModels": ["process-per-test", "serial-in-process", "parallel-context-propagated", "parallel-unattributed"],
+  "attributionPrecisions": ["exact", "aggregate", "unavailable"],
+  "limitationScopes": ["worker", "test", "retry", "phase", "action", "assertion"],
+  "requirements": {
+    "completeManifestBeforeExecution": true,
+    "unknownObligationFatal": true,
+    "identityDowngradeRequiresLimitation": true,
+    "multipleRunnersPerFrontend": true,
+    "structuralLimitationsReferenceManifestIds": true,
+    "attributionLimitationsRunnerScoped": true,
+    "timestampAttributionMayClaimCausality": false,
+    "frontendMayComputeCoverageVerdicts": false,
+    "engineOwnsManifestMerge": true,
+    "engineOwnsEvidenceValidation": true,
+    "engineOwnsAttributionMerge": true,
+    "engineOwnsCoverageAnalysis": true,
+    "engineOwnsPersistenceAndQueries": true
+  }
+}
