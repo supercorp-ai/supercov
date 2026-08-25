@@ -908,6 +908,11 @@ miss blocks flipping any default.
   it independently checks every packed npm manifest and embedded binary.
   It is deliberately not triggered by ordinary pushes
   so this groundwork consumes no Actions minutes until explicitly requested.
+  The first `0.0.11` tag exposed a distribution-only workflow error: matrix
+  targets were installed into moving `stable` while Cargo selected the pinned
+  1.93.1 toolchain, so musl could not find its target `core`. Native jobs now
+  install every target into the exact pinned compiler. The failed unpublished
+  run was cancelled as soon as this was known to conserve hosted minutes.
   The release workflow now calls that complete native matrix, downloads and
   revalidates the aggregate release set, publishes all eight exact-version
   platform packages first, and publishes the primary package only after every
