@@ -6,6 +6,16 @@ Supercov will build one Rust CLI source tree and distribute the resulting
 target binaries through thin, registry-native wrappers. No registry package
 may contain a second analyzer or coverage model.
 
+The Cargo graph is deliberately split into three exact-version packages:
+`supercov-contracts` owns the frozen interchange schemas, `supercov-engine`
+owns the single analyzer/instrumenter implementation, and `supercov` owns the
+user-facing CLI. Consumers install only `supercov`; Cargo nevertheless requires
+its two library dependencies to be published before the CLI. All three
+functional `0.0.10` packages were published and a clean `cargo install
+supercov --version =0.0.10 --locked` completed a real coverage run on
+2026-08-25. This split is a reuse boundary for future language/runtime shims,
+not three implementations.
+
 For npm, the primary `supercov` package remains the `npx supercov` entrypoint
 and selects an exact-version platform package. The initial matrix is macOS
 arm64/x64, Linux arm64/x64 with glibc and musl, and Windows arm64/x64. Platform
@@ -33,6 +43,16 @@ C-compatible packages wrap the same checksummed release artifacts. PyPI uses
 maturin `bindings = "bin"`; it does not rebuild the analyzer in Python. A
 future cargo-dist-versus-handwritten release-pipeline choice may change release
 orchestration, not artifact identity or package contracts.
+
+The Rust CLI now embeds every unavoidable JavaScript runtime collector, so a
+Cargo- or wheel-installed executable completes a JavaScript coverage run with
+no adjacent npm `dist` directory. A functional macOS arm64 PyPI wheel was built,
+metadata-checked and installed into a fresh virtual environment. The exact
+PyPI name `supercov` is not currently claimable: PyPI has an existing active
+project record with no public releases whose owner is not the authenticated
+Supercorp account. Uploads correctly fail with 403. A PyPI transfer request or
+owner cooperation is therefore a distribution gate; a 404 JSON response must
+not be interpreted as name availability.
 
 The artifact workflow is manual-only on its own so ordinary commits consume no
 eight-platform build minutes. It uses GitHub's native macOS arm64/x64, Linux

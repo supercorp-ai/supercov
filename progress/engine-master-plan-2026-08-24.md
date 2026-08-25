@@ -904,11 +904,21 @@ miss blocks flipping any default.
   distribution ADR explicitly rejects WASI as an unsound fallback for a CLI
   that owns processes/signals/filesystem transactions. Platform packages are
   generated from release binaries and are not committed or published by this
-  checkpoint. The native matrix is defined but has not yet produced a real
+  checkpoint. The Rust CLI is now self-contained: all unavoidable JavaScript
+  runtime collectors are embedded, and a copied binary with no adjacent
+  `dist`, npm wrapper, or runtime override completes a real coverage run. The
+  exact-version Cargo graph (`supercov` → `supercov-engine` →
+  `supercov-contracts`) was published at `0.0.10`; a clean install from
+  crates.io completed a real run. A maturin `bindings = "bin"` macOS arm64
+  wheel likewise passed metadata checks and a clean-venv real run. PyPI's
+  `supercov` name is nevertheless owned by a pre-existing release-less active
+  project, so the authenticated Supercorp account receives 403 and must pursue
+  a project transfer rather than falsely treating JSON 404 as availability.
+  The native npm matrix is defined but has not yet produced a real
   hosted-run green result; the attestation step is wired but therefore has not
   yet produced signed provenance. Initial npm package claims,
-  hosted matrix proof, initial package-name claims, GitHub Releases,
-  PyPI/Homebrew/cargo-binstall/opam
+  hosted matrix proof, npm platform-package claims, the PyPI name transfer,
+  GitHub Releases, Homebrew/cargo-binstall/opam
   and C-compatible wrappers remain Phase 5 gates.
 - The shared producer boundary was first frozen independently as
   `contracts/frontend-v1`. The first real Python spike exposed that v1 had no
