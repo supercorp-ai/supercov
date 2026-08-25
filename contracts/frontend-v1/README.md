@@ -67,7 +67,9 @@ A frontend contributes only:
    declared for that run. File names and process IDs are transport details and
    never establish test attribution by themselves.
 4. Setup, action, assertion, teardown and background transitions. Causal
-   transitions use explicit IDs; wall-clock overlap is diagnostic only.
+   transitions use explicit, run-unique IDs; references must resolve inside
+   the same test attempt and the causal graph must be acyclic. Wall-clock
+   overlap is diagnostic only.
 5. Limitations describing any missing denominator or attribution capability.
 
 The unified manifest must contain unique obligation IDs. The Rust engine owns

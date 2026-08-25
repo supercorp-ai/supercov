@@ -181,6 +181,8 @@ pub struct LanguageFrontendRequirements {
     pub complete_manifest_before_execution: bool,
     pub unknown_obligation_fatal: bool,
     pub identity_downgrade_requires_limitation: bool,
+    pub unknown_phase_reference_fatal: bool,
+    pub phase_causality_acyclic: bool,
     pub multiple_runners_per_frontend: bool,
     pub structural_limitations_reference_manifest_ids: bool,
     pub attribution_limitations_runner_scoped: bool,
@@ -718,6 +720,8 @@ mod tests {
         assert!(contract.requirements.complete_manifest_before_execution);
         assert!(contract.requirements.unknown_obligation_fatal);
         assert!(contract.requirements.identity_downgrade_requires_limitation);
+        assert!(contract.requirements.unknown_phase_reference_fatal);
+        assert!(contract.requirements.phase_causality_acyclic);
         assert!(contract.requirements.engine_owns_manifest_merge);
         assert!(contract.requirements.engine_owns_evidence_validation);
         assert!(contract.requirements.engine_owns_attribution_merge);

@@ -896,7 +896,12 @@ miss blocks flipping any default.
   duplicate or inconsistent limitations, unexplained precision downgrades,
   impossible exact causal linkage and exact test causality from parallel-
   unattributed execution. Python and LLVM adapters must pass this contract
-  unchanged; neither adapter has started yet.
+  unchanged; neither adapter has started yet. A Rust analyzer-entry validator
+  now additionally binds a declaration to the manifest's exact limitation-ID
+  set and observed runner set, verifies exact test/scope/retry identities, and
+  rejects illegal, duplicate, unresolved or cyclic phase transitions before
+  coverage analysis. The declaration is not added to frozen v2 archives yet;
+  that requires an explicit archive-schema migration with the first adapter.
 
 ## Non-goals and guardrails
 

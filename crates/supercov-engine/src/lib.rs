@@ -11,6 +11,7 @@ pub mod coverage_query;
 pub mod coverage_report;
 pub mod coverage_waivers;
 pub mod evidence_archive;
+pub mod frontend_protocol;
 pub mod indexed_query;
 pub mod integrity;
 pub mod javascript_frontend;

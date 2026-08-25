@@ -14,6 +14,8 @@
     "completeManifestBeforeExecution": true,
     "unknownObligationFatal": true,
     "identityDowngradeRequiresLimitation": true,
+    "unknownPhaseReferenceFatal": true,
+    "phaseCausalityAcyclic": true,
     "multipleRunnersPerFrontend": true,
     "structuralLimitationsReferenceManifestIds": true,
     "attributionLimitationsRunnerScoped": true,

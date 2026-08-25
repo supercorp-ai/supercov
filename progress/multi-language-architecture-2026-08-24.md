@@ -45,10 +45,13 @@ in that run. Structural limitations are frontend-wide; attribution
 limitations are runner-specific. Any non-exact identity axis requires an
 explicit limitation, and parallel-unattributed execution cannot claim exact
 test/action/assertion causality. The Rust contracts crate rejects malformed or
-internally impossible declarations. Wiring declarations and their referenced
-manifest limitations into archive analysis begins with the first Python/LLVM
-adapter; both must use this exact protocol rather than introducing ecosystem-
-specific report models.
+internally impossible declarations. The first analyzer-entry validator also
+requires exact agreement with manifest limitation IDs and actually observed
+runners; validates run/worker/test/retry scope; and rejects unknown, duplicate
+or cyclic phase causality before shared analysis. Persisting declarations in a
+versioned archive namespace begins with the first Python/LLVM adapter; both
+must use this exact protocol rather than introducing ecosystem-specific report
+models.
 
 ## Rust ownership boundary
 
