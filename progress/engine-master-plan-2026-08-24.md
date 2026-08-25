@@ -674,9 +674,18 @@ miss blocks flipping any default.
   runs four cases in two workers, collects non-empty frame snapshots with
   explicit action phases, and reconstructs 100% line/branch/MC/DC plus exact
   per-test vectors from the persisted archive. Build and test timings are
-  recorded separately and source remains unchanged. Generic compiler/build
-  adapters, full Test262 and browser matrices, dogfood parity, and cross-
-  platform crash/filesystem gates still block any public selector or
+  recorded separately and source remains unchanged.
+- The initial generic compiler/build frontend is Rust-owned too. Rust places
+  one isolated runtime plus declarations inside the narrowest discovered
+  source root, rewrites its own virtual ABI import to a source-relative
+  physical module, and leaves the generic build command otherwise unchanged.
+  A strict TypeScript `rootDir` fixture proves compilation, emitted-module
+  loader relocation, exact assertion attribution, and full persisted coverage;
+  an independent esbuild fixture proves the same contract when the runtime is
+  bundled into output. Neither fixture changes source or normal build output,
+  and both record build/test durations separately. Webpack/SWC and other real
+  compiler matrices, full Test262 and browser matrices, dogfood parity, and
+  cross-platform crash/filesystem gates still block any public selector or
   TypeScript-engine deletion.
 
 ## Non-goals and guardrails

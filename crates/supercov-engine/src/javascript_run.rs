@@ -112,12 +112,6 @@ pub fn run_direct_javascript(
     let environment = std::env::vars().collect::<BTreeMap<_, _>>();
     let project = discover_coverage_project(&root, &environment, &request.command)
         .map_err(|error| error.to_string())?;
-    if project.build_adapter == BuildAdapter::Generic {
-        return Err(format!(
-            "private Rust vertical slice does not yet support generic builds, discovered {:?}",
-            project.build_adapter
-        ));
-    }
     let runtime_files = javascript_runtime_files(&runtime_root);
     let integrity = create_run_integrity(
         &root,
@@ -228,16 +222,18 @@ pub fn run_direct_javascript(
         }
     }
     overrides.extend(project.build_environment.clone());
-    let preparation = if project.build_adapter == BuildAdapter::Vite {
+    let preparation = if project.build_adapter != BuildAdapter::Direct {
         let mut arguments = project.build_command[1..]
             .iter()
             .map(OsString::from)
             .collect::<Vec<_>>();
-        arguments.extend([
-            OsString::from("--"),
-            OsString::from("--config"),
-            OsString::from(".supercov/vite.config.mjs"),
-        ]);
+        if project.build_adapter == BuildAdapter::Vite {
+            arguments.extend([
+                OsString::from("--"),
+                OsString::from("--config"),
+                OsString::from(".supercov/vite.config.mjs"),
+            ]);
+        }
         let mut build_overrides = overrides.clone();
         build_overrides.insert("NODE_ENV".into(), "production".into());
         let build_environment = environment_with(build_overrides);

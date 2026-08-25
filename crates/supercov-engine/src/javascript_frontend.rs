@@ -220,7 +220,81 @@ fn copy_runtime(
             atomic_write(&destination, &bytes)?;
         }
     }
+    atomic_write(
+        &generated.join("runtime.d.ts"),
+        b"export declare function coverageHit(...args: any[]): any;\n\
+export declare function selectionBegin(...args: any[]): any;\n\
+export declare function selectionRight(...args: any[]): any;\n\
+export declare function selectionEnd(...args: any[]): any;\n\
+export declare function optionalSelect(...args: any[]): any;\n\
+export declare function optionalCallBegin(...args: any[]): any;\n\
+export declare function optionalCallReached(...args: any[]): any;\n\
+export declare function optionalCallContinued(...args: any[]): any;\n\
+export declare function optionalCallEnd(...args: any[]): any;\n\
+export declare function defaultSelected(...args: any[]): any;\n\
+export declare function defaultEntered(...args: any[]): any;\n\
+export declare function tryBegin(...args: any[]): any;\n\
+export declare function tryCatch(...args: any[]): any;\n\
+export declare function tryEnd(...args: any[]): any;\n\
+export declare function loopBegin(...args: any[]): any;\n\
+export declare function loopEntered(...args: any[]): any;\n\
+export declare function loopEnd(...args: any[]): any;\n\
+export declare function mcdcBegin(...args: any[]): any;\n\
+export declare function mcdcCondition(...args: any[]): any;\n\
+export declare function mcdcEnd(...args: any[]): any;\n\
+export declare function registerProbeV2(...args: any[]): any;\n\
+export declare function coverageHitV2(...args: any[]): any;\n\
+export declare function mcdcEndV2(...args: any[]): any;\n",
+    )?;
     Ok(())
+}
+
+fn generic_runtime_binding(
+    workspace: &Path,
+    project: &CoverageProject,
+    source_path: &Path,
+    generated: &Path,
+) -> Result<String, JavascriptFrontendError> {
+    let mut hosts = project
+        .source_roots
+        .iter()
+        .filter_map(|root| {
+            let candidate = workspace.join(root);
+            if candidate.is_dir() && source_path.strip_prefix(&candidate).is_ok() {
+                Some(candidate)
+            } else if candidate.is_file() && candidate == source_path {
+                candidate.parent().map(Path::to_owned)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    hosts.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    let host = hosts
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| workspace.to_owned());
+    let runtime_directory = host.join(".supercov");
+    fs::create_dir_all(&runtime_directory)
+        .map_err(|source| io_error(&runtime_directory, source))?;
+    for name in ["runtime.js", "runtime.d.ts"] {
+        let source = generated.join(name);
+        let destination = runtime_directory.join(name);
+        let contents = fs::read(&source).map_err(|error| io_error(&source, error))?;
+        atomic_write(&destination, &contents)?;
+    }
+    let parent = source_path.parent().ok_or_else(|| {
+        JavascriptFrontendError::UnsafeSourcePath(source_path.display().to_string())
+    })?;
+    let local = parent.strip_prefix(&host).map_err(|_| {
+        JavascriptFrontendError::UnsafeSourcePath(source_path.display().to_string())
+    })?;
+    let depth = local.components().count();
+    Ok(if depth == 0 {
+        "./.supercov/runtime.js".into()
+    } else {
+        format!("{}.supercov/runtime.js", "../".repeat(depth))
+    })
 }
 
 fn limitation_from_source(value: &SourceLimitation) -> CandidateLimitation {
@@ -456,16 +530,28 @@ pub fn prepare_javascript_frontend(
     for file in &project.source_files {
         let path = checked_source_path(workspace, file)?;
         let source = fs::read_to_string(&path).map_err(|source| io_error(&path, source))?;
-        let output = match project.build_adapter {
+        let mut output = match project.build_adapter {
             BuildAdapter::Vite => instrument_candidate(&source, file),
-            BuildAdapter::Direct | BuildAdapter::Generic => {
-                instrument_direct_candidate(&source, file)
-            }
+            BuildAdapter::Generic => instrument_candidate(&source, file),
+            BuildAdapter::Direct => instrument_direct_candidate(&source, file),
         }
         .map_err(|source| JavascriptFrontendError::Instrument {
             file: file.clone(),
             source,
         })?;
+        if project.build_adapter == BuildAdapter::Generic {
+            let runtime = generic_runtime_binding(workspace, project, &path, &generated)?;
+            output.code = output.code.replace("virtual:supercov-runtime", &runtime);
+            if matches!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("ts" | "tsx" | "mts" | "cts")
+            ) {
+                output.code = format!(
+                    "// @ts-nocheck -- generated coverage workspace only\n{}",
+                    output.code
+                );
+            }
+        }
         atomic_write(&path, output.code.as_bytes())?;
         for value in output.decisions {
             decisions.insert(value.id.clone(), value);
