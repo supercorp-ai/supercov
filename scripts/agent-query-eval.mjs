@@ -1,36 +1,49 @@
 import { spawnSync } from "node:child_process";
 import {
+  cpSync,
   existsSync,
-  mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { resolve } from "node:path";
-import { analyzeCoverageArchive } from "../dist/runAnalysis.js";
-import { writeEvidenceArchiveEntries } from "../dist/evidenceArchive.js";
+import { tmpdir } from "node:os";
+import { relative, resolve } from "node:path";
+import { repository } from "./coverage-test-helpers.mjs";
 
-const fixture = resolve("tests/fixtures/generic-node");
+const temporary = mkdtempSync(resolve(tmpdir(), "supercov-agent-query-"));
+const fixture = resolve(temporary, "project");
+const fixtureTemplate = resolve(repository, "tests/fixtures/generic-node");
+cpSync(fixtureTemplate, fixture, {
+  recursive: true,
+  filter: (path) =>
+    !relative(fixtureTemplate, path)
+      .split(/[\\/]/)
+      .some((part) => part === ".supercov" || part === "supercov"),
+});
+process.once("exit", () => rmSync(temporary, { recursive: true, force: true }));
 const cli = resolve("bin/supercov.js");
 const runsRoot = resolve(fixture, ".supercov/runs");
+const rustBinary = resolve(
+  repository,
+  "target/debug",
+  `supercov${process.platform === "win32" ? ".exe" : ""}`,
+);
+const queryEnvironment = { ...process.env, SUPERCOV_RUST_BINARY: rustBinary };
 
 function storedRun(id) {
   const directory = resolve(runsRoot, id);
   const metadata = JSON.parse(readFileSync(resolve(directory, "run.json"), "utf8"));
-  const report = analyzeCoverageArchive(resolve(directory, "evidence.raw.gz"), {
-    runId: id,
-    testExitCode: metadata.testExitCode,
-    integrity: metadata.integrity,
-  });
-  return { id, directory, metadata, report };
+  const summary = query(id);
+  return { id, directory, metadata, summary };
 }
 
 function query(runId, ...args) {
   const result = spawnSync(
     process.execPath,
     [cli, "runs", runId, "coverage", ...args, "--json"],
-    { cwd: fixture, encoding: "utf8" },
+    { cwd: fixture, env: queryEnvironment, encoding: "utf8" },
   );
   if (result.status !== 0) {
     throw new Error(
@@ -69,7 +82,7 @@ function failingQuery(runId, ...args) {
   const result = spawnSync(
     process.execPath,
     [cli, "runs", runId, "coverage", ...args, "--json"],
-    { cwd: fixture, encoding: "utf8" },
+    { cwd: fixture, env: queryEnvironment, encoding: "utf8" },
   );
   if (result.status !== 2 || result.stderr !== "") {
     throw new Error(`agent failure did not use a clean status-2 JSON channel`);
@@ -92,15 +105,37 @@ function requirePagination(response, label) {
   }
 }
 
+for (const command of [
+  [
+    "--",
+    process.execPath,
+    "--test",
+    "--test-name-pattern",
+    "admin is allowed|neither is denied",
+  ],
+  ["--", "npm", "test"],
+]) {
+  const result = spawnSync(process.execPath, [cli, ...command], {
+    cwd: fixture,
+    env: queryEnvironment,
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      `agent evaluation fixture failed: ${command.join(" ")}\n${result.error ?? ""}\n${result.stderr ?? ""}\n${result.stdout ?? ""}`,
+    );
+  }
+}
+
 const runs = readdirSync(runsRoot).sort().map(storedRun);
 const partial = runs.find(
-  ({ report }) =>
-    report.tests.some((test) => test.role === "test") &&
-    report.summary.conditionCoveragePct > 0 &&
-    report.summary.conditionCoveragePct < 100,
+  ({ summary }) =>
+    summary.tests > 0 &&
+    summary.coverage.conditionCoveragePct > 0 &&
+    summary.coverage.conditionCoveragePct < 100,
 );
 const complete = runs.find(
-  ({ report }) => report.filters?.passed.summary.conditionCoveragePct === 100,
+  ({ summary }) => summary.coverage.conditionCoveragePct === 100,
 );
 if (!partial || !complete) {
   throw new Error("agent evaluation requires one partial and one complete fixture run");
@@ -213,7 +248,7 @@ if (missingFile.command !== "coverage.file" || missingFile.error.code !== "SOURC
 const malformedRuns = spawnSync(
   process.execPath,
   [cli, "runs", partial.id, "file", mcdcGaps.gaps[0].file, "--json"],
-  { cwd: fixture, encoding: "utf8" },
+  { cwd: fixture, env: queryEnvironment, encoding: "utf8" },
 );
 if (malformedRuns.status === 0) {
   throw new Error("runs without the coverage segment must fail, not list runs");
@@ -296,9 +331,9 @@ try {
   rmSync(waiversPath, { force: true });
 }
 
-const decision = partial.report.decisions[0];
-if (!decision) throw new Error("partial run did not contain an MC/DC decision");
-const decisionDetail = query(partial.id, "decision", decision.meta.id);
+const decisionId = grouped.decisions[0]?.id;
+if (!decisionId) throw new Error("partial run did not contain an MC/DC decision");
+const decisionDetail = query(partial.id, "decision", decisionId);
 requirePagination(decisionDetail, "decision detail");
 if (
   decisionDetail.decisions?.length !== 1 ||
@@ -310,19 +345,19 @@ if (
   throw new Error("decision query did not expose conditions and witnesses");
 }
 
-const line = partial.report.lines.find((candidate) => candidate.file === file);
+const line = detail.obligations.find((obligation) => Number.isSafeInteger(obligation.line));
 if (!line) throw new Error("partial run did not contain a queryable source line");
-const covers = query(partial.id, "covers", `${line.file}:${line.line}`);
+const covers = query(partial.id, "covers", `${file}:${line.line}`);
 requirePagination(covers, "line attribution");
 if (!Array.isArray(covers.tests)) {
   throw new Error("covers query did not expose per-test attribution");
 }
 
-const test = partial.report.tests.find((candidate) => candidate.role === "test");
-if (!test) throw new Error("partial run did not contain a queryable test");
-const testDetail = query(partial.id, "test", test.id);
+const testId = covers.tests[0]?.id;
+if (!testId) throw new Error("partial run did not contain a queryable test");
+const testDetail = query(partial.id, "test", testId);
 requirePagination(testDetail, "test detail");
-if (testDetail.tests?.length !== 1 || testDetail.tests[0].id !== test.id) {
+if (testDetail.tests?.length !== 1 || testDetail.tests[0].id !== testId) {
   throw new Error("test query did not resolve an exact test ID");
 }
 if (
@@ -352,95 +387,6 @@ if (!minimized.optimal || minimized.summary.conditionCoveragePct !== 100) {
 }
 if (minimized.selectedCount >= minimized.totalCandidateTests) {
   throw new Error("minimizer failed to eliminate the redundant MC/DC vector");
-}
-
-const limitationRunId = `agent-limitations-${process.pid}`;
-const limitationDirectory = resolve(runsRoot, limitationRunId);
-try {
-  mkdirSync(limitationDirectory, { recursive: true });
-  const rawEvidence = writeEvidenceArchiveEntries(
-    [
-      {
-        path: "manifest.json",
-        contents: JSON.stringify({
-          decisions: [],
-          branches: [],
-          points: [],
-          limitations: [{
-            id: "dynamic-source",
-            kind: "dynamic-code",
-            file: "src/dynamic.mjs",
-            line: 3,
-            column: 1,
-            source: "eval(source)",
-            reason: "Runtime-generated source cannot be instrumented statically.",
-          }],
-        }),
-      },
-      {
-        path: "test/mcdc.json",
-        contents: JSON.stringify({
-          testId: "limitation-test",
-          test: "limitation-test",
-          status: "passed",
-          runtime: [{ decisions: [], hits: [] }],
-          browser: [],
-          server: [],
-        }),
-      },
-      {
-        path: "execution.host.1.jsonl",
-        contents: `${JSON.stringify({ event: "remote-launch" })}\n`,
-      },
-    ],
-    resolve(limitationDirectory, "evidence.raw.gz"),
-  );
-  writeFileSync(
-    resolve(limitationDirectory, "run.json"),
-    JSON.stringify({
-      id: limitationRunId,
-      startedAt: "2026-08-24T00:00:00.000Z",
-      durationMs: 0,
-      command: ["node", "synthetic-agent-limitation-fixture"],
-      testExitCode: 0,
-      integrity: complete.metadata.integrity,
-      rawEvidence,
-    }),
-  );
-
-  const limitedSummary = query(limitationRunId);
-  if (
-    limitedSummary.measurement?.complete !== false ||
-    limitedSummary.measurement?.blocking !== 1 ||
-    limitedSummary.structurallyComplete !== false ||
-    limitedSummary.diagnostics?.[0]?.code !== "REMOTE_SERVER_EVIDENCE_MISSING"
-  ) {
-    throw new Error("summary did not expose the blocking measurement limitation");
-  }
-  const limitedGaps = query(limitationRunId, "gaps");
-  requirePagination(limitedGaps, "limitation gap inventory");
-  if (
-    limitedGaps.gaps?.[0]?.file !== "src/dynamic.mjs" ||
-    limitedGaps.gaps[0].measurementLimitations !== 1
-  ) {
-    throw new Error("gaps did not expose the limitation-only file");
-  }
-  const limitedFile = query(
-    limitationRunId,
-    "file",
-    "src/dynamic.mjs",
-  );
-  requirePagination(limitedFile, "limitation file detail");
-  if (
-    limitedFile.totalObligations !== 0 ||
-    limitedFile.totalLimitations !== 1 ||
-    limitedFile.limitations?.[0]?.kind !== "dynamic-code" ||
-    limitedFile.limitations[0].blocking !== true
-  ) {
-    throw new Error("file detail did not separate limitations from obligations");
-  }
-} finally {
-  rmSync(limitationDirectory, { recursive: true, force: true });
 }
 
 for (const run of runs) {

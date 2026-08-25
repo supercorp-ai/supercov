@@ -48,10 +48,9 @@ jobs:
           name: supercov-native-release-set
           path: native-release
       - run: npm ci
-      # The release commit is validated locally before tagging. Build the exact
-      # tarball inputs here, then suppress npm lifecycle scripts so publication
-      # does not repeat the full local release and oracle suites.
-      - run: npm run build
+      # The release commit is validated locally before tagging. Revalidate the
+      # exact package surface without rebuilding or repeating oracle suites.
+      - run: node scripts/package-preflight.mjs
       - name: Revalidate and publish every exact-version native package
         run: |
           node scripts/verify-native-release-set.mjs native-release

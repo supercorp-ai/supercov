@@ -1,34 +1,22 @@
-import { execFileSync } from "node:child_process";
-import { readFileSync, readdirSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { resolve } from "node:path";
-import { analyzeCoverageArchive } from "../dist/runAnalysis.js";
+import {
+  coverageQuery,
+  latestRun,
+  requireSupercov,
+} from "./coverage-test-helpers.mjs";
 
 const root = resolve("tests/fixtures/generic-node");
 rmSync(resolve(root, ".supercov"), { recursive: true, force: true });
-execFileSync(resolve("bin/supercov.js"), ["--", "npm", "test"], {
-  cwd: root,
-  stdio: "inherit",
-});
-const runId = readdirSync(resolve(root, ".supercov/runs")).sort().at(-1);
-if (!runId) throw new Error("node:test fixture did not publish a run");
-const metadata = JSON.parse(
-  readFileSync(resolve(root, ".supercov/runs", runId, "run.json"), "utf8"),
-);
-const report = analyzeCoverageArchive(
-  resolve(root, ".supercov/runs", runId, "evidence.raw.gz"),
-  { runId, testExitCode: metadata.testExitCode, integrity: metadata.integrity },
-);
-const tests = report.tests.filter((test) => test.role === "test");
-if (tests.length !== 4 || tests.some((test) => test.provenance.runner !== "node:test"))
-  throw new Error(`expected four attributed node:test tests, received ${JSON.stringify(tests)}`);
-if (report.summary.conditionCoveragePct !== 100)
-  throw new Error(`expected 100% MC/DC, received ${report.summary.conditionCoveragePct}%`);
-if (report.phases.filter((phase) => phase.kind === "assertion").length !== 4)
-  throw new Error(`expected four native assertion phases, received ${JSON.stringify(report.phases)}`);
-if (report.lines.filter((line) => line.confidence.level === "asserted").length === 0)
+requireSupercov(root, ["--", "npm", "test"], { stdio: "inherit" });
+const runId = latestRun(root);
+const summary = coverageQuery(root, runId).data;
+if (summary.tests !== 4 || summary.coverageByRunner?.[0]?.runner !== "node:test")
+  throw new Error(`expected four attributed node:test tests, received ${JSON.stringify(summary)}`);
+if (summary.coverage.conditionCoveragePct !== 100)
+  throw new Error(`expected 100% MC/DC, received ${summary.coverage.conditionCoveragePct}%`);
+if (summary.confidence.lines.asserted === 0)
   throw new Error("expected node:assert argument execution to be assertion-attributed");
-if (report.decisions.some((decision) =>
-  decision.conditions.some((condition) => !condition.assertionCovered)
-))
+if (summary.confidence.assertionCoveredMcdcConditions !== summary.coverage.conditions)
   throw new Error("expected every node:test MC/DC witness to be assertion-linked");
 console.log(`[node:test] run ${runId}: four exact test scopes, 100% assertion-linked MC/DC`);

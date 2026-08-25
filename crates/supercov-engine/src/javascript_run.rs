@@ -1,7 +1,4 @@
-//! Rust-owned JavaScript execution for the explicit migration candidate.
-//!
-//! The npm default remains the shipped TypeScript engine until the platform
-//! and sustained-parity gates authorize one atomic cutover.
+//! Rust-owned JavaScript execution for the public Supercov engine.
 
 use std::{
     collections::BTreeMap,
@@ -17,7 +14,7 @@ use crate::{
     build_cache::{build_cache_key, read_build_cache, reuse_paths, write_build_cache},
     evidence_archive::{EvidenceArchiveSource, collect_sources, write_archive},
     integrity::{FrontendIntegrityInputs, create_run_integrity},
-    javascript_frontend::{javascript_runtime_files, prepare_javascript_frontend},
+    javascript_frontend::prepare_javascript_frontend,
     lifecycle::{
         ProjectLock, RunState, RunStateStatus, finalize_published_run, interrupt_run_state,
         publish_run, recover_abandoned_runs, remove_stored_tree_deferred, update_run_state,
@@ -38,8 +35,6 @@ use crate::{
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DirectJavascriptRunRequest {
     pub root: PathBuf,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_root: Option<PathBuf>,
     pub command: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
@@ -218,23 +213,19 @@ fn node_options(preload: &Path) -> String {
 /// treat failure as "staleness unavailable", matching the frozen CLI contract.
 pub fn current_javascript_integrity(
     root: &Path,
-    runtime_root: Option<&Path>,
     command: &[String],
 ) -> Result<RunIntegrity, String> {
     let environment = std::env::vars().collect::<BTreeMap<_, _>>();
     let project = discover_coverage_project(root, &environment, command)
         .map_err(|error| error.to_string())?;
-    javascript_integrity_for_project(root, runtime_root, &project)
+    javascript_integrity_for_project(root, &project)
 }
 
 fn javascript_integrity_for_project(
     root: &Path,
-    runtime_root: Option<&Path>,
     project: &crate::project_discovery::CoverageProject,
 ) -> Result<RunIntegrity, String> {
-    let frontend = runtime_root.map_or_else(FrontendIntegrityInputs::embedded_javascript, |root| {
-        FrontendIntegrityInputs::javascript(root.to_owned(), javascript_runtime_files(root))
-    });
+    let frontend = FrontendIntegrityInputs::embedded_javascript();
     create_run_integrity(root, project, &frontend).map_err(|error| error.to_string())
 }
 
@@ -253,11 +244,6 @@ pub fn run_direct_javascript(
     let initialization_started = Instant::now();
     let root = fs::canonicalize(&request.root)
         .map_err(|error| format!("{}: {error}", request.root.display()))?;
-    let runtime_root = request
-        .runtime_root
-        .as_ref()
-        .map(|path| fs::canonicalize(path).map_err(|error| format!("{}: {error}", path.display())))
-        .transpose()?;
     let nonce = now_nonce();
     let run_id = request
         .run_id
@@ -291,7 +277,7 @@ pub fn run_direct_javascript(
     let environment = std::env::vars().collect::<BTreeMap<_, _>>();
     let project = discover_coverage_project(&root, &environment, &request.command)
         .map_err(|error| error.to_string())?;
-    let integrity = javascript_integrity_for_project(&root, runtime_root.as_deref(), &project)?;
+    let integrity = javascript_integrity_for_project(&root, &project)?;
     let build_cache_key = build_cache_key(&integrity, &project)?;
     let prior_workspace = cached_workspace_path(&root).map_err(|error| error.to_string())?;
     let reusable_build = if project.build_adapter == BuildAdapter::Direct {
@@ -332,9 +318,8 @@ pub fn run_direct_javascript(
 
     let adapter_started = Instant::now();
     let collector_id = format!("collector-{}", integrity.fingerprint.execution);
-    let frontend =
-        prepare_javascript_frontend(&workspace, &project, runtime_root.as_deref(), &collector_id)
-            .map_err(|error| error.to_string())?;
+    let frontend = prepare_javascript_frontend(&workspace, &project, &collector_id)
+        .map_err(|error| error.to_string())?;
     let adapter_setup_ms = elapsed_ms(adapter_started);
 
     let evidence_relative = format!(".supercov/evidence/{run_id}");
@@ -358,20 +343,6 @@ pub fn run_direct_javascript(
             "SUPERCOV_EXECUTION_LOG".into(),
             evidence_directory
                 .join("execution.jsonl")
-                .display()
-                .to_string(),
-        ),
-        (
-            "SUPERCOV_ESM_TRANSFORMER".into(),
-            workspace
-                .join(".supercov/esmInterceptor.js")
-                .display()
-                .to_string(),
-        ),
-        (
-            "SUPERCOV_ESM_CAPABILITY_WRAPPER".into(),
-            workspace
-                .join(".supercov/launchSupervisor.js")
                 .display()
                 .to_string(),
         ),

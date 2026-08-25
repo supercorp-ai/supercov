@@ -1,8 +1,6 @@
-//! Rust coverage engine.
-//!
-//! The implementation remains a differential candidate until its public CLI
-//! and cross-platform cutover gates are complete. The TypeScript engine is a
-//! temporary regression reference, not the semantic authority.
+//! Supercov's single coverage engine. Target-language runtime adapters remain
+//! thin generated shims; instrumentation, orchestration, analysis and queries
+//! are owned here.
 
 pub mod agent_json;
 pub mod build_cache;
@@ -33,15 +31,6 @@ pub mod source_discovery;
 pub mod workspace;
 
 pub use supercov_contracts::CONTRACT_VERSION;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EngineReadiness {
-    ContractShell,
-    DifferentialCandidate,
-    Default,
-}
-
-pub const READINESS: EngineReadiness = EngineReadiness::DifferentialCandidate;
 
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

@@ -1,15 +1,18 @@
-import { execFileSync } from "node:child_process";
-import { readFileSync, readdirSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { delimiter, resolve } from "node:path";
-import { analyzeCoverageArchive } from "../dist/runAnalysis.js";
+import {
+  coverageQuery,
+  latestRun,
+  requireSupercov,
+  runMetadata,
+} from "./coverage-test-helpers.mjs";
 
 for (const adapter of ["esbuild", "webpack", "swc"]) {
   const root = resolve(`tests/fixtures/generic-${adapter}`);
   rmSync(resolve(root, ".supercov"), { recursive: true, force: true });
   rmSync(resolve(root, "supercov"), { recursive: true, force: true });
   for (const attempt of ["fresh", "reused"]) {
-    execFileSync(resolve("bin/supercov.js"), ["--", "npm", "test"], {
-      cwd: root,
+    requireSupercov(root, ["--", "npm", "test"], {
       stdio: "inherit",
       env: {
         ...process.env,
@@ -17,22 +20,12 @@ for (const adapter of ["esbuild", "webpack", "swc"]) {
         ...(adapter === "swc" ? { SUPERCOV_SOURCE_ROOTS: "src" } : {}),
       },
     });
-    const runId = readdirSync(resolve(root, ".supercov/runs")).sort().at(-1);
-    if (!runId) throw new Error(`${adapter} fixture did not publish a run`);
-    const metadata = JSON.parse(
-      readFileSync(resolve(root, ".supercov/runs", runId, "run.json"), "utf8"),
-    );
-    const report = analyzeCoverageArchive(
-      resolve(root, ".supercov/runs", runId, "evidence.raw.gz"),
-      {
-        runId,
-        testExitCode: metadata.testExitCode,
-        integrity: metadata.integrity,
-      },
-    );
-    if (report.filters?.passed.summary.conditionCoveragePct !== 100)
+    const runId = latestRun(root);
+    const metadata = runMetadata(root, runId);
+    const summary = coverageQuery(root, runId, "--filter", "passed").data;
+    if (summary.coverage.conditionCoveragePct !== 100)
       throw new Error(
-        `${adapter} ${attempt} passed-only MC/DC was ${report.filters?.passed.summary.conditionCoveragePct}%`,
+        `${adapter} ${attempt} passed-only MC/DC was ${summary.coverage.conditionCoveragePct}%`,
       );
     if (metadata.instrumentedBuildCache?.reused !== (attempt === "reused"))
       throw new Error(`${adapter} ${attempt} run had unexpected build-cache state`);

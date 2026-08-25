@@ -6,8 +6,6 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { parse as parseYaml } from "yaml";
-import { instrumentMcdc } from "../dist/instrumenter.js";
-import { instrumentSources } from "../dist/engineInstrumenter.js";
 
 function option(name, fallback) {
   const inline = process.argv.slice(2).find((value) => value.startsWith(`${name}=`));
@@ -16,23 +14,26 @@ function option(name, fallback) {
   return index >= 0 ? process.argv[index + 1] : fallback;
 }
 
-const conformanceEngine = option(
-  "--engine",
-  process.env.SUPERCOV_ENGINE ?? "rust",
-);
-if (conformanceEngine !== "rust" && conformanceEngine !== "typescript")
-  throw new Error("--engine must be either rust or typescript");
-// engineInstrumenter reads this lazily at the instrumentation boundary. Make
-// the authoritative conformance default explicit inside the harness so local,
-// CI, and release invocations cannot silently exercise different engines.
-process.env.SUPERCOV_ENGINE = conformanceEngine;
-if (conformanceEngine === "rust" && !process.env.SUPERCOV_RUST_BINARY) {
-  process.env.SUPERCOV_RUST_BINARY = resolve(
-    option(
-      "--rust-binary",
+if (option("--engine", "rust") !== "rust")
+  throw new Error("Rust is Supercov's only engine; --engine accepts only rust");
+const supercovBinary = resolve(
+  option(
+    "--rust-binary",
+    process.env.SUPERCOV_RUST_BINARY ??
       `target/release/supercov${process.platform === "win32" ? ".exe" : ""}`,
-    ),
-  );
+  ),
+);
+
+function instrumentSources(cases) {
+  const transformed = spawnSync(supercovBinary, ["__instrument-js"], {
+    input: JSON.stringify(cases),
+    encoding: "utf8",
+    maxBuffer: 256 * 1024 * 1024,
+  });
+  if (transformed.error) throw transformed.error;
+  if (transformed.status !== 0)
+    throw new Error(`Rust instrumenter failed: ${transformed.stderr.trim()}`);
+  return JSON.parse(transformed.stdout);
 }
 
 const test262Root = resolve(
@@ -177,7 +178,7 @@ function runtimePrelude(transformed) {
     // properties. `let` is the closest script-host equivalent for Test262.
     return `let ${local}=${implementation};`;
   });
-  // Replace the import in place. Babel emits it after directive prologues, and
+  // Replace the import in place. Instrumentation emits it after directive prologues, and
   // prepending the bindings would turn `"use strict"` into an ordinary string
   // expression and invalidate the equivalence test itself.
   const index = importMatch.index ?? 0;
@@ -395,7 +396,7 @@ try {
         .split(/\r|\n|\u2028|\u2029/)
         .find((line) => line.includes("Copyright")) ??
       "// Copyright Supercov Test262 equivalence run";
-    // Babel may render a transformed legacy fixture onto one very long
+    // A transformer may render a legacy fixture onto one very long
     // line. test262-stream's historical copyright regex has nested greedy
     // quantifiers, so retain the original short copyright line up front.
     writeFileSync(
@@ -413,47 +414,31 @@ try {
   };
 
   const transformationStarted = performance.now();
-  if (conformanceEngine === "rust") {
-    const batchSize = Math.max(1, Number(process.env.SUPERCOV_TEST262_BATCH ?? 128));
-    for (let offset = 0; offset < baselineTests.length; offset += batchSize) {
-      const batch = baselineTests.slice(offset, offset + batchSize);
-      try {
-        const transformed = instrumentSources(
-          batch.map((test) => ({
-            file: `test262/${relative(corpusRoot, test.path).replaceAll("\\", "/")}`,
-            source: test.source,
-          })),
-        );
-        for (const [index, test] of batch.entries())
-          writeTransformed(test, transformed[index].code);
-      } catch (batchError) {
-        // Preserve an exact per-file failure inventory even if one malformed
-        // input causes the private batch protocol to reject the whole batch.
-        for (const test of batch) {
-          try {
-            const relativePath = relative(corpusRoot, test.path).replaceAll("\\", "/");
-            writeTransformed(
-              test,
-              instrumentSources([{ file: `test262/${relativePath}`, source: test.source }])[0].code,
-            );
-          } catch (error) {
-            recordFailure(test, error ?? batchError);
-          }
+  const batchSize = Math.max(1, Number(process.env.SUPERCOV_TEST262_BATCH ?? 128));
+  for (let offset = 0; offset < baselineTests.length; offset += batchSize) {
+    const batch = baselineTests.slice(offset, offset + batchSize);
+    try {
+      const transformed = instrumentSources(
+        batch.map((test) => ({
+          file: `test262/${relative(corpusRoot, test.path).replaceAll("\\", "/")}`,
+          source: test.source,
+        })),
+      );
+      for (const [index, test] of batch.entries())
+        writeTransformed(test, transformed[index].code);
+    } catch (batchError) {
+      // Preserve an exact per-file failure inventory if one malformed input
+      // causes the batch protocol to reject the whole batch.
+      for (const test of batch) {
+        try {
+          const relativePath = relative(corpusRoot, test.path).replaceAll("\\", "/");
+          writeTransformed(
+            test,
+            instrumentSources([{ file: `test262/${relativePath}`, source: test.source }])[0].code,
+          );
+        } catch (error) {
+          recordFailure(test, error ?? batchError);
         }
-      }
-    }
-  } else {
-    for (const test of baselineTests) {
-      const relativePath = relative(corpusRoot, test.path).replaceAll("\\", "/");
-      try {
-        writeTransformed(
-          test,
-          instrumentMcdc(test.source, `test262/${relativePath}`, {
-            probeVersion: process.env.SUPERCOV_PROBE_VERSION === "2" ? 2 : 1,
-          }).code,
-        );
-      } catch (error) {
-        recordFailure(test, error);
       }
     }
   }
@@ -498,7 +483,7 @@ try {
   const revision =
     revisionResult.status === 0 ? revisionResult.stdout.trim() : "unknown";
   console.log(
-    `[test262] engine=${conformanceEngine} revision=${revision} shard=${shardText}`,
+    `[test262] engine=rust revision=${revision} shard=${shardText}`,
   );
   console.log(
     `[test262] selected files=${selected.length}; baseline passing scenarios=${baselinePassingScenarios}; baseline unsupported/failed scenarios=${baselineFailed}`,

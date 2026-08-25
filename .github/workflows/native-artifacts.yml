@@ -47,7 +47,7 @@ jobs:
         if: matrix.musl
         run: sudo apt-get update -qq && sudo apt-get install -y musl-tools
       - run: npm ci
-      - run: npm run build
+      - run: node scripts/package-preflight.mjs
       - name: Read package version
         run: node -e "require('node:fs').appendFileSync(process.env.GITHUB_ENV, 'SUPERCOV_VERSION=' + require('./package.json').version + '\n')"
       - name: Verify Windows npm command invocation before compiling

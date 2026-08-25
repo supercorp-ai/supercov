@@ -3,7 +3,7 @@
 //! This candidate reports and instruments the complete frozen JavaScript
 //! denominator, including semantic-safety boundaries and exact wide-decision
 //! fallback. It remains private until its generated runtime import, evidence
-//! transport, and attribution behavior match the reference engine.
+//! transport, and attribution behavior are defined by Supercov's frozen contracts.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -411,7 +411,7 @@ pub enum CandidateError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeBinding {
-    Differential,
+    ModuleImport,
     DirectGlobal,
 }
 
@@ -446,6 +446,148 @@ const NODE_ASSERT_METHODS: &[&str] = &[
 pub struct NodeAssertionInstrumentation {
     pub code: String,
     pub assertions: usize,
+    pub capability_imports: usize,
+}
+
+const CAPABILITY_IMPORT_EXCLUSIONS: &[&str] =
+    &["@jest/globals", "@playwright/test", "playwright", "vitest"];
+
+fn capability_source_candidate(source: &str) -> bool {
+    const SHAPES: &[&str] = &[
+        "hostPath",
+        "guestPath",
+        "mount",
+        "snapshot",
+        "createPool",
+        "acquire",
+        "container",
+        "machine",
+        "sandbox",
+    ];
+    if SHAPES.iter().any(|shape| source.contains(shape)) {
+        return true;
+    }
+    ["exec", "execute", "launch", "spawn"].iter().any(|method| {
+        source
+            .match_indices(&format!(".{method}"))
+            .any(|(index, _)| {
+                source[index + method.len() + 1..]
+                    .trim_start()
+                    .starts_with('(')
+            })
+    })
+}
+
+fn excluded_capability_import(source: &str, wrapper: &str) -> bool {
+    source == wrapper
+        || source.starts_with("node:")
+        || source.starts_with("virtual:supercov-")
+        || source.contains(".supercov/")
+        || CAPABILITY_IMPORT_EXCLUSIONS.contains(&source)
+}
+
+/// Wrap value imports that can hide a remote execution capability. This is an
+/// ahead-of-run Rust transform; the runtime shim only proxies the imported
+/// value and never parses or rewrites source.
+fn transform_capability_imports<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    source: &str,
+    wrapper: &str,
+) -> usize {
+    if !capability_source_candidate(source) || !program.source_type.is_module() {
+        return 0;
+    }
+    let ast = AstBuilder::new(allocator);
+    let mut names = CandidateNames::new(source);
+    let wrapper_local = names.allocate("__supercovImportedCapability");
+    let mut wrapped = 0;
+    let mut output = ast.vec();
+    for statement in program.body.take_in(allocator) {
+        let Statement::ImportDeclaration(mut declaration) = statement else {
+            output.push(statement);
+            continue;
+        };
+        let module_name = declaration.source.value.as_str();
+        if declaration.import_kind == ImportOrExportKind::Type
+            || excluded_capability_import(module_name, wrapper)
+        {
+            output.push(Statement::ImportDeclaration(declaration));
+            continue;
+        }
+        let mut declarations = ast.vec();
+        for specifier in declaration.specifiers.iter_mut().flatten() {
+            let local = match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                    if specifier.import_kind == ImportOrExportKind::Type =>
+                {
+                    continue;
+                }
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => &mut specifier.local,
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    &mut specifier.local
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    &mut specifier.local
+                }
+            };
+            let original = local.name.to_string();
+            let raw = names.allocate(&format!("__supercovRaw{original}"));
+            local.name = ast.ident(&raw);
+            let wrapped_value = ast.expression_call(
+                Span::default(),
+                ast.expression_identifier(Span::default(), ast.ident(&wrapper_local)),
+                NONE,
+                ast.vec1(Argument::from(
+                    ast.expression_identifier(Span::default(), ast.ident(&raw)),
+                )),
+                false,
+            );
+            declarations.push(ast.variable_declarator(
+                Span::default(),
+                VariableDeclarationKind::Const,
+                ast.binding_pattern_binding_identifier(Span::default(), ast.ident(&original)),
+                NONE,
+                Some(wrapped_value),
+                false,
+            ));
+            wrapped += 1;
+        }
+        output.push(Statement::ImportDeclaration(declaration));
+        if !declarations.is_empty() {
+            output.push(Statement::VariableDeclaration(
+                ast.alloc_variable_declaration(
+                    Span::default(),
+                    VariableDeclarationKind::Const,
+                    declarations,
+                    false,
+                ),
+            ));
+        }
+    }
+    if wrapped > 0 {
+        output.insert(
+            0,
+            Statement::ImportDeclaration(ast.alloc_import_declaration(
+                Span::default(),
+                Some(ast.vec1(ast.import_declaration_specifier_import_specifier(
+                    Span::default(),
+                    ast.module_export_name_identifier_name(
+                        Span::default(),
+                        ast.ident("wrapImportedCapability"),
+                    ),
+                    ast.binding_identifier(Span::default(), ast.ident(&wrapper_local)),
+                    ImportOrExportKind::Value,
+                ))),
+                ast.string_literal(Span::default(), ast.str(wrapper), None),
+                None,
+                NONE,
+                ImportOrExportKind::Value,
+            )),
+        );
+    }
+    program.body = output;
+    wrapped
 }
 
 fn canonical_assert_module(value: &str) -> Option<String> {
@@ -857,10 +999,22 @@ pub fn instrument_node_assertion_phases_with_expect_modules(
     file: &str,
     extra_expect_modules: &[String],
 ) -> Result<NodeAssertionInstrumentation, CandidateError> {
-    if !source.contains("assert") && !source.contains("expect") {
+    instrument_node_assertion_phases_with_runtime_hooks(source, file, extra_expect_modules, None)
+}
+
+pub fn instrument_node_assertion_phases_with_runtime_hooks(
+    source: &str,
+    file: &str,
+    extra_expect_modules: &[String],
+    capability_wrapper: Option<&str>,
+) -> Result<NodeAssertionInstrumentation, CandidateError> {
+    let assertion_candidate = source.contains("assert") || source.contains("expect");
+    let capability_candidate = capability_wrapper.is_some() && capability_source_candidate(source);
+    if !assertion_candidate && !capability_candidate {
         return Ok(NodeAssertionInstrumentation {
             code: source.into(),
             assertions: 0,
+            capability_imports: 0,
         });
     }
     let source_type = SourceType::from_path(Path::new(file))
@@ -876,35 +1030,38 @@ pub fn instrument_node_assertion_phases_with_expect_modules(
                 .collect(),
         ));
     }
-    let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
-    let bindings =
-        node_assertion_bindings(&parsed.program, semantic.scoping(), extra_expect_modules);
-    if bindings.objects.is_empty() && bindings.direct.is_empty() && bindings.expects.is_empty() {
+    let mut assertions = 0;
+    if assertion_candidate {
+        let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
+        let bindings =
+            node_assertion_bindings(&parsed.program, semantic.scoping(), extra_expect_modules);
+        let mut collector = NodeAssertionSiteCollector {
+            source,
+            file,
+            bindings: &bindings,
+            scoping: semantic.scoping(),
+            sites: HashMap::new(),
+        };
+        collector.visit_program(&parsed.program);
+        assertions = collector.sites.len();
+        if assertions > 0 {
+            NodeAssertionTransformer {
+                ast: AstBuilder::new(&allocator),
+                sites: collector.sites,
+            }
+            .visit_program(&mut parsed.program);
+        }
+    }
+    let capability_imports = capability_wrapper.map_or(0, |wrapper| {
+        transform_capability_imports(&allocator, &mut parsed.program, source, wrapper)
+    });
+    if assertions == 0 && capability_imports == 0 {
         return Ok(NodeAssertionInstrumentation {
             code: source.into(),
             assertions: 0,
+            capability_imports: 0,
         });
     }
-    let mut collector = NodeAssertionSiteCollector {
-        source,
-        file,
-        bindings: &bindings,
-        scoping: semantic.scoping(),
-        sites: HashMap::new(),
-    };
-    collector.visit_program(&parsed.program);
-    let assertions = collector.sites.len();
-    if assertions == 0 {
-        return Ok(NodeAssertionInstrumentation {
-            code: source.into(),
-            assertions: 0,
-        });
-    }
-    NodeAssertionTransformer {
-        ast: AstBuilder::new(&allocator),
-        sites: collector.sites,
-    }
-    .visit_program(&mut parsed.program);
     let (mut code, map) = generate_candidate(&parsed.program, file)?;
     let mut map = map.expect("assertion source maps are enabled");
     // An inline map is resolved relative to the transformed file itself. The
@@ -920,7 +1077,11 @@ pub fn instrument_node_assertion_phases_with_expect_modules(
     code.push_str("\n//# sourceMappingURL=data:application/json;base64,");
     BASE64_STANDARD.encode_string(map, &mut code);
     code.push('\n');
-    Ok(NodeAssertionInstrumentation { code, assertions })
+    Ok(NodeAssertionInstrumentation {
+        code,
+        assertions,
+        capability_imports,
+    })
 }
 
 type SpanKey = (u32, u32);
@@ -1693,24 +1854,51 @@ fn json_expression<'a>(ast: AstBuilder<'a>, value: &serde_json::Value) -> Expres
 /// conformance-tested; selection of the Rust engine remains private until the
 /// Phase 4 CLI/orchestration cutover is complete.
 pub fn instrument_candidate(source: &str, file: &str) -> Result<CandidateOutput, CandidateError> {
-    instrument_candidate_with_binding(source, file, RuntimeBinding::Differential)
+    instrument_candidate_with_binding(source, file, RuntimeBinding::ModuleImport, None)
 }
 
-/// Emit code for an isolated source-executing workspace. Unlike the migration
-/// differential form, this has no virtual module dependency: the generated
+pub fn instrument_candidate_with_runtime_hooks(
+    source: &str,
+    file: &str,
+    capability_wrapper: &str,
+) -> Result<CandidateOutput, CandidateError> {
+    instrument_candidate_with_binding(
+        source,
+        file,
+        RuntimeBinding::ModuleImport,
+        Some(capability_wrapper),
+    )
+}
+
+/// Emit code for an isolated source-executing workspace. Unlike the module-
+/// import form, this has no virtual module dependency: the generated
 /// Node preload installs the frozen runtime on this global before user modules
 /// evaluate.
 pub fn instrument_direct_candidate(
     source: &str,
     file: &str,
 ) -> Result<CandidateOutput, CandidateError> {
-    instrument_candidate_with_binding(source, file, RuntimeBinding::DirectGlobal)
+    instrument_candidate_with_binding(source, file, RuntimeBinding::DirectGlobal, None)
+}
+
+pub fn instrument_direct_candidate_with_runtime_hooks(
+    source: &str,
+    file: &str,
+    capability_wrapper: &str,
+) -> Result<CandidateOutput, CandidateError> {
+    instrument_candidate_with_binding(
+        source,
+        file,
+        RuntimeBinding::DirectGlobal,
+        Some(capability_wrapper),
+    )
 }
 
 fn instrument_candidate_with_binding(
     source: &str,
     file: &str,
     runtime_binding: RuntimeBinding,
+    capability_wrapper: Option<&str>,
 ) -> Result<CandidateOutput, CandidateError> {
     let source_type = SourceType::from_path(Path::new(file))
         .map_err(|error| CandidateError::UnknownSourceType(error.to_string()))?;
@@ -2124,6 +2312,9 @@ fn instrument_candidate_with_binding(
         );
     }
 
+    if let Some(wrapper) = capability_wrapper {
+        transform_capability_imports(&allocator, &mut parsed.program, source, wrapper);
+    }
     let limitations = Vec::new();
     let (code, map) = generate_candidate(&parsed.program, file)?;
     Ok(CandidateOutput {
@@ -6380,7 +6571,7 @@ mod tests {
         "export function decide(a,b,c) {\n  if ((a && b) || !c) return 1;\n  return 0;\n}\n";
 
     #[test]
-    fn matches_the_reference_if_decision_manifest_exactly() {
+    fn matches_the_frozen_if_decision_manifest_exactly() {
         let output = analyze_candidate(SOURCE, "app/decide.ts").unwrap();
         assert!(!output.complete);
         assert_eq!(
@@ -6439,6 +6630,60 @@ mod tests {
             assert!(!output.code.contains("virtual:supercov-runtime"));
             assert!(!output.code.contains("globalThis.__supercovRuntime"));
         }
+    }
+
+    #[test]
+    fn capability_imports_are_rewritten_ahead_of_run_by_rust() {
+        let source = concat!(
+            "import { ImageBuilder } from './sdk.mjs';\n",
+            "await ImageBuilder.build({ mounts: [{ source: process.cwd(), target: '/workspace' }], snapshotKey: 'base' });\n",
+        );
+        let output = instrument_node_assertion_phases_with_runtime_hooks(
+            source,
+            "tests/runner.mjs",
+            &[],
+            Some("../.supercov/launchSupervisor.js"),
+        )
+        .unwrap();
+        assert_eq!(output.assertions, 0);
+        assert_eq!(output.capability_imports, 1);
+        assert!(output.code.contains("wrapImportedCapability"));
+        assert!(output.code.contains("__supercovRawImageBuilder"));
+        assert!(output.code.contains("const ImageBuilder"));
+        assert!(output.code.contains("../.supercov/launchSupervisor.js"));
+    }
+
+    #[test]
+    fn ordinary_imports_remain_byte_identical_without_a_capability_shape() {
+        let source = "import { format } from './format.mjs';\nconsole.log(format('value'));";
+        let output = instrument_node_assertion_phases_with_runtime_hooks(
+            source,
+            "src/main.mjs",
+            &[],
+            Some("../.supercov/launchSupervisor.js"),
+        )
+        .unwrap();
+        assert_eq!(output.code, source);
+        assert_eq!(output.capability_imports, 0);
+    }
+
+    #[test]
+    fn capability_rewrite_excludes_runtime_and_type_only_imports() {
+        let source = concat!(
+            "import type { Machine } from './types.ts';\n",
+            "import { test } from 'node:test';\n",
+            "import { runtime } from '../.supercov/runtime.js';\n",
+            "console.log({ machine: true, test, runtime });\n",
+        );
+        let output = instrument_node_assertion_phases_with_runtime_hooks(
+            source,
+            "tests/runner.ts",
+            &[],
+            Some("../.supercov/launchSupervisor.js"),
+        )
+        .unwrap();
+        assert_eq!(output.code, source);
+        assert_eq!(output.capability_imports, 0);
     }
 
     #[test]

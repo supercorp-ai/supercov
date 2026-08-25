@@ -24,8 +24,6 @@ try {
     recursive: true,
   });
   const environment = { ...process.env };
-  delete environment.SUPERCOV_RUNTIME_ROOT;
-  delete environment.SUPERCOV_ENGINE;
   delete environment.SUPERCOV_RUST_BINARY;
   const result = spawnSync(executable, ["--", process.execPath, "--test"], {
     cwd: project,

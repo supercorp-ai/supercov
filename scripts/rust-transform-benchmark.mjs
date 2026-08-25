@@ -2,9 +2,7 @@
 
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { performance } from "node:perf_hooks";
 import { resolve } from "node:path";
-import { instrumentSources } from "../dist/engineInstrumenter.js";
 
 const budget = JSON.parse(
   readFileSync(resolve("benchmarks/rust-transform-budget.json"), "utf8"),
@@ -53,29 +51,18 @@ function internalSample() {
   return Number(result.durationNs) / 1_000_000;
 }
 
-process.env.SUPERCOV_ENGINE = "rust";
-process.env.SUPERCOV_RUST_BINARY = binary;
 internalSample();
-instrumentSources(cases.slice(0, 10));
 const internal = [];
-const transport = [];
 for (let index = 0; index < 7; index += 1) {
   internal.push(internalSample());
-  const started = performance.now();
-  instrumentSources(cases);
-  transport.push(performance.now() - started);
 }
 const engineMedian = median(internal);
 const engineP95 = Math.max(...internal);
-const transportMedian = median(transport);
 const extrapolatedMonorepoMs =
   engineMedian * (budget.monorepoFiles / budget.corpusFiles);
 
 console.log(
   `[rust-transform] engine median=${engineMedian.toFixed(2)}ms p95=${engineP95.toFixed(2)}ms files=${cases.length}`,
-);
-console.log(
-  `[rust-transform] temporary Node/JSON transport median=${transportMedian.toFixed(2)}ms`,
 );
 console.log(
   `[rust-transform] ${budget.monorepoFiles.toLocaleString("en-US")}-file linear extrapolation=${extrapolatedMonorepoMs.toFixed(0)}ms`,
@@ -88,10 +75,6 @@ if (engineMedian > budget.engineMedianMsMax)
   );
 if (engineP95 > budget.engineP95MsMax)
   failures.push(`engine p95 ${engineP95.toFixed(2)}ms > ${budget.engineP95MsMax}ms`);
-if (transportMedian > budget.migrationTransportMedianMsMax)
-  failures.push(
-    `migration transport median ${transportMedian.toFixed(2)}ms > ${budget.migrationTransportMedianMsMax}ms`,
-  );
 if (extrapolatedMonorepoMs > budget.monorepoExtrapolatedMsMax)
   failures.push(
     `${budget.monorepoFiles}-file extrapolation ${extrapolatedMonorepoMs.toFixed(0)}ms > ${budget.monorepoExtrapolatedMsMax}ms`,

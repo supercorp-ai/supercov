@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { analyzeCoverageArchive } from "../dist/runAnalysis.js";
+import { coverageQuery } from "./coverage-test-helpers.mjs";
 
 const root = process.cwd();
 const runId = readdirSync(resolve(root, ".supercov/runs")).sort().at(-1);
@@ -10,17 +10,14 @@ const metadata = JSON.parse(readFileSync(resolve(directory, "run.json"), "utf8")
 if (metadata.testExitCode !== 0) {
   throw new Error(`external test command exited ${metadata.testExitCode}`);
 }
-const report = analyzeCoverageArchive(resolve(directory, "evidence.raw.gz"), {
-  runId,
-  testExitCode: metadata.testExitCode,
-  integrity: metadata.integrity,
-});
-if (report.summary.lines.total === 0 || report.points.length === 0) {
+const summary = coverageQuery(root, runId).data;
+if (summary.coverage.lines.total === 0 || summary.coverage.statements.total === 0) {
   throw new Error("external run produced no first-party coverage denominator");
 }
-if (!report.scope || report.scope.entries.length === 0) {
+const scope = coverageQuery(root, runId, "scope").data;
+if (!scope.entries || scope.entries.length === 0) {
   throw new Error("external run did not retain an auditable source inventory");
 }
 console.log(
-  `[cross-repo] ${runId}: ${report.summary.lines.covered}/${report.summary.lines.total} lines, ${report.summary.branches.covered}/${report.summary.branches.total} branches, ${report.summary.coveredConditions}/${report.summary.conditions} MC/DC conditions`,
+  `[cross-repo] ${runId}: ${summary.coverage.lines.covered}/${summary.coverage.lines.total} lines, ${summary.coverage.branches.covered}/${summary.coverage.branches.total} branches, ${summary.coverage.coveredConditions}/${summary.coverage.conditions} MC/DC conditions`,
 );

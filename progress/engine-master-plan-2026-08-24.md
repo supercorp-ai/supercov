@@ -1124,13 +1124,66 @@ miss blocks flipping any default.
   Python frontend must produce v3 directly from Supercov probes; a coverage.py
   import is never a public migration path.
 
+## Checkpoint — 2026-08-25 Rust-only atomic cutover
+
+- The atomic JavaScript-engine cutover is complete in the repository. The npm
+  launcher now resolves and executes the native Rust binary unconditionally;
+  `SUPERCOV_ENGINE`, `SUPERCOV_RUNTIME_ROOT`, readiness/candidate modes and the
+  TypeScript fallback path no longer exist.
+- The complete legacy engine was deleted in the same consolidation: `src/`,
+  compiled `dist/`, TypeScript engine tests and configuration, Babel runtime
+  transformation, Babel dependencies, Jest-specific migration coverage and
+  every TypeScript-versus-Rust differential script are gone. Frozen contracts,
+  independent oracles, golden agent outputs, Test262 and black-box fixtures
+  remain.
+- JavaScript under `runtime/javascript/` is the sole canonical set of 16
+  target-runtime shims required inside Node, browsers, Playwright and Vitest.
+  Rust embeds these files at compile time, fingerprints them, writes them only
+  into the isolated workspace and performs all source instrumentation ahead of
+  execution. The former dynamic Babel ESM transformer and external runtime-root
+  override were removed; capability imports are now transformed by the Rust/
+  oxc frontend.
+- The Rust engine owns source/project discovery, complete JavaScript
+  instrumentation and manifest generation, build orchestration, process
+  supervision, workspace transactions, evidence archives, attribution,
+  coverage analysis, MC/DC witnesses, exact test-set minimization, integrity,
+  lifecycle/retention, query indexes and every human/agent query.
+- Local cutover gates are green for 146 Rust workspace tests, clippy with
+  warnings denied, runtime-shim tests, the frozen run/store/query contract, the
+  agent drill-down/minimization workflow, independent Clang MC/DC oracle,
+  node:test, Vitest, Playwright, Chromium/Firefox/WebKit syntax behavior,
+  opaque local-to-remote launch discovery, Vite, Next, esbuild, TypeScript
+  compilation, Webpack, SWC, distributed merge, native npm package pairing,
+  packed `npx`, APFS forced-termination recovery and the transform benchmark.
+  The current 500-file release transform is 32.24 ms median and 33.43 ms p95.
+  The post-cutover monolithic pinned Test262 run selected 41,593 files and
+  retained all 65,051 baseline-passing scenarios with zero Rust transform
+  failures and zero semantic-equivalence failures; baseline, transformation
+  and instrumented execution took 844.91 s, 16.65 s and 580.47 s.
+- npm packaging contains only the exec launcher, target-runtime shims, docs and
+  README plus one exact-version optional native package. The package has no
+  JavaScript engine dependencies and no public Vite engine API. Native package
+  publication remains a manual, deliberately expensive workflow; ordinary CI,
+  compatibility, cross-repository and Test262 workflows are manual dispatches
+  so routine development consumes no GitHub Actions minutes.
+- Windows remains an explicitly deferred platform gate, not a reason to retain
+  a second engine. The Rust Job-object, NTFS and native-package work stays in
+  the plan and must pass on a real Windows host before Windows binaries are
+  claimed or published.
+- Python has a strict language-frontend contract, independent coverage.py/
+  pytest oracle fixtures and private evidence-v3 analysis, but no public owned
+  Python instrumenter yet. Public runs remain JavaScript/TypeScript only. The
+  next language milestone is Supercov-owned Python obligations, probes,
+  dynamic-import hook and pytest context emitted directly into the shared Rust
+  engine; coverage.py remains development-only.
+
 ## Non-goals and guardrails
 
-- No accidental behavior change during ports; every port lands behind a flag
-  with differential diagnostics and independent semantic gates. "Faster but
-  unexplained" is a failure. A proven correction to historical JavaScript
-  behavior is required to differ, with its own regression test and any needed
-  versioned contract migration.
+- No accidental behavior change during ports; every future language frontend
+  remains private until its independent semantic and oracle gates pass.
+  "Faster but unexplained" is a failure. A proven correction to historical
+  behavior requires its own regression test and any needed versioned contract
+  migration.
 - Windows becomes a CI matrix member before any binary GA — no shipping
   binaries for platforms the suite has never run on.
 - Contracts (schemas, CLI, envelopes, process supervision) change only by
@@ -1139,5 +1192,5 @@ miss blocks flipping any default.
   implementation is not complete while equivalent production engine logic is
   still shipped in TypeScript. Only unavoidable Node/browser runtime and
   runner hooks survive the cutover.
-- The agent-facing UX work (skill/playbook, post-run hints, grouped queries)
-  continues on the TS engine throughout; users never wait on the rewrite.
+- Agent-facing UX, grouped queries and verification workflows use the same
+  Rust engine as ordinary coverage runs; no shadow analyzer is permitted.

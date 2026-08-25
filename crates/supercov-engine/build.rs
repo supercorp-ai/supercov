@@ -51,9 +51,11 @@ fn digest_files(files: &[PathBuf], workspace_root: &Path) -> String {
 fn main() {
     let crate_root =
         PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
+    let repository_root = crate_root.join("../..");
+    let runtime_root = repository_root.join("runtime/javascript");
     let mut files = Vec::new();
     collect_files(&crate_root.join("src"), &mut files);
-    collect_files(&crate_root.join("runtime"), &mut files);
+    collect_files(&runtime_root, &mut files);
     files.extend([crate_root.join("build.rs"), crate_root.join("Cargo.toml")]);
     files.sort();
     files.dedup();
@@ -63,7 +65,7 @@ fn main() {
     }
     println!(
         "cargo:rustc-env=SUPERCOV_ENGINE_SOURCE_SHA256={}",
-        digest_files(&files, &crate_root)
+        digest_files(&files, &repository_root)
     );
     let javascript_frontend = [
         crate_root.join("src/js_instrumenter.rs"),
@@ -71,11 +73,11 @@ fn main() {
         crate_root.join("Cargo.toml"),
     ];
     let mut javascript_frontend = javascript_frontend.to_vec();
-    collect_files(&crate_root.join("runtime"), &mut javascript_frontend);
+    collect_files(&runtime_root, &mut javascript_frontend);
     javascript_frontend.sort();
     javascript_frontend.dedup();
     println!(
         "cargo:rustc-env=SUPERCOV_JS_FRONTEND_SOURCE_SHA256={}",
-        digest_files(&javascript_frontend, &crate_root)
+        digest_files(&javascript_frontend, &repository_root)
     );
 }

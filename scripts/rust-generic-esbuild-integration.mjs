@@ -76,7 +76,6 @@ try {
 
   const run = rust('__run-js-direct', {
     root: project,
-    runtimeRoot: resolve(repository, 'dist'),
     command: ['npm', 'test'],
     runId: 'rust-generic-esbuild',
     startedAt: '2026-08-25T00:00:06.000Z',

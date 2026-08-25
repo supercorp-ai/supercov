@@ -52,7 +52,6 @@ function verify(name, project, sourceFile, runId) {
   const original = readFileSync(resolve(project, sourceFile), 'utf8');
   const run = rust('__run-js-direct', {
     root: project,
-    runtimeRoot: resolve(repository, 'dist'),
     command: ['npm', 'test'],
     runId,
     startedAt: `2026-08-25T00:00:${runId.endsWith('webpack') ? '08' : '09'}.000Z`,

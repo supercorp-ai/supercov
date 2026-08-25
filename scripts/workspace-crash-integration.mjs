@@ -16,33 +16,18 @@ import { tmpdir } from "node:os";
 import { basename, relative, resolve } from "node:path";
 
 const toolRoot = resolve(".");
-const cli = resolve(toolRoot, "dist/cli.js");
 const rustBinary = resolve(
   toolRoot,
   `target/debug/supercov${process.platform === "win32" ? ".exe" : ""}`,
 );
-const engineFlag = process.argv.indexOf("--engine");
-const engine = engineFlag === -1 ? "reference" : process.argv[engineFlag + 1];
-if (!new Set(["reference", "rust"]).has(engine))
-  throw new Error("--engine must be reference or rust");
-
 function launch(commandArguments, options = {}) {
-  const executable = engine === "rust" ? rustBinary : process.execPath;
-  const arguments_ = [
-    ...(engine === "rust" ? [] : [cli]),
-    "--",
-    ...commandArguments,
-  ];
   return {
-    executable,
-    arguments_,
+    executable: rustBinary,
+    arguments_: ["--", ...commandArguments],
     options: {
       ...options,
       env: {
         ...process.env,
-        ...(engine === "rust"
-          ? { SUPERCOV_RUNTIME_ROOT: resolve(toolRoot, "dist") }
-          : {}),
         ...options.env,
       },
     },
@@ -227,7 +212,7 @@ try {
   if (statSync(resolve(run, "evidence.raw.gz")).size === 0)
     throw new Error("recovered run published an empty evidence archive");
   console.log(
-    `[filesystem] ${engine} crash recovery passed on ${process.platform}`,
+    `[filesystem] Rust crash recovery passed on ${process.platform}`,
   );
 } finally {
   // The command intentionally returns before recursively unlinking its trash.

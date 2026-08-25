@@ -13,7 +13,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { relative, resolve } from "node:path";
-import { analyzeCoverageArchive } from "../dist/runAnalysis.js";
 
 function filesUnder(root, directory = root) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -42,10 +41,22 @@ function snapshot(root) {
 }
 
 const temporary = mkdtempSync(resolve(tmpdir(), "supercov-packed-npx-"));
+const rustBinary = resolve(
+  "target/release",
+  `supercov${process.platform === "win32" ? ".exe" : ""}`,
+);
+const rustEnvironment = { ...process.env, SUPERCOV_RUST_BINARY: rustBinary };
 try {
+  const preflight = spawnSync(process.execPath, ["scripts/package-preflight.mjs"], {
+    cwd: resolve("."),
+    encoding: "utf8",
+    stdio: "pipe",
+  });
+  if (preflight.status !== 0)
+    throw new Error(`package preflight failed:\n${preflight.stderr}\n${preflight.stdout}`);
   const packed = spawnSync(
     "npm",
-    ["pack", "--json", "--pack-destination", temporary],
+    ["pack", "--ignore-scripts", "--json", "--pack-destination", temporary],
     { cwd: resolve("."), encoding: "utf8", stdio: "pipe" },
   );
   if (packed.status !== 0)
@@ -65,7 +76,7 @@ try {
   const executed = spawnSync(
     "npx",
     ["--yes", `--package=${tarball}`, "supercov", "--", "npm", "test"],
-    { cwd: project, encoding: "utf8", stdio: "pipe" },
+    { cwd: project, env: rustEnvironment, encoding: "utf8", stdio: "pipe" },
   );
   if (executed.status !== 0)
     throw new Error(
@@ -112,17 +123,27 @@ try {
   }
   if (existsSync(resolve(runsRoot, runIds[0], "report.json.gz")))
     throw new Error("packed npx run persisted a derived report");
-  const report = analyzeCoverageArchive(evidenceArchive, {
-    runId: runIds[0],
-    testExitCode: metadata.testExitCode,
-    integrity: metadata.integrity,
-    generatedAt: metadata.startedAt,
-  });
+  const queried = spawnSync(
+    "npx",
+    [
+      "--yes",
+      `--package=${tarball}`,
+      "supercov",
+      "runs",
+      runIds[0],
+      "coverage",
+      "--json",
+    ],
+    { cwd: project, env: rustEnvironment, encoding: "utf8", stdio: "pipe" },
+  );
+  if (queried.status !== 0)
+    throw new Error(`packed npx query failed:\n${queried.stderr}\n${queried.stdout}`);
+  const report = JSON.parse(queried.stdout).data;
   for (const metric of ["lines", "statements", "functions", "branches"]) {
-    if (report.summary[metric].percentage !== 100)
+    if (report.coverage[metric].percentage !== 100)
       throw new Error(`${metric} coverage was not complete`);
   }
-  if (report.summary.conditionCoveragePct !== 100)
+  if (report.coverage.conditionCoveragePct !== 100)
     throw new Error("MC/DC coverage was not complete");
   console.log(
     `[packed-npx] ${tarballName}: clean no-build project, unchanged sources, 100% coverage`,

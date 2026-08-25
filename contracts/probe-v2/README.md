@@ -1,9 +1,8 @@
 # Probe contract v2
 
 This contract freezes the language-neutral meaning of Supercov's second probe
-format before the Rust engine ports it. The TypeScript implementation remains
-experimental until every promotion gate below passes; experimental status may
-not weaken these semantics.
+format. The Rust engine implements it directly; target-language runtime shims
+may not weaken these semantics.
 
 ## Exact decision encoding
 
@@ -43,9 +42,9 @@ use a wider integer or bitmap while preserving the same ternary semantics.
 - Browser adapters must activate a new epoch whenever test or phase identity
   changes, including pages, frames, workers, and newly created documents.
 
-## Promotion gates
+## Conformance gates
 
-Probe v2 cannot become the default until all of these pass:
+Every probe-v2 implementation must keep all of these passing:
 
 1. v1/v2 manifests and normalized evidence are identical across the generated,
    property, hand-written, Test262, and ecosystem corpora.

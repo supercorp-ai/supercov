@@ -50,7 +50,6 @@ try {
   const original = readFileSync(resolve(project, 'src/permission.mjs'), 'utf8');
   const result = rust('__run-js-direct', {
     root: project,
-    runtimeRoot: resolve(repository, 'dist'),
     command: [process.execPath, '--test', '--test-concurrency=2'],
     runId: 'rust-direct-node',
     startedAt: '2026-08-25T00:00:00.000Z',
@@ -120,7 +119,6 @@ try {
   );
   const commonjs = rust('__run-js-direct', {
     root: commonjsProject,
-    runtimeRoot: resolve(repository, 'dist'),
     command: [process.execPath, '--test', '--test-concurrency=2'],
     runId: 'rust-direct-commonjs-node',
     startedAt: '2026-08-25T00:00:01.000Z',

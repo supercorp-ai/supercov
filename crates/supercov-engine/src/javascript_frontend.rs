@@ -19,8 +19,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     js_instrumenter::{
         CandidateBranch, CandidateDecision, CandidateError, CandidateLimitation, CandidatePoint,
-        instrument_candidate, instrument_direct_candidate,
-        instrument_node_assertion_phases_with_expect_modules,
+        instrument_candidate_with_runtime_hooks, instrument_direct_candidate_with_runtime_hooks,
+        instrument_node_assertion_phases_with_runtime_hooks,
     },
     project_discovery::{BuildAdapter, CoverageProject},
     source_discovery::{SourceLimitation, SourceScope},
@@ -29,7 +29,6 @@ use crate::{
 const RUNTIME_INSTANCE_MARKER: &str = "__SUPERCOV_RUNTIME_INSTANCE__";
 const RUNTIME_FILES: &[&str] = &[
     "atomic.js",
-    "esmInterceptor.js",
     "launchSupervisor.js",
     "nodeAssert.js",
     "nodeAssertAdapter.js",
@@ -43,7 +42,6 @@ const RUNTIME_FILES: &[&str] = &[
     "runnerEvidence.js",
     "runtime.js",
     "transport.js",
-    "types.js",
     "vitest.js",
     "vitestReporter.js",
 ];
@@ -119,33 +117,38 @@ struct ViteTransform {
     map: Option<serde_json::Value>,
 }
 
-pub fn javascript_runtime_files(runtime_root: &Path) -> Vec<PathBuf> {
-    RUNTIME_FILES
-        .iter()
-        .map(|name| runtime_root.join(name))
-        .collect()
-}
-
 fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
     match name {
-        "atomic.js" => Some(include_bytes!("../runtime/atomic.js")),
-        "esmInterceptor.js" => Some(include_bytes!("../runtime/esmInterceptor.js")),
-        "launchSupervisor.js" => Some(include_bytes!("../runtime/launchSupervisor.js")),
-        "nodeAssert.js" => Some(include_bytes!("../runtime/nodeAssert.js")),
-        "nodeAssertAdapter.js" => Some(include_bytes!("../runtime/nodeAssertAdapter.js")),
-        "nodeAssertStrict.js" => Some(include_bytes!("../runtime/nodeAssertStrict.js")),
-        "nodeTest.js" => Some(include_bytes!("../runtime/nodeTest.js")),
-        "playwright.js" => Some(include_bytes!("../runtime/playwright.js")),
-        "playwrightReporter.js" => Some(include_bytes!("../runtime/playwrightReporter.js")),
-        "provenance.js" => Some(include_bytes!("../runtime/provenance.js")),
-        "register.mjs" => Some(include_bytes!("../runtime/register.mjs")),
-        "resolve-loader.mjs" => Some(include_bytes!("../runtime/resolve-loader.mjs")),
-        "runnerEvidence.js" => Some(include_bytes!("../runtime/runnerEvidence.js")),
-        "runtime.js" => Some(include_bytes!("../runtime/runtime.js")),
-        "transport.js" => Some(include_bytes!("../runtime/transport.js")),
-        "types.js" => Some(include_bytes!("../runtime/types.js")),
-        "vitest.js" => Some(include_bytes!("../runtime/vitest.js")),
-        "vitestReporter.js" => Some(include_bytes!("../runtime/vitestReporter.js")),
+        "atomic.js" => Some(include_bytes!("../../../runtime/javascript/atomic.js")),
+        "launchSupervisor.js" => Some(include_bytes!(
+            "../../../runtime/javascript/launchSupervisor.js"
+        )),
+        "nodeAssert.js" => Some(include_bytes!("../../../runtime/javascript/nodeAssert.js")),
+        "nodeAssertAdapter.js" => Some(include_bytes!(
+            "../../../runtime/javascript/nodeAssertAdapter.js"
+        )),
+        "nodeAssertStrict.js" => Some(include_bytes!(
+            "../../../runtime/javascript/nodeAssertStrict.js"
+        )),
+        "nodeTest.js" => Some(include_bytes!("../../../runtime/javascript/nodeTest.js")),
+        "playwright.js" => Some(include_bytes!("../../../runtime/javascript/playwright.js")),
+        "playwrightReporter.js" => Some(include_bytes!(
+            "../../../runtime/javascript/playwrightReporter.js"
+        )),
+        "provenance.js" => Some(include_bytes!("../../../runtime/javascript/provenance.js")),
+        "register.mjs" => Some(include_bytes!("../../../runtime/javascript/register.mjs")),
+        "resolve-loader.mjs" => Some(include_bytes!(
+            "../../../runtime/javascript/resolve-loader.mjs"
+        )),
+        "runnerEvidence.js" => Some(include_bytes!(
+            "../../../runtime/javascript/runnerEvidence.js"
+        )),
+        "runtime.js" => Some(include_bytes!("../../../runtime/javascript/runtime.js")),
+        "transport.js" => Some(include_bytes!("../../../runtime/javascript/transport.js")),
+        "vitest.js" => Some(include_bytes!("../../../runtime/javascript/vitest.js")),
+        "vitestReporter.js" => Some(include_bytes!(
+            "../../../runtime/javascript/vitestReporter.js"
+        )),
         _ => None,
     }
 }
@@ -236,6 +239,25 @@ fn checked_source_path(workspace: &Path, file: &str) -> Result<PathBuf, Javascri
     Ok(workspace.join(relative))
 }
 
+fn runtime_specifier(file: &str, name: &str) -> Result<String, JavascriptFrontendError> {
+    let relative = Path::new(file);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(JavascriptFrontendError::UnsafeSourcePath(file.to_owned()));
+    }
+    let depth = relative
+        .parent()
+        .map_or(0, |parent| parent.components().count());
+    Ok(if depth == 0 {
+        format!("./.supercov/{name}")
+    } else {
+        format!("{}.supercov/{name}", "../".repeat(depth))
+    })
+}
+
 fn isolate_runtime(source: &str, collector_id: &str) -> Result<String, JavascriptFrontendError> {
     let double = format!("runtimeInstanceToken = \"{RUNTIME_INSTANCE_MARKER}\"");
     let single = format!("runtimeInstanceToken = '{RUNTIME_INSTANCE_MARKER}'");
@@ -258,9 +280,9 @@ fn isolate_runtime(source: &str, collector_id: &str) -> Result<String, Javascrip
     Err(JavascriptFrontendError::MissingRuntimeMarker)
 }
 
-/// The generated language shims are embedded without their TypeScript sources.
-/// Keeping a trailing source-map directive would make Node and browser tooling
-/// look for files that intentionally are not part of the runtime distribution.
+/// Target-language shims are embedded in the Rust engine. Keeping a trailing
+/// source-map directive would make Node and browser tooling look for source
+/// maps that intentionally are not part of the runtime distribution.
 fn strip_source_map_reference(mut bytes: Vec<u8>) -> Vec<u8> {
     const MARKER: &[u8] = b"\n//# sourceMappingURL=";
     if let Some(index) = bytes
@@ -277,11 +299,7 @@ fn strip_source_map_reference(mut bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
-fn copy_runtime(
-    runtime_root: Option<&Path>,
-    generated: &Path,
-    collector_id: &str,
-) -> Result<(), JavascriptFrontendError> {
+fn copy_runtime(generated: &Path, collector_id: &str) -> Result<(), JavascriptFrontendError> {
     create_directory_all(generated)?;
     atomic_write(
         &generated.join("package.json"),
@@ -289,16 +307,10 @@ fn copy_runtime(
     )?;
     for name in RUNTIME_FILES {
         let destination = generated.join(name);
-        let (bytes, source_path) = if let Some(runtime_root) = runtime_root {
-            let source_path = runtime_root.join(name);
-            let bytes = fs::read(&source_path).map_err(|source| io_error(&source_path, source))?;
-            (bytes, source_path)
-        } else {
-            let bytes = embedded_runtime(name)
-                .expect("every declared runtime file must have an embedded asset")
-                .to_vec();
-            (bytes, PathBuf::from(format!("embedded:{name}")))
-        };
+        let source_path = PathBuf::from(format!("embedded:{name}"));
+        let bytes = embedded_runtime(name)
+            .expect("every declared runtime file must have an embedded asset")
+            .to_vec();
         let bytes = strip_source_map_reference(bytes);
         if *name == "runtime.js" {
             let text = String::from_utf8(bytes).map_err(|source| {
@@ -644,11 +656,10 @@ export function supercovViteInstrumentation(root) {\n\
 pub fn prepare_javascript_frontend(
     workspace: &Path,
     project: &CoverageProject,
-    runtime_root: Option<&Path>,
     collector_id: &str,
 ) -> Result<PreparedJavascriptFrontend, JavascriptFrontendError> {
     let generated = workspace.join(".supercov");
-    copy_runtime(runtime_root, &generated, collector_id)?;
+    copy_runtime(&generated, collector_id)?;
     configure_playwright_runtime(&generated, project)?;
     let playwright_config_path = write_playwright_config(workspace, project, &generated)?;
     let vite_config_path = write_vite_config(workspace, &generated)?;
@@ -666,10 +677,14 @@ pub fn prepare_javascript_frontend(
     for file in &project.source_files {
         let path = checked_source_path(workspace, file)?;
         let source = fs::read_to_string(&path).map_err(|source| io_error(&path, source))?;
+        let capability_wrapper = runtime_specifier(file, "launchSupervisor.js")?;
         let mut output = match project.build_adapter {
-            BuildAdapter::Vite => instrument_candidate(&source, file),
-            BuildAdapter::Generic => instrument_candidate(&source, file),
-            BuildAdapter::Direct => instrument_direct_candidate(&source, file),
+            BuildAdapter::Vite | BuildAdapter::Generic => {
+                instrument_candidate_with_runtime_hooks(&source, file, &capability_wrapper)
+            }
+            BuildAdapter::Direct => {
+                instrument_direct_candidate_with_runtime_hooks(&source, file, &capability_wrapper)
+            }
         }
         .map_err(|source| JavascriptFrontendError::Instrument {
             file: file.clone(),
@@ -721,10 +736,14 @@ pub fn prepare_javascript_frontend(
         let Ok(source) = fs::read_to_string(&path) else {
             continue;
         };
-        let output = instrument_node_assertion_phases_with_expect_modules(
+        let capability_wrapper = (!project.source_files.contains(&entry.file))
+            .then(|| runtime_specifier(&entry.file, "launchSupervisor.js"))
+            .transpose()?;
+        let output = instrument_node_assertion_phases_with_runtime_hooks(
             &source,
             &entry.file,
             std::slice::from_ref(&project.playwright_module),
+            capability_wrapper.as_deref(),
         )
         .map_err(|source| JavascriptFrontendError::Instrument {
             file: entry.file.clone(),
@@ -732,7 +751,8 @@ pub fn prepare_javascript_frontend(
         })?;
         let coverage_transformed_by_vite = project.build_adapter == BuildAdapter::Vite
             && project.source_files.contains(&entry.file);
-        if output.assertions > 0 && !coverage_transformed_by_vite {
+        if (output.assertions > 0 || output.capability_imports > 0) && !coverage_transformed_by_vite
+        {
             atomic_write(&path, output.code.as_bytes())?;
             assertion_calls += output.assertions;
         }
@@ -830,7 +850,7 @@ mod tests {
     #[test]
     fn copied_runtime_does_not_reference_unshipped_source_maps() {
         let generated = temporary("runtime-source-maps");
-        copy_runtime(None, &generated, "collector-test").unwrap();
+        copy_runtime(&generated, "collector-test").unwrap();
         for name in ["vitest.js", "provenance.js", "atomic.js"] {
             let contents = fs::read_to_string(generated.join(name)).unwrap();
             assert!(
@@ -845,7 +865,6 @@ mod tests {
     fn prepares_sorted_complete_manifest_without_touching_source_project() {
         let source_root = temporary("source");
         let workspace = temporary("workspace");
-        let runtime = temporary("runtime");
         fs::create_dir_all(source_root.join("src")).unwrap();
         fs::write(
             source_root.join("src/example.mjs"),
@@ -860,15 +879,6 @@ mod tests {
             workspace.join("src/example.mjs"),
         )
         .unwrap();
-        for name in RUNTIME_FILES {
-            fs::create_dir_all(&runtime).unwrap();
-            let contents = if *name == "runtime.js" {
-                "const runtimeInstanceToken = \"__SUPERCOV_RUNTIME_INSTANCE__\";\n"
-            } else {
-                "export {};\n"
-            };
-            fs::write(runtime.join(name), contents).unwrap();
-        }
         let project = discover_coverage_project(
             &source_root,
             &BTreeMap::new(),
@@ -876,9 +886,7 @@ mod tests {
         )
         .unwrap();
         let original = fs::read_to_string(source_root.join("src/example.mjs")).unwrap();
-        let prepared =
-            prepare_javascript_frontend(&workspace, &project, Some(&runtime), "collector-test")
-                .unwrap();
+        let prepared = prepare_javascript_frontend(&workspace, &project, "collector-test").unwrap();
         assert_eq!(
             fs::read_to_string(source_root.join("src/example.mjs")).unwrap(),
             original
@@ -896,7 +904,6 @@ mod tests {
         assert_eq!(prepared.assertion_calls, 0);
         fs::remove_dir_all(source_root).unwrap();
         fs::remove_dir_all(workspace).unwrap();
-        fs::remove_dir_all(runtime).unwrap();
     }
 
     #[test]

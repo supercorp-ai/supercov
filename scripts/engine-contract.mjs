@@ -19,6 +19,11 @@ const configured = process.env.SUPERCOV_CONTRACT_ENGINE;
 const engine = configured
   ? JSON.parse(configured)
   : [process.execPath, resolve(repository, "bin/supercov.js")];
+const localBinary = resolve(
+  repository,
+  "target/debug",
+  `supercov${process.platform === "win32" ? ".exe" : ""}`,
+);
 if (!Array.isArray(engine) || engine.some((part) => typeof part !== "string"))
   throw new Error("SUPERCOV_CONTRACT_ENGINE must be a JSON argv array");
 
@@ -29,6 +34,9 @@ function execute(cwd, args) {
     stdio: "pipe",
     env: {
       ...process.env,
+      ...(!configured && existsSync(localBinary)
+        ? { SUPERCOV_RUST_BINARY: localBinary }
+        : {}),
       SUPERCOV_DIAGNOSTIC_INTERVAL_MS: "10000",
       SUPERCOV_COMMAND_TIMEOUT_MS: "120000",
     },

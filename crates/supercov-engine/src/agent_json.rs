@@ -130,7 +130,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn success_is_byte_identical_to_the_reference_engine() {
+    fn success_is_byte_identical_to_the_frozen_golden() {
         let actual = success(
             "coverage.summary",
             &json!({"run": "run-123", "coverage": {"lines": 100}}),
@@ -144,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn pagination_is_byte_identical_to_the_reference_engine() {
+    fn pagination_is_byte_identical_to_the_frozen_golden() {
         let page = pagination(20, 20, 1, 21);
         let actual = success(
             "coverage.gaps",
@@ -156,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn errors_are_byte_identical_to_the_reference_engine() {
+    fn errors_are_byte_identical_to_the_frozen_golden() {
         let actual = failure(
             Some("coverage.file"),
             &AgentError {

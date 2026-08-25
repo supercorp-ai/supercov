@@ -27,9 +27,7 @@ function run(arguments_) {
     encoding: 'utf8',
     env: {
       ...process.env,
-      SUPERCOV_ENGINE: 'rust',
       SUPERCOV_RUST_BINARY: binary,
-      SUPERCOV_RUNTIME_ROOT: resolve(repository, 'dist'),
     },
   });
 }
@@ -120,9 +118,7 @@ try {
       cwd: project,
       env: {
         ...process.env,
-        SUPERCOV_ENGINE: 'rust',
         SUPERCOV_RUST_BINARY: binary,
-        SUPERCOV_RUNTIME_ROOT: resolve(repository, 'dist'),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     },

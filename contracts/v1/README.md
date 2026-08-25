@@ -3,8 +3,8 @@
 Status: **frozen** on 2026-08-24 from the shipped TypeScript engine, then
 audited as an implementation-neutral compatibility contract.
 
-These contracts are implementation-neutral requirements. The TypeScript
-reference engine and every Rust candidate must pass the same black-box corpus.
+These contracts are implementation-neutral requirements. The Rust engine and
+every future language frontend must pass the same black-box corpus.
 Changing an implementation is not permission to change a contract. A contract
 change requires a new version, migration rules, golden fixtures, and an
 explicit compatibility decision. This does not make historical TypeScript

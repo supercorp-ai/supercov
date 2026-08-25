@@ -4,6 +4,10 @@ import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = mkdtempSync(resolve(tmpdir(), "supercov-watchdog-"));
+const rustBinary = resolve(
+  "target/debug",
+  `supercov${process.platform === "win32" ? ".exe" : ""}`,
+);
 try {
   mkdirSync(resolve(root, "src"));
   writeFileSync(
@@ -26,6 +30,7 @@ try {
       encoding: "utf8",
       env: {
         ...process.env,
+        SUPERCOV_RUST_BINARY: rustBinary,
         SUPERCOV_DIAGNOSTIC_INTERVAL_MS: "50",
         SUPERCOV_COMMAND_TIMEOUT_MS: "220",
       },

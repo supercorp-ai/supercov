@@ -36,8 +36,6 @@ try {
   );
 
   const environment = { ...process.env };
-  delete environment.SUPERCOV_RUNTIME_ROOT;
-  delete environment.SUPERCOV_ENGINE;
   delete environment.SUPERCOV_RUST_BINARY;
 
   run("python3", ["-m", "venv", resolve(temporary, "venv")]);

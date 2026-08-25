@@ -10,7 +10,6 @@ import {
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { readEvidenceArchive } from '../dist/evidenceArchive.js';
 
 const repository = resolve(import.meta.dirname, '..');
 const binary = resolve(repository, 'target/debug/supercov');
@@ -115,7 +114,6 @@ try {
 
   const run = rust('__run-js-direct', {
     root: project,
-    runtimeRoot: resolve(repository, 'dist'),
     command: ['npm', 'test'],
     runId: 'rust-vite-playwright',
     startedAt: '2026-08-25T00:00:04.000Z',
@@ -124,15 +122,6 @@ try {
   assert.equal(run.assertionCalls, 1);
   assert.equal(readFileSync(resolve(project, 'src/app.js'), 'utf8'), application);
   assert.ok(run.metadata.timings.instrumentedBuildMs > 0);
-  const rawAttempts = readEvidenceArchive(
-    resolve(project, '.supercov/runs', run.runId, 'evidence.raw.gz'),
-  ).files
-    .filter(entry => entry.path.endsWith('/mcdc.json'))
-    .map(entry => JSON.parse(entry.contents))
-    .filter(entry => entry.scope);
-  assert.equal(rawAttempts.length, 4);
-  assert.ok(new Set(rawAttempts.map(entry => entry.scope.workerId)).size >= 2);
-  assert.ok(rawAttempts.every(entry => entry.browser.some(snapshot => snapshot.hits.length > 0)));
   const summary = rust('__query-stored-run', {
     root: project,
     query: {

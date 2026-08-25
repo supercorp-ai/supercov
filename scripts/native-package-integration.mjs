@@ -97,7 +97,7 @@ try {
 
   const mainRoot = resolve(temporary, "main");
   cpSync(resolve(repository, "bin"), resolve(mainRoot, "bin"), { recursive: true });
-  cpSync(resolve(repository, "dist"), resolve(mainRoot, "dist"), { recursive: true });
+  cpSync(resolve(repository, "runtime"), resolve(mainRoot, "runtime"), { recursive: true });
   for (const file of ["package.json", "README.md", "LICENSE"])
     cpSync(resolve(repository, file), resolve(mainRoot, file));
   const mainPack = JSON.parse(
@@ -120,7 +120,7 @@ try {
   const covered = spawnSync(process.execPath, [executable, "--", process.execPath, "--test"], {
     cwd: consumer,
     encoding: "utf8",
-    env: { ...process.env, SUPERCOV_ENGINE: "rust" },
+    env: process.env,
   });
   assert.equal(covered.status, 0, covered.stderr || covered.stdout);
   assert.match(covered.stdout, /\[coverage\] evidence:/);
@@ -134,7 +134,7 @@ try {
   const mismatched = spawnSync(process.execPath, [executable, "help"], {
     cwd: consumer,
     encoding: "utf8",
-    env: { ...process.env, SUPERCOV_ENGINE: "rust" },
+    env: process.env,
   });
   assert.equal(mismatched.status, 1);
   assert.match(mismatched.stderr, /native package version mismatch/);
@@ -145,7 +145,7 @@ try {
   const missingBinary = spawnSync(process.execPath, [executable, "help"], {
     cwd: consumer,
     encoding: "utf8",
-    env: { ...process.env, SUPERCOV_ENGINE: "rust" },
+    env: process.env,
   });
   assert.equal(missingBinary.status, 1);
   assert.match(missingBinary.stderr, /does not contain a regular Supercov executable/);
@@ -157,7 +157,7 @@ try {
   const missingPackage = spawnSync(process.execPath, [executable, "help"], {
     cwd: consumer,
     encoding: "utf8",
-    env: { ...process.env, SUPERCOV_ENGINE: "rust" },
+    env: process.env,
   });
   assert.equal(missingPackage.status, 1);
   assert.match(missingPackage.stderr, /optional native package .* is missing/);

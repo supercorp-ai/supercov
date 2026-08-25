@@ -3,8 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { readEvidenceArchive } from "../dist/evidenceArchive.js";
-import { analyzeCoverageArchive } from "../dist/runAnalysis.js";
+import { coverageQuery, localRustEnvironment } from "./coverage-test-helpers.mjs";
 
 const fixture = resolve("tests/fixtures/generic-playwright");
 const runsRoot = resolve(fixture, ".supercov/runs");
@@ -12,7 +11,7 @@ const before = new Set(existsSync(runsRoot) ? readdirSync(runsRoot) : []);
 const result = spawnSync(
   process.execPath,
   [resolve("bin/supercov.js"), "--", "npm", "run", "test:opaque"],
-  { cwd: fixture, encoding: "utf8", stdio: "pipe" },
+  { cwd: fixture, env: { ...process.env, ...localRustEnvironment }, encoding: "utf8", stdio: "pipe" },
 );
 if (result.status !== 0) {
   throw new Error(
@@ -33,44 +32,21 @@ if (metadata.instrumentedBuildCache?.reused !== true)
 const evidencePath = resolve(runsRoot, runId, "evidence.raw.gz");
 if (existsSync(resolve(runsRoot, runId, "report.json.gz")))
   throw new Error("opaque runner persisted a derived report");
-const report = analyzeCoverageArchive(evidencePath, {
-  runId,
-  testExitCode: metadata.testExitCode,
-  integrity: metadata.integrity,
-  generatedAt: metadata.startedAt,
-});
+if (!existsSync(evidencePath)) throw new Error("opaque runner omitted raw evidence");
+const summary = coverageQuery(fixture, runId).data;
 for (const metric of ["lines", "statements", "functions", "branches"]) {
-  if (report.summary[metric].percentage !== 100)
+  if (summary.coverage[metric].percentage !== 100)
     throw new Error(`${metric} coverage was not complete`);
 }
-if (report.summary.conditionCoveragePct !== 100)
+if (summary.coverage.conditionCoveragePct !== 100)
   throw new Error("MC/DC coverage was not complete");
-
-const archive = readEvidenceArchive(
-  evidencePath,
-);
-const traceFiles = archive.files.filter((entry) =>
-  /(?:^|\/)execution\..+\.jsonl$/.test(entry.path),
-);
-const events = traceFiles.flatMap(({ path, contents }) =>
-  contents
-    .split("\n")
-    .filter(Boolean)
-    .map((line, index) => {
-      try {
-        return JSON.parse(line);
-      } catch (error) {
-        throw new Error(`${path}:${index + 1}: ${error}`);
-      }
-    }),
-);
-if (events.filter((event) => event.event === "workspace-capability").length !== 1)
+if (summary.transport.workspaceCapabilities !== 1)
   throw new Error("opaque workspace capability was not discovered exactly once");
-if (events.filter((event) => event.event === "remote-launch").length !== 1)
+if (summary.transport.remoteLaunches !== 1)
   throw new Error("opaque remote launch was not intercepted exactly once");
-if (events.some((event) => JSON.stringify(event).includes("supermachine")))
+if (readFileSync(resolve("runtime/javascript/launchSupervisor.js"), "utf8").includes("supermachine"))
   throw new Error("provider-specific behavior leaked into the public fixture");
 
 console.log(
-  `[opaque-runner] run ${runId}: reused build, ${traceFiles.length} archived parseable trace shards, generic remote launch, 100% coverage`,
+  `[opaque-runner] run ${runId}: reused build, generic remote launch, 100% coverage`,
 );

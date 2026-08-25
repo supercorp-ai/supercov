@@ -18,26 +18,30 @@ npm link
 
 ## Verifying the instrumenter
 
-The coverage engine has seven independent release gates:
+Supercov has one coverage engine, implemented in Rust. JavaScript files under
+`runtime/javascript/` are target-runtime shims for Node, browsers and test
+runners; they do not contain a second analyzer or instrumenter.
 
-- semantic differential fixtures execute original and instrumented programs
-  in isolated scopes and compare return values, thrown errors, and observable
-  side-effect order;
-- a deterministic generated corpus exercises 160 nested combinations of
-  short-circuiting, ternaries, coercion, and thrown expressions on every run;
-- seeded `fast-check` properties exercise another 500 generated nested
-  expressions and 300 generated control-flow executions, with shrinking and a
-  reproducible seed on failure;
-- coverage oracles assert exact decision vectors, MC/DC witnesses, and branch
+The coverage engine has independent correctness gates:
+
+- Rust unit and golden tests cover transformation semantics, complete
+  obligation manifests, evidence validation, attribution, MC/DC witnesses,
+  storage, lifecycle recovery and agent JSON contracts;
+- syntax and behavior matrices execute original and instrumented modern
+  JavaScript, JSX, TypeScript and TSX under Node, Chromium, Firefox and WebKit;
+- coverage oracles assert exact decision vectors, MC/DC witnesses and branch
   alternatives independently of program behavior;
 - the same three-condition masking-MC/DC golden cases must report 100% for a
   complete witness set and 33.33% for an incomplete one under both Supercov
   and Clang/LLVM source-based MC/DC;
-- release CI shards the pinned TC39 Test262 corpus across 16 workers, runs the
-  official Test262 harness on original and instrumented sources, and rejects
-  any scenario that passes originally but fails after transformation; and
-- checked performance budgets cover transform latency, transactional workspace
-  preparation, output expansion, and runtime probe overhead.
+- the pinned TC39 Test262 corpus runs through the official harness before and
+  after instrumentation and rejects any originally passing scenario that
+  changes behavior;
+- black-box fixtures exercise node:test, Vitest, Playwright, opaque remote
+  execution, Vite, Next, Webpack, esbuild, SWC and TypeScript compilation; and
+- checked performance and filesystem gates cover transform latency,
+  transactional workspace preparation, output expansion, signal handling,
+  crash recovery and runtime probe overhead.
 
 ```sh
 npm test
@@ -62,7 +66,7 @@ default with `TEST262_DIR=/path/to/test262` or `--test262 <path>`.
 The differential suite includes getters, proxies, optional calls and `this`,
 computed logical assignments, defaults, `try`/`catch`/`finally`, iterator
 closing, switch fallthrough, labeled loops, async functions, and generators.
-The compatibility workflow additionally runs Node 22/24/25, Playwright
+The manually dispatched compatibility workflow additionally runs Node 22/24/25, Playwright
 1.55/current, Vite 5/current, Vitest 2/current, Chromium, Firefox, WebKit, and
 modern JavaScript/JSX/TypeScript/TSX syntax fixtures. Filesystem publication,
 symlink, copy fallback, ENOSPC, failed rename, and forced-termination recovery
@@ -191,7 +195,7 @@ producing a plausible but invalid aggregate.
 For a JavaScript or TypeScript project, the CLI:
 
 1. refreshes a stable isolated source namespace under
-   `.supercov/cache/instrumented-workspace/<project>/`, links the existing
+   `supercov/workspace/<project>/`, links the existing
    dependency tree, and creates generated runner configuration and build output
    only there; file data uses copy-on-write reflinks where the filesystem
    supports them, and falls back to copying where it does not; the stable path
@@ -210,7 +214,7 @@ For a JavaScript or TypeScript project, the CLI:
    and CommonJS projects use the same disposable direct path;
 4. runs the exact command following `--`, propagating coverage through every
    Node child process it launches. Generated adapters provide exact test,
-   worker, retry, and outcome scopes for Playwright, Vitest, Jest, and
+   worker, retry, and outcome scopes for Playwright, Vitest, and
    `node:test` without changing test imports or configs;
 5. attributes source hits and decision vectors to individual tests where an
    exact adapter is active,
@@ -223,8 +227,10 @@ For a JavaScript or TypeScript project, the CLI:
    ordinary application build is never read as an input, overwritten, or
    rebuilt afterward.
 
-Only `.supercov/` is modified in the user's checkout. A per-project lock
-rejects overlapping runs before either can build. Run state is durably written
+Only the Supercov-owned `.supercov/` run store and marker-protected
+`supercov/workspace/` cache are modified in the user's checkout. A user-created
+`supercov/` directory without Supercov's ownership marker is never treated as
+storage. A per-project lock rejects overlapping runs before either can build. Run state is durably written
 through preparing/building/testing/publishing phases; SIGINT, SIGTERM,
 and SIGHUP are forwarded to the entire child process group. If the process is
 killed without a cleanup opportunity, the next invocation marks the dead PID's
@@ -268,8 +274,7 @@ strategy trade-offs, and a measured real-suite reference.
 
 The automatic exact-attribution adapters support standard Playwright suites
 (ESM and CommonJS specs in arbitrary project directories), project-owned
-Playwright fixture packages, Vitest, Jest—including concurrent and
-parameterized tests—and `node:test`. A single command can collect several
+Playwright fixture packages, Vitest and `node:test`. A single command can collect several
 runners into one run. Unsupported runners such as AVA or Mocha still receive
 aggregate first-party structural coverage through inherited process
 instrumentation, but their hits remain background/unattributed rather than

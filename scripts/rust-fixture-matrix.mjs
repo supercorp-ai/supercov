@@ -10,7 +10,6 @@ const binary = resolve(
 );
 const rustEnvironment = {
   ...process.env,
-  SUPERCOV_ENGINE: "rust",
   SUPERCOV_RUST_BINARY: binary,
 };
 
@@ -38,9 +37,7 @@ function runNode(arguments_, extraEnvironment = {}) {
     );
 }
 
-// Chromium exercises every currently supported Rust adapter/build fixture.
-// Jest remains an explicit reference-engine-only fixture while its exact
-// per-test attribution is deferred; do not make it a false Rust cutover gate.
+// Chromium exercises every currently supported adapter/build fixture.
 run(["--prefix", "tests/fixtures/generic-playwright", "run", "test:coverage"]);
 for (const script of [
   "opaque-runner-integration.mjs",

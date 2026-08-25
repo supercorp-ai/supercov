@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn bitset_search_preserves_the_reference_first_pair_order() {
+    fn bitset_search_preserves_the_frozen_first_pair_order() {
         let vectors = vec![
             McdcVector {
                 values: vec![Some(false), None],

@@ -48,9 +48,9 @@ mod public_query;
 use human_query::render_human;
 use public_query::{PublicQueryInvocation, parse_public_query};
 
-const HELP: &str = "Supercov coverage engine (Rust differential candidate).\n\
+const HELP: &str = "Supercov coverage engine.\n\
 \n\
-Reference-engine UX:\n\
+Usage:\n\
   supercov -- <test command>\n\
   supercov runs <run-id> coverage [resource] [--json]\n\
   supercov diff <older-run> <newer-run> [--json]\n\
@@ -96,9 +96,7 @@ fn main() -> ExitCode {
         Some("diff") => public_query_command("diff", arguments.collect()),
         Some("merge") => merge_command(arguments.collect()),
         Some(command) => {
-            eprintln!(
-                "[supercov] Rust engine candidate is not ready for `{command}`; use the currently shipped engine while the Rust contract gates are incomplete"
-            );
+            eprintln!("[supercov] Unknown command: {command}. Try supercov help.");
             ExitCode::from(2)
         }
     }
@@ -181,7 +179,6 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let runtime_root = resolve_runtime_root(&root);
     let (run_id, started_at) = match public_timestamp() {
         Ok(timestamp) => timestamp,
         Err(error) => {
@@ -192,7 +189,6 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
     spawn_trash_sweeper(&root);
     let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
         root: root.clone(),
-        runtime_root,
         command,
         run_id: Some(run_id),
         started_at: Some(started_at),
@@ -369,33 +365,8 @@ fn run_store_agent_error(error: RunStoreError) -> agent_json::AgentError {
     }
 }
 
-fn resolve_runtime_root(root: &Path) -> Option<PathBuf> {
-    if let Some(configured) = std::env::var_os("SUPERCOV_RUNTIME_ROOT") {
-        let configured = PathBuf::from(configured);
-        if configured.join("runtime.js").is_file() {
-            return Some(configured);
-        }
-    }
-    let local = root.join("dist");
-    if local.join("runtime.js").is_file() {
-        return Some(local);
-    }
-    std::env::current_exe().ok().and_then(|executable| {
-        executable.ancestors().find_map(|ancestor| {
-            let candidate = ancestor.join("dist");
-            candidate.join("runtime.js").is_file().then_some(candidate)
-        })
-    })
-}
-
 fn current_javascript_integrity(root: &Path) -> Option<supercov_engine::run_store::RunIntegrity> {
-    let runtime_root = resolve_runtime_root(root);
-    supercov_engine::javascript_run::current_javascript_integrity(
-        root,
-        runtime_root.as_deref(),
-        &[],
-    )
-    .ok()
+    supercov_engine::javascript_run::current_javascript_integrity(root, &[]).ok()
 }
 
 enum PublicQueryOutput {
@@ -1801,8 +1772,7 @@ struct InstrumentCase {
     source: String,
 }
 
-/// Private migration protocol. It intentionally accepts a whole batch so the
-/// Node shim never pays one process launch per source file.
+/// Private batch protocol used by conformance and performance harnesses.
 fn instrument_js() -> ExitCode {
     let input = match stdin() {
         Ok(input) => input,
@@ -1935,12 +1905,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shell_reports_its_private_differential_readiness_honestly() {
-        assert!(HELP.contains("Rust differential candidate"));
-        assert_eq!(
-            supercov_engine::READINESS,
-            supercov_engine::EngineReadiness::DifferentialCandidate
-        );
+    fn shell_reports_the_public_engine() {
+        assert!(HELP.contains("Supercov coverage engine"));
     }
 
     #[test]

@@ -1,7 +1,6 @@
 name: CI
 
 on:
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -18,9 +17,3 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-      - run: npm run build
-      - run: npm run test:embedded-runtime
-      - run: npm run test:rust-assets

@@ -16,6 +16,12 @@ import { tmpdir } from "node:os";
 import { basename, resolve } from "node:path";
 
 const root = resolve("tests/fixtures/generic-playwright");
+const launcher = resolve("bin/supercov.js");
+const rustBinary = resolve(
+  "target/debug",
+  `supercov${process.platform === "win32" ? ".exe" : ""}`,
+);
+const rustEnvironment = { ...process.env, SUPERCOV_RUST_BINARY: rustBinary };
 const build = spawnSync("npm", ["run", "build"], {
   cwd: root,
   encoding: "utf8",
@@ -90,9 +96,9 @@ async function verifyUncatchableCacheRecovery() {
     writeFileSync(previousGenerationMarker, "last complete generation\n");
 
     const killed = spawn(
-      process.execPath,
-      [resolve("dist/cli.js"), "--", process.execPath, "test.mjs"],
-      { cwd: crashRoot, stdio: ["ignore", "pipe", "pipe"] },
+      rustBinary,
+      ["--", process.execPath, "test.mjs"],
+      { cwd: crashRoot, env: rustEnvironment, stdio: ["ignore", "pipe", "pipe"] },
     );
     let killedOutput = "";
     killed.stdout.on("data", (chunk) => (killedOutput += chunk.toString()));
@@ -141,9 +147,9 @@ async function verifyUncatchableCacheRecovery() {
       throw new Error("SIGKILL unexpectedly ran cooperative lock cleanup");
 
     const recovered = spawnSync(
-      process.execPath,
-      [resolve("dist/cli.js"), "--", process.execPath, "test.mjs"],
-      { cwd: crashRoot, encoding: "utf8", stdio: "pipe" },
+      rustBinary,
+      ["--", process.execPath, "test.mjs"],
+      { cwd: crashRoot, env: rustEnvironment, encoding: "utf8", stdio: "pipe" },
     );
     if (recovered.status !== 0)
       throw new Error(
@@ -154,7 +160,12 @@ async function verifyUncatchableCacheRecovery() {
     if (JSON.stringify(snapshot(crashRoot)) !== JSON.stringify(projectBefore))
       throw new Error("SIGKILL recovery changed a file outside the Supercov store");
   } finally {
-    rmSync(crashRoot, { recursive: true, force: true });
+    rmSync(crashRoot, {
+      recursive: true,
+      force: true,
+      maxRetries: 30,
+      retryDelay: 100,
+    });
   }
 }
 
@@ -170,8 +181,8 @@ const expectedCache = resolve(
 
 const child = spawn(
   process.execPath,
-  [resolve("bin/supercov.js"), "--", process.execPath, "-e", "setInterval(() => {}, 1000)"],
-  { cwd: root, stdio: ["ignore", "pipe", "pipe"] },
+  [launcher, "--", process.execPath, "-e", "setInterval(() => {}, 1000)"],
+  { cwd: root, env: rustEnvironment, stdio: ["ignore", "pipe", "pipe"] },
 );
 let output = "";
 let signalled = false;
@@ -233,8 +244,8 @@ const storedRunsBefore = new Set(
 // Build-cache reuse is only meaningful for a command that actually builds.
 const successful = spawnSync(
   process.execPath,
-  [resolve("bin/supercov.js"), "--", "npm", "run", "test:opaque"],
-  { cwd: root, encoding: "utf8", stdio: "pipe" },
+  [launcher, "--", "npm", "run", "test:opaque"],
+  { cwd: root, env: rustEnvironment, encoding: "utf8", stdio: "pipe" },
 );
 if (successful.status !== 0)
   throw new Error(
@@ -283,8 +294,8 @@ if (JSON.stringify(projectAfterSuccess) !== JSON.stringify(projectBefore))
 
 const cleaned = spawnSync(
   process.execPath,
-  [resolve("bin/supercov.js"), "clean", "--keep", "20"],
-  { cwd: root, encoding: "utf8", stdio: "pipe" },
+  [launcher, "clean", "--keep", "20"],
+  { cwd: root, env: rustEnvironment, encoding: "utf8", stdio: "pipe" },
 );
 if (cleaned.status !== 0)
   throw new Error(`isolated cache cleanup failed:\n${cleaned.stderr}\n${cleaned.stdout}`);
