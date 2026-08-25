@@ -945,7 +945,14 @@ miss blocks flipping any default.
   a shared analyzer defect: setup-only/background-only confidence now follows
   observed phase kinds whenever phase evidence exists, rather than a synthetic
   result role. Broader xdist scheduling, worker crash, retry, subprocess,
-  thread and async cases are still open.
+  thread and async cases are still open. Retry attribution is now proven in
+  both serial pytest and two-worker xdist using the real
+  pytest-rerunfailures 16.6 lifecycle: `item.execution_count` identifies the
+  active attempt before setup/call/teardown, and `report.rerun` identifies the
+  emitted report. Attempt zero's rerun outcome is retained as failed evidence,
+  attempt one's terminal pass alone verifies passed-only coverage, and the
+  shared analyzer classifies the logical test as flaky. No wall-clock or hook-
+  ordering inference is used.
 - Shared analysis no longer hardcodes the JavaScript coverage-model label for
   every language. `CoverageReportRequest` now carries an optional strict
   `CoverageModelDeclaration`; absent declarations retain the byte-compatible

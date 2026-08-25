@@ -409,7 +409,10 @@ fn validate_export(export: &PythonCoverageExport, run_id: &str) -> Result<(), Py
         if outcome.worker_id.trim().is_empty()
             || outcome.test_id.trim().is_empty()
             || !matches!(outcome.phase.as_str(), "setup" | "call" | "teardown")
-            || !matches!(outcome.outcome.as_str(), "passed" | "failed" | "skipped")
+            || !matches!(
+                outcome.outcome.as_str(),
+                "passed" | "failed" | "skipped" | "rerun"
+            )
             || !outcome_keys.insert((
                 outcome.worker_id.as_str(),
                 outcome.test_id.as_str(),
@@ -431,7 +434,10 @@ fn phase_id(run: &str, worker: &str, test: &str, retry: usize, phase: &str) -> S
 }
 
 fn test_status(outcomes: &[&PytestOutcome]) -> String {
-    if outcomes.iter().any(|outcome| outcome.outcome == "failed") {
+    if outcomes
+        .iter()
+        .any(|outcome| matches!(outcome.outcome.as_str(), "failed" | "rerun"))
+    {
         "failed"
     } else if outcomes.iter().any(|outcome| outcome.outcome == "skipped") {
         "skipped"
@@ -820,6 +826,8 @@ mod tests {
         include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-xdist.json");
     const OUTCOMES_GOLDEN: &[u8] =
         include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-outcomes.json");
+    const RETRY_GOLDEN: &[u8] =
+        include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-retry.json");
 
     #[test]
     fn imports_the_coverage_py_oracle_without_inventing_assertion_or_mcdc_facts() {
@@ -1027,6 +1035,47 @@ mod tests {
             .find(|result| result.test.ends_with("test_positive_path"))
             .unwrap();
         assert_eq!(expected_failure.expected_status.as_deref(), Some("failed"));
+    }
+
+    #[test]
+    fn keeps_retry_attempts_separate_and_verifies_only_the_terminal_pass() {
+        let imported = import_python_coverage_json(
+            RETRY_GOLDEN,
+            "python-tier-a-retry2",
+            "2026-08-25T00:00:00.000Z",
+            Some(0),
+        )
+        .unwrap();
+        let report = analyze_frontend_results(&imported.declaration, &imported.request).unwrap();
+        assert_eq!(
+            (
+                report.view.summary.lines.covered,
+                report.view.summary.branches.covered,
+                report.filters.passed.summary.lines.covered,
+                report.filters.passed.summary.branches.covered,
+                report.filters.failed.summary.lines.covered,
+                report.filters.failed.summary.branches.covered,
+            ),
+            (6, 3, 3, 2, 2, 1)
+        );
+        let attempts = imported
+            .request
+            .raw_results
+            .iter()
+            .filter(|result| result.role == "test")
+            .map(|result| (result.retry.unwrap(), result.status.as_deref().unwrap()))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(attempts, BTreeMap::from([(0, "failed"), (1, "passed")]));
+        assert_eq!(
+            report
+                .view
+                .tests
+                .iter()
+                .find(|test| test.role == "test")
+                .unwrap()
+                .outcome,
+            "flaky"
+        );
     }
 
     #[test]

@@ -58,8 +58,15 @@ The importer reproduces coverage.py's 11/12 executable lines and 7/8 branch
 arcs exactly. Passed-only coverage contains only the terminal ordinary pass;
 xfail, failures, skips, and background imports cannot verify it. Setup-only
 confidence is derived from the actual setup phase rather than a guessed test
-role. Retry identity, crashed workers, subprocesses, threads, and async
-execution remain explicit open gates.
+role.
+
+Retries are proven against pytest-rerunfailures 16.6 in serial pytest and
+under two-worker xdist. Its observed lifecycle assigns `item.execution_count`
+before the ordinary phase hooks and copies the zero-based attempt onto
+`report.rerun`. The producer records that identity directly. An intermediate
+`rerun` phase becomes a failed attempt; only the terminal pass contributes to
+passed-only coverage; the logical test is flaky. Crashed workers, subprocesses,
+threads, and async execution remain explicit open gates.
 
 ## Public-API basis
 

@@ -57,12 +57,20 @@ def pytest_unconfigure(config):
         _OWNED_COVERAGE.save()
 
 
-def _context(nodeid: str, phase: str) -> str:
+def _retry_from_item(item) -> int:
+    # pytest-rerunfailures increments execution_count before invoking the
+    # ordinary setup/call/teardown hooks. Pytest itself does not define this
+    # attribute, so an ordinary attempt remains retry zero.
+    execution_count = getattr(item, "execution_count", 1)
+    return max(int(execution_count) - 1, 0)
+
+
+def _context(nodeid: str, retry: int, phase: str) -> str:
     value = {
         "runId": RUN_ID,
         "workerId": WORKER_ID,
         "testId": nodeid,
-        "retry": 0,
+        "retry": retry,
         "phase": phase,
     }
     encoded = base64.urlsafe_b64encode(
@@ -75,7 +83,7 @@ def _switch(item, phase: str) -> None:
     current = coverage.Coverage.current()
     if current is None:
         raise RuntimeError("Supercov pytest hook ran without active coverage.py")
-    current.switch_context(_context(item.nodeid, phase))
+    current.switch_context(_context(item.nodeid, _retry_from_item(item), phase))
 
 
 def pytest_runtest_setup(item):
@@ -98,7 +106,7 @@ def pytest_runtest_logreport(report):
         "runId": RUN_ID,
         "workerId": WORKER_ID,
         "testId": report.nodeid,
-        "retry": 0,
+        "retry": max(int(getattr(report, "rerun", 0)), 0),
         "phase": report.when,
         "outcome": report.outcome,
         "wasXfail": bool(getattr(report, "wasxfail", False)),
