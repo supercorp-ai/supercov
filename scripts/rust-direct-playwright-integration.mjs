@@ -24,7 +24,11 @@ function rust(command, request) {
     input: JSON.stringify(request),
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  return JSON.parse(result.stdout.trim().split('\n').at(-1));
+  const lines = result.stdout.trim().split('\n');
+  return {
+    ...JSON.parse(lines.at(-1)),
+    diagnosticOutput: [...lines.slice(0, -1), result.stderr].filter(Boolean).join('\n'),
+  };
 }
 
 try {
@@ -98,7 +102,7 @@ try {
     runId: 'rust-direct-playwright',
     startedAt: '2026-08-25T00:00:03.000Z',
   });
-  assert.equal(run.exitCode, 0);
+  assert.equal(run.exitCode, 0, run.diagnosticOutput);
   assert.equal(run.assertionCalls, 4);
   assert.equal(readFileSync(resolve(project, 'src/permission.js'), 'utf8'), application);
   const rawAttempts = readEvidenceArchive(

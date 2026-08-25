@@ -848,13 +848,18 @@ fn spawn_trash_sweeper(root: &Path) {
     let Ok(executable) = std::env::current_exe() else {
         return;
     };
-    let _ = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("__sweep-trash")
         .arg(root)
+        // Keep the best-effort child from pinning a project or isolated
+        // workspace as its cwd. This is required for recursive cleanup on
+        // Windows and harmless on Unix filesystems.
+        .current_dir(std::env::temp_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+        .stderr(Stdio::null());
+    let _ = command.spawn();
 }
 
 fn sweep_trash() -> ExitCode {

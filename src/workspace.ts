@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { atomicRenameSync, atomicWriteFileSync } from "./atomic.ts";
 
@@ -147,6 +148,10 @@ export function spawnTrashDeleter(root: string): void {
   }
   try {
     spawn(process.execPath, ["-e", TRASH_DELETER_SCRIPT, trash], {
+      // A detached process must never inherit a project-owned directory as
+      // its cwd. Windows keeps that directory open and rejects the final
+      // recursive removal with EPERM until the deleter exits.
+      cwd: tmpdir(),
       detached: true,
       stdio: "ignore",
     }).unref();
