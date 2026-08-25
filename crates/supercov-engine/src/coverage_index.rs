@@ -9,7 +9,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::Serialize;
 
 use crate::{
-    coverage_analysis::{CoverageCount, CoverageSummary, find_witnesses_for_conditions},
+    coverage_analysis::{
+        CoverageCount, CoverageSummary, McdcVector, find_witnesses_for_conditions,
+    },
     coverage_report::{CoverageReport, CoverageView, TransportStats, coverage_summary_for_tests},
     query_index::{QueryIndex, QueryIndexError, QueryIndexSection},
 };
@@ -28,6 +30,15 @@ pub const SECTION_LINES: u32 = 17;
 pub const SECTION_TEST_SUMMARIES: u32 = 18;
 pub const SECTION_PHASE_SUMMARIES: u32 = 19;
 pub const SECTION_ANCHORS: u32 = 20;
+pub const SECTION_TEST_RETRIES: u32 = 21;
+pub const SECTION_TEST_ATTEMPTS: u32 = 22;
+pub const SECTION_TEST_LINES: u32 = 23;
+pub const SECTION_TEST_HITS: u32 = 24;
+pub const SECTION_TEST_DECISIONS: u32 = 25;
+pub const SECTION_TEST_VECTORS: u32 = 26;
+pub const SECTION_VECTOR_VALUES: u32 = 27;
+pub const SECTION_HIT_METADATA: u32 = 28;
+pub const SECTION_DECISION_METADATA: u32 = 29;
 
 const STRING_RECORD_SIZE: usize = 16;
 const SUMMARY_RECORD_SIZE: usize = 176;
@@ -41,6 +52,14 @@ const LINE_RECORD_SIZE: usize = 80;
 const TEST_SUMMARY_RECORD_SIZE: usize = 64;
 const PHASE_SUMMARY_RECORD_SIZE: usize = 64;
 const ANCHOR_RECORD_SIZE: usize = 64;
+const TEST_RETRY_RECORD_SIZE: usize = 16;
+const TEST_ATTEMPT_RECORD_SIZE: usize = 24;
+const TEST_LINE_RECORD_SIZE: usize = 24;
+const TEST_HIT_RECORD_SIZE: usize = 16;
+const TEST_DECISION_RECORD_SIZE: usize = 32;
+const TEST_VECTOR_RECORD_SIZE: usize = 24;
+const HIT_METADATA_RECORD_SIZE: usize = 64;
+const DECISION_METADATA_RECORD_SIZE: usize = 64;
 const NO_STRING: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -462,6 +481,8 @@ pub struct IndexedPhaseSummary {
     pub test: String,
     pub status: Option<String>,
     pub caused_by_phase_id: Option<String>,
+    pub lines: usize,
+    pub decisions: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -475,6 +496,28 @@ pub struct IndexedAnchor {
     pub conditions: Option<usize>,
     pub covered_conditions: Option<usize>,
     pub tests: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexedTestDetail {
+    pub summary: IndexedTestSummary,
+    pub retries: Vec<usize>,
+    pub attempts: Vec<crate::coverage_report::TestAttempt>,
+    pub hits: Vec<String>,
+    pub decisions: Vec<crate::coverage_report::TestDecisionResult>,
+    pub lines: Vec<crate::coverage_report::SourceLine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedHitMetadata {
+    pub id: String,
+    pub obligation: String,
+    pub branch_kind: Option<String>,
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub label: Option<String>,
+    pub alternative: Option<String>,
 }
 
 #[derive(Default)]
@@ -1294,6 +1337,18 @@ fn phase_summary_record(
         28,
         optional_string_id(phase.phase.caused_by_phase_id.as_deref(), strings)?,
     );
+    put_u64(&mut record, 32, usize_u64(phase.lines.len())?);
+    put_u64(
+        &mut record,
+        40,
+        usize_u64(
+            phase
+                .decisions
+                .iter()
+                .map(|decision| decision.vectors.len())
+                .sum(),
+        )?,
+    );
     Ok(record)
 }
 
@@ -1332,6 +1387,156 @@ fn anchor_record(
     Ok(record)
 }
 
+fn test_retry_record(
+    view_id: CoverageViewId,
+    test_id: &str,
+    retry: usize,
+    strings: &mut StringTable,
+) -> Result<[u8; TEST_RETRY_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; TEST_RETRY_RECORD_SIZE];
+    record[0] = view_id as u8;
+    put_u32(&mut record, 4, strings.intern(test_id)?);
+    put_u64(&mut record, 8, usize_u64(retry)?);
+    Ok(record)
+}
+
+fn test_attempt_record(
+    view_id: CoverageViewId,
+    test_id: &str,
+    attempt: &crate::coverage_report::TestAttempt,
+    strings: &mut StringTable,
+) -> Result<[u8; TEST_ATTEMPT_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; TEST_ATTEMPT_RECORD_SIZE];
+    record[0] = view_id as u8;
+    put_u32(&mut record, 4, strings.intern(test_id)?);
+    put_u64(&mut record, 8, usize_u64(attempt.retry)?);
+    put_u32(&mut record, 16, strings.intern(&attempt.status)?);
+    put_u32(
+        &mut record,
+        20,
+        optional_string_id(attempt.expected_status.as_deref(), strings)?,
+    );
+    Ok(record)
+}
+
+fn test_line_record(
+    view_id: CoverageViewId,
+    test_id: &str,
+    line: &crate::coverage_report::SourceLine,
+    strings: &mut StringTable,
+) -> Result<[u8; TEST_LINE_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; TEST_LINE_RECORD_SIZE];
+    record[0] = view_id as u8;
+    put_u32(&mut record, 4, strings.intern(test_id)?);
+    put_u32(&mut record, 8, strings.intern(&line.file)?);
+    put_u64(&mut record, 16, usize_u64(line.line)?);
+    Ok(record)
+}
+
+fn test_hit_record(
+    view_id: CoverageViewId,
+    test_id: &str,
+    hit: &str,
+    strings: &mut StringTable,
+) -> Result<[u8; TEST_HIT_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; TEST_HIT_RECORD_SIZE];
+    record[0] = view_id as u8;
+    put_u32(&mut record, 4, strings.intern(test_id)?);
+    put_u32(&mut record, 8, strings.intern(hit)?);
+    Ok(record)
+}
+
+fn test_vector_record(
+    vector: &McdcVector,
+    values: &mut Vec<u8>,
+) -> Result<[u8; TEST_VECTOR_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; TEST_VECTOR_RECORD_SIZE];
+    record[0] = u8::from(vector.outcome);
+    put_u64(&mut record, 8, usize_u64(values.len())?);
+    put_u64(&mut record, 16, usize_u64(vector.values.len())?);
+    values.extend(vector.values.iter().map(|value| match value {
+        None => 0,
+        Some(false) => 1,
+        Some(true) => 2,
+    }));
+    Ok(record)
+}
+
+fn test_decision_record(
+    view_id: CoverageViewId,
+    test_id: &str,
+    decision_id: &str,
+    vectors_offset: usize,
+    vectors_count: usize,
+    strings: &mut StringTable,
+) -> Result<[u8; TEST_DECISION_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; TEST_DECISION_RECORD_SIZE];
+    record[0] = view_id as u8;
+    put_u32(&mut record, 4, strings.intern(test_id)?);
+    put_u32(&mut record, 8, strings.intern(decision_id)?);
+    put_u64(&mut record, 16, usize_u64(vectors_offset)?);
+    put_u64(&mut record, 24, usize_u64(vectors_count)?);
+    Ok(record)
+}
+
+struct HitMetadataInput<'a> {
+    view_id: CoverageViewId,
+    kind: u8,
+    id: &'a str,
+    file: &'a str,
+    line: usize,
+    column: usize,
+    branch_kind: Option<&'a str>,
+    label: Option<&'a str>,
+    alternative: Option<&'a str>,
+}
+
+fn hit_metadata_record(
+    input: HitMetadataInput<'_>,
+    strings: &mut StringTable,
+) -> Result<[u8; HIT_METADATA_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; HIT_METADATA_RECORD_SIZE];
+    record[0] = input.view_id as u8;
+    record[1] = input.kind;
+    put_u32(&mut record, 4, strings.intern(input.id)?);
+    put_u32(&mut record, 8, strings.intern(input.file)?);
+    put_u64(&mut record, 16, usize_u64(input.line)?);
+    put_u64(&mut record, 24, usize_u64(input.column)?);
+    put_u32(
+        &mut record,
+        32,
+        optional_string_id(input.branch_kind, strings)?,
+    );
+    put_u32(&mut record, 36, optional_string_id(input.label, strings)?);
+    put_u32(
+        &mut record,
+        40,
+        optional_string_id(input.alternative, strings)?,
+    );
+    Ok(record)
+}
+
+fn decision_metadata_record(
+    view_id: CoverageViewId,
+    decision: &crate::coverage_report::DecisionResult,
+    strings: &mut StringTable,
+    relations: &mut StringRelations,
+) -> Result<[u8; DECISION_METADATA_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; DECISION_METADATA_RECORD_SIZE];
+    record[0] = view_id as u8;
+    put_u32(&mut record, 4, strings.intern(&decision.meta.id)?);
+    put_u32(&mut record, 8, strings.intern(&decision.meta.file)?);
+    put_u32(&mut record, 12, strings.intern(&decision.meta.source)?);
+    put_u32(&mut record, 16, strings.intern(&decision.meta.kind)?);
+    put_u64(&mut record, 24, usize_u64(decision.meta.line)?);
+    put_u64(&mut record, 32, usize_u64(decision.meta.column)?);
+    let (conditions_offset, conditions_count) =
+        relations.push(decision.meta.conditions.clone(), strings)?;
+    put_u64(&mut record, 40, conditions_offset);
+    put_u64(&mut record, 48, conditions_count);
+    Ok(record)
+}
+
 pub fn coverage_index_sections(
     report: &CoverageReport,
 ) -> Result<Vec<QueryIndexSection>, CoverageIndexError> {
@@ -1353,6 +1558,15 @@ pub fn coverage_index_sections(
     let mut test_summaries = Vec::new();
     let mut phase_summaries = Vec::new();
     let mut anchors = Vec::new();
+    let mut test_retries = Vec::new();
+    let mut test_attempts = Vec::new();
+    let mut test_lines = Vec::new();
+    let mut test_hits = Vec::new();
+    let mut test_decisions = Vec::new();
+    let mut test_vectors = Vec::new();
+    let mut vector_values = Vec::new();
+    let mut hit_metadata = Vec::new();
+    let mut decision_metadata = Vec::new();
     for (id, view) in views {
         summaries.extend_from_slice(&summary_record(id, view, &mut strings)?);
         projection_records.extend_from_slice(&projection_record(
@@ -1384,11 +1598,54 @@ pub fn coverage_index_sections(
         }
         for test in &view.tests {
             test_summaries.extend_from_slice(&test_summary_record(id, test, &mut strings)?);
+            for retry in &test.retries {
+                test_retries.extend_from_slice(&test_retry_record(
+                    id,
+                    &test.id,
+                    *retry,
+                    &mut strings,
+                )?);
+            }
+            for attempt in &test.attempts {
+                test_attempts.extend_from_slice(&test_attempt_record(
+                    id,
+                    &test.id,
+                    attempt,
+                    &mut strings,
+                )?);
+            }
+            for line in &test.lines {
+                test_lines.extend_from_slice(&test_line_record(id, &test.id, line, &mut strings)?);
+            }
+            for hit in &test.hits {
+                test_hits.extend_from_slice(&test_hit_record(id, &test.id, hit, &mut strings)?);
+            }
+            for decision in &test.decisions {
+                let vectors_offset = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
+                for vector in &decision.vectors {
+                    test_vectors
+                        .extend_from_slice(&test_vector_record(vector, &mut vector_values)?);
+                }
+                test_decisions.extend_from_slice(&test_decision_record(
+                    id,
+                    &test.id,
+                    &decision.id,
+                    vectors_offset,
+                    decision.vectors.len(),
+                    &mut strings,
+                )?);
+            }
         }
         for phase in &view.phases {
             phase_summaries.extend_from_slice(&phase_summary_record(id, phase, &mut strings)?);
         }
         for decision in &view.decisions {
+            decision_metadata.extend_from_slice(&decision_metadata_record(
+                id,
+                decision,
+                &mut strings,
+                &mut relations,
+            )?);
             anchors.extend_from_slice(&anchor_record(
                 AnchorInput {
                     view_id: id,
@@ -1428,6 +1685,22 @@ pub fn coverage_index_sections(
                 &mut strings,
                 &mut relations,
             )?);
+            for alternative in &branch.alternatives {
+                hit_metadata.extend_from_slice(&hit_metadata_record(
+                    HitMetadataInput {
+                        view_id: id,
+                        kind: 2,
+                        id: &alternative.id,
+                        file: &branch.meta.file,
+                        line: branch.meta.line,
+                        column: branch.meta.column,
+                        branch_kind: Some(&branch.meta.kind),
+                        label: None,
+                        alternative: Some(&alternative.label),
+                    },
+                    &mut strings,
+                )?);
+            }
         }
         for point in &view.points {
             anchors.extend_from_slice(&anchor_record(
@@ -1447,6 +1720,23 @@ pub fn coverage_index_sections(
                 },
                 &mut strings,
                 &mut relations,
+            )?);
+            hit_metadata.extend_from_slice(&hit_metadata_record(
+                HitMetadataInput {
+                    view_id: id,
+                    kind: match point.meta.kind {
+                        crate::coverage_analysis::PointKind::Statement => 0,
+                        crate::coverage_analysis::PointKind::Function => 1,
+                    },
+                    id: &point.meta.id,
+                    file: &point.meta.file,
+                    line: point.meta.line,
+                    column: point.meta.column,
+                    branch_kind: None,
+                    label: point.meta.label.as_deref(),
+                    alternative: None,
+                },
+                &mut strings,
             )?);
         }
         for value in &view.coverage_by_kind {
@@ -1582,6 +1872,60 @@ pub fn coverage_index_sections(
             count: usize_u64(anchors.len() / ANCHOR_RECORD_SIZE)?,
             bytes: anchors,
         },
+        QueryIndexSection {
+            kind: SECTION_TEST_RETRIES,
+            record_size: TEST_RETRY_RECORD_SIZE as u32,
+            count: usize_u64(test_retries.len() / TEST_RETRY_RECORD_SIZE)?,
+            bytes: test_retries,
+        },
+        QueryIndexSection {
+            kind: SECTION_TEST_ATTEMPTS,
+            record_size: TEST_ATTEMPT_RECORD_SIZE as u32,
+            count: usize_u64(test_attempts.len() / TEST_ATTEMPT_RECORD_SIZE)?,
+            bytes: test_attempts,
+        },
+        QueryIndexSection {
+            kind: SECTION_TEST_LINES,
+            record_size: TEST_LINE_RECORD_SIZE as u32,
+            count: usize_u64(test_lines.len() / TEST_LINE_RECORD_SIZE)?,
+            bytes: test_lines,
+        },
+        QueryIndexSection {
+            kind: SECTION_TEST_HITS,
+            record_size: TEST_HIT_RECORD_SIZE as u32,
+            count: usize_u64(test_hits.len() / TEST_HIT_RECORD_SIZE)?,
+            bytes: test_hits,
+        },
+        QueryIndexSection {
+            kind: SECTION_TEST_DECISIONS,
+            record_size: TEST_DECISION_RECORD_SIZE as u32,
+            count: usize_u64(test_decisions.len() / TEST_DECISION_RECORD_SIZE)?,
+            bytes: test_decisions,
+        },
+        QueryIndexSection {
+            kind: SECTION_TEST_VECTORS,
+            record_size: TEST_VECTOR_RECORD_SIZE as u32,
+            count: usize_u64(test_vectors.len() / TEST_VECTOR_RECORD_SIZE)?,
+            bytes: test_vectors,
+        },
+        QueryIndexSection {
+            kind: SECTION_VECTOR_VALUES,
+            record_size: 1,
+            count: usize_u64(vector_values.len())?,
+            bytes: vector_values,
+        },
+        QueryIndexSection {
+            kind: SECTION_HIT_METADATA,
+            record_size: HIT_METADATA_RECORD_SIZE as u32,
+            count: usize_u64(hit_metadata.len() / HIT_METADATA_RECORD_SIZE)?,
+            bytes: hit_metadata,
+        },
+        QueryIndexSection {
+            kind: SECTION_DECISION_METADATA,
+            record_size: DECISION_METADATA_RECORD_SIZE as u32,
+            count: usize_u64(decision_metadata.len() / DECISION_METADATA_RECORD_SIZE)?,
+            bytes: decision_metadata,
+        },
     ])
 }
 
@@ -1604,6 +1948,15 @@ impl<'a> CoverageIndex<'a> {
             (SECTION_TEST_SUMMARIES, TEST_SUMMARY_RECORD_SIZE),
             (SECTION_PHASE_SUMMARIES, PHASE_SUMMARY_RECORD_SIZE),
             (SECTION_ANCHORS, ANCHOR_RECORD_SIZE),
+            (SECTION_TEST_RETRIES, TEST_RETRY_RECORD_SIZE),
+            (SECTION_TEST_ATTEMPTS, TEST_ATTEMPT_RECORD_SIZE),
+            (SECTION_TEST_LINES, TEST_LINE_RECORD_SIZE),
+            (SECTION_TEST_HITS, TEST_HIT_RECORD_SIZE),
+            (SECTION_TEST_DECISIONS, TEST_DECISION_RECORD_SIZE),
+            (SECTION_TEST_VECTORS, TEST_VECTOR_RECORD_SIZE),
+            (SECTION_VECTOR_VALUES, 1),
+            (SECTION_HIT_METADATA, HIT_METADATA_RECORD_SIZE),
+            (SECTION_DECISION_METADATA, DECISION_METADATA_RECORD_SIZE),
         ] {
             if index.descriptor(kind)?.record_size as usize != size {
                 return Err(CoverageIndexError::InvalidRecord("record size"));
@@ -2260,6 +2613,242 @@ impl<'a> CoverageIndex<'a> {
         Ok(tests)
     }
 
+    fn test_vector(&self, index: u64) -> Result<McdcVector, CoverageIndexError> {
+        let record = self.index.record(SECTION_TEST_VECTORS, index)?;
+        if record[1..8].iter().any(|byte| *byte != 0) {
+            return Err(CoverageIndexError::InvalidRecord("test vector record"));
+        }
+        let offset = get_u64(record, 8)?;
+        let count = get_u64(record, 16)?;
+        let descriptor = self.index.descriptor(SECTION_VECTOR_VALUES)?;
+        let end = offset
+            .checked_add(count)
+            .ok_or(CoverageIndexError::InvalidRecord("vector value range"))?;
+        if end > descriptor.count {
+            return Err(CoverageIndexError::InvalidRecord("vector value range"));
+        }
+        let mut values = Vec::with_capacity(
+            usize::try_from(count).map_err(|_| CoverageIndexError::SizeOverflow)?,
+        );
+        for index in offset..end {
+            values.push(match self.index.record(SECTION_VECTOR_VALUES, index)?[0] {
+                0 => None,
+                1 => Some(false),
+                2 => Some(true),
+                _ => return Err(CoverageIndexError::InvalidRecord("vector value")),
+            });
+        }
+        Ok(McdcVector {
+            values,
+            outcome: bool_field(record[0])?,
+        })
+    }
+
+    pub fn test_details(
+        &self,
+        view: CoverageViewId,
+    ) -> Result<Vec<IndexedTestDetail>, CoverageIndexError> {
+        let summaries = self.test_summaries(view)?;
+        let positions = summaries
+            .iter()
+            .enumerate()
+            .map(|(index, test)| (test.id.clone(), index))
+            .collect::<HashMap<_, _>>();
+        if positions.len() != summaries.len() {
+            return Err(CoverageIndexError::InvalidRecord("duplicate test summary"));
+        }
+        let mut details = summaries
+            .into_iter()
+            .map(|summary| IndexedTestDetail {
+                summary,
+                retries: Vec::new(),
+                attempts: Vec::new(),
+                hits: Vec::new(),
+                decisions: Vec::new(),
+                lines: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let position = |record: &[u8]| -> Result<Option<usize>, CoverageIndexError> {
+            if CoverageViewId::try_from(record[0])? != view {
+                return Ok(None);
+            }
+            let id = self.string(get_u32(record, 4)?)?;
+            positions
+                .get(&id)
+                .copied()
+                .map(Some)
+                .ok_or(CoverageIndexError::InvalidRecord("unknown test relation"))
+        };
+        let descriptor = self.index.descriptor(SECTION_TEST_RETRIES)?;
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_TEST_RETRIES, index)?;
+            if record[1..4].iter().any(|byte| *byte != 0) {
+                return Err(CoverageIndexError::InvalidRecord("test retry record"));
+            }
+            if let Some(position) = position(record)? {
+                details[position].retries.push(
+                    usize::try_from(get_u64(record, 8)?)
+                        .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                );
+            }
+        }
+        let descriptor = self.index.descriptor(SECTION_TEST_ATTEMPTS)?;
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_TEST_ATTEMPTS, index)?;
+            if record[1..4].iter().any(|byte| *byte != 0) {
+                return Err(CoverageIndexError::InvalidRecord("test attempt record"));
+            }
+            if let Some(position) = position(record)? {
+                details[position]
+                    .attempts
+                    .push(crate::coverage_report::TestAttempt {
+                        retry: usize::try_from(get_u64(record, 8)?)
+                            .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                        status: self.string(get_u32(record, 16)?)?,
+                        expected_status: self.optional_string(get_u32(record, 20)?)?,
+                    });
+            }
+        }
+        let descriptor = self.index.descriptor(SECTION_TEST_LINES)?;
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_TEST_LINES, index)?;
+            if record[1..4].iter().any(|byte| *byte != 0)
+                || record[12..16].iter().any(|byte| *byte != 0)
+            {
+                return Err(CoverageIndexError::InvalidRecord("test line record"));
+            }
+            if let Some(position) = position(record)? {
+                details[position]
+                    .lines
+                    .push(crate::coverage_report::SourceLine {
+                        file: self.string(get_u32(record, 8)?)?,
+                        line: usize::try_from(get_u64(record, 16)?)
+                            .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                    });
+            }
+        }
+        let descriptor = self.index.descriptor(SECTION_TEST_HITS)?;
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_TEST_HITS, index)?;
+            if record[1..4].iter().any(|byte| *byte != 0)
+                || record[12..].iter().any(|byte| *byte != 0)
+            {
+                return Err(CoverageIndexError::InvalidRecord("test hit record"));
+            }
+            if let Some(position) = position(record)? {
+                details[position]
+                    .hits
+                    .push(self.string(get_u32(record, 8)?)?);
+            }
+        }
+        let descriptor = self.index.descriptor(SECTION_TEST_DECISIONS)?;
+        let vectors = self.index.descriptor(SECTION_TEST_VECTORS)?.count;
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_TEST_DECISIONS, index)?;
+            if record[1..4].iter().any(|byte| *byte != 0)
+                || record[12..16].iter().any(|byte| *byte != 0)
+            {
+                return Err(CoverageIndexError::InvalidRecord("test decision record"));
+            }
+            if let Some(position) = position(record)? {
+                let offset = get_u64(record, 16)?;
+                let count = get_u64(record, 24)?;
+                let end = offset
+                    .checked_add(count)
+                    .ok_or(CoverageIndexError::InvalidRecord("test vector range"))?;
+                if end > vectors {
+                    return Err(CoverageIndexError::InvalidRecord("test vector range"));
+                }
+                let mut observed = Vec::with_capacity(
+                    usize::try_from(count).map_err(|_| CoverageIndexError::SizeOverflow)?,
+                );
+                for vector in offset..end {
+                    observed.push(self.test_vector(vector)?);
+                }
+                details[position]
+                    .decisions
+                    .push(crate::coverage_report::TestDecisionResult {
+                        id: self.string(get_u32(record, 8)?)?,
+                        vectors: observed,
+                    });
+            }
+        }
+        Ok(details)
+    }
+
+    pub fn hit_metadata(
+        &self,
+        view: CoverageViewId,
+    ) -> Result<Vec<IndexedHitMetadata>, CoverageIndexError> {
+        let descriptor = self.index.descriptor(SECTION_HIT_METADATA)?;
+        let mut metadata = Vec::new();
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_HIT_METADATA, index)?;
+            if CoverageViewId::try_from(record[0])? != view {
+                continue;
+            }
+            if record[2..4].iter().any(|byte| *byte != 0)
+                || record[12..16].iter().any(|byte| *byte != 0)
+                || record[44..].iter().any(|byte| *byte != 0)
+            {
+                return Err(CoverageIndexError::InvalidRecord("hit metadata record"));
+            }
+            let obligation = match record[1] {
+                0 => "statement",
+                1 => "function",
+                2 => "branch",
+                _ => return Err(CoverageIndexError::InvalidRecord("hit obligation")),
+            };
+            metadata.push(IndexedHitMetadata {
+                id: self.string(get_u32(record, 4)?)?,
+                obligation: obligation.into(),
+                file: self.string(get_u32(record, 8)?)?,
+                line: usize::try_from(get_u64(record, 16)?)
+                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                column: usize::try_from(get_u64(record, 24)?)
+                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                branch_kind: self.optional_string(get_u32(record, 32)?)?,
+                label: self.optional_string(get_u32(record, 36)?)?,
+                alternative: self.optional_string(get_u32(record, 40)?)?,
+            });
+        }
+        Ok(metadata)
+    }
+
+    pub fn decision_metadata(
+        &self,
+        view: CoverageViewId,
+    ) -> Result<Vec<crate::coverage_report::DecisionMeta>, CoverageIndexError> {
+        let descriptor = self.index.descriptor(SECTION_DECISION_METADATA)?;
+        let mut metadata = Vec::new();
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_DECISION_METADATA, index)?;
+            if CoverageViewId::try_from(record[0])? != view {
+                continue;
+            }
+            if record[1..4].iter().any(|byte| *byte != 0)
+                || record[20..24].iter().any(|byte| *byte != 0)
+                || record[56..].iter().any(|byte| *byte != 0)
+            {
+                return Err(CoverageIndexError::InvalidRecord(
+                    "decision metadata record",
+                ));
+            }
+            metadata.push(crate::coverage_report::DecisionMeta {
+                id: self.string(get_u32(record, 4)?)?,
+                file: self.string(get_u32(record, 8)?)?,
+                source: self.string(get_u32(record, 12)?)?,
+                kind: self.string(get_u32(record, 16)?)?,
+                line: usize::try_from(get_u64(record, 24)?)
+                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                column: usize::try_from(get_u64(record, 32)?)
+                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                conditions: self.relation_strings(get_u64(record, 40)?, get_u64(record, 48)?)?,
+            });
+        }
+        Ok(metadata)
+    }
+
     pub fn phase_summaries(
         &self,
         view: CoverageViewId,
@@ -2272,7 +2861,7 @@ impl<'a> CoverageIndex<'a> {
                 continue;
             }
             if record[1..4].iter().any(|byte| *byte != 0)
-                || record[32..].iter().any(|byte| *byte != 0)
+                || record[48..].iter().any(|byte| *byte != 0)
             {
                 return Err(CoverageIndexError::InvalidRecord("phase summary record"));
             }
@@ -2284,6 +2873,10 @@ impl<'a> CoverageIndex<'a> {
                 test: self.string(get_u32(record, 20)?)?,
                 status: self.optional_string(get_u32(record, 24)?)?,
                 caused_by_phase_id: self.optional_string(get_u32(record, 28)?)?,
+                lines: usize::try_from(get_u64(record, 32)?)
+                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                decisions: usize::try_from(get_u64(record, 40)?)
+                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
             });
         }
         Ok(phases)
@@ -2589,6 +3182,25 @@ mod tests {
         assert_eq!(point.len(), 1);
         assert_eq!(point[0].kind, "statement");
         assert_eq!(point[0].tests, ["test"]);
+        let details = index.test_details(CoverageViewId::All).unwrap();
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].retries, [0]);
+        assert_eq!(details[0].attempts.len(), 1);
+        assert_eq!(details[0].hits, ["point"]);
+        assert_eq!(details[0].lines.len(), 1);
+        assert_eq!(details[0].lines[0].line, 2);
+        assert_eq!(details[0].decisions.len(), 1);
+        assert_eq!(details[0].decisions[0].vectors.len(), 1);
+        assert_eq!(
+            details[0].decisions[0].vectors[0].values,
+            [Some(false), None]
+        );
+        let hits = index.hit_metadata(CoverageViewId::All).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "point");
+        let decisions = index.decision_metadata(CoverageViewId::All).unwrap();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].conditions, ["a", "b"]);
         fs::remove_dir_all(root).unwrap();
     }
 }

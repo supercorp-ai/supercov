@@ -392,6 +392,85 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
   assert.equal(coversRust.status, 0, `${fixture}: ${coversRust.stderr || coversRust.stdout}`);
   assert.equal(coversRust.stdout, coversReference.stdout, `${fixture}: indexed covers JSON differs`);
 
+  const testReference = spawnSync(
+    process.execPath,
+    [
+      resolve(root, 'bin/supercov.js'),
+      'runs', runId, 'coverage', 'test', attributed.id,
+      '--filter', 'all', '--limit', '2', '--json',
+      ...(filteredKind ? ['--kind', filteredKind] : []),
+      ...(filteredRunner ? ['--runner', filteredRunner] : []),
+    ],
+    {
+      cwd: resolve(root, 'tests/fixtures', fixture),
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024 * 1024,
+    },
+  );
+  assert.equal(testReference.status, 0, `${fixture}: ${testReference.stderr || testReference.stdout}`);
+  const testRust = spawnSync(binary, ['__query-index-files'], {
+    cwd: root,
+    input: JSON.stringify({
+      archivePath,
+      runId,
+      generatedAt,
+      filter: 'all',
+      command: 'test',
+      metric: 'all',
+      kind: filteredKind,
+      runner: filteredRunner,
+      selector: attributed.id,
+      offset: 0,
+      limit: 2,
+    }),
+    encoding: 'utf8',
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  assert.equal(testRust.status, 0, `${fixture}: ${testRust.stderr || testRust.stdout}`);
+  assert.equal(testRust.stdout, testReference.stdout, `${fixture}: indexed test JSON differs`);
+
+  const testGroups = new Map();
+  for (const test of expected.tests.filter((candidate) => candidate.role === 'test')) {
+    const prefix = test.name.split(' > ')[0].toLowerCase();
+    testGroups.set(prefix, [...(testGroups.get(prefix) ?? []), test]);
+  }
+  const ambiguousTest = [...testGroups.entries()].find(([, tests]) => tests.length > 1);
+  if (ambiguousTest) {
+    const [selector] = ambiguousTest;
+    const matchesReference = spawnSync(
+      process.execPath,
+      [
+        resolve(root, 'bin/supercov.js'),
+        'runs', runId, 'coverage', 'test', selector,
+        '--filter', 'all', '--limit', '1', '--json',
+      ],
+      {
+        cwd: resolve(root, 'tests/fixtures', fixture),
+        encoding: 'utf8',
+        maxBuffer: 128 * 1024 * 1024,
+      },
+    );
+    assert.equal(matchesReference.status, 0, `${fixture}: ${matchesReference.stderr || matchesReference.stdout}`);
+    const matchesRust = spawnSync(binary, ['__query-index-files'], {
+      cwd: root,
+      input: JSON.stringify({
+        archivePath,
+        runId,
+        generatedAt,
+        filter: 'all',
+        command: 'test',
+        metric: 'all',
+        selector,
+        offset: 0,
+        limit: 1,
+      }),
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024 * 1024,
+    });
+    assert.equal(matchesRust.status, 0, `${fixture}: ${matchesRust.stderr || matchesRust.stdout}`);
+    assert.equal(matchesRust.stdout, matchesReference.stdout, `${fixture}: indexed test matches JSON differs`);
+  }
+
   const anchoredOnly = [
     ...expected.decisions.map((decision) => decision.meta),
     ...expected.branches.map((branch) => branch.meta),
@@ -453,5 +532,5 @@ const indexDifference = firstDifference(indexedActual, indexExpected);
 assert.equal(indexDifference, undefined, `typed index: ${JSON.stringify(indexDifference)}`);
 
 console.log(
-  `[rust-archive-differential] ${fixtures.length} real archives have exact report plus typed mmap summary, scope, file-gap, provenance, dimension, decision-group, and attribution query parity`,
+  `[rust-archive-differential] ${fixtures.length} real archives have exact report plus typed mmap summary, scope, file-gap, provenance, dimension, decision-group, and bidirectional attribution query parity`,
 );

@@ -419,7 +419,17 @@ miss blocks flipping any default.
   anchor-only locations. Independent index tests cover line confidence, test
   provenance, decision and point relations without relying on a serialized
   report blob.
-  Full condition/vector/test/phase detail sections and the rest of the query
+  The reverse attribution edge, `coverage test`, now also runs exclusively on
+  normalized typed columns. Per-test retries and terminal attempts, source
+  lines, hit IDs, decision-vector groups with ternary short-circuit values,
+  point/branch metadata, complete decision metadata and phase evidence counts
+  are independently validated fixed records. Unique-test detail and ambiguous
+  selector listings preserve the frozen per-category pagination contract and
+  produce byte-identical agent JSON on the same five real archive families.
+  This establishes bidirectional line/test attribution without coupling the
+  query engine to JavaScript report objects and leaves the same evidence graph
+  reusable by future language frontends.
+  Full condition/vector/decision detail sections and the rest of the query
   surface remain before this path can replace the shipped query engine.
 
 ## Non-goals and guardrails

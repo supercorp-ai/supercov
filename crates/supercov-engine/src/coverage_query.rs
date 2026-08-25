@@ -13,12 +13,14 @@ use crate::{
     coverage_analysis::{CoverageSummary, is_independence_pair},
     coverage_index::{
         CoverageDimension, CoverageIndex, CoverageIndexError, CoverageViewId, IndexedDecisionGap,
-        IndexedDimensionCoverage, IndexedFileGap, IndexedMeasurement, IndexedOutcomeCounts,
-        IndexedScopeEntry, IndexedSourceScope, IndexedSummaryConfidence, IndexedTestSummary,
+        IndexedDimensionCoverage, IndexedFileGap, IndexedHitMetadata, IndexedMeasurement,
+        IndexedOutcomeCounts, IndexedScopeEntry, IndexedSourceScope, IndexedSummaryConfidence,
+        IndexedTestSummary,
     },
     coverage_report::{
-        CoverageConfidence, CoverageReportRequest, CoverageView, ReportError, TestProvenance,
-        TransportStats, analyze_coverage_results, coverage_summary_for_tests,
+        CoverageConfidence, CoverageReportRequest, CoverageView, DecisionMeta, ReportError,
+        SourceLine, TestAttempt, TestProvenance, TransportStats, analyze_coverage_results,
+        coverage_summary_for_tests,
     },
 };
 use supercov_contracts::AgentPagination;
@@ -474,6 +476,309 @@ pub fn coverage_covers_query(
             total_phases: all_phases.len(),
             tests: tests_page,
             phases: phases_page,
+        }),
+        pagination(options.offset, options.limit, returned, total),
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CoverageTestMatch {
+    pub id: String,
+    pub name: String,
+    pub outcome: String,
+    pub provenance: TestProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageHitDetail {
+    pub id: String,
+    pub obligation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alternative: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CoverageTestDecision {
+    pub id: String,
+    pub vectors: Vec<crate::coverage_analysis::McdcVector>,
+    pub meta: DecisionMeta,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageTestPhase {
+    pub id: String,
+    pub kind: String,
+    pub operation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caused_by_phase_id: Option<String>,
+    pub lines: usize,
+    pub decisions: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CoverageTestTotals {
+    pub lines: usize,
+    pub hits: usize,
+    pub decisions: usize,
+    pub phases: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageSelectedTest {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub retries: Vec<usize>,
+    pub attempts: Vec<TestAttempt>,
+    pub outcome: String,
+    pub provenance: TestProvenance,
+    pub role: String,
+    pub hits: Vec<String>,
+    pub decisions: Vec<CoverageTestDecision>,
+    pub lines: Vec<SourceLine>,
+    pub hit_details: Vec<CoverageHitDetail>,
+    pub phases: Vec<CoverageTestPhase>,
+    pub totals: CoverageTestTotals,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CoverageTestMatchesData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub tests: Vec<CoverageTestMatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageTestDetailData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub pagination_applies_to: String,
+    pub tests: Vec<CoverageSelectedTest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum CoverageTestData {
+    Matches(CoverageTestMatchesData),
+    Detail(CoverageTestDetailData),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CoverageTestQueryOptions<'a> {
+    pub run: &'a str,
+    pub view: CoverageViewId,
+    pub kind: Option<&'a str>,
+    pub runner: Option<&'a str>,
+    pub selector: &'a str,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+fn hit_detail(id: &str, metadata: Option<&IndexedHitMetadata>) -> CoverageHitDetail {
+    match metadata {
+        Some(metadata) => CoverageHitDetail {
+            id: id.into(),
+            obligation: metadata.obligation.clone(),
+            branch_kind: metadata.branch_kind.clone(),
+            file: Some(metadata.file.clone()),
+            line: Some(metadata.line),
+            column: Some(metadata.column),
+            label: metadata.label.clone(),
+            alternative: metadata.alternative.clone(),
+        },
+        None => CoverageHitDetail {
+            id: id.into(),
+            obligation: "unknown".into(),
+            branch_kind: None,
+            file: None,
+            line: None,
+            column: None,
+            label: None,
+            alternative: None,
+        },
+    }
+}
+
+pub fn coverage_test_query(
+    index: &CoverageIndex<'_>,
+    options: CoverageTestQueryOptions<'_>,
+) -> Result<(CoverageTestData, AgentPagination), QueryError> {
+    if options.limit == 0 {
+        return Err(QueryError::InvalidPagination);
+    }
+    let tests = index.test_details(options.view)?;
+    let summaries = tests
+        .iter()
+        .map(|test| test.summary.clone())
+        .collect::<Vec<_>>();
+    let selected = selected_test_ids(&summaries, options.kind, options.runner)?;
+    let selector = options.selector.to_lowercase();
+    let matches = tests
+        .into_iter()
+        .filter(|test| {
+            selected
+                .as_ref()
+                .is_none_or(|ids| ids.contains(&test.summary.id))
+        })
+        .filter(|test| {
+            test.summary.id == selector || test.summary.name.to_lowercase().contains(&selector)
+        })
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return Err(QueryError::InvalidRecordSelection);
+    }
+    let filters = query_filters(options.view, options.kind, options.runner);
+    if matches.len() > 1 {
+        let total = matches.len();
+        let page = matches
+            .into_iter()
+            .skip(options.offset)
+            .take(options.limit)
+            .map(|test| CoverageTestMatch {
+                id: test.summary.id,
+                name: test.summary.name,
+                outcome: test.summary.outcome,
+                provenance: test.summary.provenance,
+            })
+            .collect::<Vec<_>>();
+        let returned = page.len();
+        return Ok((
+            CoverageTestData::Matches(CoverageTestMatchesData {
+                run: options.run.into(),
+                filters,
+                tests: page,
+            }),
+            pagination(options.offset, options.limit, returned, total),
+        ));
+    }
+    let test = matches.into_iter().next().expect("one test match");
+    let metadata = index
+        .hit_metadata(options.view)?
+        .into_iter()
+        .map(|metadata| (metadata.id.clone(), metadata))
+        .collect::<HashMap<_, _>>();
+    let decisions = index
+        .decision_metadata(options.view)?
+        .into_iter()
+        .map(|decision| (decision.id.clone(), decision))
+        .collect::<HashMap<_, _>>();
+    let all_phases = index
+        .phase_summaries(options.view)?
+        .into_iter()
+        .filter(|phase| phase.test == test.summary.id)
+        .map(|phase| CoverageTestPhase {
+            id: phase.id,
+            kind: phase.kind,
+            operation: phase.operation,
+            source: phase.source,
+            status: phase.status,
+            caused_by_phase_id: phase.caused_by_phase_id,
+            lines: phase.lines,
+            decisions: phase.decisions,
+        })
+        .collect::<Vec<_>>();
+    let totals = CoverageTestTotals {
+        lines: test.lines.len(),
+        hits: test.hits.len(),
+        decisions: test.decisions.len(),
+        phases: all_phases.len(),
+    };
+    let total = totals
+        .lines
+        .max(totals.hits)
+        .max(totals.decisions)
+        .max(totals.phases);
+    let lines = test
+        .lines
+        .iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let hits = test
+        .hits
+        .iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let hit_details = test
+        .hits
+        .iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .map(|id| hit_detail(id, metadata.get(id)))
+        .collect::<Vec<_>>();
+    let test_decisions = test
+        .decisions
+        .iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .map(|decision| {
+            Ok(CoverageTestDecision {
+                id: decision.id.clone(),
+                vectors: decision.vectors.clone(),
+                meta: decisions
+                    .get(&decision.id)
+                    .cloned()
+                    .ok_or(QueryError::InvalidRecordSelection)?,
+            })
+        })
+        .collect::<Result<Vec<_>, QueryError>>()?;
+    let phases = all_phases
+        .into_iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .collect::<Vec<_>>();
+    let returned = lines
+        .len()
+        .max(hits.len())
+        .max(test_decisions.len())
+        .max(phases.len());
+    Ok((
+        CoverageTestData::Detail(CoverageTestDetailData {
+            run: options.run.into(),
+            filters,
+            pagination_applies_to:
+                "lines, hits/hitDetails, decisions, and phases independently within the test".into(),
+            tests: vec![CoverageSelectedTest {
+                id: test.summary.id,
+                name: test.summary.name,
+                file: test.summary.file,
+                title: test.summary.title,
+                retries: test.retries,
+                attempts: test.attempts,
+                outcome: test.summary.outcome,
+                provenance: test.summary.provenance,
+                role: test.summary.role,
+                hits,
+                decisions: test_decisions,
+                lines,
+                hit_details,
+                phases,
+                totals,
+            }],
         }),
         pagination(options.offset, options.limit, returned, total),
     ))
