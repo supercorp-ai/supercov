@@ -56,7 +56,9 @@ jobs:
       - name: Stage native package
         run: node scripts/package-native.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --out native-dist
       - name: Pack native package
-        run: npm pack native-dist/${{ matrix.package }} --pack-destination native-dist --ignore-scripts
+        # npm 11 treats an unprefixed path containing a slash as a GitHub
+        # repository shorthand. `./` makes this unambiguously local.
+        run: npm pack ./native-dist/${{ matrix.package }} --pack-destination native-dist --ignore-scripts
       - name: Validate binary, size gate, and checksums
         run: node scripts/native-artifact-check.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --tarball native-dist/${{ matrix.package }}-${{ env.SUPERCOV_VERSION }}.tgz --out native-dist/${{ matrix.package }}.checksums.json
       - name: Sign build provenance

@@ -912,7 +912,11 @@ miss blocks flipping any default.
   targets were installed into moving `stable` while Cargo selected the pinned
   1.93.1 toolchain, so musl could not find its target `core`. Native jobs now
   install every target into the exact pinned compiler. The failed unpublished
-  run was cancelled as soon as this was known to conserve hosted minutes.
+  run was cancelled as soon as this was known to conserve hosted minutes. The
+  corrected build then exposed npm 11 interpreting `native-dist/package` as a
+  GitHub repository shorthand; native packing now uses the explicit local
+  `./native-dist/package` form. That run was likewise cancelled immediately,
+  before publication, rather than letting unrelated matrix jobs continue.
   The release workflow now calls that complete native matrix, downloads and
   revalidates the aggregate release set, publishes all eight exact-version
   platform packages first, and publishes the primary package only after every
