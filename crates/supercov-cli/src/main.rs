@@ -59,12 +59,104 @@ fn main() -> ExitCode {
         Some("__minimum-test-set") => minimum_test_sets(),
         Some("__roundtrip-query-index") => roundtrip_query_indexes(),
         Some("__query-index-files") => query_index_files(),
+        Some("__discover-source") => discover_source(),
+        Some("__discover-project") => discover_project(),
         Some("__benchmark-js-transform") => benchmark_js_transform(),
         Some("__pack-evidence") => pack_evidence(),
         Some(command) => {
             eprintln!(
                 "[supercov] Rust engine candidate is not ready for `{command}`; use the currently shipped engine while the Rust contract gates are incomplete"
             );
+            ExitCode::from(2)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DiscoverSourceRequest {
+    root: PathBuf,
+    configured_roots: Option<Vec<String>>,
+}
+
+fn discover_source() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let request: DiscoverSourceRequest = match serde_json::from_str(&input) {
+        Ok(request) => request,
+        Err(error) => {
+            eprintln!("[supercov] invalid source-discovery input: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    match supercov_engine::source_discovery::discover_source_scope(
+        &request.root,
+        request.configured_roots.as_deref(),
+    ) {
+        Ok(discovered) => match serde_json::to_string(&discovered) {
+            Ok(output) => {
+                println!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("[supercov] failed to serialize source discovery: {error}");
+                ExitCode::from(2)
+            }
+        },
+        Err(error) => {
+            eprintln!("[supercov] source discovery failed: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DiscoverProjectRequest {
+    root: PathBuf,
+    #[serde(default)]
+    environment: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    command: Vec<String>,
+}
+
+fn discover_project() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let request: DiscoverProjectRequest = match serde_json::from_str(&input) {
+        Ok(request) => request,
+        Err(error) => {
+            eprintln!("[supercov] invalid project-discovery input: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    match supercov_engine::project_discovery::discover_coverage_project(
+        &request.root,
+        &request.environment,
+        &request.command,
+    ) {
+        Ok(project) => match serde_json::to_string(&project) {
+            Ok(output) => {
+                println!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("[supercov] failed to serialize project discovery: {error}");
+                ExitCode::from(2)
+            }
+        },
+        Err(error) => {
+            eprintln!("[supercov] project discovery failed: {error}");
             ExitCode::from(2)
         }
     }

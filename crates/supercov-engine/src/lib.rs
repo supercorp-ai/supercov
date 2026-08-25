@@ -10,11 +10,14 @@ pub mod coverage_index;
 pub mod coverage_query;
 pub mod coverage_report;
 pub mod evidence_archive;
+pub mod integrity;
 pub mod js_instrumenter;
 pub mod probe_v2;
+pub mod project_discovery;
 pub mod query_index;
 pub mod run_query;
 pub mod run_store;
+pub mod source_discovery;
 
 pub use supercov_contracts::CONTRACT_VERSION;
 

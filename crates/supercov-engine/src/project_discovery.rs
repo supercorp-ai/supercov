@@ -1,0 +1,945 @@
+//! Runner/build/project discovery for zero-configuration JavaScript suites.
+
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fs, io,
+    path::{Path, PathBuf},
+};
+
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{
+    Argument, BinaryExpression, CallExpression, Expression, ImportDeclarationSpecifier,
+    ImportExpression, ImportOrExportKind, Program, Statement, StaticMemberExpression,
+};
+use oxc_ast_visit::{Visit, walk};
+use oxc_parser::Parser;
+use oxc_span::SourceType;
+use oxc_syntax::operator::BinaryOperator;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::source_discovery::{
+    DiscoveredSourceScope, SourceDiscoveryError, SourceLimitation, SourceScope,
+    discover_source_scope,
+};
+
+const PLAYWRIGHT_CONFIGS: &[&str] = &[
+    "playwright.config.ts",
+    "playwright.config.mts",
+    "playwright.config.js",
+    "playwright.config.mjs",
+    "playwright.config.cts",
+    "playwright.config.cjs",
+];
+const VITEST_CONFIGS: &[&str] = &[
+    "vitest.config.ts",
+    "vitest.config.mts",
+    "vitest.config.js",
+    "vitest.config.mjs",
+    "vitest.config.cts",
+    "vitest.config.cjs",
+    "vite.config.ts",
+    "vite.config.mts",
+    "vite.config.js",
+    "vite.config.mjs",
+];
+const JEST_CONFIGS: &[&str] = &[
+    "jest.config.ts",
+    "jest.config.mts",
+    "jest.config.js",
+    "jest.config.mjs",
+    "jest.config.cts",
+    "jest.config.cjs",
+];
+const TEST_DIRECTORIES: &[&str] = &["test", "tests", "e2e", "spec", "specs"];
+const GENERIC_COMMAND_TERMS: &[&str] = &[
+    "bin", "bun", "exec", "node", "npm", "pnpm", "run", "script", "test", "tests", "yarn",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BuildAdapter {
+    Vite,
+    Generic,
+    Direct,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoverageProject {
+    pub root: PathBuf,
+    pub source_roots: Vec<String>,
+    pub source_files: Vec<String>,
+    pub source_scope: SourceScope,
+    pub source_limitations: Vec<SourceLimitation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub playwright_config: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vitest_config: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jest_config: Option<PathBuf>,
+    pub uses_jest: bool,
+    pub playwright_module: String,
+    pub playwright_test_export: String,
+    pub playwright_exports: Vec<String>,
+    pub build_adapter: BuildAdapter,
+    pub build_command: Vec<String>,
+    pub build_environment: BTreeMap<String, String>,
+}
+
+#[derive(Debug)]
+pub enum ProjectDiscoveryError {
+    Source(SourceDiscoveryError),
+    Io { path: PathBuf, source: io::Error },
+    NoSourceFiles,
+}
+
+impl From<SourceDiscoveryError> for ProjectDiscoveryError {
+    fn from(value: SourceDiscoveryError) -> Self {
+        Self::Source(value)
+    }
+}
+
+impl std::fmt::Display for ProjectDiscoveryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Source(error) => write!(formatter, "{error}"),
+            Self::Io { path, source } => write!(formatter, "{}: {source}", path.display()),
+            Self::NoSourceFiles => write!(
+                formatter,
+                "No application source files were discovered. Set SUPERCOV_SOURCE_ROOTS=src,app."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProjectDiscoveryError {}
+
+fn package_json(root: &Path) -> Value {
+    fs::read(root.join("package.json"))
+        .ok()
+        .and_then(|contents| serde_json::from_slice(&contents).ok())
+        .unwrap_or(Value::Null)
+}
+
+fn script<'a>(manifest: &'a Value, name: &str) -> Option<&'a str> {
+    manifest.get("scripts")?.get(name)?.as_str()
+}
+
+fn regular_file(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_file())
+        .unwrap_or(false)
+}
+
+fn source_file(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let lower = name.to_ascii_lowercase();
+    [
+        ".js", ".jsx", ".ts", ".tsx", ".cjs", ".cjsx", ".cts", ".ctsx", ".mjs", ".mjsx", ".mts",
+        ".mtsx",
+    ]
+    .iter()
+    .any(|extension| lower.ends_with(extension))
+}
+
+fn read_directory(path: &Path) -> Result<Vec<fs::DirEntry>, ProjectDiscoveryError> {
+    let mut entries = fs::read_dir(path)
+        .map_err(|source| ProjectDiscoveryError::Io {
+            path: path.to_owned(),
+            source,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| ProjectDiscoveryError::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    Ok(entries)
+}
+
+fn parse_program<'a>(
+    allocator: &'a Allocator,
+    path: &Path,
+    source: &'a str,
+) -> Option<Program<'a>> {
+    let source_type = SourceType::from_path(path).ok()?;
+    let parsed = Parser::new(allocator, source, source_type).parse();
+    parsed.errors.is_empty().then_some(parsed.program)
+}
+
+#[derive(Debug, Clone)]
+struct TestApiCandidate {
+    module: String,
+    score: usize,
+    test_export: Option<String>,
+    exports: Vec<String>,
+}
+
+fn imported_test_apis(path: &Path, source: &str) -> Vec<TestApiCandidate> {
+    let allocator = Allocator::default();
+    let Some(program) = parse_program(&allocator, path, source) else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    for statement in &program.body {
+        let Statement::ImportDeclaration(declaration) = statement else {
+            continue;
+        };
+        if declaration.import_kind == ImportOrExportKind::Type {
+            continue;
+        }
+        let module = declaration.source.value.to_string();
+        let mut score = 0;
+        let mut test_export = None;
+        let mut exports = Vec::new();
+        for specifier in declaration.specifiers.iter().flatten() {
+            let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
+                continue;
+            };
+            if specifier.import_kind == ImportOrExportKind::Type {
+                continue;
+            }
+            let imported = specifier.imported.name().to_string();
+            let local = specifier.local.name.as_str();
+            exports.push(imported.clone());
+            if local == "test" {
+                score += 20;
+                test_export = Some(imported.clone());
+            } else if imported.to_ascii_lowercase().ends_with("test") {
+                score += 8;
+            }
+            if local == "expect" || imported == "expect" {
+                score += 10;
+            }
+        }
+        if score > 0 {
+            if module == "@playwright/test" {
+                score += 100;
+            } else if module.to_ascii_lowercase().contains("playwright") {
+                score += 5;
+            }
+            candidates.push(TestApiCandidate {
+                module,
+                score,
+                test_export,
+                exports,
+            });
+        }
+    }
+    candidates
+}
+
+fn test_api_candidates(directory: &Path, output: &mut Vec<TestApiCandidate>) {
+    let Ok(entries) = read_directory(directory) else {
+        return;
+    };
+    for entry in entries {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name == "node_modules" || name == "results" || name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            test_api_candidates(&path, output);
+        } else if file_type.is_file()
+            && source_file(&path)
+            && let Ok(source) = fs::read_to_string(&path)
+        {
+            output.extend(imported_test_apis(&path, &source));
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PlaywrightAdapter {
+    module: String,
+    test_export: String,
+    exports: Vec<String>,
+}
+
+fn discover_playwright_adapter(root: &Path) -> PlaywrightAdapter {
+    let mut candidates = Vec::new();
+    for directory in TEST_DIRECTORIES {
+        test_api_candidates(&root.join(directory), &mut candidates);
+    }
+    let mut scores = HashMap::<String, usize>::new();
+    for candidate in &candidates {
+        *scores.entry(candidate.module.clone()).or_default() += candidate.score;
+    }
+    let module = scores
+        .into_iter()
+        .min_by(|(left_module, left_score), (right_module, right_score)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| left_module.cmp(right_module))
+        })
+        .map(|(module, _)| module)
+        .unwrap_or_else(|| "@playwright/test".into());
+    let matching = candidates
+        .iter()
+        .filter(|candidate| candidate.module == module)
+        .collect::<Vec<_>>();
+    let test_export = matching
+        .iter()
+        .filter_map(|candidate| {
+            candidate
+                .test_export
+                .as_ref()
+                .map(|export| (candidate.score, export))
+        })
+        .max_by_key(|(score, _)| *score)
+        .map(|(_, export)| export.clone())
+        .unwrap_or_else(|| "test".into());
+    let exports = matching
+        .iter()
+        .flat_map(|candidate| candidate.exports.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    PlaywrightAdapter {
+        module,
+        test_export,
+        exports,
+    }
+}
+
+fn nested_playwright_configs(root: &Path) -> Vec<PathBuf> {
+    fn visit(directory: &Path, depth: usize, found: &mut Vec<PathBuf>) {
+        if depth > 4 {
+            return;
+        }
+        let Ok(entries) = read_directory(directory) else {
+            return;
+        };
+        for entry in entries {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with('.') || name == "node_modules" {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                visit(&path, depth + 1, found);
+            } else if file_type.is_file() && playwright_config_name(name) {
+                found.push(path);
+            }
+        }
+    }
+
+    let mut found = Vec::new();
+    for directory in ["test", "tests", "e2e"] {
+        visit(&root.join(directory), 0, &mut found);
+    }
+    found.sort();
+    found
+}
+
+fn playwright_config_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if !lower.starts_with("playwright") || !lower.contains(".config.") {
+        return false;
+    }
+    source_file(Path::new(name))
+        && lower[..lower.find(".config.").unwrap_or(0)]
+            .chars()
+            .all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+            })
+}
+
+pub fn expanded_command(root: &Path, command: &[String]) -> String {
+    let manifest = package_json(root);
+    let executable = command
+        .first()
+        .and_then(|value| Path::new(value).file_name())
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .trim_end_matches(".cmd")
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase();
+    let run_index = command.iter().position(|argument| argument == "run");
+    let script_name = run_index
+        .and_then(|index| command.get(index + 1))
+        .or_else(|| {
+            (["npm", "pnpm", "yarn", "bun"].contains(&executable.as_str()) && run_index.is_none())
+                .then(|| command.get(1))
+                .flatten()
+        });
+    let joined = command.join(" ");
+    if ["npm", "pnpm", "yarn", "bun"].contains(&executable.as_str())
+        && let Some(script_name) = script_name
+    {
+        return format!("{joined} {}", script(&manifest, script_name).unwrap_or(""));
+    }
+    joined
+}
+
+fn words(value: &str) -> BTreeSet<String> {
+    value
+        .to_ascii_lowercase()
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|word| word.len() > 1 && !GENERIC_COMMAND_TERMS.contains(word))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn relative_build_output(source: &str) -> bool {
+    let mut rest = source;
+    let mut relative = false;
+    while let Some(stripped) = rest.strip_prefix("../").or_else(|| rest.strip_prefix("./")) {
+        relative = true;
+        rest = stripped;
+    }
+    relative
+        && matches!(
+            rest.split('/').next(),
+            Some("dist" | "build" | "out" | "output")
+        )
+}
+
+fn string_expression<'a>(expression: &'a Expression<'_>) -> Option<&'a str> {
+    let Expression::StringLiteral(literal) = expression else {
+        return None;
+    };
+    Some(literal.value.as_str())
+}
+
+#[derive(Default)]
+struct BuildOutputScanner {
+    found: bool,
+}
+
+impl<'a> Visit<'a> for BuildOutputScanner {
+    fn visit_import_declaration(&mut self, declaration: &oxc_ast::ast::ImportDeclaration<'a>) {
+        self.found |= relative_build_output(declaration.source.value.as_str());
+        walk::walk_import_declaration(self, declaration);
+    }
+
+    fn visit_import_expression(&mut self, expression: &ImportExpression<'a>) {
+        if let Some(source) = string_expression(&expression.source) {
+            self.found |= relative_build_output(source);
+        }
+        walk::walk_import_expression(self, expression);
+    }
+
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if matches!(&call.callee, Expression::Identifier(identifier) if identifier.name == "require")
+            && let Some(Argument::StringLiteral(source)) = call.arguments.first()
+        {
+            self.found |= relative_build_output(source.value.as_str());
+        }
+        walk::walk_call_expression(self, call);
+    }
+}
+
+fn tests_import_build_output(root: &Path) -> bool {
+    fn visit(directory: &Path) -> bool {
+        let Ok(entries) = read_directory(directory) else {
+            return false;
+        };
+        for entry in entries {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name == "node_modules" || name.starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() && visit(&path) {
+                return true;
+            }
+            if file_type.is_file()
+                && source_file(&path)
+                && let Ok(source) = fs::read_to_string(&path)
+            {
+                let allocator = Allocator::default();
+                if let Some(program) = parse_program(&allocator, &path, &source) {
+                    let mut scanner = BuildOutputScanner::default();
+                    scanner.visit_program(&program);
+                    if scanner.found {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    ["test", "tests", "spec", "specs", "e2e", "__tests__"]
+        .iter()
+        .any(|directory| visit(&root.join(directory)))
+}
+
+fn identifier(expression: &Expression<'_>, name: &str) -> bool {
+    matches!(expression, Expression::Identifier(identifier) if identifier.name == name)
+}
+
+fn static_process_env(member: &StaticMemberExpression<'_>) -> bool {
+    member.property.name == "env" && identifier(&member.object, "process")
+}
+
+fn environment_reference(expression: &Expression<'_>) -> Option<String> {
+    match expression {
+        Expression::StaticMemberExpression(member) => {
+            let Expression::StaticMemberExpression(object) = &member.object else {
+                return None;
+            };
+            static_process_env(object).then(|| member.property.name.to_string())
+        }
+        Expression::ComputedMemberExpression(member) => {
+            let Expression::StaticMemberExpression(object) = &member.object else {
+                return None;
+            };
+            let Expression::StringLiteral(property) = &member.expression else {
+                return None;
+            };
+            static_process_env(object).then(|| property.value.to_string())
+        }
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct BuildEnvironmentScanner {
+    values: BTreeMap<String, String>,
+}
+
+impl<'a> Visit<'a> for BuildEnvironmentScanner {
+    fn visit_binary_expression(&mut self, expression: &BinaryExpression<'a>) {
+        if matches!(
+            expression.operator,
+            BinaryOperator::Equality | BinaryOperator::StrictEquality
+        ) && let Some(name) = environment_reference(&expression.left)
+            && name
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_uppercase())
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+            && let Some(value) = string_expression(&expression.right)
+        {
+            self.values.insert(name, value.into());
+        }
+        walk::walk_binary_expression(self, expression);
+    }
+}
+
+fn referenced_build_environment(root: &Path) -> BTreeMap<String, String> {
+    let Ok(entries) = read_directory(root) else {
+        return BTreeMap::new();
+    };
+    let mut values = BTreeMap::new();
+    for entry in entries {
+        let path = entry.path();
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !entry.file_type().is_ok_and(|file_type| file_type.is_file())
+            || !["vite", "webpack", "rollup", "remix", "next", "nuxt"]
+                .iter()
+                .any(|tool| name.starts_with(&format!("{tool}.config.")))
+            || !source_file(&path)
+        {
+            continue;
+        }
+        let Ok(source) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let allocator = Allocator::default();
+        let Some(program) = parse_program(&allocator, &path, &source) else {
+            continue;
+        };
+        let mut scanner = BuildEnvironmentScanner::default();
+        scanner.visit_program(&program);
+        values.extend(scanner.values);
+    }
+    values
+}
+
+fn infer_build_environment(
+    root: &Path,
+    command: &[String],
+    environment: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let command_words = words(&expanded_command(root, command));
+    if command_words.is_empty() {
+        return BTreeMap::new();
+    }
+    referenced_build_environment(root)
+        .into_iter()
+        .filter(|(name, _)| {
+            !environment.contains_key(name)
+                && words(name).iter().any(|word| command_words.contains(word))
+        })
+        .collect()
+}
+
+fn command_tokens(value: &str) -> Vec<String> {
+    value
+        .split_whitespace()
+        .map(|token| {
+            token
+                .trim_matches(|character: char| matches!(character, '\'' | '"' | '(' | ')'))
+                .trim_end_matches([';', ','])
+                .to_ascii_lowercase()
+        })
+        .collect()
+}
+
+fn has_tool(tokens: &[String], tool: &str) -> bool {
+    tokens.iter().any(|token| {
+        let file = token.rsplit('/').next().unwrap_or(token);
+        file == tool
+            || file.strip_suffix(".cmd") == Some(tool)
+            || file.strip_suffix(".exe") == Some(tool)
+    })
+}
+
+fn configured_path(
+    root: &Path,
+    environment: &BTreeMap<String, String>,
+    key: &str,
+) -> Option<PathBuf> {
+    environment.get(key).map(|value| root.join(value))
+}
+
+fn first_config(root: &Path, candidates: &[&str]) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .map(|candidate| root.join(candidate))
+        .find(|path| regular_file(path))
+}
+
+pub fn discover_coverage_project(
+    root: &Path,
+    environment: &BTreeMap<String, String>,
+    command: &[String],
+) -> Result<CoverageProject, ProjectDiscoveryError> {
+    let manifest = package_json(root);
+    let configured_roots = environment.get("SUPERCOV_SOURCE_ROOTS").map(|roots| {
+        roots
+            .split(',')
+            .map(str::trim)
+            .filter(|root| !root.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    });
+    let DiscoveredSourceScope {
+        source_files,
+        source_roots,
+        scope,
+        limitations,
+    } = discover_source_scope(root, configured_roots.as_deref())?;
+    if source_files.is_empty() {
+        return Err(ProjectDiscoveryError::NoSourceFiles);
+    }
+    let playwright_config = configured_path(root, environment, "SUPERCOV_PLAYWRIGHT_CONFIG")
+        .or_else(|| first_config(root, PLAYWRIGHT_CONFIGS))
+        .or_else(|| nested_playwright_configs(root).into_iter().next());
+    let vitest_config = configured_path(root, environment, "SUPERCOV_VITEST_CONFIG")
+        .or_else(|| first_config(root, VITEST_CONFIGS));
+    let jest_config = configured_path(root, environment, "SUPERCOV_JEST_CONFIG")
+        .or_else(|| first_config(root, JEST_CONFIGS));
+    let discovered_playwright = discover_playwright_adapter(root);
+    let playwright_module = environment
+        .get("SUPERCOV_PLAYWRIGHT_MODULE")
+        .cloned()
+        .unwrap_or_else(|| discovered_playwright.module.clone());
+    let playwright_test_export = environment
+        .get("SUPERCOV_PLAYWRIGHT_TEST_EXPORT")
+        .cloned()
+        .unwrap_or_else(|| {
+            if playwright_module == discovered_playwright.module {
+                discovered_playwright.test_export.clone()
+            } else {
+                "test".into()
+            }
+        });
+    let expanded_test_command = expanded_command(root, command);
+    let tokens = command_tokens(&expanded_test_command);
+    let uses_jest =
+        jest_config.is_some() || has_tool(&tokens, "jest") || manifest.get("jest").is_some();
+    let source_transforming_runner = has_tool(&tokens, "jest") || has_tool(&tokens, "vitest");
+    let node_test = has_tool(&tokens, "node") && tokens.iter().any(|token| token == "--test");
+    let typescript_test = tokens.iter().any(|token| {
+        [".ts", ".tsx", ".cts", ".mts"]
+            .iter()
+            .any(|extension| token.ends_with(extension) || token.contains(&format!("{extension}*")))
+    });
+    let owns_build = ["vite", "tsc", "webpack", "rollup", "next", "remix"]
+        .iter()
+        .any(|tool| has_tool(&tokens, tool));
+    let executes_source_directly = (source_transforming_runner && !tests_import_build_output(root))
+        || (node_test && typescript_test && !owns_build);
+    let build_command = if script(&manifest, "build").is_some() && !executes_source_directly {
+        vec!["npm".into(), "run".into(), "build".into()]
+    } else {
+        Vec::new()
+    };
+    let build_tokens = command_tokens(&expanded_command(root, &build_command));
+    let uses_vite_build = has_tool(&build_tokens, "vite") || has_tool(&build_tokens, "vite-node");
+    let playwright_exports = if playwright_module == discovered_playwright.module {
+        discovered_playwright.exports
+    } else {
+        vec![playwright_test_export.clone(), "expect".into()]
+    };
+    Ok(CoverageProject {
+        root: root.to_owned(),
+        source_roots,
+        source_files,
+        source_scope: scope,
+        source_limitations: limitations,
+        playwright_config,
+        vitest_config,
+        jest_config,
+        uses_jest,
+        playwright_module,
+        playwright_test_export,
+        playwright_exports,
+        build_adapter: if build_command.is_empty() {
+            BuildAdapter::Direct
+        } else if uses_vite_build {
+            BuildAdapter::Vite
+        } else {
+            BuildAdapter::Generic
+        },
+        build_command,
+        build_environment: infer_build_environment(root, command, environment),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    fn project(label: &str, files: &[(&str, &str)]) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "supercov-project-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        for (file, contents) in files {
+            let path = root.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, contents).unwrap();
+        }
+        root
+    }
+
+    fn command(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).into()).collect()
+    }
+
+    #[test]
+    fn discovers_conventional_vite_playwright_and_vitest_configuration() {
+        let root = project(
+            "vite",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"vite build"},"devDependencies":{"vite":"1"}}"#,
+                ),
+                ("src/main.ts", "export const ready = true"),
+                ("playwright.config.ts", "export default {}"),
+                ("vitest.config.ts", "export default {}"),
+                (
+                    "tests/example.spec.ts",
+                    "import { test } from '@playwright/test'",
+                ),
+            ],
+        );
+        let discovered = discover_coverage_project(&root, &BTreeMap::new(), &[]).unwrap();
+        assert_eq!(discovered.source_roots, ["src"]);
+        assert_eq!(
+            discovered.playwright_config,
+            Some(root.join("playwright.config.ts"))
+        );
+        assert_eq!(
+            discovered.vitest_config,
+            Some(root.join("vitest.config.ts"))
+        );
+        assert_eq!(discovered.playwright_module, "@playwright/test");
+        assert_eq!(discovered.playwright_test_export, "test");
+        assert_eq!(discovered.playwright_exports, ["test"]);
+        assert_eq!(discovered.build_adapter, BuildAdapter::Vite);
+        assert_eq!(discovered.build_command, command(&["npm", "run", "build"]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn skips_unrelated_builds_for_source_transforming_and_node_test_suites() {
+        for (label, test_script, test_file) in [
+            ("jest", "jest", "require('../src/index.ts')"),
+            ("vitest", "vitest run", "import '../src/index.ts'"),
+            (
+                "node",
+                "node --test tests/*.test.ts",
+                "import '../src/index.ts'",
+            ),
+        ] {
+            let root = project(
+                label,
+                &[
+                    (
+                        "package.json",
+                        &format!(
+                            r#"{{"scripts":{{"build":"node build","test":"{test_script}"}}}}"#
+                        ),
+                    ),
+                    ("src/index.ts", "export const ready = true"),
+                    ("tests/index.test.ts", test_file),
+                ],
+            );
+            let discovered =
+                discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"]))
+                    .unwrap();
+            assert_eq!(discovered.build_adapter, BuildAdapter::Direct, "{label}");
+            assert!(discovered.build_command.is_empty(), "{label}");
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn retains_the_build_when_tests_import_compiled_output() {
+        let root = project(
+            "compiled",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"tsc","test":"jest --runInBand"}}"#,
+                ),
+                ("src/index.ts", "export const ready = true"),
+                ("test/index.test.js", "require('../dist/index.js')"),
+            ],
+        );
+        let discovered =
+            discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
+        assert_eq!(discovered.build_adapter, BuildAdapter::Generic);
+        assert!(discovered.uses_jest);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn discovers_a_project_owned_playwright_fixture_via_the_ast() {
+        let root = project(
+            "fixture",
+            &[
+                ("package.json", r#"{"scripts":{"build":"vite build"}}"#),
+                ("app/root.tsx", "export default null"),
+                (
+                    "tests/nested/playwright.browser.config.ts",
+                    "export default {}",
+                ),
+                (
+                    "tests/example.spec.ts",
+                    "import { type Ignored, browserTest as test, expect, fixtureValue } from '@acme/browser-fixtures'",
+                ),
+            ],
+        );
+        let discovered = discover_coverage_project(&root, &BTreeMap::new(), &[]).unwrap();
+        assert_eq!(
+            discovered.playwright_config,
+            Some(root.join("tests/nested/playwright.browser.config.ts"))
+        );
+        assert_eq!(discovered.playwright_module, "@acme/browser-fixtures");
+        assert_eq!(discovered.playwright_test_export, "browserTest");
+        assert_eq!(
+            discovered.playwright_exports,
+            ["browserTest", "expect", "fixtureValue"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn infers_only_unset_build_flags_referenced_by_the_project_ast() {
+        let root = project(
+            "environment",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"vite build","test:isolated":"node tools/run.js"}}"#,
+                ),
+                ("app/root.ts", "export const ready = true"),
+                (
+                    "vite.config.ts",
+                    "const isolated = process.env.TEST_ISOLATED === 'true'; const bracket = process.env['TEST_BRACKET'] == \"yes\"; const ignored = 'x' === process.env.REVERSED; export default { isolated, bracket, ignored }",
+                ),
+            ],
+        );
+        let discovered = discover_coverage_project(
+            &root,
+            &BTreeMap::new(),
+            &command(&["npm", "run", "test:isolated"]),
+        )
+        .unwrap();
+        assert_eq!(
+            discovered.build_environment,
+            BTreeMap::from([("TEST_ISOLATED".into(), "true".into())])
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn environment_overrides_are_authoritative() {
+        let root = project(
+            "override",
+            &[
+                ("package.json", r#"{"scripts":{"build":"vite build"}}"#),
+                ("custom/main.ts", "main"),
+                ("configs/browser.ts", "config"),
+                (
+                    "tests/example.spec.ts",
+                    "import { test } from '@playwright/test'",
+                ),
+            ],
+        );
+        let environment = BTreeMap::from([
+            ("SUPERCOV_SOURCE_ROOTS".into(), "custom".into()),
+            (
+                "SUPERCOV_PLAYWRIGHT_CONFIG".into(),
+                "configs/browser.ts".into(),
+            ),
+            ("SUPERCOV_PLAYWRIGHT_MODULE".into(), "@custom/test".into()),
+            ("SUPERCOV_PLAYWRIGHT_TEST_EXPORT".into(), "scenario".into()),
+        ]);
+        let discovered = discover_coverage_project(&root, &environment, &[]).unwrap();
+        assert_eq!(discovered.source_roots, ["custom"]);
+        assert_eq!(
+            discovered.playwright_config,
+            Some(root.join("configs/browser.ts"))
+        );
+        assert_eq!(discovered.playwright_module, "@custom/test");
+        assert_eq!(discovered.playwright_test_export, "scenario");
+        assert_eq!(discovered.playwright_exports, ["scenario", "expect"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+}

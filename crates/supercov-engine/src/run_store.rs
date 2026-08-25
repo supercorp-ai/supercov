@@ -378,6 +378,9 @@ pub fn compare_run_integrity(
     if stored.fingerprint.configuration != current.fingerprint.configuration {
         reasons.push("test/build configuration changed".into());
     }
+    if reasons.is_empty() && stored.fingerprint.execution != current.fingerprint.execution {
+        reasons.push("execution environment changed".into());
+    }
     IntegrityComparison {
         stale: !reasons.is_empty(),
         reasons,

@@ -495,6 +495,30 @@ miss blocks flipping any default.
   use the shared bounded JSON contract. Production CLI routing remains gated
   on Rust current-project fingerprint discovery; until then the operator is a
   tested engine layer rather than a partially exposed command.
+- Rust now owns the current JavaScript project/source inventory and run-
+  integrity inputs. The source walker deterministically discovers conventional
+  roots, workspace packages, manifest exports and JSONC `tsconfig` roots;
+  excludes declarations/tests/fixtures/config/tool/generated trees; and turns
+  every unclassified first-party file into a blocking source-scope limitation.
+  It never follows links and rejects a linked explicit root. The Rust parser,
+  not regular expressions, discovers project-owned Playwright fixtures,
+  relative compiled-output imports and build-config environment comparisons.
+  Build selection distinguishes direct Jest/Vitest/`node:test`, generic builds
+  and Vite, including project-owned environment overrides. Eight source-scope
+  and ten complete project shapes—synthetic plus Playwright, `node:test`,
+  esbuild, webpack and SWC repositories—have exact differential parity;
+  independent tests cover safer inline-comment JSONC and symlink boundaries.
+  Run fingerprints are now language-neutral engine code: source, tests,
+  workspace package manifests/locks, nested build/test configuration,
+  frontend shims, Rust transformation identity, execution environment and Git
+  state occupy separately domain-separated SHA-256 inputs. Changes in each
+  domain have independent regressions, generated caches cannot inflate the
+  test fingerprint, links cannot enter a fingerprint, and an execution-only
+  change now marks a run stale instead of being missed by the historical
+  comparator. The JavaScript frontend contributes only its runtime shim files
+  and frozen frontend version; future languages use the same Rust integrity
+  implementation. Production CLI routing and the versioned atomic cutover
+  still need to wire these authoritative Rust fingerprints into publication.
 
 ## Non-goals and guardrails
 
