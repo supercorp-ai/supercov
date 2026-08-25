@@ -13,10 +13,11 @@ use crate::{
     coverage_analysis::{CoverageSummary, is_independence_pair},
     coverage_index::{
         CoverageDimension, CoverageIndex, CoverageIndexError, CoverageViewId, IndexedDecisionGap,
-        IndexedDimensionCoverage, IndexedFileGap,
+        IndexedDimensionCoverage, IndexedFileGap, IndexedMeasurement, IndexedOutcomeCounts,
+        IndexedSourceScope, IndexedSummaryConfidence,
     },
     coverage_report::{
-        CoverageReportRequest, CoverageView, ReportError, analyze_coverage_results,
+        CoverageReportRequest, CoverageView, ReportError, TransportStats, analyze_coverage_results,
         coverage_summary_for_tests,
     },
 };
@@ -156,6 +157,142 @@ pub struct CoverageRunnersData {
     pub run: String,
     pub filters: CoverageQueryFilters,
     pub runners: Vec<IndexedDimensionCoverage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageDiagnostic {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageSummaryData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub generated_at: String,
+    pub valid: bool,
+    pub stale: bool,
+    pub stale_reasons: Vec<String>,
+    pub structurally_complete: bool,
+    pub complete: bool,
+    pub coverage: CoverageSummary,
+    pub measurement: IndexedMeasurement,
+    pub coverage_by_kind: Vec<IndexedDimensionCoverage>,
+    pub coverage_by_runner: Vec<IndexedDimensionCoverage>,
+    pub attribution: crate::coverage_index::IndexedAttribution,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<TransportStats>,
+    pub diagnostics: Vec<CoverageDiagnostic>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<IndexedSummaryConfidence>,
+    pub files_with_gaps: usize,
+    pub files_with_coverage_gaps: usize,
+    pub files_with_measurement_limitations: usize,
+    pub tests: usize,
+    pub setups: usize,
+    pub test_outcomes: IndexedOutcomeCounts,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_scope: Option<IndexedSourceScope>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CoverageSummaryQueryOptions<'a> {
+    pub run: &'a str,
+    pub view: CoverageViewId,
+    pub kind: Option<&'a str>,
+    pub runner: Option<&'a str>,
+    pub valid: bool,
+    pub stale: bool,
+    pub stale_reasons: Vec<String>,
+}
+
+pub fn coverage_summary_query(
+    index: &CoverageIndex<'_>,
+    options: CoverageSummaryQueryOptions<'_>,
+) -> Result<CoverageSummaryData, QueryError> {
+    let projection = index.projection(options.view, options.kind, options.runner)?;
+    let mut diagnostics = Vec::new();
+    if projection.empty_evidence_tests > 0 {
+        diagnostics.push(CoverageDiagnostic {
+            code: "TEST_EVIDENCE_MISSING".into(),
+            severity: "warning".into(),
+            message: format!(
+                "{} test(s) recorded assertion phases but attributed zero coverage evidence; this is valid for assertions over static or uninstrumented data, but may otherwise indicate missing probe transport. First: {}",
+                projection.empty_evidence_tests,
+                projection.first_empty_evidence_test.as_deref().unwrap_or("unknown")
+            ),
+        });
+    }
+    if let Some(transport) = &projection.transport {
+        if transport.corrupt_records > 0 {
+            diagnostics.push(CoverageDiagnostic {
+                code: "CORRUPT_EVIDENCE_RECORDS".into(),
+                severity: "error".into(),
+                message: format!(
+                    "{} malformed evidence record(s) in {} file(s) were excluded; coverage is incomplete.",
+                    transport.corrupt_records, transport.corrupt_files
+                ),
+            });
+        }
+        if transport.remote_launches > 0
+            && transport.scoped_server_records == 0
+            && projection.attribution.server_explicit == 0
+            && projection.attribution.server_fallback == 0
+        {
+            diagnostics.push(CoverageDiagnostic {
+                code: "REMOTE_SERVER_EVIDENCE_MISSING".into(),
+                severity: "warning".into(),
+                message: "Remote launches were supervised, but no server evidence returned. Coverage may describe only browser/test processes; inspect how the application server is launched.".into(),
+            });
+        }
+    }
+    let coverage_by_kind = index.dimensions(options.view, CoverageDimension::Kind)?;
+    let coverage_by_runner = index.dimensions(options.view, CoverageDimension::Runner)?;
+    let filters = CoverageQueryFilters {
+        outcome: match options.view {
+            CoverageViewId::All => "all",
+            CoverageViewId::Passed => "passed",
+            CoverageViewId::Failed => "failed",
+        }
+        .into(),
+        kind: options.kind.map(str::to_owned),
+        runner: options.runner.map(str::to_owned),
+    };
+    let structurally_complete =
+        projection.summary.coverage_complete && projection.measurement.complete;
+    let complete = options.view == CoverageViewId::Passed
+        && options.valid
+        && !options.stale
+        && structurally_complete;
+    Ok(CoverageSummaryData {
+        run: options.run.into(),
+        filters,
+        generated_at: projection.generated_at,
+        valid: options.valid,
+        stale: options.stale,
+        stale_reasons: options.stale_reasons,
+        structurally_complete,
+        complete,
+        coverage: projection.summary,
+        measurement: projection.measurement.clone(),
+        coverage_by_kind,
+        coverage_by_runner,
+        attribution: projection.attribution,
+        transport: projection.transport,
+        diagnostics,
+        confidence: (options.kind.is_none() && options.runner.is_none())
+            .then_some(projection.confidence),
+        files_with_gaps: projection.files_with_gaps,
+        files_with_coverage_gaps: projection.files_with_coverage_gaps,
+        files_with_measurement_limitations: projection.measurement.files,
+        tests: projection.tests,
+        setups: projection.setups,
+        test_outcomes: projection.test_outcomes,
+        source_scope: projection.source_scope,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -273,6 +273,53 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
     dimensionReference.stdout,
     `${fixture}: indexed ${dimensionCommand} JSON differs`,
   );
+
+  const summaryFilter = fixtureIndex % 2 === 0 ? 'all' : 'passed';
+  const summaryKind = summaryFilter === 'all' ? filteredKind : undefined;
+  const summaryRunner = summaryFilter === 'all' ? filteredRunner : undefined;
+  const summaryReference = spawnSync(
+    process.execPath,
+    [
+      resolve(root, 'bin/supercov.js'),
+      'runs', runId, 'coverage',
+      '--filter', summaryFilter, '--json',
+      ...(summaryKind ? ['--kind', summaryKind] : []),
+      ...(summaryRunner ? ['--runner', summaryRunner] : []),
+    ],
+    {
+      cwd: resolve(root, 'tests/fixtures', fixture),
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024 * 1024,
+    },
+  );
+  assert.equal(summaryReference.status, 0, `${fixture}: ${summaryReference.stderr || summaryReference.stdout}`);
+  const summaryEnvelope = JSON.parse(summaryReference.stdout);
+  const summaryRust = spawnSync(binary, ['__query-index-files'], {
+    cwd: root,
+    input: JSON.stringify({
+      archivePath,
+      runId,
+      generatedAt: summaryEnvelope.data.generatedAt,
+      filter: summaryFilter,
+      command: 'summary',
+      metric: 'all',
+      kind: summaryKind,
+      runner: summaryRunner,
+      valid: summaryEnvelope.data.valid,
+      stale: summaryEnvelope.data.stale,
+      staleReasons: summaryEnvelope.data.staleReasons,
+      offset: 0,
+      limit: 20,
+    }),
+    encoding: 'utf8',
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  assert.equal(summaryRust.status, 0, `${fixture}: ${summaryRust.stderr || summaryRust.stdout}`);
+  assert.equal(
+    summaryRust.stdout,
+    summaryReference.stdout,
+    `${fixture}: indexed summary JSON differs`,
+  );
 }
 
 const indexed = spawnSync(binary, ['__roundtrip-query-index'], {
@@ -287,5 +334,5 @@ const indexDifference = firstDifference(indexedActual, indexExpected);
 assert.equal(indexDifference, undefined, `typed index: ${JSON.stringify(indexDifference)}`);
 
 console.log(
-  `[rust-archive-differential] ${fixtures.length} real archives have exact report plus typed mmap file-gap, provenance, dimension, and decision-group query parity`,
+  `[rust-archive-differential] ${fixtures.length} real archives have exact report plus typed mmap summary, file-gap, provenance, dimension, and decision-group query parity`,
 );

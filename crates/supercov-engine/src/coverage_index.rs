@@ -10,22 +10,25 @@ use serde::Serialize;
 
 use crate::{
     coverage_analysis::{CoverageCount, CoverageSummary, find_witnesses_for_conditions},
-    coverage_report::{CoverageReport, CoverageView},
+    coverage_report::{CoverageReport, CoverageView, TransportStats, coverage_summary_for_tests},
     query_index::{QueryIndex, QueryIndexError, QueryIndexSection},
 };
 
 pub const SECTION_STRING_BYTES: u32 = 1;
 pub const SECTION_STRINGS: u32 = 2;
+pub const SECTION_STRING_RELATIONS: u32 = 3;
 pub const SECTION_VIEW_SUMMARIES: u32 = 10;
 pub const SECTION_FILE_GAPS: u32 = 11;
 pub const SECTION_DECISION_GAPS: u32 = 12;
 pub const SECTION_DIMENSIONS: u32 = 13;
+pub const SECTION_PROJECTIONS: u32 = 14;
 
 const STRING_RECORD_SIZE: usize = 16;
 const SUMMARY_RECORD_SIZE: usize = 176;
 const FILE_GAP_RECORD_SIZE: usize = 176;
 const DECISION_GAP_RECORD_SIZE: usize = 96;
 const DIMENSION_RECORD_SIZE: usize = 192;
+const PROJECTION_RECORD_SIZE: usize = 512;
 const NO_STRING: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -114,6 +117,38 @@ fn usize_u32(value: usize) -> Result<u32, CoverageIndexError> {
 struct StringTable {
     ids: HashMap<String, u32>,
     strings: Vec<String>,
+}
+
+#[derive(Default)]
+struct StringRelations {
+    values: Vec<u32>,
+}
+
+impl StringRelations {
+    fn push(
+        &mut self,
+        values: impl IntoIterator<Item = String>,
+        strings: &mut StringTable,
+    ) -> Result<(u64, u64), CoverageIndexError> {
+        let offset = usize_u64(self.values.len())?;
+        for value in values {
+            self.values.push(strings.intern(&value)?);
+        }
+        Ok((offset, usize_u64(self.values.len())? - offset))
+    }
+
+    fn section(self) -> Result<QueryIndexSection, CoverageIndexError> {
+        let mut bytes = Vec::with_capacity(self.values.len() * 4);
+        for value in self.values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        Ok(QueryIndexSection {
+            kind: SECTION_STRING_RELATIONS,
+            record_size: 4,
+            count: usize_u64(bytes.len() / 4)?,
+            bytes,
+        })
+    }
 }
 
 impl StringTable {
@@ -281,6 +316,96 @@ pub struct IndexedDimensionCoverage {
     pub tests: usize,
     pub setups: usize,
     pub summary: CoverageSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedAttribution {
+    pub browser_explicit: usize,
+    pub browser_fallback: usize,
+    pub server_explicit: usize,
+    pub server_fallback: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedOutcomeCounts {
+    pub passed: usize,
+    pub failed: usize,
+    pub flaky: usize,
+    pub skipped: usize,
+    pub timed_out: usize,
+    pub interrupted: usize,
+    pub unknown: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedMeasurementKinds {
+    #[serde(rename = "dynamic-code")]
+    pub dynamic_code: usize,
+    #[serde(rename = "semantic-safety")]
+    pub semantic_safety: usize,
+    #[serde(rename = "source-scope")]
+    pub source_scope: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedMeasurement {
+    pub complete: bool,
+    pub limitations: usize,
+    pub evidence_corruptions: usize,
+    pub blocking: usize,
+    pub files: usize,
+    pub by_kind: IndexedMeasurementKinds,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedConfidenceLines {
+    pub unexecuted: usize,
+    pub executed: usize,
+    pub action: usize,
+    pub asserted: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedSummaryConfidence {
+    pub lines: IndexedConfidenceLines,
+    pub assertion_covered_mcdc_conditions: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedSourceScope {
+    pub mode: String,
+    pub roots: Vec<String>,
+    pub included: usize,
+    pub excluded: usize,
+    pub ambiguous: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexedProjection {
+    pub view: CoverageViewId,
+    pub kind: Option<String>,
+    pub runner: Option<String>,
+    pub generated_at: String,
+    pub summary: CoverageSummary,
+    pub measurement: IndexedMeasurement,
+    pub attribution: IndexedAttribution,
+    pub transport: Option<TransportStats>,
+    pub empty_evidence_tests: usize,
+    pub first_empty_evidence_test: Option<String>,
+    pub confidence: IndexedSummaryConfidence,
+    pub files_with_gaps: usize,
+    pub files_with_coverage_gaps: usize,
+    pub tests: usize,
+    pub setups: usize,
+    pub test_outcomes: IndexedOutcomeCounts,
+    pub source_scope: Option<IndexedSourceScope>,
 }
 
 #[derive(Default)]
@@ -598,6 +723,285 @@ fn dimension_record(
     Ok(record)
 }
 
+fn projection_record(
+    view_id: CoverageViewId,
+    view: &CoverageView,
+    selected: Option<&BTreeSet<String>>,
+    kind: Option<&str>,
+    runner: Option<&str>,
+    strings: &mut StringTable,
+    relations: &mut StringRelations,
+) -> Result<[u8; PROJECTION_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; PROJECTION_RECORD_SIZE];
+    record[0] = view_id as u8;
+    put_u32(
+        &mut record,
+        4,
+        kind.map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+    );
+    put_u32(
+        &mut record,
+        8,
+        runner.map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+    );
+    put_u32(&mut record, 12, strings.intern(&view.generated_at)?);
+
+    let scope = view.scope.as_ref();
+    let scope_mode = scope
+        .and_then(|value| value.get("mode"))
+        .and_then(serde_json::Value::as_str);
+    record[2] = u8::from(scope_mode.is_some());
+    put_u32(
+        &mut record,
+        16,
+        scope_mode.map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+    );
+    let roots = scope
+        .and_then(|value| value.get("roots"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let (roots_offset, roots_count) = relations.push(roots, strings)?;
+    put_u64(&mut record, 24, roots_offset);
+    put_u32(
+        &mut record,
+        32,
+        u32::try_from(roots_count).map_err(|_| CoverageIndexError::SizeOverflow)?,
+    );
+
+    let summary = selected.map_or_else(
+        || Ok(view.summary.clone()),
+        |ids| {
+            coverage_summary_for_tests(view, ids)
+                .map_err(|_| CoverageIndexError::InvalidRecord("projection summary"))
+        },
+    )?;
+    put_summary_payload(&mut record, 36, 40, &summary)?;
+
+    let mut limitation_kinds = [0_usize; 3];
+    let mut limitation_files = BTreeSet::new();
+    for limitation in &view.limitations {
+        if let Some((file, kind)) = limitation_kind(limitation) {
+            limitation_files.insert(file);
+            match kind {
+                "dynamic-code" => limitation_kinds[0] += 1,
+                "semantic-safety" => limitation_kinds[1] += 1,
+                "source-scope" => limitation_kinds[2] += 1,
+                _ => {}
+            }
+        }
+    }
+    let corrupt_records = view
+        .transport
+        .as_ref()
+        .map_or(0, |value| value.corrupt_records);
+    let corrupt_files = view
+        .transport
+        .as_ref()
+        .map_or(0, |value| value.corrupt_files);
+    for (offset, value) in [
+        (192, view.limitations.len()),
+        (200, corrupt_records),
+        (208, view.limitations.len() + corrupt_records),
+        (216, limitation_files.len() + corrupt_files),
+        (224, limitation_kinds[0]),
+        (232, limitation_kinds[1]),
+        (240, limitation_kinds[2]),
+    ] {
+        put_u64(&mut record, offset, usize_u64(value)?);
+    }
+
+    let phases = view
+        .phases
+        .iter()
+        .filter(|phase| selected.is_none_or(|selected| selected.contains(&phase.test)));
+    let mut attribution = [0_usize; 4];
+    for phase in phases {
+        attribution[0] += phase.explicit_browser_events;
+        attribution[1] += phase.inferred_browser_events;
+        attribution[2] += phase.explicit_server_events;
+        attribution[3] += phase.inferred_server_events;
+    }
+    for (index, value) in attribution.into_iter().enumerate() {
+        put_u64(&mut record, 248 + index * 8, usize_u64(value)?);
+    }
+
+    let confidence_levels = ["unexecuted", "executed", "action", "asserted"];
+    for (index, level) in confidence_levels.into_iter().enumerate() {
+        put_u64(
+            &mut record,
+            280 + index * 8,
+            usize_u64(
+                view.lines
+                    .iter()
+                    .filter(|line| line.confidence.level == level)
+                    .count(),
+            )?,
+        );
+    }
+    put_u64(
+        &mut record,
+        312,
+        usize_u64(
+            view.decisions
+                .iter()
+                .flat_map(|decision| &decision.conditions)
+                .filter(|condition| condition.assertion_covered)
+                .count(),
+        )?,
+    );
+
+    let gaps = file_gaps(view, selected)?;
+    put_u64(
+        &mut record,
+        320,
+        usize_u64(
+            gaps.iter()
+                .filter(|(_, gap)| {
+                    gap.uncovered_lines
+                        + gap.uncovered_functions * 2
+                        + gap.missing_branches * 2
+                        + gap.missing_mcdc_conditions * 3
+                        + gap.measurement_limitations * 3
+                        > 0
+                })
+                .count(),
+        )?,
+    );
+    put_u64(
+        &mut record,
+        328,
+        usize_u64(
+            gaps.iter()
+                .filter(|(_, gap)| {
+                    gap.uncovered_lines > 0
+                        || gap.uncovered_statements > 0
+                        || gap.uncovered_functions > 0
+                        || gap.missing_branches > 0
+                        || gap.missing_mcdc_conditions > 0
+                })
+                .count(),
+        )?,
+    );
+
+    let selected_tests = view
+        .tests
+        .iter()
+        .filter(|test| selected.is_none_or(|selected| selected.contains(&test.id)))
+        .collect::<Vec<_>>();
+    put_u64(
+        &mut record,
+        336,
+        usize_u64(
+            selected_tests
+                .iter()
+                .filter(|test| test.role == "test")
+                .count(),
+        )?,
+    );
+    put_u64(
+        &mut record,
+        344,
+        usize_u64(
+            selected_tests
+                .iter()
+                .filter(|test| test.role == "setup")
+                .count(),
+        )?,
+    );
+    for (index, outcome) in [
+        "passed",
+        "failed",
+        "flaky",
+        "skipped",
+        "timedOut",
+        "interrupted",
+        "unknown",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        put_u64(
+            &mut record,
+            352 + index * 8,
+            usize_u64(
+                selected_tests
+                    .iter()
+                    .filter(|test| test.role == "test" && test.outcome == outcome)
+                    .count(),
+            )?,
+        );
+    }
+
+    if let Some(transport) = &view.transport {
+        record[1] = 1;
+        for (index, value) in [
+            transport.processes,
+            transport.child_launches,
+            transport.remote_launches,
+            transport.workspace_capabilities,
+            transport.scoped_server_records,
+            transport.background_server_records,
+            transport.corrupt_records,
+            transport.corrupt_files,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            put_u64(&mut record, 408 + index * 8, usize_u64(value)?);
+        }
+    }
+
+    let phase_tests = view
+        .phases
+        .iter()
+        .map(|phase| phase.test.as_str())
+        .collect::<BTreeSet<_>>();
+    let empty_tests = selected_tests
+        .iter()
+        .filter(|test| {
+            test.role == "test"
+                && test.lines.is_empty()
+                && test.hits.is_empty()
+                && test.decisions.is_empty()
+                && phase_tests.contains(test.id.as_str())
+        })
+        .collect::<Vec<_>>();
+    put_u64(&mut record, 472, usize_u64(empty_tests.len())?);
+    put_u32(
+        &mut record,
+        20,
+        empty_tests
+            .first()
+            .map_or(Ok(NO_STRING), |test| strings.intern(&test.name))?,
+    );
+
+    let entries = scope
+        .and_then(|value| value.get("entries"))
+        .and_then(serde_json::Value::as_array);
+    for (index, status) in ["included", "excluded", "ambiguous"]
+        .into_iter()
+        .enumerate()
+    {
+        put_u64(
+            &mut record,
+            480 + index * 8,
+            usize_u64(entries.map_or(0, |entries| {
+                entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.get("status").and_then(serde_json::Value::as_str) == Some(status)
+                    })
+                    .count()
+            }))?,
+        );
+    }
+    Ok(record)
+}
+
 pub fn coverage_index_sections(
     report: &CoverageReport,
 ) -> Result<Vec<QueryIndexSection>, CoverageIndexError> {
@@ -607,12 +1011,23 @@ pub fn coverage_index_sections(
         (CoverageViewId::Failed, &report.filters.failed),
     ];
     let mut strings = StringTable::default();
+    let mut relations = StringRelations::default();
     let mut summaries = Vec::with_capacity(views.len() * SUMMARY_RECORD_SIZE);
     let mut gaps = Vec::new();
     let mut decision_gaps = Vec::new();
     let mut dimensions = Vec::new();
+    let mut projection_records = Vec::new();
     for (id, view) in views {
         summaries.extend_from_slice(&summary_record(id, view, &mut strings)?);
+        projection_records.extend_from_slice(&projection_record(
+            id,
+            view,
+            None,
+            None,
+            None,
+            &mut strings,
+            &mut relations,
+        )?);
         for value in &view.coverage_by_kind {
             dimensions.extend_from_slice(&dimension_record(
                 id,
@@ -643,6 +1058,15 @@ pub fn coverage_index_sections(
             gaps.extend_from_slice(&file_gap_record(id, &file, &gap, None, None, &mut strings)?);
         }
         for (kind, runner, selected) in projections(view) {
+            projection_records.extend_from_slice(&projection_record(
+                id,
+                view,
+                Some(&selected),
+                kind.as_deref(),
+                runner.as_deref(),
+                &mut strings,
+                &mut relations,
+            )?);
             for decision in &view.decisions {
                 decision_gaps.extend_from_slice(&decision_gap_record(
                     id,
@@ -666,9 +1090,11 @@ pub fn coverage_index_sections(
         }
     }
     let [blob, string_records] = strings.sections()?;
+    let string_relations = relations.section()?;
     Ok(vec![
         blob,
         string_records,
+        string_relations,
         QueryIndexSection {
             kind: SECTION_VIEW_SUMMARIES,
             record_size: SUMMARY_RECORD_SIZE as u32,
@@ -693,6 +1119,12 @@ pub fn coverage_index_sections(
             count: usize_u64(dimensions.len() / DIMENSION_RECORD_SIZE)?,
             bytes: dimensions,
         },
+        QueryIndexSection {
+            kind: SECTION_PROJECTIONS,
+            record_size: PROJECTION_RECORD_SIZE as u32,
+            count: usize_u64(projection_records.len() / PROJECTION_RECORD_SIZE)?,
+            bytes: projection_records,
+        },
     ])
 }
 
@@ -708,12 +1140,18 @@ impl<'a> CoverageIndex<'a> {
             (SECTION_FILE_GAPS, FILE_GAP_RECORD_SIZE),
             (SECTION_DECISION_GAPS, DECISION_GAP_RECORD_SIZE),
             (SECTION_DIMENSIONS, DIMENSION_RECORD_SIZE),
+            (SECTION_PROJECTIONS, PROJECTION_RECORD_SIZE),
         ] {
             if index.descriptor(kind)?.record_size as usize != size {
                 return Err(CoverageIndexError::InvalidRecord("record size"));
             }
         }
         index.descriptor(SECTION_STRING_BYTES)?;
+        if index.descriptor(SECTION_STRING_RELATIONS)?.record_size != 4 {
+            return Err(CoverageIndexError::InvalidRecord(
+                "string-relation record size",
+            ));
+        }
         Ok(Self { index })
     }
 
@@ -911,6 +1349,173 @@ impl<'a> CoverageIndex<'a> {
         } else {
             self.string(id).map(Some)
         }
+    }
+
+    fn relation_strings(&self, offset: u64, count: u64) -> Result<Vec<String>, CoverageIndexError> {
+        let end = offset
+            .checked_add(count)
+            .ok_or(CoverageIndexError::SizeOverflow)?;
+        let descriptor = self.index.descriptor(SECTION_STRING_RELATIONS)?;
+        if end > descriptor.count {
+            return Err(CoverageIndexError::InvalidRecord("string relation range"));
+        }
+        (offset..end)
+            .map(|index| {
+                let record = self.index.record(SECTION_STRING_RELATIONS, index)?;
+                self.string(get_u32(record, 0)?)
+            })
+            .collect()
+    }
+
+    pub fn projection(
+        &self,
+        view: CoverageViewId,
+        kind: Option<&str>,
+        runner: Option<&str>,
+    ) -> Result<IndexedProjection, CoverageIndexError> {
+        let descriptor = self.index.descriptor(SECTION_PROJECTIONS)?;
+        let mut found = None;
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_PROJECTIONS, index)?;
+            if CoverageViewId::try_from(record[0])? != view {
+                continue;
+            }
+            if record[3] != 0
+                || record[38..40].iter().any(|byte| *byte != 0)
+                || record[504..].iter().any(|byte| *byte != 0)
+            {
+                return Err(CoverageIndexError::InvalidRecord(
+                    "projection reserved bytes",
+                ));
+            }
+            let record_kind = self.optional_string(get_u32(record, 4)?)?;
+            let record_runner = self.optional_string(get_u32(record, 8)?)?;
+            if record_kind.as_deref() != kind || record_runner.as_deref() != runner {
+                continue;
+            }
+            if found.is_some() {
+                return Err(CoverageIndexError::InvalidRecord(
+                    "duplicate coverage projection",
+                ));
+            }
+            let number = |offset: usize| -> Result<usize, CoverageIndexError> {
+                usize::try_from(get_u64(record, offset)?)
+                    .map_err(|_| CoverageIndexError::SizeOverflow)
+            };
+            let limitations = number(192)?;
+            let evidence_corruptions = number(200)?;
+            let blocking = number(208)?;
+            if blocking != limitations + evidence_corruptions {
+                return Err(CoverageIndexError::InvalidRecord(
+                    "measurement blocking count",
+                ));
+            }
+            let transport_values = (0..8)
+                .map(|index| number(408 + index * 8))
+                .collect::<Result<Vec<_>, _>>()?;
+            let transport = if bool_field(record[1])? {
+                Some(TransportStats {
+                    processes: transport_values[0],
+                    child_launches: transport_values[1],
+                    remote_launches: transport_values[2],
+                    workspace_capabilities: transport_values[3],
+                    scoped_server_records: transport_values[4],
+                    background_server_records: transport_values[5],
+                    corrupt_records: transport_values[6],
+                    corrupt_files: transport_values[7],
+                })
+            } else {
+                if transport_values.iter().any(|value| *value != 0) {
+                    return Err(CoverageIndexError::InvalidRecord("transport presence flag"));
+                }
+                None
+            };
+            let has_scope = bool_field(record[2])?;
+            let scope_mode = self.optional_string(get_u32(record, 16)?)?;
+            if has_scope != scope_mode.is_some() {
+                return Err(CoverageIndexError::InvalidRecord("scope presence flag"));
+            }
+            let source_scope = if let Some(mode) = scope_mode {
+                Some(IndexedSourceScope {
+                    mode,
+                    roots: self
+                        .relation_strings(get_u64(record, 24)?, u64::from(get_u32(record, 32)?))?,
+                    included: number(480)?,
+                    excluded: number(488)?,
+                    ambiguous: number(496)?,
+                })
+            } else {
+                if get_u32(record, 32)? != 0
+                    || number(480)? != 0
+                    || number(488)? != 0
+                    || number(496)? != 0
+                {
+                    return Err(CoverageIndexError::InvalidRecord("absent scope data"));
+                }
+                None
+            };
+            let empty_evidence_tests = number(472)?;
+            let first_empty_evidence_test = self.optional_string(get_u32(record, 20)?)?;
+            if (empty_evidence_tests == 0) != first_empty_evidence_test.is_none() {
+                return Err(CoverageIndexError::InvalidRecord(
+                    "empty-evidence diagnostic identity",
+                ));
+            }
+            found = Some(IndexedProjection {
+                view,
+                kind: record_kind,
+                runner: record_runner,
+                generated_at: self.string(get_u32(record, 12)?)?,
+                summary: decode_summary(record, 36, 40)?,
+                measurement: IndexedMeasurement {
+                    complete: blocking == 0,
+                    limitations,
+                    evidence_corruptions,
+                    blocking,
+                    files: number(216)?,
+                    by_kind: IndexedMeasurementKinds {
+                        dynamic_code: number(224)?,
+                        semantic_safety: number(232)?,
+                        source_scope: number(240)?,
+                    },
+                },
+                attribution: IndexedAttribution {
+                    browser_explicit: number(248)?,
+                    browser_fallback: number(256)?,
+                    server_explicit: number(264)?,
+                    server_fallback: number(272)?,
+                },
+                transport,
+                empty_evidence_tests,
+                first_empty_evidence_test,
+                confidence: IndexedSummaryConfidence {
+                    lines: IndexedConfidenceLines {
+                        unexecuted: number(280)?,
+                        executed: number(288)?,
+                        action: number(296)?,
+                        asserted: number(304)?,
+                    },
+                    assertion_covered_mcdc_conditions: number(312)?,
+                },
+                files_with_gaps: number(320)?,
+                files_with_coverage_gaps: number(328)?,
+                tests: number(336)?,
+                setups: number(344)?,
+                test_outcomes: IndexedOutcomeCounts {
+                    passed: number(352)?,
+                    failed: number(360)?,
+                    flaky: number(368)?,
+                    skipped: number(376)?,
+                    timed_out: number(384)?,
+                    interrupted: number(392)?,
+                    unknown: number(400)?,
+                },
+                source_scope,
+            });
+        }
+        found.ok_or(CoverageIndexError::InvalidRecord(
+            "missing coverage projection",
+        ))
     }
 
     pub fn decision_gaps(
@@ -1219,6 +1824,12 @@ mod tests {
         assert_eq!(gaps.len(), 1);
         assert_eq!(gaps[0].file, "src/a.js");
         assert_eq!(gaps[0].missing_mcdc_conditions, 2);
+        let projection = index.projection(CoverageViewId::All, None, None).unwrap();
+        assert_eq!(projection.summary, report.view.summary);
+        assert_eq!(projection.tests, 1);
+        assert_eq!(projection.setups, 0);
+        assert_eq!(projection.test_outcomes.passed, 1);
+        assert!(projection.source_scope.is_none());
         fs::remove_dir_all(root).unwrap();
     }
 }

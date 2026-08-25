@@ -392,6 +392,15 @@ miss blocks flipping any default.
   and fixed a Rust/JavaScript representation difference: integer-valued
   percentages now serialize as JSON integers (`100`, not `100.0`) everywhere
   in Rust agent output, preserving the frozen JSON byte contract centrally.
+  A typed projection section now powers the complete `coverage summary`
+  envelope for every outcome/kind/runner selection. It stores independently
+  recomputed structural coverage, measurement blockers, transport health,
+  action/assertion attribution, empty-evidence diagnostics, confidence,
+  test outcomes, gap counts and source-scope roots/counts. The full summary
+  JSON—not selected fields—is byte-identical on all five real archives for
+  both provenance-filtered and passed-only views. Strict relation-range
+  validation caught a scope-root-count/summary-flag layout overlap during the
+  differential; the fixed-width layout was corrected before publication.
   Full condition/vector/test/phase detail sections and the rest of the query
   surface remain before this path can replace the shipped query engine.
 

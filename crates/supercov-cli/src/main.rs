@@ -7,9 +7,10 @@ use supercov_engine::{
     coverage_index::{CoverageIndex, coverage_index_sections},
     coverage_query::{
         CoverageDimensionQueryData, CoverageDimensionQueryOptions, CoverageFileDecisionsOptions,
-        CoverageFileQueryData, CoverageFileQueryOptions, CoverageQueryFilters, DecisionSort,
-        MinimizeMetric, MinimumTestSetRequest, coverage_dimension_query,
-        coverage_file_decisions_query, coverage_file_query, minimum_test_set_for_request,
+        CoverageFileQueryData, CoverageFileQueryOptions, CoverageQueryFilters,
+        CoverageSummaryQueryOptions, DecisionSort, MinimizeMetric, MinimumTestSetRequest,
+        coverage_dimension_query, coverage_file_decisions_query, coverage_file_query,
+        coverage_summary_query, minimum_test_set_for_request,
     },
     coverage_report::{
         ArchiveReportRequest, CoverageReportRequest, analyze_coverage_archive,
@@ -78,6 +79,9 @@ struct IndexedFileQueryRequest {
     runner: Option<String>,
     file: Option<String>,
     sort: Option<DecisionSort>,
+    valid: Option<bool>,
+    stale: Option<bool>,
+    stale_reasons: Option<Vec<String>>,
     offset: usize,
     limit: usize,
 }
@@ -109,7 +113,7 @@ fn query_index_files() -> ExitCode {
     let gaps_only = match request.command.as_str() {
         "files" => Some(false),
         "gaps" => Some(true),
-        "file-decisions" | "kinds" | "runners" => None,
+        "file-decisions" | "kinds" | "runners" | "summary" => None,
         _ => {
             eprintln!("[supercov] unsupported indexed query");
             return ExitCode::from(2);
@@ -149,6 +153,23 @@ fn query_index_files() -> ExitCode {
         write_query_index(&sections, &identity, &path).map_err(|error| error.to_string())?;
         let container = QueryIndex::open(&path, &identity).map_err(|error| error.to_string())?;
         let index = CoverageIndex::new(&container).map_err(|error| error.to_string())?;
+        if request.command == "summary" {
+            let data = coverage_summary_query(
+                &index,
+                CoverageSummaryQueryOptions {
+                    run: &request.run_id,
+                    view,
+                    kind: request.kind.as_deref(),
+                    runner: request.runner.as_deref(),
+                    valid: request.valid.unwrap_or(false),
+                    stale: request.stale.unwrap_or(false),
+                    stale_reasons: request.stale_reasons.clone().unwrap_or_default(),
+                },
+            )
+            .map_err(|error| format!("{error:?}"))?;
+            return agent_json::success("coverage.summary", &data, None)
+                .map_err(|error| format!("response exceeds {} bytes", error.max_bytes));
+        }
         if request.command == "kinds" || request.command == "runners" {
             let dimension = if request.command == "kinds" {
                 supercov_engine::coverage_index::CoverageDimension::Kind
