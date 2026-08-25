@@ -43,7 +43,7 @@
     "test:filesystem": "npm run build && node --test --test-concurrency=1 tests/unit/atomic.test.ts tests/unit/evidenceArchive.test.ts tests/unit/workspace.test.ts && node scripts/workspace-crash-integration.mjs",
     "test:watchdog": "npm run build && node scripts/watchdog-integration.mjs",
     "test:engine-contract": "npm run build && node scripts/engine-contract.mjs",
-    "test:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && node scripts/rust-js-differential.mjs",
+    "test:rust": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && cargo build -p supercov-cli && npm run build && node scripts/rust-js-differential.mjs && node scripts/rust-analysis-differential.mjs",
     "test:rust-engine": "npm run build && cargo build -p supercov-cli && node scripts/rust-engine-parity.mjs",
     "test:rust-syntax": "npm run build && cargo build -p supercov-cli && node scripts/rust-syntax-matrix.mjs",
     "test:rust-fixture": "npm run build && cargo build -p supercov-cli && node scripts/rust-fixture-matrix.mjs",

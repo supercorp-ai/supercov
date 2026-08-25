@@ -309,6 +309,14 @@ miss blocks flipping any default.
   complete. Phase 4 already owns frozen probe/agent-JSON contract slices and
   evidence packing/strict reading; discovery, workspace, supervision,
   analysis, solving, indexing, querying, and lifecycle are the next Rust ports.
+- Phase 4 has begun with the first language-neutral analyzer slice. Rust now
+  owns deterministic masking-MC/DC witness search using dense candidate
+  bitsets, plus exact line/statement/function/branch/condition summary
+  arithmetic. Manifest condition counts are explicit, so unexecuted decisions
+  cannot disappear from the denominator. The independent Clang fixture and
+  250 generated models require exact witness order and summary parity with the
+  regression reference. This core accepts no JavaScript-specific types and is
+  the shared verdict engine for every future language frontend.
 
 ## Non-goals and guardrails
 
