@@ -1061,6 +1061,456 @@ pub fn coverage_decision_query(
     ))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CoverageOtherTest {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageOtherCoverage {
+    pub covered_elsewhere: bool,
+    pub kinds: Vec<String>,
+    pub runners: Vec<String>,
+    pub tests: Vec<CoverageOtherTest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageLineObligation {
+    pub kind: String,
+    pub line: usize,
+    pub other_coverage: CoverageOtherCoverage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoveragePointObligation {
+    pub kind: String,
+    pub line: usize,
+    pub column: usize,
+    pub source: String,
+    pub other_coverage: CoverageOtherCoverage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageBranchObligation {
+    pub kind: String,
+    pub line: usize,
+    pub column: usize,
+    pub source: String,
+    pub missing: String,
+    pub other_coverage: CoverageOtherCoverage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageMcdcObligation {
+    pub kind: String,
+    pub id: String,
+    pub line: usize,
+    pub column: usize,
+    pub decision: String,
+    pub missing_condition: String,
+    pub observed_vectors: Vec<String>,
+    pub other_coverage: CoverageOtherCoverage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum CoverageFileObligation {
+    Line(CoverageLineObligation),
+    Point(CoveragePointObligation),
+    Branch(CoverageBranchObligation),
+    Mcdc(CoverageMcdcObligation),
+}
+
+impl CoverageFileObligation {
+    fn line(&self) -> usize {
+        match self {
+            Self::Line(value) => value.line,
+            Self::Point(value) => value.line,
+            Self::Branch(value) => value.line,
+            Self::Mcdc(value) => value.line,
+        }
+    }
+
+    fn kind(&self) -> &str {
+        match self {
+            Self::Line(value) => &value.kind,
+            Self::Point(value) => &value.kind,
+            Self::Branch(value) => &value.kind,
+            Self::Mcdc(value) => &value.kind,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CoverageFileTest {
+    pub id: String,
+    pub name: String,
+    pub provenance: TestProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CoverageFileLimitation {
+    pub id: String,
+    pub kind: String,
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub source: String,
+    pub reason: String,
+    pub blocking: bool,
+    pub effect: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageFileCounts {
+    pub uncovered_lines: usize,
+    pub uncovered_statements: usize,
+    pub uncovered_functions: usize,
+    pub missing_branches: usize,
+    pub missing_mcdc_conditions: usize,
+    pub waived_mcdc_conditions: usize,
+    pub measurement_limitations: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageFileDetailData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub file: String,
+    pub metric: MinimizeMetric,
+    pub counts: CoverageFileCounts,
+    pub tests: Vec<CoverageFileTest>,
+    pub total_tests: usize,
+    pub total_obligations: usize,
+    pub obligations: Vec<CoverageFileObligation>,
+    pub total_limitations: usize,
+    pub limitations: Vec<CoverageFileLimitation>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CoverageFileDetailOptions<'a> {
+    pub run: &'a str,
+    pub view: CoverageViewId,
+    pub kind: Option<&'a str>,
+    pub runner: Option<&'a str>,
+    pub selector: &'a str,
+    pub metric: MinimizeMetric,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+fn other_coverage(
+    test_ids: &[String],
+    selected: Option<&BTreeSet<String>>,
+    tests: &HashMap<String, IndexedTestSummary>,
+) -> CoverageOtherCoverage {
+    let covered = selected.map_or_else(Vec::new, |selected| {
+        test_ids
+            .iter()
+            .filter(|id| !selected.contains(*id))
+            .filter_map(|id| tests.get(id))
+            .collect::<Vec<_>>()
+    });
+    CoverageOtherCoverage {
+        covered_elsewhere: !covered.is_empty(),
+        kinds: covered
+            .iter()
+            .map(|test| test.provenance.kind.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        runners: covered
+            .iter()
+            .map(|test| test.provenance.runner.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
+        tests: covered
+            .into_iter()
+            .map(|test| CoverageOtherTest {
+                id: test.id.clone(),
+                name: test.name.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn vector_text(vector: &crate::coverage_analysis::McdcVector) -> String {
+    let values = vector
+        .values
+        .iter()
+        .map(|value| match value {
+            None => '-',
+            Some(false) => 'F',
+            Some(true) => 'T',
+        })
+        .collect::<String>();
+    format!("{values} -> {}", if vector.outcome { 'T' } else { 'F' })
+}
+
+fn obligation_matches_metric(obligation: &CoverageFileObligation, metric: MinimizeMetric) -> bool {
+    metric == MinimizeMetric::All
+        || matches!(
+            (obligation.kind(), metric),
+            ("line", MinimizeMetric::Lines)
+                | ("statement", MinimizeMetric::Statements)
+                | ("function", MinimizeMetric::Functions)
+                | ("branch", MinimizeMetric::Branches)
+                | ("mcdc", MinimizeMetric::Mcdc)
+        )
+}
+
+pub fn coverage_file_detail_query(
+    index: &CoverageIndex<'_>,
+    options: CoverageFileDetailOptions<'_>,
+) -> Result<(CoverageFileDetailData, AgentPagination), QueryError> {
+    if options.limit == 0 {
+        return Err(QueryError::InvalidPagination);
+    }
+    let test_details = index.test_details(options.view)?;
+    let test_summaries = test_details
+        .iter()
+        .map(|test| test.summary.clone())
+        .collect::<Vec<_>>();
+    let selected = selected_test_ids(&test_summaries, options.kind, options.runner)?;
+    let tests_by_id = test_summaries
+        .into_iter()
+        .map(|test| (test.id.clone(), test))
+        .collect::<HashMap<_, _>>();
+    let lines = index.lines(options.view)?;
+    let limitation_records = index.limitations(options.view)?;
+    let files = lines
+        .iter()
+        .map(|line| line.file.as_str())
+        .chain(
+            limitation_records
+                .iter()
+                .map(|limitation| limitation.file.as_str()),
+        )
+        .collect::<BTreeSet<_>>();
+    let file = if files.contains(options.selector) {
+        options.selector.to_owned()
+    } else {
+        let matches = files
+            .into_iter()
+            .filter(|file| file.contains(options.selector))
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(QueryError::InvalidRecordSelection);
+        }
+        matches[0].to_owned()
+    };
+    let selected_includes = |tests: &[String]| {
+        selected.as_ref().map_or(!tests.is_empty(), |selected| {
+            tests.iter().any(|test| selected.contains(test))
+        })
+    };
+    let uncovered_lines = lines
+        .iter()
+        .filter(|line| line.file == file && !selected_includes(&line.tests))
+        .map(|line| {
+            CoverageFileObligation::Line(CoverageLineObligation {
+                kind: "line".into(),
+                line: line.line,
+                other_coverage: other_coverage(&line.tests, selected.as_ref(), &tests_by_id),
+            })
+        })
+        .collect::<Vec<_>>();
+    let metadata = index.hit_metadata(options.view)?;
+    let statements = metadata
+        .iter()
+        .filter(|point| {
+            point.file == file
+                && point.obligation == "statement"
+                && !selected_includes(&point.tests)
+        })
+        .map(|point| {
+            CoverageFileObligation::Point(CoveragePointObligation {
+                kind: "statement".into(),
+                line: point.line,
+                column: point.column,
+                source: point.label.clone().unwrap_or_else(|| point.source.clone()),
+                other_coverage: other_coverage(&point.tests, selected.as_ref(), &tests_by_id),
+            })
+        })
+        .collect::<Vec<_>>();
+    let functions = metadata
+        .iter()
+        .filter(|point| {
+            point.file == file && point.obligation == "function" && !selected_includes(&point.tests)
+        })
+        .map(|point| {
+            CoverageFileObligation::Point(CoveragePointObligation {
+                kind: "function".into(),
+                line: point.line,
+                column: point.column,
+                source: point.label.clone().unwrap_or_else(|| point.source.clone()),
+                other_coverage: other_coverage(&point.tests, selected.as_ref(), &tests_by_id),
+            })
+        })
+        .collect::<Vec<_>>();
+    let branches = metadata
+        .iter()
+        .filter(|branch| {
+            branch.file == file
+                && branch.obligation == "branch"
+                && !selected_includes(&branch.tests)
+        })
+        .map(|branch| {
+            CoverageFileObligation::Branch(CoverageBranchObligation {
+                kind: "branch".into(),
+                line: branch.line,
+                column: branch.column,
+                source: branch.source.clone(),
+                missing: branch.alternative.clone().unwrap_or_default(),
+                other_coverage: other_coverage(&branch.tests, selected.as_ref(), &tests_by_id),
+            })
+        })
+        .collect::<Vec<_>>();
+    let original_decisions = index.decision_details(options.view)?;
+    let mut mcdc = Vec::new();
+    for original in original_decisions
+        .iter()
+        .filter(|decision| decision.meta.file == file)
+    {
+        let filtered = selected_decision(original.clone(), selected.as_ref());
+        for condition in filtered
+            .conditions
+            .iter()
+            .filter(|condition| !condition.covered)
+        {
+            let original_tests = original.conditions[condition.index]
+                .witness_tests
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            mcdc.push(CoverageFileObligation::Mcdc(CoverageMcdcObligation {
+                kind: "mcdc".into(),
+                id: original.meta.id.clone(),
+                line: original.meta.line,
+                column: original.meta.column,
+                decision: original.meta.source.clone(),
+                missing_condition: condition.source.clone(),
+                observed_vectors: filtered
+                    .vector_observations
+                    .iter()
+                    .map(|observation| vector_text(&observation.vector))
+                    .collect(),
+                other_coverage: other_coverage(&original_tests, selected.as_ref(), &tests_by_id),
+            }));
+        }
+    }
+    let mut obligations = uncovered_lines
+        .iter()
+        .chain(statements.iter())
+        .chain(functions.iter())
+        .chain(branches.iter())
+        .chain(mcdc.iter())
+        .filter(|obligation| obligation_matches_metric(obligation, options.metric))
+        .cloned()
+        .collect::<Vec<_>>();
+    obligations.sort_by(|left, right| {
+        left.line()
+            .cmp(&right.line())
+            .then_with(|| left.kind().cmp(right.kind()))
+    });
+    let mut limitations = limitation_records
+        .into_iter()
+        .filter(|limitation| limitation.file == file)
+        .map(|limitation| CoverageFileLimitation {
+            id: limitation.id,
+            kind: limitation.kind,
+            file: limitation.file,
+            line: limitation.line,
+            column: limitation.column,
+            source: limitation.source,
+            reason: limitation.reason,
+            blocking: true,
+            effect: "outside-measured-denominator".into(),
+        })
+        .collect::<Vec<_>>();
+    limitations.sort_by(|left, right| {
+        left.line
+            .cmp(&right.line)
+            .then_with(|| left.column.cmp(&right.column))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let all_file_tests = test_details
+        .iter()
+        .filter(|test| {
+            selected
+                .as_ref()
+                .is_none_or(|selected| selected.contains(&test.summary.id))
+                && test.lines.iter().any(|line| line.file == file)
+        })
+        .map(|test| CoverageFileTest {
+            id: test.summary.id.clone(),
+            name: test.summary.name.clone(),
+            provenance: test.summary.provenance.clone(),
+        })
+        .collect::<Vec<_>>();
+    let selected_obligations = obligations
+        .iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected_tests = all_file_tests
+        .iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected_limitations = limitations
+        .iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let total = obligations
+        .len()
+        .max(all_file_tests.len())
+        .max(limitations.len());
+    let returned = selected_obligations
+        .len()
+        .max(selected_tests.len())
+        .max(selected_limitations.len());
+    Ok((
+        CoverageFileDetailData {
+            run: options.run.into(),
+            filters: query_filters(options.view, options.kind, options.runner),
+            file,
+            metric: options.metric,
+            counts: CoverageFileCounts {
+                uncovered_lines: uncovered_lines.len(),
+                uncovered_statements: statements.len(),
+                uncovered_functions: functions.len(),
+                missing_branches: branches.len(),
+                missing_mcdc_conditions: mcdc.len(),
+                waived_mcdc_conditions: 0,
+                measurement_limitations: limitations.len(),
+            },
+            tests: selected_tests,
+            total_tests: all_file_tests.len(),
+            total_obligations: obligations.len(),
+            obligations: selected_obligations,
+            total_limitations: limitations.len(),
+            limitations: selected_limitations,
+        },
+        pagination(options.offset, options.limit, returned, total),
+    ))
+}
+
 pub fn coverage_scope_query(
     index: &CoverageIndex<'_>,
     options: CoverageScopeQueryOptions<'_>,

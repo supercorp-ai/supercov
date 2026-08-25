@@ -436,6 +436,42 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
 
   const coveredLine = expected.lines[0];
   assert.ok(coveredLine, `${fixture}: expected at least one line obligation`);
+  const fileDetailReference = spawnSync(
+    process.execPath,
+    [
+      resolve(root, 'bin/supercov.js'),
+      'runs', runId, 'coverage', 'file', coveredLine.file,
+      '--filter', 'all', '--metric', metric, '--limit', '2', '--json',
+      ...(filteredKind ? ['--kind', filteredKind] : []),
+      ...(filteredRunner ? ['--runner', filteredRunner] : []),
+    ],
+    {
+      cwd: resolve(root, 'tests/fixtures', fixture),
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024 * 1024,
+    },
+  );
+  assert.equal(fileDetailReference.status, 0, `${fixture}: ${fileDetailReference.stderr || fileDetailReference.stdout}`);
+  const fileDetailRust = spawnSync(binary, ['__query-index-files'], {
+    cwd: root,
+    input: JSON.stringify({
+      archivePath,
+      runId,
+      generatedAt,
+      filter: 'all',
+      command: 'file-detail',
+      metric,
+      kind: filteredKind,
+      runner: filteredRunner,
+      file: coveredLine.file,
+      offset: 0,
+      limit: 2,
+    }),
+    encoding: 'utf8',
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  assert.equal(fileDetailRust.status, 0, `${fixture}: ${fileDetailRust.stderr || fileDetailRust.stdout}`);
+  assert.equal(fileDetailRust.stdout, fileDetailReference.stdout, `${fixture}: indexed file-detail JSON differs`);
   const coversArguments = [
     resolve(root, 'bin/supercov.js'),
     'runs', runId, 'coverage', 'covers', `${coveredLine.file}:${coveredLine.line}`,

@@ -42,6 +42,7 @@ pub const SECTION_DECISION_METADATA: u32 = 29;
 pub const SECTION_DECISION_DETAILS: u32 = 30;
 pub const SECTION_DECISION_VECTOR_OBSERVATIONS: u32 = 31;
 pub const SECTION_DECISION_CONDITIONS: u32 = 32;
+pub const SECTION_LIMITATIONS: u32 = 33;
 
 const STRING_RECORD_SIZE: usize = 16;
 const SUMMARY_RECORD_SIZE: usize = 176;
@@ -66,6 +67,7 @@ const DECISION_METADATA_RECORD_SIZE: usize = 64;
 const DECISION_DETAIL_RECORD_SIZE: usize = 64;
 const DECISION_VECTOR_OBSERVATION_RECORD_SIZE: usize = 64;
 const DECISION_CONDITION_RECORD_SIZE: usize = 64;
+const LIMITATION_RECORD_SIZE: usize = 64;
 const NO_STRING: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -524,6 +526,19 @@ pub struct IndexedHitMetadata {
     pub column: usize,
     pub label: Option<String>,
     pub alternative: Option<String>,
+    pub source: String,
+    pub tests: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IndexedLimitation {
+    pub id: String,
+    pub kind: String,
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub source: String,
+    pub reason: String,
 }
 
 #[derive(Default)]
@@ -1495,11 +1510,14 @@ struct HitMetadataInput<'a> {
     branch_kind: Option<&'a str>,
     label: Option<&'a str>,
     alternative: Option<&'a str>,
+    source: &'a str,
+    tests: &'a [String],
 }
 
 fn hit_metadata_record(
     input: HitMetadataInput<'_>,
     strings: &mut StringTable,
+    relations: &mut StringRelations,
 ) -> Result<[u8; HIT_METADATA_RECORD_SIZE], CoverageIndexError> {
     let mut record = [0_u8; HIT_METADATA_RECORD_SIZE];
     record[0] = input.view_id as u8;
@@ -1519,6 +1537,39 @@ fn hit_metadata_record(
         40,
         optional_string_id(input.alternative, strings)?,
     );
+    put_u32(&mut record, 44, strings.intern(input.source)?);
+    let (tests_offset, tests_count) = relations.push(input.tests.iter().cloned(), strings)?;
+    put_u64(&mut record, 48, tests_offset);
+    put_u64(&mut record, 56, tests_count);
+    Ok(record)
+}
+
+fn limitation_record(
+    view_id: CoverageViewId,
+    limitation: &serde_json::Value,
+    strings: &mut StringTable,
+) -> Result<[u8; LIMITATION_RECORD_SIZE], CoverageIndexError> {
+    let field = |name| {
+        limitation
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .ok_or(CoverageIndexError::InvalidRecord("coverage limitation"))
+    };
+    let number = |name| {
+        limitation
+            .get(name)
+            .and_then(serde_json::Value::as_u64)
+            .ok_or(CoverageIndexError::InvalidRecord("coverage limitation"))
+    };
+    let mut record = [0_u8; LIMITATION_RECORD_SIZE];
+    record[0] = view_id as u8;
+    put_u32(&mut record, 4, strings.intern(field("id")?)?);
+    put_u32(&mut record, 8, strings.intern(field("kind")?)?);
+    put_u32(&mut record, 12, strings.intern(field("file")?)?);
+    put_u32(&mut record, 16, strings.intern(field("source")?)?);
+    put_u32(&mut record, 20, strings.intern(field("reason")?)?);
+    put_u64(&mut record, 24, number("line")?);
+    put_u64(&mut record, 32, number("column")?);
     Ok(record)
 }
 
@@ -1654,6 +1705,7 @@ pub fn coverage_index_sections(
     let mut decision_details = Vec::new();
     let mut decision_vector_observations = Vec::new();
     let mut decision_conditions = Vec::new();
+    let mut limitations = Vec::new();
     for (id, view) in views {
         summaries.extend_from_slice(&summary_record(id, view, &mut strings)?);
         projection_records.extend_from_slice(&projection_record(
@@ -1667,6 +1719,9 @@ pub fn coverage_index_sections(
         )?);
         for entry in scope_entry_records(id, view, &mut strings)? {
             scope_entries.extend_from_slice(&entry);
+        }
+        for limitation in &view.limitations {
+            limitations.extend_from_slice(&limitation_record(id, limitation, &mut strings)?);
         }
         for line in &view.lines {
             let confidence_index = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
@@ -1845,8 +1900,11 @@ pub fn coverage_index_sections(
                         branch_kind: Some(&branch.meta.kind),
                         label: None,
                         alternative: Some(&alternative.label),
+                        source: &branch.meta.source,
+                        tests: &alternative.tests,
                     },
                     &mut strings,
+                    &mut relations,
                 )?);
             }
         }
@@ -1883,8 +1941,11 @@ pub fn coverage_index_sections(
                     branch_kind: None,
                     label: point.meta.label.as_deref(),
                     alternative: None,
+                    source: &point.meta.source,
+                    tests: &point.tests,
                 },
                 &mut strings,
+                &mut relations,
             )?);
         }
         for value in &view.coverage_by_kind {
@@ -2094,6 +2155,12 @@ pub fn coverage_index_sections(
             count: usize_u64(decision_conditions.len() / DECISION_CONDITION_RECORD_SIZE)?,
             bytes: decision_conditions,
         },
+        QueryIndexSection {
+            kind: SECTION_LIMITATIONS,
+            record_size: LIMITATION_RECORD_SIZE as u32,
+            count: usize_u64(limitations.len() / LIMITATION_RECORD_SIZE)?,
+            bytes: limitations,
+        },
     ])
 }
 
@@ -2131,6 +2198,7 @@ impl<'a> CoverageIndex<'a> {
                 DECISION_VECTOR_OBSERVATION_RECORD_SIZE,
             ),
             (SECTION_DECISION_CONDITIONS, DECISION_CONDITION_RECORD_SIZE),
+            (SECTION_LIMITATIONS, LIMITATION_RECORD_SIZE),
         ] {
             if index.descriptor(kind)?.record_size as usize != size {
                 return Err(CoverageIndexError::InvalidRecord("record size"));
@@ -2739,6 +2807,32 @@ impl<'a> CoverageIndex<'a> {
         Ok(found)
     }
 
+    pub fn lines(&self, view: CoverageViewId) -> Result<Vec<IndexedLine>, CoverageIndexError> {
+        let descriptor = self.index.descriptor(SECTION_LINES)?;
+        let mut lines = Vec::new();
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_LINES, index)?;
+            if CoverageViewId::try_from(record[0])? != view {
+                continue;
+            }
+            if record[2..4].iter().any(|byte| *byte != 0)
+                || record[56..].iter().any(|byte| *byte != 0)
+            {
+                return Err(CoverageIndexError::InvalidRecord("line record"));
+            }
+            lines.push(IndexedLine {
+                file: self.string(get_u32(record, 4)?)?,
+                line: usize::try_from(get_u64(record, 8)?)
+                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                covered: bool_field(record[1])?,
+                tests: self.relation_strings(get_u64(record, 16)?, get_u64(record, 24)?)?,
+                phases: self.relation_strings(get_u64(record, 32)?, get_u64(record, 40)?)?,
+                confidence: self.confidence(get_u64(record, 48)?)?,
+            });
+        }
+        Ok(lines)
+    }
+
     pub fn test_summaries(
         &self,
         view: CoverageViewId,
@@ -2963,7 +3057,6 @@ impl<'a> CoverageIndex<'a> {
             }
             if record[2..4].iter().any(|byte| *byte != 0)
                 || record[12..16].iter().any(|byte| *byte != 0)
-                || record[44..].iter().any(|byte| *byte != 0)
             {
                 return Err(CoverageIndexError::InvalidRecord("hit metadata record"));
             }
@@ -2984,9 +3077,42 @@ impl<'a> CoverageIndex<'a> {
                 branch_kind: self.optional_string(get_u32(record, 32)?)?,
                 label: self.optional_string(get_u32(record, 36)?)?,
                 alternative: self.optional_string(get_u32(record, 40)?)?,
+                source: self.string(get_u32(record, 44)?)?,
+                tests: self.relation_strings(get_u64(record, 48)?, get_u64(record, 56)?)?,
             });
         }
         Ok(metadata)
+    }
+
+    pub fn limitations(
+        &self,
+        view: CoverageViewId,
+    ) -> Result<Vec<IndexedLimitation>, CoverageIndexError> {
+        let descriptor = self.index.descriptor(SECTION_LIMITATIONS)?;
+        let mut limitations = Vec::new();
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_LIMITATIONS, index)?;
+            if CoverageViewId::try_from(record[0])? != view {
+                continue;
+            }
+            if record[1..4].iter().any(|byte| *byte != 0)
+                || record[40..].iter().any(|byte| *byte != 0)
+            {
+                return Err(CoverageIndexError::InvalidRecord("limitation record"));
+            }
+            limitations.push(IndexedLimitation {
+                id: self.string(get_u32(record, 4)?)?,
+                kind: self.string(get_u32(record, 8)?)?,
+                file: self.string(get_u32(record, 12)?)?,
+                source: self.string(get_u32(record, 16)?)?,
+                reason: self.string(get_u32(record, 20)?)?,
+                line: usize::try_from(get_u64(record, 24)?)
+                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                column: usize::try_from(get_u64(record, 32)?)
+                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+            });
+        }
+        Ok(limitations)
     }
 
     pub fn decision_metadata(
@@ -3402,7 +3528,15 @@ mod tests {
                     label: None,
                 }],
                 branches: Vec::new(),
-                limitations: Vec::new(),
+                limitations: vec![serde_json::json!({
+                    "id": "dynamic",
+                    "kind": "dynamic-code",
+                    "file": "src/a.js",
+                    "line": 3,
+                    "column": 1,
+                    "source": "eval(code)",
+                    "reason": "dynamic source"
+                })],
                 scope: None,
             },
             raw_results: vec![RawTestResult {
@@ -3509,6 +3643,8 @@ mod tests {
         let hits = index.hit_metadata(CoverageViewId::All).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "point");
+        assert_eq!(hits[0].source, "work();");
+        assert_eq!(hits[0].tests, ["test"]);
         let decisions = index.decision_metadata(CoverageViewId::All).unwrap();
         assert_eq!(decisions.len(), 1);
         assert_eq!(decisions[0].conditions, ["a", "b"]);
@@ -3516,6 +3652,10 @@ mod tests {
             index.decision_details(CoverageViewId::All).unwrap(),
             report.view.decisions
         );
+        let limitations = index.limitations(CoverageViewId::All).unwrap();
+        assert_eq!(limitations.len(), 1);
+        assert_eq!(limitations[0].kind, "dynamic-code");
+        assert_eq!(limitations[0].line, 3);
         fs::remove_dir_all(root).unwrap();
     }
 }

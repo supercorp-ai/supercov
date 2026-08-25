@@ -439,8 +439,18 @@ miss blocks flipping any default.
   independently paginated conditions/observations/tests, are byte-identical
   on all five real archive families. Index round trips independently require
   the reconstructed decision graph to equal the analyzer graph.
-  The remaining ungrouped file obligations and the rest of the query
-  surface remain before this path can replace the shipped query engine.
+  The ungrouped `coverage file` surface is now Rust/index-native as well. It
+  composes typed lines, point/function metadata, branch alternatives,
+  independently filtered decisions, per-file tests and complete measurement-
+  limitation records into the frozen obligation inventory. Other-test
+  provenance is recomputed from exact test relations; MC/DC vector text and
+  witness-based cross-kind coverage are derived from the normalized graph.
+  Byte parity covers all five archive families, provenance filters, pagination
+  and the `all`/lines/branches/MC/DC/functions metric selections. Independent
+  records preserve limitation id/kind/location/source/reason and point source/
+  test relations, including files that sit outside the measured denominator.
+  The remaining diff/run/minimize/integrity/lifecycle agent surfaces remain
+  before this path can replace the shipped query engine.
 
 ## Non-goals and guardrails
 
