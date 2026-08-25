@@ -916,7 +916,14 @@ miss blocks flipping any default.
   corrected build then exposed npm 11 interpreting `native-dist/package` as a
   GitHub repository shorthand; native packing now uses the explicit local
   `./native-dist/package` form. That run was likewise cancelled immediately,
-  before publication, rather than letting unrelated matrix jobs continue.
+  before publication, rather than letting unrelated matrix jobs continue. A
+  subsequent publication attempt built, packed and validated the native artifacts
+  but confirmed GitHub artifact attestations are unavailable on the current
+  private-organization plan. Optional GitHub provenance was removed instead of
+  turning a billing-tier feature into a release blocker. Tag publication now
+  runs only the necessary native builds, aggregate validation and npm publish;
+  correctness/conformance gates run locally before the tag and are not repeated
+  just to spend hosted minutes.
   The release workflow now calls that complete native matrix, downloads and
   revalidates the aggregate release set, publishes all eight exact-version
   platform packages first, and publishes the primary package only after every
