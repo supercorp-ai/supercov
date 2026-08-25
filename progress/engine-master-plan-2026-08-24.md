@@ -869,14 +869,17 @@ miss blocks flipping any default.
   macOS/Linux/Windows arm64/x64 hosts, adds glibc/musl Linux variants, performs
   packed installs on matching hosts, validates direct musl execution, enforces
   the compressed-size gate, records binary/tarball SHA-256 digests and uploads
-  the generated artifacts. It is deliberately not triggered by ordinary pushes
+  the generated artifacts. Every npm tarball also receives GitHub artifact-
+  attestation build provenance from the workflow's ephemeral OIDC identity.
+  It is deliberately not triggered by ordinary pushes
   so this groundwork consumes no Actions minutes until explicitly requested.
   The
   distribution ADR explicitly rejects WASI as an unsound fallback for a CLI
   that owns processes/signals/filesystem transactions. Platform packages are
   generated from release binaries and are not committed or published by this
   checkpoint. The native matrix is defined but has not yet produced a real
-  hosted-run green result or signed provenance. Initial npm package claims,
+  hosted-run green result; the attestation step is wired but therefore has not
+  yet produced signed provenance. Initial npm package claims,
   coordinated publication, GitHub artifacts, PyPI/Homebrew/cargo-binstall/opam
   and C-compatible wrappers remain Phase 5 gates.
 

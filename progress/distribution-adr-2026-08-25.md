@@ -41,6 +41,11 @@ builds its musl target. This avoids treating cross-compilation as native runtime
 proof. GitHub documents `ubuntu-24.04-arm`, `windows-11-arm`, `macos-15`, and
 their x64 counterparts as standard hosted-runner labels, including for private
 repositories: <https://docs.github.com/en/actions/reference/runners/github-hosted-runners>.
+Each tarball is signed with GitHub artifact-attestation build provenance using
+the workflow's short-lived OIDC identity; private repositories use GitHub's
+private Sigstore instance. Verification is therefore tied to repository,
+workflow, commit and triggering event rather than to a long-lived signing key:
+<https://docs.github.com/en/actions/concepts/security/artifact-attestations>.
 
 ## Gates
 
