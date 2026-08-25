@@ -6,6 +6,7 @@
 
 pub mod agent_json;
 pub mod coverage_analysis;
+pub mod coverage_query;
 pub mod coverage_report;
 pub mod evidence_archive;
 pub mod js_instrumenter;

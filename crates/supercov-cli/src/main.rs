@@ -3,6 +3,7 @@ use std::{io::Read, path::PathBuf, process::ExitCode, time::Instant};
 use serde::{Deserialize, Serialize};
 use supercov_engine::{
     coverage_analysis::{CoverageCoreInput, analyze_core},
+    coverage_query::{MinimumTestSetRequest, minimum_test_set_for_request},
     coverage_report::{
         ArchiveReportRequest, CoverageReportRequest, analyze_coverage_archive,
         analyze_coverage_results,
@@ -42,6 +43,7 @@ fn main() -> ExitCode {
         Some("__analyze-coverage-core") => analyze_coverage_core(),
         Some("__analyze-coverage-results") => analyze_coverage_report(),
         Some("__analyze-evidence-archive") => analyze_evidence_archive(),
+        Some("__minimum-test-set") => minimum_test_sets(),
         Some("__benchmark-js-transform") => benchmark_js_transform(),
         Some("__pack-evidence") => pack_evidence(),
         Some(command) => {
@@ -51,6 +53,38 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn minimum_test_sets() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let requests: Vec<MinimumTestSetRequest> = match serde_json::from_str(&input) {
+        Ok(requests) => requests,
+        Err(error) => {
+            eprintln!("[supercov] invalid Rust minimization input: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut results = Vec::with_capacity(requests.len());
+    for request in &requests {
+        match minimum_test_set_for_request(request) {
+            Ok(result) => results.push(result),
+            Err(error) => {
+                eprintln!("[supercov] coverage minimization failed: {error:?}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if let Err(error) = serde_json::to_writer(std::io::stdout(), &results) {
+        eprintln!("[supercov] failed to write Rust minimization output: {error}");
+        return ExitCode::from(2);
+    }
+    ExitCode::SUCCESS
 }
 
 fn analyze_evidence_archive() -> ExitCode {

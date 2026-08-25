@@ -773,6 +773,23 @@ fn summary_for_results(
     Ok(analyze_core(&input)?.summary)
 }
 
+/// Recompute every structural coverage metric for an arbitrary set of test,
+/// setup, and background evidence identities. MC/DC witnesses are rebuilt
+/// from the selected observations; existing aggregate verdicts are never
+/// reused.
+pub fn coverage_summary_for_tests(
+    view: &CoverageView,
+    test_ids: &BTreeSet<String>,
+) -> Result<CoverageSummary, ReportError> {
+    summary_for_results(
+        &view.decisions,
+        &view.points,
+        &view.branches,
+        &view.lines,
+        Some(test_ids),
+    )
+}
+
 fn confidence_for(
     test_ids: impl IntoIterator<Item = String>,
     phase_ids: impl IntoIterator<Item = String>,

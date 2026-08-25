@@ -355,6 +355,18 @@ miss blocks flipping any default.
   coverage sections and agent query operators are the next layer; the shipped
   TypeScript gzipped-JSON cache remains in place until that layer reaches the
   same black-box query gates.
+- The language-neutral exact smallest-test-set solver has moved into Rust.
+  It preserves MC/DC witness-pair choices rather than flattening them into
+  ordinary set cover, expands file-scoped setup evidence only with selected
+  tests, recomputes every structural metric for each final subset, rejects
+  background/unattributed evidence, proves unreachable targets explicitly,
+  and enforces the frozen search-state budget. One hundred twenty generated
+  mixed line/statement/function/branch/MC/DC models require exact selected and
+  expanded identities, summaries and explored-state counts against the
+  regression engine; independent Rust tests cover redundant vectors,
+  unattributed evidence and combinatorial-budget failure. The remaining query
+  work is the typed mmap column layer and the complete summary/files/file/
+  decision/covers/test/diff agent surface.
 
 ## Non-goals and guardrails
 
