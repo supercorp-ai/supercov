@@ -15,9 +15,13 @@ def _relative(root: Path, filename: str) -> str:
 
 def _decode_context(context: str):
     prefix = "supercov-v1:"
-    if not context.startswith(prefix):
+    dynamic = next(
+        (part for part in context.split("|") if part.startswith(prefix)),
+        None,
+    )
+    if dynamic is None:
         return None
-    encoded = context[len(prefix):]
+    encoded = dynamic[len(prefix):]
     encoded += "=" * (-len(encoded) % 4)
     return json.loads(base64.urlsafe_b64decode(encoded).decode())
 
@@ -30,7 +34,11 @@ args = parser.parse_args()
 
 root = Path(args.root).resolve()
 cov = coverage.Coverage(data_file=args.data_file, config_file=False)
-cov.load()
+data_files = sorted(glob.glob(f"{args.data_file}.*"))
+if data_files:
+    cov.combine(data_paths=[str(Path(args.data_file).parent)], strict=True, keep=True)
+else:
+    cov.load()
 data = cov.get_data()
 
 with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as report_file:
@@ -76,6 +84,14 @@ contexts = []
 measured_files = sorted(data.measured_files())
 for context in sorted(data.measured_contexts()):
     identity = _decode_context(context)
+    static_worker = next(
+        (
+            part.removeprefix("supercov-worker-v1:")
+            for part in context.split("|")
+            if part.startswith("supercov-worker-v1:")
+        ),
+        os.environ.get("PYTEST_XDIST_WORKER", "main"),
+    )
     data.set_query_context(context)
     observations = []
     for filename in measured_files:
@@ -93,7 +109,7 @@ for context in sorted(data.measured_contexts()):
         "workerId": (
             identity["workerId"]
             if identity is not None
-            else os.environ.get("PYTEST_XDIST_WORKER", "main")
+            else static_worker
         ),
         "files": observations,
     })

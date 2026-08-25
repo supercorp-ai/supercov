@@ -441,6 +441,7 @@ pub fn import_python_coverage_json(
     bytes: &[u8],
     run_id: &str,
     generated_at: &str,
+    test_exit_code: Option<i32>,
 ) -> Result<PythonFrontendImport, PythonFrontendError> {
     let export: PythonCoverageExport = serde_json::from_slice(bytes)
         .map_err(|error| PythonFrontendError::Json(error.to_string()))?;
@@ -602,7 +603,14 @@ pub fn import_python_coverage_json(
             title: test.rsplit("::").next().map(str::to_owned),
             retry: Some(retry),
             status: Some(test_status(&outcomes)),
-            expected_status: Some("passed".into()),
+            expected_status: Some(
+                if outcomes.iter().any(|outcome| outcome.was_xfail) {
+                    "failed"
+                } else {
+                    "passed"
+                }
+                .into(),
+            ),
             flaky: false,
             provenance: TestProvenance {
                 runner: export.runner.clone(),
@@ -736,7 +744,7 @@ pub fn import_python_coverage_json(
             raw_results,
             generated_at: generated_at.into(),
             integrity: None,
-            test_exit_code: ExitCodeInput::Present(Some(0)),
+            test_exit_code: ExitCodeInput::Present(test_exit_code),
         },
     })
 }
@@ -748,12 +756,18 @@ mod tests {
 
     const GOLDEN: &[u8] =
         include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-basic.json");
+    const XDIST_GOLDEN: &[u8] =
+        include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-xdist.json");
 
     #[test]
     fn imports_the_coverage_py_oracle_without_inventing_assertion_or_mcdc_facts() {
-        let imported =
-            import_python_coverage_json(GOLDEN, "python-tier-a-ctrace", "2026-08-25T00:00:00.000Z")
-                .unwrap();
+        let imported = import_python_coverage_json(
+            GOLDEN,
+            "python-tier-a-ctrace",
+            "2026-08-25T00:00:00.000Z",
+            Some(0),
+        )
+        .unwrap();
         validate_frontend_report_request(&imported.declaration, &imported.request).unwrap();
         let report = analyze_frontend_results(&imported.declaration, &imported.request).unwrap();
         assert_eq!(
@@ -806,10 +820,72 @@ mod tests {
             import_python_coverage_json(
                 &serde_json::to_vec(&value).unwrap(),
                 "python-tier-a-ctrace",
-                "2026-08-25T00:00:00.000Z"
+                "2026-08-25T00:00:00.000Z",
+                Some(0)
             ),
             Err(PythonFrontendError::UnsupportedCollectorCore(core)) if core == "sysmon"
         ));
+    }
+
+    #[test]
+    fn keeps_xdist_workers_and_their_background_imports_separate() {
+        let imported = import_python_coverage_json(
+            XDIST_GOLDEN,
+            "python-tier-a-xdist2",
+            "2026-08-25T00:00:00.000Z",
+            Some(0),
+        )
+        .unwrap();
+        let report = analyze_frontend_results(&imported.declaration, &imported.request).unwrap();
+        assert_eq!(
+            (
+                report.view.summary.lines.covered,
+                report.view.summary.lines.total,
+                report.view.summary.branches.covered,
+                report.view.summary.branches.total,
+            ),
+            (10, 12, 6, 8)
+        );
+        let workers = imported
+            .request
+            .raw_results
+            .iter()
+            .map(|result| result.scope.as_ref().unwrap().worker_id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(workers, BTreeSet::from(["gw0", "gw1"]));
+        assert_eq!(
+            imported
+                .request
+                .raw_results
+                .iter()
+                .filter(|result| result.role == "background")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn preserves_the_supervised_exit_code_and_expected_failure_semantics() {
+        let mut value: serde_json::Value = serde_json::from_slice(GOLDEN).unwrap();
+        value["outcomes"][0]["wasXfail"] = true.into();
+        let imported = import_python_coverage_json(
+            &serde_json::to_vec(&value).unwrap(),
+            "python-tier-a-ctrace",
+            "2026-08-25T00:00:00.000Z",
+            Some(1),
+        )
+        .unwrap();
+        assert_eq!(
+            imported.request.test_exit_code,
+            ExitCodeInput::Present(Some(1))
+        );
+        let expected_failure = imported
+            .request
+            .raw_results
+            .iter()
+            .find(|result| result.test.ends_with("test_positive_path"))
+            .unwrap();
+        assert_eq!(expected_failure.expected_status.as_deref(), Some("failed"));
     }
 
     #[test]
@@ -820,7 +896,8 @@ mod tests {
             import_python_coverage_json(
                 &serde_json::to_vec(&value).unwrap(),
                 "python-tier-a-ctrace",
-                "2026-08-25T00:00:00.000Z"
+                "2026-08-25T00:00:00.000Z",
+                Some(0)
             ),
             Err(PythonFrontendError::InvalidFile(_))
         ));
@@ -831,7 +908,8 @@ mod tests {
             import_python_coverage_json(
                 &serde_json::to_vec(&value).unwrap(),
                 "python-tier-a-ctrace",
-                "2026-08-25T00:00:00.000Z"
+                "2026-08-25T00:00:00.000Z",
+                Some(0)
             ),
             Err(PythonFrontendError::InvalidContext(_))
         ));

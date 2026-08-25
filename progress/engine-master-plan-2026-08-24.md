@@ -925,7 +925,16 @@ miss blocks flipping any default.
   API sources are recorded in `contracts/python-coverage-v1` and
   `progress/python-tier-a-spike-2026-08-25.md`. Public CLI execution, xdist and
   subprocess matrices, archive v3/model migration, owned Python MC/DC probes,
-  packaging and broad dogfood remain unfinished gates.
+  packaging and broad dogfood remain unfinished gates. The next private step
+  has proven a real two-worker pytest-xdist run: the generated plugin starts a
+  separate coverage.py collector in each worker, uses a run-unique suffixed
+  data file plus static worker context, leaves the controller uninstrumented,
+  and records outcomes only in the worker. The public API combines those files
+  without deleting them; the golden import preserves both worker identities,
+  both background import contexts and exact per-test arcs. Rust now requires
+  the real supervised test exit code rather than manufacturing success and
+  preserves pytest expected-failure semantics. Broader xdist scheduling,
+  worker crash, retry and subprocess cases are still open.
 
 ## Non-goals and guardrails
 
