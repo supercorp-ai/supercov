@@ -6,15 +6,15 @@ use supercov_engine::{
     coverage_analysis::{CoverageCoreInput, analyze_core},
     coverage_index::{CoverageIndex, coverage_index_sections},
     coverage_query::{
-        CoverageCoversQueryOptions, CoverageDecisionQueryOptions, CoverageDimensionQueryData,
-        CoverageDimensionQueryOptions, CoverageFileDecisionsOptions, CoverageFileDetailOptions,
-        CoverageFileQueryData, CoverageFileQueryOptions, CoverageMinimizeQueryOptions,
-        CoverageQueryFilters, CoverageScopeQueryOptions, CoverageSummaryQueryOptions,
-        CoverageTestQueryOptions, DecisionSort, MinimizeMetric, MinimumTestSetRequest,
-        coverage_covers_query, coverage_decision_query, coverage_dimension_query,
-        coverage_file_decisions_query, coverage_file_detail_query, coverage_file_query,
-        coverage_minimize_query, coverage_scope_query, coverage_summary_query, coverage_test_query,
-        minimum_test_set_for_request,
+        CoverageCoversQueryOptions, CoverageDecisionQueryOptions, CoverageDiffQueryOptions,
+        CoverageDimensionQueryData, CoverageDimensionQueryOptions, CoverageFileDecisionsOptions,
+        CoverageFileDetailOptions, CoverageFileQueryData, CoverageFileQueryOptions,
+        CoverageMinimizeQueryOptions, CoverageQueryFilters, CoverageScopeQueryOptions,
+        CoverageSummaryQueryOptions, CoverageTestQueryOptions, DecisionSort, MinimizeMetric,
+        MinimumTestSetRequest, coverage_covers_query, coverage_decision_query, coverage_diff_query,
+        coverage_dimension_query, coverage_file_decisions_query, coverage_file_detail_query,
+        coverage_file_query, coverage_minimize_query, coverage_scope_query, coverage_summary_query,
+        coverage_test_query, minimum_test_set_for_request,
     },
     coverage_report::{
         ArchiveReportRequest, CoverageReportRequest, analyze_coverage_archive,
@@ -92,6 +92,8 @@ struct IndexedFileQueryRequest {
     limit: usize,
     target: Option<f64>,
     max_states: Option<usize>,
+    newer_archive_path: Option<PathBuf>,
+    newer_run_id: Option<String>,
 }
 
 fn query_index_files() -> ExitCode {
@@ -122,7 +124,7 @@ fn query_index_files() -> ExitCode {
         "files" => Some(false),
         "gaps" => Some(true),
         "file-decisions" | "kinds" | "runners" | "summary" | "scope" | "covers" | "test"
-        | "decision" | "file-detail" | "minimize" => None,
+        | "decision" | "file-detail" | "minimize" | "diff" => None,
         _ => {
             eprintln!("[supercov] unsupported indexed query");
             return ExitCode::from(2);
@@ -131,7 +133,7 @@ fn query_index_files() -> ExitCode {
     let archive_request = ArchiveReportRequest {
         archive_path: request.archive_path.clone(),
         run_id: request.run_id.clone(),
-        generated_at: request.generated_at,
+        generated_at: request.generated_at.clone(),
         integrity: None,
         test_exit_code: Default::default(),
     };
@@ -162,6 +164,60 @@ fn query_index_files() -> ExitCode {
         write_query_index(&sections, &identity, &path).map_err(|error| error.to_string())?;
         let container = QueryIndex::open(&path, &identity).map_err(|error| error.to_string())?;
         let index = CoverageIndex::new(&container).map_err(|error| error.to_string())?;
+        if request.command == "diff" {
+            let newer_archive_path = request
+                .newer_archive_path
+                .as_ref()
+                .ok_or_else(|| "indexed diff requires a newer archive".to_owned())?;
+            let newer_run_id = request
+                .newer_run_id
+                .as_deref()
+                .ok_or_else(|| "indexed diff requires a newer run ID".to_owned())?;
+            let newer_report = analyze_coverage_archive(&ArchiveReportRequest {
+                archive_path: newer_archive_path.clone(),
+                run_id: newer_run_id.into(),
+                generated_at: request.generated_at.clone(),
+                integrity: None,
+                test_exit_code: Default::default(),
+            })
+            .map_err(|error| format!("invalid newer coverage archive: {error:?}"))?;
+            let newer_path = root.join("newer-query-index.v1.bin");
+            let newer_identity = QueryIndexIdentity {
+                evidence_sha256: [4; 32],
+                evidence_bytes: fs::metadata(newer_archive_path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0),
+                analysis_sha256: [5; 32],
+                producer_sha256: [6; 32],
+                archive_schema_version: 2,
+            };
+            write_query_index(
+                &coverage_index_sections(&newer_report).map_err(|error| error.to_string())?,
+                &newer_identity,
+                &newer_path,
+            )
+            .map_err(|error| error.to_string())?;
+            let newer_container = QueryIndex::open(&newer_path, &newer_identity)
+                .map_err(|error| error.to_string())?;
+            let newer_index =
+                CoverageIndex::new(&newer_container).map_err(|error| error.to_string())?;
+            let (data, page) = coverage_diff_query(
+                &index,
+                &newer_index,
+                CoverageDiffQueryOptions {
+                    older_run: &request.run_id,
+                    newer_run: newer_run_id,
+                    view,
+                    kind: request.kind.as_deref(),
+                    runner: request.runner.as_deref(),
+                    offset: request.offset,
+                    limit: request.limit,
+                },
+            )
+            .map_err(|error| format!("{error:?}"))?;
+            return agent_json::success("diff", &data, Some(&page))
+                .map_err(|error| format!("response exceeds {} bytes", error.max_bytes));
+        }
         if request.command == "minimize" {
             let coverage_view = match view {
                 supercov_engine::coverage_index::CoverageViewId::All => &report.view,

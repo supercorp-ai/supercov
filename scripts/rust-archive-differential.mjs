@@ -18,17 +18,20 @@ const fixtures = [
   'generic-swc',
 ];
 
-function newestArchive(fixture) {
+function archivesForFixture(fixture) {
   const runs = resolve(root, 'tests/fixtures', fixture, '.supercov/runs');
-  const ids = readdirSync(runs, { withFileTypes: true })
+  return readdirSync(runs, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort()
-    .reverse();
-  for (const id of ids) {
-    const archivePath = resolve(runs, id, 'evidence.raw.gz');
-    if (existsSync(archivePath)) return { id, archivePath };
-  }
+    .reverse()
+    .map((id) => ({ id, archivePath: resolve(runs, id, 'evidence.raw.gz') }))
+    .filter(({ archivePath }) => existsSync(archivePath));
+}
+
+function newestArchive(fixture) {
+  const [newest] = archivesForFixture(fixture);
+  if (newest) return newest;
   throw new Error(`No evidence archive for ${fixture}`);
 }
 
@@ -671,6 +674,44 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
     assert.equal(anchorRust.status, 0, `${fixture}: ${anchorRust.stderr || anchorRust.stdout}`);
     assert.equal(anchorRust.stdout, anchorReference.stdout, `${fixture}: indexed anchored covers JSON differs`);
   }
+
+  const [, olderArchive] = archivesForFixture(fixture);
+  if (olderArchive) {
+    const diffFilter = fixtureIndex % 2 === 0 ? 'all' : 'passed';
+    const diffReference = spawnSync(
+      process.execPath,
+      [
+        resolve(root, 'bin/supercov.js'),
+        'diff', olderArchive.id, runId,
+        '--filter', diffFilter, '--limit', '2', '--json',
+      ],
+      {
+        cwd: resolve(root, 'tests/fixtures', fixture),
+        encoding: 'utf8',
+        maxBuffer: 128 * 1024 * 1024,
+      },
+    );
+    assert.equal(diffReference.status, 0, `${fixture}: ${diffReference.stderr || diffReference.stdout}`);
+    const diffRust = spawnSync(binary, ['__query-index-files'], {
+      cwd: root,
+      input: JSON.stringify({
+        archivePath: olderArchive.archivePath,
+        runId: olderArchive.id,
+        newerArchivePath: archivePath,
+        newerRunId: runId,
+        generatedAt,
+        filter: diffFilter,
+        command: 'diff',
+        metric: 'all',
+        offset: 0,
+        limit: 2,
+      }),
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024 * 1024,
+    });
+    assert.equal(diffRust.status, 0, `${fixture}: ${diffRust.stderr || diffRust.stdout}`);
+    assert.equal(diffRust.stdout, diffReference.stdout, `${fixture}: indexed diff JSON differs`);
+  }
 }
 
 const indexed = spawnSync(binary, ['__roundtrip-query-index'], {
@@ -685,5 +726,5 @@ const indexDifference = firstDifference(indexedActual, indexExpected);
 assert.equal(indexDifference, undefined, `typed index: ${JSON.stringify(indexDifference)}`);
 
 console.log(
-  `[rust-archive-differential] ${fixtures.length} real archives have exact report plus typed mmap summary, scope, file-gap, provenance, dimension, decision detail/group, minimization, and bidirectional attribution query parity`,
+  `[rust-archive-differential] ${fixtures.length} real archive families have exact report plus typed mmap summary, scope, file-gap, provenance, dimension, decision detail/group, minimization, diff, and bidirectional attribution query parity`,
 );

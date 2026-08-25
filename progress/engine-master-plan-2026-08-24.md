@@ -458,7 +458,14 @@ miss blocks flipping any default.
   addition to the 120 generated mixed-obligation solver models. Integer-valued
   targets use the shared JavaScript-number serializer, preventing `50.0` from
   silently breaking the frozen byte contract.
-  The remaining diff/run/integrity/lifecycle agent surfaces remain
+  Rust now also owns `diff` over two authenticated typed indexes. Covered line,
+  branch-alternative and MC/DC-condition identities are compared without
+  report JSON; percentage deltas, gained/lost counts and independently paged
+  labels preserve the frozen envelope. Real historical archive pairs require
+  byte parity for both all-attempt and passed-only views. Branch records retain
+  their parent decision identity, and output sorting deliberately implements
+  JavaScript UTF-16 order so non-BMP paths cannot create cross-engine drift.
+  The remaining run-list/integrity/lifecycle agent surfaces remain
   before this path can replace the shipped query engine.
 
 ## Non-goals and guardrails

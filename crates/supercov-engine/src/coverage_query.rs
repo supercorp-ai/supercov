@@ -1639,6 +1639,249 @@ pub fn coverage_file_detail_query(
     ))
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CoverageDiffDelta {
+    #[serde(serialize_with = "crate::coverage_analysis::serialize_javascript_number")]
+    pub lines: f64,
+    #[serde(serialize_with = "crate::coverage_analysis::serialize_javascript_number")]
+    pub branches: f64,
+    #[serde(serialize_with = "crate::coverage_analysis::serialize_javascript_number")]
+    pub mcdc: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageDiffSide {
+    pub line_count: usize,
+    pub branch_count: usize,
+    pub mcdc_count: usize,
+    pub lines: Vec<String>,
+    pub branches: Vec<String>,
+    pub mcdc: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CoverageDiffData {
+    pub filters: CoverageQueryFilters,
+    pub older: String,
+    pub newer: String,
+    pub delta: CoverageDiffDelta,
+    pub gained: CoverageDiffSide,
+    pub lost: CoverageDiffSide,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CoverageDiffQueryOptions<'a> {
+    pub older_run: &'a str,
+    pub newer_run: &'a str,
+    pub view: CoverageViewId,
+    pub kind: Option<&'a str>,
+    pub runner: Option<&'a str>,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+struct DiffSnapshot {
+    summary: CoverageSummary,
+    lines: BTreeSet<String>,
+    branches: HashMap<String, String>,
+    mcdc: HashMap<String, String>,
+}
+
+fn diff_snapshot(
+    index: &CoverageIndex<'_>,
+    view: CoverageViewId,
+) -> Result<DiffSnapshot, QueryError> {
+    let summary = index.summary(view)?;
+    let lines = index
+        .lines(view)?
+        .into_iter()
+        .filter(|line| line.covered)
+        .map(|line| format!("{}:{}", line.file, line.line))
+        .collect();
+    let branches = index
+        .hit_metadata(view)?
+        .into_iter()
+        .filter(|metadata| metadata.obligation == "branch" && !metadata.tests.is_empty())
+        .map(|metadata| {
+            let parent = metadata
+                .parent_id
+                .ok_or(QueryError::InvalidRecordSelection)?;
+            Ok((
+                format!("{parent}:{}", metadata.id),
+                format!(
+                    "{}:{} {}",
+                    metadata.file,
+                    metadata.line,
+                    metadata.alternative.unwrap_or_default()
+                ),
+            ))
+        })
+        .collect::<Result<HashMap<_, _>, QueryError>>()?;
+    let mcdc = index
+        .decision_details(view)?
+        .into_iter()
+        .flat_map(|decision| {
+            decision
+                .conditions
+                .into_iter()
+                .filter(|condition| condition.covered)
+                .map(move |condition| {
+                    (
+                        format!("{}:c{}", decision.meta.id, condition.index),
+                        format!(
+                            "{}:{} C{} {}",
+                            decision.meta.file,
+                            decision.meta.line,
+                            condition.index + 1,
+                            condition.source
+                        ),
+                    )
+                })
+        })
+        .collect();
+    Ok(DiffSnapshot {
+        summary,
+        lines,
+        branches,
+        mcdc,
+    })
+}
+
+fn js_string_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    left.encode_utf16().cmp(right.encode_utf16())
+}
+
+fn rounded_delta(newer: f64, older: f64) -> f64 {
+    ((newer - older) * 100.0).round() / 100.0
+}
+
+pub fn coverage_diff_query(
+    older: &CoverageIndex<'_>,
+    newer: &CoverageIndex<'_>,
+    options: CoverageDiffQueryOptions<'_>,
+) -> Result<(CoverageDiffData, AgentPagination), QueryError> {
+    if options.limit == 0 {
+        return Err(QueryError::InvalidPagination);
+    }
+    let older = diff_snapshot(older, options.view)?;
+    let newer = diff_snapshot(newer, options.view)?;
+    let mut gained_lines = newer
+        .lines
+        .difference(&older.lines)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut lost_lines = older
+        .lines
+        .difference(&newer.lines)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut gained_branches = newer
+        .branches
+        .iter()
+        .filter(|(id, _)| !older.branches.contains_key(*id))
+        .map(|(_, label)| label.clone())
+        .collect::<Vec<_>>();
+    let mut lost_branches = older
+        .branches
+        .iter()
+        .filter(|(id, _)| !newer.branches.contains_key(*id))
+        .map(|(_, label)| label.clone())
+        .collect::<Vec<_>>();
+    let mut gained_mcdc = newer
+        .mcdc
+        .iter()
+        .filter(|(id, _)| !older.mcdc.contains_key(*id))
+        .map(|(_, label)| label.clone())
+        .collect::<Vec<_>>();
+    let mut lost_mcdc = older
+        .mcdc
+        .iter()
+        .filter(|(id, _)| !newer.mcdc.contains_key(*id))
+        .map(|(_, label)| label.clone())
+        .collect::<Vec<_>>();
+    for values in [
+        &mut gained_lines,
+        &mut lost_lines,
+        &mut gained_branches,
+        &mut lost_branches,
+        &mut gained_mcdc,
+        &mut lost_mcdc,
+    ] {
+        values.sort_by(|left, right| js_string_cmp(left, right));
+    }
+    let total = [
+        gained_lines.len(),
+        gained_branches.len(),
+        gained_mcdc.len(),
+        lost_lines.len(),
+        lost_branches.len(),
+        lost_mcdc.len(),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    let page = |values: &[String]| {
+        values
+            .iter()
+            .skip(options.offset)
+            .take(options.limit)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let gained = CoverageDiffSide {
+        line_count: gained_lines.len(),
+        branch_count: gained_branches.len(),
+        mcdc_count: gained_mcdc.len(),
+        lines: page(&gained_lines),
+        branches: page(&gained_branches),
+        mcdc: page(&gained_mcdc),
+    };
+    let lost = CoverageDiffSide {
+        line_count: lost_lines.len(),
+        branch_count: lost_branches.len(),
+        mcdc_count: lost_mcdc.len(),
+        lines: page(&lost_lines),
+        branches: page(&lost_branches),
+        mcdc: page(&lost_mcdc),
+    };
+    let returned = [
+        gained.lines.len(),
+        gained.branches.len(),
+        gained.mcdc.len(),
+        lost.lines.len(),
+        lost.branches.len(),
+        lost.mcdc.len(),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    Ok((
+        CoverageDiffData {
+            filters: query_filters(options.view, options.kind, options.runner),
+            older: options.older_run.into(),
+            newer: options.newer_run.into(),
+            delta: CoverageDiffDelta {
+                lines: rounded_delta(
+                    newer.summary.lines.percentage,
+                    older.summary.lines.percentage,
+                ),
+                branches: rounded_delta(
+                    newer.summary.branches.percentage,
+                    older.summary.branches.percentage,
+                ),
+                mcdc: rounded_delta(
+                    newer.summary.condition_coverage_pct,
+                    older.summary.condition_coverage_pct,
+                ),
+            },
+            gained,
+            lost,
+        },
+        pagination(options.offset, options.limit, returned, total),
+    ))
+}
+
 pub fn coverage_scope_query(
     index: &CoverageIndex<'_>,
     options: CoverageScopeQueryOptions<'_>,

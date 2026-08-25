@@ -526,6 +526,7 @@ pub struct IndexedHitMetadata {
     pub column: usize,
     pub label: Option<String>,
     pub alternative: Option<String>,
+    pub parent_id: Option<String>,
     pub source: String,
     pub tests: Vec<String>,
 }
@@ -1898,7 +1899,7 @@ pub fn coverage_index_sections(
                         line: branch.meta.line,
                         column: branch.meta.column,
                         branch_kind: Some(&branch.meta.kind),
-                        label: None,
+                        label: Some(&branch.meta.id),
                         alternative: Some(&alternative.label),
                         source: &branch.meta.source,
                         tests: &alternative.tests,
@@ -3066,6 +3067,7 @@ impl<'a> CoverageIndex<'a> {
                 2 => "branch",
                 _ => return Err(CoverageIndexError::InvalidRecord("hit obligation")),
             };
+            let metadata_label = self.optional_string(get_u32(record, 36)?)?;
             metadata.push(IndexedHitMetadata {
                 id: self.string(get_u32(record, 4)?)?,
                 obligation: obligation.into(),
@@ -3075,8 +3077,11 @@ impl<'a> CoverageIndex<'a> {
                 column: usize::try_from(get_u64(record, 24)?)
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
                 branch_kind: self.optional_string(get_u32(record, 32)?)?,
-                label: self.optional_string(get_u32(record, 36)?)?,
+                label: (obligation != "branch")
+                    .then_some(metadata_label.clone())
+                    .flatten(),
                 alternative: self.optional_string(get_u32(record, 40)?)?,
+                parent_id: (obligation == "branch").then_some(metadata_label).flatten(),
                 source: self.string(get_u32(record, 44)?)?,
                 tests: self.relation_strings(get_u64(record, 48)?, get_u64(record, 56)?)?,
             });
