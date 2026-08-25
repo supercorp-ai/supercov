@@ -66,11 +66,17 @@ pub struct RunIntegrity {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunTimings {
+    #[serde(serialize_with = "crate::coverage_analysis::serialize_javascript_number")]
     pub initialization_ms: f64,
+    #[serde(serialize_with = "crate::coverage_analysis::serialize_javascript_number")]
     pub workspace_preparation_ms: f64,
+    #[serde(serialize_with = "crate::coverage_analysis::serialize_javascript_number")]
     pub adapter_setup_ms: f64,
+    #[serde(serialize_with = "crate::coverage_analysis::serialize_javascript_number")]
     pub instrumented_build_ms: f64,
+    #[serde(serialize_with = "crate::coverage_analysis::serialize_javascript_number")]
     pub test_command_ms: f64,
+    #[serde(serialize_with = "crate::coverage_analysis::serialize_javascript_number")]
     pub evidence_publication_ms: f64,
 }
 
@@ -97,6 +103,7 @@ pub struct RawEvidenceMetadata {
 pub struct RunMetadata {
     pub id: String,
     pub started_at: String,
+    #[serde(serialize_with = "crate::coverage_analysis::serialize_javascript_number")]
     pub duration_ms: f64,
     pub command: Vec<String>,
     pub test_exit_code: Option<i32>,

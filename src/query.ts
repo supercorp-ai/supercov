@@ -1022,8 +1022,8 @@ export function coverageMeasurement(
   };
 }
 
-function locationSelector(selector: string): { file: string; line: number } {
-  const match = /^(.*):(\d+)(?::\d+)?$/.exec(selector);
+export function locationSelector(selector: string): { file: string; line: number } {
+  const match = /^(.*):(\d+):\d+$/.exec(selector) ?? /^(.*):(\d+)$/.exec(selector);
   if (!match)
     throw new SupercovError("INVALID_ARGUMENT", "Expected <source-file>:<line>", {
       details: { selector },

@@ -148,7 +148,10 @@ pub fn coverage_minimize_query(
             .map(|test| test.id.clone())
             .collect::<BTreeSet<_>>();
         if ids.is_empty() {
-            return Err(QueryError::InvalidRecordSelection);
+            return Err(QueryError::TestFilterEmpty {
+                kind: options.kind.map(str::to_owned),
+                runner: options.runner.map(str::to_owned),
+            });
         }
         Some(ids)
     };
@@ -232,6 +235,17 @@ pub enum QueryError {
     Analysis(ReportError),
     Index(CoverageIndexError),
     InvalidPagination,
+    TestFilterEmpty {
+        kind: Option<String>,
+        runner: Option<String>,
+    },
+    TestNotFound(String),
+    DecisionNotFound(String),
+    SourceNotFound(String),
+    AmbiguousSelector {
+        selector: String,
+        matches: Vec<String>,
+    },
     InvalidRecordSelection,
     ScopeUnavailable,
 }
@@ -490,7 +504,10 @@ fn selected_test_ids(
         .map(|test| test.id.clone())
         .collect::<BTreeSet<_>>();
     if selected.is_empty() {
-        return Err(QueryError::InvalidRecordSelection);
+        return Err(QueryError::TestFilterEmpty {
+            kind: kind.map(str::to_owned),
+            runner: runner.map(str::to_owned),
+        });
     }
     Ok(Some(selected))
 }
@@ -776,7 +793,7 @@ pub fn coverage_test_query(
         })
         .collect::<Vec<_>>();
     if matches.is_empty() {
-        return Err(QueryError::InvalidRecordSelection);
+        return Err(QueryError::TestNotFound(options.selector.into()));
     }
     let filters = query_filters(options.view, options.kind, options.runner);
     if matches.len() > 1 {
@@ -1114,7 +1131,7 @@ pub fn coverage_decision_query(
             .collect();
     }
     if matches.is_empty() {
-        return Err(QueryError::InvalidRecordSelection);
+        return Err(QueryError::DecisionNotFound(options.selector.into()));
     }
     let filters = query_filters(options.view, options.kind, options.runner);
     if matches.len() > 1 {
@@ -1463,8 +1480,14 @@ pub fn coverage_file_detail_query(
             .into_iter()
             .filter(|file| file.contains(options.selector))
             .collect::<Vec<_>>();
+        if matches.is_empty() {
+            return Err(QueryError::SourceNotFound(options.selector.into()));
+        }
         if matches.len() != 1 {
-            return Err(QueryError::InvalidRecordSelection);
+            return Err(QueryError::AmbiguousSelector {
+                selector: options.selector.into(),
+                matches: matches.into_iter().map(str::to_owned).collect(),
+            });
         }
         matches[0].to_owned()
     };
@@ -2213,7 +2236,10 @@ pub fn coverage_file_decisions_query(
             .file_gaps(options.view, options.kind, options.runner)?
             .is_empty()
         {
-            return Err(QueryError::InvalidRecordSelection);
+            return Err(QueryError::TestFilterEmpty {
+                kind: options.kind.map(str::to_owned),
+                runner: options.runner.map(str::to_owned),
+            });
         }
     }
     let totals = DecisionGapTotals {
@@ -2298,7 +2324,10 @@ pub fn coverage_file_query(
     }
     let mut files = index.file_gaps(view, kind, runner)?;
     if (kind.is_some() || runner.is_some()) && files.is_empty() {
-        return Err(QueryError::InvalidRecordSelection);
+        return Err(QueryError::TestFilterEmpty {
+            kind: kind.map(str::to_owned),
+            runner: runner.map(str::to_owned),
+        });
     }
     if gaps_only {
         files.retain(|gap| gap_metric_value(gap, metric) > 0 || gap.measurement_limitations > 0);

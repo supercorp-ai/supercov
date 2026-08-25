@@ -27,6 +27,7 @@ pub struct RunListEntry {
     #[serde(serialize_with = "serialize_optional_javascript_number")]
     pub mcdc: Option<f64>,
     pub command: Vec<String>,
+    #[serde(serialize_with = "serialize_javascript_number")]
     pub duration_ms: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timings: Option<RunTimings>,

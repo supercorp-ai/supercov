@@ -729,7 +729,7 @@ miss blocks flipping any default.
   `expect(await value()).toBe(...)` can never move its receiver `await` into a
   synchronous attribution callback. Such sites remain honestly
   execution-covered instead of receiving false assertion attribution.
-- The current full checkpoint is green: 101 Rust engine tests, 188
+- The current full checkpoint is green: 103 Rust engine tests, 189
   TypeScript/reference tests, type checking, clippy with warnings denied, all
   generated/real differential models, and direct Node, Vitest, Playwright,
   Vite, esbuild, tsc, webpack, and SWC integrations. Remaining atomic-cutover
@@ -749,6 +749,29 @@ miss blocks flipping any default.
   byte-identical to the temporary TypeScript CLI for both commands. This does
   not flip the npm wrapper or authorize engine deletion; public run/query,
   structured-error, native packaging, and cross-platform gates remain.
+- The complete public agent-JSON query grammar now enters Rust directly in the
+  candidate binary. Rust parses the frozen instance-first `runs <id> coverage`
+  hierarchy, every resource selector/filter/metric/group/sort/pagination option,
+  minimization and `diff`; opens or rebuilds authenticated immutable indexes;
+  computes current-project staleness with the same Rust frontend inputs used by
+  execution; overlays reviewed waivers; and emits the bounded v1 success/error
+  envelope. Query failures retain typed identities through the operator layer,
+  so source/test/decision misses, ambiguous selectors, empty provenance views,
+  unavailable scope, unreachable targets and solver limits are never recovered
+  by parsing diagnostic strings. A public black-box differential covers every
+  resource plus malformed hierarchy, numeric pagination, filters, selection,
+  minimization, diff and exact structured failures. All outputs are byte
+  identical to the temporary reference except deliberately excluded engine-
+  identity staleness fields: the Rust instrumenter/configuration fingerprint is
+  independently more complete and must differ from a run produced by the old
+  engine. The differential also found a real reference bug in
+  `file:line:column` parsing; Rust had the documented behavior, so the temporary
+  TypeScript implementation was corrected and independently regressed instead
+  of teaching Rust the bug. Integral timing metadata now uses JavaScript-number
+  serialization, closing the last otherwise-spurious JSON byte difference.
+  Human rendering is the next public query slice; until it passes exact text
+  differentials, the candidate refuses non-JSON queries and the npm wrapper
+  remains on the shipped engine.
 
 ## Non-goals and guardrails
 

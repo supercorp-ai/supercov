@@ -24,7 +24,7 @@ use crate::{
     orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
     process_supervision::{CommandSpec, SupervisionOptions},
     project_discovery::{BuildAdapter, command_uses_tool, discover_coverage_project},
-    run_store::{RawEvidenceMetadata, RunMetadata, RunTimings},
+    run_store::{RawEvidenceMetadata, RunIntegrity, RunMetadata, RunTimings},
     workspace::{prepare_cached_workspace, prune_cached_workspace_sources},
 };
 
@@ -82,6 +82,36 @@ fn node_options(preload: &Path) -> String {
     .join(" ")
 }
 
+/// Fingerprint the current JavaScript project using the same discovery and
+/// runtime-shim inputs as a Rust-owned execution. Query callers deliberately
+/// treat failure as "staleness unavailable", matching the frozen CLI contract.
+pub fn current_javascript_integrity(
+    root: &Path,
+    runtime_root: &Path,
+    command: &[String],
+) -> Result<RunIntegrity, String> {
+    let environment = std::env::vars().collect::<BTreeMap<_, _>>();
+    let project = discover_coverage_project(root, &environment, command)
+        .map_err(|error| error.to_string())?;
+    javascript_integrity_for_project(root, runtime_root, &project)
+}
+
+fn javascript_integrity_for_project(
+    root: &Path,
+    runtime_root: &Path,
+    project: &crate::project_discovery::CoverageProject,
+) -> Result<RunIntegrity, String> {
+    create_run_integrity(
+        root,
+        project,
+        &FrontendIntegrityInputs::javascript(
+            runtime_root.to_owned(),
+            javascript_runtime_files(runtime_root),
+        ),
+    )
+    .map_err(|error| error.to_string())
+}
+
 /// Execute one direct JavaScript suite with every language-neutral stage owned
 /// by Rust. Errors are intentionally rendered at this private boundary; public
 /// activation will expose stable structured error codes.
@@ -112,13 +142,7 @@ pub fn run_direct_javascript(
     let environment = std::env::vars().collect::<BTreeMap<_, _>>();
     let project = discover_coverage_project(&root, &environment, &request.command)
         .map_err(|error| error.to_string())?;
-    let runtime_files = javascript_runtime_files(&runtime_root);
-    let integrity = create_run_integrity(
-        &root,
-        &project,
-        &FrontendIntegrityInputs::javascript(runtime_root.clone(), runtime_files),
-    )
-    .map_err(|error| error.to_string())?;
+    let integrity = javascript_integrity_for_project(&root, &runtime_root, &project)?;
     let initialization_ms = elapsed_ms(initialization_started);
 
     let workspace_started = Instant::now();

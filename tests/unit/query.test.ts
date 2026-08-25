@@ -1,8 +1,22 @@
 import { describe, it } from "node:test";
 import { expect } from "../support/expect.ts";
-import { resolveCoverageQueryInvocation } from "../../src/query.ts";
+import {
+  locationSelector,
+  resolveCoverageQueryInvocation,
+} from "../../src/query.ts";
 
 describe("coverage query routing", () => {
+  it("treats the optional trailing location number as a column", () => {
+    expect(locationSelector("src/permission.js:12:7")).toEqual({
+      file: "src/permission.js",
+      line: 12,
+    });
+    expect(locationSelector("C:\\repo\\source.ts:12:7")).toEqual({
+      file: "C:\\repo\\source.ts",
+      line: 12,
+    });
+  });
+
   it("keeps runs without an ID as the run listing", () => {
     expect(resolveCoverageQueryInvocation("runs", ["--limit", "5"])).toEqual({
       command: "runs",
