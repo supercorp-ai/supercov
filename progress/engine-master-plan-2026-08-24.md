@@ -334,6 +334,15 @@ miss blocks flipping any default.
   The differential also found and removed an old TypeScript-only serialization
   leak where an internal `Set` appeared as `explicitPhases: {}` on line
   results despite not existing in the frozen public schema.
+- Phase 4 spike S2 is closed by
+  `progress/query-index-adr-2026-08-25.md`. On the pinned 100,000-line corpus,
+  gzipped JSON misses the complete CLI gate at 16.473 ms p95 before process
+  startup; authenticated+validated rkyv measures 5.231 ms, authenticated+
+  verified FlatBuffers 9.306 ms, and the selected fixed-layout columnar index
+  with SHA-256 header/page validation 0.129 ms. The fixed format is also stable
+  across Rust/compiler layouts and 34% smaller than rkyv. Its section layout,
+  checked arithmetic, corruption corpus, immutable publication and rebuild-on-
+  version-mismatch rules are now Phase 4 implementation requirements.
 
 ## Non-goals and guardrails
 
