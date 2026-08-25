@@ -11,12 +11,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use supercov_contracts::{
+    COVERAGE_MODEL_SCHEMA_VERSION, EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION, FrontendRunDeclaration,
+};
 
 use crate::coverage_analysis::{
     AnalysisError, BranchCoverage, CoverageCoreInput, CoverageSummary, DecisionCoverage,
     McdcVector, PointCoverage, PointKind, analyze_core, find_witnesses_for_conditions,
 };
-use crate::evidence_archive::{EvidenceArchiveEntry, read_archive};
+use crate::evidence_archive::{EvidenceArchiveEntry, read_versioned_archive};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -410,6 +413,60 @@ pub struct CoverageModelDeclaration {
     pub completeness_meaning: String,
     pub measured: Vec<String>,
     pub not_measured: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PersistedCoverageModel {
+    pub schema_version: u32,
+    pub variant: String,
+    pub name: String,
+    pub completeness_meaning: String,
+    pub measured: Vec<String>,
+    pub not_measured: Vec<String>,
+}
+
+impl PersistedCoverageModel {
+    pub fn from_declaration(value: &CoverageModelDeclaration) -> Self {
+        Self {
+            schema_version: COVERAGE_MODEL_SCHEMA_VERSION,
+            variant: value.variant.clone(),
+            name: value.name.clone(),
+            completeness_meaning: value.completeness_meaning.clone(),
+            measured: value.measured.clone(),
+            not_measured: value.not_measured.clone(),
+        }
+    }
+
+    fn into_declaration(self) -> Result<CoverageModelDeclaration, &'static str> {
+        if self.schema_version != COVERAGE_MODEL_SCHEMA_VERSION {
+            return Err("unsupported coverage model schema");
+        }
+        let fields = [
+            self.variant.as_str(),
+            self.name.as_str(),
+            self.completeness_meaning.as_str(),
+        ];
+        if fields.iter().any(|field| field.trim().is_empty())
+            || self.measured.is_empty()
+            || self
+                .measured
+                .iter()
+                .chain(&self.not_measured)
+                .any(|item| item.trim().is_empty())
+            || self.measured.iter().collect::<BTreeSet<_>>().len() != self.measured.len()
+            || self.not_measured.iter().collect::<BTreeSet<_>>().len() != self.not_measured.len()
+        {
+            return Err("invalid coverage model declaration");
+        }
+        Ok(CoverageModelDeclaration {
+            variant: self.variant,
+            name: self.name,
+            completeness_meaning: self.completeness_meaning,
+            measured: self.measured,
+            not_measured: self.not_measured,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1760,8 +1817,9 @@ fn is_mcdc_result(path: &str) -> bool {
 pub fn analyze_coverage_archive(
     request: &ArchiveReportRequest,
 ) -> Result<CoverageReport, ReportError> {
-    let entries = read_archive(Path::new(&request.archive_path))
+    let archive = read_versioned_archive(Path::new(&request.archive_path))
         .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
+    let entries = archive.entries;
     let manifest = entries
         .iter()
         .find(|entry| entry.path == "manifest.json")
@@ -1841,15 +1899,43 @@ pub fn analyze_coverage_archive(
         corrupt_records: scoped_corrupt + background_corrupt + execution_corrupt,
         corrupt_files: scoped_corrupt_files + background_corrupt_files + execution_corrupt_files,
     };
-    let mut report = analyze_coverage_results(&CoverageReportRequest {
+    let (frontend, coverage_model) = if archive.schema_version == EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION
+    {
+        let frontend = entries
+            .iter()
+            .find(|entry| entry.path == "frontend.json")
+            .ok_or_else(|| ReportError::InvalidArchive("missing frontend.json".into()))
+            .and_then(parse_entry::<FrontendRunDeclaration>)?;
+        let persisted = entries
+            .iter()
+            .find(|entry| entry.path == "coverage-model.json")
+            .ok_or_else(|| ReportError::InvalidArchive("missing coverage-model.json".into()))
+            .and_then(parse_entry::<PersistedCoverageModel>)?;
+        let model = persisted
+            .into_declaration()
+            .map_err(|reason| ReportError::InvalidJson {
+                path: "coverage-model.json".into(),
+                reason: reason.into(),
+            })?;
+        (Some(frontend), Some(model))
+    } else {
+        (None, None)
+    };
+    let normalized = CoverageReportRequest {
         run_id: request.run_id.clone(),
         manifest,
         raw_results,
         generated_at: request.generated_at.clone(),
-        coverage_model: None,
+        coverage_model,
         integrity: request.integrity.clone(),
         test_exit_code: request.test_exit_code.clone(),
-    })?;
+    };
+    let mut report = if let Some(frontend) = frontend {
+        crate::frontend_protocol::analyze_frontend_results(&frontend, &normalized)
+            .map_err(|error| ReportError::InvalidArchive(error.to_string()))?
+    } else {
+        analyze_coverage_results(&normalized)?
+    };
     report.view.transport = Some(transport.clone());
     report.filters.passed.transport = Some(transport.clone());
     report.filters.failed.transport = Some(transport);

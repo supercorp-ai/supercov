@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 3,
+  "status": "private-candidate",
+  "magic": "SUPERCOV-EVIDENCE-3\n",
+  "framing": "evidence-v2-compatible-after-magic",
+  "requiredEntries": ["coverage-model.json", "frontend.json", "manifest.json"],
+  "frontendProtocolVersion": 2,
+  "coverageModelSchemaVersion": 1,
+  "v2ReaderRequired": true,
+  "unknownFrontendFieldsFatal": true,
+  "unknownCoverageModelFieldsFatal": true
+}

@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 pub const CONTRACT_VERSION: u32 = 1;
 pub const EVIDENCE_ARCHIVE_SCHEMA_VERSION: u32 = 2;
 pub const EVIDENCE_ARCHIVE_MAGIC: &str = "SUPERCOV-EVIDENCE-2\n";
+pub const EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION: u32 = 3;
+pub const EVIDENCE_ARCHIVE_V3_MAGIC: &str = "SUPERCOV-EVIDENCE-3\n";
+pub const COVERAGE_MODEL_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_JSON_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_JSON_MAX_BYTES: usize = 65_536;
 pub const DEFAULT_PAGE_SIZE: usize = 20;
@@ -221,6 +224,25 @@ pub fn python_coverage_import_contract() -> Result<PythonCoverageImportContract,
     serde_json::from_str(include_str!(
         "../../../contracts/python-coverage-v1/contract.json"
     ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvidenceV3Contract {
+    pub schema_version: u32,
+    pub status: String,
+    pub magic: String,
+    pub framing: String,
+    pub required_entries: Vec<String>,
+    pub frontend_protocol_version: u32,
+    pub coverage_model_schema_version: u32,
+    pub v2_reader_required: bool,
+    pub unknown_frontend_fields_fatal: bool,
+    pub unknown_coverage_model_fields_fatal: bool,
+}
+
+pub fn evidence_v3_contract() -> Result<EvidenceV3Contract, serde_json::Error> {
+    serde_json::from_str(include_str!("../../../contracts/evidence-v3/contract.json"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -884,5 +906,31 @@ mod tests {
             contract.column_locations,
             "unavailable-with-blocking-limitation"
         );
+    }
+
+    #[test]
+    fn evidence_v3_requires_language_identity_without_rewriting_v2() {
+        let contract = evidence_v3_contract().unwrap();
+        assert_eq!(contract.schema_version, EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION);
+        assert_eq!(contract.status, "private-candidate");
+        assert_eq!(contract.magic, EVIDENCE_ARCHIVE_V3_MAGIC);
+        assert_eq!(contract.framing, "evidence-v2-compatible-after-magic");
+        assert_eq!(
+            contract.required_entries,
+            ["coverage-model.json", "frontend.json", "manifest.json"]
+        );
+        assert_eq!(
+            contract.frontend_protocol_version,
+            LANGUAGE_FRONTEND_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            contract.coverage_model_schema_version,
+            COVERAGE_MODEL_SCHEMA_VERSION
+        );
+        assert!(contract.v2_reader_required);
+        assert!(contract.unknown_frontend_fields_fatal);
+        assert!(contract.unknown_coverage_model_fields_fatal);
+        assert_eq!(EVIDENCE_ARCHIVE_SCHEMA_VERSION, 2);
+        assert_eq!(EVIDENCE_ARCHIVE_MAGIC, "SUPERCOV-EVIDENCE-2\n");
     }
 }

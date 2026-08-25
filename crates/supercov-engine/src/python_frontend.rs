@@ -22,9 +22,11 @@ use crate::{
     coverage_analysis::PointKind,
     coverage_report::{
         BranchAlternativeMeta, BranchMeta, CoverageManifest, CoverageModelDeclaration,
-        CoveragePhase, CoverageReportRequest, ExecutionScope, ExitCodeInput, PointMeta,
-        RawTestResult, RuntimeEvent, RuntimeSnapshot, TestProvenance,
+        CoveragePhase, CoverageReportRequest, ExecutionScope, ExitCodeInput,
+        PersistedCoverageModel, PointMeta, RawTestResult, RuntimeEvent, RuntimeSnapshot,
+        TestProvenance,
     },
+    evidence_archive::EvidenceArchiveEntry,
 };
 
 pub const PYTHON_COVERAGE_IMPORT_SCHEMA_VERSION: u32 = 1;
@@ -135,6 +137,37 @@ pub struct PythonCoverageExport {
 pub struct PythonFrontendImport {
     pub declaration: FrontendRunDeclaration,
     pub request: CoverageReportRequest,
+}
+
+impl PythonFrontendImport {
+    pub fn archive_v3_entries(&self) -> Result<Vec<EvidenceArchiveEntry>, serde_json::Error> {
+        let mut entries = vec![
+            EvidenceArchiveEntry {
+                path: "coverage-model.json".into(),
+                contents: serde_json::to_vec(&PersistedCoverageModel::from_declaration(
+                    self.request
+                        .coverage_model
+                        .as_ref()
+                        .expect("Python imports always declare a coverage model"),
+                ))?,
+            },
+            EvidenceArchiveEntry {
+                path: "frontend.json".into(),
+                contents: serde_json::to_vec(&self.declaration)?,
+            },
+            EvidenceArchiveEntry {
+                path: "manifest.json".into(),
+                contents: serde_json::to_vec(&self.request.manifest)?,
+            },
+        ];
+        for (index, result) in self.request.raw_results.iter().enumerate() {
+            entries.push(EvidenceArchiveEntry {
+                path: format!("results/{index:08}/mcdc.json"),
+                contents: serde_json::to_vec(result)?,
+            });
+        }
+        Ok(entries)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -772,8 +805,14 @@ pub fn import_python_coverage_json(
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, time::SystemTime};
+
     use super::*;
-    use crate::frontend_protocol::{analyze_frontend_results, validate_frontend_report_request};
+    use crate::{
+        coverage_report::{ArchiveReportRequest, analyze_coverage_archive},
+        evidence_archive::write_archive_v3,
+        frontend_protocol::{analyze_frontend_results, validate_frontend_report_request},
+    };
 
     const GOLDEN: &[u8] =
         include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-basic.json");
@@ -916,6 +955,70 @@ mod tests {
             .find(|result| result.test.ends_with("test_positive_path"))
             .unwrap();
         assert_eq!(expected_failure.expected_status.as_deref(), Some("failed"));
+    }
+
+    #[test]
+    fn persists_and_reanalyzes_the_language_model_through_archive_v3() {
+        let imported = import_python_coverage_json(
+            GOLDEN,
+            "python-tier-a-ctrace",
+            "2026-08-25T00:00:00.000Z",
+            Some(0),
+        )
+        .unwrap();
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "supercov-python-archive-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let archive = root.join("evidence.raw.gz");
+        write_archive_v3(imported.archive_v3_entries().unwrap(), &archive).unwrap();
+        let report = analyze_coverage_archive(&ArchiveReportRequest {
+            archive_path: archive,
+            run_id: "python-tier-a-ctrace".into(),
+            generated_at: "2026-08-25T00:00:00.000Z".into(),
+            integrity: None,
+            test_exit_code: ExitCodeInput::Present(Some(0)),
+        })
+        .unwrap();
+        assert_eq!(report.view.variant, "python-native-branch");
+        assert_eq!(
+            (
+                report.view.summary.lines.covered,
+                report.view.summary.lines.total,
+                report.view.summary.branches.covered,
+                report.view.summary.branches.total,
+            ),
+            (10, 12, 6, 8)
+        );
+        assert!(!report.view.summary.coverage_complete);
+
+        let invalid_archive = root.join("invalid-evidence.raw.gz");
+        let mut invalid_entries = imported.archive_v3_entries().unwrap();
+        let model = invalid_entries
+            .iter_mut()
+            .find(|entry| entry.path == "coverage-model.json")
+            .unwrap();
+        let mut invalid_model: serde_json::Value = serde_json::from_slice(&model.contents).unwrap();
+        invalid_model["coverageVerdict"] = serde_json::json!(100);
+        model.contents = serde_json::to_vec(&invalid_model).unwrap();
+        write_archive_v3(invalid_entries, &invalid_archive).unwrap();
+        assert!(matches!(
+            analyze_coverage_archive(&ArchiveReportRequest {
+                archive_path: invalid_archive,
+                run_id: "python-tier-a-ctrace".into(),
+                generated_at: "2026-08-25T00:00:00.000Z".into(),
+                integrity: None,
+                test_exit_code: ExitCodeInput::Present(Some(0)),
+            }),
+            Err(crate::coverage_report::ReportError::InvalidJson { path, .. })
+                if path == "coverage-model.json"
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

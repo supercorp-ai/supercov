@@ -946,6 +946,18 @@ miss blocks flipping any default.
   in-memory analyzer contract only. It is intentionally not smuggled into
   frozen evidence v2; archive v3 must make the frontend declaration and model
   mandatory and retain a dual reader for historical JavaScript runs.
+- The private evidence-v3 candidate now does that migration explicitly rather
+  than modifying the frozen public writer. V3 has its own magic, retains v2's
+  canonical framing, and requires strict `frontend.json`,
+  `coverage-model.json` and `manifest.json` entries. The versioned reader
+  recognizes v2 and v3; the legacy v2-only API deliberately rejects v3 so no
+  old caller can misclassify it. The current public writer still emits v2.
+  Python's typed importer can produce deterministic v3 entries, and a complete
+  write/read/analyze round trip revalidates frontend identities and limitations
+  before reproducing the native model and oracle totals. Unknown coverage-model
+  fields are fatal. V3 still needs corruption/fuzz coverage, run-store/query
+  integration, agent-contract versioning for exposing the model, and a staged
+  public migration before its status can leave `private-candidate`.
 
 ## Non-goals and guardrails
 
