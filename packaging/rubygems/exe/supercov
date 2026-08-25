@@ -1,0 +1,11 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+binary = File.expand_path("../libexec/supercov", __dir__)
+
+unless File.file?(binary) && File.executable?(binary)
+  warn "supercov: packaged Rust executable is missing or not executable: #{binary}"
+  exit 126
+end
+
+exec(binary, *ARGV)
