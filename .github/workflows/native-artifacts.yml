@@ -2,9 +2,21 @@ name: Native artifact matrix
 
 on:
   workflow_call:
+    inputs:
+      matrix-json:
+        description: Exact native target matrix to build for this invocation
+        required: false
+        type: string
+        default: '{"include":[{"runner":"macos-15","target":"aarch64-apple-darwin","package":"supercov-darwin-arm64","executable":"supercov","packedInstall":true},{"runner":"macos-15-intel","target":"x86_64-apple-darwin","package":"supercov-darwin-x64","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","package":"supercov-linux-arm64-gnu","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","package":"supercov-linux-x64-gnu","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","package":"supercov-linux-arm64-musl","executable":"supercov","musl":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","package":"supercov-linux-x64-musl","executable":"supercov","musl":true},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","package":"supercov-win32-arm64","executable":"supercov.exe","packedInstall":true},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","package":"supercov-win32-x64","executable":"supercov.exe","packedInstall":true}]}'
+      reuse-run-id:
+        description: Optional prior workflow run whose successful target artifacts should be reused
+        required: false
+        type: string
+        default: ''
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -13,16 +25,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { runner: macos-15, target: aarch64-apple-darwin, package: supercov-darwin-arm64, executable: supercov, packedInstall: true }
-          - { runner: macos-15-intel, target: x86_64-apple-darwin, package: supercov-darwin-x64, executable: supercov, packedInstall: true }
-          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, package: supercov-linux-arm64-gnu, executable: supercov, packedInstall: true }
-          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu, package: supercov-linux-x64-gnu, executable: supercov, packedInstall: true }
-          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, package: supercov-linux-arm64-musl, executable: supercov, musl: true }
-          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-musl, package: supercov-linux-x64-musl, executable: supercov, musl: true }
-          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc, package: supercov-win32-arm64, executable: supercov.exe, packedInstall: true }
-          - { runner: windows-latest, target: x86_64-pc-windows-msvc, package: supercov-win32-x64, executable: supercov.exe, packedInstall: true }
+      matrix: ${{ fromJSON(inputs.matrix-json || '{"include":[{"runner":"macos-15","target":"aarch64-apple-darwin","package":"supercov-darwin-arm64","executable":"supercov","packedInstall":true},{"runner":"macos-15-intel","target":"x86_64-apple-darwin","package":"supercov-darwin-x64","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","package":"supercov-linux-arm64-gnu","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","package":"supercov-linux-x64-gnu","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","package":"supercov-linux-arm64-musl","executable":"supercov","musl":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","package":"supercov-linux-x64-musl","executable":"supercov","musl":true},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","package":"supercov-win32-arm64","executable":"supercov.exe","packedInstall":true},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","package":"supercov-win32-x64","executable":"supercov.exe","packedInstall":true}]}') }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -79,6 +82,15 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
+      - name: Download previously validated target artifacts
+        if: inputs.reuse-run-id != ''
+        uses: actions/download-artifact@v8
+        with:
+          run-id: ${{ inputs.reuse-run-id }}
+          github-token: ${{ github.token }}
+          pattern: supercov-*
+          path: native-release
+          merge-multiple: true
       - uses: actions/download-artifact@v8
         with:
           pattern: supercov-*

@@ -932,6 +932,16 @@ miss blocks flipping any default.
   the Windows command interpreter explicitly. A Windows npm preflight now runs
   before native compilation so package-manager invocation can no longer waste
   a five-minute binary build before failing.
+  The installed-package harness invokes the package's actual JavaScript bin
+  target through Node on every OS rather than treating npm's generated Windows
+  `.cmd` shim as a native executable. Both Windows binaries had compiled and
+  the npm preflight had passed before this second harness-only boundary was
+  exposed; all six macOS/Linux artifacts were already fully validated.
+  Hosted publication is now deliberately manual-only. Partial native releases
+  can select only the missing target matrix and merge artifacts from a prior
+  run before the aggregate integrity check, avoiding repeated builds on
+  platforms that have already passed. Push CI remains disabled; conformance,
+  browser and Test262 work stays local or explicitly dispatched.
   The release workflow now calls that complete native matrix, downloads and
   revalidates the aggregate release set, publishes all eight exact-version
   platform packages first, and publishes the primary package only after every

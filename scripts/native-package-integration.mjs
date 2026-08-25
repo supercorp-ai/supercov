@@ -112,9 +112,11 @@ try {
   };
   writeFileSync(resolve(consumer, "package.json"), `${JSON.stringify(consumerPackage, null, 2)}\n`);
   runNpm(["install", "--ignore-scripts"], { cwd: consumer });
-  const executable = resolve(consumer, "node_modules/.bin/supercov");
-  if (process.platform !== "win32") chmodSync(executable, 0o755);
-  const covered = spawnSync(executable, ["--", process.execPath, "--test"], {
+  // Invoke the JavaScript bin target that npm's generated shell/cmd shim
+  // delegates to. The generated `.cmd` file is not a native executable and
+  // cannot be passed directly to spawnSync on Windows.
+  const executable = resolve(consumer, "node_modules/supercov/bin/supercov.js");
+  const covered = spawnSync(process.execPath, [executable, "--", process.execPath, "--test"], {
     cwd: consumer,
     encoding: "utf8",
     env: { ...process.env, SUPERCOV_ENGINE: "rust" },
@@ -128,7 +130,7 @@ try {
   const wrongVersion = JSON.parse(validManifest);
   wrongVersion.version = "0.0.0-invalid";
   writeFileSync(installedManifest, `${JSON.stringify(wrongVersion, null, 2)}\n`);
-  const mismatched = spawnSync(executable, ["help"], {
+  const mismatched = spawnSync(process.execPath, [executable, "help"], {
     cwd: consumer,
     encoding: "utf8",
     env: { ...process.env, SUPERCOV_ENGINE: "rust" },
@@ -139,7 +141,7 @@ try {
 
   const installedBinary = resolve(installedPackage, "bin", target.executable);
   unlinkSync(installedBinary);
-  const missingBinary = spawnSync(executable, ["help"], {
+  const missingBinary = spawnSync(process.execPath, [executable, "help"], {
     cwd: consumer,
     encoding: "utf8",
     env: { ...process.env, SUPERCOV_ENGINE: "rust" },
@@ -151,7 +153,7 @@ try {
 
   const hiddenPackage = `${installedPackage}.missing`;
   renameSync(installedPackage, hiddenPackage);
-  const missingPackage = spawnSync(executable, ["help"], {
+  const missingPackage = spawnSync(process.execPath, [executable, "help"], {
     cwd: consumer,
     encoding: "utf8",
     env: { ...process.env, SUPERCOV_ENGINE: "rust" },
