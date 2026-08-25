@@ -117,6 +117,13 @@ declares `python-hard-kill-evidence-unflushable` as a blocking structural
 limitation. Removing it requires an owned streaming probe transport, not a
 claim that in-process state survived.
 
+The final oracle-only path corpus covers multiple source roots, namespace
+packages, two import names resolving to one physical module, Unicode and space
+characters in paths, and source generated at runtime. Its frozen export proves
+13/16 statement lines and 5/8 branch arcs with four exact pytest owners. This
+closes expansion of the coverage.py harness; subsequent Python work belongs to
+the owned Rust transformer and Supercov runtime.
+
 ## Public-API basis
 
 - [`Coverage.analysis2`](https://coverage.readthedocs.io/en/7.13.5/api_coverage.html#coverage.Coverage.analysis2)

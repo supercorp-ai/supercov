@@ -873,6 +873,8 @@ mod tests {
         include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-concurrency.json");
     const WORKER_CRASH_GOLDEN: &[u8] =
         include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-worker-crash.json");
+    const PATHS_GOLDEN: &[u8] =
+        include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-paths.json");
 
     #[test]
     fn imports_the_coverage_py_oracle_without_inventing_assertion_or_mcdc_facts() {
@@ -1231,6 +1233,60 @@ mod tests {
                 .unwrap()
                 .outcome,
             "flaky"
+        );
+    }
+
+    #[test]
+    fn preserves_multiple_roots_physical_aliases_unicode_and_generated_paths() {
+        let imported = import_python_coverage_json(
+            PATHS_GOLDEN,
+            "python-tier-a-paths2",
+            "2026-08-25T00:00:00.000Z",
+            Some(0),
+        )
+        .unwrap();
+        let report = analyze_frontend_results(&imported.declaration, &imported.request).unwrap();
+        assert_eq!(
+            (
+                report.view.summary.lines.covered,
+                report.view.summary.lines.total,
+                report.view.summary.branches.covered,
+                report.view.summary.branches.total,
+            ),
+            (13, 16, 5, 8)
+        );
+        let files = report
+            .view
+            .lines
+            .iter()
+            .map(|line| line.file.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            files,
+            BTreeSet::from([
+                "generated_src/runtime_generated.py",
+                "other_src/secondary.py",
+                "path_src/namespace_pkg/plugin.py",
+                "path_src/unicodé space/module.py",
+            ])
+        );
+        assert_eq!(
+            report
+                .view
+                .lines
+                .iter()
+                .filter(|line| line.file == "path_src/namespace_pkg/plugin.py")
+                .count(),
+            4
+        );
+        assert_eq!(
+            report
+                .view
+                .tests
+                .iter()
+                .filter(|test| test.role == "test")
+                .count(),
+            4
         );
     }
 

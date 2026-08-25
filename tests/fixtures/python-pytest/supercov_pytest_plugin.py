@@ -17,14 +17,14 @@ OUTCOME_BASE = Path(os.environ["SUPERCOV_PYTEST_OUTCOMES"])
 WORKER_ID = os.environ.get("PYTEST_XDIST_WORKER", "main")
 DATA_FILE = os.environ.get("SUPERCOV_PYTHON_DATA")
 SOURCE = os.environ.get("SUPERCOV_PYTHON_SOURCE")
+SOURCE_ENTRIES = tuple(part for part in (SOURCE or "").split(os.pathsep) if part)
 SUBPROCESS_CONFIG = os.environ.get("SUPERCOV_PYTHON_SUBPROCESS_CONFIG")
 _OWNED_COVERAGE = None
 _IS_XDIST_CONTROLLER = False
 _CURRENT_CONTEXT = ContextVar("supercov_python_context", default=None)
 _SOURCE_ROOTS = tuple(
     Path(part).resolve()
-    for part in (SOURCE or "").split(os.pathsep)
-    if part
+    for part in SOURCE_ENTRIES
 )
 _PROCESS_ENVIRONMENT_LOCK = threading.Lock()
 
@@ -140,7 +140,7 @@ _install_multiprocessing_context_propagation()
 
 
 def _start_owned_coverage():
-    if not DATA_FILE or not SOURCE:
+    if not DATA_FILE or not SOURCE_ENTRIES:
         raise RuntimeError(
             "Supercov pytest hook requires SUPERCOV_PYTHON_DATA and SUPERCOV_PYTHON_SOURCE"
         )
@@ -148,7 +148,7 @@ def _start_owned_coverage():
         data_file=DATA_FILE,
         data_suffix=True,
         branch=True,
-        source=[SOURCE],
+        source=SOURCE_ENTRIES,
         config_file=False,
         context=f"supercov-worker-v1:{WORKER_ID}",
         plugins=[_register_context_plugin],
