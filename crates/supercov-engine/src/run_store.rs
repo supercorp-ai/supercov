@@ -12,18 +12,19 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use supercov_contracts::EVIDENCE_ARCHIVE_SCHEMA_VERSION;
+use supercov_contracts::{EVIDENCE_ARCHIVE_SCHEMA_VERSION, EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION};
 
 use crate::query_index::{QUERY_INDEX_SCHEMA_VERSION, QueryIndexIdentity};
 use crate::{
     coverage_index::{CoverageIndex, CoverageIndexError, coverage_index_sections},
     coverage_report::{ArchiveReportRequest, ExitCodeInput, ReportError, analyze_coverage_archive},
+    evidence_archive::read_archive_schema_version,
     query_index::{QueryIndex, QueryIndexError, write_query_index},
 };
 
 const MAX_RUN_METADATA_BYTES: u64 = 1024 * 1024;
 pub const RUST_ANALYSIS_ABI_VERSION: u32 = 1;
-pub const RUST_QUERY_PRODUCER_ABI_VERSION: u32 = 1;
+pub const RUST_QUERY_PRODUCER_ABI_VERSION: u32 = 2;
 pub const RUST_QUERY_INDEX_FILE: &str = "query-index.v1.bin";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -428,8 +429,10 @@ fn load_run(directory: &Path, entry: &str) -> Result<StoredRun, RunStoreError> {
             "metadata ID differs from directory",
         ));
     }
-    if metadata.raw_evidence.schema_version != EVIDENCE_ARCHIVE_SCHEMA_VERSION
-        || metadata.raw_evidence.format != "framed+gzip"
+    if !matches!(
+        metadata.raw_evidence.schema_version,
+        EVIDENCE_ARCHIVE_SCHEMA_VERSION | EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION
+    ) || metadata.raw_evidence.format != "framed+gzip"
         || metadata.raw_evidence.file != "evidence.raw.gz"
         || metadata.raw_evidence.files == 0
     {
@@ -439,6 +442,12 @@ fn load_run(directory: &Path, entry: &str) -> Result<StoredRun, RunStoreError> {
     let evidence_metadata = regular_file(&evidence_path)?;
     if evidence_metadata.len() != metadata.raw_evidence.compressed_bytes {
         return Err(RunStoreError::InvalidRun("raw evidence length"));
+    }
+    if read_archive_schema_version(&evidence_path)
+        .map_err(|_| RunStoreError::InvalidRun("raw evidence archive"))?
+        != metadata.raw_evidence.schema_version
+    {
+        return Err(RunStoreError::InvalidRun("raw evidence schema mismatch"));
     }
     Ok(StoredRun {
         id: entry.into(),
@@ -595,7 +604,7 @@ pub fn query_index_identity(run: &StoredRun) -> Result<QueryIndexIdentity, RunSt
             "supercov-query-producer",
             RUST_QUERY_PRODUCER_ABI_VERSION ^ QUERY_INDEX_SCHEMA_VERSION,
         ),
-        archive_schema_version: EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+        archive_schema_version: run.metadata.raw_evidence.schema_version,
     })
 }
 
@@ -713,7 +722,9 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use crate::evidence_archive::{EvidenceArchiveEntry, write_archive};
+    use crate::evidence_archive::{
+        EvidenceArchiveEntry, read_archive, write_archive, write_archive_v3,
+    };
 
     use super::*;
 
@@ -804,6 +815,78 @@ mod tests {
         discover_runs(root).unwrap().runs.remove(0)
     }
 
+    fn create_indexable_v3_run(root: &Path) -> StoredRun {
+        let directory = create_analyzable_test_run(root, "python-run");
+        let evidence_path = directory.join("evidence.raw.gz");
+        let mut entries = read_archive(&evidence_path).unwrap();
+        for entry in &mut entries {
+            if entry.path.ends_with("/mcdc.json") {
+                let mut result: serde_json::Value =
+                    serde_json::from_slice(&entry.contents).unwrap();
+                result["provenance"]["runner"] = "pytest".into();
+                result["provenance"]["kind"] = "unit".into();
+                result["testFile"] = "tests/test_app.py".into();
+                entry.contents = serde_json::to_vec(&result).unwrap();
+            }
+        }
+        entries.push(EvidenceArchiveEntry {
+            path: "frontend.json".into(),
+            contents: serde_json::to_vec(&serde_json::json!({
+                "protocolVersion": 2,
+                "frontendId": "python",
+                "frontendVersion": "python-owned-v1",
+                "language": "python",
+                "structuralSource": "owned-probes",
+                "runners": [{
+                    "runner": "pytest",
+                    "executionModel": "serial-in-process",
+                    "attribution": {
+                        "run": "exact",
+                        "worker": "unavailable",
+                        "test": "exact",
+                        "retry": "exact",
+                        "phase": "exact",
+                        "action": "exact",
+                        "assertion": "exact"
+                    },
+                    "limitations": [{
+                        "id": "test-fixture-worker-unavailable",
+                        "scopes": ["worker"],
+                        "reason": "The persisted-run fixture intentionally has no worker identity"
+                    }]
+                }],
+                "structuralLimitations": []
+            }))
+            .unwrap(),
+        });
+        entries.push(EvidenceArchiveEntry {
+            path: "coverage-model.json".into(),
+            contents: serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 1,
+                "variant": "all",
+                "name": "python-owned-control-flow",
+                "completenessMeaning": "Every declared owned-probe obligation was observed.",
+                "measured": ["owned statements", "owned decisions"],
+                "notMeasured": []
+            }))
+            .unwrap(),
+        });
+        let archive = write_archive_v3(entries, &evidence_path).unwrap();
+        let metadata_path = directory.join("run.json");
+        let mut metadata: RunMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        metadata.raw_evidence = RawEvidenceMetadata {
+            schema_version: archive.schema_version,
+            format: archive.format.into(),
+            file: archive.file.into(),
+            files: archive.files,
+            uncompressed_bytes: archive.uncompressed_bytes,
+            compressed_bytes: archive.compressed_bytes,
+        };
+        fs::write(metadata_path, serde_json::to_vec_pretty(&metadata).unwrap()).unwrap();
+        discover_runs(root).unwrap().runs.remove(0)
+    }
+
     #[test]
     fn discovers_valid_runs_in_reverse_order_and_selects_exact_prefix_or_latest() {
         let root = temporary_directory("discovery");
@@ -849,13 +932,30 @@ mod tests {
         .unwrap();
         let corrupt = create_run(&root, "wrong-length");
         fs::write(corrupt.join("evidence.raw.gz"), b"truncated").unwrap();
+        let schema_mismatch = create_run(&root, "schema-mismatch");
+        let metadata_path = schema_mismatch.join("run.json");
+        let mut metadata: serde_json::Value =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        metadata["rawEvidence"]["schemaVersion"] = EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION.into();
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
 
         let inventory = discover_runs(&root).unwrap();
         assert_eq!(inventory.runs.len(), 1);
         assert_eq!(inventory.runs[0].id, "valid");
-        assert_eq!(inventory.rejected.len(), 2);
+        assert_eq!(inventory.rejected.len(), 3);
         assert!(inventory.rejected[0].reason.contains("metadata ID"));
-        assert!(inventory.rejected[1].reason.contains("raw evidence length"));
+        assert!(
+            inventory
+                .rejected
+                .iter()
+                .any(|run| run.reason.contains("raw evidence schema mismatch"))
+        );
+        assert!(
+            inventory
+                .rejected
+                .iter()
+                .any(|run| run.reason.contains("raw evidence length"))
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -954,6 +1054,32 @@ mod tests {
             index.verify_all().unwrap();
         }
         assert_eq!(fs::read(&run.query_index_path).unwrap(), canonical);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn indexes_v3_runs_without_misclassifying_them_as_javascript_v2() {
+        let root = temporary_directory("v3-index");
+        let run = create_indexable_v3_run(&root);
+        assert_eq!(
+            run.metadata.raw_evidence.schema_version,
+            EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION
+        );
+        assert_eq!(
+            query_index_identity(&run).unwrap().archive_schema_version,
+            EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION
+        );
+        let index = open_or_rebuild_query_index(&run).unwrap();
+        index.verify_all().unwrap();
+        let coverage_index = CoverageIndex::new(&index).unwrap();
+        assert_eq!(
+            coverage_index.model().unwrap().name,
+            "python-owned-control-flow"
+        );
+        let summary = coverage_index
+            .summary(crate::coverage_index::CoverageViewId::All)
+            .unwrap();
+        assert_eq!(summary.lines.percentage, 100.0);
         fs::remove_dir_all(root).unwrap();
     }
 

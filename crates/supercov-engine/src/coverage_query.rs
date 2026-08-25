@@ -12,10 +12,10 @@ use crate::{
     agent_json::pagination,
     coverage_analysis::{CoverageSummary, is_independence_pair},
     coverage_index::{
-        CoverageDimension, CoverageIndex, CoverageIndexError, CoverageViewId, IndexedDecisionGap,
-        IndexedDimensionCoverage, IndexedFileGap, IndexedHitMetadata, IndexedMeasurement,
-        IndexedOutcomeCounts, IndexedScopeEntry, IndexedSourceScope, IndexedSummaryConfidence,
-        IndexedTestSummary,
+        CoverageDimension, CoverageIndex, CoverageIndexError, CoverageViewId, IndexedCoverageModel,
+        IndexedDecisionGap, IndexedDimensionCoverage, IndexedFileGap, IndexedHitMetadata,
+        IndexedMeasurement, IndexedOutcomeCounts, IndexedScopeEntry, IndexedSourceScope,
+        IndexedSummaryConfidence, IndexedTestSummary,
     },
     coverage_report::{
         CoverageConfidence, CoverageReportRequest, CoverageView, DecisionMeta, ReportError,
@@ -317,6 +317,7 @@ pub struct CoverageDiagnostic {
 pub struct CoverageSummaryData {
     pub run: String,
     pub filters: CoverageQueryFilters,
+    pub model: IndexedCoverageModel,
     pub generated_at: String,
     pub valid: bool,
     pub stale: bool,
@@ -2058,6 +2059,7 @@ pub fn coverage_summary_query(
     Ok(CoverageSummaryData {
         run: options.run.into(),
         filters,
+        model: index.model()?,
         generated_at: projection.generated_at,
         valid: options.valid,
         stale: options.stale,

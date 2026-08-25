@@ -1118,9 +1118,17 @@ miss blocks flipping any default.
   analyzer contract testing, and a complete
   write/read/analyze round trip revalidates frontend identities and limitations
   before reproducing the native model and oracle totals. Unknown coverage-model
-  fields are fatal. V3 still needs corruption/fuzz coverage, run-store/query
-  integration, agent-contract versioning for exposing the model, and a staged
-  public migration before its status can leave `private-candidate`. The owned
+  fields are fatal. V3 now rejects every deterministic truncation, oversized
+  entry headers and each missing required identity entry without allocating
+  from an attacker-controlled header length. A broader property/fuzz corpus
+  and a staged public-writer migration remain before its status can leave
+  `private-candidate`.
+  The persisted run store now accepts both frozen v2 and strict v3 metadata,
+  binds disposable indexes to the archive's actual schema version, and
+  rebuilds v3 evidence through the shared analyzer. The typed query index
+  persists the versioned coverage model as a required authenticated section,
+  and `coverage.summary --json` exposes that model explicitly so agents never
+  interpret a language-specific denominator as JavaScript MC/DC. The owned
   Python frontend must produce v3 directly from Supercov probes; a coverage.py
   import is never a public migration path.
 

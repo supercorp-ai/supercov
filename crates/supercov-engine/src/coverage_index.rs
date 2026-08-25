@@ -7,12 +7,15 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Serialize;
+use supercov_contracts::COVERAGE_MODEL_SCHEMA_VERSION;
 
 use crate::{
     coverage_analysis::{
         CoverageCount, CoverageSummary, McdcVector, find_witnesses_for_conditions,
     },
-    coverage_report::{CoverageReport, CoverageView, TransportStats, coverage_summary_for_tests},
+    coverage_report::{
+        CoverageModel, CoverageReport, CoverageView, TransportStats, coverage_summary_for_tests,
+    },
     query_index::{QueryIndex, QueryIndexError, QueryIndexSection},
 };
 
@@ -43,6 +46,7 @@ pub const SECTION_DECISION_DETAILS: u32 = 30;
 pub const SECTION_DECISION_VECTOR_OBSERVATIONS: u32 = 31;
 pub const SECTION_DECISION_CONDITIONS: u32 = 32;
 pub const SECTION_LIMITATIONS: u32 = 33;
+pub const SECTION_COVERAGE_MODEL: u32 = 34;
 
 const STRING_RECORD_SIZE: usize = 16;
 const SUMMARY_RECORD_SIZE: usize = 176;
@@ -68,6 +72,7 @@ const DECISION_DETAIL_RECORD_SIZE: usize = 64;
 const DECISION_VECTOR_OBSERVATION_RECORD_SIZE: usize = 64;
 const DECISION_CONDITION_RECORD_SIZE: usize = 64;
 const LIMITATION_RECORD_SIZE: usize = 64;
+const COVERAGE_MODEL_RECORD_SIZE: usize = 48;
 const NO_STRING: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -416,6 +421,17 @@ pub struct IndexedConfidenceLines {
 pub struct IndexedSummaryConfidence {
     pub lines: IndexedConfidenceLines,
     pub assertion_covered_mcdc_conditions: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedCoverageModel {
+    pub schema_version: u32,
+    pub variant: String,
+    pub name: String,
+    pub completeness_meaning: String,
+    pub measured: Vec<String>,
+    pub not_measured: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1675,6 +1691,26 @@ fn decision_detail_record(
     Ok(record)
 }
 
+fn coverage_model_record(
+    variant: &str,
+    model: &CoverageModel,
+    strings: &mut StringTable,
+    relations: &mut StringRelations,
+) -> Result<[u8; COVERAGE_MODEL_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; COVERAGE_MODEL_RECORD_SIZE];
+    put_u32(&mut record, 0, strings.intern(variant)?);
+    put_u32(&mut record, 4, strings.intern(&model.name)?);
+    put_u32(&mut record, 8, strings.intern(&model.completeness_meaning)?);
+    let (measured_offset, measured_count) = relations.push(model.measured.clone(), strings)?;
+    put_u64(&mut record, 16, measured_offset);
+    put_u64(&mut record, 24, measured_count);
+    let (not_measured_offset, not_measured_count) =
+        relations.push(model.not_measured.clone(), strings)?;
+    put_u64(&mut record, 32, not_measured_offset);
+    put_u64(&mut record, 40, not_measured_count);
+    Ok(record)
+}
+
 pub fn coverage_index_sections(
     report: &CoverageReport,
 ) -> Result<Vec<QueryIndexSection>, CoverageIndexError> {
@@ -2012,6 +2048,12 @@ pub fn coverage_index_sections(
             }
         }
     }
+    let model = coverage_model_record(
+        &report.view.variant,
+        &report.view.model,
+        &mut strings,
+        &mut relations,
+    )?;
     let [blob, string_records] = strings.sections()?;
     let string_relations = relations.section()?;
     Ok(vec![
@@ -2164,6 +2206,12 @@ pub fn coverage_index_sections(
             count: usize_u64(limitations.len() / LIMITATION_RECORD_SIZE)?,
             bytes: limitations,
         },
+        QueryIndexSection {
+            kind: SECTION_COVERAGE_MODEL,
+            record_size: COVERAGE_MODEL_RECORD_SIZE as u32,
+            count: 1,
+            bytes: model.to_vec(),
+        },
     ])
 }
 
@@ -2202,6 +2250,7 @@ impl<'a> CoverageIndex<'a> {
             ),
             (SECTION_DECISION_CONDITIONS, DECISION_CONDITION_RECORD_SIZE),
             (SECTION_LIMITATIONS, LIMITATION_RECORD_SIZE),
+            (SECTION_COVERAGE_MODEL, COVERAGE_MODEL_RECORD_SIZE),
         ] {
             if index.descriptor(kind)?.record_size as usize != size {
                 return Err(CoverageIndexError::InvalidRecord("record size"));
@@ -2214,6 +2263,29 @@ impl<'a> CoverageIndex<'a> {
             ));
         }
         Ok(Self { index })
+    }
+
+    pub fn model(&self) -> Result<IndexedCoverageModel, CoverageIndexError> {
+        let descriptor = self.index.descriptor(SECTION_COVERAGE_MODEL)?;
+        if descriptor.count != 1 {
+            return Err(CoverageIndexError::InvalidRecord(
+                "coverage model record count",
+            ));
+        }
+        let record = self.index.record(SECTION_COVERAGE_MODEL, 0)?;
+        if record[12..16].iter().any(|byte| *byte != 0) {
+            return Err(CoverageIndexError::InvalidRecord(
+                "coverage model reserved bytes",
+            ));
+        }
+        Ok(IndexedCoverageModel {
+            schema_version: COVERAGE_MODEL_SCHEMA_VERSION,
+            variant: self.string(get_u32(record, 0)?)?,
+            name: self.string(get_u32(record, 4)?)?,
+            completeness_meaning: self.string(get_u32(record, 8)?)?,
+            measured: self.relation_strings(get_u64(record, 16)?, get_u64(record, 24)?)?,
+            not_measured: self.relation_strings(get_u64(record, 32)?, get_u64(record, 40)?)?,
+        })
     }
 
     fn string(&self, id: u32) -> Result<String, CoverageIndexError> {
@@ -3600,6 +3672,17 @@ mod tests {
         .unwrap();
         let container = QueryIndex::open(&path, &identity()).unwrap();
         let index = CoverageIndex::new(&container).unwrap();
+        assert_eq!(
+            index.model().unwrap(),
+            IndexedCoverageModel {
+                schema_version: COVERAGE_MODEL_SCHEMA_VERSION,
+                variant: report.view.variant.clone(),
+                name: report.view.model.name.clone(),
+                completeness_meaning: report.view.model.completeness_meaning.clone(),
+                measured: report.view.model.measured.clone(),
+                not_measured: report.view.model.not_measured.clone(),
+            }
+        );
         for (id, view) in [
             (CoverageViewId::All, &report.view),
             (CoverageViewId::Passed, &report.filters.passed),

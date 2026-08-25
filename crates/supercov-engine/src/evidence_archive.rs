@@ -21,6 +21,7 @@ use supercov_contracts::{
 };
 
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const MAX_ENTRY_HEADER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
 pub enum EvidenceArchiveError {
@@ -484,6 +485,9 @@ fn read_framed_entries<R: Read>(
         if header_size == 0 {
             return Err(EvidenceArchiveError::InvalidHeader("empty header"));
         }
+        if header_size > MAX_ENTRY_HEADER_BYTES {
+            return Err(EvidenceArchiveError::InvalidHeader("header is too large"));
+        }
         let mut encoded_header = vec![0; header_size];
         read_exact_or_truncated(reader, &mut encoded_header, "header")?;
         if encoded_header.last() != Some(&b'\n') {
@@ -539,6 +543,24 @@ pub fn read_archive(path: &Path) -> Result<Vec<EvidenceArchiveEntry>, EvidenceAr
     Ok(archive.entries)
 }
 
+fn schema_version_from_magic(magic: &[u8]) -> Result<u32, EvidenceArchiveError> {
+    if magic == EVIDENCE_ARCHIVE_MAGIC.as_bytes() {
+        Ok(EVIDENCE_ARCHIVE_SCHEMA_VERSION)
+    } else if magic == EVIDENCE_ARCHIVE_V3_MAGIC.as_bytes() {
+        Ok(EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION)
+    } else {
+        Err(EvidenceArchiveError::InvalidMagic)
+    }
+}
+
+pub fn read_archive_schema_version(path: &Path) -> Result<u32, EvidenceArchiveError> {
+    let input = BufReader::new(File::open(path)?);
+    let mut decoder = GzDecoder::new(input);
+    let mut magic = vec![0; EVIDENCE_ARCHIVE_MAGIC.len()];
+    read_exact_or_truncated(&mut decoder, &mut magic, "magic")?;
+    schema_version_from_magic(&magic)
+}
+
 pub fn read_versioned_archive(
     path: &Path,
 ) -> Result<VersionedEvidenceArchive, EvidenceArchiveError> {
@@ -550,13 +572,7 @@ pub fn read_versioned_archive(
     );
     let mut magic = vec![0; EVIDENCE_ARCHIVE_MAGIC.len()];
     read_exact_or_truncated(&mut decoder, &mut magic, "magic")?;
-    let schema_version = if magic == EVIDENCE_ARCHIVE_MAGIC.as_bytes() {
-        EVIDENCE_ARCHIVE_SCHEMA_VERSION
-    } else if magic == EVIDENCE_ARCHIVE_V3_MAGIC.as_bytes() {
-        EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION
-    } else {
-        return Err(EvidenceArchiveError::InvalidMagic);
-    };
+    let schema_version = schema_version_from_magic(&magic)?;
     let entries = read_framed_entries(&mut decoder)?;
     if schema_version == EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION {
         let paths = entries
@@ -625,6 +641,12 @@ mod tests {
     fn frame(entries: &[EvidenceArchiveEntry]) -> Vec<u8> {
         let (bytes, _) =
             write_framed_with_magic(entries, Vec::new(), EVIDENCE_ARCHIVE_MAGIC).unwrap();
+        bytes
+    }
+
+    fn frame_v3(entries: &[EvidenceArchiveEntry]) -> Vec<u8> {
+        let (bytes, _) =
+            write_framed_with_magic(entries, Vec::new(), EVIDENCE_ARCHIVE_V3_MAGIC).unwrap();
         bytes
     }
 
@@ -847,6 +869,52 @@ mod tests {
             Err(EvidenceArchiveError::MissingFrontend)
         ));
         assert!(!missing.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn v3_reader_rejects_all_truncations_oversized_headers_and_missing_identity() {
+        let root = temporary_directory("archive-v3-corruption");
+        let entries = vec![
+            entry("coverage-model.json", br#"{"schemaVersion":1}"#),
+            entry("frontend.json", br#"{"protocolVersion":2}"#),
+            entry("manifest.json", br#"{"decisions":[]}"#),
+        ];
+        let framed = frame_v3(&entries);
+        for end in 0..framed.len() {
+            let path = write_compressed(&root, &framed[..end]);
+            assert!(
+                read_versioned_archive(&path).is_err(),
+                "accepted v3 truncation at byte {end}"
+            );
+        }
+        let complete = write_compressed(&root, &framed);
+        assert_eq!(
+            read_versioned_archive(&complete).unwrap().schema_version,
+            EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION
+        );
+
+        let oversized_header = [
+            EVIDENCE_ARCHIVE_V3_MAGIC.as_bytes(),
+            &((MAX_ENTRY_HEADER_BYTES as u32 + 1).to_be_bytes()),
+        ]
+        .concat();
+        assert!(matches!(
+            read_versioned_archive(&write_compressed(&root, &oversized_header)),
+            Err(EvidenceArchiveError::InvalidHeader("header is too large"))
+        ));
+
+        for missing in ["coverage-model.json", "frontend.json", "manifest.json"] {
+            let incomplete = entries
+                .iter()
+                .filter(|entry| entry.path != missing)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert!(
+                read_versioned_archive(&write_compressed(&root, &frame_v3(&incomplete))).is_err(),
+                "accepted v3 archive without {missing}"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }
