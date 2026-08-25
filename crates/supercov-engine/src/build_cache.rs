@@ -1,0 +1,218 @@
+//! Exact-fingerprint reuse of instrumented JavaScript build outputs.
+
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Component, Path, PathBuf},
+    process::Command,
+};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::{lifecycle::atomic_write, project_discovery::CoverageProject, run_store::RunIntegrity};
+
+pub const BUILD_CACHE_SCHEMA_VERSION: u32 = 1;
+const OUTPUT_CANDIDATES: &[&str] = &["build", "dist", ".next", ".nuxt", ".output"];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BuildCacheMetadata {
+    pub schema_version: u32,
+    pub key: String,
+    pub created_at: String,
+    pub artifact_paths: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheIdentity<'a> {
+    schema_version: u32,
+    execution_fingerprint: &'a str,
+    adapter: crate::project_discovery::BuildAdapter,
+    command: &'a [String],
+    environment: &'a BTreeMap<String, String>,
+    node: String,
+    platform: &'static str,
+    architecture: &'static str,
+}
+
+fn safe_relative(path: &Path) -> bool {
+    path.components().next().is_some()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn regular_artifact(workspace: &Path, relative: &Path) -> bool {
+    safe_relative(relative)
+        && fs::symlink_metadata(workspace.join(relative))
+            .is_ok_and(|metadata| metadata.file_type().is_file() || metadata.file_type().is_dir())
+}
+
+fn node_version() -> String {
+    std::env::var("SUPERCOV_NODE_VERSION").unwrap_or_else(|_| {
+        Command::new("node")
+            .args(["--print", "process.versions.node"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "unavailable".into())
+    })
+}
+
+pub fn build_cache_key(
+    integrity: &RunIntegrity,
+    project: &CoverageProject,
+) -> Result<String, String> {
+    let identity = CacheIdentity {
+        schema_version: BUILD_CACHE_SCHEMA_VERSION,
+        execution_fingerprint: &integrity.fingerprint.execution,
+        adapter: project.build_adapter,
+        command: &project.build_command,
+        environment: &project.build_environment,
+        node: node_version(),
+        platform: std::env::consts::OS,
+        architecture: std::env::consts::ARCH,
+    };
+    let bytes = serde_json::to_vec(&identity)
+        .map_err(|error| format!("failed to serialize build-cache identity: {error}"))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+pub fn read_build_cache(workspace: &Path, key: &str) -> Option<BuildCacheMetadata> {
+    let path = workspace.join(".supercov/build-cache.json");
+    if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_file()) {
+        return None;
+    }
+    let metadata: BuildCacheMetadata = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+    if metadata.schema_version != BUILD_CACHE_SCHEMA_VERSION
+        || metadata.key != key
+        || metadata.artifact_paths.is_empty()
+        || metadata
+            .artifact_paths
+            .iter()
+            .any(|path| !regular_artifact(workspace, Path::new(path)))
+    {
+        return None;
+    }
+    Some(metadata)
+}
+
+pub fn reuse_paths(metadata: &BuildCacheMetadata) -> Vec<PathBuf> {
+    metadata
+        .artifact_paths
+        .iter()
+        .map(PathBuf::from)
+        .chain([PathBuf::from(".supercov/build-cache.json")])
+        .collect()
+}
+
+#[derive(Deserialize, Default)]
+struct DeclaredOutputs {
+    #[serde(default)]
+    paths: Vec<String>,
+}
+
+pub fn write_build_cache(
+    project_root: &Path,
+    workspace: &Path,
+    key: &str,
+    created_at: &str,
+) -> Result<Option<BuildCacheMetadata>, String> {
+    let declared = fs::read(workspace.join(".supercov/build-outputs.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<DeclaredOutputs>(&bytes).ok())
+        .unwrap_or_default();
+    let mut candidates = OUTPUT_CANDIDATES
+        .iter()
+        .map(|path| (*path).to_owned())
+        .chain(
+            declared
+                .paths
+                .into_iter()
+                .filter(|path| safe_relative(Path::new(path))),
+        )
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+    candidates.retain(|path| regular_artifact(workspace, Path::new(path)));
+    let existing = candidates.clone();
+    candidates.retain(|path| {
+        !existing.iter().any(|parent| {
+            parent != path
+                && Path::new(path)
+                    .strip_prefix(Path::new(parent))
+                    .is_ok_and(|local| local.components().next().is_some())
+        })
+    });
+    if candidates.is_empty() || !regular_artifact(workspace, Path::new(".supercov/manifest.json")) {
+        return Ok(None);
+    }
+    candidates.push(".supercov/manifest.json".into());
+    let metadata = BuildCacheMetadata {
+        schema_version: BUILD_CACHE_SCHEMA_VERSION,
+        key: key.into(),
+        created_at: created_at.into(),
+        artifact_paths: candidates,
+    };
+    let mut bytes = serde_json::to_vec_pretty(&metadata)
+        .map_err(|error| format!("failed to serialize build-cache metadata: {error}"))?;
+    bytes.push(b'\n');
+    atomic_write(
+        project_root,
+        &workspace.join(".supercov/build-cache.json"),
+        &bytes,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(Some(metadata))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    fn temporary() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "supercov-build-cache-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn writes_reads_and_rejects_incomplete_exact_cache_metadata() {
+        let root = temporary();
+        let workspace = root.join("supercov/workspace/project");
+        fs::create_dir_all(workspace.join(".supercov")).unwrap();
+        fs::create_dir_all(workspace.join("dist")).unwrap();
+        fs::write(workspace.join("dist/app.js"), "built").unwrap();
+        fs::write(workspace.join(".supercov/manifest.json"), "{}").unwrap();
+        let written = write_build_cache(&root, &workspace, "key", "time")
+            .unwrap()
+            .unwrap();
+        assert_eq!(written.artifact_paths, ["dist", ".supercov/manifest.json"]);
+        assert_eq!(read_build_cache(&workspace, "key"), Some(written.clone()));
+        assert_eq!(
+            reuse_paths(&written),
+            [
+                PathBuf::from("dist"),
+                PathBuf::from(".supercov/manifest.json"),
+                PathBuf::from(".supercov/build-cache.json"),
+            ]
+        );
+        fs::remove_dir_all(workspace.join("dist")).unwrap();
+        assert_eq!(read_build_cache(&workspace, "key"), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+}

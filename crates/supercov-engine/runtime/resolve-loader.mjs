@@ -96,8 +96,14 @@ export async function load(url, context, nextLoad) {
         ? loaded.source
         : Buffer.from(loaded.source).toString("utf8");
     try {
-        const { transformCapabilityImports } = await import(__rewriteRelativeImportExtension(transformer));
-        const transformed = transformCapabilityImports(source, url, wrapper);
+        const transformerUrl = transformer.startsWith("file:")
+            ? transformer
+            : pathToFileURL(resolvePath(transformer)).href;
+        const wrapperUrl = wrapper.startsWith("file:")
+            ? wrapper
+            : pathToFileURL(resolvePath(wrapper)).href;
+        const { transformCapabilityImports } = await import(__rewriteRelativeImportExtension(transformerUrl));
+        const transformed = transformCapabilityImports(source, url, wrapperUrl);
         return transformed.transformed
             ? { ...loaded, source: transformed.code }
             : loaded;

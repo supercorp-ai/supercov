@@ -121,6 +121,172 @@ pub struct RunMetadata {
     pub parents: Option<Vec<String>>,
 }
 
+#[cfg(test)]
+pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
+    use crate::{
+        coverage_analysis::{McdcVector, PointKind},
+        coverage_report::{
+            BranchAlternativeMeta, BranchMeta, CoverageManifest, DecisionMeta, DecisionSnapshot,
+            PointMeta, RawTestResult, RuntimeSnapshot, TestProvenance,
+        },
+        evidence_archive::{EvidenceArchiveEntry, write_archive},
+    };
+
+    let directory = root.join(".supercov/runs").join(id);
+    fs::create_dir_all(&directory).unwrap();
+    let decision = DecisionMeta {
+        id: "decision".into(),
+        file: "src/app.js".into(),
+        line: 1,
+        column: 0,
+        source: "left && right".into(),
+        conditions: vec!["left".into(), "right".into()],
+        kind: "if".into(),
+    };
+    let manifest = CoverageManifest {
+        decisions: vec![decision.clone()],
+        points: vec![PointMeta {
+            id: "statement".into(),
+            kind: PointKind::Statement,
+            file: "src/app.js".into(),
+            line: 1,
+            column: 0,
+            source: "work();".into(),
+            label: None,
+        }],
+        branches: vec![BranchMeta {
+            id: "branch".into(),
+            kind: "if".into(),
+            file: "src/app.js".into(),
+            line: 1,
+            column: 0,
+            source: "if (left && right)".into(),
+            alternatives: vec![
+                BranchAlternativeMeta {
+                    id: "branch:true".into(),
+                    label: "true".into(),
+                },
+                BranchAlternativeMeta {
+                    id: "branch:false".into(),
+                    label: "false".into(),
+                },
+            ],
+        }],
+        limitations: vec![],
+        scope: None,
+    };
+    let result = RawTestResult {
+        test_id: Some("test".into()),
+        scope: None,
+        test: "test".into(),
+        test_file: Some("tests/app.test.js".into()),
+        title: None,
+        retry: Some(0),
+        status: Some("passed".into()),
+        expected_status: None,
+        flaky: false,
+        provenance: TestProvenance {
+            runner: "node:test".into(),
+            kind: "unit".into(),
+            project: None,
+            source: "test-fixture".into(),
+        },
+        role: "test".into(),
+        phases: vec![],
+        runtime: vec![RuntimeSnapshot {
+            decisions: vec![DecisionSnapshot {
+                meta: decision,
+                vectors: vec![
+                    McdcVector {
+                        values: vec![Some(false), Some(false)],
+                        outcome: false,
+                    },
+                    McdcVector {
+                        values: vec![Some(false), Some(true)],
+                        outcome: false,
+                    },
+                    McdcVector {
+                        values: vec![Some(true), Some(false)],
+                        outcome: false,
+                    },
+                    McdcVector {
+                        values: vec![Some(true), Some(true)],
+                        outcome: true,
+                    },
+                ],
+            }],
+            hits: vec![
+                "statement".into(),
+                "branch:true".into(),
+                "branch:false".into(),
+            ],
+            events: vec![],
+        }],
+        browser: vec![],
+        server: vec![],
+    };
+    let archive = write_archive(
+        vec![
+            EvidenceArchiveEntry {
+                path: "manifest.json".into(),
+                contents: serde_json::to_vec(&manifest).unwrap(),
+            },
+            EvidenceArchiveEntry {
+                path: "worker/mcdc.json".into(),
+                contents: serde_json::to_vec(&result).unwrap(),
+            },
+        ],
+        &directory.join("evidence.raw.gz"),
+    )
+    .unwrap();
+    let digest = |character: char| std::iter::repeat_n(character, 64).collect::<String>();
+    let metadata = RunMetadata {
+        id: id.into(),
+        started_at: id.into(),
+        duration_ms: 1.0,
+        command: vec!["node".into(), "--test".into()],
+        test_exit_code: Some(0),
+        integrity: RunIntegrity {
+            schema_version: 2,
+            instrumenter_version: "test".into(),
+            git: None,
+            fingerprint: RunFingerprint {
+                algorithm: "sha256".into(),
+                source: digest('a'),
+                tests: digest('b'),
+                dependencies: digest('c'),
+                configuration: digest('d'),
+                instrumenter: digest('e'),
+                execution: digest('f'),
+                combined: digest('0'),
+                source_files: 1,
+                test_files: 1,
+            },
+            stale: None,
+            stale_reasons: None,
+        },
+        raw_evidence: RawEvidenceMetadata {
+            schema_version: archive.schema_version,
+            format: archive.format.into(),
+            file: archive.file.into(),
+            files: archive.files,
+            uncompressed_bytes: archive.uncompressed_bytes,
+            compressed_bytes: archive.compressed_bytes,
+        },
+        isolated_build: Some(true),
+        instrumented_build_cache: None,
+        timings: None,
+        merged: None,
+        parents: None,
+    };
+    fs::write(
+        directory.join("run.json"),
+        serde_json::to_vec_pretty(&metadata).unwrap(),
+    )
+    .unwrap();
+    directory
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredRun {
     pub id: String,
@@ -633,15 +799,8 @@ mod tests {
         directory
     }
 
-    fn copy_real_fixture_run(root: &Path) -> StoredRun {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let fixture = workspace.join("tests/fixtures/generic-webpack");
-        let source_inventory = discover_runs(&fixture).unwrap();
-        let source = select_run(&source_inventory, Some("latest")).unwrap();
-        let destination = root.join(".supercov/runs").join(&source.id);
-        fs::create_dir_all(&destination).unwrap();
-        fs::copy(&source.metadata_path, destination.join("run.json")).unwrap();
-        fs::copy(&source.evidence_path, destination.join("evidence.raw.gz")).unwrap();
+    fn create_indexable_run(root: &Path) -> StoredRun {
+        create_analyzable_test_run(root, "test-run");
         discover_runs(root).unwrap().runs.remove(0)
     }
 
@@ -770,7 +929,7 @@ mod tests {
     #[test]
     fn lazily_builds_reuses_and_repairs_a_fully_authenticated_typed_index() {
         let root = temporary_directory("lazy-index");
-        let run = copy_real_fixture_run(&root);
+        let run = create_indexable_run(&root);
         assert!(!run.query_index_path.exists());
 
         {
@@ -798,29 +957,13 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn accepts_every_persisted_run_in_the_tier_one_fixture_families() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        for family in [
-            "generic-playwright",
-            "generic-node",
-            "generic-esbuild",
-            "generic-webpack",
-            "generic-swc",
-        ] {
-            let inventory = discover_runs(&workspace.join("tests/fixtures").join(family)).unwrap();
-            assert!(!inventory.runs.is_empty(), "{family} has no persisted runs");
-            assert_eq!(inventory.rejected, [], "{family} has rejected runs");
-        }
-    }
-
     #[cfg(unix)]
     #[test]
     fn atomically_replaces_a_linked_disposable_index_without_touching_its_target() {
         use std::os::unix::fs::symlink;
 
         let root = temporary_directory("linked-index");
-        let run = copy_real_fixture_run(&root);
+        let run = create_indexable_run(&root);
         let outside = root.join("outside");
         fs::write(&outside, b"user data").unwrap();
         symlink(&outside, &run.query_index_path).unwrap();

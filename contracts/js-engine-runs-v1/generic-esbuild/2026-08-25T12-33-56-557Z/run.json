@@ -1,0 +1,51 @@
+{
+  "id": "2026-08-25T12-33-56-557Z",
+  "startedAt": "2026-08-25T12:33:56.558Z",
+  "durationMs": 590,
+  "command": [
+    "npm",
+    "test"
+  ],
+  "testExitCode": 0,
+  "integrity": {
+    "schemaVersion": 2,
+    "instrumenterVersion": "2.0.0",
+    "git": {
+      "revision": "cd7d48e96cf800e679fa054133ec673314b87fed",
+      "dirty": true
+    },
+    "fingerprint": {
+      "algorithm": "sha256",
+      "source": "bb0ebc2548670a064ceca52f1bb236d297e345454ae749e66bf5f5888c8df8cd",
+      "tests": "30417c7efa65eb4efad8e1213d622300bd2cde6bcdf881cb385a7cfda56aa6f7",
+      "dependencies": "6cb1845fe4525969c29c86ab5fd8d338bc11b06c035bd8ceab99e4b602530827",
+      "configuration": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "instrumenter": "acec1ff3a242721a75af80f86f8cf259fc425ce524e9861864a3140dd57380c3",
+      "execution": "ebbb394d8cff48d32e2cd9bd35263816242b4e40565f89489271fb5fe554097d",
+      "combined": "806c9c85b4c66983a0250cd16d2e18dc216461a667e3d60cb90a87eb7f72650f",
+      "sourceFiles": 1,
+      "testFiles": 1
+    }
+  },
+  "rawEvidence": {
+    "schemaVersion": 2,
+    "format": "framed+gzip",
+    "file": "evidence.raw.gz",
+    "files": 11,
+    "uncompressedBytes": 18535,
+    "compressedBytes": 1808
+  },
+  "isolatedBuild": true,
+  "instrumentedBuildCache": {
+    "key": "322c2093d489d7729b04ad5fc15c7e51cd9f31047bca048a8098050819d7fd03",
+    "reused": false
+  },
+  "timings": {
+    "initializationMs": 33.5,
+    "workspacePreparationMs": 19,
+    "adapterSetupMs": 89.9,
+    "instrumentedBuildMs": 130.3,
+    "testCommandMs": 268.8,
+    "evidencePublicationMs": 13
+  }
+}

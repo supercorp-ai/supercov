@@ -1,9 +1,23 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { cpSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
 const root = resolve(import.meta.dirname, '..');
-const fixture = resolve(root, 'tests/fixtures/generic-webpack');
+const fixtureSource = resolve(root, 'tests/fixtures/generic-webpack');
+const temporary = mkdtempSync(resolve(tmpdir(), 'supercov-query-differential-'));
+const fixture = resolve(temporary, 'generic-webpack');
+cpSync(fixtureSource, fixture, {
+  recursive: true,
+  filter: (path) => !path.includes(resolve(fixtureSource, '.supercov')),
+});
+cpSync(
+  resolve(root, 'contracts/js-engine-runs-v1/generic-webpack'),
+  resolve(fixture, '.supercov/runs'),
+  { recursive: true },
+);
+process.on('exit', () => rmSync(temporary, { recursive: true, force: true }));
 const binary = resolve(root, 'target/debug/supercov');
 const reference = resolve(root, 'dist/cli.js');
 
@@ -89,10 +103,10 @@ function humanExceptEngineIdentity(args, cwd = fixture) {
 const older = '2026-08-25T00-23-38-498Z';
 const newer = '2026-08-25T00-23-39-434Z';
 
-// Materialize the immutable Rust indexes for both fixture runs. A run-listing
-// reports whether the current engine has an authenticated index, so this is a
-// required precondition for comparing a store created by the former engine.
+// Materialize each engine's disposable index for both frozen runs. A listing
+// reports index availability, so both sides must begin from the same state.
 invoke('rust', ['diff', older, newer, '--json']);
+invoke('typescript', ['diff', older, newer, '--json']);
 
 exactExceptEngineIdentity(['runs', '--json']);
 exactExceptEngineIdentity(['runs', 'latest', 'coverage', '--json']);
@@ -156,12 +170,19 @@ for (const args of [
   assert.deepEqual(actual, expected, args.join(' '));
 }
 
-const playwrightFixture = resolve(root, 'tests/fixtures/generic-playwright');
+const playwrightFixtureSource = resolve(root, 'tests/fixtures/generic-playwright');
+const playwrightFixture = resolve(temporary, 'generic-playwright');
+cpSync(playwrightFixtureSource, playwrightFixture, {
+  recursive: true,
+  filter: (path) => !path.includes(resolve(playwrightFixtureSource, '.supercov')),
+});
+cpSync(
+  resolve(root, 'contracts/js-engine-runs-v1/generic-playwright'),
+  resolve(playwrightFixture, '.supercov/runs'),
+  { recursive: true },
+);
 // Keep this differential pinned to an immutable TypeScript-reference run.
-// Whole-engine parity and local dogfood legitimately append newer Rust runs to
-// the same fixture store, so `latest` would make the staleness assertion depend
-// on which integration happened to execute first.
-const playwrightRun = '2026-08-25T00-24-00-002Z';
+const playwrightRun = '2026-08-25T12-44-38-755Z';
 invoke('rust', ['runs', playwrightRun, 'coverage', '--json'], playwrightFixture);
 exactExceptEngineIdentity(
   ['runs', playwrightRun, 'coverage', '--filter', 'failed', '--json'],

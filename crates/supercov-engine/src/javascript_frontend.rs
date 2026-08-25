@@ -29,6 +29,7 @@ use crate::{
 const RUNTIME_INSTANCE_MARKER: &str = "__SUPERCOV_RUNTIME_INSTANCE__";
 const RUNTIME_FILES: &[&str] = &[
     "atomic.js",
+    "esmInterceptor.js",
     "launchSupervisor.js",
     "nodeAssert.js",
     "nodeAssertAdapter.js",
@@ -128,6 +129,7 @@ pub fn javascript_runtime_files(runtime_root: &Path) -> Vec<PathBuf> {
 fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
     match name {
         "atomic.js" => Some(include_bytes!("../runtime/atomic.js")),
+        "esmInterceptor.js" => Some(include_bytes!("../runtime/esmInterceptor.js")),
         "launchSupervisor.js" => Some(include_bytes!("../runtime/launchSupervisor.js")),
         "nodeAssert.js" => Some(include_bytes!("../runtime/nodeAssert.js")),
         "nodeAssertAdapter.js" => Some(include_bytes!("../runtime/nodeAssertAdapter.js")),
@@ -223,6 +225,25 @@ fn isolate_runtime(source: &str, collector_id: &str) -> Result<String, Javascrip
     Err(JavascriptFrontendError::MissingRuntimeMarker)
 }
 
+/// The generated language shims are embedded without their TypeScript sources.
+/// Keeping a trailing source-map directive would make Node and browser tooling
+/// look for files that intentionally are not part of the runtime distribution.
+fn strip_source_map_reference(mut bytes: Vec<u8>) -> Vec<u8> {
+    const MARKER: &[u8] = b"\n//# sourceMappingURL=";
+    if let Some(index) = bytes
+        .windows(MARKER.len())
+        .rposition(|window| window == MARKER)
+    {
+        let suffix = &bytes[index + MARKER.len()..];
+        let suffix = suffix.strip_suffix(b"\n").unwrap_or(suffix);
+        let suffix = suffix.strip_suffix(b"\r").unwrap_or(suffix);
+        if !suffix.contains(&b'\n') && !suffix.contains(&b'\r') {
+            bytes.truncate(index + 1);
+        }
+    }
+    bytes
+}
+
 fn copy_runtime(
     runtime_root: Option<&Path>,
     generated: &Path,
@@ -245,6 +266,7 @@ fn copy_runtime(
                 .to_vec();
             (bytes, PathBuf::from(format!("embedded:{name}")))
         };
+        let bytes = strip_source_map_reference(bytes);
         if *name == "runtime.js" {
             let text = String::from_utf8(bytes).map_err(|source| {
                 io_error(
@@ -373,10 +395,12 @@ fn write_vitest_config(
         .map(|path| path.display().to_string());
     let original = serde_json::to_string(&original).map_err(JavascriptFrontendError::Serialize)?;
     let source = format!(
-        "import {{ loadConfigFromFile, mergeConfig }} from 'vite';\n\
+        "import * as viteNamespace from 'vite';\n\
          import {{ resolve }} from 'node:path';\n\
          import SupercovVitestReporter from './vitestReporter.js';\n\
          import {{ supercovViteInstrumentation }} from './viteInstrumentation.mjs';\n\
+         const vite = viteNamespace.default ?? viteNamespace;\n\
+         const {{ loadConfigFromFile, mergeConfig }} = vite;\n\
          const discoveredConfig = {original};\n\
          export default async function supercovVitestConfig(env) {{\n\
            const originalPath = process.env.SUPERCOV_ORIGINAL_VITEST_CONFIG || discoveredConfig;\n\
@@ -519,9 +543,11 @@ fn write_vite_config(
     let workspace = serde_json::to_string(&workspace.display().to_string())
         .map_err(JavascriptFrontendError::Serialize)?;
     let source = format!(
-        "import {{ loadConfigFromFile, mergeConfig }} from 'vite';\n\
+        "import * as viteNamespace from 'vite';\n\
          import {{ isAbsolute, relative, resolve }} from 'node:path';\n\
          import {{ supercovViteInstrumentation }} from './viteInstrumentation.mjs';\n\
+         const vite = viteNamespace.default ?? viteNamespace;\n\
+         const {{ loadConfigFromFile, mergeConfig }} = vite;\n\
          export default async function supercovViteConfig(env) {{\n\
            const isolatedRoot = {workspace};\n\
            const loaded = await loadConfigFromFile(env, undefined, isolatedRoot);\n\
@@ -757,6 +783,20 @@ mod tests {
         let isolated = isolate_runtime(source, "collector-123").unwrap();
         assert!(isolated.contains("runtimeInstanceToken = \"collector-123\""));
         assert!(isolated.contains("=== \"__SUPERCOV_\" + \"RUNTIME_INSTANCE__\""));
+    }
+
+    #[test]
+    fn copied_runtime_does_not_reference_unshipped_source_maps() {
+        let generated = temporary("runtime-source-maps");
+        copy_runtime(None, &generated, "collector-test").unwrap();
+        for name in ["vitest.js", "provenance.js", "atomic.js"] {
+            let contents = fs::read_to_string(generated.join(name)).unwrap();
+            assert!(
+                !contents.contains("sourceMappingURL"),
+                "runtime shim retained a source-map directive: {name}"
+            );
+        }
+        fs::remove_dir_all(generated).unwrap();
     }
 
     #[test]

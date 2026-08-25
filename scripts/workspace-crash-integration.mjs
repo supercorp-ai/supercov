@@ -123,6 +123,10 @@ try {
     child.once("error", reject);
     child.once("exit", (code, signal) => resolveExit({ code, signal }));
   });
+  const closed = new Promise((resolveClose, reject) => {
+    child.once("error", reject);
+    child.once("close", resolveClose);
+  });
   await new Promise((resolveKill, reject) => {
     let observed = false;
     const timeout = setTimeout(() => {
@@ -153,6 +157,10 @@ try {
     });
   });
   const killed = await exit;
+  // On Windows, `exit` only means the process terminated. Its inherited pipe
+  // handles are released before `close`, and attempting recursive cleanup in
+  // between can fail with EPERM despite the process already being gone.
+  await closed;
   if (killed.code === 0)
     throw new Error(`crash target exited successfully instead of being killed:\n${output}`);
   if (!existsSync(marker))
@@ -198,5 +206,10 @@ try {
     `[filesystem] ${engine} crash recovery passed on ${process.platform}`,
   );
 } finally {
-  rmSync(root, { recursive: true, force: true });
+  rmSync(root, {
+    recursive: true,
+    force: true,
+    maxRetries: process.platform === "win32" ? 30 : 3,
+    retryDelay: process.platform === "win32" ? 100 : 20,
+  });
 }

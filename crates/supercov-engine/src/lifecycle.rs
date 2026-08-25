@@ -194,7 +194,7 @@ pub(crate) fn atomic_rename(source: &Path, destination: &Path) -> Result<(), Lif
     Ok(())
 }
 
-fn atomic_write(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), LifecycleError> {
+pub(crate) fn atomic_write(root: &Path, path: &Path, bytes: &[u8]) -> Result<(), LifecycleError> {
     let parent = path
         .parent()
         .ok_or_else(|| LifecycleError::UnsafePath(path.into()))?;

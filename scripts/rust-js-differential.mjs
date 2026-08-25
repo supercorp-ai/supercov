@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { instrumentMcdc } from "../src/instrumenter.ts";
 import { executeDifferential } from "../tests/unit/instrumenter-harness.ts";
@@ -101,14 +102,23 @@ const safetyCorpus = [
   },
 ];
 const allCases = [...corpus, ...executionCorpus, ...generatedCorpus, ...safetyCorpus];
-const rust = spawnSync(
-  "cargo",
-  ["run", "--quiet", "-p", "supercov-engine", "--example", "js_manifest"],
-  { input: JSON.stringify(allCases), encoding: "utf8", maxBuffer: 16 * 1024 * 1024 },
-);
-if (rust.status !== 0)
-  throw new Error(`Rust JS candidate failed (${rust.status}):\n${rust.stderr}`);
-const outputs = JSON.parse(rust.stdout);
+const temporary = mkdtempSync(resolve(tmpdir(), "supercov-js-differential-"));
+let outputs;
+try {
+  const input = resolve(temporary, "cases.json");
+  writeFileSync(input, JSON.stringify(allCases));
+  const rust = spawnSync(
+    "cargo",
+    ["run", "--quiet", "-p", "supercov-engine", "--example", "js_manifest", "--", input],
+    { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 120_000 },
+  );
+  if (rust.error) throw rust.error;
+  if (rust.status !== 0)
+    throw new Error(`Rust JS candidate failed (${rust.status}):\n${rust.stderr}`);
+  outputs = JSON.parse(rust.stdout);
+} finally {
+  rmSync(temporary, { recursive: true, force: true });
+}
 if (outputs.length !== allCases.length)
   throw new Error(`Rust candidate returned ${outputs.length} outputs for ${allCases.length} cases`);
 

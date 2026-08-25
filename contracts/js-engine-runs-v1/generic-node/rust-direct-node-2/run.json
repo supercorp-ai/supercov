@@ -1,0 +1,47 @@
+{
+  "id": "rust-direct-node-2",
+  "startedAt": "2026-08-25T00:01:00.000Z",
+  "durationMs": 534.8029170000001,
+  "command": [
+    "npm",
+    "test"
+  ],
+  "testExitCode": 0,
+  "integrity": {
+    "schemaVersion": 2,
+    "instrumenterVersion": "javascript-v1",
+    "git": {
+      "revision": "3bfc80228286866a604179fb1c59265b3377d507",
+      "dirty": true
+    },
+    "fingerprint": {
+      "algorithm": "sha256",
+      "source": "ca8fab6a3f979f78aa8f413e1cfe87f80e43319bb598895fcb327e48452bd537",
+      "tests": "e5e2dcac31a5d3b67ff5c6cb3d3c62ac2f66e33789126db18823f287e67d0a65",
+      "dependencies": "600175f0cd7e0ae8800b745dd8c8aa969391634c29ee7be9d62c29093d91e2d9",
+      "configuration": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "instrumenter": "52411b2dcb1cface1145c042401cc3651fc91fed2f57adf6cf5d01d74efc18d5",
+      "execution": "93b386f5d9c6ef000a45e4b2cff2db7910439f3db76e662dc30e1c88905f7c50",
+      "combined": "6c7f4dee505d1d5d2b50bd8dbb885b1abfa4ade4f688f0e1d36fd2825f06597a",
+      "sourceFiles": 1,
+      "testFiles": 1
+    }
+  },
+  "rawEvidence": {
+    "schemaVersion": 2,
+    "format": "framed+gzip",
+    "file": "evidence.raw.gz",
+    "files": 5,
+    "uncompressedBytes": 10778,
+    "compressedBytes": 1382
+  },
+  "isolatedBuild": true,
+  "timings": {
+    "initializationMs": 52.357291000000004,
+    "workspacePreparationMs": 16.499541999999998,
+    "adapterSetupMs": 163.749417,
+    "instrumentedBuildMs": 0.0,
+    "testCommandMs": 254.43862499999997,
+    "evidencePublicationMs": 23.037166000000003
+  }
+}

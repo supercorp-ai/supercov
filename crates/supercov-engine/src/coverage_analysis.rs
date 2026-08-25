@@ -249,8 +249,9 @@ pub(crate) fn serialize_javascript_number<S>(value: &f64, serializer: S) -> Resu
 where
     S: serde::Serializer,
 {
-    if value.is_finite() && value.fract() == 0.0 && *value >= 0.0 && *value <= u64::MAX as f64 {
-        serializer.serialize_u64(*value as u64)
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    if value.is_finite() && value.fract() == 0.0 && value.abs() <= MAX_SAFE_INTEGER {
+        serializer.serialize_i64(*value as i64)
     } else {
         serializer.serialize_f64(*value)
     }
@@ -421,7 +422,7 @@ pub fn analyze_core(input: &CoverageCoreInput) -> Result<CoverageCoreOutput, Ana
 
 #[cfg(test)]
 mod tests {
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
 
     use super::*;
 
@@ -439,6 +440,28 @@ mod tests {
     struct OracleCase {
         input_indexes: Vec<usize>,
         covered_conditions: usize,
+    }
+
+    #[derive(Serialize)]
+    struct JavascriptNumber {
+        #[serde(serialize_with = "serialize_javascript_number")]
+        value: f64,
+    }
+
+    #[test]
+    fn serializes_positive_and_negative_integers_like_json_stringify() {
+        assert_eq!(
+            serde_json::to_string(&JavascriptNumber { value: 50.0 }).unwrap(),
+            r#"{"value":50}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&JavascriptNumber { value: -50.0 }).unwrap(),
+            r#"{"value":-50}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&JavascriptNumber { value: -0.0 }).unwrap(),
+            r#"{"value":0}"#
+        );
     }
 
     #[test]

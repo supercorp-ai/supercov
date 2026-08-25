@@ -400,7 +400,10 @@ try {
     JSON.stringify({
       id: limitationRunId,
       startedAt: "2026-08-24T00:00:00.000Z",
+      durationMs: 0,
+      command: ["node", "synthetic-agent-limitation-fixture"],
       testExitCode: 0,
+      integrity: complete.metadata.integrity,
       rawEvidence,
     }),
   );

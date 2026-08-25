@@ -526,9 +526,11 @@ async function createCoverageRun(command: string[]): Promise<number> {
     atomicWriteFileSync(
       generatedViteConfig,
       [
-        `import { loadConfigFromFile, mergeConfig } from '${viteModuleSpecifier}';`,
+        `import * as viteNamespace from '${viteModuleSpecifier}';`,
         `import { isAbsolute, relative, resolve } from 'node:path';`,
         `import { mcdcVitePlugin } from '${pathToFileURL(resolve(packageSource, "vitePlugin.js")).href}';`,
+        `const vite = viteNamespace.default ?? viteNamespace;`,
+        `const { loadConfigFromFile, mergeConfig } = vite;`,
         `export default async function supercovViteConfig(env) {`,
         `  const loaded = await loadConfigFromFile(env, undefined, process.cwd());`,
         `  const originalRoot = ${JSON.stringify(root)};`,
@@ -553,10 +555,12 @@ async function createCoverageRun(command: string[]): Promise<number> {
     atomicWriteFileSync(
       generatedVitestConfig,
       [
-        `import { loadConfigFromFile, mergeConfig } from '${viteModuleSpecifier}';`,
+        `import * as viteNamespace from '${viteModuleSpecifier}';`,
         `import { resolve } from 'node:path';`,
         `import { mcdcVitePlugin } from '${pathToFileURL(resolve(packageSource, "vitePlugin.js")).href}';`,
         `import SupercovVitestReporter from '${pathToFileURL(resolve(packageSource, "vitestReporter.js")).href}';`,
+        `const vite = viteNamespace.default ?? viteNamespace;`,
+        `const { loadConfigFromFile, mergeConfig } = vite;`,
         `const discoveredConfig = ${JSON.stringify(isolatedVitestConfig)};`,
         `export default async function supercovVitestConfig(env) {`,
         `  const originalPath = process.env.SUPERCOV_ORIGINAL_VITEST_CONFIG || discoveredConfig;`,

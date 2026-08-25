@@ -38,10 +38,21 @@ function runNode(arguments_, extraEnvironment = {}) {
     );
 }
 
-// Chromium exercises every adapter/build fixture. Firefox and WebKit rerun
-// the mixed Vitest + two-worker Playwright fixture, including user contexts,
-// popup frames, service workers, WebSockets, and request attribution.
-run(["run", "test:fixture"]);
+// Chromium exercises every currently supported Rust adapter/build fixture.
+// Jest remains an explicit reference-engine-only fixture while its exact
+// per-test attribution is deferred; do not make it a false Rust cutover gate.
+run(["--prefix", "tests/fixtures/generic-playwright", "run", "test:coverage"]);
+for (const script of [
+  "opaque-runner-integration.mjs",
+  "opaque-esm-integration.mjs",
+  "node-test-integration.mjs",
+  "generic-build-integration.mjs",
+  "next-integration.mjs",
+  "distributed-merge-integration.mjs",
+  "agent-query-eval.mjs",
+]) {
+  runNode([`scripts/${script}`]);
+}
 run(["run", "test:isolation"]);
 run(["run", "test:watchdog"]);
 for (const browser of ["firefox", "webkit"]) {

@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
 import { createMcdcReport } from '../dist/analyze.js';
@@ -137,13 +139,23 @@ const expected = fixtures.map((fixture) =>
     fixture.metric,
   )
 );
-const child = spawnSync(binary, ['__minimum-test-set'], {
-  cwd: root,
-  input: JSON.stringify(requests),
-  encoding: 'utf8',
-  maxBuffer: 64 * 1024 * 1024,
-});
-assert.equal(child.status, 0, child.stderr || child.stdout);
-const actual = JSON.parse(child.stdout);
+const temporary = mkdtempSync(resolve(tmpdir(), 'supercov-minimize-differential-'));
+let actual;
+try {
+  const input = resolve(temporary, 'requests.json');
+  writeFileSync(input, JSON.stringify(requests));
+  const child = spawnSync(binary, ['__minimum-test-set'], {
+    cwd: root,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: 120_000,
+    env: { ...process.env, SUPERCOV_INTERNAL_INPUT_FILE: input },
+  });
+  if (child.error) throw child.error;
+  assert.equal(child.status, 0, child.stderr || child.stdout);
+  actual = JSON.parse(child.stdout);
+} finally {
+  rmSync(temporary, { recursive: true, force: true });
+}
 assert.deepEqual(actual, expected);
 console.log(`[rust-minimize-differential] ${actual.length} exact mixed-obligation models`);

@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 const repository = resolve(import.meta.dirname, "..");
 const runtimeFiles = [
   "atomic.js",
+  "esmInterceptor.js",
   "launchSupervisor.js",
   "nodeAssert.js",
   "nodeAssertAdapter.js",

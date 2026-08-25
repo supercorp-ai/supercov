@@ -5,6 +5,7 @@
 //! temporary regression reference, not the semantic authority.
 
 pub mod agent_json;
+pub mod build_cache;
 pub mod coverage_analysis;
 pub mod coverage_index;
 pub mod coverage_query;
@@ -25,6 +26,7 @@ pub mod project_discovery;
 #[cfg(any(test, feature = "oracle-harnesses"))]
 pub mod python_frontend;
 pub mod query_index;
+pub mod run_merge;
 pub mod run_query;
 pub mod run_store;
 pub mod source_discovery;

@@ -94,10 +94,39 @@ fn main() -> ExitCode {
         Some("clean") => cleanup_command("clean", arguments.collect()),
         Some("runs") => public_query_command("runs", arguments.collect()),
         Some("diff") => public_query_command("diff", arguments.collect()),
+        Some("merge") => merge_command(arguments.collect()),
         Some(command) => {
             eprintln!(
                 "[supercov] Rust engine candidate is not ready for `{command}`; use the currently shipped engine while the Rust contract gates are incomplete"
             );
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn merge_command(run_ids: Vec<String>) -> ExitCode {
+    let root = match std::env::current_dir() {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("[supercov] could not resolve the current directory: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let (run_id, started_at) = match public_timestamp() {
+        Ok((run_id, started_at)) => (format!("{run_id}-merge"), started_at),
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    match supercov_engine::run_merge::merge_coverage_runs(&root, &run_ids, &run_id, &started_at) {
+        Ok(merged) => {
+            println!("[supercov] merged run {merged}");
+            println!("npx supercov runs {merged} coverage");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[supercov] {error}");
             ExitCode::from(2)
         }
     }
@@ -1746,6 +1775,14 @@ fn benchmark_js_transform() -> ExitCode {
 }
 
 fn stdin() -> Result<String, String> {
+    if let Some(path) = std::env::var_os("SUPERCOV_INTERNAL_INPUT_FILE") {
+        return fs::read_to_string(&path).map_err(|error| {
+            format!(
+                "failed to read Rust engine input {}: {error}",
+                Path::new(&path).display()
+            )
+        });
+    }
     let mut input = String::new();
     std::io::stdin()
         .read_to_string(&mut input)

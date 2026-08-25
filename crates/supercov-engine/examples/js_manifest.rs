@@ -10,11 +10,26 @@ struct Case {
 }
 
 fn main() -> ExitCode {
-    let mut input = String::new();
-    if let Err(error) = std::io::stdin().read_to_string(&mut input) {
-        eprintln!("failed to read differential corpus: {error}");
-        return ExitCode::from(2);
-    }
+    let input = match std::env::args_os().nth(1) {
+        Some(path) => match std::fs::read_to_string(&path) {
+            Ok(input) => input,
+            Err(error) => {
+                eprintln!(
+                    "failed to read differential corpus {}: {error}",
+                    std::path::Path::new(&path).display()
+                );
+                return ExitCode::from(2);
+            }
+        },
+        None => {
+            let mut input = String::new();
+            if let Err(error) = std::io::stdin().read_to_string(&mut input) {
+                eprintln!("failed to read differential corpus: {error}");
+                return ExitCode::from(2);
+            }
+            input
+        }
+    };
     let cases: Vec<Case> = match serde_json::from_str(&input) {
         Ok(cases) => cases,
         Err(error) => {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync as nativeSpawnSync } from 'node:child_process';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -21,18 +21,25 @@ const fixtures = [
 
 const storedProjects = new Map();
 process.on('exit', () => {
-  for (const project of storedProjects.values()) rmSync(project, { recursive: true, force: true });
+  for (const project of storedProjects.values())
+    rmSync(dirname(project), { recursive: true, force: true });
 });
 function storedProjectForArchive(archivePath) {
-  const fixtureRoot = resolve(archivePath, '../../../..');
-  const existing = storedProjects.get(fixtureRoot);
+  const frozenRuns = resolve(archivePath, '../..');
+  const existing = storedProjects.get(frozenRuns);
   if (existing) return existing;
-  const project = mkdtempSync(join(tmpdir(), 'supercov-stored-query-'));
-  cpSync(resolve(fixtureRoot, '.supercov/runs'), resolve(project, '.supercov/runs'), {
+  const temporary = mkdtempSync(join(tmpdir(), 'supercov-stored-query-'));
+  const fixture = basename(frozenRuns);
+  const project = resolve(temporary, fixture);
+  cpSync(resolve(root, 'tests/fixtures', fixture), project, {
+    recursive: true,
+    filter: (path) => !path.includes(`${resolve(root, 'tests/fixtures', fixture, '.supercov')}`),
+  });
+  cpSync(frozenRuns, resolve(project, '.supercov/runs'), {
     recursive: true,
     filter: (path) => !path.endsWith('query-index.v1.bin') && !path.endsWith('query-index.v1.json.gz'),
   });
-  storedProjects.set(fixtureRoot, project);
+  storedProjects.set(frozenRuns, project);
   return project;
 }
 
@@ -61,7 +68,7 @@ function spawnSync(command, args, options) {
 }
 
 function archivesForFixture(fixture) {
-  const runs = resolve(root, 'tests/fixtures', fixture, '.supercov/runs');
+  const runs = resolve(root, 'contracts/js-engine-runs-v1', fixture);
   return readdirSync(runs, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
@@ -123,6 +130,7 @@ function indexedFiles(view) {
 
 for (const [fixtureIndex, fixture] of fixtures.entries()) {
   const { id: runId, archivePath } = newestArchive(fixture);
+  const queryProject = storedProjectForArchive(archivePath);
   const expected = JSON.parse(
     JSON.stringify(analyzeCoverageArchive(archivePath, { runId, generatedAt })),
   );
@@ -170,7 +178,7 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
       '--json',
     ],
     {
-      cwd: resolve(root, 'tests/fixtures', fixture),
+      cwd: queryProject,
       encoding: 'utf8',
       maxBuffer: 128 * 1024 * 1024,
     },
@@ -208,7 +216,7 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
     ...(filteredRunner ? ['--runner', filteredRunner] : []),
   ];
   const filteredReference = spawnSync(process.execPath, filteredArguments, {
-    cwd: resolve(root, 'tests/fixtures', fixture),
+    cwd: queryProject,
     encoding: 'utf8',
     maxBuffer: 128 * 1024 * 1024,
   });
@@ -250,7 +258,7 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
       ...(filteredRunner ? ['--runner', filteredRunner] : []),
     ],
     {
-      cwd: resolve(root, 'tests/fixtures', fixture),
+      cwd: queryProject,
       encoding: 'utf8',
       maxBuffer: 128 * 1024 * 1024,
     },
@@ -292,7 +300,7 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
       ...(filteredRunner ? ['--runner', filteredRunner] : []),
     ],
     {
-      cwd: resolve(root, 'tests/fixtures', fixture),
+      cwd: queryProject,
       encoding: 'utf8',
       maxBuffer: 128 * 1024 * 1024,
     },
@@ -335,7 +343,7 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
         '--filter', 'all', '--limit', '1', '--json',
       ],
       {
-        cwd: resolve(root, 'tests/fixtures', fixture),
+        cwd: queryProject,
         encoding: 'utf8',
         maxBuffer: 128 * 1024 * 1024,
       },
@@ -370,7 +378,7 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
       '--filter', filter, '--limit', '1', '--json',
     ],
     {
-      cwd: resolve(root, 'tests/fixtures', fixture),
+      cwd: queryProject,
       encoding: 'utf8',
       maxBuffer: 128 * 1024 * 1024,
     },
@@ -411,7 +419,7 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
       ...(summaryRunner ? ['--runner', summaryRunner] : []),
     ],
     {
-      cwd: resolve(root, 'tests/fixtures', fixture),
+      cwd: queryProject,
       encoding: 'utf8',
       maxBuffer: 128 * 1024 * 1024,
     },
@@ -456,7 +464,7 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
         '--limit', '1', '--json',
       ],
       {
-        cwd: resolve(root, 'tests/fixtures', fixture),
+        cwd: queryProject,
         encoding: 'utf8',
         maxBuffer: 128 * 1024 * 1024,
       },
@@ -492,7 +500,7 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
         '--filter', 'all', '--limit', '2', '--offset', '1', '--json',
       ],
       {
-        cwd: resolve(root, 'tests/fixtures', fixture),
+        cwd: queryProject,
         encoding: 'utf8',
         maxBuffer: 128 * 1024 * 1024,
       },
@@ -529,7 +537,7 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
       ...(filteredRunner ? ['--runner', filteredRunner] : []),
     ],
     {
-      cwd: resolve(root, 'tests/fixtures', fixture),
+      cwd: queryProject,
       encoding: 'utf8',
       maxBuffer: 128 * 1024 * 1024,
     },
@@ -563,7 +571,7 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
     ...(filteredRunner ? ['--runner', filteredRunner] : []),
   ];
   const coversReference = spawnSync(process.execPath, coversArguments, {
-    cwd: resolve(root, 'tests/fixtures', fixture),
+    cwd: queryProject,
     encoding: 'utf8',
     maxBuffer: 128 * 1024 * 1024,
   });
@@ -600,7 +608,7 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
       ...(filteredRunner ? ['--runner', filteredRunner] : []),
     ],
     {
-      cwd: resolve(root, 'tests/fixtures', fixture),
+      cwd: queryProject,
       encoding: 'utf8',
       maxBuffer: 128 * 1024 * 1024,
     },
@@ -643,7 +651,7 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
         '--filter', 'all', '--limit', '1', '--json',
       ],
       {
-        cwd: resolve(root, 'tests/fixtures', fixture),
+        cwd: queryProject,
         encoding: 'utf8',
         maxBuffer: 128 * 1024 * 1024,
       },
@@ -688,7 +696,7 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
         ...(filteredRunner ? ['--runner', filteredRunner] : []),
       ],
       {
-        cwd: resolve(root, 'tests/fixtures', fixture),
+        cwd: queryProject,
         encoding: 'utf8',
         maxBuffer: 128 * 1024 * 1024,
       },
@@ -728,7 +736,7 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
         '--filter', diffFilter, '--limit', '2', '--json',
       ],
       {
-        cwd: resolve(root, 'tests/fixtures', fixture),
+        cwd: queryProject,
         encoding: 'utf8',
         maxBuffer: 128 * 1024 * 1024,
       },

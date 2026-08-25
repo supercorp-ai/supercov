@@ -14,6 +14,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    build_cache::{build_cache_key, read_build_cache, reuse_paths, write_build_cache},
     evidence_archive::{EvidenceArchiveSource, collect_sources, write_archive},
     integrity::{FrontendIntegrityInputs, create_run_integrity},
     javascript_frontend::{javascript_runtime_files, prepare_javascript_frontend},
@@ -27,8 +28,10 @@ use crate::{
         CommandSpec, ForwardedSignal, SupervisionOptions, positive_milliseconds,
     },
     project_discovery::{BuildAdapter, discover_coverage_project},
-    run_store::{RawEvidenceMetadata, RunIntegrity, RunMetadata, RunTimings},
-    workspace::{prepare_cached_workspace, prune_cached_workspace_sources},
+    run_store::{
+        InstrumentedBuildCache, RawEvidenceMetadata, RunIntegrity, RunMetadata, RunTimings,
+    },
+    workspace::{cached_workspace_path, prepare_cached_workspace, prune_cached_workspace_sources},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,11 +292,19 @@ pub fn run_direct_javascript(
     let project = discover_coverage_project(&root, &environment, &request.command)
         .map_err(|error| error.to_string())?;
     let integrity = javascript_integrity_for_project(&root, runtime_root.as_deref(), &project)?;
+    let build_cache_key = build_cache_key(&integrity, &project)?;
+    let prior_workspace = cached_workspace_path(&root).map_err(|error| error.to_string())?;
+    let reusable_build = if project.build_adapter == BuildAdapter::Direct {
+        None
+    } else {
+        read_build_cache(&prior_workspace, &build_cache_key)
+    };
+    let cached_paths = reusable_build.as_ref().map(reuse_paths).unwrap_or_default();
     let initialization_ms = elapsed_ms(initialization_started);
 
     let workspace_started = Instant::now();
-    let workspace =
-        prepare_cached_workspace(&root, cleanup.lock(), &[]).map_err(|error| error.to_string())?;
+    let workspace = prepare_cached_workspace(&root, cleanup.lock(), &cached_paths)
+        .map_err(|error| error.to_string())?;
     cleanup.set_workspace(workspace.clone());
     let workspace_preparation_ms = elapsed_ms(workspace_started);
     writeln!(
@@ -351,6 +362,20 @@ pub fn run_direct_javascript(
                 .to_string(),
         ),
         (
+            "SUPERCOV_ESM_TRANSFORMER".into(),
+            workspace
+                .join(".supercov/esmInterceptor.js")
+                .display()
+                .to_string(),
+        ),
+        (
+            "SUPERCOV_ESM_CAPABILITY_WRAPPER".into(),
+            workspace
+                .join(".supercov/launchSupervisor.js")
+                .display()
+                .to_string(),
+        ),
+        (
             "SUPERCOV_MANIFEST".into(),
             frontend.manifest_path.display().to_string(),
         ),
@@ -403,7 +428,15 @@ pub fn run_direct_javascript(
         );
     }
     overrides.extend(project.build_environment.clone());
-    let preparation = if project.build_adapter != BuildAdapter::Direct {
+    let preparation = if reusable_build.is_some() {
+        writeln!(
+            diagnostics,
+            "[supercov] reusing exact-fingerprint instrumented build {}",
+            &build_cache_key[..12]
+        )
+        .map_err(|error| error.to_string())?;
+        Vec::new()
+    } else if project.build_adapter != BuildAdapter::Direct {
         let mut arguments = project.build_command[1..]
             .iter()
             .map(OsString::from)
@@ -506,6 +539,15 @@ pub fn run_direct_javascript(
         .iter()
         .find(|phase| phase.kind == PhaseKind::Test)
         .map_or(0.0, |phase| phase.duration_ms as f64);
+    let build_succeeded = execution
+        .phases
+        .iter()
+        .find(|phase| phase.kind == PhaseKind::Build)
+        .is_some_and(|phase| phase.result.exit_code() == 0);
+    if project.build_adapter != BuildAdapter::Direct && reusable_build.is_none() && build_succeeded
+    {
+        write_build_cache(&root, &workspace, &build_cache_key, &started_at)?;
+    }
     if let Some(signal) = execution.interrupted_signal {
         interrupt_run_state(&root, &run_id, &started_at, signal_name(signal))
             .map_err(|error| error.to_string())?;
@@ -582,7 +624,10 @@ pub fn run_direct_javascript(
             compressed_bytes: raw.compressed_bytes,
         },
         isolated_build: Some(true),
-        instrumented_build_cache: None,
+        instrumented_build_cache: Some(InstrumentedBuildCache {
+            key: build_cache_key,
+            reused: reusable_build.is_some(),
+        }),
         timings: Some(timings),
         merged: None,
         parents: None,

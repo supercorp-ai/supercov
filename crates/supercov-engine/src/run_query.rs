@@ -132,7 +132,9 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use crate::run_store::{discover_runs, open_or_rebuild_query_index, select_run};
+    use crate::run_store::{
+        create_analyzable_test_run, discover_runs, open_or_rebuild_query_index,
+    };
 
     use super::*;
 
@@ -147,22 +149,15 @@ mod tests {
         path
     }
 
-    fn copy_real_fixture_run(root: &Path) -> RunInventory {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let fixture = workspace.join("tests/fixtures/generic-webpack");
-        let source_inventory = discover_runs(&fixture).unwrap();
-        let source = select_run(&source_inventory, Some("latest")).unwrap();
-        let destination = root.join(".supercov/runs").join(&source.id);
-        fs::create_dir_all(&destination).unwrap();
-        fs::copy(&source.metadata_path, destination.join("run.json")).unwrap();
-        fs::copy(&source.evidence_path, destination.join("evidence.raw.gz")).unwrap();
+    fn create_indexable_run(root: &Path) -> RunInventory {
+        create_analyzable_test_run(root, "test-run");
         discover_runs(root).unwrap()
     }
 
     #[test]
     fn lists_persisted_metadata_without_building_an_index_then_reads_the_typed_index() {
         let root = temporary_directory();
-        let inventory = copy_real_fixture_run(&root);
+        let inventory = create_indexable_run(&root);
         let run = &inventory.runs[0];
         let (before, page) = run_list_query(&inventory, None, CoverageViewId::All, 0, 20);
         assert_eq!(page.total, 1);
@@ -196,7 +191,7 @@ mod tests {
     #[test]
     fn reports_staleness_in_contract_order_and_treats_a_bad_index_as_disposable() {
         let root = temporary_directory();
-        let inventory = copy_real_fixture_run(&root);
+        let inventory = create_indexable_run(&root);
         let run = &inventory.runs[0];
         open_or_rebuild_query_index(run).unwrap();
         fs::write(&run.query_index_path, b"broken disposable index").unwrap();
