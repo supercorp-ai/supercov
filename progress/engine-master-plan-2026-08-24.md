@@ -863,11 +863,20 @@ miss blocks flipping any default.
   A clean packed-install integration disables lifecycle scripts, installs the
   primary plus platform tarball, completes a real Rust coverage run, and then
   proves wrong-version, missing-binary, missing-optional-package and unsupported-
-  target errors. The Apple arm64 release binary is 4.1 MiB uncompressed. The
+  target errors. The Apple arm64 release binary is 4.1 MiB uncompressed and
+  1.9 MiB under deterministic gzip, comfortably below the 15 MiB gate. A
+  manual-only eight-target native artifact workflow now builds on native
+  macOS/Linux/Windows arm64/x64 hosts, adds glibc/musl Linux variants, performs
+  packed installs on matching hosts, validates direct musl execution, enforces
+  the compressed-size gate, records binary/tarball SHA-256 digests and uploads
+  the generated artifacts. It is deliberately not triggered by ordinary pushes
+  so this groundwork consumes no Actions minutes until explicitly requested.
+  The
   distribution ADR explicitly rejects WASI as an unsound fallback for a CLI
   that owns processes/signals/filesystem transactions. Platform packages are
   generated from release binaries and are not committed or published by this
-  checkpoint. Native-host build/provenance CI, initial npm package claims,
+  checkpoint. The native matrix is defined but has not yet produced a real
+  hosted-run green result or signed provenance. Initial npm package claims,
   coordinated publication, GitHub artifacts, PyPI/Homebrew/cargo-binstall/opam
   and C-compatible wrappers remain Phase 5 gates.
 

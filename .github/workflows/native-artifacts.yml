@@ -1,0 +1,62 @@
+name: Native artifact matrix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15, target: aarch64-apple-darwin, package: supercov-darwin-arm64, executable: supercov, packedInstall: true }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin, package: supercov-darwin-x64, executable: supercov, packedInstall: true }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, package: supercov-linux-arm64-gnu, executable: supercov, packedInstall: true }
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu, package: supercov-linux-x64-gnu, executable: supercov, packedInstall: true }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, package: supercov-linux-arm64-musl, executable: supercov, musl: true }
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-musl, package: supercov-linux-x64-musl, executable: supercov, musl: true }
+          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc, package: supercov-win32-arm64, executable: supercov.exe, packedInstall: true }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, package: supercov-win32-x64, executable: supercov.exe, packedInstall: true }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl linker
+        if: matrix.musl
+        run: sudo apt-get update -qq && sudo apt-get install -y musl-tools
+      - run: npm ci
+      - run: npm run build
+      - name: Read package version
+        run: node -e "require('node:fs').appendFileSync(process.env.GITHUB_ENV, 'SUPERCOV_VERSION=' + require('./package.json').version + '\n')"
+      - name: Build native binary
+        if: matrix.musl != true
+        run: cargo build --release --target ${{ matrix.target }} -p supercov-cli
+      - name: Build static musl binary
+        if: matrix.musl
+        run: cargo build --config 'target.${{ matrix.target }}.linker="musl-gcc"' --release --target ${{ matrix.target }} -p supercov-cli
+      - name: Packed install and real Rust run
+        if: matrix.packedInstall
+        run: node scripts/native-package-integration.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }}
+      - name: Stage native package
+        run: node scripts/package-native.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --out native-dist
+      - name: Pack native package
+        run: npm pack native-dist/${{ matrix.package }} --pack-destination native-dist --ignore-scripts
+      - name: Validate binary, size gate, and checksums
+        run: node scripts/native-artifact-check.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --tarball native-dist/${{ matrix.package }}-${{ env.SUPERCOV_VERSION }}.tgz --out native-dist/${{ matrix.package }}.checksums.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.package }}
+          path: |
+            native-dist/${{ matrix.package }}-${{ env.SUPERCOV_VERSION }}.tgz
+            native-dist/${{ matrix.package }}.checksums.json
+          if-no-files-found: error

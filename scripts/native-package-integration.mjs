@@ -17,6 +17,11 @@ import { nativePackageFor } from "../bin/native.js";
 const repository = resolve(import.meta.dirname, "..");
 const temporary = mkdtempSync(resolve(tmpdir(), "supercov-native-package-"));
 
+function option(name) {
+  const index = process.argv.indexOf(name);
+  return index === -1 ? undefined : process.argv[index + 1];
+}
+
 function run(program, arguments_, options = {}) {
   const result = spawnSync(program, arguments_, { encoding: "utf8", ...options });
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -28,8 +33,16 @@ try {
     readFileSync(resolve(repository, "npm/native-targets.json"), "utf8"),
   );
   const selected = nativePackageFor();
-  const target = targetRegistry.targets.find(entry => entry.package === selected.packageName);
+  const requestedTarget = option("--target");
+  const target = requestedTarget
+    ? targetRegistry.targets.find(entry => entry.rustTarget === requestedTarget)
+    : targetRegistry.targets.find(entry => entry.package === selected.packageName);
   assert(target, `runtime loader target ${selected.packageName} is absent from native-targets.json`);
+  assert.equal(
+    target.package,
+    selected.packageName,
+    `packed-install test must run on its native host (${target.package} requested, ${selected.packageName} selected)`,
+  );
   for (const entry of targetRegistry.targets) {
     assert.deepEqual(
       nativePackageFor(entry.platform, entry.arch, entry.libc),
@@ -43,7 +56,7 @@ try {
   const packageRoot = run(process.execPath, [
     resolve(repository, "scripts/package-native.mjs"),
     "--target", target.rustTarget,
-    "--binary", resolve(repository, `target/release/${target.executable}`),
+    "--binary", option("--binary") ?? resolve(repository, `target/release/${target.executable}`),
     "--out", resolve(temporary, "platform"),
   ]);
   const platformPack = JSON.parse(

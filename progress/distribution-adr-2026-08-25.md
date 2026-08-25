@@ -34,6 +34,14 @@ maturin `bindings = "bin"`; it does not rebuild the analyzer in Python. A
 future cargo-dist-versus-handwritten release-pipeline choice may change release
 orchestration, not artifact identity or package contracts.
 
+The initial artifact workflow is manual-only so ordinary commits consume no
+eight-platform build minutes. It uses GitHub's native macOS arm64/x64, Linux
+arm64/x64, and Windows arm64/x64 hosted runners; each Linux architecture also
+builds its musl target. This avoids treating cross-compilation as native runtime
+proof. GitHub documents `ubuntu-24.04-arm`, `windows-11-arm`, `macos-15`, and
+their x64 counterparts as standard hosted-runner labels, including for private
+repositories: <https://docs.github.com/en/actions/reference/runners/github-hosted-runners>.
+
 ## Gates
 
 - Every target cross-compiles with warnings denied and runs on a native CI host
