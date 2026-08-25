@@ -540,6 +540,26 @@ miss blocks flipping any default.
   and condition detail. Public CLI routing now remains gated on current-
   project integrity wiring, structured public argument errors and human-output
   parity—not missing coverage semantics.
+- Phase 4 lifecycle ownership has moved into Rust as an isolated engine layer.
+  Run state is a closed typed schema; project locks use exclusive creation,
+  live-owner detection, incomplete-write grace and owner-checked release;
+  recovery derives every cleanup target from root plus validated run ID rather
+  than trusting persisted paths. A killed pre-publication run is marked
+  abandoned, while a fully renamed run is treated as the durable terminal
+  record and only transactional leftovers are removed. Publication hashes the
+  immutable evidence before and after copying, verifies the staged copy and
+  compressed length, fsyncs both files/directories and exposes the run with one
+  final directory rename. Retention is deterministic, dry-run safe, project-
+  locked, preserves live work, and distinguishes `prune` (history/transients,
+  keep shared cache) from `clean` (also current and legacy owned caches).
+  Recursive deletion remains off the foreground path: owned trees are renamed
+  into durable trash and one PID-locked child sweeps them. Every existing
+  ancestor is checked for links before create/rename/delete; a regression with
+  a linked `.supercov/evidence` proves external user data is untouched. Rust
+  and TypeScript have exact differential results for prune, clean, dry-run,
+  active-run preservation, cache policy and dead-run recovery. Windows process
+  liveness/Job-object behavior remains explicitly gated on the Windows spike;
+  it is not silently claimed by this Unix-validated checkpoint.
 
 ## Non-goals and guardrails
 

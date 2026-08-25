@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 flate2.workspace = true
+libc.workspace = true
 memmap2.workspace = true
 oxc_allocator.workspace = true
 oxc_ast.workspace = true

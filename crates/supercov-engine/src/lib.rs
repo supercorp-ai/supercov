@@ -14,6 +14,7 @@ pub mod evidence_archive;
 pub mod indexed_query;
 pub mod integrity;
 pub mod js_instrumenter;
+pub mod lifecycle;
 pub mod probe_v2;
 pub mod project_discovery;
 pub mod query_index;

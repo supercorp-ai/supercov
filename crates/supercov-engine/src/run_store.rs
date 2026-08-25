@@ -176,7 +176,7 @@ fn regular_file(path: &Path) -> Result<fs::Metadata, RunStoreError> {
     Ok(metadata)
 }
 
-fn valid_run_id(value: &str) -> bool {
+pub(crate) fn valid_run_id(value: &str) -> bool {
     !value.is_empty()
         && value != "."
         && value != ".."

@@ -1,4 +1,10 @@
-use std::{fs, io::Read, path::PathBuf, process::ExitCode, time::Instant};
+use std::{
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+    process::{Command, ExitCode, Stdio},
+    time::Instant,
+};
 
 use serde::{Deserialize, Serialize};
 use supercov_engine::{
@@ -64,12 +70,110 @@ fn main() -> ExitCode {
         Some("__query-stored-run") => query_stored_run(),
         Some("__discover-source") => discover_source(),
         Some("__discover-project") => discover_project(),
+        Some("__lifecycle") => lifecycle(),
+        Some("__sweep-trash") => sweep_trash(),
         Some("__benchmark-js-transform") => benchmark_js_transform(),
         Some("__pack-evidence") => pack_evidence(),
         Some(command) => {
             eprintln!(
                 "[supercov] Rust engine candidate is not ready for `{command}`; use the currently shipped engine while the Rust contract gates are incomplete"
             );
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn spawn_trash_sweeper(root: &Path) {
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let _ = Command::new(executable)
+        .arg("__sweep-trash")
+        .arg(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
+fn sweep_trash() -> ExitCode {
+    let Some(root) = std::env::args_os().nth(2).map(PathBuf::from) else {
+        return ExitCode::from(2);
+    };
+    match supercov_engine::lifecycle::sweep_trash(&root) {
+        Ok(_) => ExitCode::SUCCESS,
+        Err(_) => ExitCode::from(2),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LifecycleRequest {
+    root: PathBuf,
+    action: String,
+    keep: Option<usize>,
+    dry_run: Option<bool>,
+    updated_at: Option<String>,
+}
+
+fn lifecycle() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let request: LifecycleRequest = match serde_json::from_str(&input) {
+        Ok(request) => request,
+        Err(error) => {
+            eprintln!("[supercov] invalid lifecycle input: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    spawn_trash_sweeper(&request.root);
+    let result = match request.action.as_str() {
+        "prune" | "clean" => {
+            let options = supercov_engine::lifecycle::CleanupOptions {
+                keep: request.keep.unwrap_or(20),
+                dry_run: request.dry_run.unwrap_or(false),
+            };
+            let updated_at = request.updated_at.as_deref().unwrap_or("internal");
+            if request.action == "prune" {
+                supercov_engine::lifecycle::prune_storage(&request.root, options, updated_at)
+            } else {
+                supercov_engine::lifecycle::clean_storage(&request.root, options, updated_at)
+            }
+            .and_then(|result| {
+                serde_json::to_value(result)
+                    .map_err(supercov_engine::lifecycle::LifecycleError::Metadata)
+            })
+        }
+        "recover" => supercov_engine::lifecycle::recover_abandoned_runs(
+            &request.root,
+            request.updated_at.as_deref().unwrap_or("internal"),
+        )
+        .and_then(|result| {
+            serde_json::to_value(result)
+                .map_err(supercov_engine::lifecycle::LifecycleError::Metadata)
+        }),
+        "sweep" => supercov_engine::lifecycle::sweep_trash(&request.root).and_then(|result| {
+            serde_json::to_value(result)
+                .map_err(supercov_engine::lifecycle::LifecycleError::Metadata)
+        }),
+        _ => {
+            eprintln!("[supercov] unsupported lifecycle action");
+            return ExitCode::from(2);
+        }
+    };
+    match result {
+        Ok(result) => {
+            spawn_trash_sweeper(&request.root);
+            println!("{result}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[supercov] lifecycle failed: {error}");
             ExitCode::from(2)
         }
     }

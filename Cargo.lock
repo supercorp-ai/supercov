@@ -779,6 +779,7 @@ name = "supercov-engine"
 version = "0.0.9"
 dependencies = [
  "flate2",
+ "libc",
  "memmap2",
  "oxc_allocator",
  "oxc_ast",
