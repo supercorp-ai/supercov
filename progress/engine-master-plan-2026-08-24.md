@@ -576,6 +576,13 @@ miss blocks flipping any default.
   denied; actual Windows runtime and NTFS crash behavior remain explicitly
   gated on the configured compatibility-matrix run rather than being inferred
   from a cross-target build.
+- Windows hosted-runner follow-up: GitHub's runner intermittently denied
+  creation beneath its 8.3-alias `%TEMP%` path even though the dedicated NTFS
+  lifecycle, crash, junction, rename, ENOSPC and Job-object tests passed. The
+  two frontend semantic fixtures now live under Cargo's ignored `target` tree
+  so this external temp policy cannot masquerade as an engine regression. Keep
+  the hosted `%TEMP%` behavior as a platform-compatibility TODO; do not weaken
+  production path validation or lifecycle guarantees to accommodate it.
 - Phase 4 now also owns isolated workspace and stable build-cache publication.
   The Rust layer performs deterministic tree copies with clonefile/FICLONE
   fallback through `reflink-copy`, excludes only the frozen generated-output

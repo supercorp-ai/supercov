@@ -804,10 +804,14 @@ mod tests {
     use crate::project_discovery::discover_coverage_project;
 
     fn temporary(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("supercov-js-frontend-{name}-{}", unique()));
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/supercov-test-fixtures")
+            .join(format!("javascript-frontend-{name}-{}", unique()));
         // These tests validate frontend contents and manifest construction.
         // The dedicated workspace/platform suite owns directory-creation,
-        // link, rename, ENOSPC, crash, and cleanup behavior on every OS.
+        // link, rename, ENOSPC, crash, and cleanup behavior on every OS. Keep
+        // semantic fixtures in Cargo's ignored target tree so hosted-runner
+        // policies on the system temporary directory cannot affect them.
         fs::create_dir_all(&path).unwrap();
         path
     }
