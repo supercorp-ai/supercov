@@ -519,6 +519,22 @@ miss blocks flipping any default.
   and frozen frontend version; future languages use the same Rust integrity
   implementation. Production CLI routing and the versioned atomic cutover
   still need to wire these authoritative Rust fingerprints into publication.
+- Persisted-run queries now traverse the real Rust lifecycle end to end rather
+  than only the archive differential harness. One path discovers and validates
+  a stored run, hashes its authoritative evidence, lazily creates or reuses the
+  authenticated binary index, opens its typed mmap sections and executes the
+  shared agent-query operators. Summary, scope, files/gaps, dimensions,
+  decision grouping/detail, file detail, covers/test attribution,
+  minimization and historical diff all produce byte-identical bounded JSON on
+  the five real fixture stores. Tests copy stores into isolated temporary
+  projects and deliberately omit every old JSON/binary cache, proving first-
+  query reconstruction rather than accidentally accepting historical output.
+  Query execution is now path-independent engine code; storage policy remains
+  solely in `run_store`. Public CLI routing remains gated on dynamic waiver
+  overlays and human-output parity. Waivers must not be baked into the
+  disposable evidence index because `supercov.waivers.json` is mutable project
+  policy rather than run evidence; the Rust query layer must evaluate and
+  annotate them at read time.
 
 ## Non-goals and guardrails
 

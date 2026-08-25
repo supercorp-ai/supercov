@@ -10,6 +10,7 @@ pub mod coverage_index;
 pub mod coverage_query;
 pub mod coverage_report;
 pub mod evidence_archive;
+pub mod indexed_query;
 pub mod integrity;
 pub mod js_instrumenter;
 pub mod probe_v2;

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { spawnSync as nativeSpawnSync } from 'node:child_process';
 import { isDeepStrictEqual } from 'node:util';
 
 import { analyzeCoverageArchive } from '../dist/runAnalysis.js';
@@ -17,6 +18,47 @@ const fixtures = [
   'generic-webpack',
   'generic-swc',
 ];
+
+const storedProjects = new Map();
+process.on('exit', () => {
+  for (const project of storedProjects.values()) rmSync(project, { recursive: true, force: true });
+});
+function storedProjectForArchive(archivePath) {
+  const fixtureRoot = resolve(archivePath, '../../../..');
+  const existing = storedProjects.get(fixtureRoot);
+  if (existing) return existing;
+  const project = mkdtempSync(join(tmpdir(), 'supercov-stored-query-'));
+  cpSync(resolve(fixtureRoot, '.supercov/runs'), resolve(project, '.supercov/runs'), {
+    recursive: true,
+    filter: (path) => !path.endsWith('query-index.v1.bin') && !path.endsWith('query-index.v1.json.gz'),
+  });
+  storedProjects.set(fixtureRoot, project);
+  return project;
+}
+
+function spawnSync(command, args, options) {
+  const result = nativeSpawnSync(command, args, options);
+  if (command !== binary || args[0] !== '__query-index-files' || result.status !== 0) return result;
+  const request = JSON.parse(options.input);
+  const {
+    archivePath,
+    generatedAt: _generatedAt,
+    newerArchivePath: _newerArchivePath,
+    newerRunId,
+    ...query
+  } = request;
+  const stored = nativeSpawnSync(binary, ['__query-stored-run'], {
+    ...options,
+    input: JSON.stringify({
+      root: storedProjectForArchive(archivePath),
+      query,
+      newerRunId,
+    }),
+  });
+  assert.equal(stored.status, 0, `stored query failed: ${stored.stderr || stored.stdout}`);
+  assert.equal(stored.stdout, result.stdout, `stored ${query.command} query differs from archive query`);
+  return result;
+}
 
 function archivesForFixture(fixture) {
   const runs = resolve(root, 'tests/fixtures', fixture, '.supercov/runs');

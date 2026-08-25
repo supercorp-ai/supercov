@@ -23,8 +23,10 @@ use supercov_engine::{
     evidence_archive::{
         EvidenceArchiveEntry, EvidenceArchiveSource, collect_sources, write_archive,
     },
+    indexed_query::{IndexedQueryRequest, NewerQuery, execute_indexed_query},
     js_instrumenter::instrument_candidate,
     query_index::{QueryIndex, QueryIndexIdentity, write_query_index},
+    run_store::{StoredRun, discover_runs, open_or_rebuild_query_index, select_run},
 };
 
 const HELP: &str = "Rust candidate for the frozen Supercov engine contract v1.\n\
@@ -59,6 +61,7 @@ fn main() -> ExitCode {
         Some("__minimum-test-set") => minimum_test_sets(),
         Some("__roundtrip-query-index") => roundtrip_query_indexes(),
         Some("__query-index-files") => query_index_files(),
+        Some("__query-stored-run") => query_stored_run(),
         Some("__discover-source") => discover_source(),
         Some("__discover-project") => discover_project(),
         Some("__benchmark-js-transform") => benchmark_js_transform(),
@@ -67,6 +70,93 @@ fn main() -> ExitCode {
             eprintln!(
                 "[supercov] Rust engine candidate is not ready for `{command}`; use the currently shipped engine while the Rust contract gates are incomplete"
             );
+            ExitCode::from(2)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredQueryRequest {
+    root: PathBuf,
+    query: IndexedQueryRequest,
+    newer_run_id: Option<String>,
+}
+
+fn analyze_stored_run(
+    run: &StoredRun,
+) -> Result<supercov_engine::coverage_report::CoverageReport, String> {
+    analyze_coverage_archive(&ArchiveReportRequest {
+        archive_path: run.evidence_path.clone(),
+        run_id: run.id.clone(),
+        generated_at: run.metadata.started_at.clone(),
+        integrity: serde_json::to_value(&run.metadata.integrity).ok(),
+        test_exit_code: supercov_engine::coverage_report::ExitCodeInput::Present(
+            run.metadata.test_exit_code,
+        ),
+    })
+    .map_err(|error| format!("invalid coverage archive: {error:?}"))
+}
+
+/// Internal differential surface for real persisted-run opening and indexing.
+/// Public argument parsing is enabled only after this path has exact parity.
+fn query_stored_run() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut request: StoredQueryRequest = match serde_json::from_str(&input) {
+        Ok(request) => request,
+        Err(error) => {
+            eprintln!("[supercov] invalid stored query input: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let result = (|| -> Result<String, String> {
+        let inventory = discover_runs(&request.root).map_err(|error| error.to_string())?;
+        let run = select_run(&inventory, Some(&request.query.run_id))
+            .map_err(|error| error.to_string())?;
+        request.query.run_id.clone_from(&run.id);
+        let container = open_or_rebuild_query_index(run).map_err(|error| error.to_string())?;
+        let index = CoverageIndex::new(&container).map_err(|error| error.to_string())?;
+        let report = if request.query.command == "minimize" {
+            Some(analyze_stored_run(run)?)
+        } else {
+            None
+        };
+
+        let newer_container;
+        let newer_index;
+        let newer_query = if request.query.command == "diff" {
+            let selector = request
+                .newer_run_id
+                .as_deref()
+                .ok_or_else(|| "stored diff requires a newer run ID".to_owned())?;
+            let newer_run =
+                select_run(&inventory, Some(selector)).map_err(|error| error.to_string())?;
+            newer_container =
+                open_or_rebuild_query_index(newer_run).map_err(|error| error.to_string())?;
+            newer_index =
+                CoverageIndex::new(&newer_container).map_err(|error| error.to_string())?;
+            Some(NewerQuery {
+                run_id: &newer_run.id,
+                index: &newer_index,
+            })
+        } else {
+            None
+        };
+        execute_indexed_query(&index, report.as_ref(), &request.query, newer_query)
+    })();
+    match result {
+        Ok(output) => {
+            print!("{output}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[supercov] stored query failed: {error}");
             ExitCode::from(2)
         }
     }
