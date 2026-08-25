@@ -148,6 +148,49 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
   });
   assert.equal(rustQuery.status, 0, `${fixture}: ${rustQuery.stderr || rustQuery.stdout}`);
   assert.equal(rustQuery.stdout, referenceQuery.stdout, `${fixture}: indexed ${command} JSON differs`);
+
+  const attributed = expected.tests.find((test) => test.role === 'test');
+  assert.ok(attributed, `${fixture}: expected at least one attributed test`);
+  const filteredKind = fixtureIndex % 2 === 0 ? attributed.provenance.kind : undefined;
+  const filteredRunner = fixtureIndex % 2 === 1 || fixtureIndex === fixtures.length - 1
+    ? attributed.provenance.runner
+    : undefined;
+  const filteredArguments = [
+    resolve(root, 'bin/supercov.js'),
+    'runs', runId, 'coverage', 'gaps',
+    '--filter', 'all', '--metric', 'mcdc', '--limit', '3', '--json',
+    ...(filteredKind ? ['--kind', filteredKind] : []),
+    ...(filteredRunner ? ['--runner', filteredRunner] : []),
+  ];
+  const filteredReference = spawnSync(process.execPath, filteredArguments, {
+    cwd: resolve(root, 'tests/fixtures', fixture),
+    encoding: 'utf8',
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  assert.equal(filteredReference.status, 0, `${fixture}: ${filteredReference.stderr || filteredReference.stdout}`);
+  const filteredRust = spawnSync(binary, ['__query-index-files'], {
+    cwd: root,
+    input: JSON.stringify({
+      archivePath,
+      runId,
+      generatedAt,
+      filter: 'all',
+      command: 'gaps',
+      metric: 'mcdc',
+      kind: filteredKind,
+      runner: filteredRunner,
+      offset: 0,
+      limit: 3,
+    }),
+    encoding: 'utf8',
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  assert.equal(filteredRust.status, 0, `${fixture}: ${filteredRust.stderr || filteredRust.stdout}`);
+  assert.equal(
+    filteredRust.stdout,
+    filteredReference.stdout,
+    `${fixture}: provenance-filtered indexed gaps JSON differs`,
+  );
 }
 
 const indexed = spawnSync(binary, ['__roundtrip-query-index'], {

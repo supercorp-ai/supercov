@@ -98,6 +98,7 @@ pub enum QueryError {
     Analysis(ReportError),
     Index(CoverageIndexError),
     InvalidPagination,
+    InvalidRecordSelection,
 }
 
 impl From<ReportError> for QueryError {
@@ -150,6 +151,18 @@ pub struct CoverageFileQueryResult {
     pub pagination: AgentPagination,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct CoverageFileQueryOptions<'a> {
+    pub run: &'a str,
+    pub view: CoverageViewId,
+    pub metric: MinimizeMetric,
+    pub gaps_only: bool,
+    pub kind: Option<&'a str>,
+    pub runner: Option<&'a str>,
+    pub offset: usize,
+    pub limit: usize,
+}
+
 fn gap_metric_value(gap: &IndexedFileGap, metric: MinimizeMetric) -> usize {
     match metric {
         MinimizeMetric::All => gap.score,
@@ -163,17 +176,25 @@ fn gap_metric_value(gap: &IndexedFileGap, metric: MinimizeMetric) -> usize {
 
 pub fn coverage_file_query(
     index: &CoverageIndex<'_>,
-    run: &str,
-    view: CoverageViewId,
-    metric: MinimizeMetric,
-    gaps_only: bool,
-    offset: usize,
-    limit: usize,
+    options: CoverageFileQueryOptions<'_>,
 ) -> Result<CoverageFileQueryResult, QueryError> {
+    let CoverageFileQueryOptions {
+        run,
+        view,
+        metric,
+        gaps_only,
+        kind,
+        runner,
+        offset,
+        limit,
+    } = options;
     if limit == 0 {
         return Err(QueryError::InvalidPagination);
     }
-    let mut files = index.file_gaps(view)?;
+    let mut files = index.file_gaps(view, kind, runner)?;
+    if (kind.is_some() || runner.is_some()) && files.is_empty() {
+        return Err(QueryError::InvalidRecordSelection);
+    }
     if gaps_only {
         files.retain(|gap| gap_metric_value(gap, metric) > 0 || gap.measurement_limitations > 0);
     }
@@ -201,8 +222,8 @@ pub fn coverage_file_query(
             CoverageViewId::Failed => "failed",
         }
         .into(),
-        kind: None,
-        runner: None,
+        kind: kind.map(str::to_owned),
+        runner: runner.map(str::to_owned),
     };
     let data = if gaps_only {
         CoverageFileQueryData::Gaps(CoverageGapsData {

@@ -377,8 +377,13 @@ miss blocks flipping any default.
   read only these columns: `coverage files` and `coverage gaps` produce
   byte-identical frozen agent-JSON envelopes across Playwright, `node:test`,
   esbuild, webpack and SWC with varied outcome filters, metrics, pagination
-  offsets and limits. Test-kind/runner projections and obligation-detail
-  sections remain before this path can replace the shipped query engine.
+  offsets and limits. The same fixed records now materialize every observed
+  test-kind, runner, and valid kind+runner projection. Each projection
+  recomputes masking-MC/DC witnesses from its own selected vectors and records
+  whether a missing obligation is covered by other tests or uncovered
+  everywhere. Byte-identical live queries prove those provenance filters on
+  the same five archives. Obligation-detail sections and the rest of the query
+  surface remain before this path can replace the shipped query engine.
 
 ## Non-goals and guardrails
 

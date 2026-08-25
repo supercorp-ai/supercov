@@ -6,8 +6,8 @@ use supercov_engine::{
     coverage_analysis::{CoverageCoreInput, analyze_core},
     coverage_index::{CoverageIndex, coverage_index_sections},
     coverage_query::{
-        CoverageFileQueryData, MinimizeMetric, MinimumTestSetRequest, coverage_file_query,
-        minimum_test_set_for_request,
+        CoverageFileQueryData, CoverageFileQueryOptions, MinimizeMetric, MinimumTestSetRequest,
+        coverage_file_query, minimum_test_set_for_request,
     },
     coverage_report::{
         ArchiveReportRequest, CoverageReportRequest, analyze_coverage_archive,
@@ -72,6 +72,8 @@ struct IndexedFileQueryRequest {
     filter: String,
     command: String,
     metric: MinimizeMetric,
+    kind: Option<String>,
+    runner: Option<String>,
     offset: usize,
     limit: usize,
 }
@@ -144,12 +146,16 @@ fn query_index_files() -> ExitCode {
         let index = CoverageIndex::new(&container).map_err(|error| error.to_string())?;
         let query = coverage_file_query(
             &index,
-            &request.run_id,
-            view,
-            request.metric,
-            gaps_only,
-            request.offset,
-            request.limit,
+            CoverageFileQueryOptions {
+                run: &request.run_id,
+                view,
+                metric: request.metric,
+                gaps_only,
+                kind: request.kind.as_deref(),
+                runner: request.runner.as_deref(),
+                offset: request.offset,
+                limit: request.limit,
+            },
         )
         .map_err(|error| format!("{error:?}"))?;
         let command = if gaps_only {

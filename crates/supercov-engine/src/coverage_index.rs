@@ -4,12 +4,12 @@
 //! checked references into an interned UTF-8 string table. New query surfaces
 //! add sections without forcing existing readers to parse unrelated data.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Serialize;
 
 use crate::{
-    coverage_analysis::{CoverageCount, CoverageSummary},
+    coverage_analysis::{CoverageCount, CoverageSummary, find_witnesses_for_conditions},
     coverage_report::{CoverageReport, CoverageView},
     query_index::{QueryIndex, QueryIndexError, QueryIndexSection},
 };
@@ -21,7 +21,8 @@ pub const SECTION_FILE_GAPS: u32 = 11;
 
 const STRING_RECORD_SIZE: usize = 16;
 const SUMMARY_RECORD_SIZE: usize = 176;
-const FILE_GAP_RECORD_SIZE: usize = 128;
+const FILE_GAP_RECORD_SIZE: usize = 176;
+const NO_STRING: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -252,42 +253,86 @@ struct MutableFileGap {
     missing_mcdc_conditions: usize,
     measurement_limitations: usize,
     limitation_mask: u32,
+    covered_by_other_tests: [usize; 5],
+    uncovered_everywhere: [usize; 5],
 }
 
 fn limitation_kind(value: &serde_json::Value) -> Option<(&str, &str)> {
     Some((value.get("file")?.as_str()?, value.get("kind")?.as_str()?))
 }
 
-fn file_gaps(view: &CoverageView) -> Vec<(String, MutableFileGap)> {
+fn includes_selected(tests: &[String], selected: Option<&BTreeSet<String>>, covered: bool) -> bool {
+    selected.map_or(covered, |selected| {
+        tests.iter().any(|test| selected.contains(test))
+    })
+}
+
+fn classify(
+    gap: &mut MutableFileGap,
+    dimension: usize,
+    selected: Option<&BTreeSet<String>>,
+    covered_overall: bool,
+) {
+    if selected.is_some() && covered_overall {
+        gap.covered_by_other_tests[dimension] += 1;
+    } else {
+        gap.uncovered_everywhere[dimension] += 1;
+    }
+}
+
+fn file_gaps(
+    view: &CoverageView,
+    selected: Option<&BTreeSet<String>>,
+) -> Result<Vec<(String, MutableFileGap)>, CoverageIndexError> {
     let mut files = BTreeMap::<String, MutableFileGap>::new();
     for line in &view.lines {
         let gap = files.entry(line.file.clone()).or_default();
-        gap.uncovered_lines += usize::from(!line.covered);
+        if !includes_selected(&line.tests, selected, line.covered) {
+            gap.uncovered_lines += 1;
+            classify(gap, 0, selected, line.covered);
+        }
     }
     for point in &view.points {
         let gap = files.entry(point.meta.file.clone()).or_default();
-        if !point.covered {
+        if !includes_selected(&point.tests, selected, point.covered) {
             match point.meta.kind {
-                crate::coverage_analysis::PointKind::Statement => gap.uncovered_statements += 1,
-                crate::coverage_analysis::PointKind::Function => gap.uncovered_functions += 1,
+                crate::coverage_analysis::PointKind::Statement => {
+                    gap.uncovered_statements += 1;
+                    classify(gap, 1, selected, point.covered);
+                }
+                crate::coverage_analysis::PointKind::Function => {
+                    gap.uncovered_functions += 1;
+                    classify(gap, 2, selected, point.covered);
+                }
             }
         }
     }
     for branch in &view.branches {
         let gap = files.entry(branch.meta.file.clone()).or_default();
-        gap.missing_branches += branch
-            .alternatives
-            .iter()
-            .filter(|alternative| !alternative.covered)
-            .count();
+        for alternative in &branch.alternatives {
+            if !includes_selected(&alternative.tests, selected, alternative.covered) {
+                gap.missing_branches += 1;
+                classify(gap, 3, selected, alternative.covered);
+            }
+        }
     }
     for decision in &view.decisions {
         let gap = files.entry(decision.meta.file.clone()).or_default();
-        gap.missing_mcdc_conditions += decision
-            .conditions
+        let selected_vectors = decision
+            .vector_observations
             .iter()
-            .filter(|condition| !condition.covered)
-            .count();
+            .filter(|observation| includes_selected(&observation.tests, selected, true))
+            .map(|observation| observation.vector.clone())
+            .collect::<Vec<_>>();
+        let witnesses =
+            find_witnesses_for_conditions(&selected_vectors, decision.meta.conditions.len())
+                .map_err(|_| CoverageIndexError::InvalidRecord("MC/DC vector width"))?;
+        for (index, witness) in witnesses.into_iter().enumerate() {
+            if witness.is_none() {
+                gap.missing_mcdc_conditions += 1;
+                classify(gap, 4, selected, decision.conditions[index].covered);
+            }
+        }
     }
     for limitation in &view.limitations {
         let Some((file, kind)) = limitation_kind(limitation) else {
@@ -302,13 +347,15 @@ fn file_gaps(view: &CoverageView) -> Vec<(String, MutableFileGap)> {
             _ => 8,
         };
     }
-    files.into_iter().collect()
+    Ok(files.into_iter().collect())
 }
 
 fn file_gap_record(
     view_id: CoverageViewId,
     file: &str,
     gap: &MutableFileGap,
+    kind: Option<&str>,
+    runner: Option<&str>,
     strings: &mut StringTable,
 ) -> Result<[u8; FILE_GAP_RECORD_SIZE], CoverageIndexError> {
     let mut record = [0_u8; FILE_GAP_RECORD_SIZE];
@@ -334,7 +381,66 @@ fn file_gap_record(
         + gap.missing_mcdc_conditions * 3
         + gap.measurement_limitations * 3;
     put_u64(&mut record, 64, usize_u64(score)?);
+    put_u32(
+        &mut record,
+        72,
+        kind.map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+    );
+    put_u32(
+        &mut record,
+        76,
+        runner.map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+    );
+    for (index, value) in gap.covered_by_other_tests.into_iter().enumerate() {
+        put_u64(&mut record, 80 + index * 8, usize_u64(value)?);
+    }
+    for (index, value) in gap.uncovered_everywhere.into_iter().enumerate() {
+        put_u64(&mut record, 120 + index * 8, usize_u64(value)?);
+    }
     Ok(record)
+}
+
+fn projections(view: &CoverageView) -> Vec<(Option<String>, Option<String>, BTreeSet<String>)> {
+    let kinds = view
+        .tests
+        .iter()
+        .map(|test| test.provenance.kind.clone())
+        .collect::<BTreeSet<_>>();
+    let runners = view
+        .tests
+        .iter()
+        .map(|test| test.provenance.runner.clone())
+        .collect::<BTreeSet<_>>();
+    let mut selectors = Vec::new();
+    for kind in &kinds {
+        selectors.push((Some(kind.clone()), None));
+    }
+    for runner in &runners {
+        selectors.push((None, Some(runner.clone())));
+    }
+    for kind in &kinds {
+        for runner in &runners {
+            selectors.push((Some(kind.clone()), Some(runner.clone())));
+        }
+    }
+    selectors
+        .into_iter()
+        .filter_map(|(kind, runner)| {
+            let selected = view
+                .tests
+                .iter()
+                .filter(|test| {
+                    kind.as_ref()
+                        .is_none_or(|value| test.provenance.kind == *value)
+                        && runner
+                            .as_ref()
+                            .is_none_or(|value| test.provenance.runner == *value)
+                })
+                .map(|test| test.id.clone())
+                .collect::<BTreeSet<_>>();
+            (!selected.is_empty()).then_some((kind, runner, selected))
+        })
+        .collect()
 }
 
 pub fn coverage_index_sections(
@@ -350,8 +456,20 @@ pub fn coverage_index_sections(
     let mut gaps = Vec::new();
     for (id, view) in views {
         summaries.extend_from_slice(&summary_record(id, view, &mut strings)?);
-        for (file, gap) in file_gaps(view) {
-            gaps.extend_from_slice(&file_gap_record(id, &file, &gap, &mut strings)?);
+        for (file, gap) in file_gaps(view, None)? {
+            gaps.extend_from_slice(&file_gap_record(id, &file, &gap, None, None, &mut strings)?);
+        }
+        for (kind, runner, selected) in projections(view) {
+            for (file, gap) in file_gaps(view, Some(&selected))? {
+                gaps.extend_from_slice(&file_gap_record(
+                    id,
+                    &file,
+                    &gap,
+                    kind.as_deref(),
+                    runner.as_deref(),
+                    &mut strings,
+                )?);
+            }
         }
     }
     let [blob, string_records] = strings.sections()?;
@@ -484,6 +602,8 @@ impl<'a> CoverageIndex<'a> {
     pub fn file_gaps(
         &self,
         view: CoverageViewId,
+        kind: Option<&str>,
+        runner: Option<&str>,
     ) -> Result<Vec<IndexedFileGap>, CoverageIndexError> {
         let descriptor = self.index.descriptor(SECTION_FILE_GAPS)?;
         let mut gaps = Vec::new();
@@ -494,7 +614,7 @@ impl<'a> CoverageIndex<'a> {
             }
             if record[1..4].iter().any(|byte| *byte != 0)
                 || record[60..64].iter().any(|byte| *byte != 0)
-                || record[72..].iter().any(|byte| *byte != 0)
+                || record[160..].iter().any(|byte| *byte != 0)
             {
                 return Err(CoverageIndexError::InvalidRecord("file-gap reserved bytes"));
             }
@@ -526,6 +646,11 @@ impl<'a> CoverageIndex<'a> {
             if score != expected_score {
                 return Err(CoverageIndexError::InvalidRecord("file-gap score"));
             }
+            let record_kind = self.optional_string(get_u32(record, 72)?)?;
+            let record_runner = self.optional_string(get_u32(record, 76)?)?;
+            if record_kind.as_deref() != kind || record_runner.as_deref() != runner {
+                continue;
+            }
             let mut limitation_kinds = Vec::new();
             for (bit, kind) in [
                 (1, "dynamic-code"),
@@ -548,18 +673,18 @@ impl<'a> CoverageIndex<'a> {
                 measurement_limitations,
                 limitation_kinds,
                 covered_by_other_tests: IndexedGapDimensions {
-                    lines: 0,
-                    statements: 0,
-                    functions: 0,
-                    branches: 0,
-                    mcdc_conditions: 0,
+                    lines: number(80)?,
+                    statements: number(88)?,
+                    functions: number(96)?,
+                    branches: number(104)?,
+                    mcdc_conditions: number(112)?,
                 },
                 uncovered_everywhere: IndexedGapDimensions {
-                    lines: uncovered_lines,
-                    statements: uncovered_statements,
-                    functions: uncovered_functions,
-                    branches: missing_branches,
-                    mcdc_conditions: missing_mcdc_conditions,
+                    lines: number(120)?,
+                    statements: number(128)?,
+                    functions: number(136)?,
+                    branches: number(144)?,
+                    mcdc_conditions: number(152)?,
                 },
                 score,
             });
@@ -573,14 +698,22 @@ impl<'a> CoverageIndex<'a> {
         Ok(gaps)
     }
 
+    fn optional_string(&self, id: u32) -> Result<Option<String>, CoverageIndexError> {
+        if id == NO_STRING {
+            Ok(None)
+        } else {
+            self.string(id).map(Some)
+        }
+    }
+
     pub fn snapshot(&self) -> Result<IndexedCoverageSnapshot, CoverageIndexError> {
         Ok(IndexedCoverageSnapshot {
             all_summary: self.summary(CoverageViewId::All)?,
             passed_summary: self.summary(CoverageViewId::Passed)?,
             failed_summary: self.summary(CoverageViewId::Failed)?,
-            all_files: self.file_gaps(CoverageViewId::All)?,
-            passed_files: self.file_gaps(CoverageViewId::Passed)?,
-            failed_files: self.file_gaps(CoverageViewId::Failed)?,
+            all_files: self.file_gaps(CoverageViewId::All, None, None)?,
+            passed_files: self.file_gaps(CoverageViewId::Passed, None, None)?,
+            failed_files: self.file_gaps(CoverageViewId::Failed, None, None)?,
         })
     }
 }
@@ -721,7 +854,7 @@ mod tests {
         ] {
             assert_eq!(index.summary(id).unwrap(), view.summary);
         }
-        let gaps = index.file_gaps(CoverageViewId::All).unwrap();
+        let gaps = index.file_gaps(CoverageViewId::All, None, None).unwrap();
         assert_eq!(gaps.len(), 1);
         assert_eq!(gaps[0].file, "src/a.js");
         assert_eq!(gaps[0].missing_mcdc_conditions, 2);
