@@ -168,11 +168,27 @@ fn unique_name() -> String {
     )
 }
 
-fn sync_directory(path: &Path) -> Result<(), LifecycleError> {
+pub(crate) fn sync_directory(path: &Path) -> Result<(), LifecycleError> {
     #[cfg(unix)]
     File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(|source| io_error(path, source))?;
+    Ok(())
+}
+
+pub(crate) fn atomic_rename(source: &Path, destination: &Path) -> Result<(), LifecycleError> {
+    let source_parent = source
+        .parent()
+        .ok_or_else(|| LifecycleError::UnsafePath(source.into()))?;
+    let destination_parent = destination
+        .parent()
+        .ok_or_else(|| LifecycleError::UnsafePath(destination.into()))?;
+    fs::create_dir_all(destination_parent).map_err(|error| io_error(destination_parent, error))?;
+    fs::rename(source, destination).map_err(|error| io_error(destination, error))?;
+    sync_directory(destination_parent)?;
+    if source_parent != destination_parent {
+        sync_directory(source_parent)?;
+    }
     Ok(())
 }
 
@@ -242,8 +258,7 @@ pub fn remove_stored_tree_deferred(
     reject_linked_ancestors(&root, &trash, true)?;
     fs::create_dir_all(&trash).map_err(|source| io_error(&trash, source))?;
     let destination = trash.join(unique_name());
-    fs::rename(&target, &destination).map_err(|source| io_error(&target, source))?;
-    sync_directory(&trash)?;
+    atomic_rename(&target, &destination)?;
     Ok(Some(destination))
 }
 
@@ -428,6 +443,7 @@ struct LockOwner {
 }
 
 pub struct ProjectLock {
+    root: PathBuf,
     path: PathBuf,
     owner: LockOwner,
     released: bool,
@@ -455,6 +471,7 @@ impl ProjectLock {
                         .map_err(|source| io_error(&path, source))?;
                     sync_directory(parent)?;
                     return Ok(Self {
+                        root: root.to_owned(),
                         path,
                         owner,
                         released: false,
@@ -502,6 +519,10 @@ impl ProjectLock {
             fs::remove_file(&self.path).map_err(|source| io_error(&self.path, source))?;
         }
         Ok(())
+    }
+
+    pub(crate) fn protects(&self, root: &Path) -> bool {
+        !self.released && self.root == root
     }
 }
 

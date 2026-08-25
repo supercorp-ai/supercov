@@ -560,6 +560,26 @@ miss blocks flipping any default.
   active-run preservation, cache policy and dead-run recovery. Windows process
   liveness/Job-object behavior remains explicitly gated on the Windows spike;
   it is not silently claimed by this Unix-validated checkpoint.
+- Phase 4 now also owns isolated workspace and stable build-cache publication.
+  The Rust layer performs deterministic tree copies with clonefile/FICLONE
+  fallback through `reflink-copy`, excludes only the frozen generated-output
+  roots and marker-owned Supercov stores, relocates internal links, rejects
+  links escaping the canonical project root, and exposes a real
+  `node_modules` mount point containing per-entry links. Every preparation,
+  refresh, recovery and source-prune operation requires the live project lock.
+  Stable cache refresh retains only explicitly fingerprint-selected artifacts,
+  keeps the previous complete generation through the publication boundary,
+  restores it on failure, recovers the newest complete generation after a
+  killed process, and defers obsolete trees to the lifecycle sweeper. Rename
+  boundaries fsync both source and destination parents when necessary. A
+  black-box TypeScript/Rust differential compares complete file contents,
+  modes, exclusions and link targets for isolated copies, cached refresh,
+  artifact reuse, pruning and interrupted publication; the independent Rust
+  tests additionally make the project lock and unchanged-source guarantees
+  explicit. Windows junction behavior, copy fallback faults, ENOSPC and
+  SIGKILL-equivalent integration remain gated on the cross-platform filesystem
+  matrix rather than being inferred from Unix parity. Public execution remains
+  disabled until process supervision owns the frozen contract end to end.
 
 ## Non-goals and guardrails
 

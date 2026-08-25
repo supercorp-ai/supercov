@@ -21,6 +21,7 @@ pub mod query_index;
 pub mod run_query;
 pub mod run_store;
 pub mod source_discovery;
+pub mod workspace;
 
 pub use supercov_contracts::CONTRACT_VERSION;
 

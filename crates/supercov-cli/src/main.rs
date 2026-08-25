@@ -71,6 +71,7 @@ fn main() -> ExitCode {
         Some("__discover-source") => discover_source(),
         Some("__discover-project") => discover_project(),
         Some("__lifecycle") => lifecycle(),
+        Some("__workspace") => workspace(),
         Some("__sweep-trash") => sweep_trash(),
         Some("__benchmark-js-transform") => benchmark_js_transform(),
         Some("__pack-evidence") => pack_evidence(),
@@ -78,6 +79,85 @@ fn main() -> ExitCode {
             eprintln!(
                 "[supercov] Rust engine candidate is not ready for `{command}`; use the currently shipped engine while the Rust contract gates are incomplete"
             );
+            ExitCode::from(2)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceRequest {
+    root: PathBuf,
+    action: String,
+    run_id: Option<String>,
+    reuse_paths: Option<Vec<PathBuf>>,
+}
+
+/// Internal differential surface for workspace publication and recovery.
+/// The public run path is enabled only after workspace and supervision gates
+/// are complete.
+fn workspace() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let request: WorkspaceRequest = match serde_json::from_str(&input) {
+        Ok(request) => request,
+        Err(error) => {
+            eprintln!("[supercov] invalid workspace input: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let result = (|| -> Result<serde_json::Value, String> {
+        let run_id = request
+            .run_id
+            .as_deref()
+            .unwrap_or("workspace-differential");
+        let mut lock =
+            supercov_engine::lifecycle::ProjectLock::acquire(&request.root, run_id, "internal")
+                .map_err(|error| error.to_string())?;
+        let value = match request.action.as_str() {
+            "prepare-isolated" => serde_json::json!({
+                "workspace": supercov_engine::workspace::prepare_isolated_workspace(
+                    &request.root,
+                    run_id,
+                    &lock,
+                ).map_err(|error| error.to_string())?,
+            }),
+            "prepare-cached" => serde_json::json!({
+                "workspace": supercov_engine::workspace::prepare_cached_workspace(
+                    &request.root,
+                    &lock,
+                    request.reuse_paths.as_deref().unwrap_or_default(),
+                ).map_err(|error| error.to_string())?,
+            }),
+            "recover-cache" => serde_json::to_value(
+                supercov_engine::workspace::recover_cached_workspace(&request.root, &lock)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?,
+            "prune-cache" => serde_json::json!({
+                "removed": supercov_engine::workspace::prune_cached_workspace_sources(
+                    &request.root,
+                    &lock,
+                ).map_err(|error| error.to_string())?,
+            }),
+            _ => return Err(format!("unsupported workspace action: {}", request.action)),
+        };
+        lock.release().map_err(|error| error.to_string())?;
+        Ok(value)
+    })();
+    match result {
+        Ok(result) => {
+            spawn_trash_sweeper(&request.root);
+            println!("{result}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[supercov] workspace failed: {error}");
             ExitCode::from(2)
         }
     }
