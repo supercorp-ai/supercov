@@ -26,6 +26,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 supercov-contracts.workspace = true
+sysinfo.workspace = true
 
 [build-dependencies]
 sha2.workspace = true

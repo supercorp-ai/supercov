@@ -72,6 +72,7 @@ fn main() -> ExitCode {
         Some("__discover-project") => discover_project(),
         Some("__lifecycle") => lifecycle(),
         Some("__workspace") => workspace(),
+        Some("__supervise") => supervise(),
         Some("__sweep-trash") => sweep_trash(),
         Some("__benchmark-js-transform") => benchmark_js_transform(),
         Some("__pack-evidence") => pack_evidence(),
@@ -80,6 +81,75 @@ fn main() -> ExitCode {
                 "[supercov] Rust engine candidate is not ready for `{command}`; use the currently shipped engine while the Rust contract gates are incomplete"
             );
             ExitCode::from(2)
+        }
+    }
+}
+
+fn supervise() -> ExitCode {
+    let mut arguments = std::env::args_os().skip(2).collect::<Vec<_>>();
+    if arguments.first().is_some_and(|argument| argument == "--") {
+        arguments.remove(0);
+    }
+    let Some(program) = arguments.first().cloned() else {
+        eprintln!("[supercov] test command must not be empty");
+        return ExitCode::from(2);
+    };
+    let diagnostic_interval = match supercov_engine::process_supervision::positive_milliseconds(
+        std::env::var("SUPERCOV_DIAGNOSTIC_INTERVAL_MS")
+            .ok()
+            .as_deref(),
+        "SUPERCOV_DIAGNOSTIC_INTERVAL_MS",
+    ) {
+        Ok(value) => value.unwrap_or_else(|| {
+            std::time::Duration::from_millis(supercov_contracts::DEFAULT_DIAGNOSTIC_INTERVAL_MS)
+        }),
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let timeout = match supercov_engine::process_supervision::positive_milliseconds(
+        std::env::var("SUPERCOV_COMMAND_TIMEOUT_MS").ok().as_deref(),
+        "SUPERCOV_COMMAND_TIMEOUT_MS",
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            eprintln!("[supercov] could not resolve the current directory: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let spec = supercov_engine::process_supervision::CommandSpec {
+        program,
+        arguments: arguments.into_iter().skip(1).collect(),
+        cwd,
+        environment: None,
+    };
+    let mut stderr = std::io::stderr().lock();
+    match supercov_engine::process_supervision::supervise_command(
+        &spec,
+        supercov_engine::process_supervision::SupervisionOptions {
+            diagnostic_interval,
+            timeout,
+            termination_grace: std::time::Duration::from_millis(
+                supercov_contracts::COMMAND_TERMINATION_GRACE_MS,
+            ),
+        },
+        &mut stderr,
+    ) {
+        Ok(result) => match u8::try_from(result.exit_code()) {
+            Ok(code) => ExitCode::from(code),
+            Err(_) => ExitCode::FAILURE,
+        },
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            ExitCode::FAILURE
         }
     }
 }

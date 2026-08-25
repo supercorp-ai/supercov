@@ -580,6 +580,26 @@ miss blocks flipping any default.
   SIGKILL-equivalent integration remain gated on the cross-platform filesystem
   matrix rather than being inferred from Unix parity. Public execution remains
   disabled until process supervision owns the frozen contract end to end.
+- The POSIX process-supervision contract is now implemented in Rust behind a
+  private black-box surface. Commands start in a dedicated process group with
+  inherited stdio and no runner-specific argument changes; positive-integer
+  diagnostic/timeout configuration is validated before spawn; no timeout is
+  invented by default. Sanitized descendant snapshots contain only PID, PPID,
+  executable basename, state and accumulated CPU time and are collected
+  through native process APIs rather than a possibly hanging `ps` subprocess.
+  SIGHUP, SIGINT and SIGTERM handlers are installed with a serialized
+  `sigaction` guard, forwarded to the entire group, escalated after the frozen
+  grace period and restored byte-for-byte after each command. Explicit timeout
+  returns 124; signal interruption returns 129/130/143; spawn and wait failures
+  cannot become successful tests. Diagnostic-output failure is observational
+  and cannot alter or orphan the command. A black-box Node parent/grandchild
+  regression proves full-tree cooperative signal delivery, while another
+  proves invalid configuration cannot spawn and diagnostics never expose a
+  private argument. Windows deliberately returns unsupported until the Job
+  Object spike and CI gate land. The unavoidable JavaScript capability/remote
+  launch interception remains a runtime shim; provider-neutral local process
+  ownership no longer needs to remain JavaScript after build orchestration is
+  wired.
 
 ## Non-goals and guardrails
 

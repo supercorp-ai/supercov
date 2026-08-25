@@ -33,6 +33,7 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 sha2 = "0.10"
 supercov-contracts = { path = "crates/supercov-contracts" }
 supercov-engine = { path = "crates/supercov-engine" }
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 
 [profile.release]
 codegen-units = 1
