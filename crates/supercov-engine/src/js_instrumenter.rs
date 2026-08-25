@@ -521,14 +521,15 @@ struct NodeAssertionBindingCollector<'s> {
     bindings: NodeAssertionBindings,
     scoping: &'s oxc_semantic::Scoping,
     allow_contextual_expect: bool,
+    expect_modules: HashSet<String>,
 }
 
 impl<'a> Visit<'a> for NodeAssertionBindingCollector<'_> {
     fn visit_import_declaration(&mut self, declaration: &oxc_ast::ast::ImportDeclaration<'a>) {
         let module_name = declaration.source.value.as_str();
         let assert_module = canonical_assert_module(module_name);
-        let expect_module = matches!(module_name, "vitest" | "@jest/globals" | "expect")
-            || self.allow_contextual_expect;
+        let expect_module =
+            self.expect_modules.contains(module_name) || self.allow_contextual_expect;
         for specifier in declaration.specifiers.iter().flatten() {
             match specifier {
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
@@ -603,6 +604,7 @@ impl<'a> Visit<'a> for NodeAssertionBindingCollector<'_> {
 fn node_assertion_bindings(
     program: &Program<'_>,
     scoping: &oxc_semantic::Scoping,
+    extra_expect_modules: &[String],
 ) -> NodeAssertionBindings {
     let allow_contextual_expect = program.source_text.contains("node:test")
         && program
@@ -613,6 +615,11 @@ fn node_assertion_bindings(
         bindings: NodeAssertionBindings::default(),
         scoping,
         allow_contextual_expect,
+        expect_modules: ["vitest", "@jest/globals", "expect", "@playwright/test"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(extra_expect_modules.iter().cloned())
+            .collect(),
     };
     collector.visit_program(program);
     collector.bindings
@@ -840,6 +847,14 @@ pub fn instrument_node_assertion_phases(
     source: &str,
     file: &str,
 ) -> Result<NodeAssertionInstrumentation, CandidateError> {
+    instrument_node_assertion_phases_with_expect_modules(source, file, &[])
+}
+
+pub fn instrument_node_assertion_phases_with_expect_modules(
+    source: &str,
+    file: &str,
+    extra_expect_modules: &[String],
+) -> Result<NodeAssertionInstrumentation, CandidateError> {
     if !source.contains("assert") && !source.contains("expect") {
         return Ok(NodeAssertionInstrumentation {
             code: source.into(),
@@ -860,7 +875,8 @@ pub fn instrument_node_assertion_phases(
         ));
     }
     let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
-    let bindings = node_assertion_bindings(&parsed.program, semantic.scoping());
+    let bindings =
+        node_assertion_bindings(&parsed.program, semantic.scoping(), extra_expect_modules);
     if bindings.objects.is_empty() && bindings.direct.is_empty() && bindings.expects.is_empty() {
         return Ok(NodeAssertionInstrumentation {
             code: source.into(),
@@ -6491,6 +6507,33 @@ mod tests {
             "test('value', () => expect(value()).toBe(1));\n",
         );
         let output = instrument_node_assertion_phases(source, "tests/value.test.mjs").unwrap();
+        assert_eq!(output.assertions, 1);
+        assert!(output.code.contains("expect.toBe"));
+    }
+
+    #[test]
+    fn playwright_expect_matchers_are_attributed_without_runner_global_state() {
+        let source = concat!(
+            "import { expect, test } from '@playwright/test';\n",
+            "test('value', () => expect(value()).toBe(1));\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/value.spec.mjs").unwrap();
+        assert_eq!(output.assertions, 1);
+        assert!(output.code.contains("expect.toBe"));
+    }
+
+    #[test]
+    fn project_discovered_expect_modules_are_not_hardcoded_in_the_transformer() {
+        let source = concat!(
+            "import { browserTest, expect } from '@acme/browser-fixtures';\n",
+            "browserTest('value', () => expect(value()).toBe(1));\n",
+        );
+        let output = instrument_node_assertion_phases_with_expect_modules(
+            source,
+            "tests/value.spec.mjs",
+            &["@acme/browser-fixtures".into()],
+        )
+        .unwrap();
         assert_eq!(output.assertions, 1);
         assert!(output.code.contains("expect.toBe"));
     }

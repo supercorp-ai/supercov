@@ -594,6 +594,15 @@ class CoveragePhaseController {
 
 let activeController: CoveragePhaseController | undefined;
 const controllers = new Map<string, CoveragePhaseController>();
+const directRuntime = () =>
+  (
+    globalThis as typeof globalThis & {
+      __SUPERCOV_DIRECT_RUNTIME__?: {
+        activateCoverageScope(scope?: CoverageExecutionScope): void;
+        takeNodeAssertionPhases(scope: CoverageExecutionScope): CoveragePhase[];
+      };
+    }
+  ).__SUPERCOV_DIRECT_RUNTIME__;
 
 function activeCoverageHeaders(): Record<string, string> | undefined {
   const controller = activeController;
@@ -893,11 +902,13 @@ const instrumentedTest = base.extend<{ mcdcAutoCollect: void }>({
     );
     controllers.set(scope.attemptId, controller);
     activeController = controller;
+    directRuntime()?.activateCoverageScope(scope);
     await controller.registerPage(page);
     try {
       await use(controller.wrap(page));
     } finally {
       await controller.dispose();
+      directRuntime()?.activateCoverageScope();
       if (activeController === controller) activeController = undefined;
       controllers.delete(scope.attemptId);
     }
@@ -1013,7 +1024,10 @@ const instrumentedTest = base.extend<{ mcdcAutoCollect: void }>({
             project: testInfo.project.name,
             explicitKind: process.env["SUPERCOV_TEST_KIND"],
           }),
-          phases: controller?.phases ?? [],
+          phases: [
+            ...(controller?.phases ?? []),
+            ...(directRuntime()?.takeNodeAssertionPhases(scope) ?? []),
+          ],
           browser,
           server,
         };

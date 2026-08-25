@@ -650,8 +650,22 @@ miss blocks flipping any default.
   link between an assertion and its obligations. Empty request contexts still
   suppress inherited process carriers, so unscoped health/background work is
   not accidentally promoted into a test. Both direct Node and Vitest fixtures
-  pass the complete Rust differential suite. Playwright/build-tool execution
-  frontends, full Test262 and browser matrices, dogfood parity, and cross-
+  pass the complete Rust differential suite.
+- The third private Rust-owned execution frontend now runs Playwright through
+  the same isolated lifecycle, including commands hidden behind npm scripts.
+  Rust writes a path-confined merging config, relocates the original config,
+  installs the coverage reporter, and configures the existing unavoidable
+  page/request/browser collector shim. Project discovery—not a hardcoded
+  package list—supplies custom fixture modules, test exports, and assertion
+  imports. The black-box fixture uses a project-owned
+  `@acme/browser-fixtures` package and proves two parallel worker processes,
+  four unique attempt identities, four passing tests, full line/branch/MC/DC,
+  exact assertion-linked obligations, unchanged source, and valid persisted
+  Rust queries. Native assertion phase IDs have their own namespace so they
+  cannot collide with Playwright action/assertion phases. This closes the
+  direct Playwright runner boundary; real application code transformed by
+  Vite/other build tools and executed in browser frames is the next frontend
+  boundary. Full Test262 and browser matrices, dogfood parity, and cross-
   platform crash/filesystem gates still block any public selector or
   TypeScript-engine deletion.
 

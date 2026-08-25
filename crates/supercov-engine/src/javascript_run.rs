@@ -196,6 +196,37 @@ pub fn run_direct_javascript(
             frontend.vitest_config_path.display().to_string(),
         );
     }
+    if project.playwright_config.is_some()
+        || command_uses_tool(&root, &request.command, "playwright")
+    {
+        overrides.insert(
+            "SUPERCOV_GENERATED_PLAYWRIGHT_CONFIG".into(),
+            frontend.playwright_config_path.display().to_string(),
+        );
+        overrides.insert(
+            "SUPERCOV_PLAYWRIGHT_MODULE".into(),
+            project.playwright_module.clone(),
+        );
+        overrides.insert(
+            "SUPERCOV_PLAYWRIGHT_TEST_EXPORT".into(),
+            project.playwright_test_export.clone(),
+        );
+        overrides.insert(
+            "SUPERCOV_PLAYWRIGHT_WRAPPER".into(),
+            "./.supercov/playwright.js".into(),
+        );
+        if let Some(original) = project
+            .playwright_config
+            .as_ref()
+            .and_then(|path| path.strip_prefix(&root).ok())
+            .map(|path| workspace.join(path))
+        {
+            overrides.insert(
+                "SUPERCOV_ORIGINAL_PLAYWRIGHT_CONFIG".into(),
+                original.display().to_string(),
+            );
+        }
+    }
     overrides.extend(project.build_environment.clone());
     let plan = ExecutionPlan {
         preparation: Vec::new(),

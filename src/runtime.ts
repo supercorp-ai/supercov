@@ -740,7 +740,7 @@ export function withNodeAssertionPhase<T>(
   if (existing) return callback();
   const attempt = assertionPhaseState(scope);
   const phase: CoveragePhase = {
-    id: `${scope.attemptId}:phase:${++attempt.counter}`,
+    id: `${scope.attemptId}:assertion:${++attempt.counter}`,
     kind: "assertion",
     operation,
     ...(source ? { source } : {}),

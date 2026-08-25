@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     js_instrumenter::{
         CandidateBranch, CandidateDecision, CandidateError, CandidateLimitation, CandidatePoint,
-        instrument_direct_candidate, instrument_node_assertion_phases,
+        instrument_direct_candidate, instrument_node_assertion_phases_with_expect_modules,
     },
     project_discovery::CoverageProject,
     source_discovery::{SourceLimitation, SourceScope},
@@ -102,6 +102,7 @@ pub struct PreparedJavascriptFrontend {
     pub manifest: JavascriptManifest,
     pub manifest_path: PathBuf,
     pub preload_path: PathBuf,
+    pub playwright_config_path: PathBuf,
     pub vitest_config_path: PathBuf,
     pub assertion_calls: usize,
 }
@@ -275,6 +276,119 @@ fn write_vitest_config(
     Ok(path)
 }
 
+fn configure_playwright_runtime(
+    generated: &Path,
+    project: &CoverageProject,
+) -> Result<(), JavascriptFrontendError> {
+    let adapter_path = generated.join("playwright.js");
+    let mut adapter =
+        fs::read_to_string(&adapter_path).map_err(|source| io_error(&adapter_path, source))?;
+    adapter = adapter
+        .replace("__SUPERCOV_PLAYWRIGHT_MODULE__", &project.playwright_module)
+        .replace(
+            "__SUPERCOV_PLAYWRIGHT_TEST_EXPORT__",
+            &project.playwright_test_export,
+        );
+    let mut exports = Vec::new();
+    if project.playwright_test_export != "test" {
+        exports.push(format!(
+            "export {{ instrumentedTest as {} }};",
+            project.playwright_test_export
+        ));
+    }
+    exports.extend(
+        project
+            .playwright_exports
+            .iter()
+            .filter(|name| {
+                name.as_str() != "test"
+                    && name.as_str() != "expect"
+                    && *name != &project.playwright_test_export
+            })
+            .map(|name| {
+                let encoded = serde_json::to_string(name)
+                    .expect("serializing a JavaScript export name cannot fail");
+                format!("export const {name} = adapter[{encoded}];")
+            }),
+    );
+    adapter = adapter.replace("/*__SUPERCOV_ADAPTER_EXPORTS__*/", &exports.join("\n"));
+    atomic_write(&adapter_path, adapter.as_bytes())?;
+
+    let loader_path = generated.join("resolve-loader.mjs");
+    let loader = fs::read_to_string(&loader_path)
+        .map_err(|source| io_error(&loader_path, source))?
+        .replace("__SUPERCOV_PLAYWRIGHT_MODULE__", &project.playwright_module);
+    atomic_write(&loader_path, loader.as_bytes())
+}
+
+fn write_playwright_config(
+    workspace: &Path,
+    project: &CoverageProject,
+    generated: &Path,
+) -> Result<PathBuf, JavascriptFrontendError> {
+    let path = generated.join("playwright.config.mjs");
+    let original = relocated_project_file(workspace, project, project.playwright_config.as_ref());
+    let original_import = if let Some(original) = &original {
+        let relative = original
+            .strip_prefix(workspace)
+            .map_err(|_| JavascriptFrontendError::UnsafeSourcePath(original.display().to_string()))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let specifier = serde_json::to_string(&format!("../{relative}"))
+            .map_err(JavascriptFrontendError::Serialize)?;
+        format!("import original from {specifier};\n")
+    } else {
+        "const original = {};\n".into()
+    };
+    let source = format!(
+        "import './register.mjs';\n\
+         import {{ dirname, isAbsolute, relative, resolve }} from 'node:path';\n\
+         import {{ fileURLToPath }} from 'node:url';\n\
+         {original_import}\
+         const resolvedValue = typeof original === 'function' ? await original({{ command: 'test', mode: 'test' }}) : original;\n\
+         const resolved = resolvedValue ?? {{}};\n\
+         const runtimeProjectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');\n\
+         const originalDirectory = {};
+         const sourceProjectRoot = process.env.SUPERCOV_SOURCE_PROJECT_ROOT;\n\
+         const runtimePath = value => {{\n\
+           if (!value) return value;\n\
+           const absolute = isAbsolute(value) ? value : resolve(originalDirectory, value);\n\
+           const local = relative(runtimeProjectRoot, absolute);\n\
+           if (local === '' || (!local.startsWith('..') && !isAbsolute(local))) return absolute;\n\
+           if (sourceProjectRoot) {{\n\
+             const sourceLocal = relative(sourceProjectRoot, absolute);\n\
+             if (sourceLocal === '' || (!sourceLocal.startsWith('..') && !isAbsolute(sourceLocal))) return resolve(runtimeProjectRoot, sourceLocal);\n\
+           }}\n\
+           throw new Error('Supercov refuses a Playwright output/cwd outside the isolated project: ' + absolute);\n\
+         }};\n\
+         const normalizeWebServer = server => server ? ({{ ...server, cwd: runtimePath(server.cwd ?? originalDirectory) }}) : server;\n\
+         const normalized = {{ ...resolved,\n\
+           testDir: runtimePath(resolved.testDir),\n\
+           outputDir: runtimePath(resolved.outputDir),\n\
+           snapshotDir: runtimePath(resolved.snapshotDir),\n\
+           projects: resolved.projects?.map(project => ({{ ...project, testDir: runtimePath(project.testDir), outputDir: runtimePath(project.outputDir), snapshotDir: runtimePath(project.snapshotDir) }})),\n\
+           webServer: Array.isArray(resolved.webServer) ? resolved.webServer.map(normalizeWebServer) : normalizeWebServer(resolved.webServer),\n\
+         }};\n\
+         const configuredReporters = normalized.reporter;\n\
+         const reporters = configuredReporters\n\
+           ? (typeof configuredReporters === 'string' ? [[configuredReporters]] : (Array.isArray(configuredReporters[0]) ? configuredReporters : [configuredReporters]))\n\
+           : [['list']];\n\
+         const coverageReporter = resolve(runtimeProjectRoot, '.supercov/playwrightReporter.js');\n\
+         export default {{ ...normalized, reporter: [...reporters, [coverageReporter]] }};\n",
+        serde_json::to_string(
+            &original
+                .as_ref()
+                .and_then(|path| path.parent())
+                .unwrap_or(workspace)
+                .display()
+                .to_string()
+        )
+        .map_err(JavascriptFrontendError::Serialize)?
+    );
+    atomic_write(&path, source.as_bytes())?;
+    Ok(path)
+}
+
 /// Prepare the complete JavaScript frontend inside an isolated workspace.
 /// The source project is read only through the copied workspace inventory.
 pub fn prepare_javascript_frontend(
@@ -285,6 +399,8 @@ pub fn prepare_javascript_frontend(
 ) -> Result<PreparedJavascriptFrontend, JavascriptFrontendError> {
     let generated = workspace.join(".supercov");
     copy_runtime(runtime_root, &generated, collector_id)?;
+    configure_playwright_runtime(&generated, project)?;
+    let playwright_config_path = write_playwright_config(workspace, project, &generated)?;
     let vitest_config_path = write_vitest_config(workspace, project, &generated)?;
 
     let mut decisions = BTreeMap::new();
@@ -325,11 +441,14 @@ pub fn prepare_javascript_frontend(
         let Ok(source) = fs::read_to_string(&path) else {
             continue;
         };
-        let output = instrument_node_assertion_phases(&source, &entry.file).map_err(|source| {
-            JavascriptFrontendError::Instrument {
-                file: entry.file.clone(),
-                source,
-            }
+        let output = instrument_node_assertion_phases_with_expect_modules(
+            &source,
+            &entry.file,
+            std::slice::from_ref(&project.playwright_module),
+        )
+        .map_err(|source| JavascriptFrontendError::Instrument {
+            file: entry.file.clone(),
+            source,
         })?;
         if output.assertions > 0 {
             atomic_write(&path, output.code.as_bytes())?;
@@ -390,6 +509,7 @@ pub fn prepare_javascript_frontend(
         manifest,
         manifest_path,
         preload_path: generated.join("register.mjs"),
+        playwright_config_path,
         vitest_config_path,
         assertion_calls,
     })
@@ -462,6 +582,7 @@ mod tests {
         assert_eq!(prepared.manifest.scope, project.source_scope);
         assert!(prepared.manifest_path.is_file());
         assert!(prepared.preload_path.is_file());
+        assert!(prepared.playwright_config_path.is_file());
         assert!(prepared.vitest_config_path.is_file());
         assert_eq!(prepared.assertion_calls, 0);
         fs::remove_dir_all(source_root).unwrap();
