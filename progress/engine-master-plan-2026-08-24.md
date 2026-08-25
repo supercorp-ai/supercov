@@ -924,8 +924,8 @@ miss blocks flipping any default.
   producer contract, fixture, golden export, architectural decision and public
   API sources are recorded in `contracts/python-coverage-v1` and
   `progress/python-tier-a-spike-2026-08-25.md`. Public CLI execution,
-  subprocess matrices, owned Python MC/DC probes, packaging and broad dogfood
-  remain unfinished gates. The next private step
+  low-level process matrices, owned Python MC/DC probes, packaging and broad
+  dogfood remain unfinished gates. The next private step
   has proven a real two-worker pytest-xdist run: the generated plugin starts a
   separate coverage.py collector in each worker, uses a run-unique suffixed
   data file plus static worker context, leaves the controller uninstrumented,
@@ -944,15 +944,29 @@ miss blocks flipping any default.
   passed-only retains only the terminal ordinary pass. This work also corrected
   a shared analyzer defect: setup-only/background-only confidence now follows
   observed phase kinds whenever phase evidence exists, rather than a synthetic
-  result role. Broader xdist scheduling, worker crash, retry, subprocess,
-  thread and async cases are still open. Retry attribution is now proven in
-  both serial pytest and two-worker xdist using the real
+  result role. Broader xdist scheduling, worker-crash, path/package, and low-
+  level execution-surface cases are still open. Retry attribution is now
+  proven in both serial pytest and two-worker xdist using the real
   pytest-rerunfailures 16.6 lifecycle: `item.execution_count` identifies the
   active attempt before setup/call/teardown, and `report.rerun` identifies the
   emitted report. Attempt zero's rerun outcome is retained as failed evidence,
   attempt one's terminal pass alone verifies passed-only coverage, and the
   shared analyzer classifies the logical test as flaky. No wall-clock or hook-
   ordering inference is used.
+  A 14-test causal-concurrency matrix now proves ordinary asyncio, a task that
+  outlives its test, an ordinary thread, a late thread, reuse of the same
+  thread-pool worker by different tests, `subprocess.Popen`, and
+  multiprocessing `spawn`. The generated hook uses a coverage.py dynamic-
+  context plugin only at measured-source frames, Python `ContextVar`
+  propagation for tasks/submissions, explicit child environment injection,
+  and the documented coverage.py process-startup configuration. The same
+  matrix passes under xdist for its non-order-dependent cases. It also exposed
+  and fixed an xdist bootstrap bug: setting `COVERAGE_PROCESS_START` before
+  xdist created workers caused them to inherit the controller's `main`
+  context. Child auto-start is now enabled only after authoritative worker
+  identity exists. Raw `_thread`/native-created threads and low-level
+  `os.system`/spawn/exec/fork/forkserver paths remain blocking, explicitly
+  declared structural limitations rather than hidden attribution claims.
 - Shared analysis no longer hardcodes the JavaScript coverage-model label for
   every language. `CoverageReportRequest` now carries an optional strict
   `CoverageModelDeclaration`; absent declarations retain the byte-compatible

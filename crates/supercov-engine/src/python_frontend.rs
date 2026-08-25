@@ -32,6 +32,8 @@ use crate::{
 pub const PYTHON_COVERAGE_IMPORT_SCHEMA_VERSION: u32 = 1;
 const MCDC_LIMITATION: &str = "python-mcdc-unavailable";
 const COLUMN_LIMITATION: &str = "python-column-location-unavailable";
+const LOW_LEVEL_THREAD_LIMITATION: &str = "python-low-level-thread-context-unavailable";
+const LOW_LEVEL_PROCESS_LIMITATION: &str = "python-low-level-process-coverage-unavailable";
 
 fn python_coverage_model() -> CoverageModelDeclaration {
     CoverageModelDeclaration {
@@ -47,6 +49,8 @@ fn python_coverage_model() -> CoverageModelDeclaration {
             "atomic condition outcomes and masking MC/DC independence".into(),
             "exact source columns for statement and branch obligations".into(),
             "causal linkage to individual actions or passing assertions".into(),
+            "causal test context for raw _thread or native-extension-created threads".into(),
+            "child coverage outside Python subprocess.Popen and multiprocessing spawn adapters".into(),
             "all input values, semantic partitions, paths, or concurrency interleavings".into(),
             "mutation score or assertion fault-detection strength".into(),
         ],
@@ -587,6 +591,24 @@ pub fn import_python_coverage_json(
             "source": "",
             "reason": "coverage.py does not expose atomic-condition vectors or masking MC/DC witnesses"
         }),
+        json!({
+            "id": LOW_LEVEL_THREAD_LIMITATION,
+            "kind": "semantic-safety",
+            "file": export.files[0].path,
+            "line": 1,
+            "column": 1,
+            "source": "",
+            "reason": "raw _thread and native-extension-created threads do not pass through the proven causal-context adapter"
+        }),
+        json!({
+            "id": LOW_LEVEL_PROCESS_LIMITATION,
+            "kind": "semantic-safety",
+            "file": export.files[0].path,
+            "line": 1,
+            "column": 1,
+            "source": "",
+            "reason": "low-level os spawn, exec, system, fork, and forkserver surfaces are not yet proven by the Python child-process adapter"
+        }),
     ];
 
     let manifest_files = export
@@ -764,7 +786,7 @@ pub fn import_python_coverage_json(
         structural_source: StructuralSource::NativeImport,
         runners: vec![FrontendRunnerDeclaration {
             runner: export.runner,
-            execution_model: ExecutionModel::SerialInProcess,
+            execution_model: ExecutionModel::ParallelContextPropagated,
             attribution: FrontendAttribution {
                 run: AttributionPrecision::Exact,
                 worker: AttributionPrecision::Exact,
@@ -787,7 +809,12 @@ pub fn import_python_coverage_json(
                 },
             ],
         }],
-        structural_limitations: vec![COLUMN_LIMITATION.into(), MCDC_LIMITATION.into()],
+        structural_limitations: vec![
+            COLUMN_LIMITATION.into(),
+            LOW_LEVEL_PROCESS_LIMITATION.into(),
+            LOW_LEVEL_THREAD_LIMITATION.into(),
+            MCDC_LIMITATION.into(),
+        ],
     };
     Ok(PythonFrontendImport {
         declaration,
@@ -828,6 +855,8 @@ mod tests {
         include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-outcomes.json");
     const RETRY_GOLDEN: &[u8] =
         include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-retry.json");
+    const CONCURRENCY_GOLDEN: &[u8] =
+        include_bytes!("../../../contracts/python-coverage-v1/examples/pytest-concurrency.json");
 
     #[test]
     fn imports_the_coverage_py_oracle_without_inventing_assertion_or_mcdc_facts() {
@@ -864,7 +893,7 @@ mod tests {
                 .iter()
                 .any(|item| item.contains("MC/DC"))
         );
-        assert_eq!(report.view.limitations.len(), 2);
+        assert_eq!(report.view.limitations.len(), 4);
         assert_eq!(
             report
                 .view
@@ -1075,6 +1104,65 @@ mod tests {
                 .unwrap()
                 .outcome,
             "flaky"
+        );
+    }
+
+    #[test]
+    fn preserves_causal_context_across_async_threads_and_processes() {
+        let imported = import_python_coverage_json(
+            CONCURRENCY_GOLDEN,
+            "python-tier-a-concurrency",
+            "2026-08-25T00:00:00.000Z",
+            Some(0),
+        )
+        .unwrap();
+        assert_eq!(
+            imported.declaration.runners[0].execution_model,
+            ExecutionModel::ParallelContextPropagated
+        );
+        let report = analyze_frontend_results(&imported.declaration, &imported.request).unwrap();
+        assert_eq!(
+            (
+                report.view.summary.lines.covered,
+                report.view.summary.lines.total,
+                report.view.summary.branches.covered,
+                report.view.summary.branches.total,
+                report.filters.passed.summary.lines.covered,
+                report.filters.passed.summary.branches.covered,
+            ),
+            (7, 12, 4, 8, 7, 4)
+        );
+        let tests = report
+            .view
+            .tests
+            .iter()
+            .filter(|test| test.role == "test")
+            .collect::<Vec<_>>();
+        assert_eq!(tests.len(), 14);
+        assert!(tests.iter().all(|test| test.outcome == "passed"));
+
+        let lines_for = |suffix: &str| {
+            tests
+                .iter()
+                .find(|test| test.name.ends_with(suffix))
+                .unwrap()
+                .lines
+                .iter()
+                .map(|line| line.line)
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(
+            lines_for("test_starts_work_that_outlives_its_phase"),
+            BTreeSet::from([10, 11])
+        );
+        assert_eq!(
+            lines_for("test_starts_a_late_python_subprocess"),
+            BTreeSet::from([1, 9, 10, 12, 14])
+        );
+        assert!(lines_for("test_releases_prior_subprocess_without_claiming_it").is_empty());
+        assert_eq!(
+            lines_for("test_starts_an_async_task_that_outlives_the_test"),
+            BTreeSet::from([10, 11])
         );
     }
 

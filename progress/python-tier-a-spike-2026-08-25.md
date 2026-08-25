@@ -65,8 +65,32 @@ under two-worker xdist. Its observed lifecycle assigns `item.execution_count`
 before the ordinary phase hooks and copies the zero-based attempt onto
 `report.rerun`. The producer records that identity directly. An intermediate
 `rerun` phase becomes a failed attempt; only the terminal pass contributes to
-passed-only coverage; the logical test is flaky. Crashed workers, subprocesses,
-threads, and async execution remain explicit open gates.
+passed-only coverage; the logical test is flaky. Crashed workers, path/package
+matrices, and low-level execution surfaces remain explicit open gates.
+
+## Proven causal concurrency
+
+A checked-in 14-test matrix proves exact source attribution for ordinary and
+overlapping asyncio tasks, `threading.Thread`, reused `ThreadPoolExecutor`
+workers, `subprocess.Popen`, and multiprocessing `spawn`. Work deliberately
+released by the following test remains owned by the test that created or
+submitted it. The collector uses a coverage.py dynamic-context plugin only at
+measured-source frames, avoiding the long-lived pytest-frame scope that would
+otherwise pin setup context across an entire run. `ContextVar` carries causal
+identity through asyncio and explicit thread/task submission adapters; child
+Python processes receive the exact context through a per-launch environment
+and coverage.py's documented process-startup configuration.
+
+The matrix also found that exporting `COVERAGE_PROCESS_START` at plugin import
+causes xdist workers themselves to auto-start with the controller's `main`
+identity. Subprocess activation now happens only after `pytest_configure` has
+provided the authoritative worker ID.
+
+This is not yet universal Python concurrency support. Raw `_thread` and
+native-extension-created threads, plus low-level `os.system`, spawn, exec,
+fork, and forkserver launch paths, are carried as blocking structural
+limitations. They must receive independent adapters and crash matrices before
+those limitations can be removed.
 
 ## Public-API basis
 

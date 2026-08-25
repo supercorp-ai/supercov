@@ -1,7 +1,13 @@
 import base64
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar, copy_context
+from functools import lru_cache
 import json
+import multiprocessing.process
 import os
 from pathlib import Path
+import subprocess
+import threading
 
 import coverage
 
@@ -11,8 +17,126 @@ OUTCOME_BASE = Path(os.environ["SUPERCOV_PYTEST_OUTCOMES"])
 WORKER_ID = os.environ.get("PYTEST_XDIST_WORKER", "main")
 DATA_FILE = os.environ.get("SUPERCOV_PYTHON_DATA")
 SOURCE = os.environ.get("SUPERCOV_PYTHON_SOURCE")
+SUBPROCESS_CONFIG = os.environ.get("SUPERCOV_PYTHON_SUBPROCESS_CONFIG")
 _OWNED_COVERAGE = None
 _IS_XDIST_CONTROLLER = False
+_CURRENT_CONTEXT = ContextVar("supercov_python_context", default=None)
+_SOURCE_ROOTS = tuple(
+    Path(part).resolve()
+    for part in (SOURCE or "").split(os.pathsep)
+    if part
+)
+_PROCESS_ENVIRONMENT_LOCK = threading.Lock()
+
+def _configure_subprocess_context(context: str) -> None:
+    if not SUBPROCESS_CONFIG:
+        return
+    os.environ["COVERAGE_PROCESS_START"] = str(Path(SUBPROCESS_CONFIG).resolve())
+    os.environ["SUPERCOV_PYTHON_CONTEXT"] = context
+
+
+@lru_cache(maxsize=None)
+def _is_measured_source(filename: str) -> bool:
+    path = Path(filename).resolve()
+    return any(path == root or root in path.parents for root in _SOURCE_ROOTS)
+
+
+class _SupercovContextPlugin(coverage.CoveragePlugin):
+    def dynamic_context(self, frame):
+        context = _CURRENT_CONTEXT.get()
+        if context is None or not _is_measured_source(frame.f_code.co_filename):
+            return None
+        return context
+
+
+def _register_context_plugin(registry):
+    registry.add_dynamic_context(_SupercovContextPlugin())
+
+
+def _install_thread_context_propagation() -> None:
+    if getattr(threading.Thread, "_supercov_context_patched", False):
+        return
+    original_start = threading.Thread.start
+
+    def start_with_context(thread, *args, **kwargs):
+        if not hasattr(thread, "_supercov_original_run"):
+            context = copy_context()
+            original_run = thread.run
+            thread._supercov_original_run = original_run
+
+            def run_with_context():
+                return context.run(original_run)
+
+            thread.run = run_with_context
+        return original_start(thread, *args, **kwargs)
+
+    threading.Thread.start = start_with_context
+    threading.Thread._supercov_context_patched = True
+
+    original_submit = ThreadPoolExecutor.submit
+
+    def submit_with_context(executor, function, /, *args, **kwargs):
+        context = copy_context()
+        return original_submit(executor, context.run, function, *args, **kwargs)
+
+    ThreadPoolExecutor.submit = submit_with_context
+
+
+def _install_subprocess_context_propagation() -> None:
+    if getattr(subprocess.Popen, "_supercov_context_patched", False):
+        return
+    original_init = subprocess.Popen.__init__
+
+    def init_with_context(process, *args, **kwargs):
+        context = _CURRENT_CONTEXT.get()
+        if SUBPROCESS_CONFIG and context is not None:
+            environment = dict(
+                os.environ if kwargs.get("env") is None else kwargs["env"]
+            )
+            environment["COVERAGE_PROCESS_START"] = str(
+                Path(SUBPROCESS_CONFIG).resolve()
+            )
+            environment["SUPERCOV_PYTHON_CONTEXT"] = context
+            kwargs["env"] = environment
+        original_init(process, *args, **kwargs)
+
+    subprocess.Popen.__init__ = init_with_context
+    subprocess.Popen._supercov_context_patched = True
+
+
+def _install_multiprocessing_context_propagation() -> None:
+    process_type = multiprocessing.process.BaseProcess
+    if getattr(process_type, "_supercov_context_patched", False):
+        return
+    original_start = process_type.start
+
+    def start_with_context(process, *args, **kwargs):
+        context = _CURRENT_CONTEXT.get()
+        if not SUBPROCESS_CONFIG or context is None:
+            return original_start(process, *args, **kwargs)
+        updates = {
+            "COVERAGE_PROCESS_START": str(Path(SUBPROCESS_CONFIG).resolve()),
+            "SUPERCOV_PYTHON_CONTEXT": context,
+        }
+        with _PROCESS_ENVIRONMENT_LOCK:
+            previous = {key: os.environ.get(key) for key in updates}
+            os.environ.update(updates)
+            try:
+                return original_start(process, *args, **kwargs)
+            finally:
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+
+    process_type.start = start_with_context
+    process_type._supercov_context_patched = True
+
+
+_install_thread_context_propagation()
+_install_subprocess_context_propagation()
+_install_multiprocessing_context_propagation()
 
 
 def _start_owned_coverage():
@@ -27,6 +151,7 @@ def _start_owned_coverage():
         source=[SOURCE],
         config_file=False,
         context=f"supercov-worker-v1:{WORKER_ID}",
+        plugins=[_register_context_plugin],
     )
     owned.start()
     return owned
@@ -37,7 +162,18 @@ if coverage.Coverage.current() is None:
 
 
 def pytest_configure(config):
-    global _IS_XDIST_CONTROLLER, _OWNED_COVERAGE
+    global _IS_XDIST_CONTROLLER, _OWNED_COVERAGE, WORKER_ID
+    worker_input = getattr(config, "workerinput", None)
+    configured_worker = (
+        worker_input.get("workerid", WORKER_ID)
+        if isinstance(worker_input, dict)
+        else WORKER_ID
+    )
+    if configured_worker != WORKER_ID:
+        if _OWNED_COVERAGE is not None:
+            _OWNED_COVERAGE.stop()
+            _OWNED_COVERAGE = None
+        WORKER_ID = configured_worker
     workers = getattr(config.option, "numprocesses", None)
     _IS_XDIST_CONTROLLER = WORKER_ID == "main" and workers not in (None, 0, "0")
     if _IS_XDIST_CONTROLLER:
@@ -45,6 +181,7 @@ def pytest_configure(config):
             _OWNED_COVERAGE.stop()
             _OWNED_COVERAGE = None
         return
+    _configure_subprocess_context(f"supercov-worker-v1:{WORKER_ID}")
     if coverage.Coverage.current() is not None:
         return
     _OWNED_COVERAGE = _start_owned_coverage()
@@ -83,7 +220,12 @@ def _switch(item, phase: str) -> None:
     current = coverage.Coverage.current()
     if current is None:
         raise RuntimeError("Supercov pytest hook ran without active coverage.py")
-    current.switch_context(_context(item.nodeid, _retry_from_item(item), phase))
+    context = _context(item.nodeid, _retry_from_item(item), phase)
+    _CURRENT_CONTEXT.set(context)
+    # A child Python process starts coverage.py through its documented
+    # process-startup hook and reads this exact parent phase from the generated
+    # run configuration. Environment inheritance is the process boundary.
+    _configure_subprocess_context(context)
 
 
 def pytest_runtest_setup(item):
@@ -113,3 +255,9 @@ def pytest_runtest_logreport(report):
     }
     with path.open("a", encoding="utf-8") as stream:
         stream.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+def pytest_runtest_logfinish(nodeid, location):
+    del nodeid, location
+    _CURRENT_CONTEXT.set(None)
+    _configure_subprocess_context(f"supercov-worker-v1:{WORKER_ID}")
