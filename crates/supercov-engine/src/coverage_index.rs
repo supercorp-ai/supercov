@@ -18,10 +18,12 @@ pub const SECTION_STRING_BYTES: u32 = 1;
 pub const SECTION_STRINGS: u32 = 2;
 pub const SECTION_VIEW_SUMMARIES: u32 = 10;
 pub const SECTION_FILE_GAPS: u32 = 11;
+pub const SECTION_DECISION_GAPS: u32 = 12;
 
 const STRING_RECORD_SIZE: usize = 16;
 const SUMMARY_RECORD_SIZE: usize = 176;
 const FILE_GAP_RECORD_SIZE: usize = 176;
+const DECISION_GAP_RECORD_SIZE: usize = 96;
 const NO_STRING: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -244,6 +246,23 @@ pub struct IndexedCoverageSnapshot {
     pub failed_files: Vec<IndexedFileGap>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedDecisionGap {
+    #[serde(skip)]
+    pub view: CoverageViewId,
+    #[serde(skip)]
+    pub file: String,
+    pub id: String,
+    pub line: usize,
+    pub column: usize,
+    pub kind: String,
+    pub conditions: usize,
+    pub missing_conditions: usize,
+    pub waived_conditions: usize,
+    pub source: String,
+}
+
 #[derive(Default)]
 struct MutableFileGap {
     uncovered_lines: usize,
@@ -443,6 +462,60 @@ fn projections(view: &CoverageView) -> Vec<(Option<String>, Option<String>, BTre
         .collect()
 }
 
+fn decision_gap_record(
+    view_id: CoverageViewId,
+    decision: &crate::coverage_report::DecisionResult,
+    selected: Option<&BTreeSet<String>>,
+    kind: Option<&str>,
+    runner: Option<&str>,
+    strings: &mut StringTable,
+) -> Result<[u8; DECISION_GAP_RECORD_SIZE], CoverageIndexError> {
+    let vectors = decision
+        .vector_observations
+        .iter()
+        .filter(|observation| includes_selected(&observation.tests, selected, true))
+        .map(|observation| observation.vector.clone())
+        .collect::<Vec<_>>();
+    let witnesses = find_witnesses_for_conditions(&vectors, decision.meta.conditions.len())
+        .map_err(|_| CoverageIndexError::InvalidRecord("MC/DC vector width"))?;
+    let mut record = [0_u8; DECISION_GAP_RECORD_SIZE];
+    record[0] = view_id as u8;
+    put_u32(
+        &mut record,
+        4,
+        kind.map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+    );
+    put_u32(
+        &mut record,
+        8,
+        runner.map_or(Ok(NO_STRING), |value| strings.intern(value))?,
+    );
+    put_u32(&mut record, 12, strings.intern(&decision.meta.id)?);
+    put_u32(&mut record, 16, strings.intern(&decision.meta.file)?);
+    put_u32(&mut record, 20, strings.intern(&decision.meta.kind)?);
+    put_u32(
+        &mut record,
+        24,
+        strings.intern(
+            &decision
+                .meta
+                .source
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        )?,
+    );
+    put_u64(&mut record, 32, usize_u64(decision.meta.line)?);
+    put_u64(&mut record, 40, usize_u64(decision.meta.column)?);
+    put_u64(&mut record, 48, usize_u64(decision.meta.conditions.len())?);
+    put_u64(
+        &mut record,
+        56,
+        usize_u64(witnesses.iter().filter(|witness| witness.is_none()).count())?,
+    );
+    Ok(record)
+}
+
 pub fn coverage_index_sections(
     report: &CoverageReport,
 ) -> Result<Vec<QueryIndexSection>, CoverageIndexError> {
@@ -454,12 +527,33 @@ pub fn coverage_index_sections(
     let mut strings = StringTable::default();
     let mut summaries = Vec::with_capacity(views.len() * SUMMARY_RECORD_SIZE);
     let mut gaps = Vec::new();
+    let mut decision_gaps = Vec::new();
     for (id, view) in views {
         summaries.extend_from_slice(&summary_record(id, view, &mut strings)?);
+        for decision in &view.decisions {
+            decision_gaps.extend_from_slice(&decision_gap_record(
+                id,
+                decision,
+                None,
+                None,
+                None,
+                &mut strings,
+            )?);
+        }
         for (file, gap) in file_gaps(view, None)? {
             gaps.extend_from_slice(&file_gap_record(id, &file, &gap, None, None, &mut strings)?);
         }
         for (kind, runner, selected) in projections(view) {
+            for decision in &view.decisions {
+                decision_gaps.extend_from_slice(&decision_gap_record(
+                    id,
+                    decision,
+                    Some(&selected),
+                    kind.as_deref(),
+                    runner.as_deref(),
+                    &mut strings,
+                )?);
+            }
             for (file, gap) in file_gaps(view, Some(&selected))? {
                 gaps.extend_from_slice(&file_gap_record(
                     id,
@@ -488,6 +582,12 @@ pub fn coverage_index_sections(
             count: usize_u64(gaps.len() / FILE_GAP_RECORD_SIZE)?,
             bytes: gaps,
         },
+        QueryIndexSection {
+            kind: SECTION_DECISION_GAPS,
+            record_size: DECISION_GAP_RECORD_SIZE as u32,
+            count: usize_u64(decision_gaps.len() / DECISION_GAP_RECORD_SIZE)?,
+            bytes: decision_gaps,
+        },
     ])
 }
 
@@ -501,6 +601,7 @@ impl<'a> CoverageIndex<'a> {
             (SECTION_STRINGS, STRING_RECORD_SIZE),
             (SECTION_VIEW_SUMMARIES, SUMMARY_RECORD_SIZE),
             (SECTION_FILE_GAPS, FILE_GAP_RECORD_SIZE),
+            (SECTION_DECISION_GAPS, DECISION_GAP_RECORD_SIZE),
         ] {
             if index.descriptor(kind)?.record_size as usize != size {
                 return Err(CoverageIndexError::InvalidRecord("record size"));
@@ -704,6 +805,64 @@ impl<'a> CoverageIndex<'a> {
         } else {
             self.string(id).map(Some)
         }
+    }
+
+    pub fn decision_gaps(
+        &self,
+        view: CoverageViewId,
+        kind: Option<&str>,
+        runner: Option<&str>,
+        file: &str,
+    ) -> Result<Vec<IndexedDecisionGap>, CoverageIndexError> {
+        let descriptor = self.index.descriptor(SECTION_DECISION_GAPS)?;
+        let mut decisions = Vec::new();
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_DECISION_GAPS, index)?;
+            if CoverageViewId::try_from(record[0])? != view {
+                continue;
+            }
+            if record[1..4].iter().any(|byte| *byte != 0)
+                || record[28..32].iter().any(|byte| *byte != 0)
+                || record[64..].iter().any(|byte| *byte != 0)
+            {
+                return Err(CoverageIndexError::InvalidRecord(
+                    "decision-gap reserved bytes",
+                ));
+            }
+            let record_kind = self.optional_string(get_u32(record, 4)?)?;
+            let record_runner = self.optional_string(get_u32(record, 8)?)?;
+            if record_kind.as_deref() != kind || record_runner.as_deref() != runner {
+                continue;
+            }
+            let record_file = self.string(get_u32(record, 16)?)?;
+            if record_file != file {
+                continue;
+            }
+            let number = |offset: usize| -> Result<usize, CoverageIndexError> {
+                usize::try_from(get_u64(record, offset)?)
+                    .map_err(|_| CoverageIndexError::SizeOverflow)
+            };
+            let conditions = number(48)?;
+            let missing_conditions = number(56)?;
+            if conditions == 0 || missing_conditions > conditions {
+                return Err(CoverageIndexError::InvalidRecord(
+                    "decision condition counts",
+                ));
+            }
+            decisions.push(IndexedDecisionGap {
+                view,
+                file: record_file,
+                id: self.string(get_u32(record, 12)?)?,
+                line: number(32)?,
+                column: number(40)?,
+                kind: self.string(get_u32(record, 20)?)?,
+                conditions,
+                missing_conditions,
+                waived_conditions: 0,
+                source: self.string(get_u32(record, 24)?)?,
+            });
+        }
+        Ok(decisions)
     }
 
     pub fn snapshot(&self) -> Result<IndexedCoverageSnapshot, CoverageIndexError> {

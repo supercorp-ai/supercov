@@ -382,7 +382,11 @@ miss blocks flipping any default.
   recomputes masking-MC/DC witnesses from its own selected vectors and records
   whether a missing obligation is covered by other tests or uncovered
   everywhere. Byte-identical live queries prove those provenance filters on
-  the same five archives. Obligation-detail sections and the rest of the query
+  the same five archives. A typed decision-gap section now also powers the
+  agent-oriented `coverage file --group decision` query, with exact
+  per-projection witness recomputation, location/missing ordering, totals and
+  pagination; its live JSON is byte-identical across that archive matrix.
+  Full condition/vector/test/phase detail sections and the rest of the query
   surface remain before this path can replace the shipped query engine.
 
 ## Non-goals and guardrails

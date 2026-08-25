@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     agent_json::pagination,
     coverage_analysis::{CoverageSummary, is_independence_pair},
-    coverage_index::{CoverageIndex, CoverageIndexError, CoverageViewId, IndexedFileGap},
+    coverage_index::{
+        CoverageIndex, CoverageIndexError, CoverageViewId, IndexedDecisionGap, IndexedFileGap,
+    },
     coverage_report::{
         CoverageReportRequest, CoverageView, ReportError, analyze_coverage_results,
         coverage_summary_for_tests,
@@ -151,6 +153,47 @@ pub struct CoverageFileQueryResult {
     pub pagination: AgentPagination,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DecisionSort {
+    Location,
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecisionGapTotals {
+    pub decisions: usize,
+    pub decisions_with_missing_conditions: usize,
+    pub conditions: usize,
+    pub missing_conditions: usize,
+    pub waived_conditions: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageFileDecisionsData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub file: String,
+    pub group: String,
+    pub sort: DecisionSort,
+    pub totals: DecisionGapTotals,
+    pub decisions: Vec<IndexedDecisionGap>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CoverageFileDecisionsOptions<'a> {
+    pub run: &'a str,
+    pub view: CoverageViewId,
+    pub kind: Option<&'a str>,
+    pub runner: Option<&'a str>,
+    pub file: &'a str,
+    pub sort: DecisionSort,
+    pub offset: usize,
+    pub limit: usize,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct CoverageFileQueryOptions<'a> {
     pub run: &'a str,
@@ -172,6 +215,87 @@ fn gap_metric_value(gap: &IndexedFileGap, metric: MinimizeMetric) -> usize {
         MinimizeMetric::Branches => gap.missing_branches,
         MinimizeMetric::Mcdc => gap.missing_mcdc_conditions,
     }
+}
+
+pub fn coverage_file_decisions_query(
+    index: &CoverageIndex<'_>,
+    options: CoverageFileDecisionsOptions<'_>,
+) -> Result<(CoverageFileDecisionsData, AgentPagination), QueryError> {
+    if options.limit == 0 {
+        return Err(QueryError::InvalidPagination);
+    }
+    let all = index.decision_gaps(options.view, options.kind, options.runner, options.file)?;
+    if (options.kind.is_some() || options.runner.is_some()) && all.is_empty() {
+        // A file with no decisions is valid, so consult the file projection to
+        // distinguish it from a nonexistent test provenance projection.
+        if index
+            .file_gaps(options.view, options.kind, options.runner)?
+            .is_empty()
+        {
+            return Err(QueryError::InvalidRecordSelection);
+        }
+    }
+    let totals = DecisionGapTotals {
+        decisions: all.len(),
+        decisions_with_missing_conditions: all
+            .iter()
+            .filter(|decision| decision.missing_conditions > 0)
+            .count(),
+        conditions: all.iter().map(|decision| decision.conditions).sum(),
+        missing_conditions: all.iter().map(|decision| decision.missing_conditions).sum(),
+        waived_conditions: all.iter().map(|decision| decision.waived_conditions).sum(),
+    };
+    let mut missing = all
+        .into_iter()
+        .filter(|decision| decision.missing_conditions > 0)
+        .collect::<Vec<_>>();
+    missing.sort_by(|left, right| match options.sort {
+        DecisionSort::Missing => right
+            .missing_conditions
+            .saturating_sub(right.waived_conditions)
+            .cmp(
+                &left
+                    .missing_conditions
+                    .saturating_sub(left.waived_conditions),
+            )
+            .then_with(|| right.missing_conditions.cmp(&left.missing_conditions))
+            .then_with(|| left.line.cmp(&right.line))
+            .then_with(|| left.column.cmp(&right.column)),
+        DecisionSort::Location => left
+            .line
+            .cmp(&right.line)
+            .then_with(|| left.column.cmp(&right.column))
+            .then_with(|| left.id.cmp(&right.id)),
+    });
+    let total = missing.len();
+    let rows = missing
+        .into_iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .collect::<Vec<_>>();
+    let returned = rows.len();
+    let filters = CoverageQueryFilters {
+        outcome: match options.view {
+            CoverageViewId::All => "all",
+            CoverageViewId::Passed => "passed",
+            CoverageViewId::Failed => "failed",
+        }
+        .into(),
+        kind: options.kind.map(str::to_owned),
+        runner: options.runner.map(str::to_owned),
+    };
+    Ok((
+        CoverageFileDecisionsData {
+            run: options.run.into(),
+            filters,
+            file: options.file.into(),
+            group: "decision".into(),
+            sort: options.sort,
+            totals,
+            decisions: rows,
+        },
+        pagination(options.offset, options.limit, returned, total),
+    ))
 }
 
 pub fn coverage_file_query(

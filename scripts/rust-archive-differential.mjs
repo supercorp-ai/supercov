@@ -191,6 +191,51 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
     filteredReference.stdout,
     `${fixture}: provenance-filtered indexed gaps JSON differs`,
   );
+
+  const indexedDecision = expected.decisions[0];
+  assert.ok(indexedDecision, `${fixture}: expected at least one decision`);
+  const decisionFile = indexedDecision.meta.file;
+  const decisionReference = spawnSync(
+    process.execPath,
+    [
+      resolve(root, 'bin/supercov.js'),
+      'runs', runId, 'coverage', 'file', decisionFile,
+      '--group', 'decision', '--sort', 'missing', '--limit', '2', '--json',
+      ...(filteredKind ? ['--kind', filteredKind] : []),
+      ...(filteredRunner ? ['--runner', filteredRunner] : []),
+    ],
+    {
+      cwd: resolve(root, 'tests/fixtures', fixture),
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024 * 1024,
+    },
+  );
+  assert.equal(decisionReference.status, 0, `${fixture}: ${decisionReference.stderr || decisionReference.stdout}`);
+  const decisionRust = spawnSync(binary, ['__query-index-files'], {
+    cwd: root,
+    input: JSON.stringify({
+      archivePath,
+      runId,
+      generatedAt,
+      filter: 'all',
+      command: 'file-decisions',
+      metric: 'all',
+      kind: filteredKind,
+      runner: filteredRunner,
+      file: decisionFile,
+      sort: 'missing',
+      offset: 0,
+      limit: 2,
+    }),
+    encoding: 'utf8',
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  assert.equal(decisionRust.status, 0, `${fixture}: ${decisionRust.stderr || decisionRust.stdout}`);
+  assert.equal(
+    decisionRust.stdout,
+    decisionReference.stdout,
+    `${fixture}: indexed file decision-group JSON differs`,
+  );
 }
 
 const indexed = spawnSync(binary, ['__roundtrip-query-index'], {
@@ -205,5 +250,5 @@ const indexDifference = firstDifference(indexedActual, indexExpected);
 assert.equal(indexDifference, undefined, `typed index: ${JSON.stringify(indexDifference)}`);
 
 console.log(
-  `[rust-archive-differential] ${fixtures.length} real immutable fixture archives have exact report and typed mmap summary/file-gap parity`,
+  `[rust-archive-differential] ${fixtures.length} real archives have exact report plus typed mmap summary, file-gap, provenance-filter, and decision-group query parity`,
 );

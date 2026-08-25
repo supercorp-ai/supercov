@@ -6,7 +6,8 @@ use supercov_engine::{
     coverage_analysis::{CoverageCoreInput, analyze_core},
     coverage_index::{CoverageIndex, coverage_index_sections},
     coverage_query::{
-        CoverageFileQueryData, CoverageFileQueryOptions, MinimizeMetric, MinimumTestSetRequest,
+        CoverageFileDecisionsOptions, CoverageFileQueryData, CoverageFileQueryOptions,
+        DecisionSort, MinimizeMetric, MinimumTestSetRequest, coverage_file_decisions_query,
         coverage_file_query, minimum_test_set_for_request,
     },
     coverage_report::{
@@ -74,6 +75,8 @@ struct IndexedFileQueryRequest {
     metric: MinimizeMetric,
     kind: Option<String>,
     runner: Option<String>,
+    file: Option<String>,
+    sort: Option<DecisionSort>,
     offset: usize,
     limit: usize,
 }
@@ -103,10 +106,11 @@ fn query_index_files() -> ExitCode {
         }
     };
     let gaps_only = match request.command.as_str() {
-        "files" => false,
-        "gaps" => true,
+        "files" => Some(false),
+        "gaps" => Some(true),
+        "file-decisions" => None,
         _ => {
-            eprintln!("[supercov] indexed query must be files or gaps");
+            eprintln!("[supercov] unsupported indexed query");
             return ExitCode::from(2);
         }
     };
@@ -144,13 +148,35 @@ fn query_index_files() -> ExitCode {
         write_query_index(&sections, &identity, &path).map_err(|error| error.to_string())?;
         let container = QueryIndex::open(&path, &identity).map_err(|error| error.to_string())?;
         let index = CoverageIndex::new(&container).map_err(|error| error.to_string())?;
+        if gaps_only.is_none() {
+            let file = request
+                .file
+                .as_deref()
+                .ok_or_else(|| "indexed file-decision query requires a file".to_owned())?;
+            let (data, page) = coverage_file_decisions_query(
+                &index,
+                CoverageFileDecisionsOptions {
+                    run: &request.run_id,
+                    view,
+                    kind: request.kind.as_deref(),
+                    runner: request.runner.as_deref(),
+                    file,
+                    sort: request.sort.unwrap_or(DecisionSort::Location),
+                    offset: request.offset,
+                    limit: request.limit,
+                },
+            )
+            .map_err(|error| format!("{error:?}"))?;
+            return agent_json::success("coverage.file", &data, Some(&page))
+                .map_err(|error| format!("response exceeds {} bytes", error.max_bytes));
+        }
         let query = coverage_file_query(
             &index,
             CoverageFileQueryOptions {
                 run: &request.run_id,
                 view,
                 metric: request.metric,
-                gaps_only,
+                gaps_only: gaps_only.expect("files/gaps command"),
                 kind: request.kind.as_deref(),
                 runner: request.runner.as_deref(),
                 offset: request.offset,
@@ -158,7 +184,7 @@ fn query_index_files() -> ExitCode {
             },
         )
         .map_err(|error| format!("{error:?}"))?;
-        let command = if gaps_only {
+        let command = if gaps_only == Some(true) {
             "coverage.gaps"
         } else {
             "coverage.files"
