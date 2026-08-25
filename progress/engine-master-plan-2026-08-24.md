@@ -20,24 +20,36 @@ code; a compatibility sweep is in flight and Tier 1 (trust) still lands first.
    benchmarks: ~40x Babel, ~4x SWC for parse→transform→codegen). This is a
    true port of the ~1,600-line instrumenter, not a parser swap — Babel and
    oxc ASTs differ.
-3. **Collectors stay in the target language.** The JS runtime/adapters remain
-   JS generated into the isolated workspace; the future Python collector is
-   Python generated the same way. The binary question is only the engine.
-   Per language the engine grows exactly two things — where probes are
-   inserted, and how test/phase identity propagates to a probe. The evidence
-   contract, analysis, MC/DC pair search and query surface are shared and are
-   never rewritten per language; probe v2's ternary-vector/epoch model is language-neutral
-   precisely to keep that true.
+3. **Every user run is measured entirely by Supercov.** External coverage
+   engines—coverage.py, LLVM source coverage/profdata, Go native coverage and
+   equivalents—are development-only differential oracles. They may generate
+   checked-in conformance facts and CI comparisons, but they are never invoked,
+   imported, configured, or required by a user's Supercov run. The existing
+   test command is the only user configuration. Supercov discovers its launch
+   graph, transforms/injects its own probes inside the isolated workspace, and
+   collects its own evidence automatically. A missing third-party coverage
+   package can therefore never change whether a user run works.
+
+   The unavoidable collectors stay in the target language. The JS runtime and
+   adapters remain Supercov-generated JS; Python receives a Supercov-generated
+   stdlib-only import/runtime/pytest shim; compiler and runner hooks for other
+   languages follow the same rule. Per language the engine grows exactly two
+   things—where Supercov-owned probes are inserted and how test/phase identity
+   propagates to them. The evidence contract, analysis, MC/DC pair search and
+   query surface are shared and are never rewritten per language; probe v2's
+   ternary-vector/epoch model is language-neutral precisely to keep that true.
+
    The ownership rule is stricter than merely moving hot paths: **everything
    that can live in Rust does**. Target-language code is permitted only where
    it must execute inside a runtime, browser, compiler/plugin API, test runner,
    or assertion framework. Such shims may propagate context and append frozen
-   evidence records; they may not implement manifests, coverage arithmetic,
-   MC/DC solving, merging, persistence, querying, or policy. Ahead-of-run
-   source transformation also belongs in Rust whenever a sound parser exists;
-   runtime hooks remain thin loaders for dynamic/generated modules. This keeps
-   one correctness implementation and one performance profile across every
-   language rather than accumulating a Python product, an OCaml product, etc.
+   Supercov evidence records; they may not implement manifests, coverage
+   arithmetic, MC/DC solving, merging, persistence, querying, or policy.
+   Ahead-of-run source transformation belongs in Rust whenever a sound parser
+   exists; runtime hooks remain thin loaders for dynamic/generated modules.
+   This keeps one correctness implementation and one performance profile
+   across every language rather than accumulating a Python product, an OCaml
+   product, etc.
 4. **No resident processes — ever.** (User decision 2026-08-24; supersedes
    the earlier `supercov serve` proposal.) Every invocation is fire-and-
    forget; "no resident service" stays a product guarantee. Query latency is
@@ -142,26 +154,28 @@ miss blocks flipping any default.
   analyzer, report/query engine, orchestration implementation, migration flag,
   and Babel engine dependencies. Preserve frozen contracts, golden outputs,
   corpora and black-box tests—not a second executable engine.
-- **Phase 5: distribution matrix + Python.** Release pipeline for all
-  registries; then the Python collector (generated conftest/import-hook shim,
-  pytest adapter) rides on the binary. PyPI wheels ship here.
+- **Phase 5: distribution matrix + owned Python frontend.** Release pipeline
+  for all registries; then a Rust Python parser/transformer emits the complete
+  owned obligation manifest and injects probe v2 ahead of the existing test
+  command. A generated stdlib-only import hook handles dynamic modules and a
+  generated pytest adapter supplies exact worker/test/retry/phase/assertion
+  context. coverage.py remains outside the product and runs only in the
+  development differential harness. PyPI wheels and `npx supercov -- pytest`
+  both execute the same Rust binary and require no project dependency.
 - **Phase 6: every other language, at full quality.** Rust, C/C++, Go, then
-  JVM/Ruby/PHP. Two tiers per language: **Tier A** adapts native coverage
-  output (LLVM profdata, `go test -cover`), **Tier B** owns the
-  instrumentation (our probe-v2 form with task-local epochs) to reach parity
-  under in-process parallelism. Full per-test attribution and assertion
-  linkage are achievable in compiled languages — an earlier note claiming
-  otherwise described the cost-optimal path, not the ceiling. Tier A is not a
-  stepping stone to discard: it is **Tier B's differential oracle** (Tier B's
-  gate is "identical structural verdicts vs Tier A, strictly better
-  attribution"), a permanent second evidence source for code we do not
-  compile ourselves, and the measurement that decides whether Tier B is
-  urgent for a given language at all. Gate per language: a
-  semantic-equivalence corpus of its own, an explicitly declared attribution
-  tier per runner, and enumerated limitations; a language whose corpus is not
-  green is a language we do not claim to support. Full design, per-language
-  matrix, attribution ladder, tier-ordering guardrails and spikes S8–S10:
-  `progress/multi-language-architecture-2026-08-24.md`.
+  JVM/Ruby/PHP. Each product frontend owns its instrumentation and emits the
+  shared probe/evidence protocol; native coverage output is used only as an
+  independent development oracle. LLVM and Go coverage can validate structural
+  verdicts, but no shipped run imports their profiles. Full per-test
+  attribution and assertion linkage remain requirements even for compiled
+  languages; compiler passes, PPX/plugin APIs, generated wrappers and runner
+  hooks are acceptable Supercov-owned injection mechanisms. Gate per language:
+  semantic-equivalence corpus, exact differential against the strongest
+  independent oracle, runner/concurrency/crash matrices, explicitly enumerated
+  limitations, and a zero-configuration run using only the pre-existing test
+  command. A language whose corpus is not green is a language we do not claim
+  to support. Full design, per-language matrix, attribution ladder and spikes
+  S8–S10: `progress/multi-language-architecture-2026-08-24.md`.
 
 ## Checkpoint — 2026-08-25 Phase 3 Rust JS instrumenter complete
 
@@ -908,7 +922,14 @@ miss blocks flipping any default.
   coverage analysis. The declaration is not added to frozen v2 archives yet;
   that requires an explicit archive-schema migration before an adapter can be
   publicly enabled.
-- The private Python Tier-A adapter has started. A checked-in pytest fixture
+- Python ownership was clarified on 2026-08-25: external coverage engines are
+  development oracles only. The coverage.py work below is therefore an oracle
+  corpus/import validator used to test Supercov's future owned Python probes;
+  it is not a candidate user frontend, will never be selected by a user run,
+  and creates no coverage.py dependency in npm, PyPI, or the target project.
+  Product Python support begins with the Rust-owned transformer and
+  Supercov-generated stdlib-only runtime described in Phase 5.
+- The Python development-oracle harness has started. A checked-in pytest fixture
   runs under coverage.py 7.15.4, exports through documented `Coverage` and
   `CoverageData` APIs, and differentially reconstructs 10/12 executable lines
   and 6/8 branch arcs in the shared Rust analyzer. The importer rejects unknown
@@ -923,9 +944,10 @@ miss blocks flipping any default.
   columns are blocking structural limitations, never zero-sized success. The
   producer contract, fixture, golden export, architectural decision and public
   API sources are recorded in `contracts/python-coverage-v1` and
-  `progress/python-tier-a-spike-2026-08-25.md`. Public CLI execution,
-  low-level process matrices, owned Python MC/DC probes, packaging and broad
-  dogfood remain unfinished gates. The next private step
+  `progress/python-tier-a-spike-2026-08-25.md`. This proves the oracle side of
+  later differentials only. Rust-owned Python parsing/transformation, owned
+  runtime evidence, automatic command injection, packaging and broad dogfood
+  remain unfinished product gates. The next oracle step
   has proven a real two-worker pytest-xdist run: the generated plugin starts a
   separate coverage.py collector in each worker, uses a run-unique suffixed
   data file plus static worker context, leaves the controller uninstrumented,
@@ -992,12 +1014,15 @@ miss blocks flipping any default.
   `coverage-model.json` and `manifest.json` entries. The versioned reader
   recognizes v2 and v3; the legacy v2-only API deliberately rejects v3 so no
   old caller can misclassify it. The current public writer still emits v2.
-  Python's typed importer can produce deterministic v3 entries, and a complete
+  The Python oracle importer can produce deterministic v3 entries for shared-
+  analyzer contract testing, and a complete
   write/read/analyze round trip revalidates frontend identities and limitations
   before reproducing the native model and oracle totals. Unknown coverage-model
   fields are fatal. V3 still needs corruption/fuzz coverage, run-store/query
   integration, agent-contract versioning for exposing the model, and a staged
-  public migration before its status can leave `private-candidate`.
+  public migration before its status can leave `private-candidate`. The owned
+  Python frontend must produce v3 directly from Supercov probes; a coverage.py
+  import is never a public migration path.
 
 ## Non-goals and guardrails
 

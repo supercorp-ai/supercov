@@ -5,16 +5,19 @@ Companion to `engine-master-plan-2026-08-24.md` and
 same evidence quality Supercov gives JavaScript today — structural MC/DC,
 per-test attribution, assertion linkage — not a degraded second tier.
 
-## Correction to an earlier framing
+## Product rule: Supercov measures every user run
 
-An earlier session note said compiled languages should "adapt, never
-reimplement": consume LLVM's `.profraw`, and report the resulting loss of
-per-test attribution and assertion phases through the honest-degradation
-tiers. That described the *cost-optimal* path and wrongly presented it as the
-capability ceiling. It is not. Full parity for compiled languages is
-achievable; it requires owning the instrumentation rather than only consuming
-native coverage output. Both are on the roadmap, in that order, because
-adapting is genuinely good for the common case and ships far sooner.
+Every user run is measured entirely by Supercov. coverage.py, LLVM
+source-coverage/profdata, Go native coverage and comparable external engines
+are development-only differential oracles. They may run in Supercov's own CI
+and generate checked-in conformance facts, but they are never invoked,
+imported, configured or required by a user's run. There is no native-coverage
+fallback and no lower-quality product tier.
+
+The existing test command is the only user configuration. Supercov discovers
+the launch graph, instruments the isolated workspace with its own probes and
+automatically injects the smallest unavoidable target-language runtime and
+runner hooks. The same rule applies to interpreted and compiled languages.
 
 ## What "full quality" decomposes into
 
@@ -29,8 +32,8 @@ The coverage-confidence boundary is unchanged and language-independent:
 
 Only two things actually vary per language:
 
-- **where probes are inserted** (source transform, IR/MIR pass, or native
-  coverage output), and
+- **where Supercov-owned probes are inserted** (source transform, IR/MIR pass,
+  compiler/plugin API), and
 - **how the current test/phase identity propagates** to a probe.
 
 Everything else — the evidence archive contract, the analysis engine, MC/DC
@@ -49,9 +52,9 @@ internally impossible declarations. The first analyzer-entry validator also
 requires exact agreement with manifest limitation IDs and actually observed
 runners; validates run/worker/test/retry scope; and rejects unknown, duplicate
 or cyclic phase causality before shared analysis. Persisting declarations in a
-versioned archive namespace begins with the first Python/LLVM adapter; both
-must use this exact protocol rather than introducing ecosystem-specific report
-models.
+versioned archive namespace begins with the first owned Python frontend. Every
+frontend must use this exact protocol rather than introducing an
+ecosystem-specific report model.
 
 ## Rust ownership boundary
 
@@ -82,95 +85,25 @@ requires its native compiler library (a plausible OCaml frontend case), that
 adapter is treated like a compiler plugin feeding the Rust engine—not an
 excuse to fork analysis logic.
 
-## Two tiers per language
+## Owned frontend and independent oracle
 
-**Tier A — adapt.** Consume the language's native coverage instrumentation
-(LLVM profdata for C/C++/Rust, `go test -cover`, coverage.py). Structural
-MC/DC is full quality here where the toolchain provides it. Attribution
-quality depends entirely on the execution model (see the ladder below).
-Assertion linkage comes from framework listener APIs where they exist.
-Weeks of work per language.
+Each language has two deliberately separate systems:
 
-**Tier B — own.** Our own instrumentation emitting probe-v2 form, with a
-thread-local or task-local epoch selecting the bitmap arena, plus assertion
-shims. Achieves parity in every execution model including in-process
-parallelism. Months per language family.
+1. **Product frontend.** Supercov-owned instrumentation emits probe-v2 state,
+   with a thread-local/task-local epoch selecting the active arena and thin
+   Supercov-generated assertion/runner shims. This is the only measurement
+   path available in a user run.
+2. **Development oracle.** Supercov's conformance suite invokes the strongest
+   independent engine available on pinned programs and compares its structural
+   facts with the owned frontend. Oracle importers are compile-gated test
+   infrastructure, are not packaged as runtime dependencies and cannot be
+   selected by product orchestration.
 
-Tier A is not a compromise on *data quality*; it is a compromise on *which
-execution models we can attribute*. That distinction is what makes shipping
-Tier A first honest rather than expedient.
-
-## Why Tier A first: it is Tier B's oracle
-
-Tier A looks like the shortcut and is the opposite. The master plan commits to
-the tsgo discipline of never validating a novel implementation against
-nothing. Our JS instrumenter is credible because we can always ask whether it
-agrees with a reference: Test262 for semantics, the independent Clang/LLVM
-oracle for MC/DC verdicts.
-
-So ask what a Rust MIR pass built *without* Tier A would be diffed against.
-Nothing. We would be shipping a novel MC/DC implementation for a language
-where we hold no reference output, and where we could not distinguish "our
-pass found a decision LLVM misses" from "our pass is wrong." That is the
-risky-big-bang this plan exists to forbid.
-
-Tier A produces that reference, which makes Tier B's acceptance gate
-checkable: **byte-identical structural verdicts against Tier A on the same
-code, with strictly better attribution.** Built in the other order, the
-reference would have to be validated against the very thing it is meant to
-validate.
-
-Of Tier A's components, exactly one is not reused:
-
-| Component | Reused by Tier B |
-| --- | --- |
-| Runner adapter (cargo/nextest/ctest/`go test` discovery, test identity) | fully |
-| Build integration (coverage build config, cargo/cmake plumbing, workspace isolation for non-JS projects) | fully — and the largest chunk |
-| Assertion linkage (framework listeners, macro/header shims) | fully — orthogonal to probe insertion |
-| Process-per-test orchestration and evidence merge | fully |
-| Equivalence-corpus harness | fully — *is* Tier B's gate |
-| profdata → evidence translator | no |
-
-Even the translator is not scaffolding. It is permanent, in three roles: the
-regression oracle for every future Tier B change (the role Clang plays for JS
-today), the fallback when our pass cannot build against a given LLVM/rustc
-version, and the only option for code we do not compile ourselves — prebuilt
-dependencies, build systems we do not control, and mixed-language projects
-where a pass cannot be inserted everywhere. Build it to production quality.
-
-### Tier A also decides whether Tier B is urgent
-
-Rung 1 is not degraded: process-per-test attribution is exact, and strictly
-better than our JS path because no interleaving exists to disambiguate. For a
-language whose ecosystem has standardised on process-per-test, Tier A is
-already full quality.
-
-Rust plausibly is that language — `cargo nextest` is process-per-test by
-architecture and widely adopted. If the ecosystem check shows most real Rust
-repositories run under nextest, then a MIR pass (months of work plus
-indefinite LLVM-cadence maintenance, S8) buys little beyond `cargo test`'s
-thread-based default. It may still be worth building for completeness, but
-that becomes a *measured* decision. C/C++ plausibly breaks the other way,
-since sharding GoogleTest across threads within one process is common. Which
-way each language falls is exactly what Tier A measures instead of guessing.
-
-## Guardrails for the tier ordering
-
-Tier A does actively harm Tier B if the ordering is allowed to leak
-LLVM's model into our own. Three rules prevent that:
-
-1. **Contracts are frozen from the JS reference implementation first**
-   (Phase 1). Tier A conforms to the contract; the contract never conforms to
-   LLVM. Where profdata cannot express something the contract requires, Tier A
-   degrades explicitly — it does not shrink the contract. Otherwise we would
-   permanently inherit LLVM's condition cap and its lack of per-test
-   attribution.
-2. **Tier A declares its attribution rung per runner, machine-checked.** A
-   thread-parallel in-process run reports aggregate attribution and says so;
-   it never presents aggregate evidence as per-test. Same discipline as the
-   `TEST_EVIDENCE_MISSING` diagnostic.
-3. **The translator ships as a supported component**, not as temporary
-   validation scaffolding, because it is permanent (above).
+The oracle prevents a novel frontend from validating itself. It does not
+define Supercov's denominator: where an external engine cannot express a
+Supercov obligation, independent golden models and language specifications
+cover the gap. The product contract never shrinks to match an oracle's cap or
+granularity.
 
 ## The attribution ladder
 
@@ -179,16 +112,17 @@ execution model, not of the language:
 
 | Rung | Execution model | Attribution | Cost |
 | --- | --- | --- | --- |
-| 1 | Process per test | **Exact** — no interleaving exists to disambiguate | Free (`LLVM_PROFILE_FILE=%p.profraw`) |
-| 2 | Serial within one process | **Exact** — snapshot-diff counters at test boundaries | Small linked shim (`__llvm_profile_reset_counters` + buffer read) |
-| 3 | Parallel within one process, context propagated | **Exact** — owned probes, task-local epoch selects arena | Tier B: our IR/MIR pass |
+| 1 | Process per test | **Exact** — no interleaving exists to disambiguate | Supercov probe buffer per process |
+| 2 | Serial within one process | **Exact** — swap/reset Supercov arenas at test boundaries | Small generated runner shim |
+| 3 | Parallel within one process, context propagated | **Exact** — owned probes, task-local epoch selects arena | Supercov source/IR/MIR instrumentation |
 | 4 | Parallel, no context propagation | Aggregate only | Declared limitation, never faked |
 
 Rung 1 is the *common case* for modern Rust: `cargo nextest`'s whole
 architecture is process-per-test. It is not an edge case, and its attribution
 is strictly better than our JS path because there is no interleaving at all.
-Rung 3 is where Tier B earns its cost; thread-local access on x86-64/ARM64 is
-a couple of instructions, comparable to LLVM's own counter increments.
+Rung 3 requires the owned frontend's context carrier; thread-local access on
+x86-64/ARM64 is a couple of instructions, comparable to native counter
+increments.
 
 ## Assertion linkage mechanisms, in order of preference
 
@@ -212,15 +146,15 @@ goroutine-local problem for attribution entirely.
 
 ## Per-language matrix
 
-| Language | Tier A source | Attribution (Tier A) | Assertion linkage | Tier B insertion point |
+| Language | Supercov product insertion | Development oracle only | Attribution | Assertion linkage |
 | --- | --- | --- | --- | --- |
-| JavaScript/TS | *is* the reference implementation | rung 3 (AsyncLocalStorage carrier) | source transform (native `assert`, imported `expect`) | done |
-| Python | coverage.py tracer | rung 1/2 (pytest-xdist is process-per-worker) | pytest's own assertion rewriting hooks | AST rewrite via import hook (pytest's proven mechanism) |
-| Rust | LLVM profdata via rustc coverage (MC/DC status: **spike S8**) | rung 1 with nextest, rung 2 with libtest shim | `assert!` macro shim; custom harness (`libtest-mimic`) | rustc MIR pass vs LLVM plugin — **ADR in S8** |
-| C/C++ | `-fcoverage-mcdc` profdata | rung 1 with ctest-per-process or `--gtest_filter` sharding | GoogleTest/Catch2 listener API (free), `<assert.h>` shim | LLVM pass |
-| Go | `go test -cover`, `GOCOVERDIR` | rung 1/2 (per-process binaries) | wrap `t.Error`/`t.Fatal` (explicit `T`) | source rewrite (Go's own coverage works this way) |
-| OCaml | native coverage adapter first; exact oracle selected by its spike | runner-dependent, declared before support | framework hooks/PPX assertion sites | compiler-libs/PPX frontend emitting probe v2, with all analysis in Rust |
-| JVM / Ruby / PHP | later; each has a mature bytecode or tracer hook | TBD | TBD | TBD |
+| JavaScript/TS | Rust source transform + generated JS/browser runtime | Test262 semantics; Clang golden MC/DC models | rung 3, AsyncLocalStorage carrier | source transform for native `assert` and imported `expect` |
+| Python | Rust source transform + generated stdlib import hook | coverage.py statements/arcs; CPython corpus | rung 3, `contextvars` carrier | generated pytest hook plus assertion-source instrumentation |
+| Rust | owned rustc MIR/LLVM plugin or source transform, decided by S8 | rustc/LLVM coverage and rustc corpus | rung 1–3 depending runner | `assert!` macro shim; runner APIs |
+| C/C++ | owned LLVM pass/source transform | clang `-fcoverage-mcdc`, GCC/LLVM corpora, csmith | rung 1–3 depending runner | GoogleTest/Catch2 listeners and forced-include assertion shim |
+| Go | owned source transform/compiler hook | `go test -cover` and Go corpus | explicit `testing.T` plus owned goroutine context | instrument `testing.T` outcomes and assertion helpers |
+| OCaml | compiler-libs/PPX frontend emitting probe v2 | independently selected native oracle | runner-dependent and declared | framework hooks/PPX assertion sites |
+| JVM / Ruby / PHP | owned bytecode/source/runtime hooks | independently selected per language | TBD before support | TBD before support |
 
 ## Ship gate: no language without its own oracle
 
@@ -234,13 +168,14 @@ checkable claim rather than marketing. JavaScript's credibility rests on
 65,053 baseline-passing Test262 scenarios plus the independent Clang/LLVM
 MC/DC oracle. The equivalents:
 
-- **Rust** — rustc's own test suite; MC/DC cross-checked against rustc's
-  native coverage output on the same programs.
+- **Rust** — rustc's own test suite; MC/DC cross-checked in development against
+  rustc's native coverage output on the same programs.
 - **C/C++** — GCC/LLVM torture tests plus csmith-generated programs;
   MC/DC cross-checked against `llvm-cov` (already our oracle today).
-- **Python** — CPython's test suite; cross-check against coverage.py for
-  line/branch agreement.
-- **Go** — Go's own test suite; cross-check against `go test -cover`.
+- **Python** — CPython's test suite; development-only cross-check against
+  coverage.py for statement/branch agreement plus independent MC/DC goldens.
+- **Go** — Go's own test suite; development-only cross-check against
+  `go test -cover`.
 
 A language whose corpus is not green is a language we do not claim support
 for. No exceptions, including for demo purposes.
@@ -273,45 +208,44 @@ for. No exceptions, including for demo purposes.
 ## New spikes
 
 - **S8 (→ Phase 6, Rust): insertion-point ADR.** Establish rustc's MC/DC
-  support status and stability; then decide Tier B insertion between a rustc
+  support status and stability; then decide owned insertion between a rustc
   MIR pass, an out-of-tree LLVM plugin, and a source transform. Must include
   the *ongoing maintenance cost* of tracking LLVM/rustc release cadence,
   which is the dominant long-term cost of this phase. Exit: written ADR with
   a maintenance-burden estimate per option.
-- **S9 (→ Phase 6, C/C++): Tier A sufficiency.** Determine clang's current
+- **S9 (→ Phase 6, C/C++): oracle boundary.** Determine clang's current
   per-decision condition cap and whether it is configurable. Our JS
-  implementation already observes decisions with 10 conditions; if Tier A
-  cannot express those, Tier A must degrade explicitly rather than silently
-  merge them. Exit: cap documented, degradation behaviour specified.
+  implementation already observes decisions with 10 conditions; if clang
+  cannot express those, its oracle comparison must declare that boundary and
+  independent goldens must cover the remainder. Exit: cap and comparison
+  boundary documented.
 - **S10 (→ Phase 6): attribution-ladder validation.** End-to-end proof of
-  rung 1 on a real repository: instrument a Rust crate, run under
-  `cargo nextest`, and produce per-test evidence in our archive format with
-  MC/DC verdicts matching `llvm-cov` on the same run. Exit: a fixture in the
+  rung 1 on a real repository: instrument a Rust crate with Supercov-owned
+  probes, run under `cargo nextest`, and produce per-test evidence in our
+  archive format. A separate development job compares structural verdicts
+  with `llvm-cov`; the product run does not invoke it. Exit: a fixture in the
   golden corpus, in the same shape as today's JS fixtures.
 
 ## Ordering
 
 Language order: Python first (already Phase 5 — largest agent-coded
-ecosystem, one adapter covers most of it, and the import-hook mechanism is
-de-risked by pytest itself), then Rust, then C/C++, then Go. JVM/Ruby/PHP only
+ecosystem, and the stdlib import-hook mechanism is de-risked by Python and
+pytest itself), then Rust, then C/C++, then Go. JVM/Ruby/PHP only
 once the shared core has absorbed four languages without accumulating
 per-language special cases in the engine.
 
-Within each language the sequence is *not* simply "Tier A then Tier B":
+Within each language the sequence is:
 
-1. **Shared plumbing** — build integration, runner adapter, test identity.
-   Reused by both tiers; the largest single chunk of work.
-2. **Assertion linkage** — framework listeners or macro/header shims. Done
-   here rather than with Tier B because it is orthogonal to probe insertion
-   and it is what makes Tier A genuinely full quality rather than
-   structural-only.
-3. **Tier A translator** — native coverage output into the frozen evidence
-   contract, with its attribution rung declared per runner.
-4. **Equivalence corpus green** — the ship gate. Support is not claimed
-   before this point.
-5. **Measure the ecosystem's actual execution models** via the standing
-   ecosystem check: what fraction of real repositories run process-per-test,
-   serial-in-process, or thread-parallel?
-6. **Prioritise Tier B from that measurement**, per language. Tier B is not an
-   automatic follow-on; it is a decision with evidence behind it, and its
-   acceptance gate is Tier A's own output.
+1. **Freeze the language coverage model** independently from any oracle.
+2. **Build the development oracle harness** and checked-in differential facts;
+   compile-gate it away from normal product builds.
+3. **Implement owned insertion and the complete manifest** in Rust, with only
+   the smallest generated target-language runtime required at execution.
+4. **Add automatic launch-graph and runner integration** so the pre-existing
+   test command is sufficient.
+5. **Add exact attribution and assertion linkage** through official runner,
+   compiler, macro or framework surfaces and owned context propagation.
+6. **Make semantic, oracle, concurrency, crash and package corpora green.**
+   Support is not claimed before this point.
+7. **Dogfood arbitrary real repositories** and verify that removing every
+   external coverage dependency leaves results unchanged.

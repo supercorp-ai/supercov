@@ -1,16 +1,17 @@
-# Python Tier-A frontend spike
+# Python coverage.py development-oracle spike
 
-Status: private correctness spike. This does not enable Python in the public
-CLI and does not change evidence archive v2.
+Status: development-only correctness oracle. This does not enable Python in
+the public CLI, does not change evidence archive v2, and is forbidden from the
+eventual user execution path.
 
 ## Decision
 
-Supercov will import Python line and arc facts from coverage.py through its
-documented Python API. It will not read the `.coverage` SQLite schema and it
-will not delegate verdicts, persistence, queries, confidence, or MC/DC to
-coverage.py.
+Supercov's conformance suite imports Python line and arc facts from coverage.py
+through its documented Python API. It does not read the `.coverage` SQLite
+schema and does not delegate product verdicts, persistence, queries,
+confidence, or MC/DC to coverage.py.
 
-The unavoidable generated Python shim has two narrow jobs:
+This oracle harness has two narrow jobs:
 
 1. a pytest plugin assigns a stable run/worker/test/retry/phase context before
    setup, call, and teardown execute, and records pytest's phase outcomes;
@@ -22,6 +23,13 @@ Rust remains responsible for project isolation, process supervision, source
 path validation, the complete obligation manifest, per-attempt merging,
 coverage analysis, limitations, evidence archives, queries, and agent output.
 
+No user run may import or invoke this harness. Product Python measurement is a
+separate Supercov-owned frontend: Rust performs ahead-of-run Python
+transformation and manifest generation, while an automatically injected
+stdlib-only Supercov runtime/import hook and pytest adapter emit the shared
+probe protocol. `coverage.py` is used only to differentially validate that
+owned implementation during development.
+
 ## Accuracy boundary
 
 coverage.py is an independent oracle for executable Python statements and
@@ -29,10 +37,11 @@ branch arcs. Its measured contexts can attribute lines and arcs to exact
 pytest setup/call/teardown phases and, with one data file per worker, to exact
 workers and tests.
 
-It does **not** expose condition vectors or masking MC/DC witnesses. A Python
-native-import run must therefore carry a blocking `python-mcdc-unavailable`
-structural limitation. Zero imported decisions must never be presented as
-proof of 100% MC/DC.
+It does **not** expose condition vectors or masking MC/DC witnesses. An oracle
+import therefore carries a blocking `python-mcdc-unavailable` structural
+limitation. Zero imported decisions must never be presented as proof of 100%
+MC/DC, and the oracle cannot certify owned MC/DC without separate independent
+model vectors.
 
 pytest assertion rewriting is also not a callback around every successful
 assertion. A passed call phase proves that the phase completed, but cannot
@@ -123,7 +132,7 @@ claim that in-process state survived.
 - [pytest hooks](https://docs.pytest.org/en/stable/reference/reference.html#hooks)
   establish setup/call/teardown and outcome lifecycle boundaries.
 
-## Gates before public enablement
+## Oracle gates before owned-frontend comparison
 
 - Freeze and strictly validate an importer schema, including producer version,
   source roots, branch mode, files, contexts, outcomes, and limitations.
@@ -132,7 +141,17 @@ claim that in-process state survived.
 - Test pass, fail, skip, setup failure, teardown failure, retry, xdist workers,
   subprocesses, multiprocessing, threads, async tests, namespace packages,
   generated code, and path aliases.
-- Add an explicit archive schema migration that persists the frontend
-  declaration and a language-specific coverage-model declaration. Evidence v2
-  remains frozen until that migration is specified and dual-read tested.
-- Never label the Python run measurement-complete while MC/DC is unavailable.
+- Keep oracle output separate from user evidence and compile/import it only in
+  development/conformance surfaces.
+- Never label an oracle import measurement-complete while MC/DC is unavailable.
+
+## Separate product gates
+
+- Rust-owned Python parser/transformer and complete obligation manifest.
+- Supercov-owned probe-v2 runtime with no third-party dependency.
+- Automatically injected stdlib-only dynamic-import and pytest lifecycle
+  adapters; the existing test command remains unchanged.
+- Exact differential against this oracle for statements and branch arcs, plus
+  independent golden MC/DC models the oracle cannot provide.
+- Evidence v3, query, crash, concurrency, packaging, and arbitrary-suite gates
+  driven only by Supercov-owned evidence.

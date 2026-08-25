@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = []
+oracle-harnesses = []
+
 [dependencies]
 base64.workspace = true
 flate2.workspace = true

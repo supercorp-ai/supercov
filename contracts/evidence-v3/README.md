@@ -10,9 +10,14 @@ mandatory in addition to `manifest.json`:
   completeness meaning, measured surfaces and unmeasured surfaces.
 
 This prevents a reader from silently applying JavaScript semantics to Python,
-LLVM, Go or OCaml evidence. The frontend limitation references must still
+Rust, C/C++, Go or OCaml evidence. The frontend limitation references must still
 exactly match manifest limitation IDs and the runner declarations must exactly
 match normalized evidence before analysis.
+
+Product archives contain only Supercov-owned probe evidence. The frozen
+frontend protocol can also frame native-import facts inside compile-gated
+development oracle tests, but such archives are not accepted as user-run
+measurement and are never a fallback product mode.
 
 V2 remains frozen and readable. V3 writers are private until dual-read,
 corruption, archive-query and lifecycle tests pass; the current public writer

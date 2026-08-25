@@ -1,4 +1,6 @@
-//! Private Tier-A Python importer backed by coverage.py's documented API.
+//! Development-only Python oracle importer backed by coverage.py's documented
+//! API. This module is excluded from ordinary product builds and must never be
+//! selected for a user run.
 //!
 //! The Python shim exports facts only. Rust validates the complete denominator,
 //! preserves background evidence, constructs normalized obligations and then
