@@ -112,9 +112,9 @@ pub fn run_direct_javascript(
     let environment = std::env::vars().collect::<BTreeMap<_, _>>();
     let project = discover_coverage_project(&root, &environment, &request.command)
         .map_err(|error| error.to_string())?;
-    if project.build_adapter != BuildAdapter::Direct {
+    if project.build_adapter == BuildAdapter::Generic {
         return Err(format!(
-            "private Rust vertical slice supports direct suites only, discovered {:?}",
+            "private Rust vertical slice does not yet support generic builds, discovered {:?}",
             project.build_adapter
         ));
     }
@@ -228,8 +228,34 @@ pub fn run_direct_javascript(
         }
     }
     overrides.extend(project.build_environment.clone());
+    let preparation = if project.build_adapter == BuildAdapter::Vite {
+        let mut arguments = project.build_command[1..]
+            .iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        arguments.extend([
+            OsString::from("--"),
+            OsString::from("--config"),
+            OsString::from(".supercov/vite.config.mjs"),
+        ]);
+        let mut build_overrides = overrides.clone();
+        build_overrides.insert("NODE_ENV".into(), "production".into());
+        let build_environment = environment_with(build_overrides);
+        vec![ExecutionPhase {
+            name: "build".into(),
+            kind: PhaseKind::Build,
+            command: CommandSpec {
+                program: project.build_command[0].clone().into(),
+                arguments,
+                cwd: workspace.clone(),
+                environment: Some(build_environment),
+            },
+        }]
+    } else {
+        Vec::new()
+    };
     let plan = ExecutionPlan {
-        preparation: Vec::new(),
+        preparation,
         test: ExecutionPhase {
             name: "test".into(),
             kind: PhaseKind::Test,
@@ -241,7 +267,6 @@ pub fn run_direct_javascript(
             },
         },
     };
-    let test_started = Instant::now();
     let execution = match execute_plan(
         &plan,
         SupervisionOptions::default(),
@@ -261,7 +286,16 @@ pub fn run_direct_javascript(
             return Err(message);
         }
     };
-    let test_command_ms = elapsed_ms(test_started);
+    let instrumented_build_ms = execution
+        .phases
+        .iter()
+        .find(|phase| phase.kind == PhaseKind::Build)
+        .map_or(0.0, |phase| phase.duration_ms as f64);
+    let test_command_ms = execution
+        .phases
+        .iter()
+        .find(|phase| phase.kind == PhaseKind::Test)
+        .map_or(0.0, |phase| phase.duration_ms as f64);
     update_run_state(
         &root,
         &run_id,
@@ -300,7 +334,7 @@ pub fn run_direct_javascript(
         initialization_ms,
         workspace_preparation_ms,
         adapter_setup_ms,
-        instrumented_build_ms: 0.0,
+        instrumented_build_ms,
         test_command_ms,
         evidence_publication_ms,
     };

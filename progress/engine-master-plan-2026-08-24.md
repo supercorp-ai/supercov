@@ -663,9 +663,19 @@ miss blocks flipping any default.
   exact assertion-linked obligations, unchanged source, and valid persisted
   Rust queries. Native assertion phase IDs have their own namespace so they
   cannot collide with Playwright action/assertion phases. This closes the
-  direct Playwright runner boundary; real application code transformed by
-  Vite/other build tools and executed in browser frames is the next frontend
-  boundary. Full Test262 and browser matrices, dogfood parity, and cross-
+  direct Playwright runner boundary.
+- Rust now owns the first complete build-backed browser execution as well.
+  For Vite projects it emits virtual-runtime imports during the ahead-of-run
+  Rust transform, writes a minimal generated Vite config whose only Supercov
+  plugin resolves that frozen runtime ABI, confines cache/Rollup/build outputs
+  to the isolated workspace, and runs build then test under one Rust process
+  supervisor. The browser black-box fixture builds a real page, starts the
+  project's unchanged Vite preview command through Playwright `webServer`,
+  runs four cases in two workers, collects non-empty frame snapshots with
+  explicit action phases, and reconstructs 100% line/branch/MC/DC plus exact
+  per-test vectors from the persisted archive. Build and test timings are
+  recorded separately and source remains unchanged. Generic compiler/build
+  adapters, full Test262 and browser matrices, dogfood parity, and cross-
   platform crash/filesystem gates still block any public selector or
   TypeScript-engine deletion.
 

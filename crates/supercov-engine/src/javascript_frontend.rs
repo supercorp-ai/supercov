@@ -18,9 +18,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     js_instrumenter::{
         CandidateBranch, CandidateDecision, CandidateError, CandidateLimitation, CandidatePoint,
-        instrument_direct_candidate, instrument_node_assertion_phases_with_expect_modules,
+        instrument_candidate, instrument_direct_candidate,
+        instrument_node_assertion_phases_with_expect_modules,
     },
-    project_discovery::CoverageProject,
+    project_discovery::{BuildAdapter, CoverageProject},
     source_discovery::{SourceLimitation, SourceScope},
 };
 
@@ -103,6 +104,7 @@ pub struct PreparedJavascriptFrontend {
     pub manifest_path: PathBuf,
     pub preload_path: PathBuf,
     pub playwright_config_path: PathBuf,
+    pub vite_config_path: PathBuf,
     pub vitest_config_path: PathBuf,
     pub assertion_calls: usize,
 }
@@ -389,6 +391,45 @@ fn write_playwright_config(
     Ok(path)
 }
 
+fn write_vite_config(
+    workspace: &Path,
+    generated: &Path,
+) -> Result<PathBuf, JavascriptFrontendError> {
+    let path = generated.join("vite.config.mjs");
+    let workspace = serde_json::to_string(&workspace.display().to_string())
+        .map_err(JavascriptFrontendError::Serialize)?;
+    let source = format!(
+        "import {{ loadConfigFromFile, mergeConfig }} from 'vite';\n\
+         import {{ isAbsolute, relative, resolve }} from 'node:path';\n\
+         export default async function supercovViteConfig(env) {{\n\
+           const isolatedRoot = {workspace};\n\
+           const loaded = await loadConfigFromFile(env, undefined, isolatedRoot);\n\
+           const config = loaded?.config ?? {{}};\n\
+           const relocate = (value, label) => {{\n\
+             const absolute = isAbsolute(value) ? value : resolve(isolatedRoot, value);\n\
+             const local = relative(isolatedRoot, absolute);\n\
+             if (local === '' || (!local.startsWith('..') && !isAbsolute(local))) return absolute;\n\
+             throw new Error('Supercov refuses ' + label + ' outside the isolated project: ' + absolute);\n\
+           }};\n\
+           const relocateOutput = output => output ? ({{ ...output, dir: output.dir ? relocate(output.dir, 'Rollup output') : output.dir, file: output.file ? relocate(output.file, 'Rollup output') : output.file }}) : output;\n\
+           const rollupOutput = config.build?.rollupOptions?.output;\n\
+           const runtimePath = resolve(isolatedRoot, '.supercov/runtime.js');\n\
+           const runtimePlugin = {{\n\
+             name: 'supercov-rust-runtime',\n\
+             enforce: 'pre',\n\
+             resolveId(id) {{ return id === 'virtual:supercov-runtime' ? runtimePath : null; }},\n\
+           }};\n\
+           const safe = {{ ...config,\n\
+             cacheDir: resolve(isolatedRoot, '.supercov/vite-cache'),\n\
+             build: {{ ...config.build, outDir: relocate(config.build?.outDir ?? 'dist', 'Vite build output'), rollupOptions: {{ ...config.build?.rollupOptions, output: Array.isArray(rollupOutput) ? rollupOutput.map(relocateOutput) : relocateOutput(rollupOutput) }} }},\n\
+           }};\n\
+           return mergeConfig(safe, {{ plugins: [runtimePlugin] }});\n\
+         }}\n"
+    );
+    atomic_write(&path, source.as_bytes())?;
+    Ok(path)
+}
+
 /// Prepare the complete JavaScript frontend inside an isolated workspace.
 /// The source project is read only through the copied workspace inventory.
 pub fn prepare_javascript_frontend(
@@ -401,6 +442,7 @@ pub fn prepare_javascript_frontend(
     copy_runtime(runtime_root, &generated, collector_id)?;
     configure_playwright_runtime(&generated, project)?;
     let playwright_config_path = write_playwright_config(workspace, project, &generated)?;
+    let vite_config_path = write_vite_config(workspace, &generated)?;
     let vitest_config_path = write_vitest_config(workspace, project, &generated)?;
 
     let mut decisions = BTreeMap::new();
@@ -414,11 +456,15 @@ pub fn prepare_javascript_frontend(
     for file in &project.source_files {
         let path = checked_source_path(workspace, file)?;
         let source = fs::read_to_string(&path).map_err(|source| io_error(&path, source))?;
-        let output = instrument_direct_candidate(&source, file).map_err(|source| {
-            JavascriptFrontendError::Instrument {
-                file: file.clone(),
-                source,
+        let output = match project.build_adapter {
+            BuildAdapter::Vite => instrument_candidate(&source, file),
+            BuildAdapter::Direct | BuildAdapter::Generic => {
+                instrument_direct_candidate(&source, file)
             }
+        }
+        .map_err(|source| JavascriptFrontendError::Instrument {
+            file: file.clone(),
+            source,
         })?;
         atomic_write(&path, output.code.as_bytes())?;
         for value in output.decisions {
@@ -510,6 +556,7 @@ pub fn prepare_javascript_frontend(
         manifest_path,
         preload_path: generated.join("register.mjs"),
         playwright_config_path,
+        vite_config_path,
         vitest_config_path,
         assertion_calls,
     })
@@ -583,6 +630,7 @@ mod tests {
         assert!(prepared.manifest_path.is_file());
         assert!(prepared.preload_path.is_file());
         assert!(prepared.playwright_config_path.is_file());
+        assert!(prepared.vite_config_path.is_file());
         assert!(prepared.vitest_config_path.is_file());
         assert_eq!(prepared.assertion_calls, 0);
         fs::remove_dir_all(source_root).unwrap();
