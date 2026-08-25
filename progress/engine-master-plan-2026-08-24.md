@@ -919,13 +919,14 @@ miss blocks flipping any default.
   403 and must pursue a project transfer rather than falsely treating JSON 404
   as availability. After transfer, `supercov-cli` remains only as a
   compatibility distribution.
-  RubyGems' exact `supercov` name is currently unregistered. An
-  `arm64-darwin` platform gem containing the same embedded-runtime Rust binary
-  and a minimal `exec` shim passes a clean install and real coverage run. Its
-  manual-only pending-trusted-publisher workflow can claim the name without a
-  stored registry secret. NuGet and Hex names are also currently unregistered,
-  but remain unclaimed until functional ecosystem launchers meet the same gate;
-  empty registry placeholders are forbidden.
+  RubyGems `supercov 0.0.10` is now published. Its `arm64-darwin` platform gem
+  contains the same embedded-runtime Rust binary and a minimal `exec` shim. The
+  manual-only GitHub OIDC workflow passed a packed install and real run before
+  publication; a separate clean install from the public registry completed a
+  second real run. The first successful upload converted the pending publisher
+  into permanent trusted publishing without a stored registry secret. NuGet
+  and Hex names remain unclaimed until functional ecosystem launchers meet the
+  same gate; empty registry placeholders are forbidden.
   The native npm matrix is defined but has not yet produced a real
   hosted-run green result; the attestation step is wired but therefore has not
   yet produced signed provenance. Initial npm package claims,

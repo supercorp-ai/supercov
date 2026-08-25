@@ -58,15 +58,15 @@ therefore a distribution gate; a 404 JSON response must not be interpreted as
 name availability. If the canonical name is transferred, `supercov-cli`
 becomes a compatibility package directing new installations to `supercov`.
 
-RubyGems is the next registry-native wrapper. The exact `supercov` gem name was
-unregistered on 2026-08-25. A real `arm64-darwin` platform gem embeds the same
-self-contained Rust binary behind a minimal Ruby `exec` shim; a clean local gem
-installation completed a real coverage run. Publication uses RubyGems' pending
-GitHub trusted-publisher flow and a manual-only workflow, so the first claim and
-later releases use short-lived OIDC credentials rather than a stored API key.
-NuGet and Hex also returned unregistered, but Supercov will not squat them with
-empty placeholders: each name is claimed only when its ecosystem-native
-launcher passes the same install-and-real-run gate.
+RubyGems `supercov 0.0.10` was published on 2026-08-25. The real
+`arm64-darwin` platform gem embeds the same self-contained Rust binary behind a
+minimal Ruby `exec` shim. Both the workflow's packed-gem installation and a
+second clean installation from the public registry completed real coverage
+runs. Publication used RubyGems' pending GitHub trusted-publisher flow, which
+converted into permanent OIDC trust after the first successful upload; no API
+key is stored. NuGet and Hex also returned unregistered, but Supercov will not
+squat them with empty placeholders: each name is claimed only when its
+ecosystem-native launcher passes the same install-and-real-run gate.
 
 The artifact workflow is manual-only on its own so ordinary commits consume no
 eight-platform build minutes. It uses GitHub's native macOS arm64/x64, Linux

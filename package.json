@@ -55,6 +55,7 @@
     "test:pypi-registry": "node scripts/pypi-registry-integration.mjs",
     "build:rubygem": "cargo build --release -p supercov && node scripts/build-rubygem.mjs",
     "test:rubygem": "node scripts/rubygem-integration.mjs",
+    "test:rubygem-registry": "node scripts/rubygem-registry-integration.mjs",
     "test:rust-syntax": "npm run build && cargo build -p supercov && node scripts/rust-syntax-matrix.mjs",
     "test:rust-fixture": "npm run build && cargo build -p supercov && node scripts/rust-fixture-matrix.mjs",
     "test:clang-mcdc": "node scripts/clang-mcdc-oracle.mjs",
