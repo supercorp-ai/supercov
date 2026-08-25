@@ -784,6 +784,283 @@ pub fn coverage_test_query(
     ))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CoverageDecisionMatch {
+    pub id: String,
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageDecisionCondition {
+    pub index: usize,
+    pub source: String,
+    pub covered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assertion_covered: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub witness: Option<[crate::coverage_analysis::McdcVector; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub witness_tests: Option<[Vec<String>; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageDecisionTotals {
+    pub conditions: usize,
+    pub vector_observations: usize,
+    pub tests: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageSelectedDecision {
+    pub meta: DecisionMeta,
+    pub executed: bool,
+    pub covered: bool,
+    pub vectors: Vec<crate::coverage_analysis::McdcVector>,
+    pub vector_observations: Vec<crate::coverage_report::VectorObservation>,
+    pub conditions: Vec<CoverageDecisionCondition>,
+    pub tests: Vec<String>,
+    pub confidence: CoverageConfidence,
+    pub totals: CoverageDecisionTotals,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CoverageDecisionMatchesData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub decisions: Vec<CoverageDecisionMatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageDecisionDetailData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub pagination_applies_to: String,
+    pub decisions: Vec<CoverageSelectedDecision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum CoverageDecisionData {
+    Matches(CoverageDecisionMatchesData),
+    Detail(CoverageDecisionDetailData),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CoverageDecisionQueryOptions<'a> {
+    pub run: &'a str,
+    pub view: CoverageViewId,
+    pub kind: Option<&'a str>,
+    pub runner: Option<&'a str>,
+    pub selector: &'a str,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+fn selector_location(selector: &str) -> Option<(&str, usize)> {
+    let (prefix, last) = selector.rsplit_once(':')?;
+    let last = last.parse::<usize>().ok()?;
+    if let Some((file, possible_line)) = prefix.rsplit_once(':')
+        && let Ok(line) = possible_line.parse::<usize>()
+    {
+        return Some((file, line));
+    }
+    Some((prefix, last))
+}
+
+fn selected_decision(
+    decision: crate::coverage_report::DecisionResult,
+    selected: Option<&BTreeSet<String>>,
+) -> crate::coverage_report::DecisionResult {
+    let Some(selected) = selected else {
+        return decision;
+    };
+    let vector_observations = decision
+        .vector_observations
+        .into_iter()
+        .filter_map(|mut observation| {
+            observation.tests.retain(|test| selected.contains(test));
+            (!observation.tests.is_empty()).then_some(observation)
+        })
+        .collect::<Vec<_>>();
+    let vectors = vector_observations
+        .iter()
+        .map(|observation| observation.vector.clone())
+        .collect::<Vec<_>>();
+    let conditions = decision
+        .meta
+        .conditions
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            let mut witness = None;
+            let mut witness_tests = None;
+            'pairs: for left in 0..vector_observations.len() {
+                for right in (left + 1)..vector_observations.len() {
+                    let first = &vector_observations[left];
+                    let second = &vector_observations[right];
+                    if is_independence_pair(&first.vector, &second.vector, index) {
+                        witness = Some([first.vector.clone(), second.vector.clone()]);
+                        witness_tests = Some([first.tests.clone(), second.tests.clone()]);
+                        break 'pairs;
+                    }
+                }
+            }
+            crate::coverage_report::ConditionResult {
+                index,
+                source: source.clone(),
+                covered: witness.is_some(),
+                assertion_covered: false,
+                witness,
+                witness_tests,
+            }
+        })
+        .collect::<Vec<_>>();
+    crate::coverage_report::DecisionResult {
+        meta: decision.meta,
+        executed: !vectors.is_empty(),
+        covered: conditions.iter().all(|condition| condition.covered),
+        vectors,
+        vector_observations,
+        conditions,
+        tests: decision
+            .tests
+            .into_iter()
+            .filter(|test| selected.contains(test))
+            .collect(),
+        confidence: decision.confidence,
+    }
+}
+
+pub fn coverage_decision_query(
+    index: &CoverageIndex<'_>,
+    options: CoverageDecisionQueryOptions<'_>,
+) -> Result<(CoverageDecisionData, AgentPagination), QueryError> {
+    if options.limit == 0 {
+        return Err(QueryError::InvalidPagination);
+    }
+    let tests = index.test_summaries(options.view)?;
+    let selected = selected_test_ids(&tests, options.kind, options.runner)?;
+    let decisions = index.decision_details(options.view)?;
+    let mut matches = decisions
+        .into_iter()
+        .filter(|decision| decision.meta.id == options.selector)
+        .collect::<Vec<_>>();
+    if matches.is_empty()
+        && let Some((file, line)) = selector_location(options.selector)
+    {
+        matches = index
+            .decision_details(options.view)?
+            .into_iter()
+            .filter(|decision| decision.meta.file == file && decision.meta.line == line)
+            .collect();
+    }
+    if matches.is_empty() {
+        return Err(QueryError::InvalidRecordSelection);
+    }
+    let filters = query_filters(options.view, options.kind, options.runner);
+    if matches.len() > 1 {
+        let total = matches.len();
+        let page = matches
+            .into_iter()
+            .skip(options.offset)
+            .take(options.limit)
+            .map(|decision| CoverageDecisionMatch {
+                id: decision.meta.id,
+                file: decision.meta.file,
+                line: decision.meta.line,
+                column: decision.meta.column,
+                source: decision.meta.source,
+            })
+            .collect::<Vec<_>>();
+        let returned = page.len();
+        return Ok((
+            CoverageDecisionData::Matches(CoverageDecisionMatchesData {
+                run: options.run.into(),
+                filters,
+                decisions: page,
+            }),
+            pagination(options.offset, options.limit, returned, total),
+        ));
+    }
+    let filtered = selected_decision(
+        matches.into_iter().next().expect("one decision match"),
+        selected.as_ref(),
+    );
+    let totals = CoverageDecisionTotals {
+        conditions: filtered.conditions.len(),
+        vector_observations: filtered.vector_observations.len(),
+        tests: filtered.tests.len(),
+    };
+    let total = totals
+        .conditions
+        .max(totals.vector_observations)
+        .max(totals.tests);
+    let vector_observations = filtered
+        .vector_observations
+        .iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let vectors = vector_observations
+        .iter()
+        .map(|observation| observation.vector.clone())
+        .collect::<Vec<_>>();
+    let conditions = filtered
+        .conditions
+        .iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .map(|condition| CoverageDecisionCondition {
+            index: condition.index,
+            source: condition.source.clone(),
+            covered: condition.covered,
+            assertion_covered: selected.is_none().then_some(condition.assertion_covered),
+            witness: condition.witness.clone(),
+            witness_tests: condition.witness_tests.clone(),
+        })
+        .collect::<Vec<_>>();
+    let tests = filtered
+        .tests
+        .iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let returned = vector_observations
+        .len()
+        .max(conditions.len())
+        .max(tests.len());
+    Ok((
+        CoverageDecisionData::Detail(CoverageDecisionDetailData {
+            run: options.run.into(),
+            filters,
+            pagination_applies_to:
+                "conditions, vectorObservations, and tests independently within each decision"
+                    .into(),
+            decisions: vec![CoverageSelectedDecision {
+                meta: filtered.meta,
+                executed: filtered.executed,
+                covered: filtered.covered,
+                vectors,
+                vector_observations,
+                conditions,
+                tests,
+                confidence: filtered.confidence,
+                totals,
+            }],
+        }),
+        pagination(options.offset, options.limit, returned, total),
+    ))
+}
+
 pub fn coverage_scope_query(
     index: &CoverageIndex<'_>,
     options: CoverageScopeQueryOptions<'_>,

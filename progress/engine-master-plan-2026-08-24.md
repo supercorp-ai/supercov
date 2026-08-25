@@ -429,7 +429,17 @@ miss blocks flipping any default.
   This establishes bidirectional line/test attribution without coupling the
   query engine to JavaScript report objects and leaves the same evidence graph
   reusable by future language frontends.
-  Full condition/vector/decision detail sections and the rest of the query
+  `coverage decision` now completes the MC/DC detail edge over typed decision,
+  observation and condition records. It preserves short-circuit ternary
+  vectors, per-vector provenance/phases/confidence, assertion-linked
+  conditions, exact witness vectors and both witness-test sets. Kind/runner
+  filters discard unrelated observations and recompute first-pair masking
+  witnesses in Rust; aggregate witnesses are never reused across provenance
+  subsets. Both exact-ID detail and ambiguous file:line selection, including
+  independently paginated conditions/observations/tests, are byte-identical
+  on all five real archive families. Index round trips independently require
+  the reconstructed decision graph to equal the analyzer graph.
+  The remaining ungrouped file obligations and the rest of the query
   surface remain before this path can replace the shipped query engine.
 
 ## Non-goals and guardrails

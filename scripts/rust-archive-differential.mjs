@@ -237,6 +237,85 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
     `${fixture}: indexed file decision-group JSON differs`,
   );
 
+  const detailReference = spawnSync(
+    process.execPath,
+    [
+      resolve(root, 'bin/supercov.js'),
+      'runs', runId, 'coverage', 'decision', indexedDecision.meta.id,
+      '--filter', 'all', '--limit', '2', '--json',
+      ...(filteredKind ? ['--kind', filteredKind] : []),
+      ...(filteredRunner ? ['--runner', filteredRunner] : []),
+    ],
+    {
+      cwd: resolve(root, 'tests/fixtures', fixture),
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024 * 1024,
+    },
+  );
+  assert.equal(detailReference.status, 0, `${fixture}: ${detailReference.stderr || detailReference.stdout}`);
+  const detailRust = spawnSync(binary, ['__query-index-files'], {
+    cwd: root,
+    input: JSON.stringify({
+      archivePath,
+      runId,
+      generatedAt,
+      filter: 'all',
+      command: 'decision',
+      metric: 'all',
+      kind: filteredKind,
+      runner: filteredRunner,
+      selector: indexedDecision.meta.id,
+      offset: 0,
+      limit: 2,
+    }),
+    encoding: 'utf8',
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  assert.equal(detailRust.status, 0, `${fixture}: ${detailRust.stderr || detailRust.stdout}`);
+  assert.equal(detailRust.stdout, detailReference.stdout, `${fixture}: indexed decision JSON differs`);
+
+  const decisionLocations = new Map();
+  for (const decision of expected.decisions) {
+    const key = `${decision.meta.file}:${decision.meta.line}`;
+    decisionLocations.set(key, [...(decisionLocations.get(key) ?? []), decision]);
+  }
+  const ambiguousDecision = [...decisionLocations.entries()].find(([, decisions]) => decisions.length > 1);
+  if (ambiguousDecision) {
+    const [selector] = ambiguousDecision;
+    const matchesReference = spawnSync(
+      process.execPath,
+      [
+        resolve(root, 'bin/supercov.js'),
+        'runs', runId, 'coverage', 'decision', selector,
+        '--filter', 'all', '--limit', '1', '--json',
+      ],
+      {
+        cwd: resolve(root, 'tests/fixtures', fixture),
+        encoding: 'utf8',
+        maxBuffer: 128 * 1024 * 1024,
+      },
+    );
+    assert.equal(matchesReference.status, 0, `${fixture}: ${matchesReference.stderr || matchesReference.stdout}`);
+    const matchesRust = spawnSync(binary, ['__query-index-files'], {
+      cwd: root,
+      input: JSON.stringify({
+        archivePath,
+        runId,
+        generatedAt,
+        filter: 'all',
+        command: 'decision',
+        metric: 'all',
+        selector,
+        offset: 0,
+        limit: 1,
+      }),
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024 * 1024,
+    });
+    assert.equal(matchesRust.status, 0, `${fixture}: ${matchesRust.stderr || matchesRust.stdout}`);
+    assert.equal(matchesRust.stdout, matchesReference.stdout, `${fixture}: indexed decision matches JSON differs`);
+  }
+
   const dimensionCommand = fixtureIndex % 2 === 0 ? 'kinds' : 'runners';
   const dimensionReference = spawnSync(
     process.execPath,
@@ -532,5 +611,5 @@ const indexDifference = firstDifference(indexedActual, indexExpected);
 assert.equal(indexDifference, undefined, `typed index: ${JSON.stringify(indexDifference)}`);
 
 console.log(
-  `[rust-archive-differential] ${fixtures.length} real archives have exact report plus typed mmap summary, scope, file-gap, provenance, dimension, decision-group, and bidirectional attribution query parity`,
+  `[rust-archive-differential] ${fixtures.length} real archives have exact report plus typed mmap summary, scope, file-gap, provenance, dimension, decision detail/group, and bidirectional attribution query parity`,
 );

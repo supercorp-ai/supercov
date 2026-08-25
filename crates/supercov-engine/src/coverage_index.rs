@@ -39,6 +39,9 @@ pub const SECTION_TEST_VECTORS: u32 = 26;
 pub const SECTION_VECTOR_VALUES: u32 = 27;
 pub const SECTION_HIT_METADATA: u32 = 28;
 pub const SECTION_DECISION_METADATA: u32 = 29;
+pub const SECTION_DECISION_DETAILS: u32 = 30;
+pub const SECTION_DECISION_VECTOR_OBSERVATIONS: u32 = 31;
+pub const SECTION_DECISION_CONDITIONS: u32 = 32;
 
 const STRING_RECORD_SIZE: usize = 16;
 const SUMMARY_RECORD_SIZE: usize = 176;
@@ -60,6 +63,9 @@ const TEST_DECISION_RECORD_SIZE: usize = 32;
 const TEST_VECTOR_RECORD_SIZE: usize = 24;
 const HIT_METADATA_RECORD_SIZE: usize = 64;
 const DECISION_METADATA_RECORD_SIZE: usize = 64;
+const DECISION_DETAIL_RECORD_SIZE: usize = 64;
+const DECISION_VECTOR_OBSERVATION_RECORD_SIZE: usize = 64;
+const DECISION_CONDITION_RECORD_SIZE: usize = 64;
 const NO_STRING: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1537,6 +1543,84 @@ fn decision_metadata_record(
     Ok(record)
 }
 
+fn decision_vector_observation_record(
+    observation: &crate::coverage_report::VectorObservation,
+    confidence_index: usize,
+    vector_index: usize,
+    strings: &mut StringTable,
+    relations: &mut StringRelations,
+) -> Result<[u8; DECISION_VECTOR_OBSERVATION_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; DECISION_VECTOR_OBSERVATION_RECORD_SIZE];
+    put_u64(&mut record, 0, usize_u64(confidence_index)?);
+    put_u64(&mut record, 8, usize_u64(vector_index)?);
+    for (offset, values) in [
+        (16, observation.tests.clone()),
+        (32, observation.phases.clone()),
+        (48, observation.explicit_phases.clone()),
+    ] {
+        let (relation_offset, relation_count) = relations.push(values, strings)?;
+        put_u64(&mut record, offset, relation_offset);
+        put_u64(&mut record, offset + 8, relation_count);
+    }
+    Ok(record)
+}
+
+fn decision_condition_record(
+    condition: &crate::coverage_report::ConditionResult,
+    witness_vectors: Option<(usize, usize)>,
+    strings: &mut StringTable,
+    relations: &mut StringRelations,
+) -> Result<[u8; DECISION_CONDITION_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; DECISION_CONDITION_RECORD_SIZE];
+    record[0] = u8::from(condition.covered)
+        | (u8::from(condition.assertion_covered) << 1)
+        | (u8::from(condition.witness.is_some()) << 2);
+    put_u32(&mut record, 4, strings.intern(&condition.source)?);
+    put_u64(&mut record, 8, usize_u64(condition.index)?);
+    if let Some((first, second)) = witness_vectors {
+        put_u64(&mut record, 16, usize_u64(first)?);
+        put_u64(&mut record, 24, usize_u64(second)?);
+    }
+    let witness_tests = condition.witness_tests.clone().unwrap_or_default();
+    for (offset, values) in [
+        (32, witness_tests[0].clone()),
+        (48, witness_tests[1].clone()),
+    ] {
+        let (relation_offset, relation_count) = relations.push(values, strings)?;
+        put_u64(&mut record, offset, relation_offset);
+        put_u64(&mut record, offset + 8, relation_count);
+    }
+    Ok(record)
+}
+
+struct DecisionDetailInput<'a> {
+    view_id: CoverageViewId,
+    decision: &'a crate::coverage_report::DecisionResult,
+    confidence_index: usize,
+    observations: (usize, usize),
+    conditions: (usize, usize),
+}
+
+fn decision_detail_record(
+    input: DecisionDetailInput<'_>,
+    strings: &mut StringTable,
+    relations: &mut StringRelations,
+) -> Result<[u8; DECISION_DETAIL_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; DECISION_DETAIL_RECORD_SIZE];
+    record[0] = input.view_id as u8;
+    record[1] = u8::from(input.decision.executed) | (u8::from(input.decision.covered) << 1);
+    put_u32(&mut record, 4, strings.intern(&input.decision.meta.id)?);
+    put_u64(&mut record, 8, usize_u64(input.confidence_index)?);
+    let (tests_offset, tests_count) = relations.push(input.decision.tests.clone(), strings)?;
+    put_u64(&mut record, 16, tests_offset);
+    put_u64(&mut record, 24, tests_count);
+    put_u64(&mut record, 32, usize_u64(input.observations.0)?);
+    put_u64(&mut record, 40, usize_u64(input.observations.1)?);
+    put_u64(&mut record, 48, usize_u64(input.conditions.0)?);
+    put_u64(&mut record, 56, usize_u64(input.conditions.1)?);
+    Ok(record)
+}
+
 pub fn coverage_index_sections(
     report: &CoverageReport,
 ) -> Result<Vec<QueryIndexSection>, CoverageIndexError> {
@@ -1567,6 +1651,9 @@ pub fn coverage_index_sections(
     let mut vector_values = Vec::new();
     let mut hit_metadata = Vec::new();
     let mut decision_metadata = Vec::new();
+    let mut decision_details = Vec::new();
+    let mut decision_vector_observations = Vec::new();
+    let mut decision_conditions = Vec::new();
     for (id, view) in views {
         summaries.extend_from_slice(&summary_record(id, view, &mut strings)?);
         projection_records.extend_from_slice(&projection_record(
@@ -1640,6 +1727,67 @@ pub fn coverage_index_sections(
             phase_summaries.extend_from_slice(&phase_summary_record(id, phase, &mut strings)?);
         }
         for decision in &view.decisions {
+            let confidence_index = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
+            confidence_records.extend_from_slice(&confidence_record(
+                &decision.confidence,
+                &mut strings,
+                &mut relations,
+            )?);
+            let observations_offset =
+                decision_vector_observations.len() / DECISION_VECTOR_OBSERVATION_RECORD_SIZE;
+            for observation in &decision.vector_observations {
+                let observation_confidence = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
+                confidence_records.extend_from_slice(&confidence_record(
+                    &observation.confidence,
+                    &mut strings,
+                    &mut relations,
+                )?);
+                let vector_index = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
+                test_vectors.extend_from_slice(&test_vector_record(
+                    &observation.vector,
+                    &mut vector_values,
+                )?);
+                decision_vector_observations.extend_from_slice(
+                    &decision_vector_observation_record(
+                        observation,
+                        observation_confidence,
+                        vector_index,
+                        &mut strings,
+                        &mut relations,
+                    )?,
+                );
+            }
+            let conditions_offset = decision_conditions.len() / DECISION_CONDITION_RECORD_SIZE;
+            for condition in &decision.conditions {
+                let witness_vectors = if let Some(witness) = &condition.witness {
+                    let first = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
+                    test_vectors
+                        .extend_from_slice(&test_vector_record(&witness[0], &mut vector_values)?);
+                    let second = test_vectors.len() / TEST_VECTOR_RECORD_SIZE;
+                    test_vectors
+                        .extend_from_slice(&test_vector_record(&witness[1], &mut vector_values)?);
+                    Some((first, second))
+                } else {
+                    None
+                };
+                decision_conditions.extend_from_slice(&decision_condition_record(
+                    condition,
+                    witness_vectors,
+                    &mut strings,
+                    &mut relations,
+                )?);
+            }
+            decision_details.extend_from_slice(&decision_detail_record(
+                DecisionDetailInput {
+                    view_id: id,
+                    decision,
+                    confidence_index,
+                    observations: (observations_offset, decision.vector_observations.len()),
+                    conditions: (conditions_offset, decision.conditions.len()),
+                },
+                &mut strings,
+                &mut relations,
+            )?);
             decision_metadata.extend_from_slice(&decision_metadata_record(
                 id,
                 decision,
@@ -1926,6 +2074,26 @@ pub fn coverage_index_sections(
             count: usize_u64(decision_metadata.len() / DECISION_METADATA_RECORD_SIZE)?,
             bytes: decision_metadata,
         },
+        QueryIndexSection {
+            kind: SECTION_DECISION_DETAILS,
+            record_size: DECISION_DETAIL_RECORD_SIZE as u32,
+            count: usize_u64(decision_details.len() / DECISION_DETAIL_RECORD_SIZE)?,
+            bytes: decision_details,
+        },
+        QueryIndexSection {
+            kind: SECTION_DECISION_VECTOR_OBSERVATIONS,
+            record_size: DECISION_VECTOR_OBSERVATION_RECORD_SIZE as u32,
+            count: usize_u64(
+                decision_vector_observations.len() / DECISION_VECTOR_OBSERVATION_RECORD_SIZE,
+            )?,
+            bytes: decision_vector_observations,
+        },
+        QueryIndexSection {
+            kind: SECTION_DECISION_CONDITIONS,
+            record_size: DECISION_CONDITION_RECORD_SIZE as u32,
+            count: usize_u64(decision_conditions.len() / DECISION_CONDITION_RECORD_SIZE)?,
+            bytes: decision_conditions,
+        },
     ])
 }
 
@@ -1957,6 +2125,12 @@ impl<'a> CoverageIndex<'a> {
             (SECTION_VECTOR_VALUES, 1),
             (SECTION_HIT_METADATA, HIT_METADATA_RECORD_SIZE),
             (SECTION_DECISION_METADATA, DECISION_METADATA_RECORD_SIZE),
+            (SECTION_DECISION_DETAILS, DECISION_DETAIL_RECORD_SIZE),
+            (
+                SECTION_DECISION_VECTOR_OBSERVATIONS,
+                DECISION_VECTOR_OBSERVATION_RECORD_SIZE,
+            ),
+            (SECTION_DECISION_CONDITIONS, DECISION_CONDITION_RECORD_SIZE),
         ] {
             if index.descriptor(kind)?.record_size as usize != size {
                 return Err(CoverageIndexError::InvalidRecord("record size"));
@@ -2849,6 +3023,143 @@ impl<'a> CoverageIndex<'a> {
         Ok(metadata)
     }
 
+    fn decision_vector_observation(
+        &self,
+        index: u64,
+    ) -> Result<crate::coverage_report::VectorObservation, CoverageIndexError> {
+        let record = self
+            .index
+            .record(SECTION_DECISION_VECTOR_OBSERVATIONS, index)?;
+        Ok(crate::coverage_report::VectorObservation {
+            confidence: self.confidence(get_u64(record, 0)?)?,
+            vector: self.test_vector(get_u64(record, 8)?)?,
+            tests: self.relation_strings(get_u64(record, 16)?, get_u64(record, 24)?)?,
+            phases: self.relation_strings(get_u64(record, 32)?, get_u64(record, 40)?)?,
+            explicit_phases: self.relation_strings(get_u64(record, 48)?, get_u64(record, 56)?)?,
+        })
+    }
+
+    fn decision_condition(
+        &self,
+        index: u64,
+    ) -> Result<crate::coverage_report::ConditionResult, CoverageIndexError> {
+        let record = self.index.record(SECTION_DECISION_CONDITIONS, index)?;
+        if record[0] & !7 != 0 || record[1..4].iter().any(|byte| *byte != 0) {
+            return Err(CoverageIndexError::InvalidRecord(
+                "decision condition record",
+            ));
+        }
+        let has_witness = record[0] & 4 != 0;
+        let witness = if has_witness {
+            Some([
+                self.test_vector(get_u64(record, 16)?)?,
+                self.test_vector(get_u64(record, 24)?)?,
+            ])
+        } else {
+            None
+        };
+        let first_tests = self.relation_strings(get_u64(record, 32)?, get_u64(record, 40)?)?;
+        let second_tests = self.relation_strings(get_u64(record, 48)?, get_u64(record, 56)?)?;
+        if !has_witness && (!first_tests.is_empty() || !second_tests.is_empty()) {
+            return Err(CoverageIndexError::InvalidRecord(
+                "condition witness tests without witness",
+            ));
+        }
+        Ok(crate::coverage_report::ConditionResult {
+            index: usize::try_from(get_u64(record, 8)?)
+                .map_err(|_| CoverageIndexError::SizeOverflow)?,
+            source: self.string(get_u32(record, 4)?)?,
+            covered: record[0] & 1 != 0,
+            assertion_covered: record[0] & 2 != 0,
+            witness,
+            witness_tests: has_witness.then_some([first_tests, second_tests]),
+        })
+    }
+
+    pub fn decision_details(
+        &self,
+        view: CoverageViewId,
+    ) -> Result<Vec<crate::coverage_report::DecisionResult>, CoverageIndexError> {
+        let metadata = self
+            .decision_metadata(view)?
+            .into_iter()
+            .map(|meta| (meta.id.clone(), meta))
+            .collect::<HashMap<_, _>>();
+        let descriptor = self.index.descriptor(SECTION_DECISION_DETAILS)?;
+        let observation_count = self
+            .index
+            .descriptor(SECTION_DECISION_VECTOR_OBSERVATIONS)?
+            .count;
+        let condition_count = self.index.descriptor(SECTION_DECISION_CONDITIONS)?.count;
+        let mut decisions = Vec::new();
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_DECISION_DETAILS, index)?;
+            if CoverageViewId::try_from(record[0])? != view {
+                continue;
+            }
+            if record[1] & !3 != 0 || record[2..4].iter().any(|byte| *byte != 0) {
+                return Err(CoverageIndexError::InvalidRecord("decision detail record"));
+            }
+            let executed = record[1] & 1 != 0;
+            let covered = record[1] & 2 != 0;
+            if covered && !executed {
+                return Err(CoverageIndexError::InvalidRecord(
+                    "covered unexecuted decision",
+                ));
+            }
+            let range = |offset: usize,
+                         available: u64,
+                         label: &'static str|
+             -> Result<std::ops::Range<u64>, CoverageIndexError> {
+                let start = get_u64(record, offset)?;
+                let count = get_u64(record, offset + 8)?;
+                let end = start
+                    .checked_add(count)
+                    .ok_or(CoverageIndexError::InvalidRecord(label))?;
+                if end > available {
+                    return Err(CoverageIndexError::InvalidRecord(label));
+                }
+                Ok(start..end)
+            };
+            let observations = range(32, observation_count, "decision observation range")?
+                .map(|index| self.decision_vector_observation(index))
+                .collect::<Result<Vec<_>, _>>()?;
+            let conditions = range(48, condition_count, "decision condition range")?
+                .map(|index| self.decision_condition(index))
+                .collect::<Result<Vec<_>, _>>()?;
+            let id = self.string(get_u32(record, 4)?)?;
+            let meta = metadata
+                .get(&id)
+                .cloned()
+                .ok_or(CoverageIndexError::InvalidRecord(
+                    "missing decision metadata",
+                ))?;
+            if conditions.len() != meta.conditions.len()
+                || conditions.iter().enumerate().any(|(index, condition)| {
+                    condition.index != index || condition.source != meta.conditions[index]
+                })
+            {
+                return Err(CoverageIndexError::InvalidRecord(
+                    "decision condition denominator",
+                ));
+            }
+            decisions.push(crate::coverage_report::DecisionResult {
+                meta,
+                executed,
+                covered,
+                vectors: observations
+                    .iter()
+                    .map(|observation| observation.vector.clone())
+                    .collect(),
+                vector_observations: observations,
+                conditions,
+                tests: self.relation_strings(get_u64(record, 16)?, get_u64(record, 24)?)?,
+                confidence: self.confidence(get_u64(record, 8)?)?,
+            });
+        }
+        Ok(decisions)
+    }
+
     pub fn phase_summaries(
         &self,
         view: CoverageViewId,
@@ -3201,6 +3512,10 @@ mod tests {
         let decisions = index.decision_metadata(CoverageViewId::All).unwrap();
         assert_eq!(decisions.len(), 1);
         assert_eq!(decisions[0].conditions, ["a", "b"]);
+        assert_eq!(
+            index.decision_details(CoverageViewId::All).unwrap(),
+            report.view.decisions
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
