@@ -41,6 +41,8 @@ const RUNTIME_FILES: &[&str] = &[
     "runtime.js",
     "transport.js",
     "types.js",
+    "vitest.js",
+    "vitestReporter.js",
 ];
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
@@ -100,6 +102,7 @@ pub struct PreparedJavascriptFrontend {
     pub manifest: JavascriptManifest,
     pub manifest_path: PathBuf,
     pub preload_path: PathBuf,
+    pub vitest_config_path: PathBuf,
     pub assertion_calls: usize,
 }
 
@@ -229,6 +232,49 @@ fn limitation_from_source(value: &SourceLimitation) -> CandidateLimitation {
     }
 }
 
+fn relocated_project_file(
+    workspace: &Path,
+    project: &CoverageProject,
+    source: Option<&PathBuf>,
+) -> Option<PathBuf> {
+    let source = source?;
+    let relative = source.strip_prefix(&project.root).ok()?;
+    Some(workspace.join(relative))
+}
+
+fn write_vitest_config(
+    workspace: &Path,
+    project: &CoverageProject,
+    generated: &Path,
+) -> Result<PathBuf, JavascriptFrontendError> {
+    let path = generated.join("vitest.config.mjs");
+    let original = relocated_project_file(workspace, project, project.vitest_config.as_ref())
+        .map(|path| path.display().to_string());
+    let original = serde_json::to_string(&original).map_err(JavascriptFrontendError::Serialize)?;
+    let source = format!(
+        "import {{ loadConfigFromFile, mergeConfig }} from 'vite';\n\
+         import {{ resolve }} from 'node:path';\n\
+         import SupercovVitestReporter from './vitestReporter.js';\n\
+         const discoveredConfig = {original};\n\
+         export default async function supercovVitestConfig(env) {{\n\
+           const originalPath = process.env.SUPERCOV_ORIGINAL_VITEST_CONFIG || discoveredConfig;\n\
+           const loaded = originalPath ? await loadConfigFromFile(env, originalPath, process.cwd()) : undefined;\n\
+           const config = mergeConfig(loaded?.config ?? {{}}, {{\n\
+             cacheDir: resolve(process.cwd(), '.supercov/vitest-cache'),\n\
+             test: {{ setupFiles: [resolve(process.cwd(), '.supercov/vitest.js')], maxConcurrency: 1 }},\n\
+           }});\n\
+           const configuredReporters = loaded?.config?.test?.reporters;\n\
+           config.test ??= {{}};\n\
+           config.test.reporters = configuredReporters\n\
+             ? [...(Array.isArray(configuredReporters) ? configuredReporters : [configuredReporters]), new SupercovVitestReporter()]\n\
+             : ['default', new SupercovVitestReporter()];\n\
+           return config;\n\
+         }}\n"
+    );
+    atomic_write(&path, source.as_bytes())?;
+    Ok(path)
+}
+
 /// Prepare the complete JavaScript frontend inside an isolated workspace.
 /// The source project is read only through the copied workspace inventory.
 pub fn prepare_javascript_frontend(
@@ -239,6 +285,7 @@ pub fn prepare_javascript_frontend(
 ) -> Result<PreparedJavascriptFrontend, JavascriptFrontendError> {
     let generated = workspace.join(".supercov");
     copy_runtime(runtime_root, &generated, collector_id)?;
+    let vitest_config_path = write_vitest_config(workspace, project, &generated)?;
 
     let mut decisions = BTreeMap::new();
     let mut points = BTreeMap::new();
@@ -343,6 +390,7 @@ pub fn prepare_javascript_frontend(
         manifest,
         manifest_path,
         preload_path: generated.join("register.mjs"),
+        vitest_config_path,
         assertion_calls,
     })
 }
@@ -414,6 +462,7 @@ mod tests {
         assert_eq!(prepared.manifest.scope, project.source_scope);
         assert!(prepared.manifest_path.is_file());
         assert!(prepared.preload_path.is_file());
+        assert!(prepared.vitest_config_path.is_file());
         assert_eq!(prepared.assertion_calls, 0);
         fs::remove_dir_all(source_root).unwrap();
         fs::remove_dir_all(workspace).unwrap();

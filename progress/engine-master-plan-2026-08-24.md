@@ -620,7 +620,7 @@ miss blocks flipping any default.
   phases, emits the complete sorted manifest, supervises the test command,
   packs the frozen evidence archive, atomically publishes immutable run
   metadata, prunes copied source and serves the persisted run through the Rust
-  mmap query index. The black-box fixture proves four concurrent test scopes,
+  mmap query index. The black-box fixture proves five concurrent test scopes,
   100% line/branch/MC/DC, all three executable lines and both MC/DC conditions
   assertion-linked, no fallback attribution, a valid/complete passed view,
   unchanged project source and no retained raw-evidence directory in the
@@ -629,13 +629,31 @@ miss blocks flipping any default.
   of virtual/legacy bindings, and persisted-run queries derive validity from
   the test exit code rather than defaulting it to false. This remains private:
   A second black-box case now proves the same complete structural result for
-  CommonJS plus top-level `require` assertion bindings. Its module-export
+  CommonJS plus top-level and nested `require` assertion bindings. Assertion
+  discovery is resolved by lexical symbol identity, so shadowed imports,
+  shadowed `require`, and unrelated assert-shaped APIs cannot be falsely
+  claimed. Native `node:test` suites using imported `expect` matchers are
+  attributed as exact assertion phases as well. The CommonJS module-export
   assignment is correctly retained as background/setup execution: the all-
   evidence view is structurally complete while the passed-test-only view does
-  not falsely attribute module initialization to a test assertion. Nested or
-  shadowed CJS assertion bindings, node:test `expect`, build-tool frontends,
-  full reference differentials and cross-platform crash/filesystem gates still
-  block any selector or TypeScript-engine deletion.
+  not falsely attribute module initialization to a test assertion.
+- The second private Rust-owned execution frontend now runs zero-configuration
+  Vitest projects, including commands hidden behind an npm script. Rust writes
+  an isolated merged Vitest configuration, injects the unavoidable local
+  setup/reporter shims, transforms lexical Vitest `expect` matchers, and keeps
+  the exact run/worker/test/retry/attempt scope active for each serial worker
+  attempt. The black-box fixture proves four passing tests, 100% line/branch/
+  MC/DC, three assertion-linked executable lines, two assertion-linked MC/DC
+  conditions, exact per-test phase operations, unchanged source, and a valid
+  structurally complete persisted query. Snapshot evidence now retains
+  de-duplicated explicit phase events instead of discarding the only causal
+  link between an assertion and its obligations. Empty request contexts still
+  suppress inherited process carriers, so unscoped health/background work is
+  not accidentally promoted into a test. Both direct Node and Vitest fixtures
+  pass the complete Rust differential suite. Playwright/build-tool execution
+  frontends, full Test262 and browser matrices, dogfood parity, and cross-
+  platform crash/filesystem gates still block any public selector or
+  TypeScript-engine deletion.
 
 ## Non-goals and guardrails
 

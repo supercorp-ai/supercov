@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -34,6 +35,18 @@ try {
   cpSync(resolve(fixture, 'package.json'), resolve(project, 'package.json'));
   cpSync(resolve(fixture, 'src'), resolve(project, 'src'), { recursive: true });
   cpSync(resolve(fixture, 'tests'), resolve(project, 'tests'), { recursive: true });
+  mkdirSync(resolve(project, 'node_modules'));
+  symlinkSync(resolve(repository, 'node_modules/expect'), resolve(project, 'node_modules/expect'));
+  writeFileSync(
+    resolve(project, 'tests/expect.test.mjs'),
+    [
+      "import test from 'node:test';",
+      "import { expect } from 'expect';",
+      "import { permission } from '../src/permission.mjs';",
+      "test('expect matcher', () => expect(permission(true, false)).toBe('allowed'));",
+      '',
+    ].join('\n'),
+  );
   const original = readFileSync(resolve(project, 'src/permission.mjs'), 'utf8');
   const result = rust('__run-js-direct', {
     root: project,
@@ -57,12 +70,26 @@ try {
   assert.equal(summary.ok, true);
   assert.equal(summary.data.valid, true);
   assert.equal(summary.data.complete, true);
-  assert.equal(summary.data.tests, 4);
+  assert.equal(summary.data.tests, 5);
   assert.equal(summary.data.coverage.conditionCoveragePct, 100);
   assert.equal(summary.data.confidence.lines.asserted, 3);
   assert.equal(summary.data.confidence.assertionCoveredMcdcConditions, 2);
-  assert.equal(summary.data.attribution.serverExplicit, 16);
+  assert.equal(summary.data.attribution.serverExplicit, 20);
   assert.equal(summary.data.attribution.serverFallback, 0);
+  const expectTest = rust('__query-stored-run', {
+    root: project,
+    query: {
+      runId: result.runId,
+      filter: 'passed',
+      command: 'test',
+      selector: 'expect matcher',
+    },
+  });
+  assert.equal(expectTest.data.tests.length, 1);
+  assert.equal(expectTest.data.tests[0].phases.length, 1);
+  assert.equal(expectTest.data.tests[0].phases[0].kind, 'assertion');
+  assert.equal(expectTest.data.tests[0].phases[0].operation, 'expect.toBe');
+  assert.equal(expectTest.data.tests[0].phases[0].lines, 2);
 
   mkdirSync(resolve(commonjsProject, 'src'), { recursive: true });
   mkdirSync(resolve(commonjsProject, 'tests'), { recursive: true });

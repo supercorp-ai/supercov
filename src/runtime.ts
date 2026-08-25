@@ -104,6 +104,7 @@ type McdcGlobal = typeof globalThis & {
   __SUPERCOV_MCDC_STATES__?: Map<string, RuntimeState>;
   __SUPERCOV_MCDC_TEST_ID__?: string;
   __SUPERCOV_PHASE_ID__?: string;
+  __SUPERCOV_ACTIVE_SCOPE__?: CoverageExecutionScope;
   __SUPERCOV_SERVER_PHASE_STORAGES__?: Map<string, RequestStorage>;
   __SUPERCOV_FETCH_PATCHED__?: boolean;
   __SUPERCOV_CHILD_PATCHED__?: boolean;
@@ -557,7 +558,28 @@ if (!isBrowser) {
 }
 
 function appendServer(record: CoverageServerRecord): void {
-  if (state.runtimeSnapshots) return;
+  if (state.runtimeSnapshots) {
+    const timestampMs = record.timestampMs ?? Date.now();
+    if (record.type === "decision") {
+      recordBrowserEvent({
+        type: "decision",
+        id: record.meta.id,
+        vector: record.vector,
+        timestampMs,
+        ...(record.phaseId ? { phaseId: record.phaseId } : {}),
+        environment: "server",
+      });
+    } else {
+      recordBrowserEvent({
+        type: "hit",
+        id: record.id,
+        timestampMs,
+        ...(record.phaseId ? { phaseId: record.phaseId } : {}),
+        environment: "server",
+      });
+    }
+    return;
+  }
   const fs = getFs();
   if (!fs) return;
   const context = currentRequestContext();
@@ -626,7 +648,30 @@ function environmentRequestContext(): CoverageRequestContext | undefined {
 }
 
 function currentRequestContext(): CoverageRequestContext {
-  return serverPhaseStorage?.getStore() ?? environmentRequestContext() ?? {};
+  const stored = serverPhaseStorage?.getStore();
+  if (stored !== undefined) {
+    if (stored.scope || stored.phaseId) return stored;
+    return runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__
+      ? { scope: runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ }
+      : {};
+  }
+  const environment = environmentRequestContext();
+  if (environment?.scope || environment?.phaseId) return environment;
+  return runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__
+    ? { scope: runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ }
+    : {};
+}
+
+/**
+ * Activate a serial runner's exact test-attempt identity. Runners using this
+ * API must guarantee that tests do not overlap inside one process; parallel
+ * worker processes remain independent. Async/concurrent runners must use
+ * withCoverageCarrier instead.
+ */
+export function activateCoverageScope(scope?: CoverageExecutionScope): void {
+  if (scope) runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__ = scope;
+  else delete runtimeGlobal.__SUPERCOV_ACTIVE_SCOPE__;
+  activateProbeV2Context(scope ? { scope } : {});
 }
 
 export function coverageCarrier(): CoverageCarrier {

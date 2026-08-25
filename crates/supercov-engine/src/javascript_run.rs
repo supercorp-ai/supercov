@@ -23,7 +23,7 @@ use crate::{
     },
     orchestration::{ExecutionPhase, ExecutionPlan, PhaseKind, execute_plan},
     process_supervision::{CommandSpec, SupervisionOptions},
-    project_discovery::{BuildAdapter, discover_coverage_project},
+    project_discovery::{BuildAdapter, command_uses_tool, discover_coverage_project},
     run_store::{RawEvidenceMetadata, RunMetadata, RunTimings},
     workspace::{prepare_cached_workspace, prune_cached_workspace_sources},
 };
@@ -47,6 +47,7 @@ pub struct DirectJavascriptRunResult {
     pub run_directory: PathBuf,
     pub workspace: PathBuf,
     pub exit_code: i32,
+    pub assertion_calls: usize,
     pub metadata: RunMetadata,
 }
 
@@ -189,6 +190,12 @@ pub fn run_direct_javascript(
             root.display().to_string(),
         ),
     ]);
+    if project.vitest_config.is_some() || command_uses_tool(&root, &request.command, "vitest") {
+        overrides.insert(
+            "SUPERCOV_GENERATED_VITEST_CONFIG".into(),
+            frontend.vitest_config_path.display().to_string(),
+        );
+    }
     overrides.extend(project.build_environment.clone());
     let plan = ExecutionPlan {
         preparation: Vec::new(),
@@ -299,6 +306,7 @@ pub fn run_direct_javascript(
         run_directory,
         workspace,
         exit_code: execution.exit_code,
+        assertion_calls: frontend.assertion_calls,
         metadata,
     })
 }

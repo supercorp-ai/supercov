@@ -25,7 +25,7 @@ use oxc_ast::{
         ImportOrExportKind, LogicalExpression, NewExpression, ObjectPropertyKind,
         PrivateFieldExpression, Program, PropertyKey, PropertyKind, Statement,
         StaticMemberExpression, SwitchStatement, TryStatement, VariableDeclaration,
-        VariableDeclarationKind, WhileStatement, WithStatement,
+        VariableDeclarationKind, VariableDeclarator, WhileStatement, WithStatement,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -37,6 +37,7 @@ use oxc_syntax::{
     number::NumberBase,
     operator::{AssignmentOperator, BinaryOperator, LogicalOperator, UnaryOperator},
     scope::ScopeFlags,
+    symbol::SymbolId,
 };
 use oxc_traverse::{Ancestor, Traverse, TraverseCtx, traverse_mut};
 use serde::{Deserialize, Serialize};
@@ -456,16 +457,20 @@ fn canonical_assert_module(value: &str) -> Option<String> {
     })
 }
 
-fn required_assert_module(expression: &Expression<'_>) -> Option<String> {
+fn required_assert_module(
+    expression: &Expression<'_>,
+    scoping: &oxc_semantic::Scoping,
+) -> Option<String> {
     if let Expression::CallExpression(call) = expression
         && matches!(&call.callee, Expression::Identifier(identifier) if identifier.name == "require")
+        && matches!(&call.callee, Expression::Identifier(identifier) if referenced_symbol(identifier, scoping).is_none())
         && let [Argument::StringLiteral(module)] = call.arguments.as_slice()
     {
         return canonical_assert_module(module.value.as_str());
     }
     if let Expression::StaticMemberExpression(member) = expression
         && member.property.name == "strict"
-        && let Some(module) = required_assert_module(&member.object)
+        && let Some(module) = required_assert_module(&member.object, scoping)
     {
         return Some(if module == "node:assert" {
             "node:assert/strict".into()
@@ -478,58 +483,100 @@ fn required_assert_module(expression: &Expression<'_>) -> Option<String> {
 
 #[derive(Default)]
 struct NodeAssertionBindings {
-    objects: HashMap<String, String>,
-    direct: HashMap<String, String>,
+    objects: HashMap<SymbolId, String>,
+    direct: HashMap<SymbolId, String>,
+    expects: HashSet<SymbolId>,
 }
 
-fn node_assertion_bindings(program: &Program<'_>) -> NodeAssertionBindings {
-    let mut bindings = NodeAssertionBindings::default();
-    for statement in &program.body {
-        if let Statement::ImportDeclaration(declaration) = statement
-            && let Some(module) = canonical_assert_module(declaration.source.value.as_str())
-        {
-            for specifier in declaration.specifiers.iter().flatten() {
-                match specifier {
-                    ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                        bindings
-                            .objects
-                            .insert(specifier.local.name.to_string(), module.clone());
+fn bind_object(
+    bindings: &mut NodeAssertionBindings,
+    identifier: &oxc_ast::ast::BindingIdentifier<'_>,
+    module: String,
+) {
+    if let Some(symbol) = identifier.symbol_id.get() {
+        bindings.objects.insert(symbol, module);
+    }
+}
+
+fn bind_direct(
+    bindings: &mut NodeAssertionBindings,
+    identifier: &oxc_ast::ast::BindingIdentifier<'_>,
+    operation: String,
+) {
+    if let Some(symbol) = identifier.symbol_id.get() {
+        bindings.direct.insert(symbol, operation);
+    }
+}
+
+fn bind_expect(
+    bindings: &mut NodeAssertionBindings,
+    identifier: &oxc_ast::ast::BindingIdentifier<'_>,
+) {
+    if let Some(symbol) = identifier.symbol_id.get() {
+        bindings.expects.insert(symbol);
+    }
+}
+
+struct NodeAssertionBindingCollector<'s> {
+    bindings: NodeAssertionBindings,
+    scoping: &'s oxc_semantic::Scoping,
+    allow_contextual_expect: bool,
+}
+
+impl<'a> Visit<'a> for NodeAssertionBindingCollector<'_> {
+    fn visit_import_declaration(&mut self, declaration: &oxc_ast::ast::ImportDeclaration<'a>) {
+        let module_name = declaration.source.value.as_str();
+        let assert_module = canonical_assert_module(module_name);
+        let expect_module = matches!(module_name, "vitest" | "@jest/globals" | "expect")
+            || self.allow_contextual_expect;
+        for specifier in declaration.specifiers.iter().flatten() {
+            match specifier {
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    if let Some(module) = &assert_module {
+                        bind_object(&mut self.bindings, &specifier.local, module.clone());
+                    } else if expect_module && specifier.local.name == "expect" {
+                        bind_expect(&mut self.bindings, &specifier.local);
                     }
-                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                        bindings
-                            .objects
-                            .insert(specifier.local.name.to_string(), module.clone());
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    if let Some(module) = &assert_module {
+                        bind_object(&mut self.bindings, &specifier.local, module.clone());
                     }
-                    ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-                        let imported = specifier.imported.name().to_string();
+                }
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                    let imported = specifier.imported.name().to_string();
+                    if let Some(module) = &assert_module {
                         if imported == "strict" {
-                            bindings.objects.insert(
-                                specifier.local.name.to_string(),
+                            bind_object(
+                                &mut self.bindings,
+                                &specifier.local,
                                 "node:assert/strict".into(),
                             );
                         } else if NODE_ASSERT_METHODS.contains(&imported.as_str()) {
-                            bindings.direct.insert(
-                                specifier.local.name.to_string(),
+                            bind_direct(
+                                &mut self.bindings,
+                                &specifier.local,
                                 format!("{module}.{imported}"),
                             );
                         }
+                    } else if expect_module && imported == "expect" {
+                        bind_expect(&mut self.bindings, &specifier.local);
                     }
                 }
             }
-            continue;
         }
-        let Statement::VariableDeclaration(declaration) = statement else {
-            continue;
-        };
-        for declarator in &declaration.declarations {
-            let Some(module) = declarator.init.as_ref().and_then(required_assert_module) else {
-                continue;
-            };
+        walk::walk_import_declaration(self, declaration);
+    }
+
+    fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'a>) {
+        if let Some(module) = declarator
+            .init
+            .as_ref()
+            .and_then(|expression| required_assert_module(expression, self.scoping))
+        {
             match &declarator.id {
                 BindingPattern::BindingIdentifier(identifier) => {
-                    bindings
-                        .objects
-                        .insert(identifier.name.to_string(), module.clone());
+                    bind_object(&mut self.bindings, identifier, module);
                 }
                 BindingPattern::ObjectPattern(pattern) => {
                     for property in &pattern.properties {
@@ -540,28 +587,101 @@ fn node_assertion_bindings(program: &Program<'_>) -> NodeAssertionBindings {
                             continue;
                         };
                         if imported == "strict" {
-                            bindings
-                                .objects
-                                .insert(local.name.to_string(), "node:assert/strict".into());
+                            bind_object(&mut self.bindings, local, "node:assert/strict".into());
                         } else if NODE_ASSERT_METHODS.contains(&imported.as_ref()) {
-                            bindings
-                                .direct
-                                .insert(local.name.to_string(), format!("{module}.{imported}"));
+                            bind_direct(&mut self.bindings, local, format!("{module}.{imported}"));
                         }
                     }
                 }
                 _ => {}
             }
         }
+        walk::walk_variable_declarator(self, declarator);
     }
-    bindings
+}
+
+fn node_assertion_bindings(
+    program: &Program<'_>,
+    scoping: &oxc_semantic::Scoping,
+) -> NodeAssertionBindings {
+    let allow_contextual_expect = program.source_text.contains("node:test")
+        && program
+            .source_text
+            .split(|character: char| !character.is_alphanumeric() && character != '_')
+            .any(|word| word == "expect");
+    let mut collector = NodeAssertionBindingCollector {
+        bindings: NodeAssertionBindings::default(),
+        scoping,
+        allow_contextual_expect,
+    };
+    collector.visit_program(program);
+    collector.bindings
 }
 
 struct NodeAssertionSiteCollector<'s> {
     source: &'s str,
     file: &'s str,
     bindings: &'s NodeAssertionBindings,
+    scoping: &'s oxc_semantic::Scoping,
     sites: HashMap<SpanKey, (String, String)>,
+}
+
+fn referenced_symbol(
+    identifier: &oxc_ast::ast::IdentifierReference<'_>,
+    scoping: &oxc_semantic::Scoping,
+) -> Option<SymbolId> {
+    identifier
+        .reference_id
+        .get()
+        .and_then(|reference| scoping.get_reference(reference).symbol_id())
+}
+
+fn assertion_member_name<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
+    match expression {
+        Expression::StaticMemberExpression(member) => Some(member.property.name.as_str()),
+        Expression::ComputedMemberExpression(member) => match &member.expression {
+            Expression::StringLiteral(literal) => Some(literal.value.as_str()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn assertion_member_object<'a>(expression: &'a Expression<'a>) -> Option<&'a Expression<'a>> {
+    match expression {
+        Expression::StaticMemberExpression(member) => Some(&member.object),
+        Expression::ComputedMemberExpression(member) => Some(&member.object),
+        _ => None,
+    }
+}
+
+fn expect_operation(
+    callee: &Expression<'_>,
+    bindings: &NodeAssertionBindings,
+    scoping: &oxc_semantic::Scoping,
+) -> Option<String> {
+    let mut current = callee;
+    let mut matchers = Vec::new();
+    while let Some(name) = assertion_member_name(current) {
+        matchers.push(name.to_owned());
+        current = assertion_member_object(current)?;
+    }
+    matchers.reverse();
+    let matcher = matchers.last()?;
+    if !matcher.starts_with("to") || !matcher.chars().nth(2).is_some_and(char::is_uppercase) {
+        return None;
+    }
+    let Expression::CallExpression(expect_call) = current else {
+        return None;
+    };
+    let Expression::Identifier(identifier) = &expect_call.callee else {
+        return None;
+    };
+    let symbol = referenced_symbol(identifier, scoping)?;
+    bindings
+        .expects
+        .contains(&symbol)
+        .then(|| format!("expect.{}", matchers.join(".")))
 }
 
 #[derive(Default)]
@@ -586,29 +706,30 @@ impl<'a> Visit<'a> for AwaitYieldScanner {
 impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
         let operation = match &call.callee {
-            Expression::Identifier(identifier) => self
-                .bindings
-                .direct
-                .get(identifier.name.as_str())
-                .cloned()
-                .or_else(|| {
+            Expression::Identifier(identifier) => referenced_symbol(identifier, self.scoping)
+                .and_then(|symbol| {
+                    self.bindings.direct.get(&symbol).cloned().or_else(|| {
+                        self.bindings
+                            .objects
+                            .get(&symbol)
+                            .map(|module| format!("{module}.ok"))
+                    })
+                }),
+            callee => {
+                let member_operation = assertion_member_object(callee).and_then(|object| {
+                    let Expression::Identifier(identifier) = object else {
+                        return None;
+                    };
+                    let symbol = referenced_symbol(identifier, self.scoping)?;
+                    let method = assertion_member_name(callee)?;
                     self.bindings
                         .objects
-                        .get(identifier.name.as_str())
-                        .map(|module| format!("{module}.ok"))
-                }),
-            Expression::StaticMemberExpression(member) => {
-                let Expression::Identifier(object) = &member.object else {
-                    walk::walk_call_expression(self, call);
-                    return;
-                };
-                self.bindings
-                    .objects
-                    .get(object.name.as_str())
-                    .filter(|_| NODE_ASSERT_METHODS.contains(&member.property.name.as_str()))
-                    .map(|module| format!("{module}.{}", member.property.name))
+                        .get(&symbol)
+                        .filter(|_| NODE_ASSERT_METHODS.contains(&method))
+                        .map(|module| format!("{module}.{method}"))
+                });
+                member_operation.or_else(|| expect_operation(callee, self.bindings, self.scoping))
             }
-            _ => None,
         };
         if let Some(operation) = operation {
             let mut unsafe_argument = AwaitYieldScanner::default();
@@ -712,14 +833,14 @@ impl<'a> VisitMut<'a> for NodeAssertionTransformer<'a> {
     }
 }
 
-/// Attribute native ESM node:assert calls by opening the assertion phase
-/// before argument evaluation. node:test `expect` remains an explicit blocker
-/// for the private vertical slice.
+/// Attribute native node:assert and node:test expect calls by opening the
+/// assertion phase before argument evaluation. Lexical symbol identity avoids
+/// wrapping a shadowed or merely assert-shaped user binding.
 pub fn instrument_node_assertion_phases(
     source: &str,
     file: &str,
 ) -> Result<NodeAssertionInstrumentation, CandidateError> {
-    if !source.contains("assert") {
+    if !source.contains("assert") && !source.contains("expect") {
         return Ok(NodeAssertionInstrumentation {
             code: source.into(),
             assertions: 0,
@@ -738,8 +859,9 @@ pub fn instrument_node_assertion_phases(
                 .collect(),
         ));
     }
-    let bindings = node_assertion_bindings(&parsed.program);
-    if bindings.objects.is_empty() && bindings.direct.is_empty() {
+    let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
+    let bindings = node_assertion_bindings(&parsed.program, semantic.scoping());
+    if bindings.objects.is_empty() && bindings.direct.is_empty() && bindings.expects.is_empty() {
         return Ok(NodeAssertionInstrumentation {
             code: source.into(),
             assertions: 0,
@@ -749,6 +871,7 @@ pub fn instrument_node_assertion_phases(
         source,
         file,
         bindings: &bindings,
+        scoping: semantic.scoping(),
         sites: HashMap::new(),
     };
     collector.visit_program(&parsed.program);
@@ -6323,6 +6446,53 @@ mod tests {
         assert_eq!(output.assertions, 2);
         assert!(output.code.contains("node:assert/strict.equal"));
         assert!(output.code.contains("node:assert.ok"));
+    }
+
+    #[test]
+    fn nested_commonjs_bindings_are_supported_but_shadowed_require_is_not() {
+        let source = concat!(
+            "function checked() { const assert = require('node:assert'); assert.ok(value()); }\n",
+            "function unrelated(require) { const assert = require('node:assert'); assert.ok(other()); }\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/value.test.cjs").unwrap();
+        assert_eq!(output.assertions, 1);
+        assert_eq!(output.code.matches("withNodeAssertionPhase").count(), 1);
+    }
+
+    #[test]
+    fn assertion_bindings_are_lexical_and_never_wrap_shadowed_values() {
+        let source = concat!(
+            "import assert from 'node:assert/strict';\n",
+            "function unrelated(assert) { assert.equal(effect(), 1); }\n",
+            "assert.equal(value(), 1);\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/value.test.mjs").unwrap();
+        assert_eq!(output.assertions, 1);
+        assert_eq!(output.code.matches("withNodeAssertionPhase").count(), 1);
+    }
+
+    #[test]
+    fn node_test_expect_matchers_are_attributed_through_lexical_imports() {
+        let source = concat!(
+            "import test from 'node:test';\n",
+            "import { expect as verify } from 'expect-library';\n",
+            "test('value', () => verify(value()).not.toEqual(1));\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/value.test.mjs").unwrap();
+        assert_eq!(output.assertions, 1);
+        assert!(output.code.contains("expect.not.toEqual"));
+        assert!(output.code.contains("verify(value()).not.toEqual(1)"));
+    }
+
+    #[test]
+    fn vitest_expect_matchers_are_attributed_without_node_test_markers() {
+        let source = concat!(
+            "import { expect, test } from 'vitest';\n",
+            "test('value', () => expect(value()).toBe(1));\n",
+        );
+        let output = instrument_node_assertion_phases(source, "tests/value.test.mjs").unwrap();
+        assert_eq!(output.assertions, 1);
+        assert!(output.code.contains("expect.toBe"));
     }
 
     #[test]

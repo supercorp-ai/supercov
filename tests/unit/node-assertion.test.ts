@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import { expect } from "../support/expect.ts";
 import { instrumentNodeAssertionPhases } from "../../src/nodeAssertionInstrumenter.ts";
 import {
+  activateCoverageScope,
   takeNodeAssertionPhases,
   withCoverageCarrier,
   withNodeAssertionPhase,
@@ -86,5 +87,28 @@ describe("native node:assert attribution", () => {
       "node:assert.equal",
     ]);
     expect(phases[1]?.error).toBe("mismatch");
+  });
+
+  it("retains an activated serial-runner scope through an empty async carrier", () => {
+    const scope: CoverageExecutionScope = {
+      version: 1,
+      runId: "serial-run",
+      workerId: "worker",
+      testId: "serial-test",
+      testKey: "serial-key",
+      retry: 0,
+      attemptId: "serial-attempt",
+    };
+    activateCoverageScope(scope);
+    try {
+      withCoverageCarrier({ version: 1 }, () => {
+        withNodeAssertionPhase("expect.toBe", "test.ts:1:1", () => undefined);
+      });
+      expect(takeNodeAssertionPhases(scope).map((phase) => phase.operation)).toEqual([
+        "expect.toBe",
+      ]);
+    } finally {
+      activateCoverageScope();
+    }
   });
 });
