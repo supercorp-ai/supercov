@@ -23,6 +23,11 @@ pub const SECTION_DECISION_GAPS: u32 = 12;
 pub const SECTION_DIMENSIONS: u32 = 13;
 pub const SECTION_PROJECTIONS: u32 = 14;
 pub const SECTION_SCOPE_ENTRIES: u32 = 15;
+pub const SECTION_CONFIDENCE: u32 = 16;
+pub const SECTION_LINES: u32 = 17;
+pub const SECTION_TEST_SUMMARIES: u32 = 18;
+pub const SECTION_PHASE_SUMMARIES: u32 = 19;
+pub const SECTION_ANCHORS: u32 = 20;
 
 const STRING_RECORD_SIZE: usize = 16;
 const SUMMARY_RECORD_SIZE: usize = 176;
@@ -31,6 +36,11 @@ const DECISION_GAP_RECORD_SIZE: usize = 96;
 const DIMENSION_RECORD_SIZE: usize = 192;
 const PROJECTION_RECORD_SIZE: usize = 512;
 const SCOPE_ENTRY_RECORD_SIZE: usize = 96;
+const CONFIDENCE_RECORD_SIZE: usize = 96;
+const LINE_RECORD_SIZE: usize = 80;
+const TEST_SUMMARY_RECORD_SIZE: usize = 64;
+const PHASE_SUMMARY_RECORD_SIZE: usize = 64;
+const ANCHOR_RECORD_SIZE: usize = 64;
 const NO_STRING: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -420,6 +430,51 @@ pub struct IndexedScopeEntry {
     pub package_root: Option<String>,
     pub measurement_limitations: usize,
     pub limitation_kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexedLine {
+    pub file: String,
+    pub line: usize,
+    pub covered: bool,
+    pub tests: Vec<String>,
+    pub phases: Vec<String>,
+    pub confidence: crate::coverage_report::CoverageConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexedTestSummary {
+    pub id: String,
+    pub name: String,
+    pub file: Option<String>,
+    pub title: Option<String>,
+    pub outcome: String,
+    pub role: String,
+    pub provenance: crate::coverage_report::TestProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexedPhaseSummary {
+    pub id: String,
+    pub kind: String,
+    pub operation: String,
+    pub source: Option<String>,
+    pub test: String,
+    pub status: Option<String>,
+    pub caused_by_phase_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexedAnchor {
+    pub kind: String,
+    pub id: String,
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub covered: bool,
+    pub conditions: Option<usize>,
+    pub covered_conditions: Option<usize>,
+    pub tests: Vec<String>,
 }
 
 #[derive(Default)]
@@ -1105,6 +1160,178 @@ fn scope_entry_records(
         .collect()
 }
 
+fn optional_string_id(
+    value: Option<&str>,
+    strings: &mut StringTable,
+) -> Result<u32, CoverageIndexError> {
+    value.map_or(Ok(NO_STRING), |value| strings.intern(value))
+}
+
+fn confidence_record(
+    confidence: &crate::coverage_report::CoverageConfidence,
+    strings: &mut StringTable,
+    relations: &mut StringRelations,
+) -> Result<[u8; CONFIDENCE_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; CONFIDENCE_RECORD_SIZE];
+    record[0] = match confidence.level.as_str() {
+        "unexecuted" => 0,
+        "executed" => 1,
+        "action" => 2,
+        "asserted" => 3,
+        _ => return Err(CoverageIndexError::InvalidRecord("confidence level")),
+    };
+    record[1] = u8::from(confidence.setup_only)
+        | (u8::from(confidence.background_only) << 1)
+        | (u8::from(confidence.asserted) << 2)
+        | (u8::from(confidence.e2e) << 3);
+    for (index, values) in [
+        confidence.tests.clone(),
+        confidence.asserted_tests.clone(),
+        confidence.runners.clone(),
+        confidence.kinds.clone(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (offset, count) = relations.push(values, strings)?;
+        put_u64(&mut record, 8 + index * 16, offset);
+        put_u64(&mut record, 16 + index * 16, count);
+    }
+    Ok(record)
+}
+
+fn line_record(
+    view_id: CoverageViewId,
+    line: &crate::coverage_report::LineResult,
+    confidence_index: usize,
+    strings: &mut StringTable,
+    relations: &mut StringRelations,
+) -> Result<[u8; LINE_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; LINE_RECORD_SIZE];
+    record[0] = view_id as u8;
+    record[1] = u8::from(line.covered);
+    put_u32(&mut record, 4, strings.intern(&line.file)?);
+    put_u64(&mut record, 8, usize_u64(line.line)?);
+    let (tests_offset, tests_count) = relations.push(line.tests.clone(), strings)?;
+    put_u64(&mut record, 16, tests_offset);
+    put_u64(&mut record, 24, tests_count);
+    let (phases_offset, phases_count) = relations.push(line.phases.clone(), strings)?;
+    put_u64(&mut record, 32, phases_offset);
+    put_u64(&mut record, 40, phases_count);
+    put_u64(&mut record, 48, usize_u64(confidence_index)?);
+    Ok(record)
+}
+
+fn test_summary_record(
+    view_id: CoverageViewId,
+    test: &crate::coverage_report::TestCoverageResult,
+    strings: &mut StringTable,
+) -> Result<[u8; TEST_SUMMARY_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; TEST_SUMMARY_RECORD_SIZE];
+    record[0] = view_id as u8;
+    record[1] = match test.role.as_str() {
+        "test" => 0,
+        "setup" => 1,
+        "background" => 2,
+        _ => return Err(CoverageIndexError::InvalidRecord("test role")),
+    };
+    record[2] = match test.outcome.as_str() {
+        "passed" => 0,
+        "failed" => 1,
+        "flaky" => 2,
+        "skipped" => 3,
+        "timedOut" => 4,
+        "interrupted" => 5,
+        "unknown" => 6,
+        _ => return Err(CoverageIndexError::InvalidRecord("test outcome")),
+    };
+    put_u32(&mut record, 4, strings.intern(&test.id)?);
+    put_u32(&mut record, 8, strings.intern(&test.name)?);
+    put_u32(
+        &mut record,
+        12,
+        optional_string_id(test.file.as_deref(), strings)?,
+    );
+    put_u32(
+        &mut record,
+        16,
+        optional_string_id(test.title.as_deref(), strings)?,
+    );
+    put_u32(&mut record, 20, strings.intern(&test.provenance.runner)?);
+    put_u32(&mut record, 24, strings.intern(&test.provenance.kind)?);
+    put_u32(
+        &mut record,
+        28,
+        optional_string_id(test.provenance.project.as_deref(), strings)?,
+    );
+    put_u32(&mut record, 32, strings.intern(&test.provenance.source)?);
+    Ok(record)
+}
+
+fn phase_summary_record(
+    view_id: CoverageViewId,
+    phase: &crate::coverage_report::PhaseResult,
+    strings: &mut StringTable,
+) -> Result<[u8; PHASE_SUMMARY_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; PHASE_SUMMARY_RECORD_SIZE];
+    record[0] = view_id as u8;
+    put_u32(&mut record, 4, strings.intern(&phase.phase.id)?);
+    put_u32(&mut record, 8, strings.intern(&phase.phase.kind)?);
+    put_u32(&mut record, 12, strings.intern(&phase.phase.operation)?);
+    put_u32(
+        &mut record,
+        16,
+        optional_string_id(phase.phase.source.as_deref(), strings)?,
+    );
+    put_u32(&mut record, 20, strings.intern(&phase.test)?);
+    put_u32(
+        &mut record,
+        24,
+        optional_string_id(phase.phase.status.as_deref(), strings)?,
+    );
+    put_u32(
+        &mut record,
+        28,
+        optional_string_id(phase.phase.caused_by_phase_id.as_deref(), strings)?,
+    );
+    Ok(record)
+}
+
+struct AnchorInput<'a> {
+    view_id: CoverageViewId,
+    kind: u8,
+    id: &'a str,
+    file: &'a str,
+    line: usize,
+    column: usize,
+    covered: bool,
+    conditions: Option<(usize, usize)>,
+    tests: &'a [String],
+}
+
+fn anchor_record(
+    input: AnchorInput<'_>,
+    strings: &mut StringTable,
+    relations: &mut StringRelations,
+) -> Result<[u8; ANCHOR_RECORD_SIZE], CoverageIndexError> {
+    let mut record = [0_u8; ANCHOR_RECORD_SIZE];
+    record[0] = input.view_id as u8;
+    record[1] = input.kind;
+    record[2] = u8::from(input.covered);
+    put_u32(&mut record, 4, strings.intern(input.id)?);
+    put_u32(&mut record, 8, strings.intern(input.file)?);
+    put_u64(&mut record, 16, usize_u64(input.line)?);
+    put_u64(&mut record, 24, usize_u64(input.column)?);
+    if let Some((covered, total)) = input.conditions {
+        put_u64(&mut record, 32, usize_u64(total)?);
+        put_u64(&mut record, 40, usize_u64(covered)?);
+    }
+    let (tests_offset, tests_count) = relations.push(input.tests.iter().cloned(), strings)?;
+    put_u64(&mut record, 48, tests_offset);
+    put_u64(&mut record, 56, tests_count);
+    Ok(record)
+}
+
 pub fn coverage_index_sections(
     report: &CoverageReport,
 ) -> Result<Vec<QueryIndexSection>, CoverageIndexError> {
@@ -1121,6 +1348,11 @@ pub fn coverage_index_sections(
     let mut dimensions = Vec::new();
     let mut projection_records = Vec::new();
     let mut scope_entries = Vec::new();
+    let mut confidence_records = Vec::new();
+    let mut line_records = Vec::new();
+    let mut test_summaries = Vec::new();
+    let mut phase_summaries = Vec::new();
+    let mut anchors = Vec::new();
     for (id, view) in views {
         summaries.extend_from_slice(&summary_record(id, view, &mut strings)?);
         projection_records.extend_from_slice(&projection_record(
@@ -1134,6 +1366,88 @@ pub fn coverage_index_sections(
         )?);
         for entry in scope_entry_records(id, view, &mut strings)? {
             scope_entries.extend_from_slice(&entry);
+        }
+        for line in &view.lines {
+            let confidence_index = confidence_records.len() / CONFIDENCE_RECORD_SIZE;
+            confidence_records.extend_from_slice(&confidence_record(
+                &line.confidence,
+                &mut strings,
+                &mut relations,
+            )?);
+            line_records.extend_from_slice(&line_record(
+                id,
+                line,
+                confidence_index,
+                &mut strings,
+                &mut relations,
+            )?);
+        }
+        for test in &view.tests {
+            test_summaries.extend_from_slice(&test_summary_record(id, test, &mut strings)?);
+        }
+        for phase in &view.phases {
+            phase_summaries.extend_from_slice(&phase_summary_record(id, phase, &mut strings)?);
+        }
+        for decision in &view.decisions {
+            anchors.extend_from_slice(&anchor_record(
+                AnchorInput {
+                    view_id: id,
+                    kind: 0,
+                    id: &decision.meta.id,
+                    file: &decision.meta.file,
+                    line: decision.meta.line,
+                    column: decision.meta.column,
+                    covered: decision.covered,
+                    conditions: Some((
+                        decision
+                            .conditions
+                            .iter()
+                            .filter(|condition| condition.covered)
+                            .count(),
+                        decision.conditions.len(),
+                    )),
+                    tests: &decision.tests,
+                },
+                &mut strings,
+                &mut relations,
+            )?);
+        }
+        for branch in &view.branches {
+            anchors.extend_from_slice(&anchor_record(
+                AnchorInput {
+                    view_id: id,
+                    kind: 1,
+                    id: &branch.meta.id,
+                    file: &branch.meta.file,
+                    line: branch.meta.line,
+                    column: branch.meta.column,
+                    covered: branch.covered,
+                    conditions: None,
+                    tests: &[],
+                },
+                &mut strings,
+                &mut relations,
+            )?);
+        }
+        for point in &view.points {
+            anchors.extend_from_slice(&anchor_record(
+                AnchorInput {
+                    view_id: id,
+                    kind: match point.meta.kind {
+                        crate::coverage_analysis::PointKind::Statement => 2,
+                        crate::coverage_analysis::PointKind::Function => 3,
+                    },
+                    id: &point.meta.id,
+                    file: &point.meta.file,
+                    line: point.meta.line,
+                    column: point.meta.column,
+                    covered: point.covered,
+                    conditions: None,
+                    tests: &point.tests,
+                },
+                &mut strings,
+                &mut relations,
+            )?);
         }
         for value in &view.coverage_by_kind {
             dimensions.extend_from_slice(&dimension_record(
@@ -1238,6 +1552,36 @@ pub fn coverage_index_sections(
             count: usize_u64(scope_entries.len() / SCOPE_ENTRY_RECORD_SIZE)?,
             bytes: scope_entries,
         },
+        QueryIndexSection {
+            kind: SECTION_CONFIDENCE,
+            record_size: CONFIDENCE_RECORD_SIZE as u32,
+            count: usize_u64(confidence_records.len() / CONFIDENCE_RECORD_SIZE)?,
+            bytes: confidence_records,
+        },
+        QueryIndexSection {
+            kind: SECTION_LINES,
+            record_size: LINE_RECORD_SIZE as u32,
+            count: usize_u64(line_records.len() / LINE_RECORD_SIZE)?,
+            bytes: line_records,
+        },
+        QueryIndexSection {
+            kind: SECTION_TEST_SUMMARIES,
+            record_size: TEST_SUMMARY_RECORD_SIZE as u32,
+            count: usize_u64(test_summaries.len() / TEST_SUMMARY_RECORD_SIZE)?,
+            bytes: test_summaries,
+        },
+        QueryIndexSection {
+            kind: SECTION_PHASE_SUMMARIES,
+            record_size: PHASE_SUMMARY_RECORD_SIZE as u32,
+            count: usize_u64(phase_summaries.len() / PHASE_SUMMARY_RECORD_SIZE)?,
+            bytes: phase_summaries,
+        },
+        QueryIndexSection {
+            kind: SECTION_ANCHORS,
+            record_size: ANCHOR_RECORD_SIZE as u32,
+            count: usize_u64(anchors.len() / ANCHOR_RECORD_SIZE)?,
+            bytes: anchors,
+        },
     ])
 }
 
@@ -1255,6 +1599,11 @@ impl<'a> CoverageIndex<'a> {
             (SECTION_DIMENSIONS, DIMENSION_RECORD_SIZE),
             (SECTION_PROJECTIONS, PROJECTION_RECORD_SIZE),
             (SECTION_SCOPE_ENTRIES, SCOPE_ENTRY_RECORD_SIZE),
+            (SECTION_CONFIDENCE, CONFIDENCE_RECORD_SIZE),
+            (SECTION_LINES, LINE_RECORD_SIZE),
+            (SECTION_TEST_SUMMARIES, TEST_SUMMARY_RECORD_SIZE),
+            (SECTION_PHASE_SUMMARIES, PHASE_SUMMARY_RECORD_SIZE),
+            (SECTION_ANCHORS, ANCHOR_RECORD_SIZE),
         ] {
             if index.descriptor(kind)?.record_size as usize != size {
                 return Err(CoverageIndexError::InvalidRecord("record size"));
@@ -1785,6 +2134,221 @@ impl<'a> CoverageIndex<'a> {
         Ok(entries)
     }
 
+    fn confidence(
+        &self,
+        index: u64,
+    ) -> Result<crate::coverage_report::CoverageConfidence, CoverageIndexError> {
+        let record = self.index.record(SECTION_CONFIDENCE, index)?;
+        if record[2..8].iter().any(|byte| *byte != 0)
+            || record[72..].iter().any(|byte| *byte != 0)
+            || record[1] & !15 != 0
+        {
+            return Err(CoverageIndexError::InvalidRecord("confidence record"));
+        }
+        let values = (0..4)
+            .map(|index| {
+                self.relation_strings(
+                    get_u64(record, 8 + index * 16)?,
+                    get_u64(record, 16 + index * 16)?,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(crate::coverage_report::CoverageConfidence {
+            level: match record[0] {
+                0 => "unexecuted",
+                1 => "executed",
+                2 => "action",
+                3 => "asserted",
+                _ => return Err(CoverageIndexError::InvalidRecord("confidence level")),
+            }
+            .into(),
+            setup_only: record[1] & 1 != 0,
+            background_only: record[1] & 2 != 0,
+            asserted: record[1] & 4 != 0,
+            e2e: record[1] & 8 != 0,
+            tests: values[0].clone(),
+            asserted_tests: values[1].clone(),
+            runners: values[2].clone(),
+            kinds: values[3].clone(),
+        })
+    }
+
+    pub fn line(
+        &self,
+        view: CoverageViewId,
+        file: &str,
+        line: usize,
+    ) -> Result<Option<IndexedLine>, CoverageIndexError> {
+        let descriptor = self.index.descriptor(SECTION_LINES)?;
+        let mut found = None;
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_LINES, index)?;
+            if CoverageViewId::try_from(record[0])? != view {
+                continue;
+            }
+            if record[2..4].iter().any(|byte| *byte != 0)
+                || record[56..].iter().any(|byte| *byte != 0)
+            {
+                return Err(CoverageIndexError::InvalidRecord("line record"));
+            }
+            let record_file = self.string(get_u32(record, 4)?)?;
+            let record_line = usize::try_from(get_u64(record, 8)?)
+                .map_err(|_| CoverageIndexError::SizeOverflow)?;
+            if record_file != file || record_line != line {
+                continue;
+            }
+            if found.is_some() {
+                return Err(CoverageIndexError::InvalidRecord("duplicate line"));
+            }
+            found = Some(IndexedLine {
+                file: record_file,
+                line: record_line,
+                covered: bool_field(record[1])?,
+                tests: self.relation_strings(get_u64(record, 16)?, get_u64(record, 24)?)?,
+                phases: self.relation_strings(get_u64(record, 32)?, get_u64(record, 40)?)?,
+                confidence: self.confidence(get_u64(record, 48)?)?,
+            });
+        }
+        Ok(found)
+    }
+
+    pub fn test_summaries(
+        &self,
+        view: CoverageViewId,
+    ) -> Result<Vec<IndexedTestSummary>, CoverageIndexError> {
+        let descriptor = self.index.descriptor(SECTION_TEST_SUMMARIES)?;
+        let mut tests = Vec::new();
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_TEST_SUMMARIES, index)?;
+            if CoverageViewId::try_from(record[0])? != view {
+                continue;
+            }
+            if record[3] != 0 || record[36..].iter().any(|byte| *byte != 0) {
+                return Err(CoverageIndexError::InvalidRecord("test summary record"));
+            }
+            tests.push(IndexedTestSummary {
+                id: self.string(get_u32(record, 4)?)?,
+                name: self.string(get_u32(record, 8)?)?,
+                file: self.optional_string(get_u32(record, 12)?)?,
+                title: self.optional_string(get_u32(record, 16)?)?,
+                role: match record[1] {
+                    0 => "test",
+                    1 => "setup",
+                    2 => "background",
+                    _ => return Err(CoverageIndexError::InvalidRecord("test role")),
+                }
+                .into(),
+                outcome: match record[2] {
+                    0 => "passed",
+                    1 => "failed",
+                    2 => "flaky",
+                    3 => "skipped",
+                    4 => "timedOut",
+                    5 => "interrupted",
+                    6 => "unknown",
+                    _ => return Err(CoverageIndexError::InvalidRecord("test outcome")),
+                }
+                .into(),
+                provenance: crate::coverage_report::TestProvenance {
+                    runner: self.string(get_u32(record, 20)?)?,
+                    kind: self.string(get_u32(record, 24)?)?,
+                    project: self.optional_string(get_u32(record, 28)?)?,
+                    source: self.string(get_u32(record, 32)?)?,
+                },
+            });
+        }
+        Ok(tests)
+    }
+
+    pub fn phase_summaries(
+        &self,
+        view: CoverageViewId,
+    ) -> Result<Vec<IndexedPhaseSummary>, CoverageIndexError> {
+        let descriptor = self.index.descriptor(SECTION_PHASE_SUMMARIES)?;
+        let mut phases = Vec::new();
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_PHASE_SUMMARIES, index)?;
+            if CoverageViewId::try_from(record[0])? != view {
+                continue;
+            }
+            if record[1..4].iter().any(|byte| *byte != 0)
+                || record[32..].iter().any(|byte| *byte != 0)
+            {
+                return Err(CoverageIndexError::InvalidRecord("phase summary record"));
+            }
+            phases.push(IndexedPhaseSummary {
+                id: self.string(get_u32(record, 4)?)?,
+                kind: self.string(get_u32(record, 8)?)?,
+                operation: self.string(get_u32(record, 12)?)?,
+                source: self.optional_string(get_u32(record, 16)?)?,
+                test: self.string(get_u32(record, 20)?)?,
+                status: self.optional_string(get_u32(record, 24)?)?,
+                caused_by_phase_id: self.optional_string(get_u32(record, 28)?)?,
+            });
+        }
+        Ok(phases)
+    }
+
+    pub fn anchors(
+        &self,
+        view: CoverageViewId,
+        file: &str,
+        line: usize,
+    ) -> Result<Vec<IndexedAnchor>, CoverageIndexError> {
+        let descriptor = self.index.descriptor(SECTION_ANCHORS)?;
+        let mut anchors = Vec::new();
+        for index in 0..descriptor.count {
+            let record = self.index.record(SECTION_ANCHORS, index)?;
+            if CoverageViewId::try_from(record[0])? != view {
+                continue;
+            }
+            if record[3] != 0 || record[12..16].iter().any(|byte| *byte != 0) {
+                return Err(CoverageIndexError::InvalidRecord("anchor record"));
+            }
+            let record_file = self.string(get_u32(record, 8)?)?;
+            let record_line = usize::try_from(get_u64(record, 16)?)
+                .map_err(|_| CoverageIndexError::SizeOverflow)?;
+            if record_file != file || record_line != line {
+                continue;
+            }
+            let total = usize::try_from(get_u64(record, 32)?)
+                .map_err(|_| CoverageIndexError::SizeOverflow)?;
+            let covered_conditions = usize::try_from(get_u64(record, 40)?)
+                .map_err(|_| CoverageIndexError::SizeOverflow)?;
+            let (kind, conditions, covered_conditions) = match record[1] {
+                0 => {
+                    if total == 0 || covered_conditions > total {
+                        return Err(CoverageIndexError::InvalidRecord(
+                            "decision anchor conditions",
+                        ));
+                    }
+                    ("decision", Some(total), Some(covered_conditions))
+                }
+                1 => ("branch", None, None),
+                2 => ("statement", None, None),
+                3 => ("function", None, None),
+                _ => return Err(CoverageIndexError::InvalidRecord("anchor kind")),
+            };
+            if kind != "decision" && (total != 0 || covered_conditions.is_some()) {
+                return Err(CoverageIndexError::InvalidRecord("anchor conditions"));
+            }
+            anchors.push(IndexedAnchor {
+                kind: kind.into(),
+                id: self.string(get_u32(record, 4)?)?,
+                file: record_file,
+                line: record_line,
+                column: usize::try_from(get_u64(record, 24)?)
+                    .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                covered: bool_field(record[2])?,
+                conditions,
+                covered_conditions,
+                tests: self.relation_strings(get_u64(record, 48)?, get_u64(record, 56)?)?,
+            });
+        }
+        anchors.sort_by_key(|anchor| anchor.column);
+        Ok(anchors)
+    }
+
     pub fn snapshot(&self) -> Result<IndexedCoverageSnapshot, CoverageIndexError> {
         Ok(IndexedCoverageSnapshot {
             all_summary: self.summary(CoverageViewId::All)?,
@@ -1877,10 +2441,10 @@ mod tests {
     };
 
     use crate::{
-        coverage_analysis::McdcVector,
+        coverage_analysis::{McdcVector, PointKind},
         coverage_report::{
-            CoverageManifest, CoverageReportRequest, DecisionMeta, ExitCodeInput, RawTestResult,
-            RuntimeSnapshot, TestProvenance, analyze_coverage_results,
+            CoverageManifest, CoverageReportRequest, DecisionMeta, ExitCodeInput, PointMeta,
+            RawTestResult, RuntimeSnapshot, TestProvenance, analyze_coverage_results,
         },
         query_index::{QueryIndexIdentity, write_query_index},
     };
@@ -1924,7 +2488,15 @@ mod tests {
             run_id: "run".into(),
             manifest: CoverageManifest {
                 decisions: vec![decision.clone()],
-                points: Vec::new(),
+                points: vec![PointMeta {
+                    id: "point".into(),
+                    kind: PointKind::Statement,
+                    file: "src/a.js".into(),
+                    line: 2,
+                    column: 3,
+                    source: "work();".into(),
+                    label: None,
+                }],
                 branches: Vec::new(),
                 limitations: Vec::new(),
                 scope: None,
@@ -1955,7 +2527,7 @@ mod tests {
                             outcome: false,
                         }],
                     }],
-                    hits: Vec::new(),
+                    hits: vec!["point".into()],
                     events: Vec::new(),
                 }],
                 browser: Vec::new(),
@@ -1998,6 +2570,25 @@ mod tests {
         assert_eq!(projection.setups, 0);
         assert_eq!(projection.test_outcomes.passed, 1);
         assert!(projection.source_scope.is_none());
+        let line = index
+            .line(CoverageViewId::All, "src/a.js", 2)
+            .unwrap()
+            .unwrap();
+        assert!(line.covered);
+        assert_eq!(line.tests, ["test"]);
+        assert_eq!(line.confidence.level, "executed");
+        let tests = index.test_summaries(CoverageViewId::All).unwrap();
+        assert_eq!(tests.len(), 1);
+        assert_eq!(tests[0].provenance.runner, "node:test");
+        let decision = index.anchors(CoverageViewId::All, "src/a.js", 1).unwrap();
+        assert_eq!(decision.len(), 1);
+        assert_eq!(decision[0].kind, "decision");
+        assert_eq!(decision[0].conditions, Some(2));
+        assert_eq!(decision[0].tests, ["test"]);
+        let point = index.anchors(CoverageViewId::All, "src/a.js", 2).unwrap();
+        assert_eq!(point.len(), 1);
+        assert_eq!(point[0].kind, "statement");
+        assert_eq!(point[0].tests, ["test"]);
         fs::remove_dir_all(root).unwrap();
     }
 }

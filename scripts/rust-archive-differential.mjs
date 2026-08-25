@@ -354,6 +354,91 @@ for (const [fixtureIndex, fixture] of fixtures.entries()) {
     assert.equal(scopeRust.status, 0, `${fixture}: ${scopeRust.stderr || scopeRust.stdout}`);
     assert.equal(scopeRust.stdout, scopeReference.stdout, `${fixture}: indexed scope JSON differs`);
   }
+
+  const coveredLine = expected.lines[0];
+  assert.ok(coveredLine, `${fixture}: expected at least one line obligation`);
+  const coversArguments = [
+    resolve(root, 'bin/supercov.js'),
+    'runs', runId, 'coverage', 'covers', `${coveredLine.file}:${coveredLine.line}`,
+    '--filter', 'all', '--limit', '2', '--json',
+    ...(filteredKind ? ['--kind', filteredKind] : []),
+    ...(filteredRunner ? ['--runner', filteredRunner] : []),
+  ];
+  const coversReference = spawnSync(process.execPath, coversArguments, {
+    cwd: resolve(root, 'tests/fixtures', fixture),
+    encoding: 'utf8',
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  assert.equal(coversReference.status, 0, `${fixture}: ${coversReference.stderr || coversReference.stdout}`);
+  const coversRust = spawnSync(binary, ['__query-index-files'], {
+    cwd: root,
+    input: JSON.stringify({
+      archivePath,
+      runId,
+      generatedAt,
+      filter: 'all',
+      command: 'covers',
+      metric: 'all',
+      kind: filteredKind,
+      runner: filteredRunner,
+      file: coveredLine.file,
+      line: coveredLine.line,
+      offset: 0,
+      limit: 2,
+    }),
+    encoding: 'utf8',
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  assert.equal(coversRust.status, 0, `${fixture}: ${coversRust.stderr || coversRust.stdout}`);
+  assert.equal(coversRust.stdout, coversReference.stdout, `${fixture}: indexed covers JSON differs`);
+
+  const anchoredOnly = [
+    ...expected.decisions.map((decision) => decision.meta),
+    ...expected.branches.map((branch) => branch.meta),
+    ...expected.points.map((point) => point.meta),
+  ].find((anchor) => !expected.lines.some(
+    (line) => line.file === anchor.file && line.line === anchor.line,
+  ));
+  if (anchoredOnly) {
+    const selector = `${anchoredOnly.file}:${anchoredOnly.line}`;
+    const anchorReference = spawnSync(
+      process.execPath,
+      [
+        resolve(root, 'bin/supercov.js'),
+        'runs', runId, 'coverage', 'covers', selector,
+        '--filter', 'all', '--limit', '2', '--json',
+        ...(filteredKind ? ['--kind', filteredKind] : []),
+        ...(filteredRunner ? ['--runner', filteredRunner] : []),
+      ],
+      {
+        cwd: resolve(root, 'tests/fixtures', fixture),
+        encoding: 'utf8',
+        maxBuffer: 128 * 1024 * 1024,
+      },
+    );
+    assert.equal(anchorReference.status, 0, `${fixture}: ${anchorReference.stderr || anchorReference.stdout}`);
+    const anchorRust = spawnSync(binary, ['__query-index-files'], {
+      cwd: root,
+      input: JSON.stringify({
+        archivePath,
+        runId,
+        generatedAt,
+        filter: 'all',
+        command: 'covers',
+        metric: 'all',
+        kind: filteredKind,
+        runner: filteredRunner,
+        file: anchoredOnly.file,
+        line: anchoredOnly.line,
+        offset: 0,
+        limit: 2,
+      }),
+      encoding: 'utf8',
+      maxBuffer: 128 * 1024 * 1024,
+    });
+    assert.equal(anchorRust.status, 0, `${fixture}: ${anchorRust.stderr || anchorRust.stdout}`);
+    assert.equal(anchorRust.stdout, anchorReference.stdout, `${fixture}: indexed anchored covers JSON differs`);
+  }
 }
 
 const indexed = spawnSync(binary, ['__roundtrip-query-index'], {
@@ -368,5 +453,5 @@ const indexDifference = firstDifference(indexedActual, indexExpected);
 assert.equal(indexDifference, undefined, `typed index: ${JSON.stringify(indexDifference)}`);
 
 console.log(
-  `[rust-archive-differential] ${fixtures.length} real archives have exact report plus typed mmap summary, scope, file-gap, provenance, dimension, and decision-group query parity`,
+  `[rust-archive-differential] ${fixtures.length} real archives have exact report plus typed mmap summary, scope, file-gap, provenance, dimension, decision-group, and attribution query parity`,
 );

@@ -407,6 +407,18 @@ miss blocks flipping any default.
   measurement status and pagination byte-for-byte on real scoped archives;
   malformed source-scope or limitation shapes fail index construction rather
   than silently disappearing from the completeness model.
+  The first normalized attribution graph is now indexed as typed line,
+  confidence, test, phase and obligation-anchor records. `coverage covers`
+  resolves exact per-line test provenance and causal action/assertion phases,
+  paginates tests and phases independently, and reports decision/branch/point
+  anchors without falsely calling a non-line location uncovered. Point-anchor
+  test relations are retained so kind/runner filters recompute coverage rather
+  than reusing an invalid aggregate. The complete agent envelope is byte-
+  identical to the shipped CLI across immutable Playwright, `node:test`,
+  esbuild, webpack and SWC archives, including filtered provenance and
+  anchor-only locations. Independent index tests cover line confidence, test
+  provenance, decision and point relations without relying on a serialized
+  report blob.
   Full condition/vector/test/phase detail sections and the rest of the query
   surface remain before this path can replace the shipped query engine.
 

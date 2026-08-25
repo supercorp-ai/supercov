@@ -14,11 +14,11 @@ use crate::{
     coverage_index::{
         CoverageDimension, CoverageIndex, CoverageIndexError, CoverageViewId, IndexedDecisionGap,
         IndexedDimensionCoverage, IndexedFileGap, IndexedMeasurement, IndexedOutcomeCounts,
-        IndexedScopeEntry, IndexedSourceScope, IndexedSummaryConfidence,
+        IndexedScopeEntry, IndexedSourceScope, IndexedSummaryConfidence, IndexedTestSummary,
     },
     coverage_report::{
-        CoverageReportRequest, CoverageView, ReportError, TransportStats, analyze_coverage_results,
-        coverage_summary_for_tests,
+        CoverageConfidence, CoverageReportRequest, CoverageView, ReportError, TestProvenance,
+        TransportStats, analyze_coverage_results, coverage_summary_for_tests,
     },
 };
 use supercov_contracts::AgentPagination;
@@ -237,6 +237,246 @@ pub struct CoverageScopeQueryOptions<'a> {
     pub runner: Option<&'a str>,
     pub offset: usize,
     pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CoverageLocation {
+    pub file: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CoverageCoveringTest {
+    pub id: String,
+    pub name: String,
+    pub provenance: TestProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageCoveringPhase {
+    pub id: String,
+    pub kind: String,
+    pub operation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub test: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caused_by_phase_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageAnchor {
+    pub kind: String,
+    pub id: String,
+    pub column: usize,
+    pub covered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub covered_conditions: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageCoversLineData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub location: CoverageLocation,
+    pub covered: bool,
+    pub confidence: CoverageConfidence,
+    pub total_tests: usize,
+    pub total_phases: usize,
+    pub tests: Vec<CoverageCoveringTest>,
+    pub phases: Vec<CoverageCoveringPhase>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageCoversAnchorsData {
+    pub run: String,
+    pub filters: CoverageQueryFilters,
+    pub location: CoverageLocation,
+    pub line_obligation: bool,
+    pub anchored: Vec<CoverageAnchor>,
+    pub total_anchored: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum CoverageCoversData {
+    Line(CoverageCoversLineData),
+    Anchors(CoverageCoversAnchorsData),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CoverageCoversQueryOptions<'a> {
+    pub run: &'a str,
+    pub view: CoverageViewId,
+    pub kind: Option<&'a str>,
+    pub runner: Option<&'a str>,
+    pub file: &'a str,
+    pub line: usize,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+fn query_filters(
+    view: CoverageViewId,
+    kind: Option<&str>,
+    runner: Option<&str>,
+) -> CoverageQueryFilters {
+    CoverageQueryFilters {
+        outcome: match view {
+            CoverageViewId::All => "all",
+            CoverageViewId::Passed => "passed",
+            CoverageViewId::Failed => "failed",
+        }
+        .into(),
+        kind: kind.map(str::to_owned),
+        runner: runner.map(str::to_owned),
+    }
+}
+
+fn selected_test_ids(
+    tests: &[IndexedTestSummary],
+    kind: Option<&str>,
+    runner: Option<&str>,
+) -> Result<Option<BTreeSet<String>>, QueryError> {
+    if kind.is_none() && runner.is_none() {
+        return Ok(None);
+    }
+    let selected = tests
+        .iter()
+        .filter(|test| {
+            kind.is_none_or(|kind| test.provenance.kind == kind)
+                && runner.is_none_or(|runner| test.provenance.runner == runner)
+        })
+        .map(|test| test.id.clone())
+        .collect::<BTreeSet<_>>();
+    if selected.is_empty() {
+        return Err(QueryError::InvalidRecordSelection);
+    }
+    Ok(Some(selected))
+}
+
+pub fn coverage_covers_query(
+    index: &CoverageIndex<'_>,
+    options: CoverageCoversQueryOptions<'_>,
+) -> Result<(CoverageCoversData, AgentPagination), QueryError> {
+    if options.limit == 0 {
+        return Err(QueryError::InvalidPagination);
+    }
+    let tests = index.test_summaries(options.view)?;
+    let selected = selected_test_ids(&tests, options.kind, options.runner)?;
+    let selected_includes = |id: &str| selected.as_ref().is_none_or(|ids| ids.contains(id));
+    let filters = query_filters(options.view, options.kind, options.runner);
+    let location = CoverageLocation {
+        file: options.file.into(),
+        line: options.line,
+    };
+    let Some(line) = index.line(options.view, options.file, options.line)? else {
+        let anchors = index.anchors(options.view, options.file, options.line)?;
+        let total = anchors.len();
+        let anchored = anchors
+            .into_iter()
+            .skip(options.offset)
+            .take(options.limit)
+            .map(|anchor| CoverageAnchor {
+                kind: anchor.kind.clone(),
+                id: anchor.id,
+                column: anchor.column,
+                covered: if matches!(anchor.kind.as_str(), "statement" | "function") {
+                    anchor.tests.iter().any(|test| selected_includes(test))
+                } else {
+                    anchor.covered
+                },
+                covered_conditions: anchor.covered_conditions,
+                conditions: anchor.conditions,
+            })
+            .collect::<Vec<_>>();
+        let returned = anchored.len();
+        return Ok((
+            CoverageCoversData::Anchors(CoverageCoversAnchorsData {
+                run: options.run.into(),
+                filters,
+                location,
+                line_obligation: false,
+                anchored,
+                total_anchored: total,
+            }),
+            pagination(options.offset, options.limit, returned, total),
+        ));
+    };
+    let tests_by_id = tests
+        .into_iter()
+        .map(|test| (test.id.clone(), test))
+        .collect::<HashMap<_, _>>();
+    let all_tests = line
+        .tests
+        .iter()
+        .filter(|id| selected_includes(id))
+        .map(|id| {
+            let test = tests_by_id.get(id);
+            CoverageCoveringTest {
+                id: id.clone(),
+                name: test.map_or_else(|| id.clone(), |test| test.name.clone()),
+                provenance: test
+                    .map_or_else(TestProvenance::default, |test| test.provenance.clone()),
+            }
+        })
+        .collect::<Vec<_>>();
+    let phases_by_id = index
+        .phase_summaries(options.view)?
+        .into_iter()
+        .map(|phase| (phase.id.clone(), phase))
+        .collect::<HashMap<_, _>>();
+    let all_phases = line
+        .phases
+        .iter()
+        .filter_map(|id| phases_by_id.get(id))
+        .filter(|phase| selected_includes(&phase.test))
+        .map(|phase| CoverageCoveringPhase {
+            id: phase.id.clone(),
+            kind: phase.kind.clone(),
+            operation: phase.operation.clone(),
+            source: phase.source.clone(),
+            test: phase.test.clone(),
+            status: phase.status.clone(),
+            caused_by_phase_id: phase.caused_by_phase_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    let tests_page = all_tests
+        .iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let phases_page = all_phases
+        .iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let total = all_tests.len().max(all_phases.len());
+    let returned = tests_page.len().max(phases_page.len());
+    Ok((
+        CoverageCoversData::Line(CoverageCoversLineData {
+            run: options.run.into(),
+            filters,
+            location,
+            covered: line.tests.iter().any(|test| selected_includes(test)),
+            confidence: line.confidence,
+            total_tests: all_tests.len(),
+            total_phases: all_phases.len(),
+            tests: tests_page,
+            phases: phases_page,
+        }),
+        pagination(options.offset, options.limit, returned, total),
+    ))
 }
 
 pub fn coverage_scope_query(
