@@ -9,8 +9,8 @@ use crate::{
     coverage_index::{CoverageIndex, CoverageViewId},
     coverage_query::CoverageQueryFilters,
     run_store::{
-        RawEvidenceMetadata, RunIntegrity, RunInventory, RunTimings, compare_run_integrity,
-        open_existing_query_index,
+        RawEvidenceMetadata, RunIntegrity, RunInventory, RunTimings, StoredRun,
+        compare_run_integrity, open_existing_query_index,
     },
 };
 
@@ -62,7 +62,7 @@ pub struct RunListData {
 
 pub fn run_list_query(
     inventory: &RunInventory,
-    current_integrity: Option<&RunIntegrity>,
+    current_integrity: &dyn Fn(&StoredRun) -> Option<RunIntegrity>,
     view: CoverageViewId,
     offset: usize,
     limit: usize,
@@ -77,8 +77,8 @@ pub fn run_list_query(
                 .ok()
                 .flatten()
                 .and_then(|container| CoverageIndex::new(&container).ok()?.summary(view).ok());
-            let comparison = current_integrity
-                .map(|current| compare_run_integrity(Some(&run.metadata.integrity), current));
+            let comparison = current_integrity(run)
+                .map(|current| compare_run_integrity(Some(&run.metadata.integrity), &current));
             RunListEntry {
                 id: run.id.clone(),
                 generated_at: run.metadata.started_at.clone(),
@@ -159,7 +159,7 @@ mod tests {
         let root = temporary_directory();
         let inventory = create_indexable_run(&root);
         let run = &inventory.runs[0];
-        let (before, page) = run_list_query(&inventory, None, CoverageViewId::All, 0, 20);
+        let (before, page) = run_list_query(&inventory, &|_| None, CoverageViewId::All, 0, 20);
         assert_eq!(page.total, 1);
         assert!(!before.runs[0].coverage_indexed);
         assert_eq!(before.runs[0].lines, None);
@@ -168,7 +168,7 @@ mod tests {
         open_or_rebuild_query_index(run).unwrap();
         let (after, page) = run_list_query(
             &inventory,
-            Some(&run.metadata.integrity),
+            &|_| Some(run.metadata.integrity.clone()),
             CoverageViewId::Passed,
             0,
             20,
@@ -182,7 +182,7 @@ mod tests {
         assert_eq!(after.filters.outcome, "passed");
         assert!(agent_json::success("runs", &after, Some(&page)).is_ok());
 
-        let (_, empty_page) = run_list_query(&inventory, None, CoverageViewId::All, 20, 20);
+        let (_, empty_page) = run_list_query(&inventory, &|_| None, CoverageViewId::All, 20, 20);
         assert_eq!(empty_page.returned, 0);
         assert!(!empty_page.has_more);
         fs::remove_dir_all(root).unwrap();
@@ -199,7 +199,13 @@ mod tests {
         let mut current = run.metadata.integrity.clone();
         current.fingerprint.source = "1".repeat(64);
         current.fingerprint.tests = "2".repeat(64);
-        let (listing, _) = run_list_query(&inventory, Some(&current), CoverageViewId::All, 0, 20);
+        let (listing, _) = run_list_query(
+            &inventory,
+            &|_| Some(current.clone()),
+            CoverageViewId::All,
+            0,
+            20,
+        );
         assert!(!listing.runs[0].coverage_indexed);
         assert_eq!(
             listing.runs[0].reasons,

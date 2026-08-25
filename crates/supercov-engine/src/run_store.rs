@@ -496,7 +496,13 @@ pub fn discover_runs(project_root: &Path) -> Result<RunInventory, RunStoreError>
             }),
         }
     }
-    runs.sort_by(|left, right| right.id.cmp(&left.id));
+    runs.sort_by(|left, right| {
+        right
+            .metadata
+            .started_at
+            .cmp(&left.metadata.started_at)
+            .then_with(|| right.id.cmp(&left.id))
+    });
     rejected.sort_by(|left, right| left.entry.cmp(&right.entry));
     Ok(RunInventory { runs, rejected })
 }
@@ -892,6 +898,16 @@ mod tests {
         let root = temporary_directory("discovery");
         create_run(&root, "2026-08-24T00-00-00-000Z");
         create_run(&root, "2026-08-25T00-00-00-000Z");
+        create_run(&root, "zz-custom-old-run");
+        let custom_metadata = root.join(".supercov/runs/zz-custom-old-run/run.json");
+        let mut custom: serde_json::Value =
+            serde_json::from_slice(&fs::read(&custom_metadata).unwrap()).unwrap();
+        custom["startedAt"] = "2026-08-23T00:00:00.000Z".into();
+        fs::write(
+            &custom_metadata,
+            serde_json::to_vec_pretty(&custom).unwrap(),
+        )
+        .unwrap();
         let inventory = discover_runs(&root).unwrap();
         assert!(inventory.rejected.is_empty());
         assert_eq!(
@@ -900,7 +916,11 @@ mod tests {
                 .iter()
                 .map(|run| run.id.as_str())
                 .collect::<Vec<_>>(),
-            ["2026-08-25T00-00-00-000Z", "2026-08-24T00-00-00-000Z"]
+            [
+                "2026-08-25T00-00-00-000Z",
+                "2026-08-24T00-00-00-000Z",
+                "zz-custom-old-run"
+            ]
         );
         assert_eq!(
             select_run(&inventory, None).unwrap().id,

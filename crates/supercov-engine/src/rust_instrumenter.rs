@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use ra_ap_syntax::{
-    AstNode, Edition, SourceFile, TextRange,
+    AstNode, Edition, SourceFile, SyntaxKind, TextRange,
     ast::{self, BinaryOp, HasAttrs, HasName, LogicOp},
 };
 use serde_json::json;
@@ -96,7 +96,7 @@ fn push_wrapper(
     scope: TextRange,
     rank: usize,
     prefix: String,
-    suffix: &'static str,
+    suffix: String,
 ) {
     let (start, end) = range_offsets(range);
     let (scope_start, scope_end) = range_offsets(scope);
@@ -113,7 +113,7 @@ fn push_wrapper(
         kind: InsertionKind::End,
         scope_len,
         rank,
-        text: suffix.into(),
+        text: suffix,
     });
 }
 
@@ -192,6 +192,24 @@ fn add_manifest_limitation(manifest: &mut CoverageManifest, file: &str, id: &str
         "source": "",
         "reason": reason
     }));
+}
+
+fn allocate_frame_name(
+    file: &str,
+    condition: &ast::Expr,
+    kind: &str,
+    identifiers: &mut BTreeSet<String>,
+) -> String {
+    let id = stable_id(file, "decision", condition.syntax().text_range(), kind);
+    let suffix = id.rsplit(':').next().unwrap_or("decision");
+    let base = format!("__supercov_decision_{suffix}");
+    let mut candidate = base.clone();
+    let mut attempt = 0_usize;
+    while !identifiers.insert(candidate.clone()) {
+        attempt += 1;
+        candidate = format!("{base}_{attempt}");
+    }
+    candidate
 }
 
 impl std::error::Error for RustInstrumenterError {}
@@ -631,6 +649,7 @@ fn instrument_decision(
     file: &str,
     condition: &ast::Expr,
     kind: &str,
+    frame_name: &str,
 ) -> bool {
     if in_const_context(condition.syntax())
         || condition
@@ -650,10 +669,10 @@ fn instrument_decision(
         range,
         0,
         format!(
-            "{runtime_path}::decision({id:?}, {}, (",
+            "({{ let mut {frame_name} = {runtime_path}::DecisionFrame::new({id:?}, {}); {runtime_path}::decision((",
             condition_ranges.len()
         ),
-        "))",
+        format!("), &mut {frame_name}) }})"),
     );
     for (index, atomic_range) in condition_ranges.into_iter().enumerate() {
         push_wrapper(
@@ -661,8 +680,8 @@ fn instrument_decision(
             atomic_range,
             range,
             1,
-            format!("{runtime_path}::condition({id:?}, {index}, ("),
-            "))",
+            format!("{runtime_path}::condition(("),
+            format!("), &mut {frame_name}, {index})"),
         );
     }
     true
@@ -687,6 +706,12 @@ pub fn instrument_rust_source(
     let tree = parsed.tree();
     let root = tree.syntax();
     let mut insertions = Vec::new();
+    let mut identifiers = root
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| token.kind() == SyntaxKind::IDENT)
+        .map(|token| token.text().to_string())
+        .collect::<BTreeSet<_>>();
 
     for list in root.descendants().filter_map(ast::StmtList::cast) {
         for statement in list.statements() {
@@ -767,42 +792,60 @@ pub fn instrument_rust_source(
                 closure.syntax().text_range(),
                 0,
                 format!("{{ {runtime_path}::hit({id:?}); ("),
-                ") }",
+                ") }".into(),
             );
         }
     }
 
     let mut skipped_let_condition = false;
     for expression in root.descendants().filter_map(ast::IfExpr::cast) {
-        if let Some(condition) = expression.condition()
-            && !instrument_decision(&mut insertions, runtime_path, file, &condition, "if")
-            && condition
+        if let Some(condition) = expression.condition() {
+            let frame_name = allocate_frame_name(file, &condition, "if", &mut identifiers);
+            if !instrument_decision(
+                &mut insertions,
+                runtime_path,
+                file,
+                &condition,
+                "if",
+                &frame_name,
+            ) && condition
                 .syntax()
                 .descendants()
                 .any(|node| ast::LetExpr::can_cast(node.kind()))
-        {
-            skipped_let_condition = true;
+            {
+                skipped_let_condition = true;
+            }
         }
     }
     for expression in root.descendants().filter_map(ast::WhileExpr::cast) {
-        if let Some(condition) = expression.condition()
-            && !instrument_decision(&mut insertions, runtime_path, file, &condition, "while")
-            && condition
+        if let Some(condition) = expression.condition() {
+            let frame_name = allocate_frame_name(file, &condition, "while", &mut identifiers);
+            if !instrument_decision(
+                &mut insertions,
+                runtime_path,
+                file,
+                &condition,
+                "while",
+                &frame_name,
+            ) && condition
                 .syntax()
                 .descendants()
                 .any(|node| ast::LetExpr::can_cast(node.kind()))
-        {
-            skipped_let_condition = true;
+            {
+                skipped_let_condition = true;
+            }
         }
     }
     for guard in root.descendants().filter_map(ast::MatchGuard::cast) {
         if let Some(condition) = guard.condition() {
+            let frame_name = allocate_frame_name(file, &condition, "match-guard", &mut identifiers);
             instrument_decision(
                 &mut insertions,
                 runtime_path,
                 file,
                 &condition,
                 "match-guard",
+                &frame_name,
             );
         }
     }
@@ -866,9 +909,13 @@ mod tests {
     const NOOP_RUNTIME: &str = r#"
 #[doc(hidden)]
 mod __supercov_runtime_v1 {
+    pub struct DecisionFrame;
+    impl DecisionFrame {
+        pub fn new(_: &'static str, _: usize) -> Self { Self }
+    }
     pub fn hit(_: &'static str) {}
-    pub fn condition(_: &'static str, _: usize, value: bool) -> bool { value }
-    pub fn decision(_: &'static str, _: usize, value: bool) -> bool { value }
+    pub fn condition(value: bool, _: &mut DecisionFrame, _: usize) -> bool { value }
+    pub fn decision(value: bool, _: &mut DecisionFrame) -> bool { value }
 }
 "#;
 

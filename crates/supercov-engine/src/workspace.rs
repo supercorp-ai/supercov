@@ -28,6 +28,7 @@ const ROOT_EXCLUSIONS: &[&str] = &[
     "coverage",
     "playwright-report",
     "test-results",
+    "target",
 ];
 const NESTED_EXCLUSIONS: &[&str] = &[".supercov", ".mcdc-pool"];
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
@@ -217,9 +218,23 @@ struct SystemWorkspaceOperations;
 
 impl WorkspaceOperations for SystemWorkspaceOperations {
     fn copy_file(&mut self, source: &Path, destination: &Path) -> Result<(), WorkspaceError> {
-        reflink_copy::reflink_or_copy(source, destination)
-            .map(|_| ())
-            .map_err(|source_error| io_error(destination, source_error))
+        // Per-file APFS clonefile calls can cost tens of milliseconds for tiny
+        // files—far more than copying their bytes. Preserve CoW for genuinely
+        // large artifacts, while ordinary source/config files take the fast
+        // portable path.
+        const REFLINK_MINIMUM_BYTES: u64 = 1024 * 1024;
+        let bytes = fs::symlink_metadata(source)
+            .map_err(|source_error| io_error(source, source_error))?
+            .len();
+        if bytes < REFLINK_MINIMUM_BYTES {
+            fs::copy(source, destination)
+                .map(|_| ())
+                .map_err(|source_error| io_error(destination, source_error))
+        } else {
+            reflink_copy::reflink_or_copy(source, destination)
+                .map(|_| ())
+                .map_err(|source_error| io_error(destination, source_error))
+        }
     }
 
     fn rename(&mut self, source: &Path, destination: &Path) -> Result<(), WorkspaceError> {

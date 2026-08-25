@@ -187,6 +187,65 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
         }
     };
     spawn_trash_sweeper(&root);
+    let detection = supercov_engine::frontend_detection::detect_frontends(&root, &command);
+    if detection.frontends.is_empty() {
+        eprintln!(
+            "[supercov] could not determine a supported test language from the command or project manifests"
+        );
+        return ExitCode::from(2);
+    }
+    if detection.frontends.len() > 1 {
+        let languages = detection
+            .frontends
+            .iter()
+            .map(|language| format!("{language:?}").to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "[supercov] the test command launches multiple language frontends ({languages}); combined polyglot evidence is not implemented yet, so Supercov refuses to publish a partial run"
+        );
+        return ExitCode::from(2);
+    }
+    if detection.frontends == [supercov_engine::frontend_detection::FrontendLanguage::Rust] {
+        let request = supercov_engine::rust_run::DirectRustRunRequest {
+            root: root.clone(),
+            command,
+            run_id,
+            started_at,
+        };
+        let mut diagnostics = std::io::stderr().lock();
+        let result = supercov_engine::rust_run::run_direct_rust(&request, &mut diagnostics);
+        spawn_trash_sweeper(&root);
+        return match result {
+            Ok(result) => {
+                println!(
+                    "[coverage] evidence: {}",
+                    result.run_directory.join("evidence.raw.gz").display()
+                );
+                eprintln!(
+                    "[supercov] Rust coverage: {} test(s) across {} artifact(s)",
+                    result.tests, result.artifacts
+                );
+                if let Some(timings) = &result.metadata.timings {
+                    eprintln!(
+                        "[supercov] timings {}",
+                        format_run_timings(timings, result.metadata.duration_ms)
+                    );
+                }
+                process_exit_code(result.exit_code)
+            }
+            Err(error) => {
+                eprintln!("[supercov] {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    if detection.frontends == [supercov_engine::frontend_detection::FrontendLanguage::Python] {
+        eprintln!(
+            "[supercov] Python was detected, but the owned Python user-run frontend is not enabled yet"
+        );
+        return ExitCode::from(2);
+    }
     let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
         root: root.clone(),
         command,
@@ -369,6 +428,29 @@ fn current_javascript_integrity(root: &Path) -> Option<supercov_engine::run_stor
     supercov_engine::javascript_run::current_javascript_integrity(root, &[]).ok()
 }
 
+fn current_integrity_for_run(
+    root: &Path,
+    run: &StoredRun,
+) -> Option<supercov_engine::run_store::RunIntegrity> {
+    if run
+        .metadata
+        .integrity
+        .instrumenter_version
+        .starts_with("supercov-rust-")
+    {
+        supercov_engine::rust_run::current_rust_integrity(root, &run.metadata.command).ok()
+    } else {
+        current_javascript_integrity(root)
+    }
+}
+
+fn javascript_run(run: &StoredRun) -> bool {
+    !run.metadata
+        .integrity
+        .instrumenter_version
+        .starts_with("supercov-rust-")
+}
+
 enum PublicQueryOutput {
     Runs {
         data: RunListData,
@@ -427,8 +509,13 @@ fn execute_public_query(
                 "failed" => supercov_engine::coverage_index::CoverageViewId::Failed,
                 _ => unreachable!("public parser validates coverage filters"),
             };
-            let current = current_javascript_integrity(root);
-            let (data, page) = run_list_query(&inventory, current.as_ref(), view, *offset, *limit);
+            let (data, page) = run_list_query(
+                &inventory,
+                &|run| current_integrity_for_run(root, run),
+                view,
+                *offset,
+                *limit,
+            );
             Ok(PublicQueryOutput::Runs {
                 data,
                 pagination: page,
@@ -447,7 +534,7 @@ fn execute_public_query(
             request
                 .valid
                 .get_or_insert(run.metadata.test_exit_code == Some(0));
-            let current = current_javascript_integrity(root);
+            let current = current_integrity_for_run(root, run);
             let mut warnings = Vec::new();
             if let Some(current) = current.as_ref() {
                 let comparison = compare_run_integrity(Some(&run.metadata.integrity), current);
@@ -470,10 +557,17 @@ fn execute_public_query(
                 let index = CoverageIndex::new(&container).map_err(|error| {
                     internal_agent_error(format!("Failed to read coverage index: {error}"))
                 })?;
-                let waiver_source = supercov_engine::coverage_waivers::read_coverage_waivers(root)
-                    .map_err(|error| {
-                        internal_agent_error(format!("Failed to read coverage waivers: {error}"))
-                    })?;
+                let waiver_source = if javascript_run(run) {
+                    supercov_engine::coverage_waivers::read_coverage_waivers(root).map_err(
+                        |error| {
+                            internal_agent_error(format!(
+                                "Failed to read coverage waivers: {error}"
+                            ))
+                        },
+                    )?
+                } else {
+                    None
+                };
                 let waiver_evaluation = if let Some(source) = waiver_source.as_ref() {
                     let decisions = supercov_engine::coverage_query::filtered_decisions(
                         &index,
@@ -511,7 +605,7 @@ fn execute_public_query(
                     })?;
                     let newer_run =
                         select_run(&inventory, Some(selector)).map_err(run_store_agent_error)?;
-                    if let Some(current) = current.as_ref() {
+                    if let Some(current) = current_integrity_for_run(root, newer_run).as_ref() {
                         let comparison =
                             compare_run_integrity(Some(&newer_run.metadata.integrity), current);
                         if comparison.stale {

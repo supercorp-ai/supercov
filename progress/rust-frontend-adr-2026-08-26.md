@@ -3,6 +3,60 @@
 Status: accepted for private implementation. Rust is not yet a claimed product
 frontend.
 
+## Implementation checkpoint — 2026-08-26
+
+The private architecture now runs end to end through the public command path:
+
+- command intent plus manifest fallback detects JavaScript, Python and Rust;
+  a pure `cargo test` invocation selects Rust automatically, while a genuinely
+  mixed command fails closed until combined polyglot publication exists;
+- Cargo metadata discovers every workspace member inside Supercov's isolated
+  copy, the owned source transform injects a generated std-only runtime, and
+  the user's checkout is never edited;
+- Cargo builds once, Supercov enumerates three libtest artifacts in its own
+  workspace, and each selected test executes in a separate process with exact
+  run/worker/test/retry/phase identity;
+- strict owned observations publish as evidence v3 and the shared Rust
+  analyzer, typed index and agent queries read them without a Rust-specific
+  report path;
+- Supercov dogfood completed 165 tests with zero failures and published run
+  `2026-08-25T21-52-35-740Z`; `runs latest coverage` reconstructed 39 Rust
+  files and correctly reported the private model as measurement-incomplete;
+- fresh-run integrity and staleness are language-aware, custom run IDs sort by
+  `startedAt`, JavaScript waivers cannot contaminate Rust queries, ignored
+  libtest cases are recorded as skipped, and passing per-test processes are
+  quiet while failures retain stdout/stderr.
+
+This does not make Rust public-ready. Cargo test-name/libtest filters, doctest
+execution, nextest/cross, macro-expanded/generated code, const/no_std targets,
+the remaining structural branch probes and assertion linkage are still release
+blockers. Unsupported mixed-language execution already refuses partial output;
+the remaining runner variants must follow the same fail-closed rule.
+
+### Measured performance checkpoint
+
+The initial 1.10x target is not met and remains a release blocker. On the
+Supercov workspace on this machine:
+
+- warm uninstrumented `cargo test --workspace`: 2.89–3.01s;
+- clean-target uninstrumented run: 20.67s;
+- owned Rust coverage after the workspace fix: 33.15s, or 1.60x cold/cold and
+  roughly 11x against a warm ordinary run;
+- covered breakdown: 75.5ms workspace, 3.91s transformation/setup, 21.43s
+  clean instrumented build, 6.09s parallel process-per-test execution, and
+  1.63s evidence publication.
+
+The first dogfood implementation accidentally omitted root `target/` from the
+isolated-copy exclusions and cloned roughly 24GB of Cargo artifacts per run.
+That path measured 25.65s; after excluding `target/` and copying small files
+normally instead of invoking per-file APFS clonefile, the same warm internal
+copy command measured 0.97s including Cargo launcher startup (actual copy work
+about 0.1–0.2s). Parallel exact-test processes reduced execution from 8.30s to
+6.09s. Reaching 1.10x now requires a crash-safe, fingerprinted instrumented
+Cargo cache/stable workspace plus reductions in transformation, process and
+archive overhead; no performance claim should use a warm baseline against a
+fresh Supercov target.
+
 ## Product boundary
 
 Rust user runs are measured only by Supercov-owned probes. `rustc -C
@@ -121,4 +175,3 @@ workspace-member rustc invocations.
 - https://rustc-dev-guide.rust-lang.org/rustc-driver/external-rustc-drivers.html
 - https://rustc-dev-guide.rust-lang.org/rustc-driver/intro.html
 - https://doc.rust-lang.org/cargo/reference/environment-variables.html
-

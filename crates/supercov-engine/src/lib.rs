@@ -10,6 +10,7 @@ pub mod coverage_query;
 pub mod coverage_report;
 pub mod coverage_waivers;
 pub mod evidence_archive;
+pub mod frontend_detection;
 pub mod frontend_protocol;
 pub mod indexed_query;
 pub mod integrity;
@@ -29,6 +30,10 @@ pub mod run_merge;
 pub mod run_query;
 pub mod run_store;
 pub mod rust_instrumenter;
+pub mod rust_project;
+pub mod rust_run;
+pub mod rust_runtime;
+pub mod rust_test_runner;
 pub mod source_discovery;
 pub mod workspace;
 

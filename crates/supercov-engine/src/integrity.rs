@@ -56,6 +56,27 @@ impl FrontendIntegrityInputs {
             engine_execution_sha256: env!("SUPERCOV_ENGINE_SOURCE_SHA256").into(),
         }
     }
+
+    pub fn embedded_rust() -> Self {
+        Self {
+            language: "rust".into(),
+            version: "rust-owned-v1".into(),
+            root: PathBuf::from("."),
+            instrumenter_files: Vec::new(),
+            execution_files: Vec::new(),
+            engine_instrumenter_sha256: env!("SUPERCOV_ENGINE_SOURCE_SHA256").into(),
+            engine_execution_sha256: env!("SUPERCOV_ENGINE_SOURCE_SHA256").into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplicitIntegrityInputs {
+    pub source_files: Vec<PathBuf>,
+    pub test_files: Vec<PathBuf>,
+    pub dependency_files: Vec<PathBuf>,
+    pub configuration_files: Vec<PathBuf>,
+    pub execution_configuration: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -454,6 +475,95 @@ pub fn create_run_integrity(
     })
 }
 
+/// Language-neutral integrity construction for frontends whose discovery does
+/// not use the JavaScript `CoverageProject` compatibility structure.
+pub fn create_explicit_run_integrity(
+    root: &Path,
+    inputs: &ExplicitIntegrityInputs,
+    frontend: &FrontendIntegrityInputs,
+) -> Result<RunIntegrity, IntegrityError> {
+    if !valid_sha256(&frontend.engine_instrumenter_sha256) {
+        return Err(IntegrityError::InvalidEngineDigest("instrumenter engine"));
+    }
+    if !valid_sha256(&frontend.engine_execution_sha256) {
+        return Err(IntegrityError::InvalidEngineDigest("execution engine"));
+    }
+    let source = digest_files(root, inputs.source_files.iter().map(|path| root.join(path)))?;
+    let tests = digest_files(root, inputs.test_files.iter().map(|path| root.join(path)))?;
+    let dependencies = digest_files(
+        root,
+        inputs.dependency_files.iter().map(|path| root.join(path)),
+    )?;
+    let configuration = digest_files(
+        root,
+        inputs
+            .configuration_files
+            .iter()
+            .map(|path| root.join(path)),
+    )?;
+    let frontend_instrumenter =
+        digest_files(&frontend.root, frontend.instrumenter_files.iter().cloned())?;
+    let frontend_execution =
+        digest_files(&frontend.root, frontend.execution_files.iter().cloned())?;
+    let instrumenter = domain_hash(
+        "supercov-run-instrumenter-v1",
+        &[
+            ("language", frontend.language.as_bytes()),
+            ("version", frontend.version.as_bytes()),
+            ("engine", frontend.engine_instrumenter_sha256.as_bytes()),
+            ("shim", frontend_instrumenter.as_bytes()),
+        ],
+    );
+    let execution = domain_hash(
+        "supercov-run-execution-v1",
+        &[
+            ("language", frontend.language.as_bytes()),
+            ("version", frontend.version.as_bytes()),
+            ("source", source.as_bytes()),
+            ("dependencies", dependencies.as_bytes()),
+            ("configuration", configuration.as_bytes()),
+            ("executionConfiguration", &inputs.execution_configuration),
+            ("engine", frontend.engine_execution_sha256.as_bytes()),
+            ("shim", frontend_execution.as_bytes()),
+        ],
+    );
+    let combined = domain_hash(
+        "supercov-run-combined-v1",
+        &[
+            ("language", frontend.language.as_bytes()),
+            ("version", frontend.version.as_bytes()),
+            ("source", source.as_bytes()),
+            ("tests", tests.as_bytes()),
+            ("dependencies", dependencies.as_bytes()),
+            ("configuration", configuration.as_bytes()),
+            ("instrumenter", instrumenter.as_bytes()),
+            ("execution", execution.as_bytes()),
+        ],
+    );
+    Ok(RunIntegrity {
+        schema_version: RUN_INTEGRITY_SCHEMA_VERSION,
+        instrumenter_version: format!("supercov-{}-{}", frontend.language, frontend.version),
+        git: git_integrity(root),
+        fingerprint: RunFingerprint {
+            // The frozen store contract names the digest primitive here. The
+            // domain-separation version belongs to the producer implementation,
+            // not this wire field.
+            algorithm: "sha256".into(),
+            source,
+            tests,
+            dependencies,
+            configuration,
+            instrumenter,
+            execution,
+            combined,
+            source_files: inputs.source_files.len(),
+            test_files: inputs.test_files.len(),
+        },
+        stale: None,
+        stale_reasons: None,
+    })
+}
+
 fn frontend_map_bytes(values: &std::collections::BTreeMap<String, String>) -> Vec<u8> {
     let mut bytes = Vec::new();
     for (key, value) in values {
@@ -651,6 +761,32 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(shim).unwrap();
+    }
+
+    #[test]
+    fn explicit_language_integrity_uses_the_frozen_store_digest_label() {
+        let root = directory("rust-project");
+        write(&root, "src/lib.rs", "pub fn ready() -> bool { true }");
+        write(
+            &root,
+            "Cargo.toml",
+            "[package]\nname='fixture'\nversion='0.0.0'\n",
+        );
+        let inputs = ExplicitIntegrityInputs {
+            source_files: vec!["src/lib.rs".into()],
+            test_files: vec!["src/lib.rs".into()],
+            dependency_files: vec!["Cargo.toml".into()],
+            configuration_files: Vec::new(),
+            execution_configuration: b"cargo\0test".to_vec(),
+        };
+        let result = create_explicit_run_integrity(
+            &root,
+            &inputs,
+            &FrontendIntegrityInputs::embedded_rust(),
+        )
+        .unwrap();
+        assert_eq!(result.fingerprint.algorithm, "sha256");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
