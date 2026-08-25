@@ -88,6 +88,22 @@ tarball directly and verifies its packed manifest selectors, executable path,
 binary size, binary digest and POSIX execute bit rather than trusting detached
 checksum metadata alone.
 
+### Temporary Windows publication hold
+
+The `0.0.11` candidate publishes only the six macOS/Linux targets. Both Windows
+binaries compile, and npm invocation/package launching was validated, but the
+first real packed x64 run failed with an NTFS `Access is denied` error while
+isolating the project's own `.supercov` store (Actions run `32886591618`). The
+ARM job was cancelled rather than spending more hosted minutes on the same
+known boundary. Windows target packages stay out of the public registry and
+the primary package's optional dependencies until a native packed run passes
+the full workspace and evidence lifecycle. This narrows advertised support; it
+does not weaken the native-runtime gate.
+
+Publication is manual-only and resumable. A complete set of already validated
+artifacts may be imported from a prior run, checked again as one release set,
+and published without rebuilding those targets.
+
 The tag-only release workflow invokes this artifact workflow as a reusable
 gate. It publishes every verified platform tarball before the primary package,
 whose exact `optionalDependencies` are machine-checked against the target

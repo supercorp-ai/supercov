@@ -3,11 +3,11 @@ name: Publish to npm
 on:
   workflow_dispatch:
     inputs:
-      windows-only:
-        description: Build only the two Windows targets and reuse another run for the rest
+      rebuild-native:
+        description: Build the native target matrix instead of reusing a complete prior run
         required: false
         type: boolean
-        default: false
+        default: true
       reuse-run-id:
         description: Prior native-artifact workflow run containing already validated targets
         required: false
@@ -23,7 +23,7 @@ jobs:
   native-artifacts:
     uses: ./.github/workflows/native-artifacts.yml
     with:
-      matrix-json: ${{ inputs.windows-only && '{"include":[{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","package":"supercov-win32-arm64","executable":"supercov.exe","packedInstall":true},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","package":"supercov-win32-x64","executable":"supercov.exe","packedInstall":true}]}' || '{"include":[{"runner":"macos-15","target":"aarch64-apple-darwin","package":"supercov-darwin-arm64","executable":"supercov","packedInstall":true},{"runner":"macos-15-intel","target":"x86_64-apple-darwin","package":"supercov-darwin-x64","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","package":"supercov-linux-arm64-gnu","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","package":"supercov-linux-x64-gnu","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","package":"supercov-linux-arm64-musl","executable":"supercov","musl":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","package":"supercov-linux-x64-musl","executable":"supercov","musl":true},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","package":"supercov-win32-arm64","executable":"supercov.exe","packedInstall":true},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","package":"supercov-win32-x64","executable":"supercov.exe","packedInstall":true}]}' }}
+      build-targets: ${{ inputs.rebuild-native }}
       reuse-run-id: ${{ inputs.reuse-run-id }}
     permissions:
       actions: read

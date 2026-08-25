@@ -942,6 +942,15 @@ miss blocks flipping any default.
   run before the aggregate integrity check, avoiding repeated builds on
   platforms that have already passed. Push CI remains disabled; conformance,
   browser and Test262 work stays local or explicitly dispatched.
+  The first sparse retry (`32886591618`) proved the selector worked—only the
+  two Windows jobs were created—but the x64 binary's real packed run then hit
+  `Access is denied` while isolating its own `.supercov` store on NTFS. This is
+  a Windows runtime/isolation defect, not a compiler or package-launcher
+  failure. The ARM job was cancelled immediately. Windows publication is
+  deferred until that defect is reproduced and fixed under the dedicated
+  Windows gate; `0.0.11` intentionally advertises only the six fully validated
+  macOS/Linux targets. The reusable release gate can also verify a complete
+  prior artifact set without rebuilding any target.
   The release workflow now calls that complete native matrix, downloads and
   revalidates the aggregate release set, publishes all eight exact-version
   platform packages first, and publishes the primary package only after every
