@@ -46,7 +46,10 @@ jobs:
       - name: Install musl linker
         if: matrix.musl
         run: sudo apt-get update -qq && sudo apt-get install -y musl-tools
-      - run: npm ci
+      # The same-version native packages do not exist until this matrix
+      # publishes them. Install the reproducible JS toolchain while omitting
+      # that circular optional dependency.
+      - run: npm ci --omit=optional
       - run: node scripts/package-preflight.mjs
       - name: Read package version
         run: node -e "require('node:fs').appendFileSync(process.env.GITHUB_ENV, 'SUPERCOV_VERSION=' + require('./package.json').version + '\n')"

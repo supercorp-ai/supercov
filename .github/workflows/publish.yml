@@ -47,7 +47,9 @@ jobs:
         with:
           name: supercov-native-release-set
           path: native-release
-      - run: npm ci
+      # The downloaded artifacts are about to create these same-version
+      # optional packages, so the publisher intentionally does not fetch them.
+      - run: npm ci --omit=optional
       # The release commit is validated locally before tagging. Revalidate the
       # exact package surface without rebuilding or repeating oracle suites.
       - run: node scripts/package-preflight.mjs
