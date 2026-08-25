@@ -317,6 +317,23 @@ miss blocks flipping any default.
   250 generated models require exact witness order and summary parity with the
   regression reference. This core accepts no JavaScript-specific types and is
   the shared verdict engine for every future language frontend.
+- Phase 4 now also owns language-neutral evidence normalization and complete
+  report reconstruction. Rust merges runtime, browser, scoped server and
+  background evidence; de-duplicates vectors and hits; resolves retries and
+  terminal outcomes; derives all/passed/failed views; preserves per-test and
+  per-phase attribution; computes explicit action/assertion confidence; and
+  aggregates lines, test files, runner/kind views and transport diagnostics.
+  One hundred generated evidence models require exact serialized report
+  parity, while real immutable Playwright, `node:test`, esbuild, webpack and
+  SWC archives require exact report, attribution, outcome, filter and transport
+  parity when read directly by the strict Rust archive reader. Independent
+  Rust regressions prove that an unexecuted manifest decision cannot disappear
+  from the denominator, timestamp overlap cannot claim causal confidence,
+  expected failures cannot become verified coverage, malformed JSONL remains
+  visible without discarding valid records, and cross-run evidence is rejected.
+  The differential also found and removed an old TypeScript-only serialization
+  leak where an internal `Set` appeared as `explicitPhases: {}` on line
+  results despite not existing in the frozen public schema.
 
 ## Non-goals and guardrails
 

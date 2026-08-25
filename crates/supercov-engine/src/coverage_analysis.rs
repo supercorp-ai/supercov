@@ -103,10 +103,12 @@ pub fn find_witnesses(
     vectors: &[McdcVector],
 ) -> Result<Vec<Option<WitnessIndexes>>, AnalysisError> {
     let width = vectors.first().map_or(0, |vector| vector.values.len());
-    find_witnesses_for_width(vectors, width)
+    find_witnesses_for_conditions(vectors, width)
 }
 
-fn find_witnesses_for_width(
+/// Find witnesses against the manifest denominator. Unlike [`find_witnesses`],
+/// this retains every condition when a decision has no observations.
+pub fn find_witnesses_for_conditions(
     vectors: &[McdcVector],
     width: usize,
 ) -> Result<Vec<Option<WitnessIndexes>>, AnalysisError> {
@@ -234,6 +236,8 @@ pub struct CoverageSummary {
     pub condition_outcomes: CoverageCount,
     pub value_selections: CoverageCount,
     pub coverage_complete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completeness_blocked: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -268,7 +272,7 @@ pub fn analyze_core(input: &CoverageCoreInput) -> Result<CoverageCoreOutput, Ana
             if coverage.condition_count == 0 {
                 return Err(AnalysisError::EmptyDecision { decision });
             }
-            find_witnesses_for_width(&coverage.vectors, coverage.condition_count)
+            find_witnesses_for_conditions(&coverage.vectors, coverage.condition_count)
         })
         .collect::<Result<Vec<_>, _>>()?;
     let conditions = witnesses.iter().map(Vec::len).sum::<usize>();
@@ -394,6 +398,7 @@ pub fn analyze_core(input: &CoverageCoreInput) -> Result<CoverageCoreOutput, Ana
             condition_outcomes,
             value_selections,
             coverage_complete,
+            completeness_blocked: None,
         },
     })
 }

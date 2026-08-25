@@ -1,0 +1,2013 @@
+//! Language-neutral reconstruction of coverage views from frozen obligations
+//! and per-attempt evidence.
+//!
+//! This module deliberately knows nothing about JavaScript or any test runner.
+//! Language frontends provide the manifest and normalized evidence records;
+//! Rust owns merging, attempt outcomes, attribution confidence, filtering and
+//! every structural coverage verdict.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::coverage_analysis::{
+    AnalysisError, BranchCoverage, CoverageCoreInput, CoverageSummary, DecisionCoverage,
+    McdcVector, PointCoverage, PointKind, analyze_core, find_witnesses_for_conditions,
+};
+use crate::evidence_archive::{EvidenceArchiveEntry, read_archive};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DecisionMeta {
+    pub id: String,
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub source: String,
+    pub conditions: Vec<String>,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PointMeta {
+    pub id: String,
+    pub kind: PointKind,
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BranchAlternativeMeta {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BranchMeta {
+    pub id: String,
+    pub kind: String,
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub source: String,
+    pub alternatives: Vec<BranchAlternativeMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoverageManifest {
+    pub decisions: Vec<DecisionMeta>,
+    pub points: Vec<PointMeta>,
+    pub branches: Vec<BranchMeta>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitations: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DecisionSnapshot {
+    pub meta: DecisionMeta,
+    pub vectors: Vec<McdcVector>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeEvent {
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector: Option<McdcVector>,
+    pub timestamp_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase_id: Option<String>,
+    pub environment: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeSnapshot {
+    #[serde(default)]
+    pub decisions: Vec<DecisionSnapshot>,
+    #[serde(default)]
+    pub hits: Vec<String>,
+    #[serde(default)]
+    pub events: Vec<RuntimeEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionScope {
+    pub version: usize,
+    pub run_id: String,
+    pub worker_id: String,
+    pub test_id: String,
+    pub test_key: String,
+    pub retry: usize,
+    pub attempt_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ServerRecord {
+    #[serde(rename = "type")]
+    pub record_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<DecisionMeta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector: Option<McdcVector>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ExecutionScope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoveragePhase {
+    pub id: String,
+    pub kind: String,
+    pub operation: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caused_by_phase_id: Option<String>,
+    pub started_at_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TestProvenance {
+    pub runner: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub source: String,
+}
+
+impl Default for TestProvenance {
+    fn default() -> Self {
+        Self {
+            runner: "unknown".into(),
+            kind: "unknown".into(),
+            project: None,
+            source: "unknown".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RawTestResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ExecutionScope>,
+    pub test: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_status: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flaky: bool,
+    #[serde(default)]
+    pub provenance: TestProvenance,
+    #[serde(default = "default_test_role")]
+    pub role: String,
+    #[serde(default)]
+    pub phases: Vec<CoveragePhase>,
+    #[serde(default)]
+    pub runtime: Vec<RuntimeSnapshot>,
+    #[serde(default)]
+    pub browser: Vec<RuntimeSnapshot>,
+    #[serde(default)]
+    pub server: Vec<ServerRecord>,
+}
+
+fn default_test_role() -> String {
+    "test".into()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestAttempt {
+    pub retry: usize,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_status: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageConfidence {
+    pub level: String,
+    pub setup_only: bool,
+    pub background_only: bool,
+    pub asserted: bool,
+    pub tests: Vec<String>,
+    pub asserted_tests: Vec<String>,
+    pub runners: Vec<String>,
+    pub kinds: Vec<String>,
+    pub e2e: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VectorObservation {
+    pub vector: McdcVector,
+    pub tests: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub explicit_phases: Vec<String>,
+    pub confidence: CoverageConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConditionResult {
+    pub index: usize,
+    pub source: String,
+    pub covered: bool,
+    pub assertion_covered: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub witness: Option<[McdcVector; 2]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub witness_tests: Option<[Vec<String>; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecisionResult {
+    pub meta: DecisionMeta,
+    pub executed: bool,
+    pub covered: bool,
+    pub vectors: Vec<McdcVector>,
+    pub vector_observations: Vec<VectorObservation>,
+    pub conditions: Vec<ConditionResult>,
+    pub tests: Vec<String>,
+    pub confidence: CoverageConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PointResult {
+    pub meta: PointMeta,
+    pub covered: bool,
+    pub tests: Vec<String>,
+    pub phases: Vec<String>,
+    pub confidence: CoverageConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlternativeResult {
+    pub id: String,
+    pub label: String,
+    pub covered: bool,
+    pub tests: Vec<String>,
+    pub phases: Vec<String>,
+    pub confidence: CoverageConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchResult {
+    pub meta: BranchMeta,
+    pub covered: bool,
+    pub alternatives: Vec<AlternativeResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct SourceLine {
+    pub file: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LineResult {
+    pub file: String,
+    pub line: usize,
+    pub covered: bool,
+    pub tests: Vec<String>,
+    pub runners: Vec<String>,
+    pub kinds: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclusive_kind: Option<String>,
+    pub phases: Vec<String>,
+    pub confidence: CoverageConfidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestDecisionResult {
+    pub id: String,
+    pub vectors: Vec<McdcVector>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestCoverageResult {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub retries: Vec<usize>,
+    pub attempts: Vec<TestAttempt>,
+    pub outcome: String,
+    pub provenance: TestProvenance,
+    pub role: String,
+    pub hits: Vec<String>,
+    pub decisions: Vec<TestDecisionResult>,
+    pub lines: Vec<SourceLine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestFileResult {
+    pub file: String,
+    pub tests: Vec<String>,
+    pub runners: Vec<String>,
+    pub kinds: Vec<String>,
+    pub lines: Vec<SourceLine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhaseResult {
+    #[serde(flatten)]
+    pub phase: CoveragePhase,
+    pub test: String,
+    pub hits: Vec<String>,
+    pub decisions: Vec<TestDecisionResult>,
+    pub lines: Vec<SourceLine>,
+    pub browser_events: usize,
+    pub server_events: usize,
+    pub explicit_events: usize,
+    pub inferred_events: usize,
+    pub explicit_browser_events: usize,
+    pub inferred_browser_events: usize,
+    pub explicit_server_events: usize,
+    pub inferred_server_events: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DimensionCoverage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
+    pub tests: usize,
+    pub setups: usize,
+    pub summary: CoverageSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageModel {
+    pub name: String,
+    pub completeness_meaning: String,
+    pub measured: Vec<String>,
+    pub not_measured: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageView {
+    pub generated_at: String,
+    pub variant: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<Value>,
+    pub model: CoverageModel,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<Value>,
+    pub limitations: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transport: Option<TransportStats>,
+    pub summary: CoverageSummary,
+    pub coverage_by_kind: Vec<DimensionCoverage>,
+    pub coverage_by_runner: Vec<DimensionCoverage>,
+    pub decisions: Vec<DecisionResult>,
+    pub points: Vec<PointResult>,
+    pub branches: Vec<BranchResult>,
+    pub tests: Vec<TestCoverageResult>,
+    pub test_files: Vec<TestFileResult>,
+    pub phases: Vec<PhaseResult>,
+    pub lines: Vec<LineResult>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageFilters {
+    pub passed: CoverageView,
+    pub failed: CoverageView,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageReport {
+    #[serde(flatten)]
+    pub view: CoverageView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionResult>,
+    pub filters: CoverageFilters,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionResult {
+    pub test_exit_code: Option<i32>,
+    pub valid: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransportStats {
+    pub processes: usize,
+    pub child_launches: usize,
+    pub remote_launches: usize,
+    pub workspace_capabilities: usize,
+    pub scoped_server_records: usize,
+    pub background_server_records: usize,
+    pub corrupt_records: usize,
+    pub corrupt_files: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoverageReportRequest {
+    pub run_id: String,
+    pub manifest: CoverageManifest,
+    pub raw_results: Vec<RawTestResult>,
+    pub generated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_exit_code")]
+    pub test_exit_code: ExitCodeInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArchiveReportRequest {
+    pub archive_path: PathBuf,
+    pub run_id: String,
+    pub generated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_exit_code")]
+    pub test_exit_code: ExitCodeInput,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ExitCodeInput {
+    #[default]
+    Missing,
+    Present(Option<i32>),
+}
+
+fn deserialize_exit_code<'de, D>(deserializer: D) -> Result<ExitCodeInput, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<i32>::deserialize(deserializer).map(ExitCodeInput::Present)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReportError {
+    Analysis(AnalysisError),
+    InvalidEvent(String),
+    InvalidServerRecord(String),
+    InvalidArchive(String),
+    MissingManifest,
+    InvalidJson { path: String, reason: String },
+    ScopeMismatch { expected: String, actual: String },
+    NoEvidence(String),
+}
+
+impl From<AnalysisError> for ReportError {
+    fn from(value: AnalysisError) -> Self {
+        Self::Analysis(value)
+    }
+}
+
+#[derive(Clone, Default)]
+struct OrderedVectors {
+    values: Vec<McdcVector>,
+    indexes: HashMap<String, usize>,
+}
+
+impl OrderedVectors {
+    fn insert(&mut self, vector: &McdcVector) -> usize {
+        let key = vector_key(vector);
+        if let Some(index) = self.indexes.get(&key) {
+            return *index;
+        }
+        let index = self.values.len();
+        self.values.push(vector.clone());
+        self.indexes.insert(key, index);
+        index
+    }
+}
+
+#[derive(Clone)]
+struct MutableObservation {
+    vector: McdcVector,
+    tests: BTreeSet<String>,
+    phases: BTreeSet<String>,
+    explicit_phases: BTreeSet<String>,
+}
+
+#[derive(Clone)]
+struct MutableTest {
+    id: String,
+    name: String,
+    file: Option<String>,
+    title: Option<String>,
+    retries: BTreeSet<usize>,
+    attempts: BTreeMap<usize, TestAttempt>,
+    runner_reported_flaky: bool,
+    provenance: TestProvenance,
+    role: String,
+    hits: BTreeSet<String>,
+    decisions: BTreeMap<String, OrderedVectors>,
+}
+
+#[derive(Clone)]
+struct MutablePhase {
+    phase: CoveragePhase,
+    test: String,
+    hits: BTreeSet<String>,
+    decisions: BTreeMap<String, OrderedVectors>,
+    browser_events: usize,
+    server_events: usize,
+    explicit_events: usize,
+    inferred_events: usize,
+    explicit_browser_events: usize,
+    inferred_browser_events: usize,
+    explicit_server_events: usize,
+    inferred_server_events: usize,
+}
+
+fn vector_key(vector: &McdcVector) -> String {
+    let mut key = String::with_capacity(vector.values.len() + 2);
+    for value in &vector.values {
+        key.push(match value {
+            None => '-',
+            Some(false) => 'F',
+            Some(true) => 'T',
+        });
+    }
+    key.push(':');
+    key.push(if vector.outcome { 'T' } else { 'F' });
+    key
+}
+
+fn sorted<T: Clone + Ord>(values: &BTreeSet<T>) -> Vec<T> {
+    values.iter().cloned().collect()
+}
+
+fn record_attempt(test: &mut MutableTest, raw: &RawTestResult) {
+    let (Some(retry), Some(raw_status)) = (raw.retry, raw.status.as_ref()) else {
+        return;
+    };
+    let previous = test.attempts.get(&retry);
+    let status = if raw_status == "unknown" {
+        previous.map_or_else(|| raw_status.clone(), |attempt| attempt.status.clone())
+    } else {
+        raw_status.clone()
+    };
+    let expected_status = raw
+        .expected_status
+        .clone()
+        .or_else(|| previous.and_then(|attempt| attempt.expected_status.clone()));
+    test.attempts.insert(
+        retry,
+        TestAttempt {
+            retry,
+            status,
+            expected_status,
+        },
+    );
+}
+
+fn test_outcome(test: &MutableTest) -> String {
+    let Some(terminal) = test.attempts.values().next_back() else {
+        return "unknown".into();
+    };
+    if terminal.status == "passed"
+        && (test.runner_reported_flaky
+            || test
+                .attempts
+                .values()
+                .take(test.attempts.len().saturating_sub(1))
+                .any(|attempt| attempt.status != "passed"))
+    {
+        "flaky".into()
+    } else {
+        terminal.status.clone()
+    }
+}
+
+fn raw_test_id(raw: &RawTestResult) -> &str {
+    raw.test_id.as_deref().unwrap_or(&raw.test)
+}
+
+pub fn passing_coverage_results(raw_results: &[RawTestResult]) -> Vec<RawTestResult> {
+    let mut attempts: BTreeMap<(String, usize), (BTreeSet<String>, bool)> = BTreeMap::new();
+    for raw in raw_results {
+        let entry = attempts
+            .entry((raw_test_id(raw).into(), raw.retry.unwrap_or(0)))
+            .or_default();
+        if let Some(status) = &raw.status {
+            entry.0.insert(status.clone());
+        }
+        entry.1 |= raw.expected_status.as_deref() == Some("failed");
+    }
+    let mut terminal_retries = BTreeMap::<String, usize>::new();
+    for (test, retry) in attempts.keys() {
+        terminal_retries
+            .entry(test.clone())
+            .and_modify(|value| *value = (*value).max(*retry))
+            .or_insert(*retry);
+    }
+    let accepted = terminal_retries
+        .into_iter()
+        .filter_map(|(test, retry)| {
+            let (statuses, expected_failure) = attempts.get(&(test.clone(), retry))?;
+            (statuses.contains("passed") && !expected_failure).then_some((test, retry))
+        })
+        .collect::<BTreeSet<_>>();
+    raw_results
+        .iter()
+        .filter(|raw| accepted.contains(&(raw_test_id(raw).into(), raw.retry.unwrap_or(0))))
+        .cloned()
+        .collect()
+}
+
+pub fn failed_coverage_results(raw_results: &[RawTestResult]) -> Vec<RawTestResult> {
+    let failed = raw_results
+        .iter()
+        .filter(|raw| raw.status.as_deref() == Some("failed"))
+        .map(|raw| (raw_test_id(raw).to_owned(), raw.retry.unwrap_or(0)))
+        .collect::<BTreeSet<_>>();
+    raw_results
+        .iter()
+        .filter(|raw| failed.contains(&(raw_test_id(raw).into(), raw.retry.unwrap_or(0))))
+        .cloned()
+        .collect()
+}
+
+fn coverage_model() -> CoverageModel {
+    CoverageModel {
+        name: "coverage-completeness-v2".into(),
+        completeness_meaning: "Every obligation in the measured model was observed by at least one existing test; test assertions and product correctness are separate assumptions.".into(),
+        measured: [
+            "executable source lines",
+            "executable statements",
+            "function entries",
+            "true and false outcomes of if, ternary, while, do/while, and classic for decisions",
+            "true and false outcomes of every atomic condition in those decisions",
+            "masking MC/DC independence for every atomic condition in those decisions",
+            "short-circuit and right-evaluated selections for &&, ||, and ?? value expressions, including JSX",
+            "short-circuit and evaluated alternatives for logical assignments and optional chains",
+            "provided and default-evaluated parameter and destructuring values",
+            "try success and catch entry",
+            "zero and entered for-in/for-of loops",
+            "entered switch cases, defaults, and implicit no-match alternatives",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        not_measured: [
+            "all input values or semantic input partitions",
+            "all execution paths or ordering/concurrency interleavings",
+            "destructuring defaults in classic for initializers (reported as blockers when discovered)",
+            "the internal statements and decisions of runtime-generated eval/Function source",
+            "mutation score or assertion fault-detection strength",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+    }
+}
+
+fn summary_for_results(
+    decisions: &[DecisionResult],
+    points: &[PointResult],
+    branches: &[BranchResult],
+    lines: &[LineResult],
+    test_ids: Option<&BTreeSet<String>>,
+) -> Result<CoverageSummary, ReportError> {
+    let includes = |tests: &[String], covered: bool| {
+        test_ids.map_or(covered, |selected| {
+            tests.iter().any(|test| selected.contains(test))
+        })
+    };
+    let input = CoverageCoreInput {
+        decisions: decisions
+            .iter()
+            .map(|decision| DecisionCoverage {
+                condition_count: decision.meta.conditions.len(),
+                vectors: decision
+                    .vector_observations
+                    .iter()
+                    .filter(|observation| includes(&observation.tests, true))
+                    .map(|observation| observation.vector.clone())
+                    .collect(),
+            })
+            .collect(),
+        points: points
+            .iter()
+            .map(|point| PointCoverage {
+                kind: point.meta.kind.clone(),
+                covered: includes(&point.tests, point.covered),
+            })
+            .collect(),
+        branches: branches
+            .iter()
+            .map(|branch| BranchCoverage {
+                kind: branch.meta.kind.clone(),
+                alternatives: branch
+                    .alternatives
+                    .iter()
+                    .map(|alternative| includes(&alternative.tests, alternative.covered))
+                    .collect(),
+            })
+            .collect(),
+        lines: lines
+            .iter()
+            .map(|line| includes(&line.tests, line.covered))
+            .collect(),
+    };
+    Ok(analyze_core(&input)?.summary)
+}
+
+fn confidence_for(
+    test_ids: impl IntoIterator<Item = String>,
+    phase_ids: impl IntoIterator<Item = String>,
+    explicit_phase_ids: impl IntoIterator<Item = String>,
+    tests: &HashMap<String, MutableTest>,
+    phases: &HashMap<String, MutablePhase>,
+    asserted_phase_ids: &BTreeSet<String>,
+) -> CoverageConfidence {
+    let test_ids = test_ids.into_iter().collect::<BTreeSet<_>>();
+    let _phase_ids = phase_ids.into_iter().collect::<BTreeSet<_>>();
+    let explicit_phase_ids = explicit_phase_ids.into_iter().collect::<BTreeSet<_>>();
+    let asserted_phases = explicit_phase_ids
+        .iter()
+        .filter(|id| asserted_phase_ids.contains(*id))
+        .collect::<Vec<_>>();
+    let asserted_tests = asserted_phases
+        .iter()
+        .filter_map(|id| phases.get(*id).map(|phase| phase.test.clone()))
+        .collect::<BTreeSet<_>>();
+    let provenances = test_ids
+        .iter()
+        .filter_map(|id| tests.get(id).map(|test| &test.provenance))
+        .collect::<Vec<_>>();
+    let roles = test_ids
+        .iter()
+        .filter_map(|id| tests.get(id).map(|test| test.role.as_str()))
+        .collect::<Vec<_>>();
+    let has_action = explicit_phase_ids.iter().any(|id| {
+        phases
+            .get(id)
+            .is_some_and(|phase| phase.phase.kind == "action")
+    });
+    let level = if test_ids.is_empty() {
+        "unexecuted"
+    } else if !asserted_tests.is_empty() {
+        "asserted"
+    } else if has_action {
+        "action"
+    } else {
+        "executed"
+    };
+    let runners = provenances
+        .iter()
+        .map(|provenance| provenance.runner.clone())
+        .collect::<BTreeSet<_>>();
+    let kinds = provenances
+        .iter()
+        .map(|provenance| provenance.kind.clone())
+        .collect::<BTreeSet<_>>();
+    CoverageConfidence {
+        level: level.into(),
+        setup_only: !roles.is_empty() && roles.iter().all(|role| *role == "setup"),
+        background_only: !roles.is_empty() && roles.iter().all(|role| *role == "background"),
+        asserted: !asserted_tests.is_empty(),
+        tests: sorted(&test_ids),
+        asserted_tests: sorted(&asserted_tests),
+        runners: sorted(&runners),
+        e2e: kinds.contains("e2e"),
+        kinds: sorted(&kinds),
+    }
+}
+
+fn add_reference(map: &mut HashMap<String, BTreeSet<String>>, id: &str, value: &str) {
+    map.entry(id.into()).or_default().insert(value.into());
+}
+
+pub fn create_coverage_view(
+    manifest: &CoverageManifest,
+    raw_results: &[RawTestResult],
+    generated_at: &str,
+) -> Result<CoverageView, ReportError> {
+    let mut decision_metadata = manifest.decisions.clone();
+    let mut decision_indexes = decision_metadata
+        .iter()
+        .enumerate()
+        .map(|(index, meta)| (meta.id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let mut vectors_by_decision = HashMap::<String, Vec<MutableObservation>>::new();
+    let mut vector_indexes = HashMap::<String, HashMap<String, usize>>::new();
+    let mut tests_by_decision = HashMap::<String, BTreeSet<String>>::new();
+    let mut tests_by_hit = HashMap::<String, BTreeSet<String>>::new();
+    let mut tests_by_id = HashMap::<String, MutableTest>::new();
+    let mut test_order = Vec::<String>::new();
+    let mut phases_by_id = HashMap::<String, MutablePhase>::new();
+    let mut phases_by_hit = HashMap::<String, BTreeSet<String>>::new();
+    let mut explicit_phases_by_hit = HashMap::<String, BTreeSet<String>>::new();
+
+    for raw in raw_results {
+        let id = raw_test_id(raw).to_owned();
+        if !tests_by_id.contains_key(&id) {
+            test_order.push(id.clone());
+            tests_by_id.insert(
+                id.clone(),
+                MutableTest {
+                    id: id.clone(),
+                    name: raw.test.clone(),
+                    file: raw.test_file.clone(),
+                    title: raw.title.clone(),
+                    retries: raw.retry.into_iter().collect(),
+                    attempts: BTreeMap::new(),
+                    runner_reported_flaky: raw.flaky,
+                    provenance: raw.provenance.clone(),
+                    role: raw.role.clone(),
+                    hits: BTreeSet::new(),
+                    decisions: BTreeMap::new(),
+                },
+            );
+        }
+        let test = tests_by_id.get_mut(&id).expect("test was inserted");
+        if let Some(retry) = raw.retry {
+            test.retries.insert(retry);
+        }
+        test.runner_reported_flaky |= raw.flaky;
+        record_attempt(test, raw);
+
+        let mut ordered_phases = raw.phases.clone();
+        ordered_phases.sort_by_key(|phase| phase.started_at_ms);
+        for phase in &ordered_phases {
+            phases_by_id.insert(
+                phase.id.clone(),
+                MutablePhase {
+                    phase: phase.clone(),
+                    test: id.clone(),
+                    hits: BTreeSet::new(),
+                    decisions: BTreeMap::new(),
+                    browser_events: 0,
+                    server_events: 0,
+                    explicit_events: 0,
+                    inferred_events: 0,
+                    explicit_browser_events: 0,
+                    inferred_browser_events: 0,
+                    explicit_server_events: 0,
+                    inferred_server_events: 0,
+                },
+            );
+        }
+
+        let correlate = |event: &RuntimeEvent| {
+            event.phase_id.clone().or_else(|| {
+                ordered_phases
+                    .iter()
+                    .take_while(|phase| phase.started_at_ms <= event.timestamp_ms)
+                    .last()
+                    .map(|phase| phase.id.clone())
+            })
+        };
+
+        let snapshots = raw.runtime.iter().chain(&raw.browser);
+        for snapshot in snapshots {
+            for decision in &snapshot.decisions {
+                if let Some(index) = decision_indexes.get(&decision.meta.id).copied() {
+                    decision_metadata[index] = decision.meta.clone();
+                } else {
+                    decision_indexes.insert(decision.meta.id.clone(), decision_metadata.len());
+                    decision_metadata.push(decision.meta.clone());
+                }
+                for vector in &decision.vectors {
+                    let key = vector_key(vector);
+                    let indexes = vector_indexes.entry(decision.meta.id.clone()).or_default();
+                    let observations = vectors_by_decision
+                        .entry(decision.meta.id.clone())
+                        .or_default();
+                    let observation_index = *indexes.entry(key.clone()).or_insert_with(|| {
+                        observations.push(MutableObservation {
+                            vector: vector.clone(),
+                            tests: BTreeSet::new(),
+                            phases: BTreeSet::new(),
+                            explicit_phases: BTreeSet::new(),
+                        });
+                        observations.len() - 1
+                    });
+                    observations[observation_index].tests.insert(id.clone());
+                    tests_by_id
+                        .get_mut(&id)
+                        .expect("registered test")
+                        .decisions
+                        .entry(decision.meta.id.clone())
+                        .or_default()
+                        .insert(vector);
+                }
+                if !decision.vectors.is_empty() {
+                    add_reference(&mut tests_by_decision, &decision.meta.id, &id);
+                }
+            }
+            for hit in &snapshot.hits {
+                add_reference(&mut tests_by_hit, hit, &id);
+                tests_by_id
+                    .get_mut(&id)
+                    .expect("registered test")
+                    .hits
+                    .insert(hit.clone());
+            }
+            for event in &snapshot.events {
+                let explicit = event.phase_id.is_some();
+                let Some(phase_id) = correlate(event) else {
+                    continue;
+                };
+                let Some(phase) = phases_by_id.get_mut(&phase_id) else {
+                    continue;
+                };
+                if event.environment == "browser" {
+                    phase.browser_events += 1;
+                    if explicit {
+                        phase.explicit_browser_events += 1;
+                    } else {
+                        phase.inferred_browser_events += 1;
+                    }
+                } else {
+                    phase.server_events += 1;
+                    if explicit {
+                        phase.explicit_server_events += 1;
+                    } else {
+                        phase.inferred_server_events += 1;
+                    }
+                }
+                if explicit {
+                    phase.explicit_events += 1;
+                } else {
+                    phase.inferred_events += 1;
+                }
+                if event.event_type == "hit" {
+                    phase.hits.insert(event.id.clone());
+                    add_reference(&mut phases_by_hit, &event.id, &phase_id);
+                    if explicit {
+                        add_reference(&mut explicit_phases_by_hit, &event.id, &phase_id);
+                    }
+                } else if event.event_type == "decision" {
+                    let vector = event
+                        .vector
+                        .as_ref()
+                        .ok_or_else(|| ReportError::InvalidEvent(event.id.clone()))?;
+                    phase
+                        .decisions
+                        .entry(event.id.clone())
+                        .or_default()
+                        .insert(vector);
+                    if let Some(index) = vector_indexes
+                        .get(&event.id)
+                        .and_then(|indexes| indexes.get(&vector_key(vector)))
+                        .copied()
+                        && let Some(observation) = vectors_by_decision
+                            .get_mut(&event.id)
+                            .and_then(|observations| observations.get_mut(index))
+                    {
+                        observation.phases.insert(phase_id.clone());
+                        if explicit {
+                            observation.explicit_phases.insert(phase_id.clone());
+                        }
+                    }
+                } else {
+                    return Err(ReportError::InvalidEvent(event.event_type.clone()));
+                }
+            }
+        }
+
+        for record in &raw.server {
+            let (record_id, decision) = if record.record_type == "decision" {
+                let meta = record
+                    .meta
+                    .as_ref()
+                    .ok_or_else(|| ReportError::InvalidServerRecord("missing meta".into()))?;
+                let vector = record
+                    .vector
+                    .as_ref()
+                    .ok_or_else(|| ReportError::InvalidServerRecord("missing vector".into()))?;
+                if let Some(index) = decision_indexes.get(&meta.id).copied() {
+                    decision_metadata[index] = meta.clone();
+                } else {
+                    decision_indexes.insert(meta.id.clone(), decision_metadata.len());
+                    decision_metadata.push(meta.clone());
+                }
+                let key = vector_key(vector);
+                let indexes = vector_indexes.entry(meta.id.clone()).or_default();
+                let observations = vectors_by_decision.entry(meta.id.clone()).or_default();
+                let index = *indexes.entry(key).or_insert_with(|| {
+                    observations.push(MutableObservation {
+                        vector: vector.clone(),
+                        tests: BTreeSet::new(),
+                        phases: BTreeSet::new(),
+                        explicit_phases: BTreeSet::new(),
+                    });
+                    observations.len() - 1
+                });
+                observations[index].tests.insert(id.clone());
+                tests_by_id
+                    .get_mut(&id)
+                    .expect("registered test")
+                    .decisions
+                    .entry(meta.id.clone())
+                    .or_default()
+                    .insert(vector);
+                add_reference(&mut tests_by_decision, &meta.id, &id);
+                (meta.id.clone(), Some(vector.clone()))
+            } else if record.record_type == "hit" {
+                let hit = record
+                    .id
+                    .as_ref()
+                    .ok_or_else(|| ReportError::InvalidServerRecord("missing hit id".into()))?;
+                add_reference(&mut tests_by_hit, hit, &id);
+                tests_by_id
+                    .get_mut(&id)
+                    .expect("registered test")
+                    .hits
+                    .insert(hit.clone());
+                (hit.clone(), None)
+            } else {
+                return Err(ReportError::InvalidServerRecord(record.record_type.clone()));
+            };
+            let Some(timestamp_ms) = record.timestamp_ms else {
+                continue;
+            };
+            let event = RuntimeEvent {
+                event_type: record.record_type.clone(),
+                id: record_id,
+                vector: decision,
+                timestamp_ms,
+                phase_id: record.phase_id.clone(),
+                environment: "server".into(),
+            };
+            let explicit = event.phase_id.is_some();
+            let phase_id = correlate(&event);
+            let Some(phase_id) = phase_id else { continue };
+            let Some(phase) = phases_by_id.get_mut(&phase_id) else {
+                continue;
+            };
+            phase.server_events += 1;
+            if explicit {
+                phase.explicit_events += 1;
+                phase.explicit_server_events += 1;
+            } else {
+                phase.inferred_events += 1;
+                phase.inferred_server_events += 1;
+            }
+            if event.event_type == "hit" {
+                phase.hits.insert(event.id.clone());
+                add_reference(&mut phases_by_hit, &event.id, &phase_id);
+                if explicit {
+                    add_reference(&mut explicit_phases_by_hit, &event.id, &phase_id);
+                }
+            } else if let Some(vector) = &event.vector {
+                phase
+                    .decisions
+                    .entry(event.id.clone())
+                    .or_default()
+                    .insert(vector);
+                if let Some(index) = vector_indexes
+                    .get(&event.id)
+                    .and_then(|indexes| indexes.get(&vector_key(vector)))
+                    .copied()
+                    && let Some(observation) = vectors_by_decision
+                        .get_mut(&event.id)
+                        .and_then(|observations| observations.get_mut(index))
+                {
+                    observation.phases.insert(phase_id.clone());
+                    if explicit {
+                        observation.explicit_phases.insert(phase_id.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    let mut asserted_phase_ids = BTreeSet::new();
+    for phase in phases_by_id.values() {
+        if phase.phase.kind == "assertion" && phase.phase.status.as_deref() == Some("passed") {
+            asserted_phase_ids.insert(phase.phase.id.clone());
+            if let Some(cause) = &phase.phase.caused_by_phase_id {
+                asserted_phase_ids.insert(cause.clone());
+            }
+        }
+    }
+
+    decision_metadata.sort_by(|left, right| {
+        left.file
+            .cmp(&right.file)
+            .then(left.line.cmp(&right.line))
+            .then(left.column.cmp(&right.column))
+    });
+    let mut decisions = Vec::with_capacity(decision_metadata.len());
+    for meta in decision_metadata {
+        let mutable = vectors_by_decision.remove(&meta.id).unwrap_or_default();
+        let mut observations = Vec::with_capacity(mutable.len());
+        for observation in mutable {
+            let confidence = confidence_for(
+                sorted(&observation.tests),
+                sorted(&observation.phases),
+                sorted(&observation.explicit_phases),
+                &tests_by_id,
+                &phases_by_id,
+                &asserted_phase_ids,
+            );
+            observations.push(VectorObservation {
+                vector: observation.vector,
+                tests: sorted(&observation.tests),
+                phases: sorted(&observation.phases),
+                explicit_phases: sorted(&observation.explicit_phases),
+                confidence,
+            });
+        }
+        let vectors = observations
+            .iter()
+            .map(|observation| observation.vector.clone())
+            .collect::<Vec<_>>();
+        let witnesses = find_witnesses_for_conditions(&vectors, meta.conditions.len())?;
+        let mut conditions = Vec::with_capacity(meta.conditions.len());
+        for (index, source) in meta.conditions.iter().enumerate() {
+            let witness = witnesses[index].map(|witness| {
+                [
+                    vectors[witness.first].clone(),
+                    vectors[witness.second].clone(),
+                ]
+            });
+            let witness_tests = witnesses[index].map(|witness| {
+                [
+                    observations[witness.first].tests.clone(),
+                    observations[witness.second].tests.clone(),
+                ]
+            });
+            let assertion_covered = (0..observations.len()).any(|left| {
+                ((left + 1)..observations.len()).any(|right| {
+                    observations[left].confidence.asserted
+                        && observations[right].confidence.asserted
+                        && crate::coverage_analysis::is_independence_pair(
+                            &observations[left].vector,
+                            &observations[right].vector,
+                            index,
+                        )
+                })
+            });
+            conditions.push(ConditionResult {
+                index,
+                source: source.clone(),
+                covered: witness.is_some(),
+                assertion_covered,
+                witness,
+                witness_tests,
+            });
+        }
+        let decision_tests = tests_by_decision.remove(&meta.id).unwrap_or_default();
+        let confidence = confidence_for(
+            sorted(&decision_tests),
+            observations
+                .iter()
+                .flat_map(|observation| observation.phases.clone()),
+            observations
+                .iter()
+                .flat_map(|observation| observation.explicit_phases.clone()),
+            &tests_by_id,
+            &phases_by_id,
+            &asserted_phase_ids,
+        );
+        decisions.push(DecisionResult {
+            executed: !vectors.is_empty(),
+            covered: conditions.iter().all(|condition| condition.covered),
+            meta,
+            vectors,
+            vector_observations: observations,
+            conditions,
+            tests: sorted(&decision_tests),
+            confidence,
+        });
+    }
+
+    let points = manifest
+        .points
+        .iter()
+        .cloned()
+        .map(|meta| {
+            let tests = tests_by_hit.get(&meta.id).cloned().unwrap_or_default();
+            let phases = phases_by_hit.get(&meta.id).cloned().unwrap_or_default();
+            let explicit = explicit_phases_by_hit
+                .get(&meta.id)
+                .cloned()
+                .unwrap_or_default();
+            PointResult {
+                covered: tests_by_hit.contains_key(&meta.id),
+                confidence: confidence_for(
+                    sorted(&tests),
+                    sorted(&phases),
+                    sorted(&explicit),
+                    &tests_by_id,
+                    &phases_by_id,
+                    &asserted_phase_ids,
+                ),
+                meta,
+                tests: sorted(&tests),
+                phases: sorted(&phases),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let branches = manifest
+        .branches
+        .iter()
+        .cloned()
+        .map(|meta| {
+            let alternatives = meta
+                .alternatives
+                .iter()
+                .map(|alternative| {
+                    let tests = tests_by_hit
+                        .get(&alternative.id)
+                        .cloned()
+                        .unwrap_or_default();
+                    let phases = phases_by_hit
+                        .get(&alternative.id)
+                        .cloned()
+                        .unwrap_or_default();
+                    let explicit = explicit_phases_by_hit
+                        .get(&alternative.id)
+                        .cloned()
+                        .unwrap_or_default();
+                    AlternativeResult {
+                        id: alternative.id.clone(),
+                        label: alternative.label.clone(),
+                        covered: tests_by_hit.contains_key(&alternative.id),
+                        tests: sorted(&tests),
+                        phases: sorted(&phases),
+                        confidence: confidence_for(
+                            sorted(&tests),
+                            sorted(&phases),
+                            sorted(&explicit),
+                            &tests_by_id,
+                            &phases_by_id,
+                            &asserted_phase_ids,
+                        ),
+                    }
+                })
+                .collect::<Vec<_>>();
+            BranchResult {
+                covered: alternatives.iter().all(|alternative| alternative.covered),
+                meta,
+                alternatives,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut line_aggregates =
+        BTreeMap::<SourceLine, (bool, BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)>::new();
+    for point in &points {
+        let aggregate = line_aggregates
+            .entry(SourceLine {
+                file: point.meta.file.clone(),
+                line: point.meta.line,
+            })
+            .or_default();
+        aggregate.0 |= point.covered;
+        aggregate.1.extend(point.tests.clone());
+        aggregate.2.extend(point.phases.clone());
+        aggregate.3.extend(
+            explicit_phases_by_hit
+                .get(&point.meta.id)
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
+    }
+    let lines = line_aggregates
+        .into_iter()
+        .map(|(location, (covered, test_ids, phase_ids, explicit_ids))| {
+            let provenances = test_ids
+                .iter()
+                .filter_map(|id| tests_by_id.get(id).map(|test| &test.provenance))
+                .collect::<Vec<_>>();
+            let runners = provenances
+                .iter()
+                .map(|provenance| provenance.runner.clone())
+                .collect::<BTreeSet<_>>();
+            let kinds = provenances
+                .iter()
+                .map(|provenance| provenance.kind.clone())
+                .collect::<BTreeSet<_>>();
+            LineResult {
+                file: location.file,
+                line: location.line,
+                covered,
+                tests: sorted(&test_ids),
+                runners: sorted(&runners),
+                exclusive_kind: (kinds.len() == 1).then(|| kinds.first().unwrap().clone()),
+                phases: sorted(&phase_ids),
+                confidence: confidence_for(
+                    sorted(&test_ids),
+                    sorted(&phase_ids),
+                    sorted(&explicit_ids),
+                    &tests_by_id,
+                    &phases_by_id,
+                    &asserted_phase_ids,
+                ),
+                kinds: sorted(&kinds),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let point_locations = manifest
+        .points
+        .iter()
+        .map(|point| {
+            (
+                point.id.clone(),
+                SourceLine {
+                    file: point.file.clone(),
+                    line: point.line,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    test_order.sort_by(|left, right| tests_by_id[left].name.cmp(&tests_by_id[right].name));
+    let tests = test_order
+        .into_iter()
+        .map(|id| {
+            let test = tests_by_id.get(&id).expect("test order references test");
+            let lines = test
+                .hits
+                .iter()
+                .filter_map(|hit| point_locations.get(hit).cloned())
+                .collect::<BTreeSet<_>>();
+            TestCoverageResult {
+                id: test.id.clone(),
+                name: test.name.clone(),
+                file: test.file.clone(),
+                title: test.title.clone(),
+                retries: sorted(&test.retries),
+                attempts: test.attempts.values().cloned().collect(),
+                outcome: test_outcome(test),
+                provenance: test.provenance.clone(),
+                role: test.role.clone(),
+                hits: sorted(&test.hits),
+                decisions: test
+                    .decisions
+                    .iter()
+                    .map(|(id, vectors)| TestDecisionResult {
+                        id: id.clone(),
+                        vectors: vectors.values.clone(),
+                    })
+                    .collect(),
+                lines: lines.into_iter().collect(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut test_files = BTreeMap::<
+        String,
+        (
+            BTreeSet<String>,
+            BTreeSet<String>,
+            BTreeSet<String>,
+            BTreeSet<SourceLine>,
+        ),
+    >::new();
+    for test in &tests {
+        let aggregate = test_files
+            .entry(
+                test.file
+                    .clone()
+                    .unwrap_or_else(|| "(unknown test file)".into()),
+            )
+            .or_default();
+        aggregate.0.insert(test.id.clone());
+        aggregate.1.insert(test.provenance.runner.clone());
+        aggregate.2.insert(test.provenance.kind.clone());
+        aggregate.3.extend(test.lines.clone());
+    }
+    let test_files = test_files
+        .into_iter()
+        .map(|(file, (tests, runners, kinds, lines))| TestFileResult {
+            file,
+            tests: sorted(&tests),
+            runners: sorted(&runners),
+            kinds: sorted(&kinds),
+            lines: lines.into_iter().collect(),
+        })
+        .collect::<Vec<_>>();
+
+    let mut phases = phases_by_id.values().cloned().collect::<Vec<_>>();
+    phases.sort_by(|left, right| {
+        left.phase
+            .started_at_ms
+            .cmp(&right.phase.started_at_ms)
+            .then(left.phase.id.cmp(&right.phase.id))
+    });
+    let phases = phases
+        .into_iter()
+        .map(|phase| {
+            let lines = phase
+                .hits
+                .iter()
+                .filter_map(|hit| point_locations.get(hit).cloned())
+                .collect::<BTreeSet<_>>();
+            PhaseResult {
+                phase: phase.phase,
+                test: phase.test,
+                hits: sorted(&phase.hits),
+                decisions: phase
+                    .decisions
+                    .into_iter()
+                    .map(|(id, vectors)| TestDecisionResult {
+                        id,
+                        vectors: vectors.values,
+                    })
+                    .collect(),
+                lines: lines.into_iter().collect(),
+                browser_events: phase.browser_events,
+                server_events: phase.server_events,
+                explicit_events: phase.explicit_events,
+                inferred_events: phase.inferred_events,
+                explicit_browser_events: phase.explicit_browser_events,
+                inferred_browser_events: phase.inferred_browser_events,
+                explicit_server_events: phase.explicit_server_events,
+                inferred_server_events: phase.inferred_server_events,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut summary = summary_for_results(&decisions, &points, &branches, &lines, None)?;
+    if !manifest.limitations.is_empty() {
+        summary.coverage_complete = false;
+        summary.completeness_blocked = Some(true);
+    }
+
+    let dimension_coverage = |field: &str| -> Result<Vec<DimensionCoverage>, ReportError> {
+        let values = tests
+            .iter()
+            .map(|test| {
+                if field == "kind" {
+                    test.provenance.kind.clone()
+                } else {
+                    test.provenance.runner.clone()
+                }
+            })
+            .collect::<BTreeSet<_>>();
+        values
+            .into_iter()
+            .map(|value| {
+                let selected = tests
+                    .iter()
+                    .filter(|test| {
+                        if field == "kind" {
+                            test.provenance.kind == value
+                        } else {
+                            test.provenance.runner == value
+                        }
+                    })
+                    .map(|test| test.id.clone())
+                    .collect::<BTreeSet<_>>();
+                Ok(DimensionCoverage {
+                    kind: (field == "kind").then(|| value.clone()),
+                    runner: (field == "runner").then(|| value.clone()),
+                    tests: tests
+                        .iter()
+                        .filter(|test| selected.contains(&test.id) && test.role == "test")
+                        .count(),
+                    setups: tests
+                        .iter()
+                        .filter(|test| selected.contains(&test.id) && test.role == "setup")
+                        .count(),
+                    summary: summary_for_results(
+                        &decisions,
+                        &points,
+                        &branches,
+                        &lines,
+                        Some(&selected),
+                    )?,
+                })
+            })
+            .collect()
+    };
+
+    Ok(CoverageView {
+        generated_at: generated_at.into(),
+        variant: "masking-short-circuit".into(),
+        scope: manifest.scope.clone(),
+        model: coverage_model(),
+        integrity: None,
+        limitations: manifest.limitations.clone(),
+        transport: None,
+        summary,
+        coverage_by_kind: dimension_coverage("kind")?,
+        coverage_by_runner: dimension_coverage("runner")?,
+        decisions,
+        points,
+        branches,
+        tests,
+        test_files,
+        phases,
+        lines,
+    })
+}
+
+pub fn analyze_coverage_results(
+    request: &CoverageReportRequest,
+) -> Result<CoverageReport, ReportError> {
+    if let Some(scope) = request
+        .raw_results
+        .iter()
+        .filter_map(|raw| raw.scope.as_ref())
+        .find(|scope| scope.run_id != request.run_id)
+    {
+        return Err(ReportError::ScopeMismatch {
+            expected: request.run_id.clone(),
+            actual: scope.run_id.clone(),
+        });
+    }
+    if request.raw_results.is_empty() {
+        return Err(ReportError::NoEvidence(request.run_id.clone()));
+    }
+    let view = create_coverage_view(
+        &request.manifest,
+        &request.raw_results,
+        &request.generated_at,
+    )?;
+    let passed = create_coverage_view(
+        &request.manifest,
+        &passing_coverage_results(&request.raw_results),
+        &request.generated_at,
+    )?;
+    let failed = create_coverage_view(
+        &request.manifest,
+        &failed_coverage_results(&request.raw_results),
+        &request.generated_at,
+    )?;
+    let execution = match request.test_exit_code {
+        ExitCodeInput::Missing => None,
+        ExitCodeInput::Present(test_exit_code) => Some(ExecutionResult {
+            valid: test_exit_code == Some(0),
+            test_exit_code,
+        }),
+    };
+    let mut view = view;
+    let mut passed = passed;
+    let mut failed = failed;
+    if let Some(integrity) = &request.integrity {
+        view.integrity = Some(integrity.clone());
+        passed.integrity = Some(integrity.clone());
+        failed.integrity = Some(integrity.clone());
+    }
+    Ok(CoverageReport {
+        view,
+        execution,
+        filters: CoverageFilters { passed, failed },
+    })
+}
+
+fn parse_entry<T: for<'de> Deserialize<'de>>(
+    entry: &EvidenceArchiveEntry,
+) -> Result<T, ReportError> {
+    serde_json::from_slice(&entry.contents).map_err(|error| ReportError::InvalidJson {
+        path: entry.path.clone(),
+        reason: error.to_string(),
+    })
+}
+
+fn parse_json_lines<'a, T: for<'de> Deserialize<'de>>(
+    entries: impl Iterator<Item = &'a EvidenceArchiveEntry>,
+) -> (Vec<T>, usize, usize) {
+    let mut records = Vec::new();
+    let mut corrupt_records = 0;
+    let mut corrupt_files = BTreeSet::new();
+    for entry in entries {
+        for line in entry.contents.split(|byte| *byte == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_slice(line) {
+                Ok(record) => records.push(record),
+                Err(_) => {
+                    corrupt_records += 1;
+                    corrupt_files.insert(entry.path.clone());
+                }
+            }
+        }
+    }
+    (records, corrupt_records, corrupt_files.len())
+}
+
+fn is_mcdc_result(path: &str) -> bool {
+    path == "mcdc.json" || path.ends_with("/mcdc.json")
+}
+
+pub fn analyze_coverage_archive(
+    request: &ArchiveReportRequest,
+) -> Result<CoverageReport, ReportError> {
+    let entries = read_archive(Path::new(&request.archive_path))
+        .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
+    let manifest = entries
+        .iter()
+        .find(|entry| entry.path == "manifest.json")
+        .ok_or(ReportError::MissingManifest)
+        .and_then(parse_entry::<CoverageManifest>)?;
+    let mut raw_results = entries
+        .iter()
+        .filter(|entry| is_mcdc_result(&entry.path))
+        .map(parse_entry::<RawTestResult>)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let (scoped_records, scoped_corrupt, scoped_corrupt_files) =
+        parse_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
+            entry.path.starts_with("server/")
+                && !entry.path.starts_with("server/background/")
+                && entry.path.ends_with(".jsonl")
+        }));
+    for record in &scoped_records {
+        let Some(scope) = &record.scope else { continue };
+        let Some(raw) = raw_results
+            .iter_mut()
+            .find(|raw| raw_test_id(raw) == scope.test_id && raw.retry.unwrap_or(0) == scope.retry)
+        else {
+            continue;
+        };
+        if !raw.server.contains(record) {
+            raw.server.push(record.clone());
+        }
+    }
+
+    let (background_records, background_corrupt, background_corrupt_files) =
+        parse_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
+            entry.path.starts_with("server/background/") && entry.path.ends_with(".jsonl")
+        }));
+    if !background_records.is_empty() {
+        raw_results.push(RawTestResult {
+            test_id: Some(format!("background:{}", request.run_id)),
+            scope: None,
+            test: "Background / unattributed".into(),
+            test_file: None,
+            title: Some("Background / unattributed".into()),
+            retry: None,
+            status: Some("unknown".into()),
+            expected_status: None,
+            flaky: false,
+            provenance: TestProvenance {
+                runner: "background".into(),
+                kind: "background".into(),
+                project: None,
+                source: "explicit".into(),
+            },
+            role: "background".into(),
+            phases: vec![],
+            runtime: vec![],
+            browser: vec![],
+            server: background_records.clone(),
+        });
+    }
+
+    let (execution_events, execution_corrupt, execution_corrupt_files) =
+        parse_json_lines::<Value>(entries.iter().filter(|entry| {
+            entry.path.starts_with("execution.") && entry.path.ends_with(".jsonl")
+        }));
+    let count_event = |name: &str| {
+        execution_events
+            .iter()
+            .filter(|event| event.get("event").and_then(Value::as_str) == Some(name))
+            .count()
+    };
+    let transport = TransportStats {
+        processes: count_event("process"),
+        child_launches: count_event("child-launch"),
+        remote_launches: count_event("remote-launch"),
+        workspace_capabilities: count_event("workspace-capability"),
+        scoped_server_records: scoped_records.len(),
+        background_server_records: background_records.len(),
+        corrupt_records: scoped_corrupt + background_corrupt + execution_corrupt,
+        corrupt_files: scoped_corrupt_files + background_corrupt_files + execution_corrupt_files,
+    };
+    let mut report = analyze_coverage_results(&CoverageReportRequest {
+        run_id: request.run_id.clone(),
+        manifest,
+        raw_results,
+        generated_at: request.generated_at.clone(),
+        integrity: request.integrity.clone(),
+        test_exit_code: request.test_exit_code.clone(),
+    })?;
+    report.view.transport = Some(transport.clone());
+    report.filters.passed.transport = Some(transport.clone());
+    report.filters.failed.transport = Some(transport);
+    Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, time::SystemTime};
+
+    use crate::evidence_archive::{EvidenceArchiveEntry, write_archive};
+
+    use super::*;
+
+    fn point(id: &str, line: usize) -> PointMeta {
+        PointMeta {
+            id: id.into(),
+            kind: PointKind::Statement,
+            file: "src/app.js".into(),
+            line,
+            column: 0,
+            source: "work();".into(),
+            label: None,
+        }
+    }
+
+    fn raw(id: &str, retry: usize, status: &str, hits: &[&str]) -> RawTestResult {
+        RawTestResult {
+            test_id: Some(id.into()),
+            scope: None,
+            test: id.into(),
+            test_file: Some("tests/app.test.js".into()),
+            title: None,
+            retry: Some(retry),
+            status: Some(status.into()),
+            expected_status: None,
+            flaky: false,
+            provenance: TestProvenance {
+                runner: "node:test".into(),
+                kind: "unit".into(),
+                project: None,
+                source: "runner-default".into(),
+            },
+            role: "test".into(),
+            phases: vec![],
+            runtime: vec![RuntimeSnapshot {
+                decisions: vec![],
+                hits: hits.iter().map(|hit| (*hit).into()).collect(),
+                events: vec![],
+            }],
+            browser: vec![],
+            server: vec![],
+        }
+    }
+
+    #[test]
+    fn report_retains_unexecuted_manifest_conditions() {
+        let manifest = CoverageManifest {
+            decisions: vec![DecisionMeta {
+                id: "decision".into(),
+                file: "src/app.js".into(),
+                line: 1,
+                column: 0,
+                source: "left && right".into(),
+                conditions: vec!["left".into(), "right".into()],
+                kind: "if".into(),
+            }],
+            points: vec![],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+        };
+        let view =
+            create_coverage_view(&manifest, &[raw("test", 0, "passed", &[])], "time").unwrap();
+        assert_eq!(view.summary.conditions, 2);
+        assert_eq!(view.summary.covered_conditions, 0);
+        assert_eq!(view.decisions[0].conditions.len(), 2);
+    }
+
+    #[test]
+    fn timestamp_overlap_cannot_upgrade_assertion_confidence() {
+        let manifest = CoverageManifest {
+            decisions: vec![],
+            points: vec![point("hit", 1)],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+        };
+        let phase = CoveragePhase {
+            id: "assertion".into(),
+            kind: "assertion".into(),
+            operation: "equal".into(),
+            source: None,
+            caused_by_phase_id: None,
+            started_at_ms: 100,
+            ended_at_ms: Some(120),
+            status: Some("passed".into()),
+            error: None,
+        };
+        let mut attempt = raw("test", 0, "passed", &["hit"]);
+        attempt.phases.push(phase.clone());
+        attempt.runtime[0].events.push(RuntimeEvent {
+            event_type: "hit".into(),
+            id: "hit".into(),
+            vector: None,
+            timestamp_ms: 110,
+            phase_id: None,
+            environment: "server".into(),
+        });
+        let inferred = create_coverage_view(&manifest, &[attempt.clone()], "time").unwrap();
+        assert_eq!(inferred.points[0].confidence.level, "executed");
+        assert!(!inferred.points[0].confidence.asserted);
+
+        attempt.runtime[0].events[0].phase_id = Some(phase.id);
+        let explicit = create_coverage_view(&manifest, &[attempt], "time").unwrap();
+        assert_eq!(explicit.points[0].confidence.level, "asserted");
+        assert!(explicit.points[0].confidence.asserted);
+    }
+
+    #[test]
+    fn verified_view_uses_only_the_terminal_successful_attempt() {
+        let manifest = CoverageManifest {
+            decisions: vec![],
+            points: vec![point("failed", 1), point("passed", 2), point("expected", 3)],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+        };
+        let failed = raw("flaky", 0, "failed", &["failed"]);
+        let mut passed = raw("flaky", 1, "passed", &["passed"]);
+        passed.flaky = true;
+        let mut expected = raw("expected-failure", 0, "passed", &["expected"]);
+        expected.expected_status = Some("failed".into());
+        let request = CoverageReportRequest {
+            run_id: "run".into(),
+            manifest,
+            raw_results: vec![failed, passed, expected],
+            generated_at: "time".into(),
+            integrity: None,
+            test_exit_code: ExitCodeInput::Missing,
+        };
+        let report = analyze_coverage_results(&request).unwrap();
+        assert!(!report.filters.passed.points[0].covered);
+        assert!(report.filters.passed.points[1].covered);
+        assert!(!report.filters.passed.points[2].covered);
+        assert!(report.filters.failed.points[0].covered);
+        assert_eq!(report.view.tests[1].outcome, "flaky");
+    }
+
+    fn archive(entries: Vec<EvidenceArchiveEntry>) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-report-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("evidence.raw.gz");
+        write_archive(entries, &path).unwrap();
+        path
+    }
+
+    #[test]
+    fn archive_analysis_keeps_valid_lines_and_reports_transport_corruption() {
+        let manifest = CoverageManifest {
+            decisions: vec![],
+            points: vec![point("background-hit", 1)],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+        };
+        let path = archive(vec![
+            EvidenceArchiveEntry {
+                path: "manifest.json".into(),
+                contents: serde_json::to_vec(&manifest).unwrap(),
+            },
+            EvidenceArchiveEntry {
+                path: "server/background/worker.jsonl".into(),
+                contents: b"{\"type\":\"hit\",\"id\":\"background-hit\"}\nnot-json\n".to_vec(),
+            },
+        ]);
+        let report = analyze_coverage_archive(&ArchiveReportRequest {
+            archive_path: path.clone(),
+            run_id: "run".into(),
+            generated_at: "time".into(),
+            integrity: None,
+            test_exit_code: ExitCodeInput::Missing,
+        })
+        .unwrap();
+        assert!(report.view.points[0].covered);
+        assert_eq!(report.view.tests[0].role, "background");
+        assert_eq!(report.view.transport.as_ref().unwrap().corrupt_records, 1);
+        assert_eq!(report.view.transport.as_ref().unwrap().corrupt_files, 1);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn archive_analysis_rejects_cross_run_evidence() {
+        let manifest = CoverageManifest {
+            decisions: vec![],
+            points: vec![],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+        };
+        let mut result = raw("test", 0, "passed", &[]);
+        result.scope = Some(ExecutionScope {
+            version: 1,
+            run_id: "other-run".into(),
+            worker_id: "worker".into(),
+            test_id: "test".into(),
+            test_key: "key".into(),
+            retry: 0,
+            attempt_id: "attempt".into(),
+        });
+        let path = archive(vec![
+            EvidenceArchiveEntry {
+                path: "manifest.json".into(),
+                contents: serde_json::to_vec(&manifest).unwrap(),
+            },
+            EvidenceArchiveEntry {
+                path: "worker/mcdc.json".into(),
+                contents: serde_json::to_vec(&result).unwrap(),
+            },
+        ]);
+        assert_eq!(
+            analyze_coverage_archive(&ArchiveReportRequest {
+                archive_path: path.clone(),
+                run_id: "run".into(),
+                generated_at: "time".into(),
+                integrity: None,
+                test_exit_code: ExitCodeInput::Missing,
+            }),
+            Err(ReportError::ScopeMismatch {
+                expected: "run".into(),
+                actual: "other-run".into(),
+            })
+        );
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn explicit_null_exit_code_remains_distinct_from_an_absent_exit_code() {
+        let request: CoverageReportRequest = serde_json::from_value(serde_json::json!({
+            "runId": "run",
+            "manifest": { "decisions": [], "points": [], "branches": [] },
+            "rawResults": [{
+                "test": "test",
+                "status": "passed",
+                "browser": [],
+                "server": []
+            }],
+            "generatedAt": "time",
+            "testExitCode": null
+        }))
+        .unwrap();
+        let report = analyze_coverage_results(&request).unwrap();
+        assert_eq!(
+            report.execution,
+            Some(ExecutionResult {
+                test_exit_code: None,
+                valid: false,
+            })
+        );
+    }
+}

@@ -3,6 +3,10 @@ use std::{io::Read, path::PathBuf, process::ExitCode, time::Instant};
 use serde::{Deserialize, Serialize};
 use supercov_engine::{
     coverage_analysis::{CoverageCoreInput, analyze_core},
+    coverage_report::{
+        ArchiveReportRequest, CoverageReportRequest, analyze_coverage_archive,
+        analyze_coverage_results,
+    },
     evidence_archive::{
         EvidenceArchiveEntry, EvidenceArchiveSource, collect_sources, write_archive,
     },
@@ -36,6 +40,8 @@ fn main() -> ExitCode {
         }
         Some("__instrument-js") => instrument_js(),
         Some("__analyze-coverage-core") => analyze_coverage_core(),
+        Some("__analyze-coverage-results") => analyze_coverage_report(),
+        Some("__analyze-evidence-archive") => analyze_evidence_archive(),
         Some("__benchmark-js-transform") => benchmark_js_transform(),
         Some("__pack-evidence") => pack_evidence(),
         Some(command) => {
@@ -45,6 +51,67 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn analyze_evidence_archive() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let request: ArchiveReportRequest = match serde_json::from_str(&input) {
+        Ok(request) => request,
+        Err(error) => {
+            eprintln!("[supercov] invalid Rust archive analysis input: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let report = match analyze_coverage_archive(&request) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("[supercov] invalid coverage archive: {error:?}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(error) = serde_json::to_writer(std::io::stdout(), &report) {
+        eprintln!("[supercov] failed to write Rust archive report output: {error}");
+        return ExitCode::from(2);
+    }
+    ExitCode::SUCCESS
+}
+
+fn analyze_coverage_report() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let requests: Vec<CoverageReportRequest> = match serde_json::from_str(&input) {
+        Ok(requests) => requests,
+        Err(error) => {
+            eprintln!("[supercov] invalid Rust coverage report input: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut reports = Vec::with_capacity(requests.len());
+    for request in &requests {
+        match analyze_coverage_results(request) {
+            Ok(report) => reports.push(report),
+            Err(error) => {
+                eprintln!("[supercov] invalid coverage evidence: {error:?}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if let Err(error) = serde_json::to_writer(std::io::stdout(), &reports) {
+        eprintln!("[supercov] failed to write Rust coverage report output: {error}");
+        return ExitCode::from(2);
+    }
+    ExitCode::SUCCESS
 }
 
 fn analyze_coverage_core() -> ExitCode {

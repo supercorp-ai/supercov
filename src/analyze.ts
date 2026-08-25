@@ -774,6 +774,7 @@ export function createMcdcReport(
         left.file.localeCompare(right.file) || left.line - right.line,
     )
     .map((line) => {
+      const { explicitPhases, ...publicLine } = line;
       const testIds = [...line.tests].sort();
       const provenances = testIds
         .map((id) => testsById.get(id)?.provenance)
@@ -783,13 +784,13 @@ export function createMcdcReport(
       ].sort();
       const kinds = [...new Set(provenances.map((value) => value.kind))].sort();
       return {
-        ...line,
+        ...publicLine,
         tests: testIds,
         runners,
         kinds,
         ...(kinds.length === 1 ? { exclusiveKind: kinds[0] } : {}),
         phases: [...line.phases].sort(),
-        confidence: confidenceFor(testIds, line.phases, line.explicitPhases),
+        confidence: confidenceFor(testIds, line.phases, explicitPhases),
       };
     });
 
