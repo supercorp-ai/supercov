@@ -63,7 +63,7 @@
     "benchmark:check": "npm run build && node scripts/benchmark.mjs",
     "benchmark:rust-transform": "npm run build && cargo build --release -p supercov && node scripts/rust-transform-benchmark.mjs",
     "check": "npm run test && npm run test:types",
-    "release:check": "npm run check && npm run test:rust && npm run build && node scripts/isolation-integration.mjs && npm run test:watchdog && npm run test:engine-contract && npm run test:packed-npx && npm run test:clang-mcdc && node scripts/benchmark.mjs && npm run benchmark:rust-transform",
+    "release:check": "npm run check && npm run test:rust && npm run test:watchdog && npm run test:engine-contract && npm run test:packed-npx && npm run test:clang-mcdc && node scripts/benchmark.mjs && npm run benchmark:rust-transform",
     "prepack": "npm run build",
     "prepublishOnly": "npm run release:check"
   },

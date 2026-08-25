@@ -33,6 +33,7 @@ jobs:
           SUPERCOV_RUST_BINARY: ${{ github.workspace }}/target/release/supercov
         run: node scripts/test262-equivalence.mjs --engine rust --test262 .test262 --limit 250 --minimum 200
       - run: npx playwright install --with-deps chromium firefox webkit
+      - run: npm run test:isolation
       - run: npm run test:fixture
       - run: npm run test:rust-fixture
       - uses: actions/setup-node@v6

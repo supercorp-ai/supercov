@@ -29,6 +29,7 @@ jobs:
       - run: npm run release:check
       - run: npm run test:rust-engine
       - run: npx playwright install --with-deps chromium firefox webkit
+      - run: npm run test:isolation
       - run: npm run test:fixture
       - run: npm run test:rust-fixture
 
