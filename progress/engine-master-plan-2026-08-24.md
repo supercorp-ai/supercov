@@ -924,6 +924,10 @@ miss blocks flipping any default.
   runs only the necessary native builds, aggregate validation and npm publish;
   correctness/conformance gates run locally before the tag and are not repeated
   just to spend hosted minutes.
+  The native packed-install harness also now resolves `npm.cmd` on Windows and
+  reports spawn errors before asserting an exit status. Five native targets
+  completed their full artifact path before the Windows-only bare-`npm` spawn
+  exposed this harness bug; the run was cancelled immediately after diagnosis.
   The release workflow now calls that complete native matrix, downloads and
   revalidates the aggregate release set, publishes all eight exact-version
   platform packages first, and publishes the primary package only after every

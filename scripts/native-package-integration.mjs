@@ -16,6 +16,7 @@ import { nativePackageFor } from "../bin/native.js";
 
 const repository = resolve(import.meta.dirname, "..");
 const temporary = mkdtempSync(resolve(tmpdir(), "supercov-native-package-"));
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 
 function option(name) {
   const index = process.argv.indexOf(name);
@@ -24,6 +25,7 @@ function option(name) {
 
 function run(program, arguments_, options = {}) {
   const result = spawnSync(program, arguments_, { encoding: "utf8", ...options });
+  if (result.error) throw result.error;
   assert.equal(result.status, 0, result.stderr || result.stdout);
   return result.stdout.trim();
 }
@@ -60,7 +62,7 @@ try {
     "--out", resolve(temporary, "platform"),
   ]);
   const platformPack = JSON.parse(
-    run("npm", ["pack", "--ignore-scripts", "--json"], { cwd: packageRoot }),
+    run(npm, ["pack", "--ignore-scripts", "--json"], { cwd: packageRoot }),
   )[0].filename;
   const artifactMetadata = resolve(temporary, `${target.package}.checksums.json`);
   run(process.execPath, [
@@ -84,7 +86,7 @@ try {
   for (const file of ["package.json", "README.md", "LICENSE"])
     cpSync(resolve(repository, file), resolve(mainRoot, file));
   const mainPack = JSON.parse(
-    run("npm", ["pack", "--ignore-scripts", "--json"], { cwd: mainRoot }),
+    run(npm, ["pack", "--ignore-scripts", "--json"], { cwd: mainRoot }),
   )[0].filename;
 
   const consumer = resolve(temporary, "consumer");
@@ -95,7 +97,7 @@ try {
     [target.package]: `file:${resolve(packageRoot, platformPack)}`,
   };
   writeFileSync(resolve(consumer, "package.json"), `${JSON.stringify(consumerPackage, null, 2)}\n`);
-  run("npm", ["install", "--ignore-scripts"], { cwd: consumer });
+  run(npm, ["install", "--ignore-scripts"], { cwd: consumer });
   const executable = resolve(consumer, "node_modules/.bin/supercov");
   if (process.platform !== "win32") chmodSync(executable, 0o755);
   const covered = spawnSync(executable, ["--", process.execPath, "--test"], {
