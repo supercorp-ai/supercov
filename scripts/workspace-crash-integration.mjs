@@ -75,6 +75,30 @@ function snapshot(root) {
   return files.sort(([left], [right]) => left.localeCompare(right));
 }
 
+async function waitForDeferredCleanup(root) {
+  if (process.platform !== "win32") return;
+  const trash = resolve(root, ".supercov/.trash");
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    let entries = [];
+    try {
+      entries = readdirSync(trash);
+    } catch (error) {
+      if (error.code === "ENOENT") return;
+      throw error;
+    }
+    if (entries.length === 0) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  }
+  let entries = [];
+  try {
+    entries = readdirSync(trash);
+  } catch {}
+  throw new Error(
+    `deferred trash cleanup did not quiesce before fixture teardown: ${entries.join(", ")}`,
+  );
+}
+
 const root = mkdtempSync(resolve(tmpdir(), "supercov-fs-crash-"));
 try {
   mkdirSync(resolve(root, "src"));
@@ -206,6 +230,12 @@ try {
     `[filesystem] ${engine} crash recovery passed on ${process.platform}`,
   );
 } finally {
+  // The command intentionally returns before recursively unlinking its trash.
+  // A Windows test fixture cannot remove the parent while that child still has
+  // directory handles open, so first assert that the asynchronous lifecycle
+  // operation itself completes. This is test teardown coordination, not a
+  // foreground wait added to the product command.
+  await waitForDeferredCleanup(root);
   rmSync(root, {
     recursive: true,
     force: true,

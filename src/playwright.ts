@@ -146,6 +146,7 @@ class CoveragePhaseController {
   private readonly pendingRegistrations = new Set<Promise<void>>();
   private scriptUpdate: Promise<void> = Promise.resolve();
   private readonly proxyCache = new WeakMap<object, object>();
+  private runtimeSnapshots: CoverageRuntimeSnapshot[] | undefined;
 
   // Parameter properties are stateful despite the base ESLint rule treating
   // this as an empty constructor.
@@ -161,6 +162,55 @@ class CoveragePhaseController {
 
   allWorkers(): Worker[] {
     return [...this.workers];
+  }
+
+  async collectRuntimeSnapshots(): Promise<CoverageRuntimeSnapshot[]> {
+    if (this.runtimeSnapshots) return this.runtimeSnapshots;
+    const snapshots: CoverageRuntimeSnapshot[] = [];
+    for (const page of this.allPages()) {
+      for (const frame of page.frames()) {
+        const snapshot = await frame
+          .evaluate(() => {
+            const getSnapshot = (
+              globalThis as typeof globalThis & {
+                __SUPERCOV_COVERAGE_SNAPSHOT__?: () => CoverageRuntimeSnapshot;
+              }
+            ).__SUPERCOV_COVERAGE_SNAPSHOT__;
+            return getSnapshot?.() ?? { decisions: [], hits: [], events: [] };
+          })
+          .catch(
+            () =>
+              ({
+                decisions: [],
+                hits: [],
+                events: [],
+              }) as CoverageRuntimeSnapshot,
+          );
+        snapshots.push(snapshot);
+      }
+    }
+    for (const worker of this.allWorkers()) {
+      const snapshot = await worker
+        .evaluate(() => {
+          const getSnapshot = (
+            globalThis as typeof globalThis & {
+              __SUPERCOV_COVERAGE_SNAPSHOT__?: () => CoverageRuntimeSnapshot;
+            }
+          ).__SUPERCOV_COVERAGE_SNAPSHOT__;
+          return getSnapshot?.() ?? { decisions: [], hits: [], events: [] };
+        })
+        .catch(
+          () =>
+            ({
+              decisions: [],
+              hits: [],
+              events: [],
+            }) as CoverageRuntimeSnapshot,
+        );
+      snapshots.push(snapshot);
+    }
+    this.runtimeSnapshots = snapshots;
+    return snapshots;
   }
 
   async registerPage(page: Page): Promise<void> {
@@ -985,26 +1035,19 @@ function mergeCollectedPhases(
 const instrumentedTest = base.extend<{ mcdcAutoCollect: void }>({
   page: async ({ page }, use, testInfo) => {
     const scope = executionScope(testInfo);
-    const configuredHeaders = Object.fromEntries(
-      Object.entries(testInfo.project.use.extraHTTPHeaders ?? {}).map(
-        ([name, value]) => [name, String(value)],
-      ),
-    );
-    const controller = new CoveragePhaseController(
-      scope,
-      configuredHeaders,
-    );
-    controllers.set(scope.attemptId, controller);
-    activeController = controller;
-    directRuntime()?.activateCoverageScope(scope);
+    const controller = controllers.get(scope.attemptId);
+    if (!controller)
+      throw new Error(
+        `Supercov's automatic Playwright collector was not initialized for ${scope.attemptId}`,
+      );
     await controller.registerPage(page);
     try {
       await use(controller.wrap(page));
     } finally {
-      await controller.dispose();
-      directRuntime()?.activateCoverageScope();
-      if (activeController === controller) activeController = undefined;
-      controllers.delete(scope.attemptId);
+      // This fixture still owns a live page. The automatic test fixture tears
+      // down after page dependencies and therefore cannot reliably evaluate
+      // frames on every Playwright version.
+      await controller.collectRuntimeSnapshots();
     }
   },
   browser: [
@@ -1036,11 +1079,20 @@ const instrumentedTest = base.extend<{ mcdcAutoCollect: void }>({
   },
   mcdcAutoCollect: [
     async (
-      { page }: { page: Page },
+      {},
       use: (value: void) => Promise<void>,
       testInfo: TestInfo,
     ) => {
       const scope = executionScope(testInfo);
+      const configuredHeaders = Object.fromEntries(
+        Object.entries(testInfo.project.use.extraHTTPHeaders ?? {}).map(
+          ([name, value]) => [name, String(value)],
+        ),
+      );
+      const controller = new CoveragePhaseController(scope, configuredHeaders);
+      controllers.set(scope.attemptId, controller);
+      activeController = controller;
+      directRuntime()?.activateCoverageScope(scope);
       const serverOutput = serverEvidencePath(scope);
       mkdirSync(serverEvidenceDirectory(scope), { recursive: true });
       rmSync(serverOutput, { force: true });
@@ -1048,62 +1100,19 @@ const instrumentedTest = base.extend<{ mcdcAutoCollect: void }>({
       try {
         await use();
       } finally {
-        const controller = controllers.get(scope.attemptId);
-        const browser: CoverageRuntimeSnapshot[] = [];
-        const pages = controller?.allPages() ?? [page];
-        for (const currentPage of pages) {
-          for (const frame of currentPage.frames()) {
-            const frameSnapshot = await frame
-              .evaluate(() => {
-                const getSnapshot = (
-                  globalThis as typeof globalThis & {
-                    __SUPERCOV_COVERAGE_SNAPSHOT__?: () => CoverageRuntimeSnapshot;
-                  }
-                ).__SUPERCOV_COVERAGE_SNAPSHOT__;
-                return getSnapshot?.() ?? { decisions: [], hits: [], events: [] };
-              })
-              .catch(
-                () =>
-                  ({
-                    decisions: [],
-                    hits: [],
-                    events: [],
-                  }) as CoverageRuntimeSnapshot,
-              );
-            browser.push(frameSnapshot);
-          }
-        }
-        for (const worker of controller?.allWorkers() ?? []) {
-          const workerSnapshot = await worker
-            .evaluate(() => {
-              const getSnapshot = (
-                globalThis as typeof globalThis & {
-                  __SUPERCOV_COVERAGE_SNAPSHOT__?: () => CoverageRuntimeSnapshot;
-                }
-              ).__SUPERCOV_COVERAGE_SNAPSHOT__;
-              return getSnapshot?.() ?? { decisions: [], hits: [], events: [] };
-            })
-            .catch(
-              () =>
-                ({
-                  decisions: [],
-                  hits: [],
-                  events: [],
-                }) as CoverageRuntimeSnapshot,
-            );
-          browser.push(workerSnapshot);
-        }
+        try {
+          const browser = await controller.collectRuntimeSnapshots();
 
-        const server = readServerRecords(scope);
-        // Emit an artifact even when this test touched no application source.
-        // A complete test-to-coverage matrix must also identify tests that are
-        // removable without changing coverage.
-        const outputPath = testInfo.outputPath("mcdc.json");
-        mkdirSync(dirname(outputPath), { recursive: true });
-        const testFile = relative(process.cwd(), testInfo.file)
-          .split(sep)
-          .join("/");
-        const payload: McdcRawTestResult = {
+          const server = readServerRecords(scope);
+          // Emit an artifact even when this test touched no application source.
+          // A complete test-to-coverage matrix must also identify tests that are
+          // removable without changing coverage.
+          const outputPath = testInfo.outputPath("mcdc.json");
+          mkdirSync(dirname(outputPath), { recursive: true });
+          const testFile = relative(process.cwd(), testInfo.file)
+            .split(sep)
+            .join("/");
+          const payload: McdcRawTestResult = {
           testId: testInfo.testId,
           scope,
           test: testInfo.titlePath.join(" > "),
@@ -1119,36 +1128,42 @@ const instrumentedTest = base.extend<{ mcdcAutoCollect: void }>({
             explicitKind: process.env["SUPERCOV_TEST_KIND"],
           }),
           phases: mergeCollectedPhases(
-            controller?.phases ?? [],
+            controller.phases,
             directRuntime()?.takeNodeAssertionPhases(scope) ?? [],
           ),
           browser,
           server,
-        };
-        const serialized = `${JSON.stringify(payload)}\n`;
-        atomicWriteFileSync(outputPath, serialized);
+          };
+          const serialized = `${JSON.stringify(payload)}\n`;
+          atomicWriteFileSync(outputPath, serialized);
 
         // Pool runners may cycle-restore a VM immediately after Playwright
         // exits, which can discard or overwrite the normal artifact copy.
         // Write one uniquely named, one-shot evidence file to the runner's
         // shared directory as well. No test streams into this path.
-        const evidenceDirectory =
-          process.env["SUPERCOV_EVIDENCE_DIR"] ??
-          (GENERATED_EVIDENCE_DIRECTORY.startsWith("__")
-            ? undefined
-            : GENERATED_EVIDENCE_DIRECTORY);
-        if (evidenceDirectory) {
-          const resolvedDirectory = resolve(process.cwd(), evidenceDirectory);
-          const safeTestId = testInfo.testId.replace(/[^a-zA-Z0-9_-]/g, "_");
-          const testEvidenceDirectory = resolve(
-            resolvedDirectory,
-            `${safeTestId}-${testInfo.retry}`,
-          );
-          mkdirSync(testEvidenceDirectory, { recursive: true });
-          atomicWriteFileSync(
-            resolve(testEvidenceDirectory, "mcdc.json"),
-            serialized,
-          );
+          const evidenceDirectory =
+            process.env["SUPERCOV_EVIDENCE_DIR"] ??
+            (GENERATED_EVIDENCE_DIRECTORY.startsWith("__")
+              ? undefined
+              : GENERATED_EVIDENCE_DIRECTORY);
+          if (evidenceDirectory) {
+            const resolvedDirectory = resolve(process.cwd(), evidenceDirectory);
+            const safeTestId = testInfo.testId.replace(/[^a-zA-Z0-9_-]/g, "_");
+            const testEvidenceDirectory = resolve(
+              resolvedDirectory,
+              `${safeTestId}-${testInfo.retry}`,
+            );
+            mkdirSync(testEvidenceDirectory, { recursive: true });
+            atomicWriteFileSync(
+              resolve(testEvidenceDirectory, "mcdc.json"),
+              serialized,
+            );
+          }
+        } finally {
+          await controller.dispose();
+          directRuntime()?.activateCoverageScope();
+          if (activeController === controller) activeController = undefined;
+          controllers.delete(scope.attemptId);
         }
       }
     },
