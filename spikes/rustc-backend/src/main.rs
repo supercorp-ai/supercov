@@ -72,8 +72,6 @@ const FINISH_DECISION_FUNCTION: &str = "__supercov_spike_runtime::mir_decision_f
 const START_BRANCH_FUNCTION: &str = "__supercov_spike_runtime::mir_branch_start";
 const HIT_BRANCH_FUNCTION: &str = "__supercov_spike_runtime::mir_branch_hit";
 const CTFE_EVENT_TARGET: &str = "rustc_const_eval::interpret::step";
-const CTFE_MARKER_PREFIX: u64 = 0x5355_5045_5243_0000;
-const CTFE_EDGE_MARKER_OFFSET: u64 = 0x8000;
 const RUNTIME_TEMPLATE: &str =
     include_str!("../../../crates/supercov-engine/runtime-assets/rust-mmap-runtime.rs");
 
@@ -87,6 +85,7 @@ static ORIGINAL_MIR_FOR_CTFE: OnceLock<MirForCtfeProvider> = OnceLock::new();
 static ORIGINAL_MIR_BUILT: OnceLock<MirBuiltProvider> = OnceLock::new();
 static ORIGINAL_MIR_DROPS: OnceLock<MirDropsProvider> = OnceLock::new();
 static CTFE_EVENTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+static CTFE_MARKERS: Mutex<BTreeMap<u64, CtfeMarkerIdentity>> = Mutex::new(BTreeMap::new());
 static MATCH_ARM_MARKERS: LazyLock<Mutex<HashMap<LocalDefId, BTreeMap<u32, u64>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static STRUCTURAL_DECISION_MARKERS: LazyLock<
@@ -106,6 +105,14 @@ static DOCTEST_ROLE: OnceLock<&'static str> = OnceLock::new();
 struct ExactSourceSnapshot {
     file: String,
     source: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CtfeMarkerIdentity {
+    crate_name: String,
+    definition: String,
+    observation_kind: &'static str,
+    local_ordinal: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -261,7 +268,12 @@ where
     ) {
         let mut visitor = CtfeEventVisitor::default();
         event.record(&mut visitor);
-        if let Some(marker) = parse_ctfe_marker(&visitor.fields) {
+        if let Some(marker) = parse_ctfe_marker(&visitor.fields)
+            && CTFE_MARKERS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&marker)
+        {
             CTFE_EVENTS.lock().expect("CTFE events lock").push(marker);
         }
     }
@@ -1522,14 +1534,13 @@ fn reject_probe_ordinal_collisions(
 }
 
 fn parse_ctfe_marker(fields: &str) -> Option<u64> {
-    let marker = fields
+    fields
         .split_once("const ")?
         .1
         .split_once("_u64")?
         .0
         .parse::<u64>()
-        .ok()?;
-    (marker & !0xffff == CTFE_MARKER_PREFIX).then_some(marker)
+        .ok()
 }
 
 struct ProbeCallbacks;
@@ -3761,19 +3772,25 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
         .get()
         .expect("original mir_for_ctfe provider");
     let body = original(tcx, def_id);
-    if env::var_os(INSTRUMENT_CTFE).is_none()
-        || !tcx.def_path_str(def_id).ends_with("const_decision")
-    {
+    if env::var_os(INSTRUMENT_CTFE).is_none() {
         return body;
     }
 
     let mut instrumented = body.clone();
     let span = tcx.def_span(def_id);
+    let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE).to_string();
+    let definition = tcx.def_path_str(def_id);
     let marker_local = instrumented
         .local_decls
         .push(LocalDecl::new(tcx.types.u64, span));
     for (block, block_data) in instrumented.basic_blocks_mut().iter_enumerated_mut() {
-        let marker = CTFE_MARKER_PREFIX | u64::from(block.as_u32());
+        let marker = ctfe_marker_identity(
+            tcx,
+            &crate_name,
+            &definition,
+            "block",
+            block.as_u32(),
+        );
         block_data
             .statements
             .insert(0, ctfe_marker_statement(tcx, marker_local, marker, span));
@@ -3795,7 +3812,9 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
         .collect::<Vec<_>>();
     let mut bridges = Vec::with_capacity(decision_edges.len());
     for (ordinal, (source, edge, target)) in decision_edges.iter().copied().enumerate() {
-        let marker = CTFE_MARKER_PREFIX | CTFE_EDGE_MARKER_OFFSET | ordinal as u64;
+        let ordinal = u32::try_from(ordinal)
+            .unwrap_or_else(|_| tcx.dcx().fatal("Supercov CTFE edge count exceeds u32"));
+        let marker = ctfe_marker_identity(tcx, &crate_name, &definition, "edge", ordinal);
         let mut bridge = BasicBlockData::new(
             Some(Terminator {
                 source_info: SourceInfo::outermost(span),
@@ -3821,6 +3840,48 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
             });
     }
     tcx.arena.alloc(instrumented)
+}
+
+fn ctfe_marker_identity(
+    tcx: TyCtxt<'_>,
+    crate_name: &str,
+    definition: &str,
+    observation_kind: &'static str,
+    local_ordinal: u32,
+) -> u64 {
+    let mut hash = Sha256::new();
+    for field in [
+        "supercov-rust-ctfe-marker-v1",
+        crate_name,
+        definition,
+        observation_kind,
+    ] {
+        hash.update(field.as_bytes());
+        hash.update([0]);
+    }
+    hash.update(local_ordinal.to_be_bytes());
+    let digest = hash.finalize();
+    let mut marker = u64::from_be_bytes(digest[..8].try_into().expect("SHA-256 prefix"));
+    if matches!(marker, 0 | u64::MAX) {
+        marker ^= 0xa5a5_a5a5_a5a5_a5a5;
+    }
+    let identity = CtfeMarkerIdentity {
+        crate_name: crate_name.into(),
+        definition: definition.into(),
+        observation_kind,
+        local_ordinal,
+    };
+    let mut markers = CTFE_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(existing) = markers.insert(marker, identity.clone())
+        && existing != identity
+    {
+        tcx.dcx().fatal(format!(
+            "Supercov CTFE marker collision {marker} between {existing:?} and {identity:?}"
+        ));
+    }
+    marker
 }
 
 fn ctfe_marker_statement<'tcx>(
@@ -6442,19 +6503,20 @@ fn write_ctfe_events(args: &[String], events: &[u64]) {
     let Ok(mut output) = OpenOptions::new().create_new(true).write(true).open(output) else {
         return;
     };
+    let markers = CTFE_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     for marker in events {
-        let ordinal = marker & 0x7fff;
-        let observation_kind = if marker & CTFE_EDGE_MARKER_OFFSET == 0 {
-            "block"
-        } else {
-            "edge"
+        let Some(identity) = markers.get(marker) else {
+            continue;
         };
         let record = format!(
-            "{{\"crate\":\"{}\",\"kind\":\"ctfe-marker\",\"marker\":{},\"observationKind\":\"{}\",\"ordinal\":{}}}\n",
-            escape(crate_name),
+            "{{\"crate\":\"{}\",\"kind\":\"ctfe-marker\",\"marker\":{},\"definition\":\"{}\",\"observationKind\":\"{}\",\"ordinal\":{}}}\n",
+            escape(&identity.crate_name),
             marker,
-            observation_kind,
-            ordinal,
+            escape(&identity.definition),
+            identity.observation_kind,
+            identity.local_ordinal,
         );
         let _ = output.write_all(record.as_bytes());
     }

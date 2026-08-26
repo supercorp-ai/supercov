@@ -453,8 +453,12 @@ blocks, splits multi-successor edges for independently identifiable edge
 markers, and observes only those markers through a private in-process rustc
 interpreter subscriber. Both true and false const-fn paths were observed while
 const values and complete stdout/stderr stayed byte-identical to the ordinary
-build. Edge identity is carried by each event, so concurrent evaluation does
-not require guessing from adjacent log records. Rust still remains private:
+build. The one-function/16-bit marker proof has now been generalized to every
+local CTFE body: marker identity is a domain-separated hash of crate,
+definition, block-or-edge kind and local ordinal; collisions are fatal and
+events retain the exact definition. Edge identity is carried by each event, so
+concurrent evaluation does not require guessing from adjacent log records.
+Rust still remains private:
 the proof covers one controlled const function and does not yet supply the
 complete const/static/inline-const/const-generic manifest, crash-safe event
 publication, `RUSTC_LOG` coexistence or acceptable performance corpus.

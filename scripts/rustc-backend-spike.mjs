@@ -1827,7 +1827,9 @@ try {
   const ctfeSequences = recordFiles(ctfeDirectory)
     .filter(({name}) => name.endsWith('-ctfe.jsonl'))
     .map(({records: fileRecords}) =>
-      fileRecords.map((record) => `${record.observationKind}:${record.ordinal}`),
+      fileRecords
+        .filter(({definition}) => definition.endsWith('const_decision'))
+        .map((record) => `${record.observationKind}:${record.ordinal}`),
     );
   assert(
     ctfeSequences.some((observations) =>
@@ -1841,6 +1843,17 @@ try {
       ].every((observation) => observations.includes(observation)),
     ),
     `expected both concurrency-safe CTFE edges and all original blocks, got ${JSON.stringify(ctfeSequences)}`,
+  );
+  const ctfeDefinitions = new Set(
+    recordFiles(ctfeDirectory)
+      .filter(({name}) => name.endsWith('-ctfe.jsonl'))
+      .flatMap(({records: fileRecords}) =>
+        fileRecords.map(({definition}) => definition),
+      ),
+  );
+  assert(
+    ctfeDefinitions.size > 1,
+    'CTFE instrumentation remained restricted to one fixture function',
   );
 
   const testTransport = createTransport('instrumented-test');

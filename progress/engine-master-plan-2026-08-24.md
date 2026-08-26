@@ -1471,6 +1471,17 @@ miss blocks flipping any default.
   raw hit must resolve to a compiler manifest, all former branch evidence is
   retained, and a dedicated one-sided branch proves no false statement hit on
   its unexecuted arm.
+- The first CTFE generalization step also removes the hard-coded
+  `const_decision` target and the process-local 16-bit block/edge namespace.
+  Every local compile-time body queried through `mir_for_ctfe` now receives a
+  domain-separated SHA-256 marker keyed by crate, textual compiler definition,
+  observation kind and local ordinal. Registration rejects any 64-bit
+  collision, the interpreter observer accepts only registered constants, and
+  records carry the exact definition plus local site. The existing true/false
+  const behavior remains byte-identical and the corpus proves more than one
+  CTFE definition is observed. This is identity groundwork only: marker-to-
+  frozen-obligation mapping and crash-safe evidence-v3 build-phase publication
+  remain the active blocker.
 
 ## Non-goals and guardrails
 
