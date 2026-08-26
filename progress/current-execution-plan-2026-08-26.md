@@ -249,6 +249,17 @@ without reconstructing interleaved event timing. The rustc spike exercises
 this normalization against authored, expanded and build-generated sources on
 every run.
 
+Authenticated `rust-probe-transport-v2` records now pass through a production
+Rust evidence projector. It validates every string probe, ordinal and decision
+vector against the normalized denominator; expands compiler selection
+semantics; assigns test and dynamic assertion phase IDs explicitly; and keeps
+context-zero observations in a separate background snapshot so they cannot
+silently become passed-test coverage. Dropped and incomplete records remain
+visible transport health rather than being discarded. The real isolated
+libtest/compiler probe run now traverses the production transport reader,
+manifest normalizer and evidence-v3 projection and proves a passed assertion's
+causal phase and exact test context.
+
 The first real-probe doctest attempt was deliberately rejected. It exposed and
 fixed an unstable-feature capability leak by adding rustc's empty
 `-Zallow-features=` restriction, but the instrumented run still regrouped one

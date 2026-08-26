@@ -1918,6 +1918,50 @@ try {
     ),
     'process-per-test fallback lost the parent assertion verdict',
   );
+  const isolatedManifest = manifests(instrumentedDirectory).find(
+    (manifestRecord) =>
+      manifestRecord.crate === 'supercov_rustc_spike_fixture' &&
+      manifestRecord.decisions.some(({id}) => id === isolatedAssertionId),
+  );
+  assert(isolatedManifest, 'isolated test compiler manifest was not emitted');
+  const productionProjection = JSON.parse(
+    run(supercov, ['__project-rust-compiler-evidence'], {
+      input: JSON.stringify({
+        normalization: {
+          manifest: isolatedManifest,
+          sources: compilerSources(
+            isolatedManifest,
+            instrumentedEnvironment.CARGO_TARGET_DIR,
+          ),
+        },
+        transportPath: isolatedTransport.path,
+        tokenHex: isolatedTransport.tokenHex,
+        baseContextId: isolatedTestContext,
+        basePhase: {
+          id: 'rust-test-phase',
+          kind: 'test',
+          operation: 'tests::child_context',
+          source: 'src/lib.rs',
+          causedByPhaseId: null,
+          startedAtMs: 0,
+          endedAtMs: 1,
+          status: 'passed',
+          error: null,
+        },
+      }),
+    }).stdout,
+  );
+  assert.equal(productionProjection.health.dropped, 0);
+  assert.equal(productionProjection.health.incomplete, 0);
+  assert(productionProjection.attributed.hits.length > 0);
+  assert.equal(productionProjection.background.hits.length, 0);
+  assert(
+    productionProjection.assertionPhases.some(
+      ({status, causedByPhaseId}) =>
+        status === 'passed' && causedByPhaseId === 'rust-test-phase',
+    ),
+    'production evidence projection lost the exact passed assertion phase',
+  );
   const instrumentedRecords = records(instrumentedDirectory);
   assert(instrumentedRecords.some((record) => record.definition === 'authored'));
   const injectedProbe = instrumentedRecords.find((record) =>

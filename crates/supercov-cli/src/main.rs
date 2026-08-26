@@ -93,12 +93,89 @@ fn main() -> ExitCode {
         Some("__pack-evidence") => pack_evidence(),
         Some("__validate-rust-compiler-manifest") => validate_rust_compiler_manifest(),
         Some("__normalize-rust-compiler-manifest") => normalize_rust_compiler_manifest(),
+        Some("__project-rust-compiler-evidence") => project_rust_compiler_evidence(),
         Some("clean") => cleanup_command(arguments.collect()),
         Some("runs") => public_query_command("runs", arguments.collect()),
         Some("diff") => public_query_command("diff", arguments.collect()),
         Some("merge") => merge_command(arguments.collect()),
         Some(command) => {
             eprintln!("[supercov] Unknown command: {command}. Try supercov help.");
+            ExitCode::from(2)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RustCompilerProjectionInput {
+    normalization: supercov_engine::rust_compiler_manifest::RustCompilerNormalizationRequest,
+    transport_path: PathBuf,
+    token_hex: String,
+    base_context_id: String,
+    base_phase: supercov_engine::coverage_report::CoveragePhase,
+}
+
+fn rust_transport_token(value: &str) -> Result<[u8; 16], String> {
+    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Rust transport token must be exactly 32 hexadecimal digits".into());
+    }
+    let mut token = [0_u8; 16];
+    for (index, byte) in token.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|error| format!("invalid Rust transport token: {error}"))?;
+    }
+    Ok(token)
+}
+
+fn project_rust_compiler_evidence() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let request: RustCompilerProjectionInput = match serde_json::from_str(&input) {
+        Ok(request) => request,
+        Err(error) => {
+            eprintln!("[supercov] invalid Rust compiler evidence request: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let result = (|| {
+        let normalized = request
+            .normalization
+            .manifest
+            .normalize(&request.normalization.sources)
+            .map_err(|error| error.to_string())?;
+        let token = rust_transport_token(&request.token_hex)?;
+        let context = request
+            .base_context_id
+            .parse::<u64>()
+            .map_err(|error| format!("invalid Rust base context: {error}"))?;
+        let transport = supercov_engine::rust_probe_transport::read_rust_transport(
+            &request.transport_path,
+            &token,
+        )
+        .map_err(|error| error.to_string())?;
+        supercov_engine::rust_compiler_evidence::project_rust_compiler_evidence(
+            context,
+            &request.base_phase,
+            &transport,
+            &normalized,
+        )
+        .map_err(|error| error.to_string())
+    })();
+    match result.and_then(|projection| {
+        serde_json::to_string(&projection)
+            .map_err(|error| format!("could not serialize Rust compiler evidence: {error}"))
+    }) {
+        Ok(output) => {
+            println!("{output}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[supercov] {error}");
             ExitCode::from(2)
         }
     }
