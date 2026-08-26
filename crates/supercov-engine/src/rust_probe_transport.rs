@@ -14,6 +14,7 @@ use std::{
 };
 
 use memmap2::{Mmap, MmapMut, MmapOptions};
+use serde::{Deserialize, Serialize};
 
 use crate::rust_runtime::{RustProbeObservation, valid_probe_id};
 
@@ -54,7 +55,8 @@ const KIND_PHASE: u8 = 4;
 
 const RUNTIME_TEMPLATE: &str = include_str!("../runtime-assets/rust-mmap-runtime.rs");
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustTransportRead {
     pub observations: Vec<RustTransportObservation>,
     pub ordinal_hits: Vec<RustOrdinalHit>,
@@ -65,21 +67,24 @@ pub struct RustTransportRead {
     pub attachments: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustTransportObservation {
     pub process_id: u32,
     pub context_id: u64,
     pub observation: RustProbeObservation,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustOrdinalHit {
     pub process_id: u32,
     pub context_id: u64,
     pub ordinal: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustPhaseContext {
     pub process_id: u32,
     pub child_context_id: u64,

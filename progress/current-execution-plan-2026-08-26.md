@@ -678,7 +678,19 @@ Supercov retains the exact counts and marks affected identities ambiguous
 instead of assigning states by catalog order. Cataloged tests project exact
 pass/fail/skipped/unknown status, retry zero, source and phase identity into
 evidence v3; a test that never started creates no fictitious phase. Exact
-runtime transport attachment, stable multi-package invocation identity, retry
+runtime transport attachment is now implemented as well. The engine reserves
+one authenticated mmap per rustdoc invocation, binds its normalized snapshot
+into outcome-unit v3, deletes the terminal transport after atomic publication,
+and rejects duplicate reservations, wrong tokens, digest tampering, count
+disagreement and evidence owned by an unknown doctest root. The outcome join
+partitions committed records into exact catalog tests plus context-zero
+background, translates merged identities/ordinals/nested assertion contexts,
+projects each partition through the shared evidence-v3 runtime path and proves
+that every committed record is accounted for exactly once. Dropped evidence is
+fatal; incomplete reservations remain explicit group health. The real Rust
+1.95 rustdoc gate publishes five passed and one ignored cataloged tests with
+runtime probes and leaves no transport file behind. Stable multi-package
+invocation identity, retry
 policy and preservation of the user's ordinary human output across
 pass/fail/signal cases remain required before these candidates can enter a
 measurement-complete public run.

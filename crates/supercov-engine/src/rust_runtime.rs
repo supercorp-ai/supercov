@@ -4,6 +4,7 @@
 //! It never computes coverage. Rust reads, validates, de-duplicates and maps
 //! these observations into the shared evidence-v3 model after test execution.
 
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs,
@@ -12,7 +13,8 @@ use std::{
 
 const RUST_PROBE_MAGIC: &str = "SUPERCOV-RUST-PROBE-1";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
 pub enum RustProbeObservation {
     Hit {
         id: String,

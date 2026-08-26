@@ -36,6 +36,7 @@ use crate::{
     rust_compiler_evidence::{
         RustCompilerEvidenceProjection, RustCompilerTransportHealth, project_rust_compiler_evidence,
     },
+    rust_compiler_manifest::NormalizedRustCompilerManifest,
     rust_compiler_orchestration::{
         RustCompilerBuild, RustCompilerBuildRequest, RustCompilerTestArtifact,
         build_with_rust_compiler_companion,
@@ -445,10 +446,19 @@ fn doctest_raw_results(
     resolution: &RustdocOutcomeResolution,
     started_at_ms: i64,
     ended_at_ms: i64,
-) -> Vec<RawTestResult> {
+    normalized: &NormalizedRustCompilerManifest,
+) -> Result<(Vec<RawTestResult>, Vec<RustCompilerAttemptHealth>), RustCompilerTestError> {
     let mut results = Vec::new();
+    let mut health = Vec::new();
     for group in &resolution.groups {
+        if group.transport.dropped != 0 {
+            return Err(RustCompilerTestError::DroppedEvidence {
+                test: format!("rustdoc:{}", group.group),
+                dropped: group.transport.dropped,
+            });
+        }
         let worker_id = format!("rustdoc-{}", &group.invocation_id[..16]);
+        let mut accounted_committed = 0_u64;
         for joined in &group.entries {
             let entry = &joined.catalog;
             let test_id = format!("rust:doctest:{}:{}:{}", group.group, entry.file, entry.line);
@@ -497,7 +507,7 @@ fn doctest_raw_results(
                     false,
                 ),
             };
-            let phases = started
+            let mut phases = started
                 .then(|| CoveragePhase {
                     id: phase_id(run_id, &attempt_id),
                     kind: "test".into(),
@@ -514,7 +524,48 @@ fn doctest_raw_results(
                     error: error.clone(),
                 })
                 .into_iter()
-                .collect();
+                .collect::<Vec<_>>();
+            let (base_context, transport) =
+                group.attributed_transport(joined).map_err(|error| {
+                    RustCompilerTestError::Projection {
+                        test: test_id.clone(),
+                        reason: error.to_string(),
+                    }
+                })?;
+            accounted_committed = accounted_committed
+                .checked_add(transport.committed)
+                .ok_or_else(|| RustCompilerTestError::Projection {
+                    test: test_id.clone(),
+                    reason: "rustdoc committed evidence count overflow".into(),
+                })?;
+            if !started && transport.committed != 0 {
+                return Err(RustCompilerTestError::Projection {
+                    test: test_id,
+                    reason: "a filtered or unstarted doctest emitted runtime evidence".into(),
+                });
+            }
+            let runtime = if let Some(base_phase) = phases.first() {
+                let projection = project_rust_compiler_evidence(
+                    base_context,
+                    base_phase,
+                    &transport,
+                    normalized,
+                )
+                .map_err(|error| RustCompilerTestError::Projection {
+                    test: test_id.clone(),
+                    reason: error.to_string(),
+                })?;
+                if snapshot_has_evidence(&projection.background) {
+                    return Err(RustCompilerTestError::Projection {
+                        test: test_id.clone(),
+                        reason: "doctest context partition retained background evidence".into(),
+                    });
+                }
+                phases.extend(projection.assertion_phases);
+                vec![projection.attributed]
+            } else {
+                Vec::new()
+            };
             results.push(RawTestResult {
                 test_id: Some(test_id.clone()),
                 scope: Some(ExecutionScope {
@@ -541,13 +592,108 @@ fn doctest_raw_results(
                 },
                 role: "test".into(),
                 phases,
-                runtime: Vec::new(),
+                runtime,
                 browser: Vec::new(),
                 server: Vec::new(),
             });
         }
+
+        let background =
+            group
+                .background_transport()
+                .map_err(|error| RustCompilerTestError::Projection {
+                    test: format!("rustdoc:{}", group.group),
+                    reason: error.to_string(),
+                })?;
+        accounted_committed = accounted_committed
+            .checked_add(background.committed)
+            .ok_or_else(|| RustCompilerTestError::Projection {
+                test: format!("rustdoc:{}", group.group),
+                reason: "rustdoc background evidence count overflow".into(),
+            })?;
+        if accounted_committed != group.transport.committed {
+            return Err(RustCompilerTestError::Projection {
+                test: format!("rustdoc:{}", group.group),
+                reason: format!(
+                    "rustdoc context partition accounted for {accounted_committed} of {} committed records",
+                    group.transport.committed
+                ),
+            });
+        }
+        if background.committed != 0 {
+            let background_id = format!("background:rustdoc:{}", group.invocation_id);
+            let background_phase = CoveragePhase {
+                id: phase_id(run_id, &background_id),
+                kind: "setup".into(),
+                operation: format!("Background while running Rust doctests for {}", group.group),
+                source: None,
+                caused_by_phase_id: None,
+                started_at_ms,
+                ended_at_ms: Some(ended_at_ms),
+                status: Some("passed".into()),
+                error: None,
+            };
+            let projection =
+                project_rust_compiler_evidence(1, &background_phase, &background, normalized)
+                    .map_err(|error| RustCompilerTestError::Projection {
+                        test: background_id.clone(),
+                        reason: error.to_string(),
+                    })?;
+            if snapshot_has_evidence(&projection.attributed)
+                || !projection.assertion_phases.is_empty()
+            {
+                return Err(RustCompilerTestError::Projection {
+                    test: background_id,
+                    reason: "context-zero doctest evidence became test-attributed".into(),
+                });
+            }
+            results.push(RawTestResult {
+                test_id: Some(background_id.clone()),
+                scope: Some(ExecutionScope {
+                    version: 1,
+                    run_id: run_id.into(),
+                    worker_id: worker_id.clone(),
+                    test_id: background_id.clone(),
+                    test_key: background_id.clone(),
+                    retry: 0,
+                    attempt_id: format!("{run_id}:doctest:{}:background", group.invocation_id),
+                }),
+                test: background_id,
+                test_file: None,
+                title: Some(format!("Background Rust doctest work for {}", group.group)),
+                retry: Some(0),
+                status: Some("passed".into()),
+                expected_status: Some("passed".into()),
+                flaky: false,
+                provenance: TestProvenance {
+                    runner: "rustdoc".into(),
+                    kind: "doctest".into(),
+                    project: Some(group.group.clone()),
+                    source: "supercov-rustdoc-context-zero".into(),
+                },
+                role: "background".into(),
+                phases: Vec::new(),
+                runtime: vec![projection.background],
+                browser: Vec::new(),
+                server: Vec::new(),
+            });
+        }
+        health.push(RustCompilerAttemptHealth {
+            test_id: format!("rustdoc:{}", group.group),
+            status: if group.transport.dropped == 0 && group.transport.incomplete == 0 {
+                "passed".into()
+            } else {
+                "unknown".into()
+            },
+            transport: RustCompilerTransportHealth {
+                committed: group.transport.committed,
+                incomplete: group.transport.incomplete,
+                dropped: group.transport.dropped,
+                attachments: group.transport.attachments,
+            },
+        });
     }
-    results
+    Ok((results, health))
 }
 
 fn doctest_command_failed(resolution: &RustdocOutcomeResolution) -> bool {
@@ -822,13 +968,14 @@ fn execute_compiler_build(
         build.build_started_at_ms,
         build.build_ended_at_ms,
     );
-    raw_results.extend(doctest_raw_results(
+    let (doctest_results, mut attempt_health) = doctest_raw_results(
         &request.run_id,
         &build.doctest_outcomes,
         build.build_started_at_ms,
         build.build_ended_at_ms,
-    ));
-    let mut attempt_health = Vec::new();
+        &build.normalized,
+    )?;
+    raw_results.extend(doctest_results);
     let mut overall_exit = i32::from(doctest_command_failed(&build.doctest_outcomes));
     for outcome in outcomes {
         let (test_status, exit) = status(&outcome.output);
@@ -1061,7 +1208,17 @@ mod tests {
                 companion_build_id: "2".repeat(64),
                 raw_catalog_sha256: "4".repeat(64),
                 raw_events_sha256: "3".repeat(64),
+                transport_sha256: "5".repeat(64),
                 join: None,
+                transport: RustTransportRead {
+                    observations: Vec::new(),
+                    ordinal_hits: Vec::new(),
+                    phases: Vec::new(),
+                    committed: 0,
+                    incomplete: 0,
+                    dropped: 0,
+                    attachments: 0,
+                },
                 entries: vec![
                     completed(0, entry("__doctest_0", 3), RustdocOutcomeStatus::Passed),
                     RustdocJoinedOutcome {
@@ -1076,8 +1233,23 @@ mod tests {
             }],
             unmatched_maps: Vec::new(),
         };
-        let results = doctest_raw_results("run", &resolution, 10, 20);
+        let normalized = NormalizedRustCompilerManifest {
+            manifest: crate::coverage_report::CoverageManifest {
+                decisions: Vec::new(),
+                points: Vec::new(),
+                branches: Vec::new(),
+                limitations: Vec::new(),
+                scope: None,
+            },
+            hit_obligations_by_ordinal: std::collections::BTreeMap::new(),
+            internal_ordinals: BTreeSet::new(),
+            decision_outcome_obligations: std::collections::BTreeMap::new(),
+            decision_loop_obligations: std::collections::BTreeMap::new(),
+        };
+        let (results, health) =
+            doctest_raw_results("run", &resolution, 10, 20, &normalized).unwrap();
         assert_eq!(results.len(), 2);
+        assert_eq!(health.len(), 1);
         assert_eq!(results[0].status.as_deref(), Some("passed"));
         assert_eq!(results[1].status.as_deref(), Some("unknown"));
         assert_eq!(results[0].retry, Some(0));

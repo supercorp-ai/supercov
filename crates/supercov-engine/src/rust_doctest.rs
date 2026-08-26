@@ -25,17 +25,20 @@ use crate::rust_compiler_manifest::{
 };
 use crate::{
     rust_probe_transport::{
-        RustPhaseContext, RustTransportRead, rust_assertion_context_id,
+        DEFAULT_DESCRIPTOR_CAPACITY, DEFAULT_PAYLOAD_CAPACITY, RustPhaseContext, RustTransportRead,
+        create_rust_transport, read_rust_transport, rust_assertion_context_id,
         validate_rust_phase_contexts,
     },
     rust_runtime::RustProbeObservation,
+    rust_test_context::rust_test_context_id,
 };
 
 const MAP_SCHEMA: &str = "supercov-rustdoc-merged-map-v2";
-const OUTCOME_SCHEMA: &str = "supercov-rustdoc-outcome-unit-v2";
+const OUTCOME_SCHEMA: &str = "supercov-rustdoc-outcome-unit-v3";
 const RUSTDOC_CATALOG_FORMAT_VERSION: u32 = 2;
 const MAX_OUTCOME_UNIT_BYTES: u64 = 16 * 1024 * 1024;
 const SOURCE_MODEL: &str = "rust-source-v1";
+const RUSTDOC_TRANSPORT_TOKEN_BYTES: usize = supercov_contracts::RUST_PROBE_TRANSPORT_TOKEN_SIZE;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -211,8 +214,16 @@ pub struct RustdocOutcomeUnit {
     pub companion_build_id: String,
     pub raw_catalog_sha256: String,
     pub raw_events_sha256: String,
+    pub transport_sha256: String,
     pub catalog: RustdocExtractedCatalog,
     pub report: RustdocOutcomeReport,
+    pub transport: RustTransportRead,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustdocTransportReservation {
+    pub path: PathBuf,
+    pub token: [u8; RUSTDOC_TRANSPORT_TOKEN_BYTES],
 }
 
 /// The exact execution state for one compiler-described merged doctest.
@@ -244,11 +255,9 @@ pub struct RustdocJoinedOutcome {
     pub state: RustdocJoinedOutcomeState,
 }
 
-/// Lossless join of one authenticated rustdoc invocation to the subset of
-/// tests described by its merged-runner map. Standalone and compile-fail
-/// doctests are intentionally retained as unmatched until their own compiler
-/// catalog is available; dropping them would make fail-fast arithmetic and
-/// test outcomes unsound.
+/// Lossless join of one authenticated rustdoc invocation to every test in its
+/// compiler catalog. The optional merged descriptor exists only for tests
+/// whose temporary bundle identities need source/probe translation.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RustdocOutcomeGroupJoin {
@@ -257,9 +266,11 @@ pub struct RustdocOutcomeGroupJoin {
     pub companion_build_id: String,
     pub raw_catalog_sha256: String,
     pub raw_events_sha256: String,
+    pub transport_sha256: String,
     /// Identity/ordinal translation for the merged bundle. `None` is valid
     /// only when every mapped doctest has zero executable obligations.
     pub join: Option<RustdocMergedJoin>,
+    pub transport: RustTransportRead,
     pub entries: Vec<RustdocJoinedOutcome>,
     pub ambiguous_filtered_out: u64,
     pub ambiguous_unstarted_tests: u64,
@@ -268,6 +279,109 @@ pub struct RustdocOutcomeGroupJoin {
 impl RustdocOutcomeGroupJoin {
     pub fn has_ambiguous_outcomes(&self) -> bool {
         self.ambiguous_filtered_out != 0 || self.ambiguous_unstarted_tests != 0
+    }
+
+    fn temporary_test_name(&self, entry: &RustdocJoinedOutcome) -> String {
+        if let Some(merged) = &entry.merged_entry {
+            format!("rustdoc:{}:{}", self.group, merged.module)
+        } else {
+            format!(
+                "rustdoc:{}:{}:{}",
+                self.group, entry.catalog.file, entry.catalog.line
+            )
+        }
+    }
+
+    pub fn attributed_transport(
+        &self,
+        entry: &RustdocJoinedOutcome,
+    ) -> Result<(u64, RustTransportRead), RustdocOutcomeError> {
+        let base = rust_test_context_id(&self.temporary_test_name(entry))
+            .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?;
+        let read = transport_for_root(&self.transport, base)?;
+        let read = if entry.merged_entry.is_some() && read.committed != 0 {
+            self.join
+                .as_ref()
+                .ok_or_else(|| {
+                    RustdocOutcomeError::Invalid(format!(
+                        "merged doctest {} has runtime evidence but no identity translation",
+                        entry.catalog.name
+                    ))
+                })?
+                .translate_transport(base, &read)
+                .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?
+        } else {
+            read
+        };
+        Ok((base, read))
+    }
+
+    pub fn background_transport(&self) -> Result<RustTransportRead, RustdocOutcomeError> {
+        let observations = self
+            .transport
+            .observations
+            .iter()
+            .filter(|record| record.context_id == 0)
+            .cloned()
+            .collect::<Vec<_>>();
+        let ordinal_hits = self
+            .transport
+            .ordinal_hits
+            .iter()
+            .filter(|record| record.context_id == 0)
+            .copied()
+            .collect::<Vec<_>>();
+        let committed = u64::try_from(observations.len() + ordinal_hits.len()).map_err(|_| {
+            RustdocOutcomeError::Invalid("rustdoc background transport count exceeds u64".into())
+        })?;
+        Ok(RustTransportRead {
+            committed,
+            observations,
+            ordinal_hits,
+            phases: Vec::new(),
+            incomplete: self.transport.incomplete,
+            dropped: self.transport.dropped,
+            attachments: self.transport.attachments,
+        })
+    }
+
+    fn validate_transport_ownership(&self) -> Result<(), RustdocOutcomeError> {
+        let expected = self
+            .entries
+            .iter()
+            .map(|entry| {
+                rust_test_context_id(&self.temporary_test_name(entry))
+                    .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        let phase_parents = phase_parent_map(&self.transport)?;
+        for context in self
+            .transport
+            .observations
+            .iter()
+            .map(|record| record.context_id)
+            .chain(
+                self.transport
+                    .ordinal_hits
+                    .iter()
+                    .map(|record| record.context_id),
+            )
+            .chain(
+                self.transport
+                    .phases
+                    .iter()
+                    .map(|phase| phase.child_context_id),
+            )
+            .filter(|context| *context != 0)
+        {
+            let root = root_context(context, &phase_parents)?;
+            if !expected.contains(&root) {
+                return Err(RustdocOutcomeError::Invalid(format!(
+                    "rustdoc transport context {context:016x} has unknown test root {root:016x}"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -289,6 +403,74 @@ impl RustdocOutcomeResolution {
             .iter()
             .any(RustdocOutcomeGroupJoin::has_ambiguous_outcomes)
     }
+}
+
+fn phase_parent_map(read: &RustTransportRead) -> Result<BTreeMap<u64, u64>, RustdocOutcomeError> {
+    let mut parents = BTreeMap::new();
+    for phase in &read.phases {
+        if parents
+            .insert(phase.child_context_id, phase.parent_context_id)
+            .is_some()
+        {
+            return Err(RustdocOutcomeError::Invalid(format!(
+                "rustdoc transport repeats phase context {:016x}",
+                phase.child_context_id
+            )));
+        }
+    }
+    Ok(parents)
+}
+
+fn root_context(
+    mut context: u64,
+    parents: &BTreeMap<u64, u64>,
+) -> Result<u64, RustdocOutcomeError> {
+    let mut seen = BTreeSet::new();
+    while let Some(parent) = parents.get(&context) {
+        if !seen.insert(context) {
+            return Err(RustdocOutcomeError::Invalid(format!(
+                "rustdoc transport phase cycle at {context:016x}"
+            )));
+        }
+        context = *parent;
+    }
+    Ok(context)
+}
+
+fn transport_for_root(
+    read: &RustTransportRead,
+    expected_root: u64,
+) -> Result<RustTransportRead, RustdocOutcomeError> {
+    let parents = phase_parent_map(read)?;
+    let mut observations = Vec::new();
+    for record in &read.observations {
+        if record.context_id != 0 && root_context(record.context_id, &parents)? == expected_root {
+            observations.push(record.clone());
+        }
+    }
+    let mut ordinal_hits = Vec::new();
+    for record in &read.ordinal_hits {
+        if record.context_id != 0 && root_context(record.context_id, &parents)? == expected_root {
+            ordinal_hits.push(*record);
+        }
+    }
+    let mut phases = Vec::new();
+    for phase in &read.phases {
+        if root_context(phase.child_context_id, &parents)? == expected_root {
+            phases.push(phase.clone());
+        }
+    }
+    let committed = u64::try_from(observations.len() + ordinal_hits.len() + phases.len())
+        .map_err(|_| RustdocOutcomeError::Invalid("rustdoc transport count exceeds u64".into()))?;
+    Ok(RustTransportRead {
+        observations,
+        ordinal_hits,
+        phases,
+        committed,
+        incomplete: 0,
+        dropped: 0,
+        attachments: 0,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -931,13 +1113,49 @@ impl RustdocOutcomeUnit {
             || !canonical_sha256(&self.companion_build_id)
             || !canonical_sha256(&self.raw_catalog_sha256)
             || !canonical_sha256(&self.raw_events_sha256)
+            || !canonical_sha256(&self.transport_sha256)
         {
             return Err(RustdocOutcomeError::Invalid(
                 "outcome unit has an unsupported schema or invalid identity binding".into(),
             ));
         }
         self.catalog.validate()?;
-        self.report.validate()
+        self.report.validate()?;
+        let transport_bytes = serde_json::to_vec(&self.transport)
+            .map_err(|error| RustdocOutcomeError::Json(error.to_string()))?;
+        if self.transport_sha256 != format!("{:x}", Sha256::digest(&transport_bytes)) {
+            return Err(RustdocOutcomeError::Invalid(
+                "rustdoc transport digest does not match its authenticated snapshot".into(),
+            ));
+        }
+        let committed = u64::try_from(
+            self.transport.observations.len()
+                + self.transport.ordinal_hits.len()
+                + self.transport.phases.len(),
+        )
+        .map_err(|_| RustdocOutcomeError::Invalid("rustdoc transport count exceeds u64".into()))?;
+        if committed != self.transport.committed {
+            return Err(RustdocOutcomeError::Invalid(
+                "rustdoc transport committed count disagrees with its records".into(),
+            ));
+        }
+        let mut children = BTreeSet::new();
+        for phase in &self.transport.phases {
+            if !children.insert(phase.child_context_id)
+                || rust_assertion_context_id(
+                    phase.parent_context_id,
+                    &phase.decision_id,
+                    phase.invocation_nonce,
+                )
+                .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?
+                    != phase.child_context_id
+            {
+                return Err(RustdocOutcomeError::Invalid(
+                    "rustdoc transport contains an invalid or duplicate phase context".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -947,10 +1165,13 @@ pub fn rustdoc_outcome_unit_from_libtest(
     companion_build_id: String,
     raw_catalog: &[u8],
     raw_events: &[u8],
+    transport: RustTransportRead,
 ) -> Result<RustdocOutcomeUnit, RustdocOutcomeError> {
     let catalog = RustdocExtractedCatalog::parse(raw_catalog)?;
     let report = parse_rustdoc_libtest_json(raw_events)
         .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?;
+    let transport_bytes = serde_json::to_vec(&transport)
+        .map_err(|error| RustdocOutcomeError::Json(error.to_string()))?;
     let unit = RustdocOutcomeUnit {
         schema: OUTCOME_SCHEMA.into(),
         invocation_id,
@@ -958,8 +1179,10 @@ pub fn rustdoc_outcome_unit_from_libtest(
         companion_build_id,
         raw_catalog_sha256: format!("{:x}", Sha256::digest(raw_catalog)),
         raw_events_sha256: format!("{:x}", Sha256::digest(raw_events)),
+        transport_sha256: format!("{:x}", Sha256::digest(&transport_bytes)),
         catalog,
         report,
+        transport,
     };
     unit.validate()?;
     Ok(unit)
@@ -973,6 +1196,7 @@ pub fn rustdoc_outcome_unit_from_framed_input(
     group: String,
     companion_build_id: String,
     input: &[u8],
+    transport: RustTransportRead,
 ) -> Result<RustdocOutcomeUnit, RustdocOutcomeError> {
     let length = input.get(..8).ok_or_else(|| {
         RustdocOutcomeError::Invalid("rustdoc outcome input has no catalog frame".into())
@@ -999,7 +1223,14 @@ pub fn rustdoc_outcome_unit_from_framed_input(
             "rustdoc outcome catalog and event frames must both be non-empty".into(),
         ));
     }
-    rustdoc_outcome_unit_from_libtest(invocation_id, group, companion_build_id, catalog, events)
+    rustdoc_outcome_unit_from_libtest(
+        invocation_id,
+        group,
+        companion_build_id,
+        catalog,
+        events,
+        transport,
+    )
 }
 
 fn outcome_io(path: &Path, error: impl std::fmt::Display) -> RustdocOutcomeError {
@@ -1018,6 +1249,53 @@ fn validate_outcome_directory(directory: &Path) -> Result<(), RustdocOutcomeErro
         ));
     }
     Ok(())
+}
+
+pub fn reserve_rustdoc_transport(
+    directory: &Path,
+    invocation_id: &str,
+) -> Result<RustdocTransportReservation, RustdocOutcomeError> {
+    validate_outcome_directory(directory)?;
+    if !canonical_sha256(invocation_id) {
+        return Err(RustdocOutcomeError::Invalid(
+            "rustdoc transport invocation identity is invalid".into(),
+        ));
+    }
+    let path = directory.join(format!("doctest-transport-{invocation_id}.mmap"));
+    let mut token = [0_u8; RUSTDOC_TRANSPORT_TOKEN_BYTES];
+    getrandom::fill(&mut token).map_err(|error| RustdocOutcomeError::Io {
+        path: path.clone(),
+        reason: error.to_string(),
+    })?;
+    create_rust_transport(
+        &path,
+        token,
+        DEFAULT_DESCRIPTOR_CAPACITY,
+        DEFAULT_PAYLOAD_CAPACITY,
+    )
+    .map_err(|error| outcome_io(&path, error))?;
+    Ok(RustdocTransportReservation { path, token })
+}
+
+pub fn rustdoc_transport_token_hex(token: &[u8; RUSTDOC_TRANSPORT_TOKEN_BYTES]) -> String {
+    token.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+pub fn read_reserved_rustdoc_transport(
+    path: &Path,
+    token_hex: &str,
+) -> Result<RustTransportRead, RustdocOutcomeError> {
+    if token_hex.len() != RUSTDOC_TRANSPORT_TOKEN_BYTES * 2
+        || !token_hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(outcome_io(path, "rustdoc transport token is invalid"));
+    }
+    let mut token = [0_u8; RUSTDOC_TRANSPORT_TOKEN_BYTES];
+    for (index, byte) in token.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&token_hex[index * 2..index * 2 + 2], 16)
+            .map_err(|error| outcome_io(path, error))?;
+    }
+    read_rust_transport(path, &token).map_err(|error| outcome_io(path, error))
 }
 
 pub fn publish_rustdoc_outcome_unit(
@@ -1305,19 +1583,23 @@ pub fn join_rustdoc_outcomes(
                 "rustdoc unresolved catalog count disagrees with libtest for {group}"
             )));
         }
-        groups.push(RustdocOutcomeGroupJoin {
+        let joined_group = RustdocOutcomeGroupJoin {
             invocation_id: outcome_unit.invocation_id,
             group,
             companion_build_id: outcome_unit.companion_build_id,
             raw_catalog_sha256: outcome_unit.raw_catalog_sha256,
             raw_events_sha256: outcome_unit.raw_events_sha256,
+            transport_sha256: outcome_unit.transport_sha256,
             join,
+            transport: outcome_unit.transport,
             entries,
             ambiguous_filtered_out: outcome_unit.report.filtered_out
                 * u64::from(outcome_unit.report.unstarted_tests != 0),
             ambiguous_unstarted_tests: outcome_unit.report.unstarted_tests
                 * u64::from(outcome_unit.report.filtered_out != 0),
-        });
+        };
+        joined_group.validate_transport_ownership()?;
+        groups.push(joined_group);
     }
 
     let unmatched_maps = maps.into_values().collect();
@@ -2780,6 +3062,25 @@ mod tests {
         lines.join("\n").into_bytes()
     }
 
+    fn empty_transport() -> RustTransportRead {
+        RustTransportRead {
+            observations: Vec::new(),
+            ordinal_hits: Vec::new(),
+            phases: Vec::new(),
+            committed: 0,
+            incomplete: 0,
+            dropped: 0,
+            attachments: 0,
+        }
+    }
+
+    fn transport_sha256(transport: &RustTransportRead) -> String {
+        format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(transport).unwrap())
+        )
+    }
+
     fn catalog_doctest(
         name: &str,
         line: u64,
@@ -2847,6 +3148,7 @@ mod tests {
     }
 
     fn passing_outcome_unit() -> RustdocOutcomeUnit {
+        let transport = empty_transport();
         RustdocOutcomeUnit {
             schema: OUTCOME_SCHEMA.into(),
             invocation_id: "1".repeat(64),
@@ -2854,6 +3156,7 @@ mod tests {
             companion_build_id: "2".repeat(64),
             raw_catalog_sha256: "4".repeat(64),
             raw_events_sha256: "3".repeat(64),
+            transport_sha256: transport_sha256(&transport),
             catalog: RustdocExtractedCatalog {
                 format_version: RUSTDOC_CATALOG_FORMAT_VERSION,
                 doctests: vec![catalog_doctest(
@@ -2884,6 +3187,7 @@ mod tests {
                 total_seconds: None,
                 compilation_seconds: None,
             },
+            transport,
         }
     }
 
@@ -3177,6 +3481,23 @@ mod tests {
     }
 
     #[test]
+    fn reserves_each_rustdoc_transport_once_and_authenticates_reads() {
+        let directory = OutcomeDirectory::new();
+        let invocation = "a".repeat(64);
+        let reservation = reserve_rustdoc_transport(&directory.0, &invocation)
+            .expect("reserve rustdoc transport");
+        assert!(reservation.path.is_file());
+        let token = rustdoc_transport_token_hex(&reservation.token);
+        assert_eq!(
+            read_reserved_rustdoc_transport(&reservation.path, &token)
+                .expect("authenticated empty transport"),
+            empty_transport()
+        );
+        assert!(reserve_rustdoc_transport(&directory.0, &invocation).is_err());
+        assert!(read_reserved_rustdoc_transport(&reservation.path, &"0".repeat(32)).is_err());
+    }
+
+    #[test]
     fn decodes_and_hashes_the_exact_catalog_and_event_frame() {
         let catalog = serde_json::to_vec(&passing_outcome_unit().catalog).unwrap();
         let events = libtest_stream(&[
@@ -3193,6 +3514,7 @@ mod tests {
             "fixture".into(),
             "2".repeat(64),
             &framed,
+            empty_transport(),
         )
         .expect("exact framed rustdoc outputs");
         assert_eq!(
@@ -3219,6 +3541,7 @@ mod tests {
                     "fixture".into(),
                     "2".repeat(64),
                     &invalid,
+                    empty_transport(),
                 )
                 .is_err()
             );
@@ -3498,6 +3821,10 @@ mod tests {
         unit.report.outcomes[0].status = RustdocOutcomeStatus::Ignored;
         invalid.push(unit);
 
+        let mut unit = passing_outcome_unit();
+        unit.transport.attachments = 1;
+        invalid.push(unit);
+
         for unit in invalid {
             assert!(unit.validate().is_err(), "accepted invalid unit: {unit:?}");
         }
@@ -3513,6 +3840,22 @@ mod tests {
         )
         .unwrap();
         assert!(read_rustdoc_outcome_units(&directory.0).is_err());
+    }
+
+    #[test]
+    fn outcome_join_rejects_transport_owned_by_an_unknown_test() {
+        let mut unit = passing_outcome_unit();
+        unit.transport.observations.push(RustTransportObservation {
+            process_id: 1,
+            context_id: 7,
+            observation: RustProbeObservation::Hit {
+                id: "rs:function:111111111111111111111111".into(),
+            },
+        });
+        unit.transport.committed = 1;
+        unit.transport_sha256 = transport_sha256(&unit.transport);
+        assert!(unit.validate().is_ok());
+        assert!(join_rustdoc_outcomes(Vec::new(), vec![unit]).is_err());
     }
 
     #[test]

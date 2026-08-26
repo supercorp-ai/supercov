@@ -102,6 +102,7 @@ fn main() -> ExitCode {
         Some("__validate-rust-compiler-manifest") => validate_rust_compiler_manifest(),
         Some("__normalize-rust-compiler-manifest") => normalize_rust_compiler_manifest(),
         Some("__join-rustdoc-merged-manifest") => join_rustdoc_merged_manifest(),
+        Some("__prepare-rustdoc-transport") => prepare_rustdoc_transport(arguments.collect()),
         Some("__publish-rustdoc-outcome") => publish_rustdoc_outcome(arguments.collect()),
         Some("__project-rust-compiler-evidence") => project_rust_compiler_evidence(),
         Some("__select-rust-compiler-companion") => select_rust_compiler_companion(),
@@ -526,16 +527,42 @@ fn publish_rustdoc_outcome(arguments: Vec<String>) -> ExitCode {
         }
     };
     let result = (|| {
+        let transport_path =
+            std::env::var_os(supercov_engine::rust_probe_transport::RUST_TRANSPORT_ENV)
+                .ok_or_else(|| {
+                    supercov_engine::rust_doctest::RustdocOutcomeError::Invalid(
+                        "rustdoc outcome publisher has no reserved transport path".into(),
+                    )
+                })?;
+        let transport_token =
+            std::env::var(supercov_engine::rust_probe_transport::RUST_TRANSPORT_TOKEN_ENV)
+                .map_err(|_| {
+                    supercov_engine::rust_doctest::RustdocOutcomeError::Invalid(
+                        "rustdoc outcome publisher has no reserved transport token".into(),
+                    )
+                })?;
+        let transport_path = PathBuf::from(transport_path);
+        let transport = supercov_engine::rust_doctest::read_reserved_rustdoc_transport(
+            &transport_path,
+            &transport_token,
+        )?;
         let unit = supercov_engine::rust_doctest::rustdoc_outcome_unit_from_framed_input(
             invocation_id.clone(),
             group.clone(),
             companion_build_id.clone(),
             &input,
+            transport,
         )?;
         let path = supercov_engine::rust_doctest::publish_rustdoc_outcome_unit(
             Path::new(directory),
             &unit,
         )?;
+        fs::remove_file(&transport_path).map_err(|error| {
+            supercov_engine::rust_doctest::RustdocOutcomeError::Io {
+                path: transport_path,
+                reason: error.to_string(),
+            }
+        })?;
         serde_json::to_string(&serde_json::json!({
             "path": path,
             "unit": unit,
@@ -544,6 +571,40 @@ fn publish_rustdoc_outcome(arguments: Vec<String>) -> ExitCode {
             supercov_engine::rust_doctest::RustdocOutcomeError::Json(error.to_string())
         })
     })();
+    match result {
+        Ok(output) => {
+            println!("{output}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn prepare_rustdoc_transport(arguments: Vec<String>) -> ExitCode {
+    let [directory, invocation_id] = arguments.as_slice() else {
+        eprintln!(
+            "[supercov] rustdoc transport preparation requires directory and invocation identity"
+        );
+        return ExitCode::from(2);
+    };
+    let result = supercov_engine::rust_doctest::reserve_rustdoc_transport(
+        Path::new(directory),
+        invocation_id,
+    )
+    .and_then(|reservation| {
+        serde_json::to_string(&serde_json::json!({
+            "path": reservation.path,
+            "token": supercov_engine::rust_doctest::rustdoc_transport_token_hex(
+                &reservation.token,
+            ),
+        }))
+        .map_err(|error| {
+            supercov_engine::rust_doctest::RustdocOutcomeError::Json(error.to_string())
+        })
+    });
     match result {
         Ok(output) => {
             println!("{output}");

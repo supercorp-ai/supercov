@@ -7786,6 +7786,13 @@ fn launch_rustdoc(args: &[String]) -> ! {
     let rustdoc = env::var_os(REAL_RUSTDOC).expect("exact rustdoc path");
     let companion = env::var_os(COMPANION_PATH).expect("compiler companion path");
     let group = argument_value(args, "--crate-name").expect("rustdoc crate name");
+    let mut invocation = Sha256::new();
+    invocation.update(b"supercov-rustdoc-invocation-v1\0");
+    for argument in args {
+        invocation.update(argument.as_bytes());
+        invocation.update(b"\0");
+    }
+    let invocation = format!("{:x}", invocation.finalize());
     let mut command = Command::new(&rustdoc);
     command
         .args(args)
@@ -7799,6 +7806,29 @@ fn launch_rustdoc(args: &[String]) -> ! {
         let status = command.status().expect("launch exact rustdoc");
         std::process::exit(status.code().unwrap_or(1));
     }
+
+    let engine = env::var_os(RUSTDOC_ENGINE_PATH).expect("Supercov engine path");
+    let directory = env::var_os(OUTPUT_DIRECTORY).expect("compiler output directory");
+    let reservation = Command::new(&engine)
+        .arg("__prepare-rustdoc-transport")
+        .arg(&directory)
+        .arg(&invocation)
+        .output()
+        .expect("prepare rustdoc transport");
+    if !reservation.status.success() {
+        let _ = io::stderr().write_all(&reservation.stderr);
+        std::process::exit(1);
+    }
+    let reservation: serde_json::Value =
+        serde_json::from_slice(&reservation.stdout).expect("parse rustdoc transport reservation");
+    let transport_path = reservation
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .expect("rustdoc transport reservation path");
+    let transport_token = reservation
+        .get("token")
+        .and_then(serde_json::Value::as_str)
+        .expect("rustdoc transport reservation token");
 
     // Rustdoc's own versioned extraction format is the authority for every
     // test identity and execution attribute. Capture it from the identical
@@ -7820,29 +7850,24 @@ fn launch_rustdoc(args: &[String]) -> ! {
     command
         .arg("--test-args=-Z unstable-options")
         .arg("--test-args=--format=json")
+        .env("SUPERCOV_RUST_TRANSPORT_FILE", transport_path)
+        .env("SUPERCOV_RUST_TRANSPORT_TOKEN", transport_token)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let output = command.output().expect("capture exact rustdoc outcomes");
-    let mut invocation = Sha256::new();
-    invocation.update(b"supercov-rustdoc-invocation-v1\0");
-    for argument in args {
-        invocation.update(argument.as_bytes());
-        invocation.update(b"\0");
-    }
-    let invocation = format!("{:x}", invocation.finalize());
     let executable = env::current_exe().expect("resolve compiler companion executable");
     let build_id = format!(
         "{:x}",
         Sha256::digest(fs::read(executable).expect("read compiler companion executable"))
     );
-    let engine = env::var_os(RUSTDOC_ENGINE_PATH).expect("Supercov engine path");
-    let directory = env::var_os(OUTPUT_DIRECTORY).expect("compiler output directory");
     let mut publisher = Command::new(engine)
         .arg("__publish-rustdoc-outcome")
         .arg(directory)
         .arg(invocation)
         .arg(group)
         .arg(build_id)
+        .env("SUPERCOV_RUST_TRANSPORT_FILE", transport_path)
+        .env("SUPERCOV_RUST_TRANSPORT_TOKEN", transport_token)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())

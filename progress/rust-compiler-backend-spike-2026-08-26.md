@@ -361,8 +361,15 @@ an unverified rustc commit.
    standalone and compile-fail tests, validates merged compiler metadata and
    preserves filtered/fail-fast ambiguity without assigning anonymous counts
    by order. Statuses already project into evidence-v3 test records with retry
-   zero and exact source identity. The next archive boundary is translated
-   runtime-evidence attachment; ordinary human-output equivalence, wrapper
+   zero and exact source identity. Runtime evidence now crosses that boundary:
+   each rustdoc invocation gets a unique authenticated mmap, outcome-unit v3
+   binds its normalized snapshot, publication removes the terminal file, and
+   the production join accounts for every committed record exactly once as an
+   exact catalog-test partition or context-zero background. Merged identities,
+   ordinals and nested assertion contexts are translated before the shared
+   evidence-v3 projection. Unknown ownership, transport tampering and dropped
+   evidence fail closed; incomplete reservations remain explicit health.
+   Ordinary human-output equivalence, wrapper
    composition, retries and failure/signal behavior remain blocking.
 4. Exact selection now independently probes rustc commit/host/driver digest,
    authenticates the companion's executable digest and rejects missing,

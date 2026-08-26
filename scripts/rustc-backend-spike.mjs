@@ -3060,7 +3060,6 @@ try {
     normalizeTestOutput(doctest.stderr),
   );
   const capturedDoctestDirectory = join(scratch, 'captured-doctest');
-  const capturedDoctestTransport = createTransport('captured-doctest');
   const capturedDoctest = run(
     'cargo',
     ['test', '--quiet', '--manifest-path', fixture, '--doc'],
@@ -3077,8 +3076,6 @@ try {
         SUPERCOV_RUST_INSTRUMENT_MIR: '1',
         SUPERCOV_RUST_REAL_RUSTDOC: realRustdoc,
         SUPERCOV_RUST_STATIC_RUNTIME_DIRECTORY: sharedRuntimeDirectory,
-        SUPERCOV_RUST_TRANSPORT_FILE: capturedDoctestTransport.path,
-        SUPERCOV_RUST_TRANSPORT_TOKEN: capturedDoctestTransport.tokenHex,
         SUPERCOV_RUSTDOC_CAPTURE_OUTCOMES: '1',
         SUPERCOV_RUSTDOC_ENGINE_PATH: supercov,
       },
@@ -3112,7 +3109,7 @@ try {
   const outcomeUnit = JSON.parse(
     readFileSync(join(capturedDoctestDirectory, outcomeFiles[0]), 'utf8'),
   );
-  assert.equal(outcomeUnit.schema, 'supercov-rustdoc-outcome-unit-v2');
+  assert.equal(outcomeUnit.schema, 'supercov-rustdoc-outcome-unit-v3');
   assert.equal(outcomeUnit.catalog.format_version, 2);
   assert.equal(outcomeUnit.catalog.doctests.length, 6);
   assert.equal(
@@ -3121,6 +3118,22 @@ try {
       .update(JSON.stringify(outcomeUnit.catalog))
       .digest('hex'),
     'rustdoc outcome unit was not bound to the exact extracted catalog',
+  );
+  // The transport contains full-width u64 identities, so JavaScript cannot
+  // parse and reserialize it byte-exactly. Rust validates this digest before
+  // publication and again on ingestion; the JS spike only checks its shape.
+  assert.match(outcomeUnit.transportSha256, /^[0-9a-f]{64}$/);
+  assert.equal(outcomeUnit.transport.dropped, 0);
+  assert.equal(outcomeUnit.transport.incomplete, 0);
+  assert(
+    outcomeUnit.transport.ordinalHits.length >= 2,
+    'captured rustdoc outcome unit contains no runtime probes',
+  );
+  assert(
+    !readdirSync(capturedDoctestDirectory).some((name) =>
+      name.startsWith('doctest-transport-'),
+    ),
+    'published rustdoc outcome retained its terminal transport file',
   );
   assert.equal(
     outcomeUnit.rawEventsSha256,

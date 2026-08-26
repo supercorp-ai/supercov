@@ -1540,7 +1540,14 @@ miss blocks flipping any default.
   identity ambiguity rustdoc leaves when filtered and fail-fast-unstarted
   counts coexist. Cataloged tests project status, retry zero and source/phase
   identity into evidence v3 without inventing a phase for a test that never
-  started. Translated runtime attachment, stable multi-package invocation
+  started. Outcome-unit v3 now additionally binds the authenticated runtime
+  transport snapshot. A supervisor-created per-invocation mmap is consumed and
+  removed at atomic publication; the join partitions every committed record
+  exactly once across cataloged test roots and context-zero background,
+  translates merged obligation/ordinal/assertion identities and projects the
+  result through the shared evidence-v3 runtime path. Unknown roots, digest or
+  count tampering and dropped evidence fail closed, while incomplete
+  reservations remain explicit health. Stable multi-package invocation
   identity and visible-output equivalence remain open before public rustdoc
   execution.
 
