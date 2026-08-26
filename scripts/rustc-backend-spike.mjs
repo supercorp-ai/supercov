@@ -195,11 +195,26 @@ function decisionForConditions(manifestRecord, definition, sources) {
 }
 
 function branchFor(manifestRecord, definition, kind) {
-  const matches = manifestRecord.branches.filter(
-    (branch) => branch.kind === kind && branch.definitions.includes(definition),
-  );
+  const matches = branchesFor(manifestRecord, definition, kind);
   assert.equal(matches.length, 1, `expected one ${definition} ${kind} branch`);
   return matches[0];
+}
+
+function branchesFor(manifestRecord, definition, kind) {
+  return manifestRecord.branches.filter(
+    (branch) => branch.kind === kind && branch.definitions.includes(definition),
+  ).sort((left, right) => left.start - right.start || left.end - right.end);
+}
+
+function loopAlternativeOrdinals(branch) {
+  const zero = branch.alternatives.find(
+    ({label}) => label === 'zero iterations',
+  )?.probeOrdinal;
+  const entered = branch.alternatives.find(
+    ({label}) => label === 'entered',
+  )?.probeOrdinal;
+  assert(zero && entered, `incomplete loop alternatives for ${branch.id}`);
+  return {zero, entered};
 }
 
 function records(directory) {
@@ -333,7 +348,7 @@ try {
   assert.equal(identityManifestA.model, 'rust-source-v1');
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
-    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: for-loop, match, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
+    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: match, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
   ]);
   const allIds = [
     ...identityManifestA.points.map(({id}) => id),
@@ -352,6 +367,34 @@ try {
     identityManifestA.points.some(({kind}) => kind === 'statement'),
     'compiler manifest did not emit statement points',
   );
+  assert(
+    identityManifestA.branches.every(({kind}) =>
+      ['decision-outcome', 'loop-entry'].includes(kind),
+    ),
+    'compiler manifest emitted a branch kind outside the frozen Rust contract',
+  );
+  assert(
+    identityManifestA.decisions.every(({kind}) =>
+      ['if', 'if-let', 'while', 'while-let', 'let-chain'].includes(kind),
+    ),
+    'compiler manifest emitted a decision kind outside the frozen Rust contract',
+  );
+  for (const definition of [
+    'for_values',
+    'for_break',
+    'two_for_values',
+    'nested_for_values',
+    'interrupted_for',
+  ]) {
+    assert(
+      !identityManifestA.points.some(
+        (point) =>
+          point.definitions.includes(definition) &&
+          point.provenance === 'synthetic-expansion',
+      ),
+      `compiler for-loop scaffolding leaked into ${definition} points`,
+    );
+  }
   const compoundDecision = decisionFor(identityManifestA, 'compound');
   assert.equal(compoundDecision?.kind, 'if');
   assert.equal(compoundDecision?.conditions.length, 2);
@@ -501,6 +544,11 @@ try {
   assert.match(baselineBehavior.stdout, /nested-expression=\[89, 83, 89, 83, 89\]/);
   assert.match(baselineBehavior.stdout, /while=\[0, 2, 0\]/);
   assert.match(baselineBehavior.stdout, /while-let=\[0, 5, 0, 0\]/);
+  assert.match(baselineBehavior.stdout, /for=\[0, 5\]/);
+  assert.match(baselineBehavior.stdout, /for-break=\[0, 7\]/);
+  assert.match(baselineBehavior.stdout, /for-two=\[2, 3\]/);
+  assert.match(baselineBehavior.stdout, /for-nested=\[0, 5\]/);
+  assert.match(baselineBehavior.stdout, /for-panic=true/);
   const runtimeManifest = crateManifest(
     instrumentedDirectory,
     'supercov_rustc_spike_fixture',
@@ -521,7 +569,7 @@ try {
   const whileInvocation = branchFor(
     runtimeManifest,
     'while_compound',
-    'while-invocation',
+    'loop-entry',
   );
   const whileZero = whileInvocation.alternatives.find(
     ({label}) => label === 'zero iterations',
@@ -532,7 +580,7 @@ try {
   const whileLetInvocation = branchFor(
     runtimeManifest,
     'while_let_chain',
-    'while-invocation',
+    'loop-entry',
   );
   const whileLetZero = whileLetInvocation.alternatives.find(
     ({label}) => label === 'zero iterations',
@@ -540,6 +588,34 @@ try {
   const whileLetEntered = whileLetInvocation.alternatives.find(
     ({label}) => label === 'entered',
   )?.probeOrdinal;
+  const {zero: forZero, entered: forEntered} = loopAlternativeOrdinals(
+    branchFor(runtimeManifest, 'for_values', 'loop-entry'),
+  );
+  const {zero: forBreakZero, entered: forBreakEntered} =
+    loopAlternativeOrdinals(
+      branchFor(runtimeManifest, 'for_break', 'loop-entry'),
+    );
+  const twoForBranches = branchesFor(runtimeManifest, 'two_for_values', 'loop-entry');
+  assert.equal(twoForBranches.length, 2, 'expected two sequential for branches');
+  const twoForOrdinals = twoForBranches.map(loopAlternativeOrdinals);
+  const nestedForBranches = branchesFor(
+    runtimeManifest,
+    'nested_for_values',
+    'loop-entry',
+  );
+  assert.equal(nestedForBranches.length, 2, 'expected outer and inner for branches');
+  const nestedForOrdinals = nestedForBranches.map(loopAlternativeOrdinals);
+  const interruptedForOrdinals = loopAlternativeOrdinals(
+    branchFor(runtimeManifest, 'interrupted_for', 'loop-entry'),
+  );
+  const committedForOrdinals = [
+    forZero,
+    forEntered,
+    forBreakZero,
+    forBreakEntered,
+    ...twoForOrdinals.flatMap(({zero, entered}) => [zero, entered]),
+    ...nestedForOrdinals.flatMap(({zero, entered}) => [zero, entered]),
+  ];
   assert(
     [
       authoredProbe,
@@ -550,6 +626,7 @@ try {
       whileEntered,
       whileLetZero,
       whileLetEntered,
+      ...committedForOrdinals,
     ].every(Boolean),
     'runtime probe is not bound to its manifest obligation',
   );
@@ -558,8 +635,8 @@ try {
   assert.equal(behaviorEvidence.dropped, 0);
   assert.equal(
     behaviorEvidence.incomplete,
-    1,
-    'a panic during an active compound decision must remain explicit incomplete health',
+    2,
+    'decision-condition and iterator-next panics must remain explicit incomplete health',
   );
   assert.deepEqual(
     new Set(behaviorEvidence.ordinals.map(({ordinal}) => ordinal)),
@@ -572,6 +649,7 @@ try {
       whileEntered,
       whileLetZero,
       whileLetEntered,
+      ...committedForOrdinals,
     ]),
   );
   assert.equal(
@@ -599,6 +677,29 @@ try {
       .length,
     1,
     'the entered while-let invocation must commit exactly once across iterations',
+  );
+  assert.equal(
+    behaviorEvidence.ordinals.filter(({ordinal}) => ordinal === forZero).length,
+    1,
+    'the empty for invocation must commit zero iterations exactly once',
+  );
+  assert.equal(
+    behaviorEvidence.ordinals.filter(({ordinal}) => ordinal === forEntered).length,
+    1,
+    'the entered for invocation must commit exactly once across iterations',
+  );
+  for (const ordinal of committedForOrdinals.slice(2)) {
+    assert.equal(
+      behaviorEvidence.ordinals.filter((hit) => hit.ordinal === ordinal).length,
+      1,
+      `for alternative ${ordinal} must commit exactly once`,
+    );
+  }
+  assert(
+    !behaviorEvidence.ordinals.some(({ordinal}) =>
+      [interruptedForOrdinals.zero, interruptedForOrdinals.entered].includes(ordinal),
+    ),
+    'a panicking iterator committed a false zero/entered alternative',
   );
   const vectorsForDecision = (decision) => {
     const id = decision?.id;
@@ -986,7 +1087,7 @@ try {
   );
 
   console.log(
-    '[rustc-backend-spike] expanded-HIR obligations keep deterministic identities; compiler branch regions become exact Supercov nested/short-circuit/pattern/while ternary vectors and per-invocation loop branches with libtest contexts, while MIR/CTFE/rustdoc interception preserves behavior and source',
+    '[rustc-backend-spike] expanded-HIR obligations keep deterministic identities; compiler mappings become exact Supercov nested/short-circuit/pattern/while ternary vectors and pre-optimization for-loop plus per-invocation loop branches with libtest contexts, while MIR/CTFE/rustdoc interception preserves behavior and source',
   );
 } finally {
   rmSync(scratch, {recursive: true, force: true});

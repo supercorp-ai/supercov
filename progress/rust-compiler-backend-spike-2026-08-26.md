@@ -146,8 +146,19 @@ The spike proved:
     multiple iterations, two/one zero/entered compound-`while` invocations and
     three/one zero/entered `while let` invocations. Cross-thread completion and
     killed unfinished branch frames retain exact start context and explicit
-    incomplete health. The next denominator gate is `for`, match, let-else,
+    incomplete health. The next denominator gate is match, let-else,
     `?`, assertions, executable statements, CTFE and doctest integration.
+19. Authored `for` loops now emit the frozen `loop-entry` zero/entered branch
+    without a fictitious Boolean decision. The companion overrides rustc's
+    documented post-borrow-check/pre-optimization MIR provider, recognizes the
+    exact desugared `Iterator::next` `Option::None`/`Some` switch, and inserts
+    Supercov's first-commit frame before optimizer-specific iterator lowering.
+    Nested switches are assigned to the smallest enclosing authored loop.
+    Goldens prove empty, multi-iteration, sequential, nested, always-exiting
+    and iterator-panic cases; panic leaves an incomplete frame and no false
+    alternative. The same work excludes compiler for/while desugaring
+    scaffolding from authored statement points and replaces private branch and
+    decision labels with the frozen contract kinds.
 
 The companion executable is about 600 KiB on arm64 macOS and dynamically uses
 the exact `librustc_driver` already shipped by the user's `rustc` component.
@@ -219,7 +230,7 @@ an unverified rustc commit.
 
 ## Next implementation gates
 
-1. Extend the proven expanded-HIR `if` slice to loops, match, let-else, `?`,
+1. Extend the proven expanded-HIR control slice to match, let-else, `?`,
    assertions and remaining executable statement
    semantics; bind their real MIR/CTFE probes to the same manifest IDs. Add
    derive, nested/external expansion, generic/trait, include/module and

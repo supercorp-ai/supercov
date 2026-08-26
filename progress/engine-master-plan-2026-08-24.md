@@ -1313,7 +1313,7 @@ miss blocks flipping any default.
   directories emit byte-identical candidates without ephemeral paths. The
   selected function MIR probes now emit manifest-derived ordinals. The manifest
   remains deliberately incomplete until the same identity and real probes
-  cover loops, match, let-else, `?`, assertions, CTFE and doctest obligations.
+  cover match, let-else, `?`, assertions, CTFE and doctest obligations.
 - The next private slice translates rustc's authored branch regions into
   Supercov-owned MIR decision frames rather than importing a rustc/LLVM
   profile. Exact goldens now cover all exercised ternary shapes for `&&`, `||`,
@@ -1338,8 +1338,19 @@ miss blocks flipping any default.
   starts once at the natural loop entry and is bypassed by backedges, preserving
   the start context across migration and leaving killed writers explicitly
   incomplete. Exact fixtures prove multi-iteration behavior without duplicate
-  or relabeled invocation evidence. `for`, match, let-else, `?`, assertions,
+  or relabeled invocation evidence. Match, let-else, `?`, assertions,
   CTFE and doctest completeness remain private release blockers.
+- Authored `for` loops now close the same frozen `loop-entry` zero/entered
+  obligation without inventing an MC/DC decision. A documented post-borrow-
+  check/pre-optimization provider binds rustc's exact desugared
+  `Iterator::next` `Option::None`/`Some` switch and inserts Supercov's owned
+  first-commit mmap frame before later optimizer-specific lowering. The
+  executable corpus covers empty, multi-iteration, sequential, nested,
+  always-exiting and iterator-panic loops. Smallest-enclosing-source ownership
+  separates nested loops, and panicking `next()` leaves only explicit
+  incomplete health. This work also removes compiler-desugaring scaffolding
+  from authored statement points and gates emitted branch/decision kinds
+  against the frozen Rust contract.
 
 ## Non-goals and guardrails
 

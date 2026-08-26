@@ -98,6 +98,57 @@ pub fn while_let_chain(mut values: Vec<Option<usize>>, enabled: bool) -> usize {
     total
 }
 
+pub fn for_values(values: Vec<usize>) -> usize {
+    let mut total = 0;
+    for value in values {
+        total += value;
+    }
+    total
+}
+
+pub fn for_break(values: Vec<usize>) -> usize {
+    for value in values {
+        return value;
+    }
+    0
+}
+
+pub fn two_for_values(first: Vec<usize>, second: Vec<usize>) -> usize {
+    let mut total = 0;
+    for value in first {
+        total += value;
+    }
+    for value in second {
+        total += value;
+    }
+    total
+}
+
+pub fn nested_for_values(rows: Vec<Vec<usize>>) -> usize {
+    let mut total = 0;
+    for row in rows {
+        for value in row {
+            total += value;
+        }
+    }
+    total
+}
+
+struct PanicOnNext;
+
+impl Iterator for PanicOnNext {
+    type Item = usize;
+
+    #[inline(never)]
+    fn next(&mut self) -> Option<Self::Item> {
+        panic!("iterator-next-panic")
+    }
+}
+
+pub fn interrupted_for() {
+    for _value in PanicOnNext {}
+}
+
 #[inline(never)]
 fn panic_condition() -> bool {
     panic!("decision-condition-panic")

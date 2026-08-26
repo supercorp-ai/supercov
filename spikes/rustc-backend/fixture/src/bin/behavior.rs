@@ -3,8 +3,9 @@ use std::{cell::RefCell, panic};
 use supercov_rustc_spike_fixture::{
     CONST_FALSE_VALUE, CONST_VALUE, authored, chained, compound, context_normal_scope,
     context_panic_scope, disjoined, drop_order, fallible, generated_by_build_script,
-    generated_by_proc, generated_by_rules, interrupted_decision, mixed, nested,
-    nested_expression, panic_path, pattern, repeated_expansions, while_compound, while_let_chain,
+    for_break, for_values, generated_by_proc, generated_by_rules, interrupted_decision,
+    interrupted_for, mixed, nested, nested_expression, nested_for_values, panic_path, pattern,
+    repeated_expansions, two_for_values, while_compound, while_let_chain,
 };
 
 fn main() {
@@ -18,6 +19,7 @@ fn main() {
         context_panic_scope(&context_log)
     }));
     let interrupted = panic::catch_unwind(|| interrupted_decision(true));
+    let interrupted_for = panic::catch_unwind(interrupted_for);
     panic::set_hook(previous_hook);
     assert!(context_panic.is_err());
     assert_eq!(authored(true), 1);
@@ -27,6 +29,7 @@ fn main() {
     println!("drop-value={}", drop_order(&log));
     println!("panic={}", panic.is_err());
     println!("decision-panic={}", interrupted.is_err());
+    println!("for-panic={}", interrupted_for.is_err());
     println!("drop-order={:?}", log.into_inner());
     println!("const-values={CONST_VALUE:?},{CONST_FALSE_VALUE:?}");
     println!(
@@ -98,6 +101,22 @@ fn main() {
             while_let_chain(vec![Some(2), Some(3)], true),
             while_let_chain(vec![Some(2)], false),
             while_let_chain(vec![Some(0)], true),
+        ]
+    );
+    println!("for={:?}", [for_values(Vec::new()), for_values(vec![2, 3])]);
+    println!("for-break={:?}", [for_break(Vec::new()), for_break(vec![7, 9])]);
+    println!(
+        "for-two={:?}",
+        [
+            two_for_values(Vec::new(), vec![2]),
+            two_for_values(vec![3], Vec::new()),
+        ]
+    );
+    println!(
+        "for-nested={:?}",
+        [
+            nested_for_values(Vec::new()),
+            nested_for_values(vec![Vec::new(), vec![2, 3]]),
         ]
     );
 }

@@ -205,7 +205,7 @@ display comes from rustc's expanded HIR instead of falsely printing the macro
 invocation as the condition. The exploratory 0/1/2/3 function ordinals are
 gone: runtime MIR hits now carry the u64 prefix of the exact manifest point ID,
 and the compiler rejects both full-ID and probe-prefix collisions. The
-candidate still carries a blocking denominator limitation: `for`, match, let-else,
+candidate still carries a blocking denominator limitation: match, let-else,
 `?`, assertion, CTFE and doctest obligation/probe mappings, plus full package
 and compiler fingerprints, remain R1 work. No measurement-complete claim is
 possible yet.
@@ -252,6 +252,19 @@ redirects backedges past that start. The executable fixture proves two zero
 and one entered compound-`while` invocation, three zero and one entered
 `while let` invocation, exact short-circuit vectors, multiple iterations and
 no per-iteration relabeling or duplicate loop observation.
+
+Authored `for` loops now use the frozen `loop-entry` branch kind without
+inventing a Boolean decision. The companion overrides rustc's documented
+post-borrow-check/pre-optimization MIR boundary, binds the exact
+`Iterator::next` `Option::None`/`Some` switch while it is still structural, and
+inserts the same crash-visible first-commit frame before ordinary optimization.
+This survives optimizer-specific iterator lowering without importing native
+coverage. The corpus proves empty and multi-iteration loops, two loops in one
+function, nested loops, a body with no backedge, and a panic from `next()`.
+Nested switches bind to the smallest enclosing authored loop. The panic leaves
+an incomplete frame and no false alternative. Compiler-generated for/while
+scaffolding is no longer counted as authored statement coverage, and candidate
+branch/decision kinds are gated against the frozen contract enums.
 
 The CTFE provider spike is now executable rather than hypothetical. The
 companion overrides `mir_for_ctfe`, inserts execution markers in original

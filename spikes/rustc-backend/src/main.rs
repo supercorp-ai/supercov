@@ -24,6 +24,7 @@ use std::{
 };
 
 use rustc_driver::{Callbacks, Compilation};
+use rustc_data_structures::steal::Steal;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir::{
     self as hir,
@@ -38,11 +39,11 @@ use rustc_middle::{
         coverage::{CoverageKind, MappingKind},
         interpret::Scalar,
     },
-    ty::TyCtxt,
+    ty::{self, TyCtxt},
     util::Providers,
 };
 use rustc_session::Session;
-use rustc_span::{DUMMY_SP, FileName, def_id::LocalDefId, source_map::Spanned};
+use rustc_span::{DesugaringKind, DUMMY_SP, FileName, def_id::LocalDefId, source_map::Spanned};
 
 use rustc_log::{
     tracing::{Event, Metadata, Subscriber, field},
@@ -77,9 +78,12 @@ const RUNTIME_TEMPLATE: &str =
 
 type OptimizedMirProvider = for<'tcx> fn(TyCtxt<'tcx>, LocalDefId) -> &'tcx Body<'tcx>;
 type MirForCtfeProvider = for<'tcx> fn(TyCtxt<'tcx>, LocalDefId) -> &'tcx Body<'tcx>;
+type MirDropsProvider =
+    for<'tcx> fn(TyCtxt<'tcx>, LocalDefId) -> &'tcx Steal<Body<'tcx>>;
 
 static ORIGINAL_OPTIMIZED_MIR: OnceLock<OptimizedMirProvider> = OnceLock::new();
 static ORIGINAL_MIR_FOR_CTFE: OnceLock<MirForCtfeProvider> = OnceLock::new();
+static ORIGINAL_MIR_DROPS: OnceLock<MirDropsProvider> = OnceLock::new();
 static CTFE_EVENTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 static DOCTEST_ROLE: OnceLock<&'static str> = OnceLock::new();
 
@@ -113,6 +117,7 @@ struct BranchAlternativeObligation {
 struct BranchObligation {
     identity: StableObligationIdentity,
     branch_kind: &'static str,
+    discriminator: String,
     alternatives: Vec<BranchAlternativeObligation>,
     definitions: Vec<String>,
 }
@@ -499,6 +504,12 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
     }
 
     fn point(&mut self, span: rustc_span::Span, point_kind: &'static str, discriminator: &str) {
+        if span.desugaring_kind().is_some() {
+            // Compiler lowering scaffolding is not authored executable source.
+            // The enclosing control construct records its explicit obligations
+            // from the source callsite instead.
+            return;
+        }
         let Some(identity) = self.identity(point_kind, span, discriminator) else {
             return;
         };
@@ -559,8 +570,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             ("if", true, false) => "if-let",
             ("if", true, true) => "let-chain",
             ("while", false, _) => "while",
-            ("while", true, false) => "while-let",
-            ("while", true, true) => "while-let-chain",
+            ("while", true, _) => "while-let",
             _ => self.tcx.dcx().fatal(format!(
                 "Supercov has no Rust decision kind for {control_kind} in {}",
                 self.definition
@@ -669,9 +679,15 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             }
         }
 
+        let decision_span = if control_kind == "while" {
+            expression.span.source_callsite()
+        } else {
+            expression.span
+        };
         self.record_branch(
-            expression.span,
-            decision_kind,
+            decision_span,
+            "decision-outcome",
+            &format!("decision-outcome:{decision_kind}"),
             &[("true", "condition true"), ("false", "condition false")],
         );
     }
@@ -680,18 +696,19 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
         &mut self,
         span: rustc_span::Span,
         branch_kind: &'static str,
+        discriminator: &str,
         alternatives: &[(&str, &'static str)],
     ) {
-        let Some(branch) = self.identity("branch", span, branch_kind) else {
+        let Some(branch) = self.identity("branch", span, discriminator) else {
             return;
         };
         let alternatives = alternatives
             .iter()
-            .filter_map(|(discriminator, label)| {
+            .filter_map(|(alternative, label)| {
                 self.identity(
                     "branch-alternative",
                     span,
-                    &format!("{branch_kind}:{discriminator}"),
+                    &format!("{discriminator}:{alternative}"),
                 )
                 .map(|identity| BranchAlternativeObligation { identity, label })
             })
@@ -707,7 +724,9 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 ))
             }
             Some(existing)
-                if existing.branch_kind != branch_kind || existing.alternatives != alternatives =>
+                if existing.branch_kind != branch_kind
+                    || existing.discriminator != discriminator
+                    || existing.alternatives != alternatives =>
             {
                 self.tcx.dcx().fatal(format!(
                     "Supercov Rust branch aggregation mismatch for {}",
@@ -725,6 +744,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     BranchObligation {
                         identity: branch,
                         branch_kind,
+                        discriminator: discriminator.into(),
                         alternatives,
                         definitions: vec![self.definition.clone()],
                     },
@@ -792,22 +812,34 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
     }
 
     fn visit_expr(&mut self, expression: &'tcx hir::Expr<'tcx>) {
-        if let hir::ExprKind::Loop(block, _, hir::LoopSource::While, _) = expression.kind {
-            if let Some(control) = block.expr
-                && matches!(control.kind, hir::ExprKind::If(_, _, _))
-            {
-                self.control_overrides
-                    .insert(control.hir_id.local_id.as_u32(), "while");
-                self.record_branch(
-                    expression.span,
-                    "while-invocation",
+        if let hir::ExprKind::Loop(block, _, source, _) = expression.kind {
+            match source {
+                hir::LoopSource::While => {
+                    if let Some(control) = block.expr
+                        && matches!(control.kind, hir::ExprKind::If(_, _, _))
+                    {
+                        self.control_overrides
+                            .insert(control.hir_id.local_id.as_u32(), "while");
+                        self.record_branch(
+                            expression.span.source_callsite(),
+                            "loop-entry",
+                            "loop-entry:while",
+                            &[("zero", "zero iterations"), ("entered", "entered")],
+                        );
+                    } else {
+                        self.limitations.insert(format!(
+                            "RUST_CONTROL_MAPPING_UNRESOLVED: {}: while control is not the expected expanded HIR shape",
+                            self.definition
+                        ));
+                    }
+                }
+                hir::LoopSource::ForLoop => self.record_branch(
+                    expression.span.source_callsite(),
+                    "loop-entry",
+                    "loop-entry:for",
                     &[("zero", "zero iterations"), ("entered", "entered")],
-                );
-            } else {
-                self.limitations.insert(format!(
-                    "RUST_CONTROL_MAPPING_UNRESOLVED: {}: while control is not the expected expanded HIR shape",
-                    self.definition
-                ));
+                ),
+                hir::LoopSource::Loop => {}
             }
         }
         if let hir::ExprKind::If(condition, _, _) = expression.kind {
@@ -864,9 +896,10 @@ fn manifest_json(
                 .collect::<Vec<_>>()
                 .join(",");
             format!(
-                "{{\"id\":\"{}\",\"kind\":\"{}\",\"sourceKey\":\"{}\",\"start\":{},\"end\":{},\"provenance\":\"{}\",\"probeOrdinal\":\"{}\",\"definitions\":{},\"alternatives\":[{}],\"canonical\":\"{}\"}}",
+                "{{\"id\":\"{}\",\"kind\":\"{}\",\"discriminator\":\"{}\",\"sourceKey\":\"{}\",\"start\":{},\"end\":{},\"provenance\":\"{}\",\"probeOrdinal\":\"{}\",\"definitions\":{},\"alternatives\":[{}],\"canonical\":\"{}\"}}",
                 escape(&branch.identity.id),
                 branch.branch_kind,
+                escape(&branch.discriminator),
                 escape(&branch.identity.source.key),
                 branch.identity.source.start,
                 branch.identity.source.end,
@@ -1028,7 +1061,7 @@ impl Callbacks for ProbeCallbacks {
         let mut branches = BTreeMap::<String, BranchObligation>::new();
         let mut decisions = BTreeMap::<String, DecisionObligation>::new();
         let mut manifest_limitations = BTreeSet::from([
-            "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: for-loop, match, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
+            "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: match, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
         ]);
 
         for owner in tcx.hir_body_owners() {
@@ -1038,8 +1071,8 @@ impl Callbacks for ProbeCallbacks {
             let kind = tcx.def_kind(def_id);
             let mir = if matches!(
                 kind,
-                DefKind::Const { .. }
-                    | DefKind::AssocConst { .. }
+                DefKind::Const
+                    | DefKind::AssocConst
                     | DefKind::Static { .. }
                     | DefKind::AnonConst
                     | DefKind::InlineConst
@@ -1240,8 +1273,71 @@ impl Callbacks for ProbeCallbacks {
 fn install_query_overrides(_session: &Session, providers: &mut Providers) {
     let _ = ORIGINAL_OPTIMIZED_MIR.set(providers.queries.optimized_mir);
     let _ = ORIGINAL_MIR_FOR_CTFE.set(providers.queries.mir_for_ctfe);
+    let _ = ORIGINAL_MIR_DROPS.set(providers.queries.mir_drops_elaborated_and_const_checked);
     providers.queries.optimized_mir = optimized_mir_with_probe;
     providers.queries.mir_for_ctfe = mir_for_ctfe_with_markers;
+    providers.queries.mir_drops_elaborated_and_const_checked = mir_drops_with_for_probes;
+}
+
+fn mir_drops_with_for_probes<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: LocalDefId,
+) -> &'tcx Steal<Body<'tcx>> {
+    let original = ORIGINAL_MIR_DROPS
+        .get()
+        .expect("original mir_drops_elaborated_and_const_checked provider");
+    let body = original(tcx, def_id);
+    if env::var_os(INSTRUMENT_MIR).is_none()
+        || tcx.hir_body_const_context(def_id).is_some()
+    {
+        return body;
+    }
+    let plans = {
+        let borrowed = body.borrow();
+        runtime_for_loop_plans(tcx, def_id, &borrowed)
+    }
+    .unwrap_or_else(|error| {
+        tcx.dcx().fatal(format!(
+            "Supercov could not bind pre-optimization Rust for-loop probes in {}: {error}",
+            tcx.def_path_str(def_id)
+        ))
+    });
+    if plans.is_empty() {
+        return body;
+    }
+    let Some(start) = find_runtime_function(tcx, START_BRANCH_FUNCTION) else {
+        tcx.dcx().fatal(format!(
+            "Supercov branch-start runtime is missing while instrumenting {}",
+            tcx.def_path_str(def_id)
+        ));
+    };
+    let Some(hit) = find_runtime_function(tcx, HIT_BRANCH_FUNCTION) else {
+        tcx.dcx().fatal(format!(
+            "Supercov branch-hit runtime is missing while instrumenting {}",
+            tcx.def_path_str(def_id)
+        ));
+    };
+    let mut instrumented = body.steal();
+    let span = tcx.def_span(def_id);
+    let unit = instrumented
+        .local_decls
+        .push(LocalDecl::new(tcx.types.unit, span));
+    let mut plans = plans;
+    if let Err(error) = instrument_runtime_for_loops(
+        tcx,
+        &mut instrumented,
+        &mut plans,
+        start,
+        hit,
+        unit,
+        span,
+    ) {
+        tcx.dcx().fatal(format!(
+            "Supercov could not inject pre-optimization Rust for-loop probes in {}: {error}",
+            tcx.def_path_str(def_id)
+        ));
+    }
+    tcx.alloc_steal_mir(instrumented)
 }
 
 fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tcx Body<'tcx> {
@@ -1368,18 +1464,22 @@ struct RuntimeDecisionPlan {
     loop_token: Option<rustc_middle::mir::Local>,
 }
 
-fn runtime_decision_plans<'tcx>(
-    tcx: TyCtxt<'tcx>,
+struct RuntimeBodyObligations {
+    definition: String,
+    crate_name: String,
+    branches: BTreeMap<String, BranchObligation>,
+    decisions: BTreeMap<String, DecisionObligation>,
+}
+
+fn runtime_body_obligations(
+    tcx: TyCtxt<'_>,
     def_id: LocalDefId,
-    body: &Body<'tcx>,
-) -> Result<Vec<RuntimeDecisionPlan>, String> {
+) -> Option<RuntimeBodyObligations> {
     let definition = tcx.def_path_str(def_id);
     if definition.contains("__supercov_spike_runtime") {
-        return Ok(Vec::new());
+        return None;
     }
-    let Some(hir_body) = tcx.hir_maybe_body_owned_by(def_id) else {
-        return Ok(Vec::new());
-    };
+    let hir_body = tcx.hir_maybe_body_owned_by(def_id)?;
     let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE).to_string();
     let mut points = BTreeMap::new();
     let mut branches = BTreeMap::new();
@@ -1399,6 +1499,28 @@ fn runtime_decision_plans<'tcx>(
         control_overrides: BTreeMap::new(),
     }
     .visit_body(hir_body);
+    Some(RuntimeBodyObligations {
+        definition,
+        crate_name,
+        branches,
+        decisions,
+    })
+}
+
+fn runtime_decision_plans<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: LocalDefId,
+    body: &Body<'tcx>,
+) -> Result<Vec<RuntimeDecisionPlan>, String> {
+    let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
+        return Ok(Vec::new());
+    };
+    let RuntimeBodyObligations {
+        definition,
+        crate_name,
+        branches,
+        decisions,
+    } = obligations;
     if decisions.is_empty() {
         return Ok(Vec::new());
     }
@@ -1591,7 +1713,8 @@ fn runtime_decision_plans<'tcx>(
             let candidates = branches
                 .values()
                 .filter(|branch| {
-                    branch.branch_kind == "while-invocation"
+                    branch.branch_kind == "loop-entry"
+                        && branch.discriminator == "loop-entry:while"
                         && branch.identity.source.key == decision.identity.source.key
                         && branch.identity.source.start <= decision.identity.source.start
                         && branch.identity.source.end >= decision.identity.source.end
@@ -1640,6 +1763,314 @@ fn runtime_decision_plans<'tcx>(
         });
     }
     Ok(plans)
+}
+
+#[derive(Debug)]
+struct RuntimeForLoopPlan {
+    id: String,
+    switch_block: BasicBlock,
+    zero_target: BasicBlock,
+    entered_target: BasicBlock,
+    token: Option<rustc_middle::mir::Local>,
+    zero_ordinal: u64,
+    entered_ordinal: u64,
+}
+
+fn option_switch_targets<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    block: BasicBlock,
+) -> Option<(BasicBlock, BasicBlock)> {
+    let TerminatorKind::SwitchInt { discr, targets } =
+        &body.basic_blocks[block].terminator().kind
+    else {
+        return None;
+    };
+    let discriminant_local = discr.place()?.as_local()?;
+    let enum_place = body.basic_blocks[block]
+        .statements
+        .iter()
+        .rev()
+        .find_map(|statement| {
+            let StatementKind::Assign(assignment) = &statement.kind else {
+                return None;
+            };
+            let (destination, value) = &**assignment;
+            if destination.as_local() != Some(discriminant_local) {
+                return None;
+            }
+            let Rvalue::Discriminant(place) = value else {
+                return None;
+            };
+            Some(*place)
+        })?;
+    let ty::Adt(definition, _) = enum_place.ty(&body.local_decls, tcx).ty.kind() else {
+        return None;
+    };
+    let none = tcx.lang_items().option_none_variant()?;
+    let some = tcx.lang_items().option_some_variant()?;
+    if tcx.parent(none) != definition.did() || tcx.parent(some) != definition.did() {
+        return None;
+    }
+    let none = definition
+        .discriminant_for_variant(tcx, definition.variant_index_with_id(none))
+        .val;
+    let some = definition
+        .discriminant_for_variant(tcx, definition.variant_index_with_id(some))
+        .val;
+    Some((
+        targets.target_for_value(none),
+        targets.target_for_value(some),
+    ))
+}
+
+fn runtime_for_loop_plans<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: LocalDefId,
+    body: &Body<'tcx>,
+) -> Result<Vec<RuntimeForLoopPlan>, String> {
+    let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
+        return Ok(Vec::new());
+    };
+    let for_branches = obligations
+        .branches
+        .values()
+        .filter(|branch| {
+            branch.branch_kind == "loop-entry"
+                && branch.discriminator == "loop-entry:for"
+                && branch.definitions.contains(&obligations.definition)
+        })
+        .collect::<Vec<_>>();
+    let mut plans = Vec::new();
+    for branch in &for_branches {
+        let zero_ordinal = branch
+            .alternatives
+            .iter()
+            .find(|alternative| alternative.label == "zero iterations")
+            .map(|alternative| alternative.identity.probe_ordinal)
+            .ok_or_else(|| format!("for branch {} has no zero alternative", branch.identity.id))?;
+        let entered_ordinal = branch
+            .alternatives
+            .iter()
+            .find(|alternative| alternative.label == "entered")
+            .map(|alternative| alternative.identity.probe_ordinal)
+            .ok_or_else(|| {
+                format!("for branch {} has no entered alternative", branch.identity.id)
+            })?;
+        let candidates = body
+            .basic_blocks
+            .iter_enumerated()
+            .filter_map(|(block, data)| {
+                let span = data.terminator().source_info.span;
+                if span.desugaring_kind() != Some(DesugaringKind::ForLoop) {
+                    return None;
+                }
+                let source = stable_source_range(
+                    tcx,
+                    span.source_callsite(),
+                    &obligations.crate_name,
+                )
+                .ok()?;
+                if source.key != branch.identity.source.key
+                    || source.start < branch.identity.source.start
+                    || source.end > branch.identity.source.end
+                {
+                    return None;
+                }
+                let owner = for_branches
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.identity.source.key == source.key
+                            && candidate.identity.source.start <= source.start
+                            && candidate.identity.source.end >= source.end
+                    })
+                    .min_by_key(|candidate| {
+                        candidate
+                            .identity
+                            .source
+                            .end
+                            .saturating_sub(candidate.identity.source.start)
+                    })?;
+                if owner.identity.id != branch.identity.id {
+                    return None;
+                }
+                option_switch_targets(tcx, body, block)
+                    .map(|(zero_target, entered_target)| (block, zero_target, entered_target))
+            })
+            .collect::<Vec<_>>();
+        let [(switch_block, zero_target, entered_target)] = candidates.as_slice() else {
+            return Err(format!(
+                "for branch {} maps to {} exact Option switches",
+                branch.identity.id,
+                candidates.len()
+            ));
+        };
+        plans.push(RuntimeForLoopPlan {
+            id: branch.identity.id.clone(),
+            switch_block: *switch_block,
+            zero_target: *zero_target,
+            entered_target: *entered_target,
+            token: None,
+            zero_ordinal,
+            entered_ordinal,
+        });
+    }
+    Ok(plans)
+}
+
+fn instrument_runtime_for_loops<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &mut Body<'tcx>,
+    plans: &mut [RuntimeForLoopPlan],
+    start: LocalDefId,
+    hit: LocalDefId,
+    unit: rustc_middle::mir::Local,
+    span: rustc_span::Span,
+) -> Result<(), String> {
+    for index in 0..plans.len() {
+        let dominators = body.basic_blocks.dominators().clone();
+        let mut header = dominators
+            .immediate_dominator(plans[index].switch_block)
+            .ok_or_else(|| format!("for branch {} has no loop header", plans[index].id))?;
+        while !matches!(body.basic_blocks[header].terminator().kind, TerminatorKind::Call { .. })
+        {
+            header = dominators.immediate_dominator(header).ok_or_else(|| {
+                format!("for branch {} has no iterator-next call", plans[index].id)
+            })?;
+        }
+        let TerminatorKind::Call {
+            destination,
+            target: Some(target),
+            ..
+        } = body.basic_blocks[header].terminator().kind
+        else {
+            return Err(format!(
+                "for branch {} iterator header is not a returning call",
+                plans[index].id
+            ));
+        };
+        let ty::Adt(option, _) = destination.ty(&body.local_decls, tcx).ty.kind() else {
+            return Err(format!(
+                "for branch {} iterator call does not return Option",
+                plans[index].id
+            ));
+        };
+        let some = tcx
+            .lang_items()
+            .option_some_variant()
+            .ok_or_else(|| "rustc has no Option::Some lang item".to_owned())?;
+        if tcx.parent(some) != option.did() || !dominators.dominates(target, plans[index].switch_block)
+        {
+            return Err(format!(
+                "for branch {} iterator call does not lead to its Option switch",
+                plans[index].id
+            ));
+        }
+        let cleanup = body.basic_blocks[header].is_cleanup;
+        let original = std::mem::replace(
+            &mut body.basic_blocks_mut()[header],
+            BasicBlockData::new(None, cleanup),
+        );
+        let iteration_block = body.basic_blocks_mut().push(original);
+        for plan in plans.iter_mut() {
+            if plan.switch_block == header {
+                plan.switch_block = iteration_block;
+            }
+            if plan.zero_target == header {
+                plan.zero_target = iteration_block;
+            }
+            if plan.entered_target == header {
+                plan.entered_target = iteration_block;
+            }
+        }
+        for (predecessor, _) in body
+            .basic_blocks
+            .predecessors()[header]
+            .iter()
+            .copied()
+            .map(|predecessor| (predecessor, dominators.dominates(header, predecessor)))
+            .filter(|(_, backedge)| *backedge)
+            .collect::<Vec<_>>()
+        {
+            let predecessor = if predecessor == header {
+                iteration_block
+            } else {
+                predecessor
+            };
+            let mut replaced = 0;
+            body.basic_blocks_mut()[predecessor]
+                .terminator_mut()
+                .successors_mut(|target| {
+                    if *target == header {
+                        *target = iteration_block;
+                        replaced += 1;
+                    }
+                });
+            if replaced == 0 {
+                return Err(format!(
+                    "for branch {} lost back edge from {:?}",
+                    plans[index].id, predecessor
+                ));
+            }
+        }
+        let token = body.local_decls.push(LocalDecl::new(tcx.types.u64, span));
+        body.basic_blocks_mut()[header] = runtime_call_block(
+            tcx,
+            start,
+            std::iter::empty(),
+            Place::from(token),
+            iteration_block,
+            span,
+            cleanup,
+        );
+        plans[index].token = Some(token);
+    }
+
+    for plan in plans {
+        let token = plan
+            .token
+            .ok_or_else(|| format!("for branch {} has no frame token", plan.id))?;
+        for (target, ordinal) in [
+            (plan.zero_target, plan.zero_ordinal),
+            (plan.entered_target, plan.entered_ordinal),
+        ] {
+            let cleanup = body.basic_blocks[plan.switch_block].is_cleanup;
+            let bridge = body.basic_blocks_mut().push(runtime_call_block(
+                tcx,
+                hit,
+                [
+                    Operand::Copy(Place::from(token)),
+                    Operand::const_from_scalar(
+                        tcx,
+                        tcx.types.u64,
+                        Scalar::from_u64(ordinal),
+                        span,
+                    ),
+                ]
+                .into_iter(),
+                Place::from(unit),
+                target,
+                span,
+                cleanup,
+            ));
+            let mut replaced = 0;
+            body.basic_blocks_mut()[plan.switch_block]
+                .terminator_mut()
+                .successors_mut(|edge| {
+                    if *edge == target {
+                        *edge = bridge;
+                        replaced += 1;
+                    }
+                });
+            if replaced != 1 {
+                return Err(format!(
+                    "for branch {} target {:?} replacement count was {replaced}",
+                    plan.id, target
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn instrument_runtime_loop_frames<'tcx>(
@@ -1776,11 +2207,7 @@ fn instrument_runtime_decisions<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &mut Body<'tcx>,
     plans: &[RuntimeDecisionPlan],
-    start: LocalDefId,
-    condition: LocalDefId,
-    finish: LocalDefId,
-    branch_hit: Option<LocalDefId>,
-    unit: rustc_middle::mir::Local,
+    runtime: DecisionRuntime,
     span: rustc_span::Span,
 ) -> Result<(), String> {
     let mut starts = BTreeSet::new();
@@ -1817,7 +2244,7 @@ fn instrument_runtime_decisions<'tcx>(
                         if let (Some(token), Some((zero, entered))) =
                             (plan.loop_token, plan.loop_alternatives)
                         {
-                            let Some(branch_hit) = branch_hit else {
+                            let Some(branch_hit) = runtime.branch_hit else {
                                 return Err(format!(
                                     "loop decision {} has no branch-hit runtime",
                                     plan.id
@@ -1836,7 +2263,7 @@ fn instrument_runtime_decisions<'tcx>(
                                     ),
                                 ]
                                 .into_iter(),
-                                Place::from(unit),
+                                Place::from(runtime.unit),
                                 continuation,
                                 span,
                                 cleanup,
@@ -1844,7 +2271,7 @@ fn instrument_runtime_decisions<'tcx>(
                         }
                         continuation = body.basic_blocks_mut().push(runtime_call_block(
                             tcx,
-                            finish,
+                            runtime.finish,
                             [
                                 Operand::Copy(Place::from(token)),
                                 Operand::const_from_scalar(
@@ -1855,7 +2282,7 @@ fn instrument_runtime_decisions<'tcx>(
                                 ),
                             ]
                             .into_iter(),
-                            Place::from(unit),
+                            Place::from(runtime.unit),
                             continuation,
                             span,
                             cleanup,
@@ -1863,7 +2290,7 @@ fn instrument_runtime_decisions<'tcx>(
                     }
                     let bridge = body.basic_blocks_mut().push(runtime_call_block(
                         tcx,
-                        condition,
+                        runtime.condition,
                         [
                             Operand::Copy(Place::from(token)),
                             Operand::const_from_scalar(
@@ -1880,7 +2307,7 @@ fn instrument_runtime_decisions<'tcx>(
                             ),
                         ]
                         .into_iter(),
-                        Place::from(unit),
+                        Place::from(runtime.unit),
                         continuation,
                         span,
                         cleanup,
@@ -1915,7 +2342,7 @@ fn instrument_runtime_decisions<'tcx>(
             .push(BasicBlockData::new(Some(original), cleanup));
         let call = runtime_call_block(
             tcx,
-            start,
+            runtime.start,
             [
                 Operand::const_from_scalar(
                     tcx,
@@ -1940,6 +2367,15 @@ fn instrument_runtime_decisions<'tcx>(
         body.basic_blocks_mut()[source].terminator = call.terminator;
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct DecisionRuntime {
+    start: LocalDefId,
+    condition: LocalDefId,
+    finish: LocalDefId,
+    branch_hit: Option<LocalDefId>,
+    unit: rustc_middle::mir::Local,
 }
 
 fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tcx Body<'tcx> {
@@ -2020,11 +2456,13 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
             tcx,
             &mut instrumented,
             &decision_plans,
-            start,
-            condition,
-            finish,
-            hit_branch,
-            unit,
+            DecisionRuntime {
+                start,
+                condition,
+                finish,
+                branch_hit: hit_branch,
+                unit,
+            },
             span,
         )
     {
