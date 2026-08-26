@@ -33,6 +33,9 @@ probe_macros::generated_nested_scrutinee_match_function!();
 probe_macros::generated_nested_guard_match_function!();
 probe_macros::generated_let_else_function!();
 probe_macros::generated_two_let_else_function!();
+probe_macros::generated_try_function!();
+probe_macros::generated_two_try_function!();
+probe_macros::generated_nested_try_function!();
 
 pub mod repeated_expansions {
     generated_function!();
@@ -70,6 +73,34 @@ pub fn two_let_else(first: Option<usize>, second: Option<usize>) -> usize {
         return first;
     };
     first + second
+}
+
+pub fn try_result(value: Result<usize, &'static str>) -> Result<usize, &'static str> {
+    Ok(value? + 1)
+}
+
+pub fn try_option(value: Option<usize>) -> Option<usize> {
+    Some(value? + 1)
+}
+
+pub fn two_try_results(
+    first: Result<usize, &'static str>,
+    second: Result<usize, &'static str>,
+) -> Result<usize, &'static str> {
+    Ok(first? + second?)
+}
+
+pub fn nested_try_result(
+    value: Result<Result<usize, &'static str>, &'static str>,
+) -> Result<usize, &'static str> {
+    Ok(value?? + 1)
+}
+
+pub fn panic_before_try() -> Result<usize, &'static str> {
+    fn operand() -> Result<usize, &'static str> {
+        panic!("try operand")
+    }
+    Ok(operand()? + 1)
 }
 
 /// A non-mergeable doctest with a hidden setup line.

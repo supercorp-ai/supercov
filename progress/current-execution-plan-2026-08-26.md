@@ -206,7 +206,7 @@ invocation as the condition. The exploratory 0/1/2/3 function ordinals are
 gone: runtime MIR hits now carry the u64 prefix of the exact manifest point ID,
 and the compiler rejects both full-ID and probe-prefix collisions. The
 candidate still carries blocking denominator limitations. The authored match
-   slice below has since narrowed that surface, but `?`, assertion,
+   slices below have since narrowed that surface, but assertion,
    CTFE and doctest obligation/probe mappings,
 plus full package and compiler fingerprints, remain R1 work. No measurement-
 complete claim is possible yet.
@@ -305,6 +305,18 @@ to survive borrow checking exactly once, removes them, and installs the same
 first-commit runtime frame. Simple and nested patterns, two sequential authored
 statements, and two sequential synthetic statements sharing one collapsed
 callsite all preserve baseline behavior and exact per-invocation counts.
+
+The `?` operator now has an independently owned compiler-backed branch path as
+well. Expanded HIR freezes `continued` and `early return` alternatives, while
+built MIR identifies the actual `Try::branch` call and its typed
+`ControlFlow::Continue`/`Break` switch. Private endpoint markers survive borrow
+checking exactly once, are rebound after enclosing structural edits, and are
+removed before the first-commit runtime frame is installed. The frame begins
+only after operand evaluation and `Try::branch` return, so a panicking operand
+records neither alternative and does not create a false incomplete frame.
+Exact behavior/evidence goldens cover `Result`, `Option`, sequential operators,
+nested `value??`, and sequential/nested proc-macro operators whose source spans
+all collapse to one invocation.
 
 The CTFE provider spike is now executable rather than hypothetical. The
 companion overrides `mir_for_ctfe`, inserts execution markers in original

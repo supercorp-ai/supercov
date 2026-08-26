@@ -357,7 +357,7 @@ try {
   assert.equal(identityManifestA.model, 'rust-source-v1');
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
-    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
+    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
   ]);
   const allIds = [
     ...identityManifestA.points.map(({id}) => id),
@@ -379,7 +379,7 @@ try {
   );
   assert(
     identityManifestA.branches.every(({kind}) =>
-      ['decision-outcome', 'loop-entry', 'match-arm', 'let-else'].includes(kind),
+      ['decision-outcome', 'loop-entry', 'match-arm', 'let-else', 'try-operator'].includes(kind),
     ),
     'compiler manifest emitted a branch kind outside the frozen Rust contract',
   );
@@ -580,6 +580,29 @@ try {
   assert.match(baselineBehavior.stdout, /let-else-two=\[5, 0, 2\]/);
   assert.match(baselineBehavior.stdout, /let-else-generated-proc=\[8, 0\]/);
   assert.match(baselineBehavior.stdout, /let-else-generated-two-proc=\[5, 0, 2\]/);
+  assert.match(baselineBehavior.stdout, /try-result=\[Ok\(8\), Err\("no"\)\]/);
+  assert.match(baselineBehavior.stdout, /try-option=\[Some\(8\), None\]/);
+  assert.match(
+    baselineBehavior.stdout,
+    /try-two=\[Ok\(5\), Err\("first"\), Err\("second"\)\]/,
+  );
+  assert.match(
+    baselineBehavior.stdout,
+    /try-generated-proc=\[Ok\(9\), Err\("no"\)\]/,
+  );
+  assert.match(
+    baselineBehavior.stdout,
+    /try-generated-two-proc=\[Ok\(5\), Err\("first"\), Err\("second"\)\]/,
+  );
+  assert.match(
+    baselineBehavior.stdout,
+    /try-nested=\[Ok\(8\), Err\("inner"\), Err\("outer"\)\]/,
+  );
+  assert.match(
+    baselineBehavior.stdout,
+    /try-generated-nested-proc=\[Ok\(8\), Err\("inner"\), Err\("outer"\)\]/,
+  );
+  assert.match(baselineBehavior.stdout, /try-panic=true/);
   assert.match(baselineBehavior.stdout, /match-unreachable=\[1, 2\]/);
   assert.match(baselineBehavior.stdout, /match-generated=\[23, 29\]/);
   assert.match(baselineBehavior.stdout, /match-generated-proc=\[31, 37\]/);
@@ -686,6 +709,64 @@ try {
     generatedLetElse.fallback,
     ...generatedTwoLetElse.flatMap(({matched, fallback}) => [matched, fallback]),
   ];
+  const tryOrdinals = (branch) => ({
+    continued: branch.alternatives.find(({label}) => label === 'continued')
+      ?.probeOrdinal,
+    returned: branch.alternatives.find(({label}) => label === 'early return')
+      ?.probeOrdinal,
+  });
+  const tryResult = tryOrdinals(
+    branchFor(runtimeManifest, 'try_result', 'try-operator'),
+  );
+  const tryOption = tryOrdinals(
+    branchFor(runtimeManifest, 'try_option', 'try-operator'),
+  );
+  const twoTry = branchesFor(runtimeManifest, 'two_try_results', 'try-operator')
+    .sort((left, right) => left.start - right.start)
+    .map(tryOrdinals);
+  assert.equal(twoTry.length, 2, 'expected two sequential authored try operators');
+  const generatedTry = tryOrdinals(
+    branchFor(runtimeManifest, 'generated_try_by_proc', 'try-operator'),
+  );
+  const generatedTwoTry = branchesFor(
+    runtimeManifest,
+    'generated_two_try_by_proc',
+    'try-operator',
+  ).map(tryOrdinals);
+  assert.equal(
+    generatedTwoTry.length,
+    2,
+    'expected two sequential synthetic try operators',
+  );
+  const panicTry = tryOrdinals(
+    branchFor(runtimeManifest, 'panic_before_try', 'try-operator'),
+  );
+  const nestedTry = branchesFor(runtimeManifest, 'nested_try_result', 'try-operator')
+    .sort((left, right) => left.start - right.start)
+    .map(tryOrdinals);
+  assert.equal(nestedTry.length, 2, 'expected two nested authored try operators');
+  const generatedNestedTry = branchesFor(
+    runtimeManifest,
+    'generated_nested_try_by_proc',
+    'try-operator',
+  ).map(tryOrdinals);
+  assert.equal(
+    generatedNestedTry.length,
+    2,
+    'expected two nested synthetic try operators',
+  );
+  const committedTryOrdinals = [
+    tryResult.continued,
+    tryResult.returned,
+    tryOption.continued,
+    tryOption.returned,
+    ...twoTry.flatMap(({continued, returned}) => [continued, returned]),
+    generatedTry.continued,
+    generatedTry.returned,
+    ...generatedTwoTry.flatMap(({continued, returned}) => [continued, returned]),
+    ...nestedTry.flatMap(({continued, returned}) => [continued, returned]),
+    ...generatedNestedTry.flatMap(({continued, returned}) => [continued, returned]),
+  ];
   const matchValueGroups = matchGroupsFor(runtimeManifest, 'match_value');
   const matchIdenticalGroups = matchGroupsFor(runtimeManifest, 'match_identical');
   const matchEmptyGroups = matchGroupsFor(runtimeManifest, 'match_empty');
@@ -779,6 +860,7 @@ try {
       letElseMatched,
       letElseFallback,
       ...additionalLetElseOrdinals,
+      ...committedTryOrdinals,
       ...matchSelectedOrdinals,
     ].every(Boolean),
     'runtime probe is not bound to its manifest obligation',
@@ -806,6 +888,7 @@ try {
       letElseMatched,
       letElseFallback,
       ...additionalLetElseOrdinals,
+      ...committedTryOrdinals,
       ...matchSelectedOrdinals,
     ]),
   );
@@ -852,6 +935,71 @@ try {
       .sort(),
     [1, 1],
     'sequential synthetic let-else fallback alternatives lost semantic order/counts',
+  );
+  for (const [ordinal, count] of [
+    [tryResult.continued, 1],
+    [tryResult.returned, 1],
+    [tryOption.continued, 1],
+    [tryOption.returned, 1],
+    [twoTry[0].continued, 2],
+    [twoTry[0].returned, 1],
+    [twoTry[1].continued, 1],
+    [twoTry[1].returned, 1],
+    [generatedTry.continued, 1],
+    [generatedTry.returned, 1],
+    [nestedTry[0].continued, 2],
+    [nestedTry[0].returned, 1],
+    [nestedTry[1].continued, 1],
+    [nestedTry[1].returned, 1],
+  ]) {
+    assert.equal(
+      behaviorEvidence.ordinals.filter((hit) => hit.ordinal === ordinal).length,
+      count,
+      `try-operator alternative ${ordinal} did not retain exact invocation count`,
+    );
+  }
+  assert.deepEqual(
+    generatedTwoTry
+      .map(({continued}) =>
+        behaviorEvidence.ordinals.filter((hit) => hit.ordinal === continued).length,
+      )
+      .sort(),
+    [1, 2],
+    'sequential synthetic try continuations lost semantic order/counts',
+  );
+  assert.deepEqual(
+    generatedTwoTry
+      .map(({returned}) =>
+        behaviorEvidence.ordinals.filter((hit) => hit.ordinal === returned).length,
+      )
+      .sort(),
+    [1, 1],
+    'sequential synthetic try residuals lost semantic order/counts',
+  );
+  assert.deepEqual(
+    generatedNestedTry
+      .map(({continued}) =>
+        behaviorEvidence.ordinals.filter((hit) => hit.ordinal === continued).length,
+      )
+      .sort(),
+    [1, 2],
+    'nested synthetic try continuations lost semantic order/counts',
+  );
+  assert.deepEqual(
+    generatedNestedTry
+      .map(({returned}) =>
+        behaviorEvidence.ordinals.filter((hit) => hit.ordinal === returned).length,
+      )
+      .sort(),
+    [1, 1],
+    'nested synthetic try residuals lost semantic order/counts',
+  );
+  assert.equal(
+    behaviorEvidence.ordinals.some(({ordinal}) =>
+      [panicTry.continued, panicTry.returned].includes(ordinal),
+    ),
+    false,
+    'a panic while evaluating the try operand must not commit either alternative',
   );
   assert.equal(
     behaviorEvidence.ordinals.filter(({ordinal}) => ordinal === whileZero).length,
@@ -1469,7 +1617,7 @@ try {
   );
 
   console.log(
-    '[rustc-backend-spike] expanded-HIR obligations keep deterministic identities; compiler mappings become exact Supercov nested/short-circuit/pattern/while/match-guard ternary vectors and pre-optimization for-loop/match first-commit branches with libtest contexts, while MIR/CTFE/rustdoc interception preserves behavior and source',
+    '[rustc-backend-spike] expanded-HIR obligations keep deterministic identities; compiler mappings become exact Supercov nested/short-circuit/pattern/while/match-guard vectors and pre-optimization for-loop/match/let-else/try first-commit branches with libtest contexts, while MIR/CTFE/rustdoc interception preserves behavior and source',
   );
 } finally {
   rmSync(scratch, {recursive: true, force: true});

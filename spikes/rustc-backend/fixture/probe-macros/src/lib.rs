@@ -56,6 +56,27 @@ pub fn generated_two_let_else_function(_input: TokenStream) -> TokenStream {
         .expect("valid generated sequential Rust let-else")
 }
 
+#[proc_macro]
+pub fn generated_try_function(_input: TokenStream) -> TokenStream {
+    "pub fn generated_try_by_proc(value: Result<usize, &'static str>) -> Result<usize, &'static str> { Ok(value? + 1) }"
+        .parse()
+        .expect("valid generated Rust try operator")
+}
+
+#[proc_macro]
+pub fn generated_two_try_function(_input: TokenStream) -> TokenStream {
+    "pub fn generated_two_try_by_proc(first: Result<usize, &'static str>, second: Result<usize, &'static str>) -> Result<usize, &'static str> { Ok(first? + second?) }"
+        .parse()
+        .expect("valid generated sequential Rust try operators")
+}
+
+#[proc_macro]
+pub fn generated_nested_try_function(_input: TokenStream) -> TokenStream {
+    "pub fn generated_nested_try_by_proc(value: Result<Result<usize, &'static str>, &'static str>) -> Result<usize, &'static str> { Ok(value?? + 1) }"
+        .parse()
+        .expect("valid generated nested Rust try operators")
+}
+
 #[proc_macro_attribute]
 pub fn generated_test(_attribute: TokenStream, item: TokenStream) -> TokenStream {
     let mut output: TokenStream = "#[test]".parse().expect("valid test attribute");

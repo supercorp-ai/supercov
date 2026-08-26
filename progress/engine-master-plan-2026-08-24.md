@@ -1313,7 +1313,7 @@ miss blocks flipping any default.
   directories emit byte-identical candidates without ephemeral paths. The
   selected function MIR probes now emit manifest-derived ordinals. The manifest
   remains deliberately incomplete until the same identity and real probes
-  cover `?`, assertions, CTFE and doctest obligations.
+  cover assertions, CTFE and doctest obligations.
 - The next private slice translates rustc's authored branch regions into
   Supercov-owned MIR decision frames rather than importing a rustc/LLVM
   profile. Exact goldens now cover all exercised ternary shapes for `&&`, `||`,
@@ -1338,7 +1338,7 @@ miss blocks flipping any default.
   starts once at the natural loop entry and is bypassed by backedges, preserving
   the start context across migration and leaving killed writers explicitly
   incomplete. Exact fixtures prove multi-iteration behavior without duplicate
-  or relabeled invocation evidence. Match, `?`, assertions,
+  or relabeled invocation evidence. Match and `?` are now closed below; assertions,
   CTFE and doctest completeness remain private release blockers.
 - Authored `for` loops now close the same frozen `loop-entry` zero/entered
   obligation without inventing an MC/DC decision. A documented post-borrow-
@@ -1376,6 +1376,15 @@ miss blocks flipping any default.
   markers that must survive borrow checking exactly once and are removed before
   runtime calls. Simple/nested patterns and multiple sequential authored and
   synthetic statements preserve behavior and exact invocation counts.
+- `?` now has a frozen `continued`/`early return` denominator and an exact
+  owned first-commit path. Expanded HIR supplies stable obligations; the built-
+  MIR bridge binds the actual typed `Try::branch` call and
+  `ControlFlow::Continue`/`Break` switch, carries semantic endpoint markers
+  across borrow checking exactly once, removes them, and only then installs
+  runtime calls. `Result`, `Option`, sequential and nested authored operators,
+  collapsed sequential/nested proc-macro operators and an operand panic have
+  exact behavior/evidence goldens. Operand evaluation precedes frame start, so
+  its panic creates neither a false alternative nor a false incomplete frame.
 
 ## Non-goals and guardrails
 

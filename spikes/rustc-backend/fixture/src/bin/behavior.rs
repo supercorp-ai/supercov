@@ -6,12 +6,14 @@ use supercov_rustc_spike_fixture::{
     generated_by_build_script, generated_by_proc, generated_by_rules, generated_guarded_match_by_proc,
     generated_let_else_by_proc, generated_match, generated_match_by_proc, generated_nested_guard_match_by_proc,
     generated_nested_match_by_proc, generated_nested_scrutinee_match_by_proc,
-    generated_two_let_else_by_proc, interrupted_decision,
+    generated_nested_try_by_proc, generated_try_by_proc, generated_two_let_else_by_proc,
+    generated_two_try_by_proc,
+    interrupted_decision,
     interrupted_for, interrupted_match, match_empty, match_identical, match_irrefutable,
     let_else_value, match_unreachable, match_value, mixed, nested, nested_expression, nested_for_values,
     nested_let_else,
-    nested_match, panic_path, pattern, repeated_expansions, two_for_values, while_compound,
-    two_let_else, while_let_chain,
+    nested_match, nested_try_result, panic_before_try, panic_path, pattern, repeated_expansions, try_option,
+    try_result, two_for_values, two_let_else, two_try_results, while_compound, while_let_chain,
 };
 
 fn main() {
@@ -216,6 +218,52 @@ fn main() {
             generated_two_let_else_by_proc(Some(Ok(2)), None),
         ]
     );
+    println!(
+        "try-result={:?}",
+        [try_result(Ok(7)), try_result(Err("no"))]
+    );
+    println!("try-option={:?}", [try_option(Some(7)), try_option(None)]);
+    println!(
+        "try-two={:?}",
+        [
+            two_try_results(Ok(2), Ok(3)),
+            two_try_results(Err("first"), Ok(3)),
+            two_try_results(Ok(2), Err("second")),
+        ]
+    );
+    println!(
+        "try-generated-proc={:?}",
+        [generated_try_by_proc(Ok(8)), generated_try_by_proc(Err("no"))]
+    );
+    println!(
+        "try-generated-two-proc={:?}",
+        [
+            generated_two_try_by_proc(Ok(2), Ok(3)),
+            generated_two_try_by_proc(Err("first"), Ok(3)),
+            generated_two_try_by_proc(Ok(2), Err("second")),
+        ]
+    );
+    println!(
+        "try-nested={:?}",
+        [
+            nested_try_result(Ok(Ok(7))),
+            nested_try_result(Ok(Err("inner"))),
+            nested_try_result(Err("outer")),
+        ]
+    );
+    println!(
+        "try-generated-nested-proc={:?}",
+        [
+            generated_nested_try_by_proc(Ok(Ok(7))),
+            generated_nested_try_by_proc(Ok(Err("inner"))),
+            generated_nested_try_by_proc(Err("outer")),
+        ]
+    );
+    let previous_hook = panic::take_hook();
+    panic::set_hook(Box::new(|_| {}));
+    let try_panic = panic::catch_unwind(panic_before_try);
+    panic::set_hook(previous_hook);
+    println!("try-panic={}", try_panic.is_err());
     println!(
         "match-nested={:?}",
         [

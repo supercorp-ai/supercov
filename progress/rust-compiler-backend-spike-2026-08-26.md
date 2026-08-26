@@ -146,7 +146,7 @@ The spike proved:
     multiple iterations, two/one zero/entered compound-`while` invocations and
     three/one zero/entered `while let` invocations. Cross-thread completion and
     killed unfinished branch frames retain exact start context and explicit
-    incomplete health. `?`, assertions, executable statements, CTFE and
+    incomplete health. Assertions, executable statements, CTFE and
     doctest integration remain denominator gates.
 19. Authored `for` loops now emit the frozen `loop-entry` zero/entered branch
     without a fictitious Boolean decision. The companion overrides rustc's
@@ -195,6 +195,15 @@ The spike proved:
     authored statements, and sequential synthetic statements sharing one
     collapsed callsite, with byte-identical baseline behavior and exact
     alternative counts.
+22. `?` now emits the frozen `continued`/`early return` alternatives from
+    expanded HIR and measures them through Supercov-owned pre-optimization MIR
+    frames. The built-MIR bridge recognizes the exact typed `Try::branch`
+    destination and `ControlFlow::Continue`/`Break` switch rather than guessing
+    from source text or importing LLVM counts. Its markers survive borrow
+    checking exactly once and are removed before runtime calls. The frame starts
+    after operand evaluation, so an operand panic commits neither alternative.
+    Exact `Result`, `Option`, sequential, nested and collapsed proc-macro cases
+    preserve baseline output and per-invocation counts.
 
 The companion executable is about 600 KiB on arm64 macOS and dynamically uses
 the exact `librustc_driver` already shipped by the user's `rustc` component.
@@ -266,8 +275,7 @@ an unverified rustc commit.
 
 ## Next implementation gates
 
-1. Extend the proven expanded-HIR control slice to `?`,
-   assertions and remaining executable statement
+1. Extend the proven expanded-HIR control slice to assertions and remaining executable statement
    semantics; bind their real MIR/CTFE probes to the same manifest IDs. Add
    derive, external expansion, generic/trait, include/module and
    package-fingerprint corpora before treating the candidate as a complete

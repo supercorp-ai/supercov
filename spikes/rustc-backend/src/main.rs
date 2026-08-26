@@ -89,7 +89,10 @@ static CTFE_EVENTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 static MATCH_ARM_MARKERS: Mutex<BTreeMap<String, BTreeMap<u32, u64>>> = Mutex::new(BTreeMap::new());
 static MATCH_GUARD_MARKERS: Mutex<BTreeMap<String, Vec<MatchGuardConditionMarker>>> =
     Mutex::new(BTreeMap::new());
-static LET_ELSE_MARKERS: Mutex<BTreeMap<String, Vec<LetElseMarker>>> = Mutex::new(BTreeMap::new());
+static LET_ELSE_MARKERS: Mutex<BTreeMap<String, Vec<StructuralBranchMarker>>> =
+    Mutex::new(BTreeMap::new());
+static TRY_OPERATOR_MARKERS: Mutex<BTreeMap<String, Vec<StructuralBranchMarker>>> =
+    Mutex::new(BTreeMap::new());
 static UNREACHABLE_MATCH_ARMS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static DOCTEST_ROLE: OnceLock<&'static str> = OnceLock::new();
 
@@ -173,7 +176,7 @@ struct MatchGuardConditionMarker {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct LetElseMarker {
+struct StructuralBranchMarker {
     local: u32,
     branch_id: String,
     alternative_ordinal: u64,
@@ -1017,6 +1020,20 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
     }
 
     fn visit_expr(&mut self, expression: &'tcx hir::Expr<'tcx>) {
+        if let hir::ExprKind::Match(scrutinee, _, hir::MatchSource::TryDesugar(_)) = expression.kind
+        {
+            // The operand is evaluated before the `?` selection begins. Visit
+            // it first so collapsed macro expansions retain semantic order for
+            // nested operators as well as sequential ones.
+            self.visit_expr(scrutinee);
+            let _ = self.record_branch(
+                expression.span,
+                "try-operator",
+                "try-operator",
+                &[("continued", "continued"), ("returned", "early return")],
+            );
+            return;
+        }
         if let hir::ExprKind::Loop(block, _, source, _) = expression.kind {
             match source {
                 hir::LoopSource::While => {
@@ -1337,7 +1354,7 @@ impl Callbacks for ProbeCallbacks {
         let mut decisions = BTreeMap::<String, DecisionObligation>::new();
         let mut match_groups = BTreeMap::<String, MatchSelectionObligation>::new();
         let mut manifest_limitations = BTreeSet::from([
-            "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
+            "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: assertion, CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
         ]);
 
         for owner in tcx.hir_body_owners() {
@@ -1910,6 +1927,204 @@ struct SyntheticLetElsePath {
     fallback: BasicBlock,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct TryOperatorPath {
+    start: BasicBlock,
+    continued: BasicBlock,
+    returned: BasicBlock,
+}
+
+fn control_flow_switch_targets<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    block: BasicBlock,
+) -> Option<(BasicBlock, BasicBlock)> {
+    let TerminatorKind::SwitchInt { discr, targets } = &body.basic_blocks[block].terminator().kind
+    else {
+        return None;
+    };
+    let discriminant_local = discr.place()?.as_local()?;
+    let enum_place = body.basic_blocks[block]
+        .statements
+        .iter()
+        .rev()
+        .find_map(|statement| {
+            let StatementKind::Assign(assignment) = &statement.kind else {
+                return None;
+            };
+            let (destination, value) = &**assignment;
+            if destination.as_local() != Some(discriminant_local) {
+                return None;
+            }
+            let Rvalue::Discriminant(place) = value else {
+                return None;
+            };
+            Some(*place)
+        })?;
+    let ty::Adt(definition, _) = enum_place.ty(&body.local_decls, tcx).ty.kind() else {
+        return None;
+    };
+    let continued = tcx.lang_items().cf_continue_variant()?;
+    let returned = tcx.lang_items().cf_break_variant()?;
+    if tcx.parent(continued) != definition.did() || tcx.parent(returned) != definition.did() {
+        return None;
+    }
+    let continued = definition
+        .discriminant_for_variant(tcx, definition.variant_index_with_id(continued))
+        .val;
+    let returned = definition
+        .discriminant_for_variant(tcx, definition.variant_index_with_id(returned))
+        .val;
+    Some((
+        targets.target_for_value(continued),
+        targets.target_for_value(returned),
+    ))
+}
+
+fn try_operator_assignments<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    crate_name: &str,
+    body: &Body<'tcx>,
+    branches: &[&BranchObligation],
+) -> Result<BTreeMap<String, TryOperatorPath>, String> {
+    let mut branches_by_source = BTreeMap::<(String, u32, u32), Vec<&BranchObligation>>::new();
+    for branch in branches {
+        branches_by_source
+            .entry((
+                branch.identity.source.key.clone(),
+                branch.identity.source.start,
+                branch.identity.source.end,
+            ))
+            .or_default()
+            .push(branch);
+    }
+    let candidates = body
+        .basic_blocks
+        .iter_enumerated()
+        .filter_map(|(_, data)| {
+            let terminator = data.terminator();
+            if terminator.source_info.span.desugaring_kind() != Some(DesugaringKind::QuestionMark) {
+                return None;
+            }
+            let TerminatorKind::Call {
+                destination,
+                target: Some(target),
+                ..
+            } = terminator.kind
+            else {
+                return None;
+            };
+            let ty::Adt(definition, _) = destination.ty(&body.local_decls, tcx).ty.kind() else {
+                return None;
+            };
+            let continued = tcx.lang_items().cf_continue_variant()?;
+            let returned = tcx.lang_items().cf_break_variant()?;
+            if tcx.parent(continued) != definition.did() || tcx.parent(returned) != definition.did()
+            {
+                return None;
+            }
+            let (continued, returned) = control_flow_switch_targets(tcx, body, target)?;
+            let source = stable_source_range(
+                tcx,
+                terminator.source_info.span.source_callsite(),
+                crate_name,
+            )
+            .ok()?;
+            Some((
+                source,
+                TryOperatorPath {
+                    start: target,
+                    continued,
+                    returned,
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    let mut paths_by_source = BTreeMap::<(String, u32, u32), Vec<TryOperatorPath>>::new();
+    for (source, path) in candidates {
+        let owners = branches_by_source
+            .iter()
+            .filter(|((key, start, end), _)| {
+                key == &source.key && *start <= source.start && *end >= source.end
+            })
+            .collect::<Vec<_>>();
+        let Some(minimum_width) = owners
+            .iter()
+            .map(|((_, start, end), _)| end.saturating_sub(*start))
+            .min()
+        else {
+            continue;
+        };
+        let exact_owners = owners
+            .into_iter()
+            .filter(|((_, start, end), _)| end.saturating_sub(*start) == minimum_width)
+            .map(|(key, _)| key.clone())
+            .collect::<BTreeSet<_>>();
+        let exact_owners = exact_owners.into_iter().collect::<Vec<_>>();
+        let [owner] = exact_owners.as_slice() else {
+            return Err(format!(
+                "question-mark path at {}:{}-{} has ambiguous authored owners",
+                source.key, source.start, source.end
+            ));
+        };
+        paths_by_source.entry(owner.clone()).or_default().push(path);
+    }
+    let mut assignments = BTreeMap::new();
+    for (source, mut source_branches) in branches_by_source {
+        let mut source_paths = paths_by_source.remove(&source).unwrap_or_default();
+        source_branches.sort_by_key(|branch| branch.identity.owner_local_ordinal);
+        let rank_by_start = source_paths
+            .iter()
+            .map(|candidate| {
+                let rank = source_paths
+                    .iter()
+                    .filter(|other| {
+                        other.start != candidate.start
+                            && block_reaches(body, other.start, candidate.start)
+                    })
+                    .count();
+                (candidate.start.as_u32(), rank)
+            })
+            .collect::<BTreeMap<_, _>>();
+        source_paths.sort_by_key(|candidate| rank_by_start[&candidate.start.as_u32()]);
+        if source_branches.len() != source_paths.len() {
+            return Err(format!(
+                "{} try-operator obligations at {}:{}-{} map to {} ControlFlow selections",
+                source_branches.len(),
+                source.0,
+                source.1,
+                source.2,
+                source_paths.len()
+            ));
+        }
+        let ranks = source_paths
+            .iter()
+            .map(|candidate| {
+                source_paths
+                    .iter()
+                    .filter(|other| {
+                        other.start != candidate.start
+                            && block_reaches(body, other.start, candidate.start)
+                    })
+                    .count()
+            })
+            .collect::<Vec<_>>();
+        if ranks.iter().enumerate().any(|(index, rank)| index != *rank) {
+            return Err(format!(
+                "try-operator selections at {}:{}-{} have no total semantic order",
+                source.0, source.1, source.2
+            ));
+        }
+        assignments.extend(
+            source_branches
+                .into_iter()
+                .zip(source_paths)
+                .map(|(branch, path)| (branch.identity.id.clone(), path)),
+        );
+    }
+    Ok(assignments)
+}
+
 fn synthetic_let_else_assignments(
     tcx: TyCtxt<'_>,
     crate_name: &str,
@@ -2102,10 +2317,18 @@ fn mir_built_with_match_markers<'tcx>(
                 && branch.identity.provenance == "synthetic-expansion"
         })
         .collect::<Vec<_>>();
-    if synthetic_groups.is_empty() && synthetic_let_else.is_empty() {
+    let try_operators = obligations
+        .branches
+        .values()
+        .filter(|branch| {
+            branch.definitions.contains(&obligations.definition)
+                && branch.branch_kind == "try-operator"
+        })
+        .collect::<Vec<_>>();
+    if synthetic_groups.is_empty() && synthetic_let_else.is_empty() && try_operators.is_empty() {
         return body;
     }
-    let (assignments, guard_blocks, let_else_assignments) = {
+    let (assignments, guard_blocks, let_else_assignments, try_assignments) = {
         let borrowed = body.borrow();
         let assignments = if synthetic_groups.is_empty() {
             BTreeMap::new()
@@ -2174,7 +2397,20 @@ fn mir_built_with_match_markers<'tcx>(
                 obligations.definition
             ))
         });
-        (assignments, guard_blocks, let_else_assignments)
+        let try_assignments =
+            try_operator_assignments(tcx, &obligations.crate_name, &borrowed, &try_operators)
+                .unwrap_or_else(|error| {
+                    tcx.dcx().fatal(format!(
+                        "Supercov could not bind pre-borrow-check try operators in {}: {error}",
+                        obligations.definition
+                    ))
+                });
+        (
+            assignments,
+            guard_blocks,
+            let_else_assignments,
+            try_assignments,
+        )
     };
     let mut instrumented = body.steal();
     let mut local_ordinals = BTreeMap::new();
@@ -2229,7 +2465,38 @@ fn mir_built_with_match_markers<'tcx>(
                 0,
                 match_arm_marker_statement(tcx, marker_local, alternative.identity.probe_ordinal),
             );
-            let_else_markers.push(LetElseMarker {
+            let_else_markers.push(StructuralBranchMarker {
+                local: marker_local.as_u32(),
+                branch_id: branch.identity.id.clone(),
+                alternative_ordinal: alternative.identity.probe_ordinal,
+            });
+        }
+    }
+    let mut try_markers = Vec::new();
+    for branch in &try_operators {
+        let path = try_assignments[&branch.identity.id];
+        for (label, block) in [
+            ("continued", path.continued),
+            ("early return", path.returned),
+        ] {
+            let alternative = branch
+                .alternatives
+                .iter()
+                .find(|alternative| alternative.label == label)
+                .unwrap_or_else(|| {
+                    tcx.dcx().fatal(format!(
+                        "Supercov try operator {} has no {label} alternative",
+                        branch.identity.id
+                    ))
+                });
+            let marker_local = instrumented
+                .local_decls
+                .push(LocalDecl::new(tcx.types.u64, DUMMY_SP));
+            instrumented.basic_blocks_mut()[block].statements.insert(
+                0,
+                match_arm_marker_statement(tcx, marker_local, alternative.identity.probe_ordinal),
+            );
+            try_markers.push(StructuralBranchMarker {
                 local: marker_local.as_u32(),
                 branch_id: branch.identity.id.clone(),
                 alternative_ordinal: alternative.identity.probe_ordinal,
@@ -2278,6 +2545,19 @@ fn mir_built_with_match_markers<'tcx>(
             ));
         }
     }
+    if !try_markers.is_empty() {
+        let mut markers = TRY_OPERATOR_MARKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = markers.insert(obligations.definition.clone(), try_markers.clone())
+            && existing != try_markers
+        {
+            tcx.dcx().fatal(format!(
+                "Supercov try-operator marker collision for {}",
+                obligations.definition
+            ));
+        }
+    }
     tcx.alloc_steal_mir(instrumented)
 }
 
@@ -2292,13 +2572,14 @@ fn mir_drops_with_structural_probes<'tcx>(
     if env::var_os(INSTRUMENT_MIR).is_none() || tcx.hir_body_const_context(def_id).is_some() {
         return body;
     }
-    let (match_plans, for_plans, guard_plans, let_else_plans) = {
+    let (match_plans, for_plans, guard_plans, let_else_plans, try_plans) = {
         let borrowed = body.borrow();
         (
             runtime_match_plans(tcx, def_id, &borrowed),
             runtime_for_loop_plans(tcx, def_id, &borrowed),
             runtime_marked_guard_decision_plans(tcx, def_id, &borrowed),
             runtime_marked_let_else_plans(tcx, def_id, &borrowed),
+            runtime_marked_try_operator_plans(tcx, def_id, &borrowed),
         )
     };
     let match_plans = match_plans.unwrap_or_else(|error| {
@@ -2325,15 +2606,24 @@ fn mir_drops_with_structural_probes<'tcx>(
             tcx.def_path_str(def_id)
         ))
     });
+    let try_plans = try_plans.unwrap_or_else(|error| {
+        tcx.dcx().fatal(format!(
+            "Supercov could not bind pre-optimization Rust try-operator probes in {}: {error}",
+            tcx.def_path_str(def_id)
+        ))
+    });
     if match_plans.is_empty()
         && for_plans.is_empty()
         && guard_plans.is_empty()
         && let_else_plans.is_empty()
+        && try_plans.is_empty()
     {
         return body;
     }
-    let has_branch_plans =
-        !match_plans.is_empty() || !for_plans.is_empty() || !let_else_plans.is_empty();
+    let has_branch_plans = !match_plans.is_empty()
+        || !for_plans.is_empty()
+        || !let_else_plans.is_empty()
+        || !try_plans.is_empty();
     let start_branch = has_branch_plans
         .then(|| find_runtime_function(tcx, START_BRANCH_FUNCTION))
         .flatten();
@@ -2451,6 +2741,38 @@ fn mir_drops_with_structural_probes<'tcx>(
     {
         tcx.dcx().fatal(format!(
             "Supercov could not inject pre-optimization Rust synthetic let-else probes in {}: {error}",
+            tcx.def_path_str(def_id)
+        ));
+    }
+    // Structural edits above may split either endpoint of a lowered `?`.
+    // Bind the retained semantic markers only after enclosing selections have
+    // settled, then remove every marker before this MIR leaves the provider.
+    let mut try_plans =
+        runtime_marked_try_operator_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
+            tcx.dcx().fatal(format!(
+                "Supercov could not rebind pre-optimization Rust try-operator probes in {}: {error}",
+                tcx.def_path_str(def_id)
+            ))
+        });
+    if let Err(error) = strip_try_operator_markers(&mut instrumented, &tcx.def_path_str(def_id)) {
+        tcx.dcx().fatal(format!(
+            "Supercov could not consume pre-borrow-check Rust try-operator markers in {}: {error}",
+            tcx.def_path_str(def_id)
+        ));
+    }
+    if let (Some(start), Some(hit)) = (start_branch, hit_branch)
+        && let Err(error) = instrument_runtime_matches(
+            tcx,
+            &mut instrumented,
+            &mut try_plans,
+            start,
+            hit,
+            unit,
+            span,
+        )
+    {
+        tcx.dcx().fatal(format!(
+            "Supercov could not inject pre-optimization Rust try-operator probes in {}: {error}",
             tcx.def_path_str(def_id)
         ));
     }
@@ -3561,20 +3883,16 @@ fn runtime_marked_guard_decision_plans<'tcx>(
     Ok(plans)
 }
 
-fn runtime_marked_let_else_plans<'tcx>(
+fn runtime_marked_branch_plans<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: LocalDefId,
     body: &Body<'tcx>,
+    markers: Vec<StructuralBranchMarker>,
+    kind: &str,
 ) -> Result<Vec<RuntimeMatchPlan>, String> {
     let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
         return Ok(Vec::new());
     };
-    let markers = LET_ELSE_MARKERS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&obligations.definition)
-        .cloned()
-        .unwrap_or_default();
     if markers.is_empty() {
         return Ok(Vec::new());
     }
@@ -3597,7 +3915,7 @@ fn runtime_marked_let_else_plans<'tcx>(
             }
         }
     }
-    let mut markers_by_branch = BTreeMap::<String, Vec<&LetElseMarker>>::new();
+    let mut markers_by_branch = BTreeMap::<String, Vec<&StructuralBranchMarker>>::new();
     for marker in &markers {
         markers_by_branch
             .entry(marker.branch_id.clone())
@@ -3607,12 +3925,13 @@ fn runtime_marked_let_else_plans<'tcx>(
     let dominators = body.basic_blocks.dominators().clone();
     let mut plans = Vec::new();
     for (branch_id, branch_markers) in markers_by_branch {
-        let branch = obligations.branches.get(&branch_id).ok_or_else(|| {
-            format!("synthetic let-else marker references unknown branch {branch_id}")
-        })?;
+        let branch = obligations
+            .branches
+            .get(&branch_id)
+            .ok_or_else(|| format!("{kind} marker references unknown branch {branch_id}"))?;
         if branch_markers.len() != 2 {
             return Err(format!(
-                "synthetic let-else {branch_id} has {} endpoint markers",
+                "{kind} {branch_id} has {} endpoint markers",
                 branch_markers.len()
             ));
         }
@@ -3624,7 +3943,7 @@ fn runtime_marked_let_else_plans<'tcx>(
                 .unwrap_or_default();
             let [entry_block] = blocks.as_slice() else {
                 return Err(format!(
-                    "synthetic let-else {branch_id} endpoint marker survived in {} MIR blocks",
+                    "{kind} {branch_id} endpoint marker survived in {} MIR blocks",
                     blocks.len()
                 ));
             };
@@ -3636,14 +3955,14 @@ fn runtime_marked_let_else_plans<'tcx>(
                 })
                 .ok_or_else(|| {
                     format!(
-                        "synthetic let-else {branch_id} marker has unknown ordinal {}",
+                        "{kind} {branch_id} marker has unknown ordinal {}",
                         marker.alternative_ordinal
                     )
                 })?;
             endpoints.push((alternative, *entry_block));
         }
         let start_block = nearest_common_dominator(&dominators, endpoints[0].1, endpoints[1].1)
-            .ok_or_else(|| format!("synthetic let-else {branch_id} has no common dominator"))?;
+            .ok_or_else(|| format!("{kind} {branch_id} has no common dominator"))?;
         let mut arms = Vec::new();
         for (alternative, entry_block) in endpoints {
             let entry_sources = body.basic_blocks.predecessors()[entry_block]
@@ -3653,7 +3972,7 @@ fn runtime_marked_let_else_plans<'tcx>(
                 .collect::<Vec<_>>();
             if entry_sources.is_empty() {
                 return Err(format!(
-                    "synthetic let-else {branch_id} endpoint {} has no incoming selection edge",
+                    "{kind} {branch_id} endpoint {} has no incoming selection edge",
                     alternative.identity.id
                 ));
             }
@@ -3672,6 +3991,36 @@ fn runtime_marked_let_else_plans<'tcx>(
         });
     }
     Ok(plans)
+}
+
+fn runtime_marked_let_else_plans<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: LocalDefId,
+    body: &Body<'tcx>,
+) -> Result<Vec<RuntimeMatchPlan>, String> {
+    let definition = tcx.def_path_str(def_id);
+    let markers = LET_ELSE_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&definition)
+        .cloned()
+        .unwrap_or_default();
+    runtime_marked_branch_plans(tcx, def_id, body, markers, "synthetic let-else")
+}
+
+fn runtime_marked_try_operator_plans<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: LocalDefId,
+    body: &Body<'tcx>,
+) -> Result<Vec<RuntimeMatchPlan>, String> {
+    let definition = tcx.def_path_str(def_id);
+    let markers = TRY_OPERATOR_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&definition)
+        .cloned()
+        .unwrap_or_default();
+    runtime_marked_branch_plans(tcx, def_id, body, markers, "try operator")
 }
 
 fn strip_match_arm_markers(body: &mut Body<'_>, definition: &str) -> Result<(), String> {
@@ -3777,6 +4126,44 @@ fn strip_let_else_markers(body: &mut Body<'_>, definition: &str) -> Result<(), S
     if removed != marker_locals.len() {
         return Err(format!(
             "synthetic let-else markers in {definition} survived borrow checking {removed}/{} times",
+            marker_locals.len()
+        ));
+    }
+    Ok(())
+}
+
+fn strip_try_operator_markers(body: &mut Body<'_>, definition: &str) -> Result<(), String> {
+    let marker_locals = TRY_OPERATOR_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(definition)
+        .map(|markers| {
+            markers
+                .iter()
+                .map(|marker| marker.local)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    if marker_locals.is_empty() {
+        return Ok(());
+    }
+    let mut removed = 0;
+    for data in body.basic_blocks_mut() {
+        data.statements.retain(|statement| {
+            let StatementKind::Assign(assignment) = &statement.kind else {
+                return true;
+            };
+            let (destination, _) = &**assignment;
+            let is_marker = destination
+                .as_local()
+                .is_some_and(|local| marker_locals.contains(&local.as_u32()));
+            removed += usize::from(is_marker);
+            !is_marker
+        });
+    }
+    if removed != marker_locals.len() {
+        return Err(format!(
+            "try-operator markers in {definition} survived borrow checking {removed}/{} times",
             marker_locals.len()
         ));
     }
