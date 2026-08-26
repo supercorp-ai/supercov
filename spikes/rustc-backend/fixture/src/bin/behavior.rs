@@ -1,19 +1,21 @@
 use std::{cell::RefCell, panic};
 
 use supercov_rustc_spike_fixture::{
-    CONST_FALSE_VALUE, CONST_VALUE, authored, chained, compound, context_normal_scope,
-    context_panic_scope, disjoined, drop_order, fallible, for_break, for_values,
-    generated_by_build_script, generated_by_proc, generated_by_rules, generated_guarded_match_by_proc,
-    generated_let_else_by_proc, generated_match, generated_match_by_proc, generated_nested_guard_match_by_proc,
+    CONST_FALSE_VALUE, CONST_VALUE, assert_compound, assert_equal, assert_equal_evaluation_order,
+    assert_not_equal, assert_panicking_condition, assert_panicking_message_argument, authored,
+    chained, compound, context_normal_scope, context_panic_scope, debug_assert_compound,
+    debug_assert_equal, debug_assert_not_equal, disjoined, drop_order, fallible, for_break,
+    for_values, generated_assertion_by_proc, generated_by_build_script, generated_by_proc,
+    generated_by_rules, generated_guarded_match_by_proc, generated_let_else_by_proc,
+    generated_match, generated_match_by_proc, generated_nested_guard_match_by_proc,
     generated_nested_match_by_proc, generated_nested_scrutinee_match_by_proc,
     generated_nested_try_by_proc, generated_try_by_proc, generated_two_let_else_by_proc,
-    generated_two_try_by_proc,
-    interrupted_decision,
-    interrupted_for, interrupted_match, match_empty, match_identical, match_irrefutable,
-    let_else_value, match_unreachable, match_value, mixed, nested, nested_expression, nested_for_values,
-    nested_let_else,
-    nested_match, nested_try_result, panic_before_try, panic_path, pattern, repeated_expansions, try_option,
-    try_result, two_for_values, two_let_else, two_try_results, while_compound, while_let_chain,
+    generated_two_try_by_proc, interrupted_decision, interrupted_for, interrupted_match,
+    let_else_value, match_empty, match_identical, match_irrefutable, match_unreachable,
+    match_value, mixed, nested, nested_expression, nested_for_values, nested_let_else,
+    nested_match, nested_try_result, panic_before_try, panic_path, pattern, repeated_expansions,
+    try_option, try_result, two_for_values, two_let_else, two_try_results, while_compound,
+    while_let_chain,
 };
 
 fn main() {
@@ -29,6 +31,29 @@ fn main() {
     let interrupted = panic::catch_unwind(|| interrupted_decision(true));
     let interrupted_for = panic::catch_unwind(interrupted_for);
     let interrupted_match = panic::catch_unwind(|| interrupted_match(Some(3)));
+    let assertion_panics = [
+        panic::catch_unwind(|| assert_compound(false, true)).is_err(),
+        panic::catch_unwind(|| assert_compound(true, false)).is_err(),
+        panic::catch_unwind(|| assert_compound(true, true)).is_err(),
+        panic::catch_unwind(|| assert_equal(1, 1)).is_err(),
+        panic::catch_unwind(|| assert_equal(1, 2)).is_err(),
+        panic::catch_unwind(|| assert_not_equal(1, 2)).is_err(),
+        panic::catch_unwind(|| assert_not_equal(1, 1)).is_err(),
+        panic::catch_unwind(|| debug_assert_compound(false, true)).is_err(),
+        panic::catch_unwind(|| debug_assert_compound(true, false)).is_err(),
+        panic::catch_unwind(|| debug_assert_compound(true, true)).is_err(),
+        panic::catch_unwind(|| debug_assert_equal(1, 1)).is_err(),
+        panic::catch_unwind(|| debug_assert_equal(1, 2)).is_err(),
+        panic::catch_unwind(|| debug_assert_not_equal(1, 2)).is_err(),
+        panic::catch_unwind(|| debug_assert_not_equal(1, 1)).is_err(),
+        panic::catch_unwind(|| generated_assertion_by_proc(false, true)).is_err(),
+        panic::catch_unwind(|| generated_assertion_by_proc(true, false)).is_err(),
+        panic::catch_unwind(|| generated_assertion_by_proc(true, true)).is_err(),
+    ];
+    let assertion_condition_panic = panic::catch_unwind(assert_panicking_condition);
+    let assertion_message_panic = panic::catch_unwind(assert_panicking_message_argument);
+    let assertion_order = RefCell::new(Vec::new());
+    assert_equal_evaluation_order(&assertion_order);
     panic::set_hook(previous_hook);
     assert!(context_panic.is_err());
     assert_eq!(authored(true), 1);
@@ -40,6 +65,15 @@ fn main() {
     println!("decision-panic={}", interrupted.is_err());
     println!("for-panic={}", interrupted_for.is_err());
     println!("match-panic={}", interrupted_match.is_err());
+    println!("assertion-panics={assertion_panics:?}");
+    println!(
+        "assertion-edge-panics={:?}",
+        [
+            assertion_condition_panic.is_err(),
+            assertion_message_panic.is_err()
+        ]
+    );
+    println!("assertion-order={:?}", assertion_order.into_inner());
     println!("drop-order={:?}", log.into_inner());
     println!("const-values={CONST_VALUE:?},{CONST_FALSE_VALUE:?}");
     println!(
@@ -114,7 +148,10 @@ fn main() {
         ]
     );
     println!("for={:?}", [for_values(Vec::new()), for_values(vec![2, 3])]);
-    println!("for-break={:?}", [for_break(Vec::new()), for_break(vec![7, 9])]);
+    println!(
+        "for-break={:?}",
+        [for_break(Vec::new()), for_break(vec![7, 9])]
+    );
     println!(
         "for-two={:?}",
         [
@@ -150,10 +187,16 @@ fn main() {
         "match-unreachable={:?}",
         [match_unreachable(true), match_unreachable(false)]
     );
-    println!("match-generated={:?}", [generated_match(true), generated_match(false)]);
+    println!(
+        "match-generated={:?}",
+        [generated_match(true), generated_match(false)]
+    );
     println!(
         "match-generated-proc={:?}",
-        [generated_match_by_proc(true), generated_match_by_proc(false)]
+        [
+            generated_match_by_proc(true),
+            generated_match_by_proc(false)
+        ]
     );
     println!(
         "match-generated-guarded-proc={:?}",
@@ -189,7 +232,10 @@ fn main() {
             generated_nested_guard_match_by_proc(None, true),
         ]
     );
-    println!("let-else={:?}", [let_else_value(Some(7)), let_else_value(None)]);
+    println!(
+        "let-else={:?}",
+        [let_else_value(Some(7)), let_else_value(None)]
+    );
     println!(
         "let-else-nested={:?}",
         [
@@ -208,7 +254,10 @@ fn main() {
     );
     println!(
         "let-else-generated-proc={:?}",
-        [generated_let_else_by_proc(Some(7)), generated_let_else_by_proc(None)]
+        [
+            generated_let_else_by_proc(Some(7)),
+            generated_let_else_by_proc(None)
+        ]
     );
     println!(
         "let-else-generated-two-proc={:?}",
@@ -233,7 +282,10 @@ fn main() {
     );
     println!(
         "try-generated-proc={:?}",
-        [generated_try_by_proc(Ok(8)), generated_try_by_proc(Err("no"))]
+        [
+            generated_try_by_proc(Ok(8)),
+            generated_try_by_proc(Err("no"))
+        ]
     );
     println!(
         "try-generated-two-proc={:?}",

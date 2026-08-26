@@ -87,8 +87,9 @@ static ORIGINAL_MIR_BUILT: OnceLock<MirBuiltProvider> = OnceLock::new();
 static ORIGINAL_MIR_DROPS: OnceLock<MirDropsProvider> = OnceLock::new();
 static CTFE_EVENTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 static MATCH_ARM_MARKERS: Mutex<BTreeMap<String, BTreeMap<u32, u64>>> = Mutex::new(BTreeMap::new());
-static MATCH_GUARD_MARKERS: Mutex<BTreeMap<String, Vec<MatchGuardConditionMarker>>> =
-    Mutex::new(BTreeMap::new());
+static STRUCTURAL_DECISION_MARKERS: Mutex<
+    BTreeMap<String, Vec<StructuralDecisionConditionMarker>>,
+> = Mutex::new(BTreeMap::new());
 static LET_ELSE_MARKERS: Mutex<BTreeMap<String, Vec<StructuralBranchMarker>>> =
     Mutex::new(BTreeMap::new());
 static TRY_OPERATOR_MARKERS: Mutex<BTreeMap<String, Vec<StructuralBranchMarker>>> =
@@ -158,6 +159,7 @@ struct DecisionCondition {
     text: String,
     true_outcome: Option<bool>,
     false_outcome: Option<bool>,
+    invert_value: bool,
 }
 
 #[derive(Debug)]
@@ -166,10 +168,11 @@ struct DecisionObligation {
     decision_kind: &'static str,
     conditions: Vec<DecisionCondition>,
     definitions: Vec<String>,
+    structural_marker: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct MatchGuardConditionMarker {
+struct StructuralDecisionConditionMarker {
     local: u32,
     decision_id: String,
     condition_index: usize,
@@ -521,6 +524,26 @@ fn is_function_body(kind: DefKind) -> bool {
     )
 }
 
+fn assertion_macro_kind(tcx: TyCtxt<'_>, span: rustc_span::Span) -> Option<&'static str> {
+    if !span.from_expansion() {
+        return None;
+    }
+    let definition = span
+        .ctxt()
+        .outer_expn_data()
+        .macro_def_id
+        .map(|id| tcx.def_path_str(id))?;
+    match definition.rsplit("::").next()? {
+        "assert" => Some("assert"),
+        "assert_eq" => Some("assert-eq"),
+        "assert_ne" => Some("assert-ne"),
+        "debug_assert" => Some("debug-assert"),
+        "debug_assert_eq" => Some("debug-assert-eq"),
+        "debug_assert_ne" => Some("debug-assert-ne"),
+        _ => None,
+    }
+}
+
 struct HirManifestCollector<'a, 'tcx> {
     tcx: TyCtxt<'tcx>,
     def_id: rustc_span::def_id::DefId,
@@ -645,6 +668,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             ("while", false, _) => "while",
             ("while", true, _) => "while-let",
             ("match-guard", _, _) => "match-guard",
+            ("assertion", _, _) => "assertion",
             _ => self.tcx.dcx().fatal(format!(
                 "Supercov has no Rust decision kind for {control_kind} in {}",
                 self.definition
@@ -715,6 +739,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 source,
                 true_outcome: condition.true_outcome,
                 false_outcome: condition.false_outcome,
+                invert_value: false,
             });
         }
         let decision = self.identity("decision", condition.span, decision_kind)?;
@@ -727,7 +752,9 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 ))
             }
             Some(existing)
-                if existing.decision_kind != decision_kind || existing.conditions != conditions =>
+                if existing.decision_kind != decision_kind
+                    || existing.conditions != conditions
+                    || existing.structural_marker != (decision_kind == "assertion") =>
             {
                 self.tcx.dcx().fatal(format!(
                     "Supercov Rust decision aggregation mismatch for {}",
@@ -747,21 +774,116 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                         decision_kind,
                         conditions,
                         definitions: vec![self.definition.clone()],
+                        structural_marker: decision_kind == "assertion",
                     },
                 );
             }
         }
 
-        let decision_span = if control_kind == "while" {
+        let decision_span = if control_kind == "while" || decision_kind == "assertion" {
             expression.span.source_callsite()
         } else {
             expression.span
         };
+        let (branch_kind, alternatives) = if decision_kind == "assertion" {
+            (
+                "assertion-outcome",
+                [("passed", "passed"), ("failed", "failed")],
+            )
+        } else {
+            (
+                "decision-outcome",
+                [("true", "condition true"), ("false", "condition false")],
+            )
+        };
         let _ = self.record_branch(
             decision_span,
-            "decision-outcome",
-            &format!("decision-outcome:{decision_kind}"),
-            &[("true", "condition true"), ("false", "condition false")],
+            branch_kind,
+            &format!("{branch_kind}:{decision_kind}"),
+            &alternatives,
+        );
+        Some(decision_id)
+    }
+
+    fn record_single_condition_assertion(
+        &mut self,
+        expression: &'tcx hir::Expr<'tcx>,
+        macro_kind: &'static str,
+        invert_value: bool,
+    ) -> Option<String> {
+        let span = expression.span.source_callsite();
+        let source = match stable_source_range(self.tcx, span, self.crate_name) {
+            Ok(source) if source.owned => source,
+            Ok(source) => {
+                self.limitations.insert(format!(
+                    "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: assertion: unowned {} source {}",
+                    self.definition, source.class, source.key
+                ));
+                return None;
+            }
+            Err(error) => {
+                self.limitations.insert(format!(
+                    "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: assertion: {error}",
+                    self.definition
+                ));
+                return None;
+            }
+        };
+        let decision = self.identity("decision", span, "assertion")?;
+        let condition = DecisionCondition {
+            source: source.clone(),
+            branch_source: source,
+            text: self
+                .tcx
+                .sess
+                .source_map()
+                .span_to_snippet(span)
+                .unwrap_or_else(|_| format!("{macro_kind}!(...)")),
+            true_outcome: Some(true),
+            false_outcome: Some(false),
+            invert_value,
+        };
+        let decision_id = decision.id.clone();
+        match self.decisions.get_mut(&decision.id) {
+            Some(existing) if existing.identity.canonical != decision.canonical => {
+                self.tcx.dcx().fatal(format!(
+                    "Supercov Rust obligation ID collision for {}",
+                    decision.id
+                ))
+            }
+            Some(existing)
+                if existing.decision_kind != "assertion"
+                    || existing.conditions.as_slice() != std::slice::from_ref(&condition)
+                    || !existing.structural_marker =>
+            {
+                self.tcx.dcx().fatal(format!(
+                    "Supercov Rust assertion aggregation mismatch for {}",
+                    decision.id
+                ))
+            }
+            Some(existing) => {
+                existing.definitions.push(self.definition.clone());
+                existing.definitions.sort();
+                existing.definitions.dedup();
+            }
+            None => {
+                self.decisions.insert(
+                    decision.id.clone(),
+                    DecisionObligation {
+                        identity: decision,
+                        decision_kind: "assertion",
+                        conditions: vec![condition],
+                        definitions: vec![self.definition.clone()],
+                        structural_marker: true,
+                    },
+                );
+            }
+        }
+        let _ = self.record_branch(
+            span,
+            "assertion-outcome",
+            "assertion-outcome:assertion",
+            &[("passed", "passed"), ("failed", "failed")],
         );
         Some(decision_id)
     }
@@ -1086,7 +1208,41 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
             self.match_context = previous;
             return;
         }
-        if let hir::ExprKind::If(condition, _, _) = expression.kind {
+        let assertion = if let hir::ExprKind::If(condition, _, _) = expression.kind {
+            assertion_macro_kind(self.tcx, expression.span).map(|kind| (kind, condition))
+        } else {
+            None
+        };
+        if let Some((kind, condition)) = assertion {
+            match (kind, condition.kind) {
+                (
+                    "assert" | "debug-assert",
+                    hir::ExprKind::Unary(rustc_ast::UnOp::Not, authored),
+                ) => {
+                    let _ = self.record_control_decision(expression, authored, "assertion");
+                }
+                (
+                    "assert-eq" | "debug-assert-eq",
+                    hir::ExprKind::Unary(rustc_ast::UnOp::Not, comparison),
+                ) if matches!(
+                    comparison.kind,
+                    hir::ExprKind::Binary(operator, _, _)
+                        if matches!(
+                            operator.node,
+                            rustc_ast::BinOpKind::Eq | rustc_ast::BinOpKind::Ne
+                        )
+                ) =>
+                {
+                    let _ = self.record_single_condition_assertion(expression, kind, false);
+                }
+                ("assert-ne" | "debug-assert-ne", hir::ExprKind::Binary(operator, _, _))
+                    if operator.node == rustc_ast::BinOpKind::Eq =>
+                {
+                    let _ = self.record_single_condition_assertion(expression, kind, true);
+                }
+                _ => {}
+            }
+        } else if let hir::ExprKind::If(condition, _, _) = expression.kind {
             let control_kind = self
                 .control_overrides
                 .remove(&expression.hir_id.local_id.as_u32())
@@ -1354,7 +1510,7 @@ impl Callbacks for ProbeCallbacks {
         let mut decisions = BTreeMap::<String, DecisionObligation>::new();
         let mut match_groups = BTreeMap::<String, MatchSelectionObligation>::new();
         let mut manifest_limitations = BTreeSet::from([
-            "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: assertion, CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
+            "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: assertion phase attribution, CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
         ]);
 
         for owner in tcx.hir_body_owners() {
@@ -2125,6 +2281,144 @@ fn try_operator_assignments<'tcx>(
     Ok(assignments)
 }
 
+fn assertion_condition_marker_assignments<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    crate_name: &str,
+    body: &Body<'tcx>,
+    decisions: &[&DecisionObligation],
+) -> Result<Vec<(String, usize, BasicBlock)>, String> {
+    let mut conditions_by_source =
+        BTreeMap::<(String, u32, u32), Vec<(&DecisionObligation, usize)>>::new();
+    for decision in decisions {
+        for (index, condition) in decision.conditions.iter().enumerate() {
+            conditions_by_source
+                .entry((
+                    condition.branch_source.key.clone(),
+                    condition.branch_source.start,
+                    condition.branch_source.end,
+                ))
+                .or_default()
+                .push((decision, index));
+        }
+    }
+    if conditions_by_source.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut blocks_by_source = BTreeMap::<(String, u32, u32), Vec<BasicBlock>>::new();
+    for (block, data) in body.basic_blocks.iter_enumerated() {
+        let terminator = data.terminator();
+        let TerminatorKind::SwitchInt { discr, .. } = &terminator.kind else {
+            continue;
+        };
+        if discr.ty(&body.local_decls, tcx) != tcx.types.bool {
+            continue;
+        }
+        let discriminant_is_constant = match discr {
+            Operand::Constant(_) => true,
+            Operand::Copy(place) | Operand::Move(place) => place.as_local().is_some_and(|local| {
+                data.statements.iter().rev().any(|statement| {
+                    let StatementKind::Assign(assignment) = &statement.kind else {
+                        return false;
+                    };
+                    let (destination, value) = &**assignment;
+                    destination.as_local() == Some(local)
+                        && matches!(value, Rvalue::Use(Operand::Constant(_)))
+                })
+            }),
+            Operand::RuntimeChecks(_) => false,
+        };
+        if discriminant_is_constant {
+            continue;
+        }
+        let source = stable_source_range(tcx, terminator.source_info.span, crate_name)?;
+        let callsite = stable_source_range(
+            tcx,
+            terminator.source_info.span.source_callsite(),
+            crate_name,
+        )?;
+        let owners = conditions_by_source
+            .keys()
+            .filter(|(key, start, end)| {
+                [&source, &callsite].iter().any(|candidate| {
+                    key == &candidate.key && *start <= candidate.start && *end >= candidate.end
+                })
+            })
+            .collect::<Vec<_>>();
+        let Some(minimum_width) = owners
+            .iter()
+            .map(|(_, start, end)| end.saturating_sub(*start))
+            .min()
+        else {
+            continue;
+        };
+        let exact = owners
+            .into_iter()
+            .filter(|(_, start, end)| end.saturating_sub(*start) == minimum_width)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let exact = exact.into_iter().collect::<Vec<_>>();
+        let [owner] = exact.as_slice() else {
+            return Err(format!(
+                "assertion condition at {}:{}-{} has ambiguous authored owners",
+                callsite.key, callsite.start, callsite.end
+            ));
+        };
+        blocks_by_source
+            .entry(owner.clone())
+            .or_default()
+            .push(block);
+    }
+    let mut assignments = Vec::new();
+    for (source, mut source_conditions) in conditions_by_source {
+        let mut blocks = blocks_by_source.remove(&source).unwrap_or_default();
+        source_conditions
+            .sort_by_key(|(decision, index)| (decision.identity.owner_local_ordinal, *index));
+        let rank_by_block = blocks
+            .iter()
+            .map(|candidate| {
+                let rank = blocks
+                    .iter()
+                    .filter(|other| other != &candidate && block_reaches(body, **other, *candidate))
+                    .count();
+                (candidate.as_u32(), rank)
+            })
+            .collect::<BTreeMap<_, _>>();
+        blocks.sort_by_key(|block| rank_by_block[&block.as_u32()]);
+        if source_conditions.len() != blocks.len() {
+            return Err(format!(
+                "{} assertion conditions at {}:{}-{} map to {} typed Boolean switches",
+                source_conditions.len(),
+                source.0,
+                source.1,
+                source.2,
+                blocks.len()
+            ));
+        }
+        let ranks = blocks
+            .iter()
+            .map(|candidate| {
+                blocks
+                    .iter()
+                    .filter(|other| other != &candidate && block_reaches(body, **other, *candidate))
+                    .count()
+            })
+            .collect::<Vec<_>>();
+        if ranks.iter().enumerate().any(|(index, rank)| index != *rank) {
+            return Err(format!(
+                "assertion conditions at {}:{}-{} have no total semantic order",
+                source.0, source.1, source.2
+            ));
+        }
+        assignments.extend(
+            source_conditions
+                .into_iter()
+                .zip(blocks)
+                .map(|((decision, index), block)| (decision.identity.id.clone(), index, block)),
+        );
+    }
+    Ok(assignments)
+}
+
 fn synthetic_let_else_assignments(
     tcx: TyCtxt<'_>,
     crate_name: &str,
@@ -2325,7 +2619,19 @@ fn mir_built_with_match_markers<'tcx>(
                 && branch.branch_kind == "try-operator"
         })
         .collect::<Vec<_>>();
-    if synthetic_groups.is_empty() && synthetic_let_else.is_empty() && try_operators.is_empty() {
+    let assertion_decisions = obligations
+        .decisions
+        .values()
+        .filter(|decision| {
+            decision.definitions.contains(&obligations.definition)
+                && decision.decision_kind == "assertion"
+        })
+        .collect::<Vec<_>>();
+    if synthetic_groups.is_empty()
+        && synthetic_let_else.is_empty()
+        && try_operators.is_empty()
+        && assertion_decisions.is_empty()
+    {
         return body;
     }
     let (assignments, guard_blocks, let_else_assignments, try_assignments) = {
@@ -2385,6 +2691,20 @@ fn mir_built_with_match_markers<'tcx>(
                 );
             }
         }
+        guard_blocks.extend(
+            assertion_condition_marker_assignments(
+                tcx,
+                &obligations.crate_name,
+                &borrowed,
+                &assertion_decisions,
+            )
+            .unwrap_or_else(|error| {
+                tcx.dcx().fatal(format!(
+                    "Supercov could not bind pre-borrow-check assertion conditions in {}: {error}",
+                    obligations.definition
+                ))
+            }),
+        );
         let let_else_assignments = synthetic_let_else_assignments(
             tcx,
             &obligations.crate_name,
@@ -2438,7 +2758,7 @@ fn mir_built_with_match_markers<'tcx>(
             0,
             match_arm_marker_statement(tcx, marker_local, condition_index as u64),
         );
-        guard_markers.push(MatchGuardConditionMarker {
+        guard_markers.push(StructuralDecisionConditionMarker {
             local: marker_local.as_u32(),
             decision_id,
             condition_index,
@@ -2518,7 +2838,7 @@ fn mir_built_with_match_markers<'tcx>(
         }
     }
     if !guard_markers.is_empty() {
-        let mut markers = MATCH_GUARD_MARKERS
+        let mut markers = STRUCTURAL_DECISION_MARKERS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(existing) =
@@ -2577,7 +2897,7 @@ fn mir_drops_with_structural_probes<'tcx>(
         (
             runtime_match_plans(tcx, def_id, &borrowed),
             runtime_for_loop_plans(tcx, def_id, &borrowed),
-            runtime_marked_guard_decision_plans(tcx, def_id, &borrowed),
+            runtime_marked_decision_plans(tcx, def_id, &borrowed),
             runtime_marked_let_else_plans(tcx, def_id, &borrowed),
             runtime_marked_try_operator_plans(tcx, def_id, &borrowed),
         )
@@ -2596,7 +2916,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     });
     let guard_plans = guard_plans.unwrap_or_else(|error| {
         tcx.dcx().fatal(format!(
-            "Supercov could not bind pre-optimization Rust synthetic guard probes in {}: {error}",
+            "Supercov could not bind pre-optimization Rust structural decision probes in {}: {error}",
             tcx.def_path_str(def_id)
         ))
     });
@@ -2680,13 +3000,15 @@ fn mir_drops_with_structural_probes<'tcx>(
     // Match instrumentation may replace the accepting edge of a guard. Bind
     // exact Boolean targets after that edit while the semantic markers remain.
     let guard_plans =
-        runtime_marked_guard_decision_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
+        runtime_marked_decision_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
             tcx.dcx().fatal(format!(
                 "Supercov could not rebind pre-optimization Rust synthetic guard probes in {}: {error}",
                 tcx.def_path_str(def_id)
             ))
         });
-    if let Err(error) = strip_match_guard_markers(&mut instrumented, &tcx.def_path_str(def_id)) {
+    if let Err(error) =
+        strip_structural_decision_markers(&mut instrumented, &tcx.def_path_str(def_id))
+    {
         tcx.dcx().fatal(format!(
             "Supercov could not consume pre-borrow-check Rust match guard markers in {}: {error}",
             tcx.def_path_str(def_id)
@@ -3016,17 +3338,29 @@ fn runtime_decision_plans<'tcx>(
             } => Some((mapping.span, true_bcb.as_u32(), false_bcb.as_u32())),
             MappingKind::Code { .. } => None,
         })
-        .map(|(span, true_bcb, false_bcb)| {
-            stable_source_range(tcx, span, &crate_name).map(|source| (source, true_bcb, false_bcb))
+        .map(|(span, true_bcb, false_bcb)| -> Result<_, String> {
+            let source = stable_source_range(tcx, span, &crate_name)?;
+            Ok((source, true_bcb, false_bcb))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let dominators = body.basic_blocks.dominators().clone();
     let mut plans = Vec::new();
     let mut fallback_blocks = BTreeSet::new();
-    for decision in decisions.values().filter(|decision| {
-        !(decision.decision_kind == "match-guard"
-            && decision.identity.provenance == "synthetic-expansion")
-    }) {
+    let marked_decisions = STRUCTURAL_DECISION_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&definition)
+        .map(|markers| {
+            markers
+                .iter()
+                .map(|marker| marker.decision_id.clone())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    for decision in decisions
+        .values()
+        .filter(|decision| !marked_decisions.contains(&decision.identity.id))
+    {
         let digest = decision
             .identity
             .id
@@ -3165,6 +3499,12 @@ fn runtime_decision_plans<'tcx>(
                             .collect::<Vec<_>>(),
                     ));
                 };
+            let (true_sources, false_sources, true_target, false_target) = if condition.invert_value
+            {
+                (false_sources, true_sources, false_target, true_target)
+            } else {
+                (true_sources, false_sources, true_target, false_target)
+            };
             conditions.push(RuntimeDecisionCondition {
                 index: index as u64,
                 entry_block,
@@ -3760,7 +4100,7 @@ fn runtime_match_plans<'tcx>(
     Ok(plans)
 }
 
-fn runtime_marked_guard_decision_plans<'tcx>(
+fn runtime_marked_decision_plans<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: LocalDefId,
     body: &Body<'tcx>,
@@ -3768,7 +4108,7 @@ fn runtime_marked_guard_decision_plans<'tcx>(
     let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
         return Ok(Vec::new());
     };
-    let markers = MATCH_GUARD_MARKERS
+    let markers = STRUCTURAL_DECISION_MARKERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&obligations.definition)
@@ -3796,7 +4136,8 @@ fn runtime_marked_guard_decision_plans<'tcx>(
             }
         }
     }
-    let mut markers_by_decision = BTreeMap::<String, Vec<&MatchGuardConditionMarker>>::new();
+    let mut markers_by_decision =
+        BTreeMap::<String, Vec<&StructuralDecisionConditionMarker>>::new();
     for marker in &markers {
         markers_by_decision
             .entry(marker.decision_id.clone())
@@ -3806,7 +4147,7 @@ fn runtime_marked_guard_decision_plans<'tcx>(
     let mut plans = Vec::new();
     for (decision_id, mut decision_markers) in markers_by_decision {
         let decision = obligations.decisions.get(&decision_id).ok_or_else(|| {
-            format!("synthetic guard marker references unknown decision {decision_id}")
+            format!("structural marker references unknown decision {decision_id}")
         })?;
         decision_markers.sort_by_key(|marker| marker.condition_index);
         if decision_markers.len() != decision.conditions.len()
@@ -3816,7 +4157,7 @@ fn runtime_marked_guard_decision_plans<'tcx>(
                 .any(|(index, marker)| index != marker.condition_index)
         {
             return Err(format!(
-                "synthetic guard {decision_id} has {}/{} ordered condition markers",
+                "structural decision {decision_id} has {}/{} ordered condition markers",
                 decision_markers.len(),
                 decision.conditions.len()
             ));
@@ -3839,7 +4180,7 @@ fn runtime_marked_guard_decision_plans<'tcx>(
                 .unwrap_or_default();
             let [entry_block] = blocks.as_slice() else {
                 return Err(format!(
-                    "synthetic guard {decision_id} condition {} marker survived in {} MIR blocks",
+                    "structural decision {decision_id} condition {} marker survived in {} MIR blocks",
                     marker.condition_index,
                     blocks.len()
                 ));
@@ -3848,24 +4189,31 @@ fn runtime_marked_guard_decision_plans<'tcx>(
                 &body.basic_blocks[*entry_block].terminator().kind
             else {
                 return Err(format!(
-                    "synthetic guard {decision_id} condition {} marker does not precede a switch",
+                    "structural decision {decision_id} condition {} marker does not precede a switch",
                     marker.condition_index
                 ));
             };
             if discr.ty(&body.local_decls, tcx) != tcx.types.bool {
                 return Err(format!(
-                    "synthetic guard {decision_id} condition {} marker precedes a non-Boolean switch",
+                    "structural decision {decision_id} condition {} marker precedes a non-Boolean switch",
                     marker.condition_index
                 ));
             }
             let condition = &decision.conditions[marker.condition_index];
+            let raw_true_target = targets.target_for_value(1);
+            let raw_false_target = targets.target_for_value(0);
+            let (true_target, false_target) = if condition.invert_value {
+                (raw_false_target, raw_true_target)
+            } else {
+                (raw_true_target, raw_false_target)
+            };
             conditions.push(RuntimeDecisionCondition {
                 index: marker.condition_index as u64,
                 entry_block: *entry_block,
                 true_sources: vec![*entry_block],
                 false_sources: vec![*entry_block],
-                true_target: targets.target_for_value(1),
-                false_target: targets.target_for_value(0),
+                true_target,
+                false_target,
                 true_outcome: condition.true_outcome,
                 false_outcome: condition.false_outcome,
             });
@@ -4056,8 +4404,8 @@ fn strip_match_arm_markers(body: &mut Body<'_>, definition: &str) -> Result<(), 
     Ok(())
 }
 
-fn strip_match_guard_markers(body: &mut Body<'_>, definition: &str) -> Result<(), String> {
-    let marker_locals = MATCH_GUARD_MARKERS
+fn strip_structural_decision_markers(body: &mut Body<'_>, definition: &str) -> Result<(), String> {
+    let marker_locals = STRUCTURAL_DECISION_MARKERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(definition)
@@ -4087,7 +4435,7 @@ fn strip_match_guard_markers(body: &mut Body<'_>, definition: &str) -> Result<()
     }
     if removed != marker_locals.len() {
         return Err(format!(
-            "synthetic match guard markers in {definition} survived borrow checking {removed}/{} times",
+            "structural decision markers in {definition} survived borrow checking {removed}/{} times",
             marker_locals.len()
         ));
     }

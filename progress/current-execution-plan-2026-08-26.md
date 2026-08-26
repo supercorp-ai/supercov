@@ -206,8 +206,10 @@ invocation as the condition. The exploratory 0/1/2/3 function ordinals are
 gone: runtime MIR hits now carry the u64 prefix of the exact manifest point ID,
 and the compiler rejects both full-ID and probe-prefix collisions. The
 candidate still carries blocking denominator limitations. The authored match
-   slices below have since narrowed that surface, but assertion,
-   CTFE and doctest obligation/probe mappings,
+   slices below have since narrowed that surface. The six stable assertion
+   macros now have exact passed/failed and MC/DC observations, including
+   collapsed proc-macro output and panic/evaluation-order goldens, but exact
+   assertion-phase attribution, CTFE and doctest obligation/probe mappings,
 plus full package and compiler fingerprints, remain R1 work. No measurement-
 complete claim is possible yet.
 

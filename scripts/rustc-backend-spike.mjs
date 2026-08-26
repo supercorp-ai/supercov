@@ -357,7 +357,7 @@ try {
   assert.equal(identityManifestA.model, 'rust-source-v1');
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
-    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
+    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: assertion phase attribution, CTFE and doctest obligation/probe mappings are not emitted yet',
   ]);
   const allIds = [
     ...identityManifestA.points.map(({id}) => id),
@@ -379,15 +379,28 @@ try {
   );
   assert(
     identityManifestA.branches.every(({kind}) =>
-      ['decision-outcome', 'loop-entry', 'match-arm', 'let-else', 'try-operator'].includes(kind),
+      [
+        'decision-outcome',
+        'loop-entry',
+        'match-arm',
+        'let-else',
+        'try-operator',
+        'assertion-outcome',
+      ].includes(kind),
     ),
     'compiler manifest emitted a branch kind outside the frozen Rust contract',
   );
   assert(
     identityManifestA.decisions.every(({kind}) =>
-      ['if', 'if-let', 'while', 'while-let', 'let-chain', 'match-guard'].includes(
-        kind,
-      ),
+      [
+        'if',
+        'if-let',
+        'while',
+        'while-let',
+        'let-chain',
+        'match-guard',
+        'assertion',
+      ].includes(kind),
     ),
     'compiler manifest emitted a decision kind outside the frozen Rust contract',
   );
@@ -562,6 +575,12 @@ try {
   assert.match(baselineBehavior.stdout, /for-nested=\[0, 5\]/);
   assert.match(baselineBehavior.stdout, /for-panic=true/);
   assert.match(baselineBehavior.stdout, /match-panic=true/);
+  assert.match(
+    baselineBehavior.stdout,
+    /assertion-panics=\[true, true, false, false, true, false, true, true, true, false, false, true, false, true, true, true, false\]/,
+  );
+  assert.match(baselineBehavior.stdout, /assertion-edge-panics=\[true, true\]/);
+  assert.match(baselineBehavior.stdout, /assertion-order=\["left", "right"\]/);
   assert.match(baselineBehavior.stdout, /match=\[3, 2, 2, 0\]/);
   assert.match(baselineBehavior.stdout, /match-identical=\[7, 7, 9\]/);
   assert.match(baselineBehavior.stdout, /match-empty=true/);
@@ -617,10 +636,10 @@ try {
   );
   const behaviorManifest = crateManifest(instrumentedDirectory, 'behavior');
   assert(
-    !behaviorManifest.decisions.some((decision) =>
-      decision.definitions.includes('main'),
-    ),
-    'hidden assert!/println! control flow leaked into the authored decision denominator',
+    behaviorManifest.decisions
+      .filter((decision) => decision.definitions.includes('main'))
+      .every((decision) => decision.kind === 'assertion'),
+    'hidden assert!/println! implementation control flow leaked into the authored decision denominator',
   );
   const runtimeProbe = (definition) =>
     obligationFor(runtimeManifest, definition)?.probeOrdinal;
@@ -866,7 +885,11 @@ try {
     'runtime probe is not bound to its manifest obligation',
   );
   const behaviorEvidence = readTransport(behaviorTransport);
-  assert.equal(behaviorEvidence.attachments, 1);
+  assert.equal(
+    behaviorEvidence.attachments,
+    2,
+    'the instrumented library and assertion-bearing behavior crate must attach independently',
+  );
   assert.equal(behaviorEvidence.dropped, 0);
   assert.equal(
     behaviorEvidence.incomplete,
@@ -1232,6 +1255,62 @@ try {
     JSON.stringify({values: [true, false, null], outcome: false}),
     JSON.stringify({values: [true, true, true], outcome: true}),
   ].sort());
+  const assertionVectors = {
+    compound: [
+      JSON.stringify({values: [false, null], outcome: false}),
+      JSON.stringify({values: [true, false], outcome: false}),
+      JSON.stringify({values: [true, true], outcome: true}),
+    ].sort(),
+    equality: [
+      JSON.stringify({values: [false], outcome: false}),
+      JSON.stringify({values: [true], outcome: true}),
+    ].sort(),
+  };
+  assert.deepEqual(decisionVectors('assert_compound'), assertionVectors.compound);
+  assert.deepEqual(decisionVectors('assert_equal'), assertionVectors.equality);
+  assert.deepEqual(decisionVectors('assert_not_equal'), assertionVectors.equality);
+  assert.deepEqual(
+    decisionVectors('debug_assert_compound'),
+    assertionVectors.compound,
+  );
+  assert.deepEqual(decisionVectors('debug_assert_equal'), assertionVectors.equality);
+  assert.deepEqual(
+    decisionVectors('debug_assert_not_equal'),
+    assertionVectors.equality,
+  );
+  assert.deepEqual(
+    decisionVectors('generated_assertion_by_proc'),
+    assertionVectors.compound,
+  );
+  assert.deepEqual(decisionVectors('assert_panicking_message_argument'), [
+    JSON.stringify({values: [false], outcome: false}),
+  ]);
+  assert.deepEqual(decisionVectors('assert_equal_evaluation_order'), [
+    JSON.stringify({values: [true], outcome: true}),
+  ]);
+  assert(
+    !behaviorEvidence.decisions.some(
+      ({id}) => id === decisionFor(runtimeManifest, 'assert_panicking_condition')?.id,
+    ),
+    'an assertion condition panic was incorrectly committed as a failed assertion',
+  );
+  for (const definition of [
+    'assert_compound',
+    'assert_equal',
+    'assert_not_equal',
+    'debug_assert_compound',
+    'debug_assert_equal',
+    'debug_assert_not_equal',
+    'generated_assertion_by_proc',
+  ]) {
+    const assertion = decisionFor(runtimeManifest, definition);
+    assert.equal(assertion?.kind, 'assertion');
+    const outcome = branchFor(runtimeManifest, definition, 'assertion-outcome');
+    assert.deepEqual(
+      outcome.alternatives.map(({label}) => label).sort(),
+      ['failed', 'passed'],
+    );
+  }
   assert.deepEqual(
     vectorsForDecision(
       decisionForConditions(runtimeManifest, 'match_value', [
@@ -1617,7 +1696,7 @@ try {
   );
 
   console.log(
-    '[rustc-backend-spike] expanded-HIR obligations keep deterministic identities; compiler mappings become exact Supercov nested/short-circuit/pattern/while/match-guard vectors and pre-optimization for-loop/match/let-else/try first-commit branches with libtest contexts, while MIR/CTFE/rustdoc interception preserves behavior and source',
+    '[rustc-backend-spike] expanded-HIR obligations keep deterministic identities; compiler mappings become exact Supercov nested/short-circuit/pattern/while/match-guard/assertion vectors and pre-optimization for-loop/match/let-else/try first-commit branches with libtest contexts, while MIR/CTFE/rustdoc interception preserves behavior and source',
   );
 } finally {
   rmSync(scratch, {recursive: true, force: true});

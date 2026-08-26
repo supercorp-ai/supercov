@@ -77,6 +77,13 @@ pub fn generated_nested_try_function(_input: TokenStream) -> TokenStream {
         .expect("valid generated nested Rust try operators")
 }
 
+#[proc_macro]
+pub fn generated_assertion_function(_input: TokenStream) -> TokenStream {
+    "pub fn generated_assertion_by_proc(left: bool, right: bool) { assert!(left && right, \"generated assertion failed\"); }"
+        .parse()
+        .expect("valid generated Rust assertion")
+}
+
 #[proc_macro_attribute]
 pub fn generated_test(_attribute: TokenStream, item: TokenStream) -> TokenStream {
     let mut output: TokenStream = "#[test]".parse().expect("valid test attribute");

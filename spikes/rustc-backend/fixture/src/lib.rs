@@ -36,6 +36,7 @@ probe_macros::generated_two_let_else_function!();
 probe_macros::generated_try_function!();
 probe_macros::generated_two_try_function!();
 probe_macros::generated_nested_try_function!();
+probe_macros::generated_assertion_function!();
 
 pub mod repeated_expansions {
     generated_function!();
@@ -101,6 +102,58 @@ pub fn panic_before_try() -> Result<usize, &'static str> {
         panic!("try operand")
     }
     Ok(operand()? + 1)
+}
+
+pub fn assert_compound(left: bool, right: bool) {
+    assert!(left && right, "compound assertion failed: {left}/{right}");
+}
+
+pub fn assert_equal(left: usize, right: usize) {
+    assert_eq!(left, right, "values differ");
+}
+
+pub fn assert_not_equal(left: usize, right: usize) {
+    assert_ne!(left, right, "values unexpectedly equal");
+}
+
+pub fn debug_assert_compound(left: bool, right: bool) {
+    debug_assert!(left && right, "debug compound assertion failed");
+}
+
+pub fn debug_assert_equal(left: usize, right: usize) {
+    debug_assert_eq!(left, right, "debug values differ");
+}
+
+pub fn debug_assert_not_equal(left: usize, right: usize) {
+    debug_assert_ne!(left, right, "debug values unexpectedly equal");
+}
+
+pub fn assert_panicking_condition() {
+    fn condition() -> bool {
+        panic!("assertion condition")
+    }
+    assert!(condition());
+}
+
+pub fn assert_panicking_message_argument() {
+    fn message() -> &'static str {
+        panic!("assertion message argument")
+    }
+
+    assert!(std::hint::black_box(false), "{}", message());
+}
+
+pub fn assert_equal_evaluation_order(log: &std::cell::RefCell<Vec<&'static str>>) {
+    fn operand(
+        log: &std::cell::RefCell<Vec<&'static str>>,
+        label: &'static str,
+        value: usize,
+    ) -> usize {
+        log.borrow_mut().push(label);
+        value
+    }
+
+    assert_eq!(operand(log, "left", 7), operand(log, "right", 7));
 }
 
 /// A non-mergeable doctest with a hidden setup line.
@@ -241,8 +294,8 @@ pub fn match_identical(value: u8) -> usize {
 
 pub fn match_empty(value: bool) {
     match value {
-        true => {},
-        false => {},
+        true => {}
+        false => {}
     }
 }
 

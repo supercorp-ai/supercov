@@ -1385,6 +1385,16 @@ miss blocks flipping any default.
   collapsed sequential/nested proc-macro operators and an operand panic have
   exact behavior/evidence goldens. Operand evaluation precedes frame start, so
   its panic creates neither a false alternative nor a false incomplete frame.
+- Rust assertions now have an owned outcome denominator and exact runtime
+  observations for `assert!`, `assert_eq!`, `assert_ne!` and their debug
+  variants. Expanded HIR retains authored compound conditions; structural
+  Boolean markers bind them before optimization and are removed before runtime
+  injection. Goldens prove passed/failed vectors, `assert_ne!`'s inverted
+  compiler comparison, collapsed proc-macro source, once-only left-to-right
+  operand evaluation, no false failure when condition evaluation panics, and a
+  committed failure before a message argument panics. Assertion-phase identity
+  is deliberately not inferred from these outcomes and remains a separate
+  promotion gate.
 
 ## Non-goals and guardrails
 

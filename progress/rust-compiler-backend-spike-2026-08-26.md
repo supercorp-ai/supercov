@@ -275,8 +275,13 @@ an unverified rustc commit.
 
 ## Next implementation gates
 
-1. Extend the proven expanded-HIR control slice to assertions and remaining executable statement
-   semantics; bind their real MIR/CTFE probes to the same manifest IDs. Add
+1. Extend the proven expanded-HIR control slice to remaining executable statement
+   semantics. Assertion passed/failed outcomes and MC/DC are now exact for the
+   six stable standard macros, including collapsed proc-macro output, inverted
+   `assert_ne!` comparison semantics, condition/message panic timing and
+   once-only left-to-right operand evaluation; exact assertion-phase identity
+   remains a separate attribution gate. Bind remaining real MIR/CTFE probes to
+   the same manifest IDs. Add
    derive, external expansion, generic/trait, include/module and
    package-fingerprint corpora before treating the candidate as a complete
    manifest.
