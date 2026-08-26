@@ -14,6 +14,7 @@ use crate::{
 
 const SCHEMA: &str = "supercov-rust-manifest-candidate-v1";
 const MODEL: &str = "rust-source-v1";
+const SOURCE_SNAPSHOT_SCHEMA: &str = "supercov-rust-source-snapshots-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -133,6 +134,41 @@ pub struct RustCompilerSource {
     pub source: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCompilerSourceSnapshots {
+    pub schema: String,
+    #[serde(rename = "crate")]
+    pub crate_name: String,
+    pub sources: BTreeMap<String, RustCompilerSource>,
+}
+
+impl RustCompilerSourceSnapshots {
+    pub fn parse(bytes: &[u8]) -> Result<Self, RustCompilerManifestError> {
+        let snapshots: Self = serde_json::from_slice(bytes)
+            .map_err(|error| RustCompilerManifestError::Json(error.to_string()))?;
+        snapshots.validate()?;
+        Ok(snapshots)
+    }
+
+    pub fn validate(&self) -> Result<(), RustCompilerManifestError> {
+        if self.schema != SOURCE_SNAPSHOT_SCHEMA
+            || self.crate_name.trim().is_empty()
+            || self.sources.is_empty()
+            || self.sources.iter().any(|(key, source)| {
+                !valid_source_key(key)
+                    || source.file.trim().is_empty()
+                    || source.file.chars().any(char::is_control)
+            })
+        {
+            return Err(RustCompilerManifestError::InvalidSource(
+                "malformed compiler source snapshot envelope".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Runtime ordinal semantics retained alongside the language-neutral
 /// manifest. A single selected match arm can cover its selected alternative
 /// and the not-selected alternatives of every sibling in the evaluated group.
@@ -159,6 +195,166 @@ impl RustCompilerNormalizationRequest {
             .map_err(|error| RustCompilerManifestError::Json(error.to_string()))?;
         request.manifest.normalize(&request.sources)
     }
+}
+
+pub fn normalize_rust_compiler_candidates(
+    candidates: Vec<(RustCompilerManifest, RustCompilerSourceSnapshots)>,
+) -> Result<NormalizedRustCompilerManifest, RustCompilerManifestError> {
+    if candidates.is_empty() {
+        return Err(RustCompilerManifestError::Invalid(
+            "compiler build emitted no owned Rust denominator".into(),
+        ));
+    }
+    let mut crate_names = BTreeSet::new();
+    let mut points = BTreeMap::<String, RustCompilerPoint>::new();
+    let mut branches = BTreeMap::<String, RustCompilerBranch>::new();
+    let mut decisions = BTreeMap::<String, RustCompilerDecision>::new();
+    let mut groups = BTreeMap::<String, RustCompilerSelectionGroup>::new();
+    let mut limitations = BTreeSet::new();
+    let mut sources = BTreeMap::<String, RustCompilerSource>::new();
+    for (manifest, snapshots) in candidates {
+        manifest.validate()?;
+        snapshots.validate()?;
+        if snapshots.crate_name != manifest.crate_name {
+            return Err(RustCompilerManifestError::InvalidSource(format!(
+                "compiler manifest/source snapshot identity mismatch for {}",
+                manifest.crate_name
+            )));
+        }
+        crate_names.insert(manifest.crate_name);
+        limitations.extend(manifest.limitations);
+        for (key, source) in snapshots.sources {
+            if let Some(existing) = sources.insert(key.clone(), source.clone())
+                && existing != source
+            {
+                return Err(RustCompilerManifestError::InvalidSource(format!(
+                    "compiler source {key} changed across build units"
+                )));
+            }
+        }
+        for point in manifest.points {
+            merge_point(&mut points, point)?;
+        }
+        for branch in manifest.branches {
+            merge_branch(&mut branches, branch)?;
+        }
+        for decision in manifest.decisions {
+            merge_decision(&mut decisions, decision)?;
+        }
+        for group in manifest.selection_groups {
+            merge_selection_group(&mut groups, group)?;
+        }
+    }
+    let manifest = RustCompilerManifest {
+        schema: SCHEMA.into(),
+        model: MODEL.into(),
+        crate_name: if crate_names.len() == 1 {
+            crate_names.into_iter().next().expect("one crate")
+        } else {
+            "workspace".into()
+        },
+        measurement_complete: false,
+        points: points.into_values().collect(),
+        branches: branches.into_values().collect(),
+        decisions: decisions.into_values().collect(),
+        selection_groups: groups.into_values().collect(),
+        limitations: limitations.into_iter().collect(),
+    };
+    manifest.normalize(&sources)
+}
+
+fn merge_definitions(destination: &mut Vec<String>, source: Vec<String>) {
+    destination.extend(source);
+    destination.sort();
+    destination.dedup();
+}
+
+fn merge_point(
+    destination: &mut BTreeMap<String, RustCompilerPoint>,
+    point: RustCompilerPoint,
+) -> Result<(), RustCompilerManifestError> {
+    if let Some(existing) = destination.get_mut(&point.id) {
+        let mut left = existing.clone();
+        let mut right = point.clone();
+        left.definitions.clear();
+        right.definitions.clear();
+        if left != right {
+            return Err(RustCompilerManifestError::Invalid(format!(
+                "point {} changed across build units",
+                point.id
+            )));
+        }
+        merge_definitions(&mut existing.definitions, point.definitions);
+    } else {
+        destination.insert(point.id.clone(), point);
+    }
+    Ok(())
+}
+
+fn merge_branch(
+    destination: &mut BTreeMap<String, RustCompilerBranch>,
+    branch: RustCompilerBranch,
+) -> Result<(), RustCompilerManifestError> {
+    if let Some(existing) = destination.get_mut(&branch.id) {
+        let mut left = existing.clone();
+        let mut right = branch.clone();
+        left.definitions.clear();
+        right.definitions.clear();
+        if left != right {
+            return Err(RustCompilerManifestError::Invalid(format!(
+                "branch {} changed across build units",
+                branch.id
+            )));
+        }
+        merge_definitions(&mut existing.definitions, branch.definitions);
+    } else {
+        destination.insert(branch.id.clone(), branch);
+    }
+    Ok(())
+}
+
+fn merge_decision(
+    destination: &mut BTreeMap<String, RustCompilerDecision>,
+    decision: RustCompilerDecision,
+) -> Result<(), RustCompilerManifestError> {
+    if let Some(existing) = destination.get_mut(&decision.id) {
+        let mut left = existing.clone();
+        let mut right = decision.clone();
+        left.definitions.clear();
+        right.definitions.clear();
+        if left != right {
+            return Err(RustCompilerManifestError::Invalid(format!(
+                "decision {} changed across build units",
+                decision.id
+            )));
+        }
+        merge_definitions(&mut existing.definitions, decision.definitions);
+    } else {
+        destination.insert(decision.id.clone(), decision);
+    }
+    Ok(())
+}
+
+fn merge_selection_group(
+    destination: &mut BTreeMap<String, RustCompilerSelectionGroup>,
+    group: RustCompilerSelectionGroup,
+) -> Result<(), RustCompilerManifestError> {
+    if let Some(existing) = destination.get_mut(&group.id) {
+        let mut left = existing.clone();
+        let mut right = group.clone();
+        left.definitions.clear();
+        right.definitions.clear();
+        if left != right {
+            return Err(RustCompilerManifestError::Invalid(format!(
+                "selection group {} changed across build units",
+                group.id
+            )));
+        }
+        merge_definitions(&mut existing.definitions, group.definitions);
+    } else {
+        destination.insert(group.id.clone(), group);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -850,6 +1046,85 @@ mod tests {
             RustCompilerManifest::parse(&serde_json::to_vec(&traversal).unwrap()),
             Err(RustCompilerManifestError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn source_snapshot_envelope_is_strict_and_never_resolves_paths() {
+        let snapshots = json!({
+            "schema": SOURCE_SNAPSHOT_SCHEMA,
+            "crate": "fixture",
+            "sources": {
+                "source:src/lib.rs": {"file": "src/lib.rs", "source": "fn work() {}\n"},
+                "generated:package:.:generated.rs": {
+                    "file": "generated:package:.:generated.rs",
+                    "source": "fn generated() {}\n"
+                }
+            }
+        });
+        let parsed =
+            RustCompilerSourceSnapshots::parse(&serde_json::to_vec(&snapshots).unwrap()).unwrap();
+        assert_eq!(parsed.crate_name, "fixture");
+        assert_eq!(parsed.sources.len(), 2);
+
+        let mut unknown = snapshots.clone();
+        unknown["path"] = json!("/tmp/guess");
+        assert!(
+            RustCompilerSourceSnapshots::parse(&serde_json::to_vec(&unknown).unwrap()).is_err()
+        );
+
+        let mut traversal = snapshots;
+        traversal["sources"]["source:../outside.rs"] =
+            json!({"file": "outside.rs", "source": "fn hidden() {}"});
+        assert!(
+            RustCompilerSourceSnapshots::parse(&serde_json::to_vec(&traversal).unwrap()).is_err()
+        );
+    }
+
+    #[test]
+    fn repeated_compiler_units_merge_only_when_identity_and_source_are_exact() {
+        let first =
+            RustCompilerManifest::parse(&serde_json::to_vec(&valid_manifest()).unwrap()).unwrap();
+        let mut second = first.clone();
+        second.points[0].definitions = vec![
+            "fixture::function".into(),
+            "fixture::tests::function".into(),
+        ];
+        let snapshots = RustCompilerSourceSnapshots::parse(
+            &serde_json::to_vec(&json!({
+                "schema": SOURCE_SNAPSHOT_SCHEMA,
+                "crate": "fixture",
+                "sources": {
+                    "source:src/lib.rs": {
+                        "file": "src/lib.rs",
+                        "source": "0123456789 value and more source bytes"
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let normalized = normalize_rust_compiler_candidates(vec![
+            (first.clone(), snapshots.clone()),
+            (second, snapshots.clone()),
+        ])
+        .unwrap();
+        assert_eq!(normalized.manifest.points.len(), 1);
+        assert_eq!(normalized.manifest.branches.len(), 1);
+        assert_eq!(normalized.manifest.decisions.len(), 1);
+
+        let mut changed = snapshots;
+        changed.sources.get_mut("source:src/lib.rs").unwrap().source =
+            "changed source bytes that remain long enough".into();
+        assert!(normalize_rust_compiler_candidates(vec![
+            (first.clone(), RustCompilerSourceSnapshots::parse(
+                &serde_json::to_vec(&json!({
+                    "schema": SOURCE_SNAPSHOT_SCHEMA,
+                    "crate": "fixture",
+                    "sources": {"source:src/lib.rs": {"file": "src/lib.rs", "source": "0123456789 value and more source bytes"}}
+                })).unwrap(),
+            ).unwrap()),
+            (first, changed),
+        ]).is_err());
     }
 
     #[test]

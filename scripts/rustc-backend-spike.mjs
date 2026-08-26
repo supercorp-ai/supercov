@@ -3,6 +3,7 @@ import {spawnSync} from 'node:child_process';
 import {createHash, randomBytes} from 'node:crypto';
 import {
   closeSync,
+  cpSync,
   ftruncateSync,
   mkdtempSync,
   openSync,
@@ -141,9 +142,9 @@ function run(command, args, options = {}) {
     input: options.input,
     env: {
       ...process.env,
-      SUPERCOV_RUSTC_SPIKE_SOURCE_ROOT: fixtureRoot,
+      SUPERCOV_RUST_SOURCE_ROOT: fixtureRoot,
       ...(commandEnvironment.CARGO_TARGET_DIR
-        ? {SUPERCOV_RUSTC_SPIKE_TARGET_ROOT: commandEnvironment.CARGO_TARGET_DIR}
+        ? {SUPERCOV_RUST_TARGET_ROOT: commandEnvironment.CARGO_TARGET_DIR}
         : {}),
       ...commandEnvironment,
     },
@@ -158,47 +159,25 @@ function run(command, args, options = {}) {
   return result;
 }
 
-function compilerSources(manifestRecord, targetDirectory) {
-  const generatedFiles = readdirSync(targetDirectory, {recursive: true})
-    .map((path) => String(path).replaceAll('\\', '/'));
-  return Object.fromEntries(
-    [...new Set([
-      ...manifestRecord.points.map(({sourceKey}) => sourceKey),
-      ...manifestRecord.branches.map(({sourceKey}) => sourceKey),
-      ...manifestRecord.decisions.flatMap((decision) => [
-        decision.sourceKey,
-        ...decision.conditions.map(({sourceKey}) => sourceKey),
-      ]),
-      ...manifestRecord.selectionGroups.flatMap((group) => [
-        group.sourceKey,
-        ...group.arms.map(({bodySourceKey}) => bodySourceKey),
-      ]),
-    ])].map((sourceKey) => {
-      if (sourceKey.startsWith('source:')) {
-        const relative = sourceKey.slice('source:'.length);
-        return [
-          sourceKey,
-          {file: relative, source: readFileSync(join(fixtureRoot, relative), 'utf8')},
-        ];
-      }
-      const generated = /^generated:package:[^:]+:(.+)$/.exec(sourceKey);
-      assert(generated, `unresolved compiler source key ${sourceKey}`);
-      const suffix = `/out/${generated[1]}`;
-      const matches = generatedFiles.filter((path) => `/${path}`.endsWith(suffix));
-      assert.equal(
-        matches.length,
-        1,
-        `expected one generated source for ${sourceKey}, found ${matches.length}`,
-      );
-      return [
-        sourceKey,
-        {
-          file: sourceKey,
-          source: readFileSync(join(targetDirectory, matches[0]), 'utf8'),
-        },
-      ];
-    }),
-  );
+function compilerSources(directory, crate) {
+  const snapshots = readdirSync(directory)
+    .filter(
+      (name) =>
+        name.startsWith('sources-') &&
+        name.endsWith(`-${crate}.json`),
+    )
+    .map((name) => JSON.parse(readFileSync(join(directory, name), 'utf8')));
+  assert(snapshots.length > 0, `expected compiler source snapshots for ${crate}`);
+  for (const snapshot of snapshots) {
+    assert.equal(snapshot.schema, 'supercov-rust-source-snapshots-v1');
+    assert.equal(snapshot.crate, crate);
+    assert.deepEqual(
+      snapshot.sources,
+      snapshots[0].sources,
+      `compiler source snapshots changed across ${crate} compilations`,
+    );
+  }
+  return snapshots[0].sources;
 }
 
 function manifests(directory) {
@@ -491,13 +470,60 @@ try {
     /multiple exact compiler companions match the selected rustc/,
   );
 
+  const productionFixture = join(scratch, 'production-fixture');
+  cpSync(fixtureRoot, productionFixture, {
+    recursive: true,
+    filter: (path) =>
+      !path.startsWith(join(fixtureRoot, 'target')) &&
+      !path.startsWith(join(fixtureRoot, '.supercov')),
+  });
+  const productionRun = JSON.parse(
+    run(supercov, ['__run-rust-compiler'], {
+      env: {RUSTC: rustc},
+      input: JSON.stringify({
+        projectRoot: productionFixture,
+        command: ['cargo', 'test'],
+        runId: 'run_compiler_orchestration',
+        generatedAt: '2026-08-26T00:00:00.000Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+    }).stdout,
+  );
+  assert.equal(productionRun.exitCode, 0);
+  assert.equal(productionRun.selection.companionPath, wrapper);
+  assert(productionRun.denominator.points > 0);
+  assert(productionRun.denominator.branches > 0);
+  assert(productionRun.denominator.decisions > 0);
+  assert(productionRun.artifacts > 0);
+  assert(productionRun.tests > 0);
+  assert.equal(productionRun.attemptHealth.length, productionRun.tests);
+  assert(
+    productionRun.attemptHealth.every(
+      ({status, transport}) =>
+        transport.dropped === 0 &&
+        (status === 'skipped' || transport.attachments > 0),
+    ),
+    'production compiler run lost or dropped authenticated test evidence',
+  );
+  assert(productionRun.summary.lines.covered > 0);
+  assert(productionRun.summary.branches.covered > 0);
+  assert.equal(
+    createHash('sha256')
+      .update(readFileSync(join(productionFixture, 'src/lib.rs')))
+      .digest('hex'),
+    fixtureSourceDigest,
+    'production compiler orchestration modified project source',
+  );
+
   const observedDirectory = join(scratch, 'observed');
   const observedTarget = join(scratch, 'observed-target');
   run('cargo', ['test', '--manifest-path', fixture, '--no-run'], {
     env: {
       CARGO_TARGET_DIR: observedTarget,
       RUSTC_WRAPPER: wrapper,
-      SUPERCOV_RUSTC_SPIKE_OUTPUT: observedDirectory,
+      SUPERCOV_RUST_COMPILER_OUTPUT: observedDirectory,
     },
   });
   const observed = records(observedDirectory);
@@ -542,14 +568,14 @@ try {
     env: {
       CARGO_TARGET_DIR: join(scratch, 'identity-target-a'),
       RUSTC_WRAPPER: wrapper,
-      SUPERCOV_RUSTC_SPIKE_OUTPUT: identityDirectoryA,
+      SUPERCOV_RUST_COMPILER_OUTPUT: identityDirectoryA,
     },
   });
   run('cargo', ['build', '--quiet', '--manifest-path', fixture, '--lib'], {
     env: {
       CARGO_TARGET_DIR: join(scratch, 'identity-target-b'),
       RUSTC_WRAPPER: wrapper,
-      SUPERCOV_RUSTC_SPIKE_OUTPUT: identityDirectoryB,
+      SUPERCOV_RUST_COMPILER_OUTPUT: identityDirectoryB,
     },
   });
   const identityManifestA = crateManifest(
@@ -578,10 +604,7 @@ try {
     run(supercov, ['__normalize-rust-compiler-manifest'], {
       input: JSON.stringify({
         manifest: identityManifestA,
-        sources: compilerSources(
-          identityManifestA,
-          join(scratch, 'identity-target-a'),
-        ),
+        sources: compilerSources(identityDirectoryA, 'supercov_rustc_spike_fixture'),
       }),
     }).stdout,
   );
@@ -749,7 +772,7 @@ try {
       env: {
         CARGO_TARGET_DIR: join(scratch, 'collision-target'),
         RUSTC_WRAPPER: wrapper,
-        SUPERCOV_RUSTC_SPIKE_OUTPUT: join(scratch, 'collision-output'),
+        SUPERCOV_RUST_COMPILER_OUTPUT: join(scratch, 'collision-output'),
         SUPERCOV_RUSTC_SPIKE_FORCE_ID_COLLISION: '1',
       },
     },
@@ -763,7 +786,7 @@ try {
       env: {
         CARGO_TARGET_DIR: join(scratch, 'probe-collision-target'),
         RUSTC_WRAPPER: wrapper,
-        SUPERCOV_RUSTC_SPIKE_OUTPUT: join(scratch, 'probe-collision-output'),
+        SUPERCOV_RUST_COMPILER_OUTPUT: join(scratch, 'probe-collision-output'),
         SUPERCOV_RUSTC_SPIKE_FORCE_PROBE_COLLISION: '1',
       },
     },
@@ -780,8 +803,8 @@ try {
   const instrumentedEnvironment = {
     CARGO_TARGET_DIR: join(scratch, 'instrumented-target'),
     RUSTC_WRAPPER: wrapper,
-    SUPERCOV_RUSTC_SPIKE_OUTPUT: instrumentedDirectory,
-    SUPERCOV_RUSTC_SPIKE_INSTRUMENT_MIR: '1',
+    SUPERCOV_RUST_COMPILER_OUTPUT: instrumentedDirectory,
+    SUPERCOV_RUST_INSTRUMENT_MIR: '1',
     SUPERCOV_RUST_TRANSPORT_FILE: behaviorTransport.path,
     SUPERCOV_RUST_TRANSPORT_TOKEN: behaviorTransport.tokenHex,
     SUPERCOV_RUST_CONTEXT_ID: transportContext.toString(16).padStart(16, '0'),
@@ -1725,8 +1748,8 @@ try {
       env: {
         CARGO_TARGET_DIR: join(scratch, 'ctfe-target'),
         RUSTC_WRAPPER: wrapper,
-        SUPERCOV_RUSTC_SPIKE_OUTPUT: ctfeDirectory,
-        SUPERCOV_RUSTC_SPIKE_INSTRUMENT_CTFE: '1',
+        SUPERCOV_RUST_COMPILER_OUTPUT: ctfeDirectory,
+        SUPERCOV_RUST_INSTRUMENT_CTFE: '1',
       },
     },
   );
@@ -2005,8 +2028,8 @@ try {
         normalization: {
           manifest: isolatedManifest,
           sources: compilerSources(
-            isolatedManifest,
-            instrumentedEnvironment.CARGO_TARGET_DIR,
+            instrumentedDirectory,
+            'supercov_rustc_spike_fixture',
           ),
         },
         transportPath: isolatedTransport.path,
@@ -2054,7 +2077,7 @@ try {
     env: {
       CARGO_TARGET_DIR: join(scratch, 'doctest-target'),
       RUSTC_WRAPPER: wrapper,
-      SUPERCOV_RUSTC_SPIKE_OUTPUT: doctestDirectory,
+      SUPERCOV_RUST_COMPILER_OUTPUT: doctestDirectory,
     },
   });
   assert.equal(passedTests(doctest.stdout), 3);
@@ -2075,9 +2098,9 @@ try {
       env: {
         CARGO_TARGET_DIR: join(scratch, 'wrapped-doctest-target'),
         RUSTDOC: rustdocLauncher,
-        SUPERCOV_RUSTC_SPIKE_COMPANION_PATH: wrapper,
-        SUPERCOV_RUSTC_SPIKE_OUTPUT: wrappedDoctestDirectory,
-        SUPERCOV_RUSTC_SPIKE_REAL_RUSTDOC: realRustdoc,
+        SUPERCOV_RUST_COMPANION_PATH: wrapper,
+        SUPERCOV_RUST_COMPILER_OUTPUT: wrappedDoctestDirectory,
+        SUPERCOV_RUST_REAL_RUSTDOC: realRustdoc,
       },
     },
   );

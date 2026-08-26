@@ -1414,6 +1414,29 @@ miss blocks flipping any default.
   those contexts as explicit evidence-v3 assertion phases remain the promotion
   gate; phase causality is never inferred from outcome timing.
 
+## Checkpoint — 2026-08-26 production Rust compiler execution
+
+- The private path now spans real Cargo invocation through exact rustc-
+  companion selection, compiler-owned source snapshots, repeated-unit
+  denominator merge, process-per-libtest execution, authenticated transport,
+  assertion/background projection and shared evidence-v3 analysis. Cargo's
+  actual compiler path is the selection authority; wrapper attestations are
+  independently reverified after build.
+- A production-shaped test-harness build exposed and fixed textual-`main`
+  marker aliasing by keying all structural markers with rustc `LocalDefId`.
+  Paired source/manifest sidecars are strict and complete; the engine never
+  guesses compiler source keys from the later filesystem.
+- Each exact test attempt gets an OS-random 128-bit token, a bounded private
+  mmap and a collision-preflighted base context. Supported assertion phases
+  retain causal identity; context-zero evidence becomes a background result.
+  Ignored/no-source tests may honestly produce no attachment, caught panics
+  retain incomplete reservations without false vectors, and dropped or
+  invalid evidence fails closed.
+- Public Rust remains blocked on CTFE, doctest, exact Cargo/libtest filter and
+  retry capture, compiler-build evidence, atomic store/query lifecycle and the
+  complete semantic, platform and performance matrices. The candidate still
+  advertises those incomplete public capabilities as false.
+
 ## Non-goals and guardrails
 
 - No accidental behavior change during ports; every future language frontend

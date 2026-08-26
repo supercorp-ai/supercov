@@ -204,6 +204,37 @@ The spike proved:
     after operand evaluation, so an operand panic commits neither alternative.
     Exact `Result`, `Option`, sequential, nested and collapsed proc-macro cases
     preserve baseline output and per-invocation counts.
+23. Production Cargo orchestration now uses `RUSTC_WORKSPACE_WRAPPER` as the
+    compiler-selection boundary. Cargo supplies the actual rustc path, so a
+    working command, rustup override or explicit `RUSTC` is not guessed from
+    repository files. Every wrapper invocation writes an authenticated
+    selection attestation; the supervisor independently reselects after the
+    build and rejects mixed or changed compiler identities.
+24. The companion emits exact source snapshots from rustc's `SourceMap` beside
+    every manifest candidate. The engine requires one strict pair per compiler
+    unit, rejects filesystem inference and merges repeated units only when
+    source and obligation identities are exact. The full Cargo fixture found a
+    generated test-harness `main` collision that direct binary compilation had
+    missed. Keying structural markers by rustc `LocalDefId` fixed it without a
+    textual-name heuristic.
+25. The production-shaped frontend now executes one real libtest process per
+    attempt. Each receives an OS-random 128-bit capability token, its own
+    bounded transport file and a collision-preflighted context. Exact test,
+    worker, retry and assertion-phase identities reach the shared evidence-v3
+    validator and analyzer. Context-zero records are persisted as background;
+    they never become passed-test or assertion confidence.
+26. Transport attachment count is not used as a coverage verdict. An ignored
+    test or a test that touches no instrumented source can correctly attach
+    zero runtimes. Unknown, malformed, unauthenticated and capacity-dropped
+    records remain fatal. Uncommitted reservations remain explicit health
+    because a caught condition panic has no completed decision outcome and is
+    not equivalent to silently lost evidence.
+27. `npm run test:rustc-backend-spike` now covers Cargo build, exact selection,
+    source-sidecar merge, process-per-test execution, evidence projection and
+    shared analysis in one production-shaped call. The checkout source digest
+    remains exact. This is still private: CTFE and rustdoc/doctest publication,
+    exact Cargo/libtest filter capture, archive/store lifecycle, compiler-build
+    phase evidence and the target matrix remain blocking capabilities.
 
 The companion executable is about 600 KiB on arm64 macOS and dynamically uses
 the exact `librustc_driver` already shipped by the user's `rustc` component.
@@ -286,8 +317,8 @@ an unverified rustc commit.
    assertion-decision and transport-global invocation identity, including
    repeated and nested assertion executions. The shared engine projects these
    into stable evidence-v3 phases and preserves a missing verdict as unknown;
-   wiring that projection into the compiler supervisor remains the attribution
-   gate. Bind remaining real MIR/CTFE probes to
+   the compiler supervisor now carries that projection through a real Cargo
+   build and process-per-test run into shared analysis. Bind remaining real MIR/CTFE probes to
    the same manifest IDs. Add
    derive, external expansion, generic/trait, include/module and
    package-fingerprint corpora before treating the candidate as a complete
@@ -315,9 +346,11 @@ an unverified rustc commit.
    did not; the experiment was not promoted.
 4. Exact selection now independently probes rustc commit/host/driver digest,
    authenticates the companion's executable digest and rejects missing,
-   duplicate or incomplete-public candidates. Add the remaining packaged
-   custom-toolchain/platform matrix before connecting the companion to
-   `npx supercov -- cargo test`.
+   duplicate or incomplete-public candidates. The private Cargo wrapper and
+   libtest execution path are now connected internally. Preserve the exact
+   original Cargo/libtest selection semantics, integrate atomic store/query
+   lifecycle, and add the packaged custom-toolchain/platform matrix before
+   connecting the companion to public `npx supercov -- cargo test`.
 
 ## Primary references
 

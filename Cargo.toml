@@ -16,6 +16,7 @@ repository = "https://github.com/supercorp-ai/supercov"
 [workspace.dependencies]
 base64 = "0.22"
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+getrandom = "0.3"
 junction = "2.0.0"
 libc = "0.2"
 memmap2 = "0.9.11"

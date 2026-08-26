@@ -4,7 +4,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use supercov_contracts::{
     RustCompilerCompanionError, RustCompilerCompanionHandshake, RustCompilerIdentity,
@@ -136,13 +136,77 @@ impl std::fmt::Display for RustCompilerSelectionError {
 
 impl std::error::Error for RustCompilerSelectionError {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SelectedRustCompilerCompanion {
     pub rustc_path: PathBuf,
+    pub compiler_library_directory: PathBuf,
     pub companion_path: PathBuf,
     pub compiler: RustCompilerIdentity,
     pub handshake: RustCompilerCompanionHandshake,
+}
+
+fn resolve_program(program: &Path) -> Result<PathBuf, RustCompilerSelectionError> {
+    let has_parent = program
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty());
+    let candidate = if program.is_absolute() || has_parent {
+        if program.is_absolute() {
+            program.to_path_buf()
+        } else {
+            env::current_dir()
+                .map_err(io_error("resolve current directory for", program))?
+                .join(program)
+        }
+    } else {
+        let path = env::var_os("PATH").ok_or_else(|| {
+            RustCompilerSelectionError::InvalidSysroot(
+                "PATH is unavailable while resolving rustc".into(),
+            )
+        })?;
+        env::split_paths(&path)
+            .map(|directory| directory.join(program))
+            .find(|candidate| {
+                fs::symlink_metadata(candidate).is_ok_and(|metadata| {
+                    metadata.file_type().is_file() || metadata.file_type().is_symlink()
+                })
+            })
+            .ok_or_else(|| RustCompilerSelectionError::Io {
+                operation: "resolve executable",
+                path: program.to_path_buf(),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found on PATH"),
+            })?
+    };
+    let metadata =
+        fs::symlink_metadata(&candidate).map_err(io_error("inspect executable", &candidate))?;
+    if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+        return Err(RustCompilerSelectionError::NonRegularFile(candidate));
+    }
+    Ok(candidate)
+}
+
+pub fn configure_companion_loader_environment(
+    command: &mut Command,
+    compiler_library_directory: &Path,
+) -> Result<(), RustCompilerSelectionError> {
+    let variable = if cfg!(target_os = "macos") {
+        "DYLD_LIBRARY_PATH"
+    } else if cfg!(windows) {
+        "PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    };
+    let mut paths = vec![compiler_library_directory.to_path_buf()];
+    if let Some(current) = env::var_os(variable) {
+        paths.extend(env::split_paths(&current));
+    }
+    let paths = env::join_paths(paths).map_err(|source| {
+        RustCompilerSelectionError::InvalidSysroot(format!(
+            "could not construct {variable}: {source}"
+        ))
+    })?;
+    command.env(variable, paths);
+    Ok(())
 }
 
 fn io_error(
@@ -178,23 +242,7 @@ fn command_output(
     let mut command = Command::new(program);
     command.args(args).stdin(Stdio::null());
     if let Some(directory) = compiler_library_directory {
-        let variable = if cfg!(target_os = "macos") {
-            "DYLD_LIBRARY_PATH"
-        } else if cfg!(windows) {
-            "PATH"
-        } else {
-            "LD_LIBRARY_PATH"
-        };
-        let mut paths = vec![directory.to_path_buf()];
-        if let Some(current) = env::var_os(variable) {
-            paths.extend(env::split_paths(&current));
-        }
-        let paths = env::join_paths(paths).map_err(|source| {
-            RustCompilerSelectionError::InvalidSysroot(format!(
-                "could not construct {variable}: {source}"
-            ))
-        })?;
-        command.env(variable, paths);
+        configure_companion_loader_environment(&mut command, directory)?;
     }
     let output = command.output().map_err(io_error("execute", program))?;
     if !output.status.success() {
@@ -288,7 +336,7 @@ struct ProbedRustc {
 }
 
 fn probe_rustc(rustc_path: &Path) -> Result<ProbedRustc, RustCompilerSelectionError> {
-    let rustc_path = fs::canonicalize(rustc_path).map_err(io_error("resolve rustc", rustc_path))?;
+    let rustc_path = resolve_program(rustc_path)?;
     let verbose = command_output(
         &rustc_path,
         &["-vV"],
@@ -379,7 +427,7 @@ pub fn select_rust_compiler_companion(
     candidates: &[PathBuf],
     require_public_capabilities: bool,
 ) -> Result<SelectedRustCompilerCompanion, RustCompilerSelectionError> {
-    let rustc_path = fs::canonicalize(rustc_path).map_err(io_error("resolve rustc", rustc_path))?;
+    let rustc_path = resolve_program(rustc_path)?;
     let probed = probe_rustc(&rustc_path)?;
     let compiler = probed.identity;
     let mut matches = Vec::new();
@@ -397,6 +445,7 @@ pub fn select_rust_compiler_companion(
         [] => Err(RustCompilerSelectionError::NoMatchingCompanion),
         [(companion_path, handshake)] => Ok(SelectedRustCompilerCompanion {
             rustc_path,
+            compiler_library_directory: probed.driver_directory,
             companion_path: companion_path.clone(),
             compiler,
             handshake: handshake.clone(),

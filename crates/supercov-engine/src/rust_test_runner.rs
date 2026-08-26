@@ -239,7 +239,16 @@ fn executable_name(value: &str) -> &str {
         .trim_end_matches(".cmd")
 }
 
-fn cargo_arguments(root: &Path, command: &[String]) -> Result<Vec<String>, RustTestRunnerError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CargoTestInvocation {
+    pub program: String,
+    pub arguments: Vec<String>,
+}
+
+pub(crate) fn cargo_invocation(
+    root: &Path,
+    command: &[String],
+) -> Result<CargoTestInvocation, RustTestRunnerError> {
     let expanded = crate::project_discovery::expanded_command(root, command);
     let words = shell_words(&expanded)?;
     let cargo = words
@@ -248,19 +257,39 @@ fn cargo_arguments(root: &Path, command: &[String]) -> Result<Vec<String>, RustT
         .ok_or_else(|| RustTestRunnerError::UnsupportedCommand(
             "Rust was detected, but the expanded command does not expose a stable Cargo invocation".into(),
         ))?;
-    if words.get(cargo + 1).map(String::as_str) != Some("test") {
+    let test = words[cargo + 1..]
+        .iter()
+        .position(|word| word == "test")
+        .map(|position| cargo + 1 + position)
+        .ok_or_else(|| {
+            RustTestRunnerError::UnsupportedCommand(
+                "the first owned Rust runner currently requires `cargo test`; nextest and cross remain detected but explicitly unsupported".into(),
+            )
+        })?;
+    if words[cargo + 1..test]
+        .iter()
+        .any(|word| matches!(word.as_str(), "&&" | "||" | ";" | "|"))
+    {
         return Err(RustTestRunnerError::UnsupportedCommand(
-            "the first owned Rust runner currently requires `cargo test`; nextest and cross remain detected but explicitly unsupported".into(),
+            "the Cargo invocation contains a shell boundary before `test`".into(),
         ));
     }
-    let mut arguments = vec!["test".into()];
-    for argument in &words[cargo + 2..] {
+    let mut arguments = words[cargo + 1..=test].to_vec();
+    for argument in &words[test + 1..] {
         if argument == "--" {
             break;
         }
+        if matches!(argument.as_str(), "&&" | "||" | ";" | "|") {
+            return Err(RustTestRunnerError::UnsupportedCommand(
+                "the Cargo test command contains an unsupported shell boundary".into(),
+            ));
+        }
         arguments.push(argument.clone());
     }
-    Ok(arguments)
+    Ok(CargoTestInvocation {
+        program: words[cargo].clone(),
+        arguments,
+    })
 }
 
 fn relative_source(root: &Path, path: &Path) -> Result<String, RustTestRunnerError> {
@@ -283,10 +312,12 @@ fn build_test_artifacts(
     project: &PreparedRustProject,
     command: &[String],
 ) -> Result<Vec<TestArtifact>, RustTestRunnerError> {
-    let mut arguments = cargo_arguments(&project.workspace_root, command)?;
-    arguments.extend(["--no-run".into(), "--message-format=json".into()]);
-    let output = Command::new("cargo")
-        .args(arguments)
+    let mut invocation = cargo_invocation(&project.workspace_root, command)?;
+    invocation
+        .arguments
+        .extend(["--no-run".into(), "--message-format=json".into()]);
+    let output = Command::new(&invocation.program)
+        .args(invocation.arguments)
         .current_dir(&project.workspace_root)
         .env("CARGO_TARGET_DIR", &project.target_directory)
         .output()

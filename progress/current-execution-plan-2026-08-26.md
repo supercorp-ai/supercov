@@ -287,6 +287,40 @@ false, so the same selector rejects it when public capabilities are required.
 This closes identity negotiation only; production Cargo orchestration and the
 remaining capability gates still block cutover.
 
+Production Cargo orchestration and the first complete runtime path are now
+executable too. Cargo supplies its actual rustc path to Supercov through
+`RUSTC_WORKSPACE_WRAPPER`; the engine selects and re-verifies the exact
+commit/host/driver/binary-matched companion for every compiler invocation.
+All generated state lives under the run's `.supercov/work` directory with a
+fresh private Cargo target. The companion writes strict paired manifest and
+source-snapshot sidecars from rustc's own `SourceMap`; the engine rejects
+missing, extra, duplicate and identity-changing units, then merges repeated
+workspace compilation units into one normalized denominator. A full fixture
+build exposed and fixed a real generated-test-harness collision: structural
+markers are now keyed by `LocalDefId`, not textual owner names such as
+`main`.
+
+The same path now enumerates real libtest artifacts and executes one process
+per selected test candidate with an OS-random 128-bit token, one bounded mmap
+transport and one preflighted deterministic context. Every observation is
+validated against the frozen denominator and projected into evidence v3;
+supported assertion macros retain exact nested phase causality, while context
+zero becomes a separate background result and cannot upgrade the test.
+Malformed, unauthenticated, unknown or capacity-dropped evidence fails closed.
+Interrupted reservations remain explicit attempt health: they can represent a
+caught panic that correctly produced no decision outcome, so they are not
+silently relabeled as transport loss. Ignored tests may legitimately attach no
+runtime because their bodies did not execute. The production-shaped fixture
+passes through the shared frontend validator and analyzer with nonzero line
+and branch coverage and zero dropped records.
+
+This closes the initial Cargo -> companion -> libtest -> evidence-v3 ->
+analyzer path, not R1/R2. The internal run still needs exact capture of Cargo/
+libtest filter and retry semantics, atomic archive/store/query publication,
+build-phase evidence, lifecycle recovery, CTFE publication and doctest
+execution. The private companion continues to advertise CTFE and doctest
+capabilities as false, so public selection still fails by construction.
+
 The first real-probe doctest attempt was deliberately rejected. It exposed and
 fixed an unstable-feature capability leak by adding rustc's empty
 `-Zallow-features=` restriction, but the instrumented run still regrouped one

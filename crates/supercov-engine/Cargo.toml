@@ -17,6 +17,7 @@ oracle-harnesses = []
 [dependencies]
 base64.workspace = true
 flate2.workspace = true
+getrandom.workspace = true
 libc.workspace = true
 memmap2.workspace = true
 reflink-copy.workspace = true

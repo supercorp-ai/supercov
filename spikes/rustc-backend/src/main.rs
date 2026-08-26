@@ -14,13 +14,13 @@ extern crate rustc_session;
 extern crate rustc_span;
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     env,
     fs::{self, OpenOptions},
     io::Write,
     path::{Component, Path, PathBuf},
     process::Command,
-    sync::{Mutex, OnceLock},
+    sync::{LazyLock, Mutex, OnceLock},
 };
 
 use rustc_data_structures::steal::Steal;
@@ -52,14 +52,14 @@ use rustc_log::{
 use rustc_parse::{lexer::StripTokens, new_parser_from_source_str};
 use sha2::{Digest, Sha256};
 
-const OUTPUT_DIRECTORY: &str = "SUPERCOV_RUSTC_SPIKE_OUTPUT";
-const INSTRUMENT_MIR: &str = "SUPERCOV_RUSTC_SPIKE_INSTRUMENT_MIR";
-const INSTRUMENT_CTFE: &str = "SUPERCOV_RUSTC_SPIKE_INSTRUMENT_CTFE";
-const REAL_RUSTDOC: &str = "SUPERCOV_RUSTC_SPIKE_REAL_RUSTDOC";
-const COMPANION_PATH: &str = "SUPERCOV_RUSTC_SPIKE_COMPANION_PATH";
-const RUSTDOC_LAUNCHED: &str = "SUPERCOV_RUSTC_SPIKE_RUSTDOC_LAUNCHED";
-const SOURCE_ROOT: &str = "SUPERCOV_RUSTC_SPIKE_SOURCE_ROOT";
-const TARGET_ROOT: &str = "SUPERCOV_RUSTC_SPIKE_TARGET_ROOT";
+const OUTPUT_DIRECTORY: &str = "SUPERCOV_RUST_COMPILER_OUTPUT";
+const INSTRUMENT_MIR: &str = "SUPERCOV_RUST_INSTRUMENT_MIR";
+const INSTRUMENT_CTFE: &str = "SUPERCOV_RUST_INSTRUMENT_CTFE";
+const REAL_RUSTDOC: &str = "SUPERCOV_RUST_REAL_RUSTDOC";
+const COMPANION_PATH: &str = "SUPERCOV_RUST_COMPANION_PATH";
+const RUSTDOC_LAUNCHED: &str = "SUPERCOV_RUSTDOC_LAUNCHED";
+const SOURCE_ROOT: &str = "SUPERCOV_RUST_SOURCE_ROOT";
+const TARGET_ROOT: &str = "SUPERCOV_RUST_TARGET_ROOT";
 const FORCE_ID_COLLISION: &str = "SUPERCOV_RUSTC_SPIKE_FORCE_ID_COLLISION";
 const FORCE_PROBE_COLLISION: &str = "SUPERCOV_RUSTC_SPIKE_FORCE_PROBE_COLLISION";
 const PROBE_FUNCTION: &str = "__supercov_spike_runtime::ordinal_hit";
@@ -87,18 +87,26 @@ static ORIGINAL_MIR_FOR_CTFE: OnceLock<MirForCtfeProvider> = OnceLock::new();
 static ORIGINAL_MIR_BUILT: OnceLock<MirBuiltProvider> = OnceLock::new();
 static ORIGINAL_MIR_DROPS: OnceLock<MirDropsProvider> = OnceLock::new();
 static CTFE_EVENTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
-static MATCH_ARM_MARKERS: Mutex<BTreeMap<String, BTreeMap<u32, u64>>> = Mutex::new(BTreeMap::new());
-static STRUCTURAL_DECISION_MARKERS: Mutex<
-    BTreeMap<String, Vec<StructuralDecisionConditionMarker>>,
-> = Mutex::new(BTreeMap::new());
-static LET_ELSE_MARKERS: Mutex<BTreeMap<String, Vec<StructuralBranchMarker>>> =
-    Mutex::new(BTreeMap::new());
-static TRY_OPERATOR_MARKERS: Mutex<BTreeMap<String, Vec<StructuralBranchMarker>>> =
-    Mutex::new(BTreeMap::new());
-static ASSERTION_PHASE_MARKERS: Mutex<BTreeMap<String, Vec<AssertionPhaseMarker>>> =
-    Mutex::new(BTreeMap::new());
+static MATCH_ARM_MARKERS: LazyLock<Mutex<HashMap<LocalDefId, BTreeMap<u32, u64>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static STRUCTURAL_DECISION_MARKERS: LazyLock<
+    Mutex<HashMap<LocalDefId, Vec<StructuralDecisionConditionMarker>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static LET_ELSE_MARKERS: LazyLock<Mutex<HashMap<LocalDefId, Vec<StructuralBranchMarker>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static TRY_OPERATOR_MARKERS: LazyLock<Mutex<HashMap<LocalDefId, Vec<StructuralBranchMarker>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static ASSERTION_PHASE_MARKERS: LazyLock<Mutex<HashMap<LocalDefId, Vec<AssertionPhaseMarker>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 static UNREACHABLE_MATCH_ARMS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+static SOURCE_SNAPSHOTS: Mutex<BTreeMap<String, ExactSourceSnapshot>> = Mutex::new(BTreeMap::new());
 static DOCTEST_ROLE: OnceLock<&'static str> = OnceLock::new();
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ExactSourceSnapshot {
+    file: String,
+    source: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct StableSourceRange {
@@ -405,6 +413,29 @@ fn stable_source_range(
             false,
         ),
     };
+    if owned {
+        let source = file
+            .src
+            .as_ref()
+            .ok_or_else(|| format!("rustc retained no source text for {key}"))?
+            .to_string();
+        let display = key
+            .strip_prefix("source:")
+            .map(str::to_owned)
+            .unwrap_or_else(|| key.clone());
+        let snapshot = ExactSourceSnapshot {
+            file: display,
+            source,
+        };
+        let mut snapshots = SOURCE_SNAPSHOTS
+            .lock()
+            .map_err(|_| "source snapshot lock poisoned".to_owned())?;
+        if let Some(existing) = snapshots.insert(key.clone(), snapshot.clone())
+            && existing != snapshot
+        {
+            return Err(format!("source identity {key} resolved to different bytes"));
+        }
+    }
     Ok(StableSourceRange {
         key,
         start,
@@ -1433,6 +1464,29 @@ fn manifest_json(
     )
 }
 
+fn source_snapshots_json(crate_name: &str, required: &BTreeSet<String>) -> Result<String, String> {
+    let snapshots = SOURCE_SNAPSHOTS
+        .lock()
+        .map_err(|_| "source snapshot lock poisoned".to_owned())?;
+    let mut encoded = Vec::with_capacity(required.len());
+    for key in required {
+        let snapshot = snapshots
+            .get(key)
+            .ok_or_else(|| format!("Rust denominator source {key} has no compiler snapshot"))?;
+        encoded.push(format!(
+            "\"{}\":{{\"file\":\"{}\",\"source\":\"{}\"}}",
+            escape(key),
+            escape(&snapshot.file),
+            escape(&snapshot.source),
+        ));
+    }
+    Ok(format!(
+        "{{\"schema\":\"supercov-rust-source-snapshots-v1\",\"crate\":\"{}\",\"sources\":{{{}}}}}\n",
+        escape(crate_name),
+        encoded.join(","),
+    ))
+}
+
 fn reject_probe_ordinal_collisions(
     tcx: TyCtxt<'_>,
     points: &BTreeMap<String, PointObligation>,
@@ -1718,6 +1772,13 @@ impl Callbacks for ProbeCallbacks {
             tcx.dcx()
                 .fatal("Supercov could not flush the Rust compiler trace");
         }
+        if points.is_empty()
+            && branches.is_empty()
+            && decisions.is_empty()
+            && match_groups.is_empty()
+        {
+            return Compilation::Continue;
+        }
         let manifest_path = directory.join(format!(
             "manifest-{}-{}.json",
             std::process::id(),
@@ -1747,6 +1808,48 @@ impl Callbacks for ProbeCallbacks {
         {
             tcx.dcx()
                 .fatal("Supercov could not persist the Rust manifest candidate");
+        }
+        let required_sources = points
+            .values()
+            .map(|point| point.source.key.clone())
+            .chain(
+                branches
+                    .values()
+                    .map(|branch| branch.identity.source.key.clone()),
+            )
+            .chain(decisions.values().flat_map(|decision| {
+                std::iter::once(decision.identity.source.key.clone()).chain(
+                    decision
+                        .conditions
+                        .iter()
+                        .map(|condition| condition.source.key.clone()),
+                )
+            }))
+            .chain(match_groups.values().flat_map(|group| {
+                std::iter::once(group.identity.source.key.clone())
+                    .chain(group.arms.iter().map(|arm| arm.body_source.key.clone()))
+            }))
+            .collect::<BTreeSet<_>>();
+        let snapshots = source_snapshots_json(&crate_name_string, &required_sources)
+            .unwrap_or_else(|error| tcx.dcx().fatal(error));
+        let snapshots_path = directory.join(format!(
+            "sources-{}-{}.json",
+            std::process::id(),
+            sanitize(&crate_name_string)
+        ));
+        let Ok(mut snapshots_output) = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(snapshots_path)
+        else {
+            tcx.dcx()
+                .fatal("Supercov could not create a unique Rust source snapshot");
+        };
+        if snapshots_output.write_all(snapshots.as_bytes()).is_err()
+            || snapshots_output.flush().is_err()
+        {
+            tcx.dcx()
+                .fatal("Supercov could not persist the Rust source snapshot");
         }
         Compilation::Continue
     }
@@ -2991,8 +3094,7 @@ fn mir_built_with_match_markers<'tcx>(
         let mut markers = MATCH_ARM_MARKERS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(existing) =
-            markers.insert(obligations.definition.clone(), local_ordinals.clone())
+        if let Some(existing) = markers.insert(def_id, local_ordinals.clone())
             && existing != local_ordinals
         {
             tcx.dcx().fatal(format!(
@@ -3005,8 +3107,7 @@ fn mir_built_with_match_markers<'tcx>(
         let mut markers = STRUCTURAL_DECISION_MARKERS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(existing) =
-            markers.insert(obligations.definition.clone(), guard_markers.clone())
+        if let Some(existing) = markers.insert(def_id, guard_markers.clone())
             && existing != guard_markers
         {
             tcx.dcx().fatal(format!(
@@ -3019,8 +3120,7 @@ fn mir_built_with_match_markers<'tcx>(
         let mut markers = LET_ELSE_MARKERS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(existing) =
-            markers.insert(obligations.definition.clone(), let_else_markers.clone())
+        if let Some(existing) = markers.insert(def_id, let_else_markers.clone())
             && existing != let_else_markers
         {
             tcx.dcx().fatal(format!(
@@ -3033,7 +3133,7 @@ fn mir_built_with_match_markers<'tcx>(
         let mut markers = TRY_OPERATOR_MARKERS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(existing) = markers.insert(obligations.definition.clone(), try_markers.clone())
+        if let Some(existing) = markers.insert(def_id, try_markers.clone())
             && existing != try_markers
         {
             tcx.dcx().fatal(format!(
@@ -3046,10 +3146,8 @@ fn mir_built_with_match_markers<'tcx>(
         let mut markers = ASSERTION_PHASE_MARKERS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(existing) = markers.insert(
-            obligations.definition.clone(),
-            assertion_phase_markers.clone(),
-        ) && existing != assertion_phase_markers
+        if let Some(existing) = markers.insert(def_id, assertion_phase_markers.clone())
+            && existing != assertion_phase_markers
         {
             tcx.dcx().fatal(format!(
                 "Supercov assertion phase marker collision for {}",
@@ -3389,7 +3487,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     let assertion_phase_markers = ASSERTION_PHASE_MARKERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&tcx.def_path_str(def_id))
+        .get(&def_id)
         .cloned()
         .unwrap_or_default();
     let (match_plans, for_plans, guard_plans, let_else_plans, try_plans) = {
@@ -3483,7 +3581,9 @@ fn mir_drops_with_structural_probes<'tcx>(
     let unit = instrumented
         .local_decls
         .push(LocalDecl::new(tcx.types.unit, span));
-    if let Err(error) = strip_match_arm_markers(&mut instrumented, &tcx.def_path_str(def_id)) {
+    if let Err(error) =
+        strip_match_arm_markers(&mut instrumented, def_id, &tcx.def_path_str(def_id))
+    {
         tcx.dcx().fatal(format!(
             "Supercov could not consume pre-borrow-check Rust match markers in {}: {error}",
             tcx.def_path_str(def_id)
@@ -3516,7 +3616,7 @@ fn mir_drops_with_structural_probes<'tcx>(
             ))
         });
     if let Err(error) =
-        strip_structural_decision_markers(&mut instrumented, &tcx.def_path_str(def_id))
+        strip_structural_decision_markers(&mut instrumented, def_id, &tcx.def_path_str(def_id))
     {
         tcx.dcx().fatal(format!(
             "Supercov could not consume pre-borrow-check Rust match guard markers in {}: {error}",
@@ -3553,7 +3653,8 @@ fn mir_drops_with_structural_probes<'tcx>(
                 tcx.def_path_str(def_id)
             ))
         });
-    if let Err(error) = strip_let_else_markers(&mut instrumented, &tcx.def_path_str(def_id)) {
+    if let Err(error) = strip_let_else_markers(&mut instrumented, def_id, &tcx.def_path_str(def_id))
+    {
         tcx.dcx().fatal(format!(
             "Supercov could not consume pre-borrow-check Rust let-else markers in {}: {error}",
             tcx.def_path_str(def_id)
@@ -3585,7 +3686,9 @@ fn mir_drops_with_structural_probes<'tcx>(
                 tcx.def_path_str(def_id)
             ))
         });
-    if let Err(error) = strip_try_operator_markers(&mut instrumented, &tcx.def_path_str(def_id)) {
+    if let Err(error) =
+        strip_try_operator_markers(&mut instrumented, def_id, &tcx.def_path_str(def_id))
+    {
         tcx.dcx().fatal(format!(
             "Supercov could not consume pre-borrow-check Rust try-operator markers in {}: {error}",
             tcx.def_path_str(def_id)
@@ -3876,7 +3979,7 @@ fn runtime_decision_plans<'tcx>(
     let marked_decisions = STRUCTURAL_DECISION_MARKERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&definition)
+        .get(&def_id)
         .map(|markers| {
             markers
                 .iter()
@@ -4278,7 +4381,7 @@ fn runtime_let_else_plans<'tcx>(
     let marked_branches = LET_ELSE_MARKERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&obligations.definition)
+        .get(&def_id)
         .map(|markers| {
             markers
                 .iter()
@@ -4481,7 +4584,7 @@ fn runtime_match_plans<'tcx>(
     let marker_ordinals = MATCH_ARM_MARKERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&obligations.definition)
+        .get(&def_id)
         .cloned()
         .unwrap_or_default();
     let marker_blocks = body
@@ -4638,7 +4741,7 @@ fn runtime_marked_decision_plans<'tcx>(
     let markers = STRUCTURAL_DECISION_MARKERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&obligations.definition)
+        .get(&def_id)
         .cloned()
         .unwrap_or_default();
     if markers.is_empty() {
@@ -4674,7 +4777,15 @@ fn runtime_marked_decision_plans<'tcx>(
     let mut plans = Vec::new();
     for (decision_id, mut decision_markers) in markers_by_decision {
         let decision = obligations.decisions.get(&decision_id).ok_or_else(|| {
-            format!("structural marker references unknown decision {decision_id}")
+            format!(
+                "structural marker references unknown decision {decision_id}; reconstructed decisions: {}",
+                obligations
+                    .decisions
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
         })?;
         decision_markers.sort_by_key(|marker| marker.condition_index);
         if decision_markers.len() != decision.conditions.len()
@@ -4873,11 +4984,10 @@ fn runtime_marked_let_else_plans<'tcx>(
     def_id: LocalDefId,
     body: &Body<'tcx>,
 ) -> Result<Vec<RuntimeMatchPlan>, String> {
-    let definition = tcx.def_path_str(def_id);
     let markers = LET_ELSE_MARKERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&definition)
+        .get(&def_id)
         .cloned()
         .unwrap_or_default();
     runtime_marked_branch_plans(tcx, def_id, body, markers, "synthetic let-else")
@@ -4888,21 +4998,24 @@ fn runtime_marked_try_operator_plans<'tcx>(
     def_id: LocalDefId,
     body: &Body<'tcx>,
 ) -> Result<Vec<RuntimeMatchPlan>, String> {
-    let definition = tcx.def_path_str(def_id);
     let markers = TRY_OPERATOR_MARKERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&definition)
+        .get(&def_id)
         .cloned()
         .unwrap_or_default();
     runtime_marked_branch_plans(tcx, def_id, body, markers, "try operator")
 }
 
-fn strip_match_arm_markers(body: &mut Body<'_>, definition: &str) -> Result<(), String> {
+fn strip_match_arm_markers(
+    body: &mut Body<'_>,
+    def_id: LocalDefId,
+    definition: &str,
+) -> Result<(), String> {
     let marker_locals = MATCH_ARM_MARKERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(definition)
+        .get(&def_id)
         .map(|markers| markers.keys().copied().collect::<BTreeSet<_>>())
         .unwrap_or_default();
     if marker_locals.is_empty() {
@@ -4931,11 +5044,15 @@ fn strip_match_arm_markers(body: &mut Body<'_>, definition: &str) -> Result<(), 
     Ok(())
 }
 
-fn strip_structural_decision_markers(body: &mut Body<'_>, definition: &str) -> Result<(), String> {
+fn strip_structural_decision_markers(
+    body: &mut Body<'_>,
+    def_id: LocalDefId,
+    definition: &str,
+) -> Result<(), String> {
     let marker_locals = STRUCTURAL_DECISION_MARKERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(definition)
+        .get(&def_id)
         .map(|markers| {
             markers
                 .iter()
@@ -4969,11 +5086,15 @@ fn strip_structural_decision_markers(body: &mut Body<'_>, definition: &str) -> R
     Ok(())
 }
 
-fn strip_let_else_markers(body: &mut Body<'_>, definition: &str) -> Result<(), String> {
+fn strip_let_else_markers(
+    body: &mut Body<'_>,
+    def_id: LocalDefId,
+    definition: &str,
+) -> Result<(), String> {
     let marker_locals = LET_ELSE_MARKERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(definition)
+        .get(&def_id)
         .map(|markers| {
             markers
                 .iter()
@@ -5007,11 +5128,15 @@ fn strip_let_else_markers(body: &mut Body<'_>, definition: &str) -> Result<(), S
     Ok(())
 }
 
-fn strip_try_operator_markers(body: &mut Body<'_>, definition: &str) -> Result<(), String> {
+fn strip_try_operator_markers(
+    body: &mut Body<'_>,
+    def_id: LocalDefId,
+    definition: &str,
+) -> Result<(), String> {
     let marker_locals = TRY_OPERATOR_MARKERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(definition)
+        .get(&def_id)
         .map(|markers| {
             markers
                 .iter()

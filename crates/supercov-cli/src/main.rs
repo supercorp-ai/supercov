@@ -59,7 +59,15 @@ Usage:\n\
   supercov clean [--keep N] [--dry-run]\n";
 
 fn main() -> ExitCode {
-    let mut arguments = std::env::args().skip(1);
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if std::env::var_os(
+        supercov_engine::rust_compiler_orchestration::RUST_COMPILER_WRAPPER_CONFIG_ENV,
+    )
+    .is_some()
+    {
+        return rust_compiler_wrapper(arguments);
+    }
+    let mut arguments = arguments.into_iter();
     match arguments.next().as_deref() {
         None | Some("help" | "--help" | "-h") => {
             print!("{HELP}");
@@ -95,12 +103,210 @@ fn main() -> ExitCode {
         Some("__normalize-rust-compiler-manifest") => normalize_rust_compiler_manifest(),
         Some("__project-rust-compiler-evidence") => project_rust_compiler_evidence(),
         Some("__select-rust-compiler-companion") => select_rust_compiler_companion(),
+        Some("__build-rust-compiler") => build_rust_compiler(),
+        Some("__run-rust-compiler") => run_rust_compiler(),
         Some("clean") => cleanup_command(arguments.collect()),
         Some("runs") => public_query_command("runs", arguments.collect()),
         Some("diff") => public_query_command("diff", arguments.collect()),
         Some("merge") => merge_command(arguments.collect()),
         Some(command) => {
             eprintln!("[supercov] Unknown command: {command}. Try supercov help.");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn rust_compiler_wrapper(arguments: Vec<String>) -> ExitCode {
+    let Some(rustc) = arguments.first() else {
+        eprintln!("[supercov] Cargo compiler wrapper received no rustc path");
+        return ExitCode::from(2);
+    };
+    let Some(config_path) = std::env::var_os(
+        supercov_engine::rust_compiler_orchestration::RUST_COMPILER_WRAPPER_CONFIG_ENV,
+    )
+    .map(PathBuf::from) else {
+        eprintln!("[supercov] Cargo compiler wrapper configuration is missing");
+        return ExitCode::from(2);
+    };
+    let result = (|| -> Result<ExitCode, String> {
+        let metadata = fs::symlink_metadata(&config_path).map_err(|error| error.to_string())?;
+        if !metadata.file_type().is_file() {
+            return Err(format!(
+                "unsafe Rust compiler wrapper configuration: {}",
+                config_path.display()
+            ));
+        }
+        let config: supercov_engine::rust_compiler_orchestration::RustCompilerWrapperConfig =
+            serde_json::from_slice(&fs::read(&config_path).map_err(|error| error.to_string())?)
+                .map_err(|error| format!("invalid Rust compiler wrapper configuration: {error}"))?;
+        let selection = supercov_engine::rust_compiler_selection::select_rust_compiler_companion(
+            Path::new(rustc),
+            &config.candidates,
+            config.require_public_capabilities,
+        )
+        .map_err(|error| error.to_string())?;
+        let selection_metadata =
+            fs::symlink_metadata(&config.selection_directory).map_err(|error| error.to_string())?;
+        if !selection_metadata.file_type().is_dir() {
+            return Err(format!(
+                "unsafe Rust compiler selection directory: {}",
+                config.selection_directory.display()
+            ));
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let attestation = config
+            .selection_directory
+            .join(format!("selection-{}-{now}.json", std::process::id()));
+        let bytes = serde_json::to_vec(&selection).map_err(|error| error.to_string())?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&attestation)
+            .map_err(|error| error.to_string())?;
+        use std::io::Write as _;
+        file.write_all(&bytes).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+
+        let mut command = Command::new(&selection.companion_path);
+        command.args(&arguments).env_remove(
+            supercov_engine::rust_compiler_orchestration::RUST_COMPILER_WRAPPER_CONFIG_ENV,
+        );
+        supercov_engine::rust_compiler_selection::configure_companion_loader_environment(
+            &mut command,
+            &selection.compiler_library_directory,
+        )
+        .map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            let error = command.exec();
+            Err(format!(
+                "could not execute Rust compiler companion: {error}"
+            ))
+        }
+        #[cfg(not(unix))]
+        {
+            let status = command
+                .status()
+                .map_err(|error| format!("could not execute Rust compiler companion: {error}"))?;
+            Ok(ExitCode::from(
+                status.code().unwrap_or(1).clamp(0, 255) as u8
+            ))
+        }
+    })();
+    match result {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn build_rust_compiler() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let request: supercov_engine::rust_compiler_orchestration::RustCompilerBuildRequest =
+        match serde_json::from_str(&input) {
+            Ok(request) => request,
+            Err(error) => {
+                eprintln!("[supercov] invalid Rust compiler build request: {error}");
+                return ExitCode::from(2);
+            }
+        };
+    match supercov_engine::rust_compiler_orchestration::build_with_rust_compiler_companion(&request)
+    {
+        Ok(build) => match serde_json::to_string(&build) {
+            Ok(output) => {
+                println!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("[supercov] could not serialize Rust compiler build: {error}");
+                ExitCode::from(2)
+            }
+        },
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_rust_compiler() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let request: supercov_engine::rust_compiler_test_runner::RustCompilerRunRequest =
+        match serde_json::from_str(&input) {
+            Ok(request) => request,
+            Err(error) => {
+                eprintln!("[supercov] invalid Rust compiler run request: {error}");
+                return ExitCode::from(2);
+            }
+        };
+    let run = match supercov_engine::rust_compiler_test_runner::run_rust_compiler_frontend(
+        &request,
+        &mut std::io::stderr(),
+    ) {
+        Ok(run) => run,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let report = match supercov_engine::frontend_protocol::analyze_frontend_results(
+        &run.declaration,
+        &run.request,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("[supercov] Rust compiler frontend contract failed: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let output = serde_json::json!({
+        "runId": run.request.run_id,
+        "exitCode": run.exit_code,
+        "selection": run.selection,
+        "artifacts": run.artifacts,
+        "tests": run.request.raw_results.iter().filter(|result| result.role == "test").count(),
+        "backgroundResults": run.request.raw_results.iter().filter(|result| result.role == "background").count(),
+        "attemptHealth": run.attempt_health,
+        "denominator": {
+            "points": run.request.manifest.points.len(),
+            "branches": run.request.manifest.branches.len(),
+            "decisions": run.request.manifest.decisions.len(),
+            "limitations": run.request.manifest.limitations.len(),
+        },
+        "summary": report.view.summary,
+        "buildMs": run.build_ms,
+        "executionMs": run.execution_ms,
+    });
+    match serde_json::to_string(&output) {
+        Ok(output) => {
+            println!("{output}");
+            ExitCode::from(run.exit_code.clamp(0, 255) as u8)
+        }
+        Err(error) => {
+            eprintln!("[supercov] could not serialize Rust compiler run: {error}");
             ExitCode::from(2)
         }
     }
