@@ -217,8 +217,11 @@ candidate still carries blocking denominator limitations. The authored match
    parents, cycles and cross-attempt chains fail closed. The real compiler
    corpus corrected one false premise before freezing: a valid phase definition
    may have no committed observation when evaluation panics or touches only
-   uninstrumented data. Evidence-v3 phase projection, CTFE and doctest
-   obligation/probe mappings,
+   uninstrumented data. The shared engine now projects those verified dynamic
+   contexts into distinct evidence-v3 assertion phases with source, causal
+   parent and committed passed/failed status; missing verdicts remain unknown
+   rather than inferred. Compiler-supervisor integration of that projection,
+   CTFE and doctest obligation/probe mappings,
 plus full package and compiler fingerprints, remain R1 work. No measurement-
 complete claim is possible yet.
 

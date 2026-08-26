@@ -284,8 +284,10 @@ an unverified rustc commit.
    child context, restore on normal and unwind exits, and nest exactly. The
    `rust-probe-transport-v2` now carries supervisor-verifiable parent,
    assertion-decision and transport-global invocation identity, including
-   repeated and nested assertion executions. Evidence-v3 phase metadata
-   projection remains the attribution gate. Bind remaining real MIR/CTFE probes to
+   repeated and nested assertion executions. The shared engine projects these
+   into stable evidence-v3 phases and preserves a missing verdict as unknown;
+   wiring that projection into the compiler supervisor remains the attribution
+   gate. Bind remaining real MIR/CTFE probes to
    the same manifest IDs. Add
    derive, external expansion, generic/trait, include/module and
    package-fingerprint corpora before treating the candidate as a complete
