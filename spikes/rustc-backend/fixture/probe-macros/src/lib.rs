@@ -6,3 +6,10 @@ pub fn generated_function(_input: TokenStream) -> TokenStream {
         .parse()
         .expect("valid generated Rust")
 }
+
+#[proc_macro_attribute]
+pub fn generated_test(_attribute: TokenStream, item: TokenStream) -> TokenStream {
+    let mut output: TokenStream = "#[test]".parse().expect("valid test attribute");
+    output.extend(item);
+    output
+}

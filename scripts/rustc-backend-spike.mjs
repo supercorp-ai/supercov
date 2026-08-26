@@ -75,7 +75,7 @@ function readTransport(transport) {
     committed += 1;
     const kind = bytes[descriptor + 1];
     if (kind !== 3) continue;
-    assert.equal(Number(bytes.readBigUInt64LE(descriptor + 8)), transportContext);
+    const context = bytes.readBigUInt64LE(descriptor + 8).toString();
     const payloadOffset = bytes.readUInt32LE(descriptor + 16);
     const payloadLength = bytes.readUInt32LE(descriptor + 20);
     const idLength = bytes.readUInt32LE(descriptor + 24);
@@ -84,7 +84,10 @@ function readTransport(transport) {
     assert.equal(idLength, 0);
     assert.equal(valueLength, 8);
     assert(payloadOffset + payloadLength <= payloadCapacity);
-    ordinals.push(Number(bytes.readBigUInt64LE(payloadBase + payloadOffset)));
+    ordinals.push({
+      context,
+      ordinal: Number(bytes.readBigUInt64LE(payloadBase + payloadOffset)),
+    });
   }
   return {
     attachments: Number(bytes.readBigUInt64LE(72)),
@@ -149,6 +152,18 @@ function passedTests(output) {
     (total, match) => total + Number(match[1]),
     0,
   );
+}
+
+function testContextId(testName) {
+  let value = 0xcbf29ce484222325n;
+  for (const byte of Buffer.from(`supercov-rust-test-v1\0${testName}`)) {
+    value ^= BigInt(byte);
+    value = BigInt.asUintN(64, value * 0x100000001b3n);
+  }
+  if (value === 0n || value === 0xffffffffffffffffn) {
+    value ^= 0xa5a5a5a5a5a5a5a5n;
+  }
+  return value.toString();
 }
 
 try {
@@ -229,7 +244,19 @@ try {
   assert.equal(behaviorEvidence.attachments, 1);
   assert.equal(behaviorEvidence.dropped, 0);
   assert.equal(behaviorEvidence.incomplete, 0);
-  assert.deepEqual(new Set(behaviorEvidence.ordinals), new Set([0, 1, 2, 3]));
+  assert.deepEqual(
+    new Set(behaviorEvidence.ordinals.map(({ordinal}) => ordinal)),
+    new Set([0, 1, 2, 3]),
+  );
+  const behaviorPairs = new Set(
+    behaviorEvidence.ordinals.map(({context, ordinal}) => `${context}:${ordinal}`),
+  );
+  assert(behaviorPairs.has('303:0'), 'normal scope did not activate context 303');
+  assert(behaviorPairs.has('404:3'), 'panic scope did not activate context 404');
+  assert(
+    behaviorPairs.has(`${transportContext}:0`),
+    `context was not restored after scope exit: ${JSON.stringify([...behaviorPairs])}`,
+  );
 
   const ctfeDirectory = join(scratch, 'ctfe');
   const ctfeBehavior = run(
@@ -292,7 +319,61 @@ try {
   assert.equal(testEvidence.attachments, 1);
   assert.equal(testEvidence.dropped, 0);
   assert.equal(testEvidence.incomplete, 0);
-  assert.deepEqual(new Set(testEvidence.ordinals), new Set([0, 1, 2, 3]));
+  assert.deepEqual(
+    new Set(testEvidence.ordinals.map(({ordinal}) => ordinal)),
+    new Set([0, 1, 2, 3]),
+  );
+
+  const concurrentTransport = createTransport('concurrent-tests');
+  const concurrentTests = run(
+    'cargo',
+    [
+      'test',
+      '--quiet',
+      '--manifest-path',
+      fixture,
+      '--lib',
+      'context',
+      '--',
+      '--ignored',
+      '--test-threads=5',
+    ],
+    {
+      env: {
+        ...instrumentedEnvironment,
+        SUPERCOV_RUST_TRANSPORT_FILE: concurrentTransport.path,
+        SUPERCOV_RUST_TRANSPORT_TOKEN: concurrentTransport.tokenHex,
+        SUPERCOV_RUST_CONTEXT_ID: '0000000000000000',
+      },
+    },
+  );
+  assert.match(concurrentTests.stdout, /5 passed/);
+  const concurrentEvidence = readTransport(concurrentTransport);
+  assert.equal(concurrentEvidence.attachments, 1);
+  assert.equal(concurrentEvidence.dropped, 0);
+  assert.equal(concurrentEvidence.incomplete, 0);
+  const contextNames = [
+    'tests::context_one',
+    'tests::context_two',
+    'tests::attribute_context',
+    'tests::panic_context',
+  ];
+  const contextIds = contextNames.map(testContextId);
+  assert.equal(new Set(contextIds).size, contextIds.length, 'test context collision');
+  assert.deepEqual(
+    new Set(
+      concurrentEvidence.ordinals.map(
+        ({context, ordinal}) => `${context}:${ordinal}`,
+      ),
+    ),
+    new Set([
+      `${contextIds[0]}:0`,
+      `${contextIds[1]}:1`,
+      `${contextIds[2]}:0`,
+      `${contextIds[3]}:3`,
+      '0:0',
+    ]),
+  );
   const instrumentedRecords = records(instrumentedDirectory);
   assert(instrumentedRecords.some((record) => record.definition === 'authored'));
   const injectedProbe = instrumentedRecords.find((record) =>

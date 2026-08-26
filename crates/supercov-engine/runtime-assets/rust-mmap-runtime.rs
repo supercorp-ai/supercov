@@ -2,6 +2,7 @@
 #[allow(dead_code)]
 mod __SUPERCOV_MODULE__ {
     use std::fs::OpenOptions;
+    use std::cell::Cell;
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
@@ -20,6 +21,11 @@ mod __SUPERCOV_MODULE__ {
     const KIND_HIT: u8 = 1;
     const KIND_DECISION: u8 = 2;
     const KIND_ORDINAL_HIT: u8 = 3;
+    const NO_CONTEXT_OVERRIDE: u64 = u64::MAX;
+
+    std::thread_local! {
+        static CONTEXT_OVERRIDE: Cell<Option<u64>> = const { Cell::new(None) };
+    }
 
     struct Transport {
         pointer: *mut u8,
@@ -188,6 +194,9 @@ mod __SUPERCOV_MODULE__ {
                 self.dropped();
                 return;
             }
+            let context_id = CONTEXT_OVERRIDE
+                .with(Cell::get)
+                .unwrap_or(self.context_id);
             let descriptor_offset = HEADER_SIZE + descriptor as usize * DESCRIPTOR_SIZE;
             let payload_offset = self.payload_base + payload as usize;
             // SAFETY: the two atomic reservations prove these descriptor and
@@ -198,7 +207,7 @@ mod __SUPERCOV_MODULE__ {
                 descriptor_pointer.add(2).write(outcome);
                 descriptor_pointer.add(3).write(0);
                 write_u32(descriptor_pointer, 4, std::process::id());
-                write_u64(descriptor_pointer, 8, self.context_id);
+                write_u64(descriptor_pointer, 8, context_id);
                 write_u32(descriptor_pointer, 16, payload as u32);
                 write_u32(descriptor_pointer, 20, payload_length);
                 write_u32(descriptor_pointer, 24, id_length);
@@ -210,7 +219,7 @@ mod __SUPERCOV_MODULE__ {
                         kind,
                         outcome,
                         std::process::id(),
-                        self.context_id,
+                        context_id,
                         payload as u32,
                         payload_length,
                         id_length,
@@ -401,5 +410,20 @@ mod __SUPERCOV_MODULE__ {
         if let Some(transport) = transport() {
             transport.record(KIND_ORDINAL_HIT, 0, "", &ordinal.to_le_bytes());
         }
+    }
+
+    #[inline(never)]
+    pub fn enter_context(context_id: u64) -> u64 {
+        debug_assert!(!matches!(context_id, 0 | u64::MAX));
+        CONTEXT_OVERRIDE
+            .with(|current| current.replace(Some(context_id)))
+            .unwrap_or(NO_CONTEXT_OVERRIDE)
+    }
+
+    #[inline(never)]
+    pub fn exit_context(previous: u64) {
+        CONTEXT_OVERRIDE.with(|current| {
+            current.set((previous != NO_CONTEXT_OVERRIDE).then_some(previous));
+        });
     }
 }

@@ -389,6 +389,7 @@ pub struct RustProbeTransportRecordKinds {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustProbeTransportContext {
     pub zero: String,
+    pub max: String,
     pub nonzero: String,
     pub published_identity: Vec<String>,
 }
@@ -1470,6 +1471,8 @@ mod tests {
             contract.context.published_identity,
             ["run", "worker", "test", "retry", "phase"]
         );
+        assert_eq!(contract.context.zero, "background-or-unattributed");
+        assert_eq!(contract.context.max, "reserved-runtime-sentinel");
         assert!(
             contract
                 .completeness

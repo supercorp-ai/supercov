@@ -78,6 +78,16 @@ The spike proved:
     Thread and process concurrency, descriptor and payload exhaustion, wrong
     token/context, corrupt/truncated records, symlinks and an uncommitted
     descriptor all fail closed or produce explicit loss health as specified.
+13. Exact libtest identity is available after expansion without naming a test
+    framework. The companion joins each function to rustc's generated
+    `rustc_test_marker`, derives a deterministic collision-checked context ID,
+    enters it at MIR function entry, and restores the previous nested context
+    on normal returns, existing cleanup resumes, and direct unwind actions.
+    Five concurrent ordinary, procedural-attribute-generated and expected-
+    panic tests retain separate contexts. Work on an unpropagated child thread
+    is retained as context zero rather than guessed; that explicit health is
+    the trigger for an exact process-per-test rerun until child/async context
+    propagation is independently proven.
 
 The companion executable is about 600 KiB on arm64 macOS and dynamically uses
 the exact `librustc_driver` already shipped by the user's `rustc` component.
@@ -119,8 +129,11 @@ an unverified rustc commit.
 4. Runtime probes publish into the frozen bounded transport. Each record binds
    the task token, process ID, and a supervisor-resolved 64-bit context ID; the
    shared engine alone maps that context to run/worker/test/retry/phase and
-   converts valid observations into evidence v3. A dynamic in-process context
-   carrier remains required before concurrent libtest can be exact.
+   converts valid observations into evidence v3. The injected runtime has a
+   nesting-safe thread-local carrier, and the companion activates it from
+   rustc's own generated test marker rather than test-name heuristics. Child
+   threads and executor migrations do not inherit TLS; they stay context zero
+   and require owned propagation or exact rerun fallback.
 5. A scoped rustdoc launcher selects the exact ordinary rustdoc and injects
    the compiler companion as its test-builder wrapper. The first proof maps
    standalone hidden lines and joins merged bundle/runner identities without a
@@ -137,9 +150,11 @@ an unverified rustc commit.
 
 1. Derive stable expansion identities and complete branch/condition mappings
    from expanded HIR plus MIR source info.
-2. Build the dynamic test/retry/phase context carrier on the frozen transport;
-   prove concurrent libtest, async, subprocess, retry, late-work, no_std and
-   supported-target behavior. Windows remains a separate explicit target gate.
+2. Extend the proven libtest entry/unwind carrier through child threads, async
+   executors, subprocesses, retry, late work and phases, or activate the exact
+   process-per-test fallback whenever context-zero work is observed. Prove
+   no_std and supported-target behavior. Windows remains a separate explicit
+   target gate.
 3. Generalize the proven CTFE marker path across every frozen compile-time
    surface, map every marker into the frozen manifest, and make publication
    crash-safe. Extend the proven rustdoc interception/mapping path with runtime

@@ -1293,6 +1293,13 @@ miss blocks flipping any default.
   matrix and the broader semantic corpus remain explicit blockers. Windows
   transport remains a later target-specific gate and no GitHub Actions were
   invoked for this checkpoint.
+- A follow-on compiler proof now derives logical test names from rustc's
+  generated test markers—including a test produced by a procedural attribute
+  macro—and injects nesting-safe context entry/restoration on every normal and
+  unwind exit. Five concurrent libtests, including expected panic, remain
+  separated. A spawned child thread deliberately remains context zero, proving
+  Supercov detects rather than guesses missing propagation; exact child/async
+  propagation or automatic process-per-test rerun remains a promotion gate.
 
 ## Non-goals and guardrails
 

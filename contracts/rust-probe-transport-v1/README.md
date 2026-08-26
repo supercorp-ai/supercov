@@ -33,10 +33,11 @@ offset/length split into ID and value lengths, and a 64-bit FNV-1a checksum over
 all meaningful descriptor metadata plus payload. The variable payload follows
 the complete fixed descriptor array.
 
-Context `0` means background or unattributed execution. A nonzero ID resolves,
-through supervisor-owned attempt metadata, to exact run, worker, logical test,
-retry, and phase identity. It is recorded per observation so concurrent
-contexts are never inferred from timestamps or process order.
+Context `0` means background or unattributed execution. `u64::MAX` is reserved
+as the runtime's nesting sentinel and is never a published context. Every other
+nonzero ID resolves, through supervisor-owned attempt metadata, to exact run,
+worker, logical test, retry, and phase identity. It is recorded per observation
+so concurrent contexts are never inferred from timestamps or process order.
 
 ## Publication and crash semantics
 

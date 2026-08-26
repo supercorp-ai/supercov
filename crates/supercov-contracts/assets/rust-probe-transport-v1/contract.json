@@ -40,6 +40,7 @@
   },
   "context": {
     "zero": "background-or-unattributed",
+    "max": "reserved-runtime-sentinel",
     "nonzero": "supervisor-resolved-exact-context",
     "publishedIdentity": ["run", "worker", "test", "retry", "phase"]
   },

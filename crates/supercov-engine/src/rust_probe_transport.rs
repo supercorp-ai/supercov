@@ -486,6 +486,16 @@ fn main() {{
         let second = __supercov_runtime_v1::condition(false, &mut frame, 1);
         __supercov_runtime_v1::decision(first && second, &mut frame);
         __supercov_runtime_v1::ordinal_hit(7);
+    }} else if mode == "contexts" {{
+        __supercov_runtime_v1::hit("rs:statement:0123456789abcdef01234567");
+        let outer = __supercov_runtime_v1::enter_context(100);
+        __supercov_runtime_v1::hit("rs:statement:0123456789abcdef01234567");
+        let inner = __supercov_runtime_v1::enter_context(200);
+        __supercov_runtime_v1::hit("rs:statement:0123456789abcdef01234567");
+        __supercov_runtime_v1::exit_context(inner);
+        __supercov_runtime_v1::hit("rs:statement:0123456789abcdef01234567");
+        __supercov_runtime_v1::exit_context(outer);
+        __supercov_runtime_v1::hit("rs:statement:0123456789abcdef01234567");
     }} else if mode == "kill" {{
         __supercov_runtime_v1::hit("rs:function:fedcba9876543210fedcba98");
         println!("ready");
@@ -612,6 +622,25 @@ fn main() {{
                 .collect::<std::collections::BTreeSet<_>>()
                 .len(),
             8
+        );
+
+        let nested = directory.join("nested-context.transport");
+        create_rust_transport(&nested, TOKEN, 16, 4_096).unwrap();
+        let output = Command::new(&binary)
+            .arg("contexts")
+            .env(RUST_TRANSPORT_ENV, &nested)
+            .env(RUST_TRANSPORT_TOKEN_ENV, token_hex())
+            .env(RUST_CONTEXT_ENV, format!("{CONTEXT:016x}"))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let read = read_rust_transport(&nested, &TOKEN).unwrap();
+        assert_eq!(
+            read.observations
+                .iter()
+                .map(|item| item.context_id)
+                .collect::<Vec<_>>(),
+            [CONTEXT, 100, 200, 100, CONTEXT]
         );
 
         let rejected = directory.join("rejected-token.transport");

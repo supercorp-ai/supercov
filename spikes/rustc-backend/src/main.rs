@@ -48,6 +48,8 @@ const REAL_RUSTDOC: &str = "SUPERCOV_RUSTC_SPIKE_REAL_RUSTDOC";
 const COMPANION_PATH: &str = "SUPERCOV_RUSTC_SPIKE_COMPANION_PATH";
 const RUSTDOC_LAUNCHED: &str = "SUPERCOV_RUSTC_SPIKE_RUSTDOC_LAUNCHED";
 const PROBE_FUNCTION: &str = "__supercov_spike_runtime::ordinal_hit";
+const ENTER_CONTEXT_FUNCTION: &str = "__supercov_spike_runtime::enter_context";
+const EXIT_CONTEXT_FUNCTION: &str = "__supercov_spike_runtime::exit_context";
 const CTFE_EVENT_TARGET: &str = "rustc_const_eval::interpret::step";
 const CTFE_MARKER_PREFIX: u64 = 0x5355_5045_5243_0000;
 const CTFE_EDGE_MARKER_OFFSET: u64 = 0x8000;
@@ -357,53 +359,175 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
     if env::var_os(INSTRUMENT_MIR).is_none() {
         return body;
     }
-    let mut instrumented = body.clone();
     let definition = tcx.def_path_str(def_id);
-    let Some(probe_id) = probe_id_for(&definition) else {
+    let probe_id = probe_id_for(&definition);
+    let context_id = context_id_for(tcx, def_id, &definition);
+    if probe_id.is_none() && context_id.is_none() {
         return body;
-    };
-    let Some(probe_function) = tcx
-        .hir_free_items()
-        .map(|item| item.owner_id.def_id)
-        .find(|item| tcx.def_path_str(*item).ends_with(PROBE_FUNCTION))
-    else {
+    }
+    let probe_function = probe_id.and_then(|_| find_runtime_function(tcx, PROBE_FUNCTION));
+    let enter_context = context_id.and_then(|_| find_runtime_function(tcx, ENTER_CONTEXT_FUNCTION));
+    let exit_context = context_id.and_then(|_| find_runtime_function(tcx, EXIT_CONTEXT_FUNCTION));
+    if probe_id.is_some() != probe_function.is_some()
+        || context_id.is_some() != (enter_context.is_some() && exit_context.is_some())
+    {
         return body;
-    };
+    }
 
+    let mut instrumented = body.clone();
     let span = tcx.def_span(def_id);
     let unit = instrumented
         .local_decls
         .push(LocalDecl::new(tcx.types.unit, span));
+    let previous_context = context_id.map(|_| {
+        instrumented
+            .local_decls
+            .push(LocalDecl::new(tcx.types.u64, span))
+    });
+    if let (Some(previous), Some(exit)) = (previous_context, exit_context) {
+        let continuing_unwinds = instrumented
+            .basic_blocks
+            .iter_enumerated()
+            .filter_map(|(block, data)| {
+                matches!(data.terminator().unwind(), Some(UnwindAction::Continue)).then_some(block)
+            })
+            .collect::<Vec<_>>();
+        let exits = instrumented
+            .basic_blocks
+            .iter_enumerated()
+            .filter_map(|(block, data)| {
+                matches!(
+                    data.terminator().kind,
+                    TerminatorKind::Return | TerminatorKind::UnwindResume
+                )
+                .then_some((block, data.is_cleanup))
+            })
+            .collect::<Vec<_>>();
+        for (block, cleanup) in exits {
+            let original = instrumented.basic_blocks[block].terminator().clone();
+            let continuation = instrumented
+                .basic_blocks_mut()
+                .push(BasicBlockData::new(Some(original), cleanup));
+            instrumented.basic_blocks_mut()[block] = runtime_call_block(
+                tcx,
+                exit,
+                [Operand::Copy(Place::from(previous))].into_iter(),
+                Place::from(unit),
+                continuation,
+                span,
+                cleanup,
+            );
+        }
+        if !continuing_unwinds.is_empty() {
+            let resume = instrumented.basic_blocks_mut().push(BasicBlockData::new(
+                Some(Terminator {
+                    source_info: SourceInfo::outermost(span),
+                    kind: TerminatorKind::UnwindResume,
+                }),
+                true,
+            ));
+            let cleanup = instrumented.basic_blocks_mut().push(runtime_call_block(
+                tcx,
+                exit,
+                [Operand::Copy(Place::from(previous))].into_iter(),
+                Place::from(unit),
+                resume,
+                span,
+                true,
+            ));
+            for block in continuing_unwinds {
+                *instrumented.basic_blocks_mut()[block]
+                    .terminator_mut()
+                    .unwind_mut()
+                    .expect("collected unwind action") = UnwindAction::Cleanup(cleanup);
+            }
+        }
+    }
     let continuation = {
         let original_start =
             instrumented.basic_blocks_mut()[rustc_middle::mir::START_BLOCK].clone();
         instrumented.basic_blocks_mut().push(original_start)
     };
-    instrumented.basic_blocks_mut()[rustc_middle::mir::START_BLOCK] = BasicBlockData::new(
+    let mut entry = continuation;
+    if let (Some(probe_id), Some(probe_function)) = (probe_id, probe_function) {
+        let block = runtime_call_block(
+            tcx,
+            probe_function,
+            [Operand::const_from_scalar(
+                tcx,
+                tcx.types.u64,
+                Scalar::from_u64(probe_id),
+                span,
+            )]
+            .into_iter(),
+            Place::from(unit),
+            entry,
+            span,
+            false,
+        );
+        if context_id.is_some() {
+            entry = instrumented.basic_blocks_mut().push(block);
+        } else {
+            instrumented.basic_blocks_mut()[rustc_middle::mir::START_BLOCK] = block;
+        }
+    }
+    if let (Some(context_id), Some(enter), Some(previous)) =
+        (context_id, enter_context, previous_context)
+    {
+        instrumented.basic_blocks_mut()[rustc_middle::mir::START_BLOCK] = runtime_call_block(
+            tcx,
+            enter,
+            [Operand::const_from_scalar(
+                tcx,
+                tcx.types.u64,
+                Scalar::from_u64(context_id),
+                span,
+            )]
+            .into_iter(),
+            Place::from(previous),
+            entry,
+            span,
+            false,
+        );
+    }
+    tcx.arena.alloc(instrumented)
+}
+
+fn find_runtime_function(tcx: TyCtxt<'_>, suffix: &str) -> Option<LocalDefId> {
+    tcx.hir_free_items()
+        .map(|item| item.owner_id.def_id)
+        .find(|item| tcx.def_path_str(*item).ends_with(suffix))
+}
+
+fn runtime_call_block<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    function: LocalDefId,
+    arguments: impl Iterator<Item = Operand<'tcx>>,
+    destination: Place<'tcx>,
+    target: rustc_middle::mir::BasicBlock,
+    span: rustc_span::Span,
+    cleanup: bool,
+) -> BasicBlockData<'tcx> {
+    BasicBlockData::new(
         Some(Terminator {
             source_info: SourceInfo::outermost(span),
             kind: TerminatorKind::Call {
-                func: Operand::function_handle(tcx, probe_function.to_def_id(), [], span),
-                args: [Spanned {
-                    node: Operand::const_from_scalar(
-                        tcx,
-                        tcx.types.u64,
-                        Scalar::from_u64(probe_id),
-                        span,
-                    ),
-                    span: DUMMY_SP,
-                }]
-                .into(),
-                destination: Place::from(unit),
-                target: Some(continuation),
+                func: Operand::function_handle(tcx, function.to_def_id(), [], span),
+                args: arguments
+                    .map(|node| Spanned {
+                        node,
+                        span: DUMMY_SP,
+                    })
+                    .collect(),
+                destination,
+                target: Some(target),
                 unwind: UnwindAction::Continue,
                 call_source: CallSource::Misc,
                 fn_span: span,
             },
         }),
-        false,
-    );
-    tcx.arena.alloc(instrumented)
+        cleanup,
+    )
 }
 
 fn probe_id_for(definition: &str) -> Option<u64> {
@@ -418,6 +542,40 @@ fn probe_id_for(definition: &str) -> Option<u64> {
         }
     }
     None
+}
+
+fn context_id_for(tcx: TyCtxt<'_>, def_id: LocalDefId, definition: &str) -> Option<u64> {
+    if matches!(tcx.def_kind(def_id), DefKind::Fn)
+        && let Some(test_name) = tcx.hir_body_owners().find_map(|owner| {
+            rustc_hir::find_attr!(tcx, owner, RustcTestMarker(name) => *name)
+                .filter(|name| name.as_str() == definition)
+        })
+    {
+        return Some(test_context_id(test_name.as_str()));
+    }
+    for (suffix, context_id) in [("context_normal_scope", 303), ("context_panic_scope", 404)] {
+        if definition.ends_with(suffix) {
+            return Some(context_id);
+        }
+    }
+    None
+}
+
+fn test_context_id(test_name: &str) -> u64 {
+    let mut value = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in b"supercov-rust-test-v1\0"
+        .iter()
+        .copied()
+        .chain(test_name.bytes())
+    {
+        value ^= u64::from(byte);
+        value = value.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    if matches!(value, 0 | u64::MAX) {
+        value ^ 0xa5a5_a5a5_a5a5_a5a5
+    } else {
+        value
+    }
 }
 
 fn sanitize(value: &str) -> String {

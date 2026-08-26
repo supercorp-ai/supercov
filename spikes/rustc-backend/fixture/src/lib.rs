@@ -84,9 +84,19 @@ pub fn panic_path(log: &std::cell::RefCell<Vec<&'static str>>) {
     panic!("expected-panic");
 }
 
+pub fn context_normal_scope() -> usize {
+    authored(true)
+}
+
+pub fn context_panic_scope(log: &std::cell::RefCell<Vec<&'static str>>) {
+    panic_path(log);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static CONTEXT_BARRIER: std::sync::Barrier = std::sync::Barrier::new(2);
 
     #[test]
     fn exercises_every_surface() {
@@ -108,5 +118,44 @@ mod tests {
         assert_eq!(drop_order(&log), 23);
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| panic_path(&log)));
         assert!(panic.is_err());
+    }
+
+    #[cfg(supercov_spike_instrumented)]
+    #[test]
+    #[ignore = "requires compiler-spike context instrumentation"]
+    fn context_one() {
+        CONTEXT_BARRIER.wait();
+        assert_eq!(authored(true), 1);
+    }
+
+    #[cfg(supercov_spike_instrumented)]
+    #[test]
+    #[ignore = "requires compiler-spike context instrumentation"]
+    fn context_two() {
+        CONTEXT_BARRIER.wait();
+        assert_eq!(fallible(2), Ok(3));
+    }
+
+    #[cfg(supercov_spike_instrumented)]
+    #[probe_macros::generated_test]
+    #[ignore = "requires compiler-spike context instrumentation"]
+    fn attribute_context() {
+        assert_eq!(authored(false), 2);
+    }
+
+    #[cfg(supercov_spike_instrumented)]
+    #[test]
+    #[ignore = "requires compiler-spike context instrumentation"]
+    #[should_panic(expected = "expected-panic")]
+    fn panic_context() {
+        let log = std::cell::RefCell::new(Vec::new());
+        panic_path(&log);
+    }
+
+    #[cfg(supercov_spike_instrumented)]
+    #[test]
+    #[ignore = "requires compiler-spike context instrumentation"]
+    fn child_context() {
+        assert_eq!(std::thread::spawn(|| authored(true)).join().unwrap(), 1);
     }
 }
