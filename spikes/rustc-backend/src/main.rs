@@ -5,6 +5,7 @@ extern crate rustc_driver;
 extern crate rustc_errors;
 extern crate rustc_hir;
 extern crate rustc_interface;
+extern crate rustc_log;
 extern crate rustc_middle;
 extern crate rustc_parse;
 extern crate rustc_session;
@@ -15,7 +16,7 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::PathBuf,
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
 };
 
 use rustc_driver::{Callbacks, Compilation};
@@ -24,8 +25,8 @@ use rustc_hir::def::DefKind;
 use rustc_interface::interface::{Compiler, Config};
 use rustc_middle::{
     mir::{
-        BasicBlockData, Body, CallSource, LocalDecl, Operand, Place, SourceInfo, Terminator,
-        TerminatorKind, UnwindAction, interpret::Scalar,
+        BasicBlockData, Body, CallSource, LocalDecl, Operand, Place, Rvalue, SourceInfo, Statement,
+        StatementKind, Terminator, TerminatorKind, UnwindAction, interpret::Scalar,
     },
     ty::TyCtxt,
     util::Providers,
@@ -33,11 +34,19 @@ use rustc_middle::{
 use rustc_session::Session;
 use rustc_span::{DUMMY_SP, FileName, def_id::LocalDefId, source_map::Spanned};
 
+use rustc_log::{
+    tracing::{Event, Metadata, Subscriber, field},
+    tracing_subscriber::{Layer, layer::SubscriberExt, registry::LookupSpan},
+};
 use rustc_parse::{lexer::StripTokens, new_parser_from_source_str};
 
 const OUTPUT_DIRECTORY: &str = "SUPERCOV_RUSTC_SPIKE_OUTPUT";
 const INSTRUMENT_MIR: &str = "SUPERCOV_RUSTC_SPIKE_INSTRUMENT_MIR";
+const INSTRUMENT_CTFE: &str = "SUPERCOV_RUSTC_SPIKE_INSTRUMENT_CTFE";
 const PROBE_FUNCTION: &str = "__supercov_spike_runtime::probe";
+const CTFE_EVENT_TARGET: &str = "rustc_const_eval::interpret::step";
+const CTFE_MARKER_PREFIX: u64 = 0x5355_5045_5243_0000;
+const CTFE_EDGE_MARKER_OFFSET: u64 = 0x8000;
 const INJECTED_RUNTIME: &str = r#"
 #[doc(hidden)]
 #[allow(dead_code)]
@@ -58,8 +67,62 @@ mod __supercov_spike_runtime {
 "#;
 
 type OptimizedMirProvider = for<'tcx> fn(TyCtxt<'tcx>, LocalDefId) -> &'tcx Body<'tcx>;
+type MirForCtfeProvider = for<'tcx> fn(TyCtxt<'tcx>, LocalDefId) -> &'tcx Body<'tcx>;
 
 static ORIGINAL_OPTIMIZED_MIR: OnceLock<OptimizedMirProvider> = OnceLock::new();
+static ORIGINAL_MIR_FOR_CTFE: OnceLock<MirForCtfeProvider> = OnceLock::new();
+static CTFE_EVENTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
+struct CtfeLayer;
+
+impl<S> Layer<S> for CtfeLayer
+where
+    S: Subscriber + for<'span> LookupSpan<'span>,
+{
+    fn enabled(
+        &self,
+        metadata: &Metadata<'_>,
+        _context: rustc_log::tracing_subscriber::layer::Context<'_, S>,
+    ) -> bool {
+        metadata.target() == CTFE_EVENT_TARGET
+            && *metadata.level() == rustc_log::tracing::Level::INFO
+    }
+
+    fn on_event(
+        &self,
+        event: &Event<'_>,
+        _context: rustc_log::tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let mut visitor = CtfeEventVisitor::default();
+        event.record(&mut visitor);
+        if let Some(marker) = parse_ctfe_marker(&visitor.fields) {
+            CTFE_EVENTS.lock().expect("CTFE events lock").push(marker);
+        }
+    }
+}
+
+#[derive(Default)]
+struct CtfeEventVisitor {
+    fields: String,
+}
+
+impl field::Visit for CtfeEventVisitor {
+    fn record_debug(&mut self, field: &field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write as _;
+        let _ = write!(&mut self.fields, "{}={value:?};", field.name());
+    }
+}
+
+fn parse_ctfe_marker(fields: &str) -> Option<u64> {
+    let marker = fields
+        .split_once("const ")?
+        .1
+        .split_once("_u64")?
+        .0
+        .parse::<u64>()
+        .ok()?;
+    (marker & !0xffff == CTFE_MARKER_PREFIX).then_some(marker)
+}
 
 struct ProbeCallbacks;
 
@@ -146,7 +209,96 @@ impl Callbacks for ProbeCallbacks {
 
 fn install_query_overrides(_session: &Session, providers: &mut Providers) {
     let _ = ORIGINAL_OPTIMIZED_MIR.set(providers.queries.optimized_mir);
+    let _ = ORIGINAL_MIR_FOR_CTFE.set(providers.queries.mir_for_ctfe);
     providers.queries.optimized_mir = optimized_mir_with_probe;
+    providers.queries.mir_for_ctfe = mir_for_ctfe_with_markers;
+}
+
+fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tcx Body<'tcx> {
+    let original = ORIGINAL_MIR_FOR_CTFE
+        .get()
+        .expect("original mir_for_ctfe provider");
+    let body = original(tcx, def_id);
+    if env::var_os(INSTRUMENT_CTFE).is_none()
+        || !tcx.def_path_str(def_id).ends_with("const_decision")
+    {
+        return body;
+    }
+
+    let mut instrumented = body.clone();
+    let span = tcx.def_span(def_id);
+    let marker_local = instrumented
+        .local_decls
+        .push(LocalDecl::new(tcx.types.u64, span));
+    for (block, block_data) in instrumented.basic_blocks_mut().iter_enumerated_mut() {
+        let marker = CTFE_MARKER_PREFIX | u64::from(block.as_u32());
+        block_data
+            .statements
+            .insert(0, ctfe_marker_statement(tcx, marker_local, marker, span));
+    }
+
+    let decision_edges = instrumented
+        .basic_blocks
+        .iter_enumerated()
+        .filter_map(|(source, block)| {
+            let targets = block.terminator().successors().collect::<Vec<_>>();
+            (targets.len() > 1).then_some(
+                targets
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(edge, target)| (source, edge, target)),
+            )
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    let mut bridges = Vec::with_capacity(decision_edges.len());
+    for (ordinal, (source, edge, target)) in decision_edges.iter().copied().enumerate() {
+        let marker = CTFE_MARKER_PREFIX | CTFE_EDGE_MARKER_OFFSET | ordinal as u64;
+        let mut bridge = BasicBlockData::new(
+            Some(Terminator {
+                source_info: SourceInfo::outermost(span),
+                kind: TerminatorKind::Goto { target },
+            }),
+            false,
+        );
+        bridge
+            .statements
+            .push(ctfe_marker_statement(tcx, marker_local, marker, span));
+        let bridge = instrumented.basic_blocks_mut().push(bridge);
+        bridges.push((source, edge, bridge));
+    }
+    for (source, edge, bridge) in bridges {
+        let mut current = 0;
+        instrumented.basic_blocks_mut()[source]
+            .terminator_mut()
+            .successors_mut(|target| {
+                if current == edge {
+                    *target = bridge;
+                }
+                current += 1;
+            });
+    }
+    tcx.arena.alloc(instrumented)
+}
+
+fn ctfe_marker_statement<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    marker_local: rustc_middle::mir::Local,
+    marker: u64,
+    span: rustc_span::Span,
+) -> Statement<'tcx> {
+    Statement::new(
+        SourceInfo::outermost(span),
+        StatementKind::Assign(Box::new((
+            Place::from(marker_local),
+            Rvalue::Use(Operand::const_from_scalar(
+                tcx,
+                tcx.types.u64,
+                Scalar::from_u64(marker),
+                span,
+            )),
+        ))),
+    )
 }
 
 fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tcx Body<'tcx> {
@@ -248,6 +400,57 @@ fn main() {
         args.push("--cfg=supercov_spike_instrumented".into());
         args.push("--check-cfg=cfg(supercov_spike_instrumented)".into());
     }
+    if env::var_os(INSTRUMENT_CTFE).is_some() {
+        let subscriber = rustc_log::tracing_subscriber::Registry::default().with(CtfeLayer);
+        rustc_log::tracing::subscriber::set_global_default(subscriber)
+            .expect("install CTFE event observer");
+    }
     let mut callbacks = ProbeCallbacks;
     rustc_driver::run_compiler(&args, &mut callbacks);
+    if env::var_os(INSTRUMENT_CTFE).is_some() {
+        let events = CTFE_EVENTS.lock().expect("CTFE events lock");
+        write_ctfe_events(&args, &events);
+    }
+}
+
+fn write_ctfe_events(args: &[String], events: &[u64]) {
+    if events.is_empty() {
+        return;
+    }
+    let Ok(directory) = env::var(OUTPUT_DIRECTORY) else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    if fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let crate_name = args
+        .windows(2)
+        .find_map(|pair| (pair[0] == "--crate-name").then_some(pair[1].as_str()))
+        .unwrap_or("unknown");
+    let output = directory.join(format!(
+        "{}-{}-ctfe.jsonl",
+        std::process::id(),
+        sanitize(crate_name)
+    ));
+    let Ok(mut output) = OpenOptions::new().create_new(true).write(true).open(output) else {
+        return;
+    };
+    for marker in events {
+        let ordinal = marker & 0x7fff;
+        let observation_kind = if marker & CTFE_EDGE_MARKER_OFFSET == 0 {
+            "block"
+        } else {
+            "edge"
+        };
+        let record = format!(
+            "{{\"crate\":\"{}\",\"kind\":\"ctfe-marker\",\"marker\":{},\"observationKind\":\"{}\",\"ordinal\":{}}}\n",
+            escape(crate_name),
+            marker,
+            observation_kind,
+            ordinal,
+        );
+        let _ = output.write_all(record.as_bytes());
+    }
+    let _ = output.flush();
 }

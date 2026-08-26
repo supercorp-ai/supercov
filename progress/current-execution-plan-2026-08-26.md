@@ -160,6 +160,18 @@ zero-configuration injection boundary, not public completeness: the temporary
 atomic bitmap must still become the bounded production transport and pass the
 full semantic/property corpus.
 
+The CTFE provider spike is now executable rather than hypothetical. The
+companion overrides `mir_for_ctfe`, inserts execution markers in original
+blocks, splits multi-successor edges for independently identifiable edge
+markers, and observes only those markers through a private in-process rustc
+interpreter subscriber. Both true and false const-fn paths were observed while
+const values and complete stdout/stderr stayed byte-identical to the ordinary
+build. Edge identity is carried by each event, so concurrent evaluation does
+not require guessing from adjacent log records. Rust still remains private:
+the proof covers one controlled const function and does not yet supply the
+complete const/static/inline-const/const-generic manifest, crash-safe event
+publication, `RUSTC_LOG` coexistence or acceptable performance corpus.
+
 Correctness corpus:
 
 - original-versus-instrumented differential programs checking values, panics,

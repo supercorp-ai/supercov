@@ -22,6 +22,7 @@ pub const fn const_decision(value: bool) -> usize {
 }
 
 pub const CONST_VALUE: usize = const_decision(true);
+pub const CONST_FALSE_VALUE: usize = const_decision(false);
 
 pub fn authored(value: bool) -> usize {
     if value { 1 } else { 2 }
@@ -77,6 +78,7 @@ mod tests {
         assert_eq!(generated_by_proc(true), 17);
         assert_eq!(generated_by_build_script(false), 9);
         assert_eq!(CONST_VALUE, 11);
+        assert_eq!(CONST_FALSE_VALUE, 13);
     }
 
     #[cfg(supercov_spike_instrumented)]

@@ -53,6 +53,19 @@ function records(directory) {
     );
 }
 
+function recordFiles(directory) {
+  return readdirSync(directory)
+    .filter((name) => name.endsWith('.jsonl'))
+    .map((name) => ({
+      name,
+      records: readFileSync(join(directory, name), 'utf8')
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => JSON.parse(line)),
+    }));
+}
+
 try {
   run('cargo', ['build', '--manifest-path', manifest], {
     env: {RUSTC_BOOTSTRAP: '1'},
@@ -124,6 +137,41 @@ try {
   assert.equal(instrumentedBehavior.stderr, baselineBehavior.stderr);
   assert.match(baselineBehavior.stdout, /drop-order=\["panic-drop", "second", "first"\]/);
 
+  const ctfeDirectory = join(scratch, 'ctfe');
+  const ctfeBehavior = run(
+    'cargo',
+    ['run', '--quiet', '--manifest-path', fixture, '--bin', 'behavior'],
+    {
+      env: {
+        CARGO_TARGET_DIR: join(scratch, 'ctfe-target'),
+        RUSTC_WRAPPER: wrapper,
+        SUPERCOV_RUSTC_SPIKE_OUTPUT: ctfeDirectory,
+        SUPERCOV_RUSTC_SPIKE_INSTRUMENT_CTFE: '1',
+      },
+    },
+  );
+  assert.equal(ctfeBehavior.stdout, baselineBehavior.stdout);
+  assert.equal(ctfeBehavior.stderr, baselineBehavior.stderr);
+  assert.match(ctfeBehavior.stdout, /const-values=11,13/);
+  const ctfeSequences = recordFiles(ctfeDirectory)
+    .filter(({name}) => name.endsWith('-ctfe.jsonl'))
+    .map(({records: fileRecords}) =>
+      fileRecords.map((record) => `${record.observationKind}:${record.ordinal}`),
+    );
+  assert(
+    ctfeSequences.some((observations) =>
+      [
+        'block:0',
+        'block:1',
+        'block:2',
+        'block:3',
+        'edge:0',
+        'edge:1',
+      ].every((observation) => observations.includes(observation)),
+    ),
+    `expected both concurrency-safe CTFE edges and all original blocks, got ${JSON.stringify(ctfeSequences)}`,
+  );
+
   const probeTest = run(
     'cargo',
     [
@@ -167,7 +215,7 @@ try {
   );
 
   console.log(
-    '[rustc-backend-spike] expanded provenance and side-effecting MIR probes preserve values, errors, panics, drops, stdout and stderr; ordinary RUSTC_WRAPPER does not observe the extracted doctest crate',
+    '[rustc-backend-spike] expanded provenance, runtime MIR probes and compile-time CTFE path markers preserve values, errors, panics, drops, stdout and stderr; ordinary RUSTC_WRAPPER does not observe the extracted doctest crate',
   );
 } finally {
   rmSync(scratch, {recursive: true, force: true});

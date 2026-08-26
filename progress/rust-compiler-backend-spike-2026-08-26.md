@@ -48,6 +48,16 @@ The spike proved:
    stderr, values, `Result` errors, caught panic status and drop ordering. The
    synthetic runtime is tagged by a compiler-only source name and can be
    excluded from the user denominator without a path heuristic.
+8. A separate `mir_for_ctfe` override can insert semantics-neutral markers
+   into in-memory const MIR. Original basic blocks get execution markers;
+   multi-successor edges are split and get edge-specific markers, so coverage
+   does not depend on reconstructing interleaved interpreter event order.
+9. rustc's CTFE interpreter already emits an internal event for each executed
+   MIR statement when an in-process subscriber enables its exact target. A
+   private subscriber records only Supercov's marker constants and has no
+   formatting/output layer. The fixture observed both true and false const-fn
+   edges and every original block while const values and complete program
+   stdout/stderr remained byte-identical to the baseline.
 
 The companion executable is about 600 KiB on arm64 macOS and dynamically uses
 the exact `librustc_driver` already shipped by the user's `rustc` component.
@@ -79,11 +89,13 @@ an unverified rustc commit.
 2. The companion derives the denominator from expanded compiler structures and
    emits frozen source/expansion/generated provenance. It inserts Supercov
    runtime probes into runtime MIR only after semantic analysis.
-3. A separate CTFE provider path records compile-time execution. Merely adding
-   runtime calls to const MIR is invalid. If a callback-compatible interpreter
-   hook cannot be made exact, a versioned Supercov fork of the relevant rustc
-   const-eval provider is required; const completeness remains a release
-   blocker until that experiment succeeds.
+3. A separate CTFE provider path records compile-time execution. Runtime calls
+   in const MIR are invalid. The first exact-version experiment now injects
+   block and split-edge markers into `mir_for_ctfe` and captures their
+   interpreter events in-process without emitting compiler-log output. This
+   avoids a copied CTFE machine or bundled compiler fork. It remains private
+   until the full const/static/const-generic corpus, manifest mapping,
+   crash-safe publication, `RUSTC_LOG` coexistence and performance gates pass.
 4. A rustdoc companion observes/extracts and compiles doctests with exact
    documented-source mapping. Hidden lines and merged doctests remain explicit
    traced gates.
@@ -100,7 +112,9 @@ an unverified rustc commit.
    and prove collision, unsupported-atomic, no_std and target behavior.
 2. Derive stable expansion identities and complete branch/condition mappings
    from expanded HIR plus MIR source info.
-3. Spike CTFE path tracing and rustdoc interception; either unresolved item
+3. Generalize the proven CTFE marker path across every frozen compile-time
+   surface, map every marker into the frozen manifest, and make publication
+   crash-safe. Spike rustdoc interception separately; either incomplete area
    blocks public Rust support.
 4. Add exact-version mismatch, missing-companion and custom-toolchain failure
    tests before connecting the companion to `npx supercov -- cargo test`.

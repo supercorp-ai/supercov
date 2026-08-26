@@ -1,6 +1,8 @@
 use std::{cell::RefCell, panic};
 
-use supercov_rustc_spike_fixture::{authored, drop_order, fallible, panic_path};
+use supercov_rustc_spike_fixture::{
+    CONST_FALSE_VALUE, CONST_VALUE, authored, drop_order, fallible, panic_path,
+};
 
 fn main() {
     let log = RefCell::new(Vec::new());
@@ -14,4 +16,5 @@ fn main() {
     println!("drop-value={}", drop_order(&log));
     println!("panic={}", panic.is_err());
     println!("drop-order={:?}", log.into_inner());
+    println!("const-values={CONST_VALUE:?},{CONST_FALSE_VALUE:?}");
 }

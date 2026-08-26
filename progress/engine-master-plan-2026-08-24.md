@@ -1249,9 +1249,14 @@ miss blocks flipping any default.
   query implementation. LLVM/rustc coverage remains a development oracle.
 - The spike also proved two hard boundaries: CTFE requires a distinct provider
   path, and Cargo's normal `RUSTC_WRAPPER` does not receive rustdoc's extracted
-  doctest crate. Both remain release blockers. The concrete-source Rust
-  transformer is now a private differential reference, not the intended
-  public denominator or injection authority.
+  doctest crate. The CTFE path now has a working exact-version proof: the
+  companion injects in-memory block and split-edge markers through
+  `mir_for_ctfe` and captures only their interpreter events without compiler
+  log output; true and false paths preserved values and stdout/stderr. Its full
+  const corpus, manifest, crash and performance gates remain blockers.
+  Doctest interception is still unimplemented. The concrete-source Rust
+  transformer is a private differential reference, not the intended public
+  denominator or injection authority.
 - `rust-compiler-companion-v1` freezes fail-closed selection and capability
   negotiation. Public readiness requires expanded provenance, runtime MIR
   probes, generated-source provenance, CTFE tracing, rustdoc/doctest tracing
