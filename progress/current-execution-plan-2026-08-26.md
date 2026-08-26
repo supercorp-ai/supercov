@@ -606,6 +606,18 @@ background. Public tracing still requires complete extracted-source obligations
 and probes, outcome/retry archive joining, custom wrapper composition, failure
 and signal forwarding, and the full doctest semantics/crash corpus.
 
+The standalone extracted-source slice now carries real owned obligations too.
+For single-line spans, the companion combines rustdoc's original path/line
+metadata with a bounded unique snippet match and emits exact byte ranges against
+the original documentation source snapshot. Hidden setup and both visible
+assertion invocations become authored statement points; each assertion macro is
+one source statement while its generated implementation and rustdoc's synthetic
+`fn main` remain outside the denominator. The corresponding runtime point is
+observed under the exact standalone test context, and ambiguous, missing,
+multiline or synthetic mappings fail closed. Complete multiline and merged
+extracted-source obligations remain open, so this does not enable the public
+rustdoc capability.
+
 Correctness corpus:
 
 - original-versus-instrumented differential programs checking values, panics,

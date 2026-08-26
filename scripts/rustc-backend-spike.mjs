@@ -3105,8 +3105,22 @@ try {
   const observedDoctestContexts = new Set(
     authoredDoctestHits.map(({context}) => context),
   );
+  const doctestPhaseParents = new Map(
+    doctestRuntime.phases.map(({child, parent}) => [child, parent]),
+  );
+  const doctestRootContext = (context) => {
+    const seen = new Set();
+    while (doctestPhaseParents.has(context)) {
+      assert(!seen.has(context), `doctest phase context cycle at ${context}`);
+      seen.add(context);
+      context = doctestPhaseParents.get(context);
+    }
+    return context;
+  };
   assert(
-    [...observedDoctestContexts].every((context) => doctestContexts.has(context)),
+    [...observedDoctestContexts].every((context) =>
+      doctestContexts.has(doctestRootContext(context)),
+    ),
     `doctest probes escaped exact test contexts: ${JSON.stringify([...observedDoctestContexts])}`,
   );
   assert(
@@ -3118,16 +3132,56 @@ try {
   );
   assert.match(standalone?.doctestPath ?? '', /(^|\/)src\/lib\.rs$/);
   assert.match(standalone?.doctestLine ?? '', /^\d+$/);
-  const standaloneAuthoredLines = wrappedDoctestRecords
-    .filter((record) => record.doctestRole === 'standalone')
-    .flatMap((record) => record.mirAuthoredLines ?? []);
-  assert(
-    standaloneAuthoredLines.includes(sourceLine('# let hidden')),
-    `hidden doctest line was not mapped to authored source: ${JSON.stringify(standaloneAuthoredLines)}`,
+  const standaloneManifest = crateManifest(wrappedDoctestDirectory, 'rust_out');
+  const standaloneSources = compilerSources(wrappedDoctestDirectory, 'rust_out');
+  const standaloneDoctestPoints = standaloneManifest.points.filter(
+    ({provenance}) => provenance === 'doctest-source',
   );
   assert(
-    standaloneAuthoredLines.includes(sourceLine('assert_eq!(hidden + 2')),
-    `visible doctest line was not mapped to authored source: ${JSON.stringify(standaloneAuthoredLines)}`,
+    standaloneDoctestPoints.length >= 3,
+    `standalone doctest statements were not added to the owned denominator: ${JSON.stringify(
+      standaloneManifest.points.map(({kind, provenance, sourceKey, start, end}) => ({
+        kind,
+        provenance,
+        sourceKey,
+        start,
+        end,
+      })),
+    )}`,
+  );
+  const standalonePointSources = standaloneDoctestPoints.map((point) =>
+    obligationSource(standaloneSources, point),
+  );
+  assert(
+    standalonePointSources.some((source) => source.includes('let hidden')),
+    `hidden doctest statement was not mapped to authored bytes: ${JSON.stringify(standalonePointSources)}`,
+  );
+  assert(
+    standalonePointSources.some((source) => source.includes('hidden + 2')),
+    `visible doctest assertion was not mapped to authored bytes: ${JSON.stringify(standalonePointSources)}`,
+  );
+  assert(
+    standalonePointSources.some((source) => source.includes('authored(false)')),
+    `dependency-calling doctest assertion was not mapped to authored bytes: ${JSON.stringify(standalonePointSources)}`,
+  );
+  assert(
+    standalonePointSources.every((source) => !source.includes('fn main')),
+    'rustdoc wrapper code became an authored coverage obligation',
+  );
+  const standaloneContext = doctestTestRecords.find(({testName}) =>
+    testName.includes(':src/lib.rs:'),
+  )?.testContextId;
+  assert(standaloneContext, 'standalone doctest context identity is missing');
+  const standaloneOrdinals = new Set(
+    standaloneDoctestPoints.map(({probeOrdinal}) => probeOrdinal),
+  );
+  assert(
+    doctestRuntime.ordinals.some(
+      ({context, ordinal}) =>
+        doctestRootContext(context) === standaloneContext &&
+        standaloneOrdinals.has(ordinal),
+    ),
+    'standalone doctest source probes were not attributed to its exact context',
   );
   assert(
     wrappedDoctestRecords.some(

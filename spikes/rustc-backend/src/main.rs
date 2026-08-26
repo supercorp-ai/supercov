@@ -578,6 +578,94 @@ fn stable_source_range(
     }
     let start = file.original_relative_byte_pos(span.lo()).0;
     let end = file.original_relative_byte_pos(span.hi()).0;
+    let extracted_doctest_path = match &file.name {
+        FileName::DocTest(path, _) => Some(path.clone()),
+        FileName::Real(name) if DOCTEST_ROLE.get().copied() == Some("standalone") => {
+            let local = FileName::Real(name.clone())
+                .prefer_local_unconditionally()
+                .to_string_lossy()
+                .into_owned()
+                .replace('\\', "/");
+            env::var("UNSTABLE_RUSTDOC_TEST_PATH")
+                .ok()
+                .filter(|path| path.replace('\\', "/") == local)
+                .map(PathBuf::from)
+        }
+        _ => None,
+    };
+    if let Some(path) = extracted_doctest_path {
+        let snippet = source_map
+            .span_to_snippet(span)
+            .map_err(|_| "rustdoc retained no exact extracted snippet".to_owned())?;
+        if snippet.is_empty() || snippet.contains('\r') || snippet.contains('\n') {
+            return Err("multiline or empty extracted doctest span".into());
+        }
+        let start_location = source_map.lookup_char_pos(span.lo());
+        let end_location = source_map.lookup_char_pos(span.hi());
+        let authored_start = source_map.doctest_offset_line(&file.name, start_location.line);
+        let authored_end = source_map.doctest_offset_line(&file.name, end_location.line);
+        if authored_start != authored_end || authored_start == 0 {
+            return Err("doctest span does not map to one authored line".into());
+        }
+        let root = normalized_root(SOURCE_ROOT)
+            .ok_or_else(|| "missing normalized Rust source root".to_owned())?;
+        let original_path = normalized_path(&root.join(&path));
+        let relative = original_path
+            .strip_prefix(&root)
+            .map_err(|_| "doctest source escaped the Rust source root".to_owned())?;
+        let original = fs::read_to_string(&original_path)
+            .map_err(|error| format!("{}: {error}", original_path.display()))?;
+        let mut line_offset = 0_usize;
+        let mut matches = Vec::new();
+        for (index, original_line) in original.split_inclusive('\n').enumerate() {
+            let line = index + 1;
+            if line.abs_diff(authored_start) <= 2 {
+                let mut positions = original_line.match_indices(&snippet);
+                if let Some((first, _)) = positions.next() {
+                    if positions.next().is_some() {
+                        return Err(format!(
+                            "extracted doctest snippet is ambiguous on authored line {line}"
+                        ));
+                    }
+                    matches.push((line_offset, first, line));
+                }
+            }
+            line_offset += original_line.len();
+        }
+        let [(line_offset, first, _authored_line)] = matches.as_slice() else {
+            return Err(format!(
+                "extracted doctest snippet has {} authored matches near line {authored_start}",
+                matches.len()
+            ));
+        };
+        let mapped_start = line_offset
+            .checked_add(*first)
+            .ok_or_else(|| "doctest source offset overflow".to_owned())?;
+        let mapped_end = mapped_start
+            .checked_add(snippet.len())
+            .ok_or_else(|| "doctest source offset overflow".to_owned())?;
+        let key = format!("source:{}", relative.to_string_lossy().replace('\\', "/"));
+        let snapshot = ExactSourceSnapshot {
+            file: relative.to_string_lossy().replace('\\', "/"),
+            source: original,
+        };
+        let mut snapshots = SOURCE_SNAPSHOTS
+            .lock()
+            .map_err(|_| "source snapshot lock poisoned".to_owned())?;
+        if let Some(existing) = snapshots.insert(key.clone(), snapshot.clone())
+            && existing != snapshot
+        {
+            return Err(format!("source identity {key} resolved to different bytes"));
+        }
+        return Ok(StableSourceRange {
+            key,
+            start: u32::try_from(mapped_start)
+                .map_err(|_| "doctest start exceeds u32".to_owned())?,
+            end: u32::try_from(mapped_end).map_err(|_| "doctest end exceeds u32".to_owned())?,
+            class: "doctest",
+            owned: true,
+        });
+    }
     let (key, class, owned) = match &file.name {
         FileName::Real(name) => {
             let local_name = FileName::Real(name.clone())
@@ -614,14 +702,7 @@ fn stable_source_range(
                 )
             }
         }
-        FileName::DocTest(path, line) => (
-            format!(
-                "doctest:{}:{line}",
-                path.to_string_lossy().replace('\\', "/")
-            ),
-            "doctest",
-            false,
-        ),
+        FileName::DocTest(_, _) => unreachable!("doctest source returned above"),
         FileName::Custom(name) if name == "supercov-rust-runtime" => {
             ("injected:supercov-rust-runtime".into(), "injected", false)
         }
@@ -711,7 +792,9 @@ fn obligation_identity(
     }
     let callsite = stable_source_range(tcx, span.source_callsite(), crate_name)?;
     let synthetic_expansion = span.from_expansion() && source == callsite;
-    let provenance = if synthetic_expansion {
+    let provenance = if source.class == "doctest" {
+        "doctest-source"
+    } else if synthetic_expansion {
         "synthetic-expansion"
     } else if span.from_expansion() {
         "authored-expansion"
@@ -1428,8 +1511,17 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
                     );
                 }
             }
-            hir::StmtKind::Expr(_) | hir::StmtKind::Semi(_) => {
-                self.point(statement.span, "statement", "expression")
+            hir::StmtKind::Expr(expression) | hir::StmtKind::Semi(expression) => {
+                // rustc expands assertion macros before HIR. Count the
+                // authored invocation as one statement, rather than either
+                // dropping it as external macro implementation detail or
+                // exposing the macro's internal statements as user source.
+                let span = if assertion_macro_kind(self.tcx, expression.span).is_some() {
+                    statement.span.source_callsite()
+                } else {
+                    statement.span
+                };
+                self.point(span, "statement", "expression")
             }
             hir::StmtKind::Let(_) | hir::StmtKind::Item(_) => {}
         }
@@ -1993,7 +2085,7 @@ impl Callbacks for ProbeCallbacks {
                 collector.visit_body(body);
             }
             let record = format!(
-                "{{\"crate\":\"{}\",\"definition\":\"{}\",\"kind\":\"{:?}\",\"span\":\"{}\",\"callsite\":\"{}\",\"expanded\":{},\"mirBlocks\":{},\"mirSpans\":{},\"mirAuthoredLines\":{},\"sourceSnippet\":{},\"bodySnippet\":{},\"doctestRole\":{},\"doctestPath\":{},\"doctestLine\":{},\"testName\":{},\"testContextId\":{},\"doctestDisplayName\":{},\"functionObligationId\":{},\"sourceKey\":{},\"sourceStart\":{},\"sourceEnd\":{},\"sourceProvenance\":{}}}\n",
+                "{{\"crate\":\"{}\",\"definition\":\"{}\",\"kind\":\"{:?}\",\"span\":\"{}\",\"callsite\":\"{}\",\"expanded\":{},\"mirBlocks\":{},\"mirSpans\":{},\"mirAuthoredLines\":{},\"sourceSnippet\":{},\"bodySnippet\":{},\"doctestRole\":{},\"doctestPath\":{},\"doctestLine\":{},\"testName\":{},\"testContextId\":{},\"doctestDisplayName\":{},\"manifestPointCount\":{},\"manifestLimitations\":{},\"functionObligationId\":{},\"sourceKey\":{},\"sourceStart\":{},\"sourceEnd\":{},\"sourceProvenance\":{}}}\n",
                 escape(&crate_name_string),
                 escape(&tcx.def_path_str(def_id)),
                 kind,
@@ -2011,6 +2103,8 @@ impl Callbacks for ProbeCallbacks {
                 json_string(test_name.as_deref()),
                 test_context_id.map_or_else(|| "null".into(), |value| format!("\"{value}\"")),
                 json_string(doctest_display_name.as_deref()),
+                points.len(),
+                json_strings(&manifest_limitations.iter().cloned().collect::<Vec<_>>()),
                 json_string(
                     function_identity
                         .as_ref()
@@ -5097,10 +5191,13 @@ fn runtime_statement_plans<'tcx>(
             MappingKind::Code { bcb } => Some((mapping.span, bcb.as_u32())),
             MappingKind::Branch { .. } => None,
         })
-        .map(|(span, bcb)| -> Result<_, String> {
-            Ok((stable_source_range(tcx, span, &crate_name)?, bcb))
+        .filter_map(|(span, bcb)| {
+            stable_source_range(tcx, span, &crate_name)
+                .or_else(|_| stable_source_range(tcx, span.source_callsite(), &crate_name))
+                .ok()
+                .map(|source| (source, bcb))
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
     let dominators = body.basic_blocks.dominators().clone();
     let mut plans = Vec::with_capacity(statements.len());
     for (id, point) in statements {
@@ -5122,7 +5219,17 @@ fn runtime_statement_plans<'tcx>(
                             .iter()
                             .map(|statement| statement.source_info.span)
                             .chain(std::iter::once(data.terminator().source_info.span))
-                            .filter_map(|span| stable_source_range(tcx, span, &crate_name).ok())
+                            .filter_map(|span| {
+                                stable_source_range(tcx, span, &crate_name)
+                                    .or_else(|_| {
+                                        stable_source_range(
+                                            tcx,
+                                            span.source_callsite(),
+                                            &crate_name,
+                                        )
+                                    })
+                                    .ok()
+                            })
                             .any(|source| {
                                 source.key == point.source.key
                                     && source.start >= point.source.start

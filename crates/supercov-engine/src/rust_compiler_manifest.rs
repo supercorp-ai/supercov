@@ -441,7 +441,11 @@ fn ordinal(value: &str) -> Option<u64> {
 fn provenance(value: &str) -> bool {
     matches!(
         value,
-        "authored-source" | "authored-expansion" | "synthetic-expansion" | "generated-source"
+        "authored-source"
+            | "authored-expansion"
+            | "synthetic-expansion"
+            | "generated-source"
+            | "doctest-source"
     )
 }
 
@@ -1226,6 +1230,15 @@ mod tests {
             RustCompilerManifest::parse(&serde_json::to_vec(&non_loop_relation).unwrap()),
             Err(RustCompilerManifestError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn accepts_exact_doctest_source_provenance() {
+        let mut value = valid_manifest();
+        value["points"][0]["provenance"] = json!("doctest-source");
+
+        let manifest = RustCompilerManifest::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(manifest.points[0].provenance, "doctest-source");
     }
 
     #[test]

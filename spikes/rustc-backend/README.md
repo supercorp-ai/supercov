@@ -40,9 +40,14 @@ The executable also proves the rustdoc interception boundary. A generated
 launcher invokes the exact ordinary rustdoc with Supercov as its
 `--test-builder-wrapper`; user code needs no configuration. The companion sees
 standalone synthesized stdin, merged bundle source and the merged runner's
-`__doctest_N` identity table. Standalone `DocTest` line offsets map hidden and
-visible MIR spans back to authored documentation lines, while merged runner
-HIR binds the same ordinal to rustdoc's source path and line. The launcher's
+`__doctest_N` identity table. For the proven single-line standalone slice,
+rustdoc path/offset metadata plus an exact bounded snippet match maps hidden
+setup and visible assertion statements to byte ranges in the original
+documentation source. Assertion macro invocations become one authored
+statement each; their generated implementation statements and rustdoc's
+synthetic `fn main` do not enter the denominator. The emitted point probes run
+under the standalone doctest's exact test context. Merged runner HIR binds the
+same ordinal to rustdoc's source path and line. The launcher's
 private unstable-option bootstrap is removed before compiling user doctest
 code; a `compile_fail` feature-gate test proves it does not enable unstable
 Rust. Normal and intercepted doctest output match after replacing elapsed-time
@@ -57,8 +62,10 @@ maps it to rustdoc's human test name. Calls into an instrumented dependency
 publish under two distinct exact contexts with no drops or incomplete records.
 Unrelated setup observations remain background rather than being reassigned.
 
-Complete extracted-source obligations/probes, outcome/retry archive joining,
-custom rustdoc/wrapper composition, failure/signal forwarding and the full
-hidden/merged/compile-fail/no_std corpus remain promotion gates. This spike
-proves automatic interception, source identity and the first exact runtime
-attribution slice, not the complete `rustdocDoctestTracing` capability.
+Multiline and merged extracted-source obligations/probes, outcome/retry archive
+joining, custom rustdoc/wrapper composition, failure/signal forwarding and the
+full hidden/merged/compile-fail/no_std corpus remain promotion gates. Ambiguous
+or missing source matches fail closed instead of receiving invented locations.
+This spike proves automatic interception, exact standalone single-line source
+identity and the first exact runtime-attribution slice, not the complete
+`rustdocDoctestTracing` capability.
