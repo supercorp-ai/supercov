@@ -734,6 +734,7 @@ pub fn recover_abandoned_runs(
                     state.pid
                 )),
             )?;
+            remove_stored_tree_deferred(root, &root.join(".supercov/work").join(&id))?;
         }
         recovered.push(id);
     }
@@ -1020,10 +1021,7 @@ mod tests {
             recover_abandoned_runs(&root, "recovered").unwrap(),
             [dead, published]
         );
-        assert_eq!(
-            read_state(&root, dead).unwrap().unwrap().status,
-            RunStateStatus::Abandoned
-        );
+        assert!(!root.join(".supercov/work").join(dead).exists());
         assert!(!root.join(".supercov/work").join(published).exists());
         assert!(root.join(".supercov/runs").join(published).exists());
         assert!(root.join("src/index.js").exists());

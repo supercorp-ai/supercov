@@ -95,6 +95,15 @@ fn is_executable_wrapper_program(argument: &str) -> bool {
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    // The parent-death watchdog inherits arbitrary wrapper environments. It
+    // must dispatch before Cargo/rustdoc wrapper detection and must never emit
+    // user-visible output.
+    if arguments.as_slice() == ["__watch-process-group"] {
+        return match supercov_engine::process_supervision::watch_parent_process_group() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::from(125),
+        };
+    }
     // Cargo inherits both wrapper-mode variables during a doctest build. Its
     // rustc wrapper protocol always prepends the real compiler executable,
     // whereas RUSTDOC receives rustdoc's arguments directly. Dispatch the
@@ -398,7 +407,7 @@ fn run_rust_compiler() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let request: supercov_engine::rust_compiler_run::DirectRustCompilerRunRequest =
+    let mut request: supercov_engine::rust_compiler_run::DirectRustCompilerRunRequest =
         match serde_json::from_str(&input) {
             Ok(request) => request,
             Err(error) => {
@@ -406,6 +415,9 @@ fn run_rust_compiler() -> ExitCode {
                 return ExitCode::from(2);
             }
         };
+    request.watchdog_program = std::env::current_exe()
+        .ok()
+        .and_then(|path| fs::canonicalize(path).ok());
     let run = match supercov_engine::rust_compiler_run::run_direct_rust_compiler(
         &request,
         &mut std::io::stderr(),
@@ -413,7 +425,7 @@ fn run_rust_compiler() -> ExitCode {
         Ok(run) => run,
         Err(error) => {
             eprintln!("[supercov] {error}");
-            return ExitCode::from(2);
+            return ExitCode::from(error.exit_code.clamp(0, 255) as u8);
         }
     };
     match serde_json::to_string(&run) {
@@ -935,11 +947,15 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    let watchdog_program = std::env::current_exe()
+        .ok()
+        .and_then(|path| fs::canonicalize(path).ok());
     let request = supercov_engine::javascript_run::DirectJavascriptRunRequest {
         root: root.clone(),
         command,
         run_id: Some(run_id),
         started_at: Some(started_at),
+        watchdog_program,
     };
     let mut diagnostics = std::io::stderr().lock();
     let result = supercov_engine::javascript_run::run_direct_javascript(&request, &mut diagnostics);
@@ -1416,7 +1432,7 @@ fn run_js_direct() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let request: supercov_engine::javascript_run::DirectJavascriptRunRequest =
+    let mut request: supercov_engine::javascript_run::DirectJavascriptRunRequest =
         match serde_json::from_str(&input) {
             Ok(request) => request,
             Err(error) => {
@@ -1424,6 +1440,9 @@ fn run_js_direct() -> ExitCode {
                 return ExitCode::from(2);
             }
         };
+    request.watchdog_program = std::env::current_exe()
+        .ok()
+        .and_then(|path| fs::canonicalize(path).ok());
     let mut diagnostics = std::io::stderr().lock();
     match supercov_engine::javascript_run::run_direct_javascript(&request, &mut diagnostics) {
         Ok(result) => match serde_json::to_string(&result) {
@@ -1491,7 +1510,19 @@ fn supervise() -> ExitCode {
         captured_output: None,
     };
     let mut stderr = std::io::stderr().lock();
-    match supercov_engine::process_supervision::supervise_command(
+    let supervisor = match std::env::current_exe()
+        .map_err(|error| error.to_string())
+        .and_then(|path| {
+            supercov_engine::process_supervision::ProcessSupervisor::new_crash_safe(&path)
+                .map_err(|error| error.to_string())
+        }) {
+        Ok(supervisor) => supervisor,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match supervisor.supervise(
         &spec,
         supercov_engine::process_supervision::SupervisionOptions {
             diagnostic_interval,

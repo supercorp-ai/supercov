@@ -17,7 +17,7 @@ import {
   writeSync,
 } from 'node:fs';
 import {tmpdir} from 'node:os';
-import {dirname, join, resolve} from 'node:path';
+import {basename, dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -204,8 +204,9 @@ function spawnCommand(command, args, options = {}) {
         : {}),
       ...commandEnvironment,
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
   });
+  if (options.input !== undefined) child.stdin.end(options.input);
   let stdout = '';
   let stderr = '';
   child.stdout.setEncoding('utf8');
@@ -662,6 +663,56 @@ try {
     {cwd: productionFixture},
   );
   assert.match(productionQuery.stdout, /run_0123456789abcdef/);
+
+  const killedRunId = 'run_4123456789abcdef';
+  const killedProduction = spawnCommand(supercov, ['__run-rust-compiler'], {
+    env: {RUSTC: rustc},
+    input: JSON.stringify({
+      root: productionFixture,
+      command: [cargo, 'test', '--doc'],
+      runId: killedRunId,
+      startedAt: '2026-08-26T00:00:30.000Z',
+      wrapperPath: supercov,
+      companionCandidates: [wrapper],
+      requirePublicCapabilities: false,
+    }),
+  });
+  const killedWorkspaceRun = join(
+    productionFixture,
+    '.supercov/cache/workspace',
+    basename(productionFixture),
+    '.supercov/work',
+    killedRunId,
+  );
+  const killedSelection = join(
+    killedWorkspaceRun,
+    'rust-compiler/selections',
+  );
+  for (let attempt = 0; attempt < 1_200; attempt += 1) {
+    if (existsSync(killedSelection) && readdirSync(killedSelection).length > 0) break;
+    assert.equal(
+      killedProduction.child.exitCode,
+      null,
+      'the compiler run exited before its supervised Cargo child was active',
+    );
+    await delay(25);
+  }
+  assert(
+    existsSync(killedSelection) && readdirSync(killedSelection).length > 0,
+    'the compiler run never reached its supervised Cargo child',
+  );
+  assert(
+    killedProduction.child.kill('SIGKILL'),
+    'failed to kill the compiler-run supervisor',
+  );
+  const killedProductionResult = await killedProduction.result;
+  assert.equal(killedProductionResult.signal, 'SIGKILL');
+  await delay(100);
+  assert(
+    existsSync(killedWorkspaceRun),
+    'SIGKILL unexpectedly ran cooperative compiler-work cleanup',
+  );
+
   const filteredProductionRun = JSON.parse(
     run(supercov, ['__run-rust-compiler'], {
       env: {RUSTC: rustc},
@@ -695,6 +746,18 @@ try {
   assert.equal(filteredProductionRun.transportHealth[0].scopeKind, 'test-attempt');
   assert.equal(filteredProductionRun.transportHealth[0].status, 'passed');
   assert(
+    filteredProductionRun.recoveredRuns.includes(killedRunId),
+    'the next compiler run did not report the abandoned SIGKILL transaction',
+  );
+  assert(
+    !existsSync(killedWorkspaceRun),
+    'the next compiler run retained abandoned compiler workspace state',
+  );
+  assert(
+    !existsSync(join(productionFixture, '.supercov/work', killedRunId)),
+    'the next compiler run retained abandoned publication state',
+  );
+  assert(
     !existsSync(
       join(
         productionFixture,
@@ -702,6 +765,60 @@ try {
       ),
     ),
     'filtered production compiler run left terminal work state behind',
+  );
+
+  const interruptedRunId = 'run_5123456789abcdef';
+  const interruptedProduction = spawnCommand(supercov, ['__run-rust-compiler'], {
+    env: {RUSTC: rustc},
+    input: JSON.stringify({
+      root: productionFixture,
+      command: [cargo, 'test', '--doc'],
+      runId: interruptedRunId,
+      startedAt: '2026-08-26T00:01:30.000Z',
+      wrapperPath: supercov,
+      companionCandidates: [wrapper],
+      requirePublicCapabilities: false,
+    }),
+  });
+  const interruptedWorkspaceRun = join(
+    productionFixture,
+    '.supercov/cache/workspace',
+    basename(productionFixture),
+    '.supercov/work',
+    interruptedRunId,
+  );
+  const interruptedSelection = join(
+    interruptedWorkspaceRun,
+    'rust-compiler/selections',
+  );
+  for (let attempt = 0; attempt < 1_200; attempt += 1) {
+    if (existsSync(interruptedSelection) && readdirSync(interruptedSelection).length > 0) break;
+    assert.equal(
+      interruptedProduction.child.exitCode,
+      null,
+      'the interrupt gate exited before its supervised Cargo child was active',
+    );
+    await delay(25);
+  }
+  assert(
+    existsSync(interruptedSelection) && readdirSync(interruptedSelection).length > 0,
+    'the interrupt gate never reached its supervised Cargo child',
+  );
+  assert(
+    interruptedProduction.child.kill('SIGTERM'),
+    'failed to interrupt the compiler-run supervisor',
+  );
+  const interruptedProductionResult = await interruptedProduction.result;
+  assert.equal(interruptedProductionResult.status, 143);
+  assert.equal(interruptedProductionResult.signal, null);
+  assert.match(interruptedProductionResult.stderr, /interrupted by SIGTERM/);
+  assert(
+    !existsSync(interruptedWorkspaceRun),
+    'cooperative compiler interruption retained isolated work state',
+  );
+  assert(
+    !existsSync(join(productionFixture, '.supercov/work', interruptedRunId)),
+    'cooperative compiler interruption retained publication work state',
   );
 
   const docOnlyProductionRun = JSON.parse(

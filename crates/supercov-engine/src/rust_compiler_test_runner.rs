@@ -6,11 +6,11 @@
 //! retained as background results and are never credited to the test.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
     fs,
-    io::Write,
+    io::{self, Write},
     path::{Component, Path, PathBuf},
-    process::{Command, Output},
     sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -32,6 +32,7 @@ use crate::{
         ExitCodeInput, PersistedCoverageModel, RawTestResult, RuntimeSnapshot, TestProvenance,
     },
     evidence_archive::EvidenceArchiveEntry,
+    process_supervision::{CommandSpec, ProcessSupervisor, SupervisedOutput, SupervisionOptions},
     rust_compiler_ctfe::RustCompilerCtfeUnit,
     rust_compiler_evidence::{
         RustCompilerEvidenceProjection, RustCompilerTransportHealth, project_rust_compiler_evidence,
@@ -39,7 +40,6 @@ use crate::{
     rust_compiler_manifest::NormalizedRustCompilerManifest,
     rust_compiler_orchestration::{
         RustCompilerBuild, RustCompilerBuildRequest, RustCompilerTestArtifact,
-        build_with_rust_compiler_companion,
     },
     rust_doctest::{RustdocJoinedOutcomeState, RustdocOutcomeResolution, RustdocOutcomeStatus},
     rust_probe_transport::{
@@ -63,6 +63,7 @@ pub struct RustCompilerRunRequest {
     pub wrapper_path: PathBuf,
     pub companion_candidates: Vec<PathBuf>,
     pub require_public_capabilities: bool,
+    pub watchdog_program: Option<PathBuf>,
 }
 
 impl RustCompilerRunRequest {
@@ -151,6 +152,7 @@ pub enum RustCompilerTestError {
     DroppedEvidence { test: String, dropped: u64 },
     Projection { test: String, reason: String },
     UnsupportedCommand(String),
+    Interrupted { code: i32, signal: String },
 }
 
 impl std::fmt::Display for RustCompilerTestError {
@@ -185,6 +187,9 @@ impl std::fmt::Display for RustCompilerTestError {
                 write!(formatter, "invalid Rust evidence for {test}: {reason}")
             }
             Self::UnsupportedCommand(reason) => formatter.write_str(reason),
+            Self::Interrupted { signal, .. } => {
+                write!(formatter, "Rust test run was interrupted by {signal}")
+            }
         }
     }
 }
@@ -222,7 +227,7 @@ struct ProcessTask {
 #[derive(Debug)]
 struct ProcessOutcome {
     task: ProcessTask,
-    output: Output,
+    output: SupervisedOutput,
     read: RustTransportRead,
     started_at_ms: i64,
     ended_at_ms: i64,
@@ -275,18 +280,34 @@ fn normalize_artifacts(
 }
 
 fn list_tests(
+    project_root: &Path,
     artifact: &TestArtifact,
     selection_arguments: &[String],
+    supervisor: &ProcessSupervisor,
+    options: SupervisionOptions,
 ) -> Result<Vec<String>, RustCompilerTestError> {
-    let output = Command::new(&artifact.executable)
-        .args(selection_arguments)
-        .args(["--list", "--format", "terse"])
-        .output()
+    let mut arguments = selection_arguments
+        .iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+    arguments.extend(["--list".into(), "--format".into(), "terse".into()]);
+    let output = supervisor
+        .supervise_captured(
+            &CommandSpec {
+                program: artifact.executable.clone().into_os_string(),
+                arguments,
+                cwd: project_root.to_owned(),
+                environment: None,
+                captured_output: None,
+            },
+            options,
+            &mut io::sink(),
+        )
         .map_err(|error| RustCompilerTestError::List {
             artifact: artifact.executable.clone(),
             reason: error.to_string(),
         })?;
-    if !output.status.success() {
+    if output.result.exit_code() != 0 {
         return Err(RustCompilerTestError::List {
             artifact: artifact.executable.clone(),
             reason: format!(
@@ -326,7 +347,20 @@ fn snapshot_has_evidence(snapshot: &RuntimeSnapshot) -> bool {
     !snapshot.hits.is_empty() || !snapshot.decisions.is_empty() || !snapshot.events.is_empty()
 }
 
-fn run_process(project_root: &Path, task: &ProcessTask) -> Result<ProcessOutcome, String> {
+fn inherited_environment(
+    overrides: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
+    let mut environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
+    environment.extend(overrides);
+    environment.into_iter().collect()
+}
+
+fn run_process(
+    project_root: &Path,
+    task: &ProcessTask,
+    supervisor: &ProcessSupervisor,
+    options: SupervisionOptions,
+) -> Result<ProcessOutcome, String> {
     let mut token = [0_u8; TOKEN_BYTES];
     getrandom::fill(&mut token).map_err(|error| error.to_string())?;
     create_rust_transport(
@@ -337,14 +371,37 @@ fn run_process(project_root: &Path, task: &ProcessTask) -> Result<ProcessOutcome
     )
     .map_err(|error| error.to_string())?;
     let started_at_ms = epoch_ms().map_err(|error| error.to_string())?;
-    let output = Command::new(&task.artifact.executable)
-        .args(&task.run_arguments)
-        .args(["--exact", &task.test])
-        .current_dir(project_root)
-        .env(RUST_TRANSPORT_ENV, &task.transport)
-        .env(RUST_TRANSPORT_TOKEN_ENV, token_hex(&token))
-        .env(RUST_CONTEXT_ENV, format!("{:016x}", task.context_id))
-        .output()
+    let mut arguments = task
+        .run_arguments
+        .iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+    arguments.extend([OsString::from("--exact"), OsString::from(&task.test)]);
+    let output = supervisor
+        .supervise_captured(
+            &CommandSpec {
+                program: task.artifact.executable.clone().into_os_string(),
+                arguments,
+                cwd: project_root.to_owned(),
+                environment: Some(inherited_environment([
+                    (
+                        OsString::from(RUST_TRANSPORT_ENV),
+                        task.transport.clone().into_os_string(),
+                    ),
+                    (
+                        OsString::from(RUST_TRANSPORT_TOKEN_ENV),
+                        OsString::from(token_hex(&token)),
+                    ),
+                    (
+                        OsString::from(RUST_CONTEXT_ENV),
+                        OsString::from(format!("{:016x}", task.context_id)),
+                    ),
+                ])),
+                captured_output: None,
+            },
+            options,
+            &mut io::sink(),
+        )
         .map_err(|error| error.to_string())?;
     let ended_at_ms = epoch_ms().map_err(|error| error.to_string())?;
     let read = read_rust_transport(&task.transport, &token).map_err(|error| error.to_string())?;
@@ -787,8 +844,8 @@ fn ctfe_raw_results(
         .collect()
 }
 
-fn status(output: &Output) -> (&'static str, i32) {
-    let exit = output.status.code().unwrap_or(1);
+fn status(output: &SupervisedOutput) -> (&'static str, i32) {
+    let exit = output.result.exit_code();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let skipped =
         exit == 0 && (stdout.contains("running 0 tests") || stdout.contains("; 1 ignored;"));
@@ -896,14 +953,34 @@ pub fn run_rust_compiler_frontend(
     request: &RustCompilerRunRequest,
     diagnostics: &mut dyn Write,
 ) -> Result<RustCompilerFrontendRun, RustCompilerTestError> {
-    let build = build_with_rust_compiler_companion(&request.build_request())
+    let supervisor = request
+        .watchdog_program
+        .as_deref()
+        .map_or_else(ProcessSupervisor::new, ProcessSupervisor::new_crash_safe)
         .map_err(|error| RustCompilerTestError::Build(error.to_string()))?;
-    execute_compiler_build(request, build, diagnostics)
+    let options = SupervisionOptions::from_environment()
+        .map_err(|error| RustCompilerTestError::Build(error.to_string()))?;
+    let build = crate::rust_compiler_orchestration::build_with_rust_compiler_companion_supervised(
+        &request.build_request(),
+        &supervisor,
+        options,
+        diagnostics,
+    )
+    .map_err(|error| match error {
+        crate::rust_compiler_orchestration::RustCompilerOrchestrationError::Interrupted {
+            code,
+            signal,
+        } => RustCompilerTestError::Interrupted { code, signal },
+        error => RustCompilerTestError::Build(error.to_string()),
+    })?;
+    execute_compiler_build(request, build, &supervisor, options, diagnostics)
 }
 
 fn execute_compiler_build(
     request: &RustCompilerRunRequest,
     build: RustCompilerBuild,
+    supervisor: &ProcessSupervisor,
+    options: SupervisionOptions,
     diagnostics: &mut dyn Write,
 ) -> Result<RustCompilerFrontendRun, RustCompilerTestError> {
     let project_root = fs::canonicalize(&request.project_root)
@@ -926,7 +1003,13 @@ fn execute_compiler_build(
                 "doc-only execution unexpectedly produced a libtest artifact".into(),
             )
         })?;
-        let tests = list_tests(artifact, &selection.list_arguments)?;
+        let tests = list_tests(
+            &project_root,
+            artifact,
+            &selection.list_arguments,
+            supervisor,
+            options,
+        )?;
         let contexts = preflight_rust_test_contexts(tests.clone())
             .map_err(|error| RustCompilerTestError::Context(error.to_string()))?;
         for (test_index, test) in tests.into_iter().enumerate() {
@@ -965,7 +1048,7 @@ fn execute_compiler_build(
                     outcomes
                         .lock()
                         .expect("Rust compiler result lock poisoned")
-                        .push(run_process(&project_root, task));
+                        .push(run_process(&project_root, task, supervisor, options));
                 }
             });
         }

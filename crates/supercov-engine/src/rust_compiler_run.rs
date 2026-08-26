@@ -8,8 +8,8 @@ use crate::{
     coverage_report::{ArchiveReportRequest, ExitCodeInput, analyze_coverage_archive},
     evidence_archive::write_archive,
     lifecycle::{
-        ProjectLock, finalize_published_run, publish_run, recover_abandoned_runs,
-        remove_stored_tree_deferred,
+        ProjectLock, RunState, RunStateStatus, finalize_published_run, publish_run,
+        recover_abandoned_runs, remove_stored_tree_deferred, update_run_state, write_run_state,
     },
     run_store::{RawEvidenceMetadata, RunMetadata, RunTimings},
     rust_compiler_test_runner::{RustCompilerRunRequest, run_rust_compiler_frontend},
@@ -27,6 +27,8 @@ pub struct DirectRustCompilerRunRequest {
     pub wrapper_path: PathBuf,
     pub companion_candidates: Vec<PathBuf>,
     pub require_public_capabilities: bool,
+    #[serde(skip)]
+    pub watchdog_program: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -58,6 +60,37 @@ pub struct RustCompilerDenominatorCounts {
     pub limitations: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectRustCompilerRunError {
+    pub message: String,
+    pub exit_code: i32,
+    pub signal: Option<String>,
+}
+
+impl std::fmt::Display for DirectRustCompilerRunError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DirectRustCompilerRunError {}
+
+impl From<String> for DirectRustCompilerRunError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            exit_code: 2,
+            signal: None,
+        }
+    }
+}
+
+impl From<&str> for DirectRustCompilerRunError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
 fn elapsed_ms(started: Instant) -> f64 {
     (started.elapsed().as_secs_f64() * 10_000.0).round() / 10.0
 }
@@ -65,7 +98,7 @@ fn elapsed_ms(started: Instant) -> f64 {
 pub fn run_direct_rust_compiler(
     request: &DirectRustCompilerRunRequest,
     diagnostics: &mut dyn Write,
-) -> Result<DirectRustCompilerRunResult, String> {
+) -> Result<DirectRustCompilerRunResult, DirectRustCompilerRunError> {
     if request.command.is_empty() || request.companion_candidates.is_empty() {
         return Err("test command and exact compiler companion candidates are required".into());
     }
@@ -76,7 +109,7 @@ pub fn run_direct_rust_compiler(
     let mut lock = ProjectLock::acquire(&root, &request.run_id, &request.started_at)
         .map_err(|error| error.to_string())?;
     let initialization_ms = elapsed_ms(initialization_started);
-    let result = (|| {
+    let result = (|| -> Result<DirectRustCompilerRunResult, DirectRustCompilerRunError> {
         let recovered_runs = recover_abandoned_runs(&root, &request.started_at)
             .map_err(|error| error.to_string())?;
         if !recovered_runs.is_empty() {
@@ -96,6 +129,30 @@ pub fn run_direct_rust_compiler(
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
 
+        write_run_state(
+            &root,
+            &RunState {
+                id: request.run_id.clone(),
+                pid: std::process::id(),
+                root: root.display().to_string(),
+                workspace: workspace.display().to_string(),
+                started_at: request.started_at.clone(),
+                updated_at: request.started_at.clone(),
+                status: RunStateStatus::Preparing,
+                signal: None,
+                error: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        update_run_state(
+            &root,
+            &request.run_id,
+            RunStateStatus::Building,
+            &request.started_at,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+
         let run = run_rust_compiler_frontend(
             &RustCompilerRunRequest {
                 project_root: workspace.clone(),
@@ -105,10 +162,21 @@ pub fn run_direct_rust_compiler(
                 wrapper_path: request.wrapper_path.clone(),
                 companion_candidates: request.companion_candidates.clone(),
                 require_public_capabilities: request.require_public_capabilities,
+                watchdog_program: request.watchdog_program.clone(),
             },
             diagnostics,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| match error {
+            crate::rust_compiler_test_runner::RustCompilerTestError::Interrupted {
+                code,
+                signal,
+            } => DirectRustCompilerRunError {
+                message: format!("Rust compiler run was interrupted by {signal}"),
+                exit_code: code,
+                signal: Some(signal),
+            },
+            error => error.to_string().into(),
+        })?;
 
         let publication_started = Instant::now();
         let archive_path = root
@@ -199,6 +267,18 @@ pub fn run_direct_rust_compiler(
         };
         let run_directory =
             publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;
+        update_run_state(
+            &root,
+            &request.run_id,
+            if run.exit_code == 0 {
+                RunStateStatus::Complete
+            } else {
+                RunStateStatus::Failed
+            },
+            &request.started_at,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
         finalize_published_run(&root, &request.run_id).map_err(|error| error.to_string())?;
         remove_stored_tree_deferred(
             &root,
@@ -223,7 +303,23 @@ pub fn run_direct_rust_compiler(
             metadata,
         })
     })();
-    if result.is_err() {
+    if let Err(error) = &result {
+        if let Some(signal) = &error.signal {
+            let _ = crate::lifecycle::interrupt_run_state(
+                &root,
+                &request.run_id,
+                &request.started_at,
+                signal,
+            );
+        } else {
+            let _ = update_run_state(
+                &root,
+                &request.run_id,
+                RunStateStatus::Failed,
+                &request.started_at,
+                Some(error.message.clone()),
+            );
+        }
         let _ =
             remove_stored_tree_deferred(&root, &root.join(".supercov/work").join(&request.run_id));
         if let Ok(workspace) = cached_workspace_path(&root) {
@@ -237,6 +333,6 @@ pub fn run_direct_rust_compiler(
     match (result, release) {
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
+        (Ok(_), Err(error)) => Err(error.into()),
     }
 }

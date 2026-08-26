@@ -795,6 +795,35 @@ complete, and terminal work is removed. Full output/order compatibility,
 cross-artifact fail-fast, retries, multi-package identity, wrapper composition
 and failure/signal recovery remain open.
 
+The production compiler path now uses one shared process-supervision session
+for Cargo builds, rustdoc, libtest discovery and every parallel process-per-test
+attempt. Captured stdout and stderr are drained separately without changing
+exit status. Signals remain visible to every active child rather than being
+consumed by one worker. On POSIX, every command is held before `exec` until a
+forked copy of the exact Supercov binary has left the target group, closed
+unrelated descriptors and acknowledged its private liveness pipe. Ordinary
+return, unwind and uncatchable supervisor death close that pipe and kill the
+complete group; Windows retains the existing kill-on-close Job Object.
+
+Executable gates now send SIGTERM after the exact Cargo companion is active and
+require exit 143 plus no original-store or isolated-workspace debris. A separate
+gate SIGKILLs that production supervisor, proves its active Cargo/descendant
+group cannot escape, requires cooperative cleanup not to run, and then requires
+the next exact-selection run to report and remove the abandoned transaction.
+This exposed and fixed two lifecycle bugs: compiler runs had no minimum durable
+run state, and recovery retained terminal `Abandoned` state under `.supercov/work`.
+Failure/signal recovery for this standard Cargo/rustdoc topology is now closed;
+retry, multi-package, custom-runner and wrapper-composition failure matrices
+remain open.
+
+The same armed parent-death boundary now protects the already-public
+JavaScript/TypeScript frontend rather than existing only on the compiler path.
+Its production isolation gate waits until an instrumented test has spawned a
+descendant, SIGKILLs Supercov, proves that neither process survives or performs
+delayed work, and requires the following run to report and remove the abandoned
+transaction. The complete node:test, Vitest, Playwright and build-adapter matrix
+remains green under this supervisor.
+
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.
 

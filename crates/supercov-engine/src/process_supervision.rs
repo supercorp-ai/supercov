@@ -2,8 +2,8 @@
 
 use std::{
     ffi::OsString,
-    fs::OpenOptions,
-    io::{self, Write},
+    fs::{self, OpenOptions},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     sync::{
@@ -20,6 +20,12 @@ use supercov_contracts::{
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+#[cfg(unix)]
+use std::os::{
+    fd::{AsRawFd, FromRawFd, OwnedFd},
+    unix::{ffi::OsStrExt as _, process::CommandExt as _},
+};
 
 #[derive(Debug)]
 pub enum SupervisionError {
@@ -122,11 +128,6 @@ impl CommandSpec {
         if let Some(environment) = &self.environment {
             command.env_clear().envs(environment.iter().cloned());
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            command.process_group(0);
-        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -153,6 +154,25 @@ impl Default for SupervisionOptions {
             timeout: None,
             termination_grace: Duration::from_millis(COMMAND_TERMINATION_GRACE_MS),
         }
+    }
+}
+
+impl SupervisionOptions {
+    pub fn from_environment() -> Result<Self, SupervisionError> {
+        Ok(Self {
+            diagnostic_interval: positive_milliseconds(
+                std::env::var("SUPERCOV_DIAGNOSTIC_INTERVAL_MS")
+                    .ok()
+                    .as_deref(),
+                "SUPERCOV_DIAGNOSTIC_INTERVAL_MS",
+            )?
+            .unwrap_or_else(|| Duration::from_millis(DEFAULT_DIAGNOSTIC_INTERVAL_MS)),
+            timeout: positive_milliseconds(
+                std::env::var("SUPERCOV_COMMAND_TIMEOUT_MS").ok().as_deref(),
+                "SUPERCOV_COMMAND_TIMEOUT_MS",
+            )?,
+            termination_grace: Duration::from_millis(COMMAND_TERMINATION_GRACE_MS),
+        })
     }
 }
 
@@ -202,6 +222,13 @@ pub struct SupervisedResult {
     pub signal: Option<i32>,
     pub timed_out: bool,
     pub interrupted_signal: Option<ForwardedSignal>,
+}
+
+#[derive(Debug)]
+pub struct SupervisedOutput {
+    pub result: SupervisedResult,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
 }
 
 impl SupervisedResult {
@@ -377,7 +404,10 @@ impl SignalFlags {
     }
 
     fn received(&self) -> Option<ForwardedSignal> {
-        match RECEIVED_SIGNAL.swap(0, Ordering::SeqCst) {
+        // A supervisor is shared by every concurrently running child in one
+        // execution session. Keep the signal visible until the session guard
+        // is dropped so every process group observes the same interruption.
+        match RECEIVED_SIGNAL.load(Ordering::SeqCst) {
             libc::SIGHUP => Some(ForwardedSignal::Sighup),
             libc::SIGINT => Some(ForwardedSignal::Sigint),
             libc::SIGTERM => Some(ForwardedSignal::Sigterm),
@@ -433,7 +463,7 @@ impl SignalFlags {
     }
 
     fn received(&self) -> Option<ForwardedSignal> {
-        match RECEIVED_SIGNAL.swap(0, Ordering::SeqCst) {
+        match RECEIVED_SIGNAL.load(Ordering::SeqCst) {
             2 => Some(ForwardedSignal::Sigint),
             15 => Some(ForwardedSignal::Sigterm),
             _ => None,
@@ -633,6 +663,190 @@ fn forward_windows_control(child: &Child) {
     let _ = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id()) };
 }
 
+/// The write end is held only by the supervising process. A tiny watchdog
+/// created in the command's pre-exec child blocks on the read end. Normal
+/// completion, an unwind, or uncatchable supervisor death all close this
+/// descriptor and make the watchdog kill the command's complete process group.
+#[cfg(unix)]
+struct ParentDeathGuard {
+    _writer: OwnedFd,
+}
+
+#[cfg(unix)]
+fn parent_death_pipe() -> Result<(OwnedFd, OwnedFd), SupervisionError> {
+    let mut descriptors = [-1_i32; 2];
+    // SAFETY: `descriptors` is a live two-element output buffer for pipe(2).
+    if unsafe { libc::pipe(descriptors.as_mut_ptr()) } != 0 {
+        return Err(SupervisionError::PlatformOperation {
+            operation: "create parent-death supervision pipe",
+            source: io::Error::last_os_error(),
+        });
+    }
+    // SAFETY: pipe(2) returned two newly owned descriptors.
+    let read = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
+    // SAFETY: same as above for the write end.
+    let write = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
+    for descriptor in [read.as_raw_fd(), write.as_raw_fd()] {
+        // SAFETY: the descriptor is live and F_SETFD accepts FD_CLOEXEC.
+        if unsafe { libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+            return Err(SupervisionError::PlatformOperation {
+                operation: "protect parent-death supervision pipe across exec",
+                source: io::Error::last_os_error(),
+            });
+        }
+    }
+    Ok((read, write))
+}
+
+#[cfg(unix)]
+fn spawn_contained(
+    command: &mut Command,
+    program: &OsString,
+    watchdog_program: Option<&Path>,
+) -> Result<(Child, Option<ParentDeathGuard>), SupervisionError> {
+    let Some(watchdog_program) = watchdog_program else {
+        command.process_group(0);
+        let child = command.spawn().map_err(|source| SupervisionError::Spawn {
+            program: program.clone(),
+            source,
+        })?;
+        return Ok((child, None));
+    };
+    let (read, write) = parent_death_pipe()?;
+    let (ready_read, ready_write) = parent_death_pipe()?;
+    let read_descriptor = read.as_raw_fd();
+    let write_descriptor = write.as_raw_fd();
+    let ready_read_descriptor = ready_read.as_raw_fd();
+    let ready_write_descriptor = ready_write.as_raw_fd();
+    let watchdog_program = std::ffi::CString::new(watchdog_program.as_os_str().as_bytes())
+        .map_err(|_| SupervisionError::PlatformOperation {
+            operation: "encode parent-death watchdog executable",
+            source: io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"),
+        })?;
+    let watchdog_argument =
+        std::ffi::CString::new("__watch-process-group").expect("static CString");
+    // SAFETY: this closure calls only async-signal-safe syscalls between fork
+    // and exec. The forked watchdog immediately execs the already-loaded
+    // Supercov binary; it never returns to Rust or touches an inherited lock.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let _ = libc::close(write_descriptor);
+            let watchdog = libc::fork();
+            if watchdog < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if watchdog == 0 {
+                let _ = libc::close(ready_read_descriptor);
+                if libc::dup2(read_descriptor, 0) < 0 || libc::dup2(ready_write_descriptor, 3) < 0 {
+                    libc::_exit(125);
+                }
+                for descriptor in [read_descriptor, ready_write_descriptor, 1, 2] {
+                    if descriptor != 0 && descriptor != 3 {
+                        let _ = libc::close(descriptor);
+                    }
+                }
+                let arguments = [
+                    watchdog_program.as_ptr(),
+                    watchdog_argument.as_ptr(),
+                    std::ptr::null(),
+                ];
+                libc::execv(watchdog_program.as_ptr(), arguments.as_ptr());
+                libc::_exit(125);
+            }
+            let _ = libc::close(read_descriptor);
+            let _ = libc::close(ready_write_descriptor);
+            let mut ready = 0_u8;
+            loop {
+                let received = libc::read(ready_read_descriptor, (&raw mut ready).cast(), 1);
+                if received == 1 && ready == 1 {
+                    break;
+                }
+                if received < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return Err(io::Error::other(
+                    "parent-death watchdog failed before command exec",
+                ));
+            }
+            let _ = libc::close(ready_read_descriptor);
+            Ok(())
+        });
+    }
+    let child = command.spawn().map_err(|source| SupervisionError::Spawn {
+        program: program.clone(),
+        source,
+    })?;
+    drop(read);
+    drop(ready_read);
+    drop(ready_write);
+    Ok((child, Some(ParentDeathGuard { _writer: write })))
+}
+
+#[cfg(unix)]
+pub fn watch_parent_process_group() -> io::Result<()> {
+    // The target waits for our readiness byte, so its PID remains both our
+    // parent PID and the process-group ID until containment is armed.
+    let process_group = unsafe { libc::getppid() };
+    if process_group <= 1 {
+        return Err(io::Error::other(
+            "parent-death watchdog has no target process",
+        ));
+    }
+    // SAFETY: the watchdog is a non-leader child in the target's process group.
+    if unsafe { libc::setsid() } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let descriptor_root = if Path::new("/proc/self/fd").is_dir() {
+        Path::new("/proc/self/fd")
+    } else {
+        Path::new("/dev/fd")
+    };
+    let descriptors = fs::read_dir(descriptor_root)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<i32>().ok())
+        .filter(|descriptor| !matches!(*descriptor, 0 | 3))
+        .collect::<Vec<_>>();
+    for descriptor in descriptors {
+        // SAFETY: closing a descriptor that the directory iterator already
+        // released, or one concurrently absent, is harmless.
+        let _ = unsafe { libc::close(descriptor) };
+    }
+    let ready = [1_u8];
+    // SAFETY: pre-exec mapped the private readiness pipe to descriptor 3.
+    if unsafe { libc::write(3, ready.as_ptr().cast(), ready.len()) } != 1 {
+        return Err(io::Error::last_os_error());
+    }
+    let _ = unsafe { libc::close(3) };
+    let mut buffer = [0_u8; 1];
+    loop {
+        // The supervisor never writes. EOF means normal supervisor teardown,
+        // unwind, or uncatchable process death.
+        let read = unsafe { libc::read(0, buffer.as_mut_ptr().cast(), buffer.len()) };
+        if read == 0 {
+            break;
+        }
+        if read < 0 {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            break;
+        }
+    }
+    let _ = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn watch_parent_process_group() -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "the POSIX parent-death watchdog is unavailable",
+    ))
+}
+
 #[cfg(unix)]
 fn signal_process_group(child: &mut Child, signal: i32) {
     let pid = child.id() as i32;
@@ -671,9 +885,46 @@ fn write_diagnostic(child: &Child, started: Instant, writer: &mut dyn Write) {
     let _ = writeln!(writer, "{}", diagnostic).and_then(|_| writer.flush());
 }
 
+fn validate_options(options: SupervisionOptions) -> Result<(), SupervisionError> {
+    if options.diagnostic_interval.is_zero() || options.termination_grace.is_zero() {
+        return Err(SupervisionError::InvalidMilliseconds {
+            name: "process supervision interval".into(),
+        });
+    }
+    if options.timeout.is_some_and(|timeout| timeout.is_zero()) {
+        return Err(SupervisionError::InvalidMilliseconds {
+            name: "SUPERCOV_COMMAND_TIMEOUT_MS".into(),
+        });
+    }
+    Ok(())
+}
+
+fn read_pipe(mut pipe: impl Read) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn captured_bytes(
+    reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    stream: &'static str,
+) -> Result<Vec<u8>, SupervisionError> {
+    reader
+        .join()
+        .map_err(|_| SupervisionError::PlatformOperation {
+            operation: "join captured process output reader",
+            source: io::Error::other(format!("{stream} reader panicked")),
+        })?
+        .map_err(|source| SupervisionError::PlatformOperation {
+            operation: "read captured process output",
+            source,
+        })
+}
+
 #[cfg(unix)]
 pub struct ProcessSupervisor {
     signals: SignalFlags,
+    watchdog_program: Option<PathBuf>,
 }
 
 #[cfg(unix)]
@@ -681,6 +932,26 @@ impl ProcessSupervisor {
     pub fn new() -> Result<Self, SupervisionError> {
         Ok(Self {
             signals: SignalFlags::install()?,
+            watchdog_program: None,
+        })
+    }
+
+    pub fn new_crash_safe(watchdog_program: &Path) -> Result<Self, SupervisionError> {
+        let watchdog_program = fs::canonicalize(watchdog_program).map_err(|source| {
+            SupervisionError::PlatformOperation {
+                operation: "resolve parent-death watchdog executable",
+                source,
+            }
+        })?;
+        if !fs::metadata(&watchdog_program).is_ok_and(|metadata| metadata.is_file()) {
+            return Err(SupervisionError::PlatformOperation {
+                operation: "validate parent-death watchdog executable",
+                source: io::Error::new(io::ErrorKind::InvalidInput, "expected a regular file"),
+            });
+        }
+        Ok(Self {
+            signals: SignalFlags::install()?,
+            watchdog_program: Some(watchdog_program),
         })
     }
 
@@ -690,16 +961,7 @@ impl ProcessSupervisor {
         options: SupervisionOptions,
         writer: &mut dyn Write,
     ) -> Result<SupervisedResult, SupervisionError> {
-        if options.diagnostic_interval.is_zero() || options.termination_grace.is_zero() {
-            return Err(SupervisionError::InvalidMilliseconds {
-                name: "process supervision interval".into(),
-            });
-        }
-        if options.timeout.is_some_and(|timeout| timeout.is_zero()) {
-            return Err(SupervisionError::InvalidMilliseconds {
-                name: "SUPERCOV_COMMAND_TIMEOUT_MS".into(),
-            });
-        }
+        validate_options(options)?;
         if let Some(signal) = self.signals.received() {
             return Ok(SupervisedResult {
                 status: None,
@@ -709,10 +971,72 @@ impl ProcessSupervisor {
             });
         }
         let mut command = spec.command()?;
-        let mut child = command.spawn().map_err(|source| SupervisionError::Spawn {
-            program: spec.program.clone(),
-            source,
-        })?;
+        let (mut child, _parent_death_guard) = spawn_contained(
+            &mut command,
+            &spec.program,
+            self.watchdog_program.as_deref(),
+        )?;
+        self.monitor(&mut child, options, writer)
+    }
+
+    pub fn supervise_captured(
+        &self,
+        spec: &CommandSpec,
+        options: SupervisionOptions,
+        writer: &mut dyn Write,
+    ) -> Result<SupervisedOutput, SupervisionError> {
+        validate_options(options)?;
+        if spec.captured_output.is_some() {
+            return Err(SupervisionError::PlatformOperation {
+                operation: "configure separate captured process output",
+                source: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "merged and separate capture cannot be requested together",
+                ),
+            });
+        }
+        if let Some(signal) = self.signals.received() {
+            return Ok(SupervisedOutput {
+                result: SupervisedResult {
+                    status: None,
+                    signal: Some(signal.raw()),
+                    timed_out: false,
+                    interrupted_signal: Some(signal),
+                },
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            });
+        }
+        let mut command = spec.command()?;
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let (mut child, parent_death_guard) = spawn_contained(
+            &mut command,
+            &spec.program,
+            self.watchdog_program.as_deref(),
+        )?;
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+        let stdout_reader = thread::spawn(move || read_pipe(stdout));
+        let stderr_reader = thread::spawn(move || read_pipe(stderr));
+        let result = self.monitor(&mut child, options, writer);
+        // Closing the liveness writer makes the watchdog kill any descendants
+        // that retained the output pipes after the root command exited.
+        drop(parent_death_guard);
+        let stdout = captured_bytes(stdout_reader, "stdout")?;
+        let stderr = captured_bytes(stderr_reader, "stderr")?;
+        Ok(SupervisedOutput {
+            result: result?,
+            stdout,
+            stderr,
+        })
+    }
+
+    fn monitor(
+        &self,
+        child: &mut Child,
+        options: SupervisionOptions,
+        writer: &mut dyn Write,
+    ) -> Result<SupervisedResult, SupervisionError> {
         let started = Instant::now();
         let mut next_diagnostic = started + options.diagnostic_interval;
         let timeout_at = options.timeout.map(|timeout| started + timeout);
@@ -725,7 +1049,7 @@ impl ProcessSupervisor {
             let status = match child.try_wait() {
                 Ok(status) => status,
                 Err(error) => {
-                    signal_process_group(&mut child, libc::SIGKILL);
+                    signal_process_group(child, libc::SIGKILL);
                     let _ = child.wait();
                     return Err(SupervisionError::Wait(error));
                 }
@@ -744,7 +1068,7 @@ impl ProcessSupervisor {
                 && let Some(signal) = self.signals.received()
             {
                 interrupted_signal = Some(signal);
-                signal_process_group(&mut child, signal.raw());
+                signal_process_group(child, signal.raw());
                 termination = Some((now, Some(signal)));
             }
             if termination.is_none() && timeout_at.is_some_and(|deadline| now >= deadline) {
@@ -755,12 +1079,12 @@ impl ProcessSupervisor {
                 options.timeout.expect("timeout deadline").as_millis()
             )
             .and_then(|_| writer.flush());
-                signal_process_group(&mut child, libc::SIGTERM);
+                signal_process_group(child, libc::SIGTERM);
                 termination = Some((now, None));
-                write_diagnostic(&child, started, writer);
+                write_diagnostic(child, started, writer);
             }
             if now >= next_diagnostic && !timed_out {
-                write_diagnostic(&child, started, writer);
+                write_diagnostic(child, started, writer);
                 while next_diagnostic <= now {
                     next_diagnostic += options.diagnostic_interval;
                 }
@@ -770,7 +1094,7 @@ impl ProcessSupervisor {
                     now.duration_since(terminated_at) >= options.termination_grace
                 })
             {
-                signal_process_group(&mut child, libc::SIGKILL);
+                signal_process_group(child, libc::SIGKILL);
                 escalated = true;
             }
             thread::sleep(POLL_INTERVAL);
@@ -793,22 +1117,17 @@ impl ProcessSupervisor {
         })
     }
 
+    pub fn new_crash_safe(_watchdog_program: &Path) -> Result<Self, SupervisionError> {
+        Self::new()
+    }
+
     pub fn supervise(
         &self,
         spec: &CommandSpec,
         options: SupervisionOptions,
         writer: &mut dyn Write,
     ) -> Result<SupervisedResult, SupervisionError> {
-        if options.diagnostic_interval.is_zero() || options.termination_grace.is_zero() {
-            return Err(SupervisionError::InvalidMilliseconds {
-                name: "process supervision interval".into(),
-            });
-        }
-        if options.timeout.is_some_and(|timeout| timeout.is_zero()) {
-            return Err(SupervisionError::InvalidMilliseconds {
-                name: "SUPERCOV_COMMAND_TIMEOUT_MS".into(),
-            });
-        }
+        validate_options(options)?;
         if let Some(signal) = self.signals.received() {
             return Ok(SupervisedResult {
                 status: None,
@@ -832,6 +1151,73 @@ impl ProcessSupervisor {
             let _ = child.wait();
             return Err(error);
         }
+        self.monitor(&mut child, options, writer)
+    }
+
+    pub fn supervise_captured(
+        &self,
+        spec: &CommandSpec,
+        options: SupervisionOptions,
+        writer: &mut dyn Write,
+    ) -> Result<SupervisedOutput, SupervisionError> {
+        validate_options(options)?;
+        if spec.captured_output.is_some() {
+            return Err(SupervisionError::PlatformOperation {
+                operation: "configure separate captured process output",
+                source: io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "merged and separate capture cannot be requested together",
+                ),
+            });
+        }
+        if let Some(signal) = self.signals.received() {
+            return Ok(SupervisedOutput {
+                result: SupervisedResult {
+                    status: None,
+                    signal: None,
+                    timed_out: false,
+                    interrupted_signal: Some(signal),
+                },
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            });
+        }
+        let mut command = spec.command()?;
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|source| SupervisionError::Spawn {
+            program: spec.program.clone(),
+            source,
+        })?;
+        if let Err(error) = self.job.assign(&child) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        if let Err(error) = resume_suspended_process(child.id()) {
+            self.job.terminate();
+            let _ = child.wait();
+            return Err(error);
+        }
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+        let stdout_reader = thread::spawn(move || read_pipe(stdout));
+        let stderr_reader = thread::spawn(move || read_pipe(stderr));
+        let result = self.monitor(&mut child, options, writer);
+        let stdout = captured_bytes(stdout_reader, "stdout")?;
+        let stderr = captured_bytes(stderr_reader, "stderr")?;
+        Ok(SupervisedOutput {
+            result: result?,
+            stdout,
+            stderr,
+        })
+    }
+
+    fn monitor(
+        &self,
+        child: &mut Child,
+        options: SupervisionOptions,
+        writer: &mut dyn Write,
+    ) -> Result<SupervisedResult, SupervisionError> {
         let started = Instant::now();
         let mut next_diagnostic = started + options.diagnostic_interval;
         let timeout_at = options.timeout.map(|timeout| started + timeout);
@@ -908,12 +1294,27 @@ impl ProcessSupervisor {
         ))
     }
 
+    pub fn new_crash_safe(_watchdog_program: &Path) -> Result<Self, SupervisionError> {
+        Self::new()
+    }
+
     pub fn supervise(
         &self,
         _spec: &CommandSpec,
         _options: SupervisionOptions,
         _writer: &mut dyn Write,
     ) -> Result<SupervisedResult, SupervisionError> {
+        Err(SupervisionError::UnsupportedPlatform(
+            "this target has no process-tree containment implementation",
+        ))
+    }
+
+    pub fn supervise_captured(
+        &self,
+        _spec: &CommandSpec,
+        _options: SupervisionOptions,
+        _writer: &mut dyn Write,
+    ) -> Result<SupervisedOutput, SupervisionError> {
         Err(SupervisionError::UnsupportedPlatform(
             "this target has no process-tree containment implementation",
         ))
@@ -926,6 +1327,14 @@ pub fn supervise_command(
     writer: &mut dyn Write,
 ) -> Result<SupervisedResult, SupervisionError> {
     ProcessSupervisor::new()?.supervise(spec, options, writer)
+}
+
+pub fn supervise_captured_command(
+    spec: &CommandSpec,
+    options: SupervisionOptions,
+    writer: &mut dyn Write,
+) -> Result<SupervisedOutput, SupervisionError> {
+    ProcessSupervisor::new()?.supervise_captured(spec, options, writer)
 }
 
 #[cfg(test)]
@@ -980,6 +1389,29 @@ mod tests {
             supervise_command(&spec, SupervisionOptions::default(), &mut diagnostics).unwrap();
         assert_eq!(result.exit_code(), 7);
         assert!(!result.timed_out);
+        assert!(diagnostics.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn captures_stdout_and_stderr_separately_without_losing_status() {
+        let spec = CommandSpec {
+            program: "/bin/sh".into(),
+            arguments: vec![
+                "-c".into(),
+                "printf stdout-value; printf stderr-value >&2; exit 9".into(),
+            ],
+            cwd: std::env::current_dir().unwrap(),
+            environment: None,
+            captured_output: None,
+        };
+        let mut diagnostics = Vec::new();
+        let output =
+            supervise_captured_command(&spec, SupervisionOptions::default(), &mut diagnostics)
+                .unwrap();
+        assert_eq!(output.result.exit_code(), 9);
+        assert_eq!(output.stdout, b"stdout-value");
+        assert_eq!(output.stderr, b"stderr-value");
         assert!(diagnostics.is_empty());
     }
 

@@ -7,8 +7,9 @@
 
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{self, Write},
     path::{Component, Path, PathBuf},
     process::Command,
     thread,
@@ -18,6 +19,9 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    process_supervision::{
+        CommandSpec, ForwardedSignal, ProcessSupervisor, SupervisedOutput, SupervisionOptions,
+    },
     rust_compiler_ctfe::{RustCompilerCtfeUnit, read_rust_compiler_ctfe},
     rust_compiler_manifest::{NormalizedRustCompilerManifest, normalize_rust_compiler_candidates},
     rust_compiler_selection::{SelectedRustCompilerCompanion, select_rust_compiler_companion},
@@ -27,6 +31,35 @@ use crate::{
     },
     rust_test_runner::{cargo_invocation, rust_cargo_execution_selection},
 };
+
+fn inherited_environment(
+    overrides: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
+    let mut environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
+    environment.extend(overrides);
+    environment.into_iter().collect()
+}
+
+fn supervised_success(output: &SupervisedOutput) -> bool {
+    output.result.status == Some(0)
+        && output.result.signal.is_none()
+        && !output.result.timed_out
+        && output.result.interrupted_signal.is_none()
+}
+
+fn interrupted_error(output: &SupervisedOutput) -> Option<RustCompilerOrchestrationError> {
+    output.result.interrupted_signal.map(|signal| {
+        let signal = match signal {
+            ForwardedSignal::Sighup => "SIGHUP",
+            ForwardedSignal::Sigint => "SIGINT",
+            ForwardedSignal::Sigterm => "SIGTERM",
+        };
+        RustCompilerOrchestrationError::Interrupted {
+            code: output.result.exit_code(),
+            signal: signal.into(),
+        }
+    })
+}
 
 pub const RUST_COMPILER_WRAPPER_CONFIG_ENV: &str = "SUPERCOV_RUST_COMPILER_WRAPPER_CONFIG";
 pub const RUST_COMPILER_OUTPUT_ENV: &str = "SUPERCOV_RUST_COMPILER_OUTPUT";
@@ -113,6 +146,7 @@ pub enum RustCompilerOrchestrationError {
     CompilerOutput(String),
     Selection(String),
     Manifest(String),
+    Interrupted { code: i32, signal: String },
 }
 
 impl std::fmt::Display for RustCompilerOrchestrationError {
@@ -128,6 +162,9 @@ impl std::fmt::Display for RustCompilerOrchestrationError {
             Self::CompilerOutput(reason) => write!(formatter, "invalid Rust compiler output: {reason}"),
             Self::Selection(reason) => write!(formatter, "Rust compiler selection failed: {reason}"),
             Self::Manifest(reason) => write!(formatter, "Rust compiler manifest failed: {reason}"),
+            Self::Interrupted { signal, .. } => {
+                write!(formatter, "Rust compiler run was interrupted by {signal}")
+            }
         }
     }
 }
@@ -666,6 +703,19 @@ fn rendered_cargo_diagnostics(stdout: &[u8]) -> String {
 pub fn build_with_rust_compiler_companion(
     request: &RustCompilerBuildRequest,
 ) -> Result<RustCompilerBuild, RustCompilerOrchestrationError> {
+    let supervisor = ProcessSupervisor::new()
+        .map_err(|error| RustCompilerOrchestrationError::Cargo(error.to_string()))?;
+    let options = SupervisionOptions::from_environment()
+        .map_err(|error| RustCompilerOrchestrationError::Cargo(error.to_string()))?;
+    build_with_rust_compiler_companion_supervised(request, &supervisor, options, &mut io::sink())
+}
+
+pub fn build_with_rust_compiler_companion_supervised(
+    request: &RustCompilerBuildRequest,
+    supervisor: &ProcessSupervisor,
+    options: SupervisionOptions,
+    diagnostics: &mut dyn Write,
+) -> Result<RustCompilerBuild, RustCompilerOrchestrationError> {
     if request.command.is_empty()
         || !valid_run_id(&request.run_id)
         || request.companion_candidates.is_empty()
@@ -730,20 +780,54 @@ pub fn build_with_rust_compiler_companion(
         invocation
             .arguments
             .extend(["--no-run".into(), "--message-format=json".into()]);
-        let output = Command::new(&invocation.program)
-            .args(&invocation.arguments)
-            .current_dir(&project_root)
-            .env("CARGO_TARGET_DIR", &target_directory)
-            .env("RUSTC_WORKSPACE_WRAPPER", &wrapper)
-            .env(RUST_COMPILER_WRAPPER_CONFIG_ENV, &config_path)
-            .env(RUST_COMPILER_OUTPUT_ENV, &candidate_directory)
-            .env(RUST_SOURCE_ROOT_ENV, &project_root)
-            .env(RUST_TARGET_ROOT_ENV, &target_directory)
-            .env(RUST_INSTRUMENT_MIR_ENV, "1")
-            .env(RUST_INSTRUMENT_CTFE_ENV, "1")
-            .output()
+        let environment = inherited_environment([
+            (
+                OsString::from("CARGO_TARGET_DIR"),
+                target_directory.clone().into_os_string(),
+            ),
+            (
+                OsString::from("RUSTC_WORKSPACE_WRAPPER"),
+                wrapper.clone().into_os_string(),
+            ),
+            (
+                OsString::from(RUST_COMPILER_WRAPPER_CONFIG_ENV),
+                config_path.clone().into_os_string(),
+            ),
+            (
+                OsString::from(RUST_COMPILER_OUTPUT_ENV),
+                candidate_directory.clone().into_os_string(),
+            ),
+            (
+                OsString::from(RUST_SOURCE_ROOT_ENV),
+                project_root.clone().into_os_string(),
+            ),
+            (
+                OsString::from(RUST_TARGET_ROOT_ENV),
+                target_directory.clone().into_os_string(),
+            ),
+            (OsString::from(RUST_INSTRUMENT_MIR_ENV), OsString::from("1")),
+            (
+                OsString::from(RUST_INSTRUMENT_CTFE_ENV),
+                OsString::from("1"),
+            ),
+        ]);
+        let output = supervisor
+            .supervise_captured(
+                &CommandSpec {
+                    program: invocation.program.clone().into(),
+                    arguments: invocation.arguments.iter().map(OsString::from).collect(),
+                    cwd: project_root.clone(),
+                    environment: Some(environment),
+                    captured_output: None,
+                },
+                options,
+                diagnostics,
+            )
             .map_err(|error| RustCompilerOrchestrationError::Cargo(error.to_string()))?;
-        if !output.status.success() {
+        if let Some(error) = interrupted_error(&output) {
+            return Err(error);
+        }
+        if !supervised_success(&output) {
             let rendered = rendered_cargo_diagnostics(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(RustCompilerOrchestrationError::Cargo(
@@ -756,26 +840,69 @@ pub fn build_with_rust_compiler_companion(
     };
     let doctest_output = if execution.run_doctests {
         Some(
-            Command::new(&invocation.program)
-                .args(&execution.doctest_arguments)
-                .current_dir(&project_root)
-                .env("CARGO_TARGET_DIR", &target_directory)
-                .env("RUSTC_WORKSPACE_WRAPPER", &wrapper)
-                .env(RUST_COMPILER_WRAPPER_CONFIG_ENV, &config_path)
-                .env(RUST_COMPILER_OUTPUT_ENV, &candidate_directory)
-                .env(RUST_SOURCE_ROOT_ENV, &project_root)
-                .env(RUST_TARGET_ROOT_ENV, &target_directory)
-                .env(RUST_INSTRUMENT_MIR_ENV, "1")
-                .env(RUST_INSTRUMENT_CTFE_ENV, "1")
-                .env(RUST_STATIC_RUNTIME_DIRECTORY_ENV, &shared_runtime_directory)
-                .env("RUSTDOC", &wrapper)
-                .env(RUSTDOC_WRAPPER_MODE_ENV, "1")
-                .output()
+            supervisor
+                .supervise_captured(
+                    &CommandSpec {
+                        program: invocation.program.clone().into(),
+                        arguments: execution
+                            .doctest_arguments
+                            .iter()
+                            .map(OsString::from)
+                            .collect(),
+                        cwd: project_root.clone(),
+                        environment: Some(inherited_environment([
+                            (
+                                OsString::from("CARGO_TARGET_DIR"),
+                                target_directory.clone().into_os_string(),
+                            ),
+                            (
+                                OsString::from("RUSTC_WORKSPACE_WRAPPER"),
+                                wrapper.clone().into_os_string(),
+                            ),
+                            (
+                                OsString::from(RUST_COMPILER_WRAPPER_CONFIG_ENV),
+                                config_path.clone().into_os_string(),
+                            ),
+                            (
+                                OsString::from(RUST_COMPILER_OUTPUT_ENV),
+                                candidate_directory.clone().into_os_string(),
+                            ),
+                            (
+                                OsString::from(RUST_SOURCE_ROOT_ENV),
+                                project_root.clone().into_os_string(),
+                            ),
+                            (
+                                OsString::from(RUST_TARGET_ROOT_ENV),
+                                target_directory.clone().into_os_string(),
+                            ),
+                            (OsString::from(RUST_INSTRUMENT_MIR_ENV), OsString::from("1")),
+                            (
+                                OsString::from(RUST_INSTRUMENT_CTFE_ENV),
+                                OsString::from("1"),
+                            ),
+                            (
+                                OsString::from(RUST_STATIC_RUNTIME_DIRECTORY_ENV),
+                                shared_runtime_directory.clone().into_os_string(),
+                            ),
+                            (OsString::from("RUSTDOC"), wrapper.clone().into_os_string()),
+                            (
+                                OsString::from(RUSTDOC_WRAPPER_MODE_ENV),
+                                OsString::from("1"),
+                            ),
+                        ])),
+                        captured_output: None,
+                    },
+                    options,
+                    diagnostics,
+                )
                 .map_err(|error| RustCompilerOrchestrationError::Cargo(error.to_string()))?,
         )
     } else {
         None
     };
+    if let Some(error) = doctest_output.as_ref().and_then(interrupted_error) {
+        return Err(error);
+    }
     let build_ms = started.elapsed().as_secs_f64() * 1000.0;
     let build_ended_at_ms = epoch_ms()?;
     let selection = verified_compiler_selection(
@@ -814,7 +941,7 @@ pub fn build_with_rust_compiler_companion(
         .unwrap_or_default();
     let (doctest_exit_code, doctest_stdout, doctest_stderr) = doctest_output.map_or_else(
         || (None, Vec::new(), Vec::new()),
-        |output| (output.status.code(), output.stdout, output.stderr),
+        |output| (output.result.status, output.stdout, output.stderr),
     );
     Ok(RustCompilerBuild {
         selection,

@@ -59,6 +59,34 @@ function snapshot(directory) {
   return entries;
 }
 
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function waitForProcessExit(pid, timeoutMs = 5_000) {
+  const started = Date.now();
+  while (processExists(pid)) {
+    if (Date.now() - started >= timeoutMs)
+      throw new Error(`process ${pid} survived its Supercov supervisor`);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+}
+
+async function waitForFile(path, timeoutMs = 20_000) {
+  const started = Date.now();
+  while (!existsSync(path)) {
+    if (Date.now() - started >= timeoutMs)
+      throw new Error(`timed out waiting for ${path}`);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+}
+
 async function verifyUncatchableCacheRecovery() {
   const crashRoot = mkdtempSync(resolve(tmpdir(), "supercov-crash-recovery-"));
   try {
@@ -169,7 +197,102 @@ async function verifyUncatchableCacheRecovery() {
   }
 }
 
+async function verifyUncatchableTestTreeRecovery() {
+  if (process.platform === "win32") return;
+  const crashRoot = mkdtempSync(resolve(tmpdir(), "supercov-test-tree-recovery-"));
+  try {
+    mkdirSync(resolve(crashRoot, "src"));
+    writeFileSync(
+      resolve(crashRoot, "package.json"),
+      '{"name":"test-tree-recovery","private":true,"type":"module"}\n',
+    );
+    writeFileSync(
+      resolve(crashRoot, "src/decision.js"),
+      "export const decision = (a, b) => a && b;\n",
+    );
+    const ready = resolve(crashRoot, "test-tree-ready.json");
+    const escaped = resolve(crashRoot, "test-tree-escaped.txt");
+    const descendantProgram = [
+      "const fs=require('node:fs')",
+      `setTimeout(()=>fs.writeFileSync(${JSON.stringify(escaped)},'escaped'),750)`,
+      "setInterval(()=>{},1000)",
+    ].join(";");
+    writeFileSync(
+      resolve(crashRoot, "test.mjs"),
+      [
+        'import { spawn } from "node:child_process";',
+        'import { writeFileSync } from "node:fs";',
+        'import { decision } from "./src/decision.js";',
+        'if (!decision(true, true)) throw new Error("bad decision");',
+        'if (process.argv[2] === "crash") {',
+        `  const child = spawn(process.execPath, ["-e", ${JSON.stringify(descendantProgram)}], { stdio: "ignore" });`,
+        `  writeFileSync(${JSON.stringify(ready)}, JSON.stringify({ parent: process.pid, descendant: child.pid }));`,
+        "  setInterval(() => {}, 1000);",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    const killed = spawn(
+      rustBinary,
+      ["--", process.execPath, "test.mjs", "crash"],
+      { cwd: crashRoot, env: rustEnvironment, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let output = "";
+    killed.stdout.on("data", (chunk) => (output += chunk.toString()));
+    killed.stderr.on("data", (chunk) => (output += chunk.toString()));
+    const killedExit = new Promise((resolveExit, reject) => {
+      killed.once("error", reject);
+      killed.once("exit", (code, signal) => resolveExit({ code, signal }));
+    });
+    await waitForFile(ready);
+    const tree = JSON.parse(readFileSync(ready, "utf8"));
+    const workRoot = resolve(crashRoot, ".supercov/work");
+    const abandonedRuns = existsSync(workRoot) ? readdirSync(workRoot) : [];
+    if (abandonedRuns.length !== 1)
+      throw new Error(`expected one active run before SIGKILL, found ${abandonedRuns.join(", ")}\n${output}`);
+    if (!killed.kill("SIGKILL"))
+      throw new Error("could not SIGKILL the active JavaScript Supercov run");
+    const killedResult = await killedExit;
+    if (killedResult.signal !== "SIGKILL")
+      throw new Error(`expected SIGKILL, received ${JSON.stringify(killedResult)}\n${output}`);
+    await Promise.all([
+      waitForProcessExit(tree.parent),
+      waitForProcessExit(tree.descendant),
+    ]);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 850));
+    if (existsSync(escaped))
+      throw new Error("a JavaScript test descendant escaped after Supercov was SIGKILLed");
+
+    const recovered = spawnSync(
+      rustBinary,
+      ["--", process.execPath, "test.mjs", "once"],
+      { cwd: crashRoot, env: rustEnvironment, encoding: "utf8", stdio: "pipe" },
+    );
+    if (recovered.status !== 0)
+      throw new Error(
+        `post-SIGKILL test-tree recovery failed:\n${recovered.stderr}\n${recovered.stdout}`,
+      );
+    if (!recovered.stderr.includes(abandonedRuns[0]))
+      throw new Error(
+        `the next run did not report abandoned run ${abandonedRuns[0]}:\n${recovered.stderr}`,
+      );
+    if (existsSync(resolve(workRoot, abandonedRuns[0])))
+      throw new Error("the next run did not remove the abandoned JavaScript transaction");
+    if (existsSync(resolve(crashRoot, ".supercov/locks/active.json")))
+      throw new Error("the recovered JavaScript run left the project lock behind");
+  } finally {
+    rmSync(crashRoot, {
+      recursive: true,
+      force: true,
+      maxRetries: 30,
+      retryDelay: 100,
+    });
+  }
+}
+
 await verifyUncatchableCacheRecovery();
+await verifyUncatchableTestTreeRecovery();
 
 const projectBefore = snapshot(root);
 const workRoot = resolve(root, ".supercov/work");
@@ -303,5 +426,5 @@ if (existsSync(expectedCache))
   throw new Error("supercov clean left the isolated build cache behind");
 
 console.log(
-  `[isolation] SIGKILL preserved the prior cache generation, the next run recovered its transaction, unchanged source reused its instrumented build, SIGTERM remained cooperative, clean removed all cache data, and no project file outside the Supercov store changed`,
+  `[isolation] SIGKILL preserved the prior cache generation, killed the complete active JavaScript test tree, and recovered both abandoned transactions; unchanged source reused its instrumented build, SIGTERM remained cooperative, clean removed all cache data, and no project file outside the Supercov store changed`,
 );

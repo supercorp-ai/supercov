@@ -29,6 +29,25 @@ function waitFor(path, timeoutMs = 5_000) {
   });
 }
 
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    throw error;
+  }
+}
+
+async function waitForProcessExit(pid, timeoutMs = 5_000) {
+  const started = Date.now();
+  while (processExists(pid)) {
+    if (Date.now() - started >= timeoutMs)
+      throw new Error(`process ${pid} survived its Supercov supervisor`);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+}
+
 try {
   const touched = resolve(temporary, 'invalid-started');
   const invalid = spawnSync(
@@ -117,10 +136,48 @@ try {
     assert.deepEqual(signalResult, { code: 143, signal: null });
     assert.equal(readFileSync(parentTerminated, 'utf8'), 'yes');
     assert.equal(readFileSync(descendantTerminated, 'utf8'), 'yes');
+
+    const killReady = resolve(temporary, 'kill-ready');
+    const escaped = resolve(temporary, 'escaped-after-parent-kill');
+    const killDescendantProgram = [
+      "const fs=require('node:fs')",
+      `setTimeout(()=>fs.writeFileSync(${JSON.stringify(escaped)},'escaped'),750)`,
+      'setInterval(()=>{},1000)',
+    ].join(';');
+    const killParentProgram = [
+      "const fs=require('node:fs')",
+      "const {spawn}=require('node:child_process')",
+      `const child=spawn(process.execPath,['-e',${JSON.stringify(killDescendantProgram)}],{stdio:'ignore'})`,
+      `fs.writeFileSync(${JSON.stringify(killReady)},JSON.stringify({parent:process.pid,descendant:child.pid}))`,
+      'setInterval(()=>{},1000)',
+    ].join(';');
+    const killedSupervisor = spawn(
+      binary,
+      ['__supervise', '--', process.execPath, '-e', killParentProgram],
+      {
+        cwd: temporary,
+        stdio: 'ignore',
+        env: { ...process.env, SUPERCOV_DIAGNOSTIC_INTERVAL_MS: '60000' },
+      },
+    );
+    await waitFor(killReady);
+    const killedTree = JSON.parse(readFileSync(killReady, 'utf8'));
+    assert.equal(killedSupervisor.kill('SIGKILL'), true);
+    await new Promise((resolveExit) => killedSupervisor.once('exit', resolveExit));
+    await Promise.all([
+      waitForProcessExit(killedTree.parent),
+      waitForProcessExit(killedTree.descendant),
+    ]);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 850));
+    assert.equal(
+      existsSync(escaped),
+      false,
+      'a descendant escaped after uncatchable Supercov supervisor death',
+    );
   }
 
   console.log(
-    `[rust-process-supervision] pre-spawn validation, sanitized diagnostics, explicit timeout 124${process.platform === 'win32' ? '' : ', and cooperative full-tree signal forwarding'}`,
+    `[rust-process-supervision] pre-spawn validation, sanitized diagnostics, explicit timeout 124${process.platform === 'win32' ? '' : ', cooperative full-tree signal forwarding, and SIGKILL parent-death containment'}`,
   );
 } finally {
   rmSync(temporary, { recursive: true, force: true });

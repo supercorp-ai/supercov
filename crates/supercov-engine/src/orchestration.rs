@@ -150,12 +150,22 @@ pub fn execute_plan(
     plan: &ExecutionPlan,
     options: SupervisionOptions,
     writer: &mut dyn Write,
+    before_phase: impl FnMut(&ExecutionPhase, &mut dyn Write) -> Result<(), OrchestrationError>,
+) -> Result<ExecutionResult, OrchestrationError> {
+    let supervisor = ProcessSupervisor::new()?;
+    execute_plan_with_supervisor(&supervisor, plan, options, writer, before_phase)
+}
+
+pub fn execute_plan_with_supervisor(
+    supervisor: &ProcessSupervisor,
+    plan: &ExecutionPlan,
+    options: SupervisionOptions,
+    writer: &mut dyn Write,
     mut before_phase: impl FnMut(&ExecutionPhase, &mut dyn Write) -> Result<(), OrchestrationError>,
 ) -> Result<ExecutionResult, OrchestrationError> {
     validate(plan)?;
     // One guard spans every external phase. Signals received after a build
     // exits but before the test spawns remain pending and prevent that spawn.
-    let supervisor = ProcessSupervisor::new()?;
     let mut executions = Vec::new();
     for phase in plan.preparation.iter().chain(std::iter::once(&plan.test)) {
         before_phase(phase, writer)?;

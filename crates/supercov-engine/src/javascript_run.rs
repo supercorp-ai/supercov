@@ -31,9 +31,11 @@ use crate::{
         publish_run, recover_abandoned_runs, remove_stored_tree_deferred, update_run_state,
         write_run_state,
     },
-    orchestration::{ExecutionPhase, ExecutionPlan, OrchestrationError, PhaseKind, execute_plan},
+    orchestration::{
+        ExecutionPhase, ExecutionPlan, OrchestrationError, PhaseKind, execute_plan_with_supervisor,
+    },
     process_supervision::{
-        CommandSpec, ForwardedSignal, SupervisionOptions, positive_milliseconds,
+        CommandSpec, ForwardedSignal, ProcessSupervisor, SupervisionOptions, positive_milliseconds,
     },
     project_discovery::{BuildAdapter, discover_coverage_project},
     run_store::{
@@ -51,6 +53,8 @@ pub struct DirectJavascriptRunRequest {
     pub run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
+    #[serde(skip)]
+    pub watchdog_program: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -702,40 +706,53 @@ pub fn run_direct_javascript(
         },
     };
     let options = supervision_options()?;
-    let execution = match execute_plan(&plan, options, diagnostics, |phase, diagnostics| {
-        let status = if phase.kind == PhaseKind::Test {
-            if frontend.assertion_calls > 0 {
+    let watchdog_program = request.watchdog_program.as_ref().ok_or_else(|| {
+        DirectJavascriptRunError::Failed(
+            "the JavaScript run is missing its crash-containment executable".into(),
+        )
+    })?;
+    let supervisor = ProcessSupervisor::new_crash_safe(watchdog_program)
+        .map_err(|error| DirectJavascriptRunError::Failed(error.to_string()))?;
+    let execution = match execute_plan_with_supervisor(
+        &supervisor,
+        &plan,
+        options,
+        diagnostics,
+        |phase, diagnostics| {
+            let status = if phase.kind == PhaseKind::Test {
+                if frontend.assertion_calls > 0 {
+                    writeln!(
+                        diagnostics,
+                        "[supercov] attributed {} native node:assert call(s)",
+                        frontend.assertion_calls
+                    )
+                    .map_err(|error| OrchestrationError::PhaseSetup {
+                        phase: phase.name.clone(),
+                        reason: error.to_string(),
+                    })?;
+                }
                 writeln!(
                     diagnostics,
-                    "[supercov] attributed {} native node:assert call(s)",
-                    frontend.assertion_calls
+                    "[supercov] running in isolated workspace: {}",
+                    request.command.join(" ")
                 )
                 .map_err(|error| OrchestrationError::PhaseSetup {
                     phase: phase.name.clone(),
                     reason: error.to_string(),
                 })?;
-            }
-            writeln!(
-                diagnostics,
-                "[supercov] running in isolated workspace: {}",
-                request.command.join(" ")
-            )
-            .map_err(|error| OrchestrationError::PhaseSetup {
-                phase: phase.name.clone(),
-                reason: error.to_string(),
+                RunStateStatus::Testing
+            } else {
+                RunStateStatus::Building
+            };
+            update_run_state(&root, &run_id, status, &started_at, None).map_err(|error| {
+                OrchestrationError::PhaseSetup {
+                    phase: phase.name.clone(),
+                    reason: error.to_string(),
+                }
             })?;
-            RunStateStatus::Testing
-        } else {
-            RunStateStatus::Building
-        };
-        update_run_state(&root, &run_id, status, &started_at, None).map_err(|error| {
-            OrchestrationError::PhaseSetup {
-                phase: phase.name.clone(),
-                reason: error.to_string(),
-            }
-        })?;
-        Ok(())
-    }) {
+            Ok(())
+        },
+    ) {
         Ok(execution) => execution,
         Err(error) => {
             let message = error.to_string();
