@@ -172,6 +172,20 @@ the proof covers one controlled const function and does not yet supply the
 complete const/static/inline-const/const-generic manifest, crash-safe event
 publication, `RUSTC_LOG` coexistence or acceptable performance corpus.
 
+The rustdoc launch boundary is now proven as well. Cargo's ordinary
+`RUSTC_WRAPPER` still does not see synthesized doctest crates, so Supercov uses
+a scoped launcher for the exact ordinary rustdoc and adds its compiler
+companion as rustdoc's test-builder wrapper. The controlled fixture observes
+standalone source, merged bundle source and merged runner source; maps hidden
+and visible standalone lines through rustdoc's path/offset metadata; and joins
+merged `__doctest_N` owners to the runner's source path, line and test name.
+The launcher removes its private unstable-option bootstrap before user code is
+compiled, and a stable `compile_fail` feature-gate case proves there is no
+capability leak. Baseline/intercepted output (excluding elapsed-time values)
+and checkout hashes match. Public tracing still requires real probes, exact
+per-doctest attempt transport, custom rustdoc/wrapper composition and the full
+doctest semantics/crash corpus.
+
 Correctness corpus:
 
 - original-versus-instrumented differential programs checking values, panics,

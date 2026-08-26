@@ -15,7 +15,7 @@ private frontend must fail closed for every open row.
 | RCV-EXPANSION-2 | Proc/derive expansions | Compiler-backend spike sees proc-macro-generated HIR/MIR and invocation provenance | Stable generated-token identity, real probes and derive corpus |
 | RCV-GENERATED-1 | Build-script and included generated source | Compiler-backend spike sees `OUT_DIR` source and mutates emitted MIR | Generated-source identity, real probes and crash corpus |
 | RCV-CONST-1 | Const/static/const-fn execution | Exact-version companion inserts in-memory CTFE block and split-edge markers; both const-fn paths are observed with identical values/output | Full const/static/inline-const/const-generic manifest, semantics, concurrency, crash and performance corpus |
-| RCV-DOCTEST-1 | Doctest extraction and attribution | Spike proves ordinary `RUSTC_WRAPPER` does not observe rustdoc's extracted crate | Owned rustdoc companion, mapping and hidden-line golden corpus |
+| RCV-DOCTEST-1 | Doctest extraction and attribution | Scoped exact-rustdoc launcher observes standalone/merged sources; hidden lines and merged `__doctest_N` path/line identities are mapped without enabling unstable user code | Runtime probes, exact per-doctest attempt transport, wrapper composition and full doctest corpus |
 | RCV-ATTRIBUTION-1 | Exact run/worker/test/retry/phase identity | Process-per-libtest runner test | Concurrency, retry, crash and late-work corpus |
 | RCV-ARCHIVE-1 | Strict evidence v3 publication and query | Evidence/archive/run-store tests | Full CLI and lifecycle crash matrix |
 | RCV-ORACLE-1 | No external product measurement | Contract assertion | rustc/LLVM oracle-only CI with product-dependency audit |

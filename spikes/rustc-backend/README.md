@@ -35,3 +35,20 @@ manifest identities, every const/static/inline-const surface, crash-safe
 publication, ordinary `RUSTC_LOG` coexistence and performance remain explicit
 gates. External LLVM/rustc coverage is not used. All fixture targets and
 observations live in a temporary directory and are deleted after the spike.
+
+The executable also proves the rustdoc interception boundary. A generated
+launcher invokes the exact ordinary rustdoc with Supercov as its
+`--test-builder-wrapper`; user code needs no configuration. The companion sees
+standalone synthesized stdin, merged bundle source and the merged runner's
+`__doctest_N` identity table. Standalone `DocTest` line offsets map hidden and
+visible MIR spans back to authored documentation lines, while merged runner
+HIR binds the same ordinal to rustdoc's source path and line. The launcher's
+private unstable-option bootstrap is removed before compiling user doctest
+code; a `compile_fail` feature-gate test proves it does not enable unstable
+Rust. Normal and intercepted doctest output match after replacing elapsed-time
+values, and the checkout hash remains exact.
+
+Doctest runtime probes, per-test transport, custom rustdoc/wrapper composition,
+failure/signal forwarding and the full hidden/merged/compile-fail/no_std corpus
+remain promotion gates. This spike proves automatic interception and source
+identity, not the complete `rustdocDoctestTracing` capability.

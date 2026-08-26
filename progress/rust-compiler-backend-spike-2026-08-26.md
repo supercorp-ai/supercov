@@ -42,8 +42,9 @@ The spike proved:
    not define or install it and its source hash remains unchanged. An
    instrumented-only test observes all four probe bits.
 6. Cargo's ordinary `RUSTC_WRAPPER` does not receive the compiler invocation
-   for rustdoc's extracted doctest crate. Doctests need a matched rustdoc/test-
-   builder companion or an independently equivalent owned extraction path.
+   for rustdoc's extracted doctest crate. A scoped exact-rustdoc launcher can,
+   however, install the same companion through rustdoc's test-builder-wrapper
+   boundary without repository configuration.
 7. The ordinary and instrumented behavior binaries have identical stdout,
    stderr, values, `Result` errors, caught panic status and drop ordering. The
    synthetic runtime is tagged by a compiler-only source name and can be
@@ -58,6 +59,17 @@ The spike proved:
    formatting/output layer. The fixture observed both true and false const-fn
    edges and every original block while const values and complete program
    stdout/stderr remained byte-identical to the baseline.
+10. The scoped rustdoc launcher observes standalone synthesized stdin, merged
+    bundle source and the merged runner source. Standalone path/line/offset
+    metadata maps hidden and visible generated MIR back to authored doc lines;
+    merged `__doctest_N` bundle owners join to the runner's exact source path,
+    line and test name.
+11. Enabling the unstable rustdoc wrapper option does not leak unstable Rust
+    into user compilation. The companion removes only its injected response-
+    file option and bootstrap before compiling user doctests, while preserving
+    rustdoc's own merged runner bootstrap. A stable `compile_fail` feature
+    gate, ordinary/intercepted output comparison and source hash guard all
+    pass.
 
 The companion executable is about 600 KiB on arm64 macOS and dynamically uses
 the exact `librustc_driver` already shipped by the user's `rustc` component.
@@ -96,9 +108,11 @@ an unverified rustc commit.
    avoids a copied CTFE machine or bundled compiler fork. It remains private
    until the full const/static/const-generic corpus, manifest mapping,
    crash-safe publication, `RUSTC_LOG` coexistence and performance gates pass.
-4. A rustdoc companion observes/extracts and compiles doctests with exact
-   documented-source mapping. Hidden lines and merged doctests remain explicit
-   traced gates.
+4. A scoped rustdoc launcher selects the exact ordinary rustdoc and injects
+   the compiler companion as its test-builder wrapper. The first proof maps
+   standalone hidden lines and joins merged bundle/runner identities without a
+   second extraction pass. Runtime probes, exact test attempt context, custom
+   wrapper composition and the full doctest corpus remain required.
 5. Generated files are captured in the isolated Cargo target after build
    scripts and before crate compilation. External symlinks and provenance
    ambiguity fail closed.
@@ -114,8 +128,9 @@ an unverified rustc commit.
    from expanded HIR plus MIR source info.
 3. Generalize the proven CTFE marker path across every frozen compile-time
    surface, map every marker into the frozen manifest, and make publication
-   crash-safe. Spike rustdoc interception separately; either incomplete area
-   blocks public Rust support.
+   crash-safe. Extend the proven rustdoc interception/mapping path with runtime
+   probes and exact per-doctest attribution. Either incomplete area blocks
+   public Rust support.
 4. Add exact-version mismatch, missing-companion and custom-toolchain failure
    tests before connecting the companion to `npx supercov -- cargo test`.
 

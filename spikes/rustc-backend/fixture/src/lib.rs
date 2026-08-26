@@ -24,6 +24,23 @@ pub const fn const_decision(value: bool) -> usize {
 pub const CONST_VALUE: usize = const_decision(true);
 pub const CONST_FALSE_VALUE: usize = const_decision(false);
 
+/// A non-mergeable doctest with a hidden setup line.
+///
+/// ```standalone_crate
+/// # let hidden = std::hint::black_box(20);
+/// assert_eq!(hidden + 2, 22);
+/// ```
+pub fn standalone_doctest_surface() {}
+
+/// The rustdoc launcher must not leak its private unstable-option bootstrap
+/// into user doctest compilation.
+///
+/// ```compile_fail
+/// #![feature(test)]
+/// extern crate test;
+/// ```
+pub fn stable_feature_gate_doctest_surface() {}
+
 pub fn authored(value: bool) -> usize {
     if value { 1 } else { 2 }
 }

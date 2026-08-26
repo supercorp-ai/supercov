@@ -1254,9 +1254,13 @@ miss blocks flipping any default.
   `mir_for_ctfe` and captures only their interpreter events without compiler
   log output; true and false paths preserved values and stdout/stderr. Its full
   const corpus, manifest, crash and performance gates remain blockers.
-  Doctest interception is still unimplemented. The concrete-source Rust
-  transformer is a private differential reference, not the intended public
-  denominator or injection authority.
+  Doctest interception now has a separate executable proof: a scoped launcher
+  adds the compiler companion through exact rustdoc's test-builder-wrapper
+  boundary, maps standalone hidden lines, and joins merged bundle/runner
+  `__doctest_N` identities without a second extraction pass or unstable-user-
+  code leak. Doctest probes and per-test transport remain blockers. The
+  concrete-source Rust transformer is a private differential reference, not
+  the intended public denominator or injection authority.
 - `rust-compiler-companion-v1` freezes fail-closed selection and capability
   negotiation. Public readiness requires expanded provenance, runtime MIR
   probes, generated-source provenance, CTFE tracing, rustdoc/doctest tracing

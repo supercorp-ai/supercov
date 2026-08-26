@@ -16,6 +16,7 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::PathBuf,
+    process::Command,
     sync::{Mutex, OnceLock},
 };
 
@@ -43,6 +44,9 @@ use rustc_parse::{lexer::StripTokens, new_parser_from_source_str};
 const OUTPUT_DIRECTORY: &str = "SUPERCOV_RUSTC_SPIKE_OUTPUT";
 const INSTRUMENT_MIR: &str = "SUPERCOV_RUSTC_SPIKE_INSTRUMENT_MIR";
 const INSTRUMENT_CTFE: &str = "SUPERCOV_RUSTC_SPIKE_INSTRUMENT_CTFE";
+const REAL_RUSTDOC: &str = "SUPERCOV_RUSTC_SPIKE_REAL_RUSTDOC";
+const COMPANION_PATH: &str = "SUPERCOV_RUSTC_SPIKE_COMPANION_PATH";
+const RUSTDOC_LAUNCHED: &str = "SUPERCOV_RUSTC_SPIKE_RUSTDOC_LAUNCHED";
 const PROBE_FUNCTION: &str = "__supercov_spike_runtime::probe";
 const CTFE_EVENT_TARGET: &str = "rustc_const_eval::interpret::step";
 const CTFE_MARKER_PREFIX: u64 = 0x5355_5045_5243_0000;
@@ -72,6 +76,7 @@ type MirForCtfeProvider = for<'tcx> fn(TyCtxt<'tcx>, LocalDefId) -> &'tcx Body<'
 static ORIGINAL_OPTIMIZED_MIR: OnceLock<OptimizedMirProvider> = OnceLock::new();
 static ORIGINAL_MIR_FOR_CTFE: OnceLock<MirForCtfeProvider> = OnceLock::new();
 static CTFE_EVENTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+static DOCTEST_ROLE: OnceLock<&'static str> = OnceLock::new();
 
 struct CtfeLayer;
 
@@ -172,6 +177,9 @@ impl Callbacks for ProbeCallbacks {
             return Compilation::Continue;
         };
         let source_map = tcx.sess.source_map();
+        let doctest_role = DOCTEST_ROLE.get().copied();
+        let doctest_path = env::var("UNSTABLE_RUSTDOC_TEST_PATH").ok();
+        let doctest_line = env::var("UNSTABLE_RUSTDOC_TEST_LINE").ok();
 
         for owner in tcx.hir_body_owners() {
             let def_id = owner.to_def_id();
@@ -190,8 +198,56 @@ impl Callbacks for ProbeCallbacks {
             } else {
                 tcx.optimized_mir(def_id)
             };
+            let mut mir_spans = mir
+                .basic_blocks
+                .iter()
+                .flat_map(|block| {
+                    block
+                        .statements
+                        .iter()
+                        .map(|statement| statement.source_info.span)
+                        .chain(
+                            block
+                                .terminator
+                                .iter()
+                                .map(|terminator| terminator.source_info.span),
+                        )
+                })
+                .map(|span| source_map.span_to_diagnostic_string(span))
+                .collect::<Vec<_>>();
+            mir_spans.sort();
+            mir_spans.dedup();
+            let mut mir_authored_lines = if doctest_role == Some("standalone") {
+                mir.basic_blocks
+                    .iter()
+                    .flat_map(|block| {
+                        block
+                            .statements
+                            .iter()
+                            .map(|statement| statement.source_info.span)
+                            .chain(
+                                block
+                                    .terminator
+                                    .iter()
+                                    .map(|terminator| terminator.source_info.span),
+                            )
+                    })
+                    .map(|span| source_map.lookup_char_pos(span.lo()))
+                    .map(|location| {
+                        source_map.doctest_offset_line(&location.file.name, location.line)
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            mir_authored_lines.sort();
+            mir_authored_lines.dedup();
+            let source_snippet = source_map.span_to_snippet(span).ok();
+            let body_snippet = source_map
+                .span_to_snippet(tcx.hir_body_owned_by(owner).value.span)
+                .ok();
             let record = format!(
-                "{{\"crate\":\"{}\",\"definition\":\"{}\",\"kind\":\"{:?}\",\"span\":\"{}\",\"callsite\":\"{}\",\"expanded\":{},\"mir_blocks\":{}}}\n",
+                "{{\"crate\":\"{}\",\"definition\":\"{}\",\"kind\":\"{:?}\",\"span\":\"{}\",\"callsite\":\"{}\",\"expanded\":{},\"mirBlocks\":{},\"mirSpans\":{},\"mirAuthoredLines\":{},\"sourceSnippet\":{},\"bodySnippet\":{},\"doctestRole\":{},\"doctestPath\":{},\"doctestLine\":{}}}\n",
                 escape(&crate_name.to_string()),
                 escape(&tcx.def_path_str(def_id)),
                 kind,
@@ -199,6 +255,13 @@ impl Callbacks for ProbeCallbacks {
                 escape(&source_map.span_to_diagnostic_string(callsite)),
                 span.from_expansion(),
                 mir.basic_blocks.len(),
+                json_strings(&mir_spans),
+                json_usizes(&mir_authored_lines),
+                json_string(source_snippet.as_deref()),
+                json_string(body_snippet.as_deref()),
+                json_string(doctest_role),
+                json_string(doctest_path.as_deref()),
+                json_string(doctest_line.as_deref()),
             );
             let _ = output.write_all(record.as_bytes());
         }
@@ -394,8 +457,50 @@ fn escape(value: &str) -> String {
         .replace('\t', "\\t")
 }
 
+fn json_string(value: Option<&str>) -> String {
+    value.map_or_else(|| "null".into(), |value| format!("\"{}\"", escape(value)))
+}
+
+fn json_strings(values: &[String]) -> String {
+    let values = values
+        .iter()
+        .map(|value| format!("\"{}\"", escape(value)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{values}]")
+}
+
+fn json_usizes(values: &[usize]) -> String {
+    let values = values
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{values}]")
+}
+
 fn main() {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
+    if env::args()
+        .next()
+        .and_then(|argument| {
+            PathBuf::from(argument)
+                .file_name()
+                .map(|name| name.to_owned())
+        })
+        .is_some_and(|name| name == "supercov-rustdoc-backend-spike")
+    {
+        launch_rustdoc(&args);
+    }
+    if env::var_os(RUSTDOC_LAUNCHED).is_some() {
+        let role = doctest_role(&args);
+        let _ = DOCTEST_ROLE.set(role);
+        if role != "merged-runner" {
+            strip_injected_rustdoc_unstable_option(&mut args);
+            // SAFETY: the compiler companion has not created any threads yet.
+            unsafe { env::remove_var("RUSTC_BOOTSTRAP") };
+        }
+    }
     if env::var_os(INSTRUMENT_MIR).is_some() {
         args.push("--cfg=supercov_spike_instrumented".into());
         args.push("--check-cfg=cfg(supercov_spike_instrumented)".into());
@@ -410,6 +515,69 @@ fn main() {
     if env::var_os(INSTRUMENT_CTFE).is_some() {
         let events = CTFE_EVENTS.lock().expect("CTFE events lock");
         write_ctfe_events(&args, &events);
+    }
+}
+
+fn launch_rustdoc(args: &[String]) -> ! {
+    let rustdoc = env::var_os(REAL_RUSTDOC).expect("exact rustdoc path");
+    let companion = env::var_os(COMPANION_PATH).expect("compiler companion path");
+    let status = Command::new(rustdoc)
+        .args(args)
+        .arg("-Zunstable-options")
+        .arg("--test-builder-wrapper")
+        .arg(companion)
+        .env("RUSTC_BOOTSTRAP", "1")
+        .env(RUSTDOC_LAUNCHED, "1")
+        .status()
+        .expect("launch exact rustdoc");
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+fn doctest_role(args: &[String]) -> &'static str {
+    if env::var_os("UNSTABLE_RUSTDOC_TEST_PATH").is_some() {
+        "standalone"
+    } else if args
+        .iter()
+        .any(|argument| argument.contains("doctest_runner_"))
+    {
+        "merged-runner"
+    } else if args
+        .iter()
+        .any(|argument| argument.contains("doctest_bundle_"))
+    {
+        "merged-bundle"
+    } else {
+        "unknown"
+    }
+}
+
+fn strip_injected_rustdoc_unstable_option(args: &mut [String]) {
+    for argument in args {
+        let Some(path) = argument.strip_prefix('@') else {
+            continue;
+        };
+        let Ok(contents) = fs::read_to_string(path) else {
+            continue;
+        };
+        let filtered = contents
+            .lines()
+            .filter(|line| *line != "-Zunstable-options")
+            .collect::<Vec<_>>()
+            .join("\n");
+        if filtered == contents || filtered.len() == contents.len() {
+            continue;
+        }
+        let filtered_path = format!("{path}.supercov-{}", std::process::id());
+        let Ok(mut output) = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&filtered_path)
+        else {
+            continue;
+        };
+        if output.write_all(filtered.as_bytes()).is_ok() && output.flush().is_ok() {
+            *argument = format!("@{filtered_path}");
+        }
     }
 }
 

@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {mkdtempSync, readFileSync, readdirSync, rmSync} from 'node:fs';
+import {
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -64,6 +70,17 @@ function recordFiles(directory) {
         .filter(Boolean)
         .map((line) => JSON.parse(line)),
     }));
+}
+
+function normalizeTestOutput(output) {
+  return output.replace(/\d+(?:\.\d+)?s/g, '<time>');
+}
+
+function passedTests(output) {
+  return [...output.matchAll(/(\d+) passed/g)].reduce(
+    (total, match) => total + Number(match[1]),
+    0,
+  );
 }
 
 try {
@@ -200,22 +217,93 @@ try {
   );
 
   const doctestDirectory = join(scratch, 'doctest');
-  const doctest = run('cargo', ['test', '--manifest-path', fixture, '--doc'], {
+  const doctest = run('cargo', ['test', '--quiet', '--manifest-path', fixture, '--doc'], {
     env: {
       CARGO_TARGET_DIR: join(scratch, 'doctest-target'),
       RUSTC_WRAPPER: wrapper,
       SUPERCOV_RUSTC_SPIKE_OUTPUT: doctestDirectory,
     },
   });
-  assert.match(doctest.stdout, /1 passed/);
+  assert.equal(passedTests(doctest.stdout), 3);
   const doctestRecords = records(doctestDirectory);
   assert(
     !doctestRecords.some((record) => record.span.includes('src/lib.rs - (line 3)')),
     'ordinary RUSTC_WRAPPER unexpectedly observed rustdoc extracted source',
   );
 
+  const rustdocLauncher = join(scratch, 'supercov-rustdoc-backend-spike');
+  symlinkSync(wrapper, rustdocLauncher);
+  const realRustdoc = run('rustup', ['which', 'rustdoc']).stdout.trim();
+  const wrappedDoctestDirectory = join(scratch, 'wrapped-doctest');
+  const wrappedDoctest = run(
+    'cargo',
+    ['test', '--quiet', '--manifest-path', fixture, '--doc'],
+    {
+      env: {
+        CARGO_TARGET_DIR: join(scratch, 'wrapped-doctest-target'),
+        RUSTDOC: rustdocLauncher,
+        SUPERCOV_RUSTC_SPIKE_COMPANION_PATH: wrapper,
+        SUPERCOV_RUSTC_SPIKE_OUTPUT: wrappedDoctestDirectory,
+        SUPERCOV_RUSTC_SPIKE_REAL_RUSTDOC: realRustdoc,
+      },
+    },
+  );
+  assert.equal(
+    normalizeTestOutput(wrappedDoctest.stdout),
+    normalizeTestOutput(doctest.stdout),
+  );
+  assert.equal(
+    normalizeTestOutput(wrappedDoctest.stderr),
+    normalizeTestOutput(doctest.stderr),
+  );
+  const wrappedDoctestRecords = records(wrappedDoctestDirectory);
+  const standalone = wrappedDoctestRecords.find(
+    (record) => record.doctestRole === 'standalone',
+  );
+  assert.match(standalone?.doctestPath ?? '', /(^|\/)src\/lib\.rs$/);
+  assert.match(standalone?.doctestLine ?? '', /^\d+$/);
+  const standaloneAuthoredLines = wrappedDoctestRecords
+    .filter((record) => record.doctestRole === 'standalone')
+    .flatMap((record) => record.mirAuthoredLines ?? []);
+  assert(
+    standaloneAuthoredLines.includes(sourceLine('# let hidden')),
+    `hidden doctest line was not mapped to authored source: ${JSON.stringify(standaloneAuthoredLines)}`,
+  );
+  assert(
+    standaloneAuthoredLines.includes(sourceLine('assert_eq!(hidden + 2')),
+    `visible doctest line was not mapped to authored source: ${JSON.stringify(standaloneAuthoredLines)}`,
+  );
+  assert(
+    wrappedDoctestRecords.some(
+      (record) =>
+        record.doctestRole === 'merged-bundle' &&
+        record.definition.includes('__doctest_0'),
+    ),
+    'the companion did not observe merged doctest user code',
+  );
+  assert(
+    wrappedDoctestRecords.some(
+      (record) =>
+        record.doctestRole === 'merged-runner' &&
+        record.definition.includes('__doctest_0'),
+    ),
+    'the companion did not observe the merged doctest identity map',
+  );
+  const mergedIdentity = wrappedDoctestRecords.find(
+    (record) =>
+      record.doctestRole === 'merged-runner' &&
+      record.definition === '__doctest_0::TEST',
+  );
+  assert.match(mergedIdentity?.bodySnippet ?? '', /src\/lib\.rs/);
+  assert.match(mergedIdentity?.bodySnippet ?? '', /line 3/);
+  assert.equal(
+    createHash('sha256').update(readFileSync(fixtureSourcePath)).digest('hex'),
+    fixtureSourceDigest,
+    'the rustdoc companion modified the fixture source',
+  );
+
   console.log(
-    '[rustc-backend-spike] expanded provenance, runtime MIR probes and compile-time CTFE path markers preserve values, errors, panics, drops, stdout and stderr; ordinary RUSTC_WRAPPER does not observe the extracted doctest crate',
+    '[rustc-backend-spike] expanded provenance, runtime MIR probes and CTFE markers preserve behavior; a scoped rustdoc test-builder companion observes standalone and merged doctest identities without output or checkout changes',
   );
 } finally {
   rmSync(scratch, {recursive: true, force: true});
