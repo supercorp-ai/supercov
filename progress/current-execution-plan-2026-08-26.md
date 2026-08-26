@@ -743,6 +743,20 @@ confidence. Use this sound process boundary for the first public integration.
 Retain in-process concurrent libtest only as a later optimization after its
 thread/async/subprocess carriers prove equivalent attribution.
 
+Checkpoint (2026-08-26): the production process-per-test path now preserves
+Cargo's pre-separator `TESTNAME` and libtest's positional filters, `--skip`,
+`--ignored`, `--include-ignored`, `--exclude-should-panic`, `--test`, `--bench`,
+`--exact` and force-in-process selection. The same parsed plan filters each
+artifact before tasks are created and carries only execution-relevant modes to
+the exact child invocation; a deliberately empty selection is a successful
+zero-test run. Supercov no longer injects `--nocapture`. Scheduling and
+presentation options that the split process model cannot yet reproduce—thread
+count, shuffle, fail-fast, formats and capture/display modes—fail closed rather
+than being discarded. A real compiler run proves
+`cargo test records_real_runtime_probes -- --include-ignored` executes exactly
+the one requested ignored test with authenticated evidence. Full output/order,
+cross-artifact fail-fast, retries and custom-runner composition remain open.
+
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.
 

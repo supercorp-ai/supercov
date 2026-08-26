@@ -621,6 +621,43 @@ try {
     {cwd: productionFixture},
   );
   assert.match(productionQuery.stdout, /run_0123456789abcdef/);
+  const filteredProductionRun = JSON.parse(
+    run(supercov, ['__run-rust-compiler'], {
+      env: {RUSTC: rustc},
+      input: JSON.stringify({
+        root: productionFixture,
+        command: [
+          'cargo',
+          'test',
+          'records_real_runtime_probes',
+          '--',
+          '--include-ignored',
+        ],
+        runId: 'run_1123456789abcdef',
+        startedAt: '2026-08-26T00:01:00.000Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+    }).stdout,
+  );
+  assert.equal(filteredProductionRun.exitCode, 0);
+  assert.equal(
+    filteredProductionRun.tests,
+    1,
+    'the production compiler runner discarded Cargo TESTNAME filtering',
+  );
+  assert.equal(filteredProductionRun.attemptHealth.length, 1);
+  assert.equal(filteredProductionRun.attemptHealth[0].status, 'passed');
+  assert(
+    !existsSync(
+      join(
+        productionFixture,
+        '.supercov/work/run_1123456789abcdef',
+      ),
+    ),
+    'filtered production compiler run left terminal work state behind',
+  );
   assert.equal(
     createHash('sha256')
       .update(readFileSync(join(productionFixture, 'src/lib.rs')))

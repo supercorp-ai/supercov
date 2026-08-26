@@ -1432,8 +1432,15 @@ miss blocks flipping any default.
   Ignored/no-source tests may honestly produce no attachment, caught panics
   retain incomplete reservations without false vectors, and dropped or
   invalid evidence fails closed.
-- Public Rust remains blocked on CTFE, doctest, exact Cargo/libtest filter and
-  retry capture, compiler-build evidence, atomic store/query lifecycle and the
+- Cargo/libtest filtering now has a strict production contract. Cargo's
+  `TESTNAME` and libtest positional/ignored/skip/exact selection are preserved
+  across artifact listing and exact process execution; empty filtered sets are
+  valid, and Supercov no longer injects `--nocapture`. Options whose scheduling
+  or presentation semantics are not yet reproducible fail closed. The real
+  compiler gate runs exactly one ignored test selected on both sides of `--`.
+- Public Rust remains blocked on full Cargo/libtest output/order and retry
+  capture, remaining doctest execution integration, compiler-build evidence,
+  atomic store/query lifecycle and the
   complete semantic, platform and performance matrices. The candidate still
   advertises those incomplete public capabilities as false.
 

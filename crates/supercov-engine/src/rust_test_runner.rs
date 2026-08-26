@@ -243,6 +243,13 @@ fn executable_name(value: &str) -> &str {
 pub(crate) struct CargoTestInvocation {
     pub program: String,
     pub arguments: Vec<String>,
+    pub runner_arguments: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RustLibtestSelection {
+    pub list_arguments: Vec<String>,
+    pub run_arguments: Vec<String>,
 }
 
 pub(crate) fn cargo_invocation(
@@ -275,20 +282,150 @@ pub(crate) fn cargo_invocation(
         ));
     }
     let mut arguments = words[cargo + 1..=test].to_vec();
+    let mut runner_arguments = Vec::new();
+    let mut after_separator = false;
     for argument in &words[test + 1..] {
-        if argument == "--" {
-            break;
+        if argument == "--" && !after_separator {
+            after_separator = true;
+            continue;
         }
         if matches!(argument.as_str(), "&&" | "||" | ";" | "|") {
             return Err(RustTestRunnerError::UnsupportedCommand(
                 "the Cargo test command contains an unsupported shell boundary".into(),
             ));
         }
-        arguments.push(argument.clone());
+        if after_separator {
+            runner_arguments.push(argument.clone());
+        } else {
+            arguments.push(argument.clone());
+        }
     }
     Ok(CargoTestInvocation {
         program: words[cargo].clone(),
         arguments,
+        runner_arguments,
+    })
+}
+
+fn cargo_option_takes_value(argument: &str) -> Option<bool> {
+    let name = argument.split_once('=').map_or(argument, |(name, _)| name);
+    match name {
+        "-p" | "--package" | "--exclude" | "--bin" | "--example" | "--test" | "--bench" | "-F"
+        | "--features" | "-j" | "--jobs" | "--profile" | "--target" | "--target-dir"
+        | "--message-format" | "--color" | "--config" | "-Z" | "--manifest-path" => {
+            Some(!argument.contains('='))
+        }
+        "--no-run"
+        | "--no-fail-fast"
+        | "--future-incompat-report"
+        | "-q"
+        | "--quiet"
+        | "-v"
+        | "--verbose"
+        | "--workspace"
+        | "--all"
+        | "--lib"
+        | "--bins"
+        | "--examples"
+        | "--tests"
+        | "--benches"
+        | "--all-targets"
+        | "--doc"
+        | "--all-features"
+        | "--no-default-features"
+        | "-r"
+        | "--release"
+        | "--timings"
+        | "--ignore-rust-version"
+        | "--locked"
+        | "--offline"
+        | "--frozen" => Some(false),
+        _ if argument.starts_with("-vv") => Some(false),
+        _ if argument.starts_with("-p") && argument.len() > 2 => Some(false),
+        _ if argument.starts_with("-F") && argument.len() > 2 => Some(false),
+        _ if argument.starts_with("-j") && argument.len() > 2 => Some(false),
+        _ => None,
+    }
+}
+
+pub(crate) fn rust_libtest_selection(
+    invocation: &CargoTestInvocation,
+) -> Result<RustLibtestSelection, RustTestRunnerError> {
+    let test = invocation
+        .arguments
+        .iter()
+        .position(|argument| argument == "test")
+        .ok_or_else(|| {
+            RustTestRunnerError::UnsupportedCommand(
+                "the expanded Cargo invocation lost its test subcommand".into(),
+            )
+        })?;
+    let mut cargo_filter = None;
+    let mut index = test + 1;
+    while index < invocation.arguments.len() {
+        let argument = &invocation.arguments[index];
+        if argument.starts_with('-') {
+            let takes_value = cargo_option_takes_value(argument).ok_or_else(|| {
+                RustTestRunnerError::UnsupportedCommand(format!(
+                    "the pinned Cargo test contract does not recognize option {argument}"
+                ))
+            })?;
+            if takes_value {
+                index += 1;
+                if index == invocation.arguments.len() {
+                    return Err(RustTestRunnerError::UnsupportedCommand(format!(
+                        "Cargo option {argument} has no value"
+                    )));
+                }
+            }
+        } else if cargo_filter.replace(argument.clone()).is_some() {
+            return Err(RustTestRunnerError::UnsupportedCommand(
+                "Cargo test has more than one pre-separator TESTNAME".into(),
+            ));
+        }
+        index += 1;
+    }
+
+    let mut list_arguments = cargo_filter.into_iter().collect::<Vec<_>>();
+    let mut run_arguments = Vec::new();
+    let mut index = 0;
+    while index < invocation.runner_arguments.len() {
+        let argument = &invocation.runner_arguments[index];
+        match argument.as_str() {
+            "--ignored"
+            | "--include-ignored"
+            | "--exclude-should-panic"
+            | "--test"
+            | "--bench"
+            | "--force-run-in-process" => {
+                list_arguments.push(argument.clone());
+                run_arguments.push(argument.clone());
+            }
+            "--exact" => list_arguments.push(argument.clone()),
+            "--skip" => {
+                let value = invocation.runner_arguments.get(index + 1).ok_or_else(|| {
+                    RustTestRunnerError::UnsupportedCommand(
+                        "libtest --skip has no filter value".into(),
+                    )
+                })?;
+                list_arguments.extend([argument.clone(), value.clone()]);
+                index += 1;
+            }
+            _ if argument.starts_with("--skip=") && argument.len() > "--skip=".len() => {
+                list_arguments.push(argument.clone());
+            }
+            _ if !argument.starts_with('-') => list_arguments.push(argument.clone()),
+            _ => {
+                return Err(RustTestRunnerError::UnsupportedCommand(format!(
+                    "libtest option {argument} cannot yet be reproduced exactly by process-per-test execution"
+                )));
+            }
+        }
+        index += 1;
+    }
+    Ok(RustLibtestSelection {
+        list_arguments,
+        run_arguments,
     })
 }
 
@@ -738,6 +875,80 @@ mod tests {
         frontend_protocol::validate_frontend_report_request,
         rust_project::prepare_rust_project,
     };
+
+    #[test]
+    fn cargo_and_libtest_selection_is_preserved_without_presentation_guessing() {
+        let root = Path::new(".");
+        let invocation = cargo_invocation(
+            root,
+            &[
+                "cargo".into(),
+                "test".into(),
+                "-p".into(),
+                "fixture".into(),
+                "authored".into(),
+                "--".into(),
+                "generated".into(),
+                "--skip".into(),
+                "slow".into(),
+                "--include-ignored".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(invocation.arguments, ["test", "-p", "fixture", "authored"]);
+        assert_eq!(
+            invocation.runner_arguments,
+            ["generated", "--skip", "slow", "--include-ignored"]
+        );
+        let selection = rust_libtest_selection(&invocation).unwrap();
+        assert_eq!(
+            selection.list_arguments,
+            [
+                "authored",
+                "generated",
+                "--skip",
+                "slow",
+                "--include-ignored"
+            ]
+        );
+        assert_eq!(selection.run_arguments, ["--include-ignored"]);
+    }
+
+    #[test]
+    fn libtest_modes_that_process_per_test_cannot_reproduce_fail_closed() {
+        for arguments in [
+            vec!["--test-threads", "4"],
+            vec!["--shuffle"],
+            vec!["--format=json"],
+            vec!["--nocapture"],
+            vec!["--fail-fast"],
+        ] {
+            let invocation = CargoTestInvocation {
+                program: "cargo".into(),
+                arguments: vec!["test".into()],
+                runner_arguments: arguments.into_iter().map(str::to_owned).collect(),
+            };
+            assert!(rust_libtest_selection(&invocation).is_err());
+        }
+    }
+
+    #[test]
+    fn cargo_test_options_are_not_mistaken_for_the_test_name_filter() {
+        let invocation = CargoTestInvocation {
+            program: "cargo".into(),
+            arguments: vec![
+                "test".into(),
+                "--manifest-path".into(),
+                "nested/Cargo.toml".into(),
+                "--features=one,two".into(),
+                "needle".into(),
+            ],
+            runner_arguments: vec!["--ignored".into(), "other".into()],
+        };
+        let selection = rust_libtest_selection(&invocation).unwrap();
+        assert_eq!(selection.list_arguments, ["needle", "--ignored", "other"]);
+        assert_eq!(selection.run_arguments, ["--ignored"]);
+    }
 
     #[test]
     fn cargo_libtest_runs_produce_queryable_owned_evidence() {

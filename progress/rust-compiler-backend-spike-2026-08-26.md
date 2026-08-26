@@ -374,8 +374,13 @@ an unverified rustc commit.
 4. Exact selection now independently probes rustc commit/host/driver digest,
    authenticates the companion's executable digest and rejects missing,
    duplicate or incomplete-public candidates. The private Cargo wrapper and
-   libtest execution path are now connected internally. Preserve the exact
-   original Cargo/libtest selection semantics, integrate atomic store/query
+   libtest execution path are now connected internally. Cargo `TESTNAME` and
+   libtest positional, ignored, included-ignored, skip and exact selection now
+   survive the process-per-test split; zero selected tests are valid and
+   unsupported scheduling/presentation modes fail closed. A real production
+   run selects and executes one ignored test through arguments on both sides of
+   `--`. Preserve exact output/order, cross-artifact fail-fast and retries;
+   integrate atomic store/query
    lifecycle, and add the packaged custom-toolchain/platform matrix before
    connecting the companion to public `npx supercov -- cargo test`.
 

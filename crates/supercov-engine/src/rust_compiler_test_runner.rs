@@ -48,6 +48,7 @@ use crate::{
         read_rust_transport,
     },
     rust_test_context::preflight_rust_test_contexts,
+    rust_test_runner::{cargo_invocation, rust_libtest_selection},
 };
 
 const TOKEN_BYTES: usize = supercov_contracts::RUST_PROBE_TRANSPORT_TOKEN_SIZE;
@@ -148,6 +149,7 @@ pub enum RustCompilerTestError {
     Transport { test: String, reason: String },
     DroppedEvidence { test: String, dropped: u64 },
     Projection { test: String, reason: String },
+    UnsupportedCommand(String),
 }
 
 impl std::fmt::Display for RustCompilerTestError {
@@ -181,6 +183,7 @@ impl std::fmt::Display for RustCompilerTestError {
             Self::Projection { test, reason } => {
                 write!(formatter, "invalid Rust evidence for {test}: {reason}")
             }
+            Self::UnsupportedCommand(reason) => formatter.write_str(reason),
         }
     }
 }
@@ -212,6 +215,7 @@ struct ProcessTask {
     test_id: String,
     context_id: u64,
     transport: PathBuf,
+    run_arguments: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -269,8 +273,12 @@ fn normalize_artifacts(
         .collect()
 }
 
-fn list_tests(artifact: &TestArtifact) -> Result<Vec<String>, RustCompilerTestError> {
+fn list_tests(
+    artifact: &TestArtifact,
+    selection_arguments: &[String],
+) -> Result<Vec<String>, RustCompilerTestError> {
     let output = Command::new(&artifact.executable)
+        .args(selection_arguments)
         .args(["--list", "--format", "terse"])
         .output()
         .map_err(|error| RustCompilerTestError::List {
@@ -329,7 +337,8 @@ fn run_process(project_root: &Path, task: &ProcessTask) -> Result<ProcessOutcome
     .map_err(|error| error.to_string())?;
     let started_at_ms = epoch_ms().map_err(|error| error.to_string())?;
     let output = Command::new(&task.artifact.executable)
-        .args(["--exact", &task.test, "--nocapture"])
+        .args(&task.run_arguments)
+        .args(["--exact", &task.test])
         .current_dir(project_root)
         .env(RUST_TRANSPORT_ENV, &task.transport)
         .env(RUST_TRANSPORT_TOKEN_ENV, token_hex(&token))
@@ -896,13 +905,17 @@ fn execute_compiler_build(
 ) -> Result<RustCompilerFrontendRun, RustCompilerTestError> {
     let project_root = fs::canonicalize(&request.project_root)
         .map_err(|error| io_error(&request.project_root, error))?;
+    let invocation = cargo_invocation(&project_root, &request.command)
+        .map_err(|error| RustCompilerTestError::UnsupportedCommand(error.to_string()))?;
+    let selection = rust_libtest_selection(&invocation)
+        .map_err(|error| RustCompilerTestError::UnsupportedCommand(error.to_string()))?;
     let artifacts = normalize_artifacts(&project_root, &build.artifacts)?;
     let evidence_root = build.compiler_output_directory.join("attempts");
     fs::create_dir(&evidence_root).map_err(|error| io_error(&evidence_root, error))?;
     let mut tasks = Vec::new();
     let mut identities = BTreeSet::new();
     for (artifact_index, artifact) in artifacts.iter().enumerate() {
-        let tests = list_tests(artifact)?;
+        let tests = list_tests(artifact, &selection.list_arguments)?;
         let contexts = preflight_rust_test_contexts(tests.clone())
             .map_err(|error| RustCompilerTestError::Context(error.to_string()))?;
         for (test_index, test) in tests.into_iter().enumerate() {
@@ -919,15 +932,10 @@ fn execute_compiler_build(
                 test_id,
                 context_id: contexts[&test],
                 transport: evidence_root.join(format!("{artifact_index:04}-{test_index:08}.mmap")),
+                run_arguments: selection.run_arguments.clone(),
             });
         }
     }
-    if tasks.is_empty() {
-        return Err(RustCompilerTestError::Context(
-            "Cargo produced no enumerable libtest tests".into(),
-        ));
-    }
-
     let execution_started = Instant::now();
     let workers = std::thread::available_parallelism()
         .map(usize::from)
