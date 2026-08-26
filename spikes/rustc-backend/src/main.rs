@@ -6006,6 +6006,7 @@ fn main() {
         args.push("-Cinstrument-coverage".into());
         args.push("-Zcoverage-options=branch".into());
         args.push("-Zno-profiler-runtime".into());
+        args.push("-Zallow-features=".into());
         args.push("--cfg=supercov_spike_instrumented".into());
         args.push("--check-cfg=cfg(supercov_spike_instrumented)".into());
     }

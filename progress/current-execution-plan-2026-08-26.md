@@ -222,8 +222,8 @@ candidate still carries blocking denominator limitations. The authored match
    parent and committed passed/failed status; missing verdicts remain unknown
    rather than inferred. Compiler-supervisor integration of that projection,
    CTFE and doctest obligation/probe mappings, plus full package and compiler
-fingerprints, remain R1 work. No measurement-
-complete claim is possible yet.
+   fingerprints, remain R1 work. No measurement-complete claim is possible
+   yet.
 
 The production engine now also owns strict ingestion of the compiler manifest
 candidate. Unknown fields/schema/model, premature completeness, malformed or
@@ -231,6 +231,14 @@ noncanonical source identities, duplicate IDs or probe ordinals, unsupported
 obligation kinds, dangling/cyclic match ownership and mismatched match-arm
 ordinals fail before evidence can be analyzed. The companion must still be
 moved out of the development spike and connected to this boundary.
+
+The first real-probe doctest attempt was deliberately rejected. It exposed and
+fixed an unstable-feature capability leak by adding rustc's empty
+`-Zallow-features=` restriction, but the instrumented run still regrouped one
+standalone plus two merged doctests into one three-test runner and therefore
+changed visible command output. Passing verdicts are insufficient: doctest
+probe publication stays blocked until execution grouping and output are also
+equivalent.
 
 The first dynamic decision slice is now executable as well. The companion
 uses rustc's exact source-to-optimized-MIR branch regions to locate each

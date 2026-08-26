@@ -301,7 +301,13 @@ an unverified rustc commit.
    surface, map every marker into the frozen manifest, and make publication
    crash-safe. Extend the proven rustdoc interception/mapping path with runtime
    probes and exact per-doctest attribution. Either incomplete area blocks
-   public Rust support.
+   public Rust support. A real-probe doctest experiment found two concrete
+   constraints. Private MIR flags must include rustc's empty
+   `-Zallow-features=` boundary so `RUSTC_BOOTSTRAP` cannot make a user's stable
+   `compile_fail` feature gate succeed. With that fixed, enabling the current
+   MIR path still changed rustdoc's visible grouping from one standalone plus
+   two merged tests into one three-test group. Results passed, but output parity
+   did not; the experiment was not promoted.
 4. Add exact-version mismatch, missing-companion and custom-toolchain failure
    tests before connecting the companion to `npx supercov -- cargo test`.
 
