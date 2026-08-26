@@ -3883,6 +3883,7 @@ struct RuntimeDecisionPlan {
 struct RuntimeBodyObligations {
     definition: String,
     crate_name: String,
+    points: BTreeMap<String, PointObligation>,
     branches: BTreeMap<String, BranchObligation>,
     decisions: BTreeMap<String, DecisionObligation>,
     match_groups: BTreeMap<String, MatchSelectionObligation>,
@@ -3920,6 +3921,7 @@ fn runtime_body_obligations(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Runti
     Some(RuntimeBodyObligations {
         definition,
         crate_name,
+        points,
         branches,
         decisions,
         match_groups,
@@ -3937,6 +3939,7 @@ fn runtime_decision_plans<'tcx>(
     let RuntimeBodyObligations {
         definition,
         crate_name,
+        points: _,
         branches,
         decisions,
         match_groups: _,
@@ -4199,6 +4202,113 @@ fn runtime_decision_plans<'tcx>(
             loop_token: None,
         });
     }
+    Ok(plans)
+}
+
+#[derive(Debug)]
+struct RuntimePointPlan {
+    id: String,
+    ordinal: u64,
+    block: BasicBlock,
+    source_start: u32,
+}
+
+fn runtime_statement_plans<'tcx>(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+    body: &Body<'tcx>,
+) -> Result<Vec<RuntimePointPlan>, String> {
+    let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
+        return Ok(Vec::new());
+    };
+    let RuntimeBodyObligations {
+        definition,
+        crate_name,
+        points,
+        ..
+    } = obligations;
+    let statements = points
+        .into_iter()
+        .filter(|(_, point)| point.point_kind == "statement")
+        .collect::<Vec<_>>();
+    if statements.is_empty() {
+        return Ok(Vec::new());
+    }
+    let coverage = body.function_coverage_info.as_deref();
+    let mut bcb_blocks = BTreeMap::<u32, Vec<BasicBlock>>::new();
+    for (block, data) in body.basic_blocks.iter_enumerated() {
+        for statement in &data.statements {
+            if let StatementKind::Coverage(CoverageKind::VirtualCounter { bcb }) = statement.kind {
+                bcb_blocks.entry(bcb.as_u32()).or_default().push(block);
+            }
+        }
+    }
+    let code_mappings = coverage
+        .into_iter()
+        .flat_map(|coverage| coverage.mappings.iter())
+        .filter_map(|mapping| match mapping.kind {
+            MappingKind::Code { bcb } => Some((mapping.span, bcb.as_u32())),
+            MappingKind::Branch { .. } => None,
+        })
+        .map(|(span, bcb)| -> Result<_, String> {
+            Ok((stable_source_range(tcx, span, &crate_name)?, bcb))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let dominators = body.basic_blocks.dominators().clone();
+    let mut plans = Vec::with_capacity(statements.len());
+    for (id, point) in statements {
+        let mut candidates = code_mappings
+            .iter()
+            .filter(|(source, _)| {
+                source.key == point.source.key
+                    && source.start >= point.source.start
+                    && source.end <= point.source.end
+            })
+            .flat_map(|(_, bcb)| bcb_blocks.get(bcb).into_iter().flatten().copied())
+            .collect::<BTreeSet<_>>();
+        if candidates.is_empty() {
+            candidates.extend(body.basic_blocks.iter_enumerated().filter_map(|(block, data)| {
+                data.statements
+                    .iter()
+                    .map(|statement| statement.source_info.span)
+                    .chain(std::iter::once(data.terminator().source_info.span))
+                    .filter_map(|span| stable_source_range(tcx, span, &crate_name).ok())
+                    .any(|source| {
+                        source.key == point.source.key
+                            && source.start >= point.source.start
+                            && source.end <= point.source.end
+                    })
+                    .then_some(block)
+            }));
+        }
+        let mut candidates = candidates.into_iter();
+        let Some(mut block) = candidates.next() else {
+            return Err(format!(
+                "statement {id} in {definition} has no exact MIR entry mapping"
+            ));
+        };
+        for candidate in candidates {
+            block = nearest_common_dominator(&dominators, block, candidate).ok_or_else(|| {
+                format!("statement {id} in {definition} has disconnected MIR mappings")
+            })?;
+        }
+        plans.push(RuntimePointPlan {
+            id,
+            ordinal: point.probe_ordinal,
+            block,
+            source_start: point.source.start,
+        });
+    }
+    // Replacing a block prepends a probe. Visit coalesced source statements in
+    // reverse source order so the resulting call chain executes in authored
+    // order before the shared optimized MIR block.
+    plans.sort_by(|left, right| {
+        left.block
+            .as_u32()
+            .cmp(&right.block.as_u32())
+            .then_with(|| right.source_start.cmp(&left.source_start))
+            .then_with(|| right.id.cmp(&left.id))
+    });
     Ok(plans)
 }
 
@@ -5739,9 +5849,17 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
             "Supercov could not bind Rust let-else probes in {definition}: {error}"
         ))
     });
+    let statement_plans = runtime_statement_plans(tcx, def_id, body).unwrap_or_else(|error| {
+        tcx.dcx().fatal(format!(
+            "Supercov could not bind Rust statement probes in {definition}: {error}"
+        ))
+    });
     let probe_id = probe_id_for(tcx, def_id, &definition);
     let context_id = context_id_for(tcx, def_id, &definition);
-    let probe_function = probe_id.and_then(|_| find_runtime_function(tcx, PROBE_FUNCTION));
+    let has_point_probes = probe_id.is_some() || !statement_plans.is_empty();
+    let probe_function = has_point_probes
+        .then(|| find_runtime_function(tcx, PROBE_FUNCTION))
+        .flatten();
     let enter_context = context_id.and_then(|_| find_runtime_function(tcx, ENTER_CONTEXT_FUNCTION));
     let exit_context = context_id.and_then(|_| find_runtime_function(tcx, EXIT_CONTEXT_FUNCTION));
     let start_decision = (!decision_plans.is_empty())
@@ -5763,7 +5881,7 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
     let hit_branch = has_branch_plans
         .then(|| find_runtime_function(tcx, HIT_BRANCH_FUNCTION))
         .flatten();
-    if probe_id.is_some() != probe_function.is_some()
+    if has_point_probes != probe_function.is_some()
         || context_id.is_some() != (enter_context.is_some() && exit_context.is_some())
         || (!decision_plans.is_empty()
             && (start_decision.is_none()
@@ -5783,6 +5901,7 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
         && context_id.is_none()
         && decision_plans.is_empty()
         && let_else_plans.is_empty()
+        && statement_plans.is_empty()
     {
         return tcx.arena.alloc(instrumented);
     }
@@ -5835,6 +5954,20 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
     {
         tcx.dcx().fatal(format!(
             "Supercov could not inject Rust decision probes in {definition}: {error}"
+        ));
+    }
+    if let Some(probe_function) = probe_function
+        && let Err(error) = instrument_runtime_points(
+            tcx,
+            &mut instrumented,
+            &statement_plans,
+            probe_function,
+            unit,
+            span,
+        )
+    {
+        tcx.dcx().fatal(format!(
+            "Supercov could not inject Rust statement probes in {definition}: {error}"
         ));
     }
     let previous_context = context_id.map(|_| {
@@ -5951,6 +6084,43 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
     tcx.arena.alloc(instrumented)
 }
 
+fn instrument_runtime_points<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &mut Body<'tcx>,
+    plans: &[RuntimePointPlan],
+    probe_function: LocalDefId,
+    unit: rustc_middle::mir::Local,
+    span: rustc_span::Span,
+) -> Result<(), String> {
+    for plan in plans {
+        if plan.block.index() >= body.basic_blocks.len() {
+            return Err(format!(
+                "statement {} lost MIR entry block {:?}",
+                plan.id, plan.block
+            ));
+        }
+        let cleanup = body.basic_blocks[plan.block].is_cleanup;
+        let original = body.basic_blocks[plan.block].clone();
+        let continuation = body.basic_blocks_mut().push(original);
+        body.basic_blocks_mut()[plan.block] = runtime_call_block(
+            tcx,
+            probe_function,
+            [Operand::const_from_scalar(
+                tcx,
+                tcx.types.u64,
+                Scalar::from_u64(plan.ordinal),
+                span,
+            )]
+            .into_iter(),
+            Place::from(unit),
+            continuation,
+            span,
+            cleanup,
+        );
+    }
+    Ok(())
+}
+
 fn find_runtime_function(tcx: TyCtxt<'_>, suffix: &str) -> Option<LocalDefId> {
     tcx.hir_free_items()
         .map(|item| item.owner_id.def_id)
@@ -5993,19 +6163,15 @@ fn runtime_call_block<'tcx>(
 }
 
 fn probe_id_for(tcx: TyCtxt<'_>, def_id: LocalDefId, definition: &str) -> Option<u64> {
-    let targeted = ["authored", "fallible", "drop_order", "panic_path"]
-        .iter()
-        .any(|suffix| definition.ends_with(suffix));
-    if !targeted {
+    if definition.contains("__supercov_spike_runtime")
+        || !is_function_body(tcx.def_kind(def_id))
+    {
         return None;
     }
     let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE).to_string();
-    match function_identity(tcx, def_id.to_def_id(), tcx.def_span(def_id), &crate_name) {
-        Ok(identity) => Some(identity.probe_ordinal),
-        Err(error) => tcx.dcx().fatal(format!(
-            "Supercov could not bind runtime probe {definition} to its manifest: {error}"
-        )),
-    }
+    function_identity(tcx, def_id.to_def_id(), tcx.def_span(def_id), &crate_name)
+        .ok()
+        .map(|identity| identity.probe_ordinal)
 }
 
 fn context_id_for(tcx: TyCtxt<'_>, def_id: LocalDefId, definition: &str) -> Option<u64> {

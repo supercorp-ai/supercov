@@ -1459,6 +1459,18 @@ miss blocks flipping any default.
   honest denominator limitations. Lifecycle promotion is still blocked on the
   crash, ENOSPC and concurrent-run matrix; public Rust selection remains false
   until those plus every R1/R2 gate are closed.
+- A post-checkpoint audit found a real spike-era shortcut before moving to
+  CTFE: the denominator emitted general statement/function points, but runtime
+  function hits were limited to four fixture names and statement hits were not
+  injected. The companion now instruments every source-backed function and
+  statement obligation. It uses rustc code mappings with exact MIR-span
+  fallback, chains sequential statements that rustc coalesces into one block
+  in authored order, and leaves dummy-span harness functions unmeasured with
+  their existing explicit source limitation rather than inventing identity.
+  The full macro/generated/concurrent corpus remains behavior-identical; every
+  raw hit must resolve to a compiler manifest, all former branch evidence is
+  retained, and a dedicated one-sided branch proves no false statement hit on
+  its unexecuted arm.
 
 ## Non-goals and guardrails
 

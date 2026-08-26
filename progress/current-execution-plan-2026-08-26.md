@@ -204,7 +204,14 @@ ordinal, and stay byte-identical across clean targets. Synthetic condition
 display comes from rustc's expanded HIR instead of falsely printing the macro
 invocation as the condition. The exploratory 0/1/2/3 function ordinals are
 gone: runtime MIR hits now carry the u64 prefix of the exact manifest point ID,
-and the compiler rejects both full-ID and probe-prefix collisions. The
+and the compiler rejects both full-ID and probe-prefix collisions. A later
+audit removed the remaining fixture-name shortcut: every source-backed
+function and statement point is now injected. rustc code mappings and exact
+MIR-span fallback locate statement entry; sequential statements coalesced into
+one optimized block become an authored-order probe chain. A focused one-sided
+branch proves its untaken statement remains uncovered while the taken and
+following statements are observed. Dummy-span compiler harness functions keep
+an explicit source limitation rather than receiving invented identity. The
 candidate still carries blocking denominator limitations. The authored match
    slices below have since narrowed that surface. The six stable assertion
    macros now have exact passed/failed and MC/DC observations, including

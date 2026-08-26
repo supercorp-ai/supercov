@@ -177,6 +177,15 @@ pub fn authored(value: bool) -> usize {
     if value { 1 } else { 2 }
 }
 
+pub fn statement_paths(value: bool, log: &mut Vec<&'static str>) {
+    if value {
+        log.push("true-path");
+    } else {
+        log.push("false-path");
+    }
+    log.push("after-path");
+}
+
 pub fn compound(left: bool, right: bool) -> usize {
     if left && right { 29 } else { 31 }
 }
@@ -456,6 +465,9 @@ mod tests {
     #[ignore = "requires compiler-spike MIR instrumentation"]
     fn records_real_runtime_probes() {
         assert_eq!(authored(true), 1);
+        let mut paths = Vec::new();
+        statement_paths(true, &mut paths);
+        assert_eq!(paths, ["true-path", "after-path"]);
         assert_eq!(fallible(2), Ok(3));
         let log = std::cell::RefCell::new(Vec::new());
         assert_eq!(drop_order(&log), 23);
