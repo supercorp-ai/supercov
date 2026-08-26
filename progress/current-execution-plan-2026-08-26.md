@@ -221,9 +221,16 @@ candidate still carries blocking denominator limitations. The authored match
    contexts into distinct evidence-v3 assertion phases with source, causal
    parent and committed passed/failed status; missing verdicts remain unknown
    rather than inferred. Compiler-supervisor integration of that projection,
-   CTFE and doctest obligation/probe mappings,
-plus full package and compiler fingerprints, remain R1 work. No measurement-
+   CTFE and doctest obligation/probe mappings, plus full package and compiler
+fingerprints, remain R1 work. No measurement-
 complete claim is possible yet.
+
+The production engine now also owns strict ingestion of the compiler manifest
+candidate. Unknown fields/schema/model, premature completeness, malformed or
+noncanonical source identities, duplicate IDs or probe ordinals, unsupported
+obligation kinds, dangling/cyclic match ownership and mismatched match-arm
+ordinals fail before evidence can be analyzed. The companion must still be
+moved out of the development spike and connected to this boundary.
 
 The first dynamic decision slice is now executable as well. The companion
 uses rustc's exact source-to-optimized-MIR branch regions to locate each

@@ -30,6 +30,7 @@ pub mod run_merge;
 pub mod run_query;
 pub mod run_store;
 pub mod rust_build_cache;
+pub mod rust_compiler_manifest;
 pub mod rust_instrumenter;
 pub mod rust_phase_projection;
 pub mod rust_probe_transport;
