@@ -1494,9 +1494,16 @@ miss blocks flipping any default.
   the controlled const-fn corpus proves independent false and true evaluations.
   The direct decision-to-outcome-branch relation also removed a runtime
   token-domain error and now guarantees the branch observation is committed
-  before a decision vector can become complete. The broader
-  const/static/inline-const/const-generic corpus remains the active blocker;
-  the candidate therefore reports incomplete CTFE mapping and stays private.
+  before a decision vector can become complete. The next corpus expansion
+  proves direct const, static, const-fn, const-generic-fn, generic associated
+  const, anonymous array-length and independent inline-const owners. rustc
+  omits native branch regions for several of these owners, so typed Boolean
+  markers are now inserted into built MIR, required to survive exactly once,
+  consumed from CTFE MIR and removed before evaluation. Multi-condition
+  masking and separate nested decisions are exact as well. Remaining CTFE
+  branch kinds, failure/resource/concurrency cases and performance are active
+  blockers; the candidate therefore reports incomplete CTFE mapping and stays
+  private.
 
 ## Non-goals and guardrails
 

@@ -2458,11 +2458,13 @@ fn try_operator_assignments<'tcx>(
     Ok(assignments)
 }
 
-fn assertion_condition_marker_assignments<'tcx>(
+fn structural_decision_condition_marker_assignments<'tcx>(
     tcx: TyCtxt<'tcx>,
     crate_name: &str,
     body: &Body<'tcx>,
     decisions: &[&DecisionObligation],
+    allow_constant_discriminants: bool,
+    subject: &str,
 ) -> Result<Vec<(String, usize, BasicBlock)>, String> {
     let mut conditions_by_source =
         BTreeMap::<(String, u32, u32), Vec<(&DecisionObligation, usize)>>::new();
@@ -2504,7 +2506,7 @@ fn assertion_condition_marker_assignments<'tcx>(
             }),
             Operand::RuntimeChecks(_) => false,
         };
-        if discriminant_is_constant {
+        if discriminant_is_constant && !allow_constant_discriminants {
             continue;
         }
         let source = stable_source_range(tcx, terminator.source_info.span, crate_name)?;
@@ -2536,7 +2538,7 @@ fn assertion_condition_marker_assignments<'tcx>(
         let exact = exact.into_iter().collect::<Vec<_>>();
         let [owner] = exact.as_slice() else {
             return Err(format!(
-                "assertion condition at {}:{}-{} has ambiguous authored owners",
+                "{subject} condition at {}:{}-{} has ambiguous authored owners",
                 callsite.key, callsite.start, callsite.end
             ));
         };
@@ -2563,7 +2565,7 @@ fn assertion_condition_marker_assignments<'tcx>(
         blocks.sort_by_key(|block| rank_by_block[&block.as_u32()]);
         if source_conditions.len() != blocks.len() {
             return Err(format!(
-                "{} assertion conditions at {}:{}-{} map to {} typed Boolean switches",
+                "{} {subject} conditions at {}:{}-{} map to {} typed Boolean switches",
                 source_conditions.len(),
                 source.0,
                 source.1,
@@ -2582,7 +2584,7 @@ fn assertion_condition_marker_assignments<'tcx>(
             .collect::<Vec<_>>();
         if ranks.iter().enumerate().any(|(index, rank)| index != *rank) {
             return Err(format!(
-                "assertion conditions at {}:{}-{} have no total semantic order",
+                "{subject} conditions at {}:{}-{} have no total semantic order",
                 source.0, source.1, source.2
             ));
         }
@@ -2851,12 +2853,94 @@ fn mir_built_with_match_markers<'tcx>(
         .get()
         .expect("original mir_built provider");
     let body = original(tcx, def_id);
-    if env::var_os(INSTRUMENT_MIR).is_none() || tcx.hir_body_const_context(def_id).is_some() {
+    if env::var_os(INSTRUMENT_MIR).is_none() {
         return body;
     }
     let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
         return body;
     };
+    let structural_ctfe_owner = matches!(
+        tcx.def_kind(def_id),
+        DefKind::Const
+            | DefKind::AssocConst
+            | DefKind::Static { .. }
+            | DefKind::AnonConst
+            | DefKind::InlineConst
+    );
+    if structural_ctfe_owner {
+        let decisions = obligations
+            .decisions
+            .values()
+            .filter(|decision| decision.definitions.contains(&obligations.definition))
+            .collect::<Vec<_>>();
+        if decisions.is_empty() {
+            return body;
+        }
+        let assignments = {
+            let borrowed = body.borrow();
+            structural_decision_condition_marker_assignments(
+                tcx,
+                &obligations.crate_name,
+                &borrowed,
+                &decisions,
+                true,
+                "CTFE",
+            )
+            .unwrap_or_else(|error| {
+                tcx.dcx().fatal(format!(
+                    "Supercov could not bind pre-borrow-check CTFE decisions in {}: {error}",
+                    obligations.definition
+                ))
+            })
+        };
+        let mut instrumented = body.steal();
+        let mut markers = Vec::new();
+        for (decision_id, condition_index, block) in assignments {
+            let marker_local = instrumented
+                .local_decls
+                .push(LocalDecl::new(tcx.types.u64, DUMMY_SP));
+            instrumented.basic_blocks_mut()[block].statements.insert(
+                0,
+                match_arm_marker_statement(tcx, marker_local, condition_index as u64),
+            );
+            markers.push(StructuralDecisionConditionMarker {
+                local: marker_local.as_u32(),
+                decision_id,
+                condition_index,
+            });
+        }
+        if markers.len()
+            != decisions
+                .iter()
+                .map(|decision| decision.conditions.len())
+                .sum::<usize>()
+        {
+            tcx.dcx().fatal(format!(
+                "Supercov CTFE decision markers cover {}/{} conditions in {}",
+                markers.len(),
+                decisions
+                    .iter()
+                    .map(|decision| decision.conditions.len())
+                    .sum::<usize>(),
+                obligations.definition
+            ));
+        }
+        let mut stored = STRUCTURAL_DECISION_MARKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = stored.insert(def_id, markers.clone())
+            && existing != markers
+        {
+            tcx.dcx().fatal(format!(
+                "Supercov CTFE decision marker collision for {}",
+                obligations.definition
+            ));
+        }
+        return tcx.alloc_steal_mir(instrumented);
+    }
+    if tcx.hir_body_const_context(def_id).is_some() {
+        return body;
+    }
     {
         let borrowed = body.borrow();
         let block_sources = executable_block_sources(tcx, &obligations.crate_name, &borrowed);
@@ -2992,11 +3076,13 @@ fn mir_built_with_match_markers<'tcx>(
             }
         }
         guard_blocks.extend(
-            assertion_condition_marker_assignments(
+            structural_decision_condition_marker_assignments(
                 tcx,
                 &obligations.crate_name,
                 &borrowed,
                 &assertion_decisions,
+                false,
+                "assertion",
             )
             .unwrap_or_else(|error| {
                 tcx.dcx().fatal(format!(
@@ -3821,11 +3907,30 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
     let span = tcx.def_span(def_id);
     let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE).to_string();
     let definition = tcx.def_path_str(def_id);
-    let decision_plans = runtime_decision_plans(tcx, def_id, body).unwrap_or_else(|error| {
+    let mut decision_plans = runtime_decision_plans(tcx, def_id, body).unwrap_or_else(|error| {
         tcx.dcx().fatal(format!(
             "Supercov could not bind Rust CTFE decision probes in {definition}: {error}"
         ))
     });
+    let structural_decision_plans =
+        runtime_marked_decision_plans(tcx, def_id, body).unwrap_or_else(|error| {
+            tcx.dcx().fatal(format!(
+                "Supercov could not bind marked Rust CTFE decisions in {definition}: {error}"
+            ))
+        });
+    let mut decision_ids = decision_plans
+        .iter()
+        .map(|plan| plan.id.clone())
+        .collect::<BTreeSet<_>>();
+    for plan in structural_decision_plans {
+        if !decision_ids.insert(plan.id.clone()) {
+            tcx.dcx().fatal(format!(
+                "Supercov bound CTFE decision {} through two compiler paths in {definition}",
+                plan.id
+            ));
+        }
+        decision_plans.push(plan);
+    }
     let mut hit_ordinals_by_block = BTreeMap::<BasicBlock, BTreeSet<u64>>::new();
     for plan in runtime_statement_plans(tcx, def_id, body).unwrap_or_else(|error| {
         tcx.dcx().fatal(format!(
@@ -3844,6 +3949,13 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
             .entry(rustc_middle::mir::START_BLOCK)
             .or_default()
             .insert(identity.probe_ordinal);
+    }
+    if let Err(error) =
+        strip_structural_decision_markers(&mut instrumented, def_id, &definition)
+    {
+        tcx.dcx().fatal(format!(
+            "Supercov could not consume pre-borrow-check Rust CTFE markers in {definition}: {error}"
+        ));
     }
     let marker_local = instrumented
         .local_decls
@@ -4367,6 +4479,24 @@ fn runtime_decision_plans<'tcx>(
     if decisions.is_empty() {
         return Ok(Vec::new());
     }
+    let marked_decisions = STRUCTURAL_DECISION_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&def_id)
+        .map(|markers| {
+            markers
+                .iter()
+                .map(|marker| marker.decision_id.clone())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let decisions = decisions
+        .values()
+        .filter(|decision| !marked_decisions.contains(&decision.identity.id))
+        .collect::<Vec<_>>();
+    if decisions.is_empty() {
+        return Ok(Vec::new());
+    }
     let coverage = body.function_coverage_info.as_deref();
     if coverage.is_none() && !tcx.def_span(def_id).from_expansion() {
         return Err(format!(
@@ -4399,21 +4529,7 @@ fn runtime_decision_plans<'tcx>(
     let dominators = body.basic_blocks.dominators().clone();
     let mut plans = Vec::new();
     let mut fallback_blocks = BTreeSet::new();
-    let marked_decisions = STRUCTURAL_DECISION_MARKERS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&def_id)
-        .map(|markers| {
-            markers
-                .iter()
-                .map(|marker| marker.decision_id.clone())
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    for decision in decisions
-        .values()
-        .filter(|decision| !marked_decisions.contains(&decision.identity.id))
-    {
+    for decision in decisions {
         let digest = decision
             .identity
             .id

@@ -940,6 +940,10 @@ try {
     /try-generated-nested-proc=\[Ok\(8\), Err\("inner"\), Err\("outer"\)\]/,
   );
   assert.match(baselineBehavior.stdout, /try-panic=true/);
+  assert.match(
+    baselineBehavior.stdout,
+    /ctfe-surfaces=\[17, 29, 31, 43, 47, 53, 59, 61, 2, 67, 79, 89, 83, 89, 83, 103, 101, 97\]/,
+  );
   assert.match(baselineBehavior.stdout, /match-unreachable=\[1, 2\]/);
   assert.match(baselineBehavior.stdout, /match-generated=\[23, 29\]/);
   assert.match(baselineBehavior.stdout, /match-generated-proc=\[31, 37\]/);
@@ -1963,8 +1967,8 @@ try {
       );
     }
   }
-  const constDecisionInvocations = ctfeInvocations.filter(({definition}) =>
-    definition.endsWith('const_decision'),
+  const constDecisionInvocations = ctfeInvocations.filter(
+    ({definition}) => definition === 'const_decision',
   );
   assert.equal(
     constDecisionInvocations.length,
@@ -1983,49 +1987,135 @@ try {
     ['0', '1'],
     'CTFE invocation frames did not preserve the independent false/true paths',
   );
-  const constDecision = decisionFor(runtimeManifest, 'const_decision');
-  assert(constDecision, 'const_decision has no frozen decision obligation');
-  const ctfeVectors = constDecisionInvocations.map(({records: invocationRecords}) => {
-    let active;
-    let completed;
-    for (const record of invocationRecords) {
-      const semantic = mappingsByMarker.get(
-        `${record.crate}:${record.marker}`,
-      ).decision;
-      if (!semantic) continue;
-      assert.equal(
-        semantic.id,
-        constDecision.id,
-        'const_decision CTFE frame crossed decision identity',
-      );
-      if (semantic.event === 'start') {
-        assert.equal(active, undefined, 'nested duplicate const decision start');
-        active = Array(constDecision.conditions.length).fill(null);
-      } else if (semantic.event === 'condition') {
-        assert(active, 'CTFE condition has no active decision');
-        assert.equal(
-          active[semantic.conditionIndex],
-          null,
-          'CTFE condition was observed twice',
-        );
-        active[semantic.conditionIndex] = semantic.value;
-      } else if (semantic.event === 'finish') {
-        assert(active, 'CTFE finish has no active decision');
-        completed = {values: active, outcome: semantic.outcome};
-        active = undefined;
+  const ctfeVectorsForDecision = (definition, decision) => {
+    assert(
+      decision?.definitions.includes(definition),
+      `${definition} has no matching frozen decision obligation`,
+    );
+    const invocations = ctfeInvocations.filter(
+      (invocation) => invocation.definition === definition,
+    );
+    assert(invocations.length > 0, `${definition} has no CTFE invocation`);
+    const vectors = [];
+    for (const {records: invocationRecords} of invocations) {
+      const active = [];
+      for (const record of invocationRecords) {
+        const semantic = mappingsByMarker.get(
+          `${record.crate}:${record.marker}`,
+        ).decision;
+        if (!semantic) continue;
+        if (semantic.event === 'start') {
+          const meta = runtimeManifest.decisions.find(({id}) => id === semantic.id);
+          assert(
+            meta?.definitions.includes(definition),
+            `${definition} started unknown CTFE decision ${semantic.id}`,
+          );
+          active.push({id: semantic.id, values: Array(meta.conditions.length).fill(null)});
+        } else if (semantic.event === 'condition') {
+          const frame = active.at(-1);
+          assert(frame, `${definition} CTFE condition has no active decision`);
+          assert.equal(
+            frame.id,
+            semantic.id,
+            `${definition} CTFE condition crossed nested decision identity`,
+          );
+          assert.equal(
+            frame.values[semantic.conditionIndex],
+            null,
+            `${definition} CTFE condition was observed twice`,
+          );
+          frame.values[semantic.conditionIndex] = semantic.value;
+        } else if (semantic.event === 'finish') {
+          const frame = active.pop();
+          assert(frame, `${definition} CTFE finish has no active decision`);
+          assert.equal(
+            frame.id,
+            semantic.id,
+            `${definition} CTFE finish crossed nested decision identity`,
+          );
+          if (frame.id === decision.id) {
+            vectors.push(JSON.stringify({values: frame.values, outcome: semantic.outcome}));
+          }
+        }
       }
+      assert.deepEqual(active, [], `${definition} CTFE decision frame remained open`);
     }
-    assert.equal(active, undefined, 'CTFE decision frame remained open');
-    assert(completed, 'CTFE decision frame never completed');
-    return JSON.stringify(completed);
-  });
+    assert(vectors.length > 0, `${definition} CTFE decision never completed`);
+    return vectors.sort();
+  };
+  const ctfeVectorsForDefinition = (definition) => {
+    const decisions = runtimeManifest.decisions.filter(({definitions}) =>
+      definitions.includes(definition),
+    );
+    assert.equal(decisions.length, 1, `${definition} does not have exactly one decision`);
+    return ctfeVectorsForDecision(definition, decisions[0]);
+  };
+  const ctfeVectors = ctfeVectorsForDefinition('const_decision');
   assert.deepEqual(
-    ctfeVectors.sort(),
+    ctfeVectors,
     [
       JSON.stringify({values: [false], outcome: false}),
       JSON.stringify({values: [true], outcome: true}),
     ].sort(),
     'CTFE semantic mappings did not reconstruct the exact false/true vectors',
+  );
+  const oneVector = (value) => [JSON.stringify({values: [value], outcome: value})];
+  assert.deepEqual(ctfeVectorsForDefinition('DIRECT_CONST_TRUE'), oneVector(true));
+  assert.deepEqual(ctfeVectorsForDefinition('DIRECT_CONST_FALSE'), oneVector(false));
+  assert.deepEqual(ctfeVectorsForDefinition('STATIC_CONST_TRUE'), oneVector(true));
+  assert.deepEqual(ctfeVectorsForDefinition('STATIC_CONST_FALSE'), oneVector(false));
+  assert.deepEqual(
+    ctfeVectorsForDefinition('const_generic_decision'),
+    [...oneVector(false), ...oneVector(true)].sort(),
+  );
+  assert.deepEqual(
+    ctfeVectorsForDefinition('ConstGenericValue::<ENABLED>::VALUE'),
+    [...oneVector(false), ...oneVector(true)].sort(),
+  );
+  assert.deepEqual(
+    ctfeVectorsForDefinition('ARRAY_DECISION_LEN::{constant#0}'),
+    oneVector(true),
+  );
+  assert.deepEqual(
+    ctfeVectorsForDefinition('inline_const_values::{constant#1}'),
+    oneVector(true),
+  );
+  assert.deepEqual(
+    ctfeVectorsForDefinition('inline_const_values::{constant#2}'),
+    oneVector(false),
+  );
+  assert.deepEqual(
+    ctfeVectorsForDecision(
+      'const_mixed',
+      decisionForConditions(runtimeManifest, 'const_mixed', ['first', 'second', 'third']),
+    ),
+    [
+      JSON.stringify({values: [false, false, null], outcome: false}),
+      JSON.stringify({values: [false, true, true], outcome: true}),
+      JSON.stringify({values: [true, null, false], outcome: false}),
+      JSON.stringify({values: [true, null, true], outcome: true}),
+    ].sort(),
+  );
+  assert.deepEqual(
+    ctfeVectorsForDecision(
+      'const_nested',
+      decisionForConditions(runtimeManifest, 'const_nested', ['first']),
+    ),
+    [
+      JSON.stringify({values: [false], outcome: false}),
+      JSON.stringify({values: [true], outcome: true}),
+      JSON.stringify({values: [true], outcome: true}),
+    ].sort(),
+  );
+  assert.deepEqual(
+    ctfeVectorsForDecision(
+      'const_nested',
+      decisionForConditions(runtimeManifest, 'const_nested', ['second']),
+    ),
+    [
+      JSON.stringify({values: [false], outcome: false}),
+      JSON.stringify({values: [true], outcome: true}),
+    ].sort(),
   );
   const ctfeDefinitions = new Set(
     ctfeRecordFiles.flatMap(({records: fileRecords}) =>

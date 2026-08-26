@@ -1,21 +1,26 @@
 use std::{cell::RefCell, panic};
 
 use supercov_rustc_spike_fixture::{
-    CONST_FALSE_VALUE, CONST_VALUE, assert_compound, assert_equal, assert_equal_evaluation_order,
-    assert_not_equal, assert_panicking_condition, assert_panicking_message_argument, authored,
-    chained, compound, context_normal_scope, context_panic_scope, debug_assert_compound,
-    debug_assert_equal, debug_assert_not_equal, disjoined, drop_order, fallible, for_break,
-    for_values, generated_assertion_by_proc, generated_by_build_script, generated_by_proc,
-    generated_by_rules, generated_guarded_match_by_proc, generated_let_else_by_proc,
-    generated_match, generated_match_by_proc, generated_nested_guard_match_by_proc,
+    ARRAY_DECISION_LEN, ASSOCIATED_CONST_FALSE, ASSOCIATED_CONST_TRUE, CONST_FALSE_VALUE,
+    CONST_GENERIC_FALSE, CONST_GENERIC_TRUE, CONST_MIXED_FALSE_FALSE,
+    CONST_MIXED_FIRST_TRUE_FALSE, CONST_MIXED_FIRST_TRUE_TRUE, CONST_MIXED_SECOND_TRUE,
+    CONST_NESTED_INNER_FALSE, CONST_NESTED_INNER_TRUE, CONST_NESTED_OUTER_FALSE, CONST_VALUE,
+    DIRECT_CONST_FALSE, DIRECT_CONST_TRUE, STATIC_CONST_FALSE, STATIC_CONST_TRUE, assert_compound,
+    assert_equal, assert_equal_evaluation_order, assert_not_equal, assert_panicking_condition,
+    assert_panicking_message_argument, authored, chained, compound, context_normal_scope,
+    context_panic_scope, debug_assert_compound, debug_assert_equal, debug_assert_not_equal,
+    disjoined, drop_order, fallible, for_break, for_values, generated_assertion_by_proc,
+    generated_by_build_script, generated_by_proc, generated_by_rules,
+    generated_guarded_match_by_proc, generated_let_else_by_proc, generated_match,
+    generated_match_by_proc, generated_nested_guard_match_by_proc,
     generated_nested_match_by_proc, generated_nested_scrutinee_match_by_proc,
     generated_nested_try_by_proc, generated_try_by_proc, generated_two_let_else_by_proc,
-    generated_two_try_by_proc, interrupted_decision, interrupted_for, interrupted_match,
-    let_else_value, match_empty, match_identical, match_irrefutable, match_unreachable,
-    match_value, mixed, nested, nested_expression, nested_for_values, nested_let_else,
-    nested_match, nested_try_result, panic_before_try, panic_path, pattern, repeated_expansions,
-    try_option, try_result, two_for_values, two_let_else, two_try_results, while_compound,
-    while_let_chain,
+    generated_two_try_by_proc, inline_const_values, interrupted_decision, interrupted_for,
+    interrupted_match, let_else_value, match_empty, match_identical, match_irrefutable,
+    match_unreachable, match_value, mixed, nested, nested_expression, nested_for_values,
+    nested_let_else, nested_match, nested_try_result, panic_before_try, panic_path, pattern,
+    repeated_expansions, try_option, try_result, two_for_values, two_let_else, two_try_results,
+    while_compound, while_let_chain,
 };
 
 fn main() {
@@ -76,6 +81,29 @@ fn main() {
     println!("assertion-order={:?}", assertion_order.into_inner());
     println!("drop-order={:?}", log.into_inner());
     println!("const-values={CONST_VALUE:?},{CONST_FALSE_VALUE:?}");
+    println!(
+        "ctfe-surfaces={:?}",
+        [
+            DIRECT_CONST_TRUE,
+            DIRECT_CONST_FALSE,
+            STATIC_CONST_TRUE,
+            STATIC_CONST_FALSE,
+            CONST_GENERIC_TRUE,
+            CONST_GENERIC_FALSE,
+            ASSOCIATED_CONST_TRUE,
+            ASSOCIATED_CONST_FALSE,
+            ARRAY_DECISION_LEN,
+            inline_const_values()[0],
+            inline_const_values()[1],
+            CONST_MIXED_FALSE_FALSE,
+            CONST_MIXED_SECOND_TRUE,
+            CONST_MIXED_FIRST_TRUE_FALSE,
+            CONST_MIXED_FIRST_TRUE_TRUE,
+            CONST_NESTED_OUTER_FALSE,
+            CONST_NESTED_INNER_FALSE,
+            CONST_NESTED_INNER_TRUE,
+        ]
+    );
     println!(
         "expanded={:?}",
         [

@@ -465,10 +465,10 @@ unsound idea of assigning flat adjacent events to a definition; missing return
 markers after a panic or compiler crash can instead remain explicitly
 incomplete. Edge identity is carried by each event, so concurrent evaluation
 does not require guessing from adjacent log records.
-Rust still remains private: the proof covers one controlled const function and
-does not yet supply the complete denominator and corpus for
-const/static/inline-const/const-generic code, `RUSTC_LOG` coexistence or
-acceptable performance.
+Rust still remains private. The proof now covers distinct direct-const,
+static, const-fn, const-generic-fn, generic-associated-const, anonymous
+array-length and inline-const owners. It does not yet cover every CTFE branch
+kind, failure mode, target, `RUSTC_LOG` coexistence or acceptable performance.
 
 The first mapped CTFE evidence slice is now carried through the real run
 boundary. Compiler-finalized event and mapping sidecars are published with
@@ -495,6 +495,19 @@ plus an explicitly incomplete vector, but never a complete vector whose
 outcome branch is missing. The manifest limitation now says *complete* CTFE and
 doctest mapping remain; the controlled CTFE slice is real, but the wider const
 corpus is still a release blocker and this is not a completeness claim.
+
+The owner matrix exposed a real compiler distinction and closed it without a
+source heuristic. rustc retains native branch regions for const functions but
+not for direct consts, statics, anonymous consts or associated consts. Those
+owner kinds now receive typed Boolean condition markers in built MIR before
+borrow checking; the exact-version companion requires each marker to survive
+once, reconstructs it from the CTFE MIR, and removes it before evaluation.
+Runtime const-function instrumentation remains on its independent native-region
+path. Exact corpus vectors now cover direct true/false consts and statics, two
+instantiations each of a const-generic function and generic associated const,
+an anonymous array-length decision, two independent inline consts, all four
+masked paths through `(first || second) && third`, and separate outer/inner
+const decisions. The complete CTFE branch-kind and failure corpus remains open.
 
 The rustdoc launch boundary is now proven as well. Cargo's ordinary
 `RUSTC_WRAPPER` still does not see synthesized doctest crates, so Supercov uses

@@ -52,6 +52,58 @@ pub const fn const_decision(value: bool) -> usize {
 pub const CONST_VALUE: usize = const_decision(true);
 pub const CONST_FALSE_VALUE: usize = const_decision(false);
 
+pub const DIRECT_CONST_TRUE: usize = if true { 17 } else { 19 };
+pub const DIRECT_CONST_FALSE: usize = if false { 23 } else { 29 };
+
+pub static STATIC_CONST_TRUE: usize = if true { 31 } else { 37 };
+pub static STATIC_CONST_FALSE: usize = if false { 41 } else { 43 };
+
+pub const fn const_generic_decision<const ENABLED: bool>() -> usize {
+    if ENABLED { 47 } else { 53 }
+}
+
+pub const CONST_GENERIC_TRUE: usize = const_generic_decision::<true>();
+pub const CONST_GENERIC_FALSE: usize = const_generic_decision::<false>();
+
+pub const fn const_mixed(first: bool, second: bool, third: bool) -> usize {
+    if (first || second) && third { 83 } else { 89 }
+}
+
+pub const CONST_MIXED_FALSE_FALSE: usize = const_mixed(false, false, true);
+pub const CONST_MIXED_SECOND_TRUE: usize = const_mixed(false, true, true);
+pub const CONST_MIXED_FIRST_TRUE_FALSE: usize = const_mixed(true, false, false);
+pub const CONST_MIXED_FIRST_TRUE_TRUE: usize = const_mixed(true, false, true);
+
+pub const fn const_nested(first: bool, second: bool) -> usize {
+    if first {
+        if second { 97 } else { 101 }
+    } else {
+        103
+    }
+}
+
+pub const CONST_NESTED_OUTER_FALSE: usize = const_nested(false, true);
+pub const CONST_NESTED_INNER_FALSE: usize = const_nested(true, false);
+pub const CONST_NESTED_INNER_TRUE: usize = const_nested(true, true);
+
+pub struct ConstGenericValue<const ENABLED: bool>;
+
+impl<const ENABLED: bool> ConstGenericValue<ENABLED> {
+    pub const VALUE: usize = if ENABLED { 59 } else { 61 };
+}
+
+pub const ASSOCIATED_CONST_TRUE: usize = ConstGenericValue::<true>::VALUE;
+pub const ASSOCIATED_CONST_FALSE: usize = ConstGenericValue::<false>::VALUE;
+
+pub const ARRAY_DECISION_LEN: usize = [0_u8; if true { 2 } else { 3 }].len();
+
+pub fn inline_const_values() -> [usize; 2] {
+    [
+        const { if true { 67 } else { 71 } },
+        const { if false { 73 } else { 79 } },
+    ]
+}
+
 pub fn let_else_value(value: Option<usize>) -> usize {
     let Some(value) = value else {
         return 0;
