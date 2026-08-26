@@ -7,6 +7,7 @@
 //! the whole process dies midway through a later record.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     path::Path,
     sync::atomic::{AtomicU8, AtomicU64, Ordering},
@@ -22,8 +23,8 @@ pub const RUST_CONTEXT_ENV: &str = "SUPERCOV_RUST_CONTEXT_ID";
 pub const DEFAULT_DESCRIPTOR_CAPACITY: u32 = 32_768;
 pub const DEFAULT_PAYLOAD_CAPACITY: u32 = 4 * 1024 * 1024;
 
-const MAGIC: &[u8; 8] = b"SCVRUST1";
-const VERSION: u32 = 1;
+const MAGIC: &[u8; 8] = b"SCVRUST2";
+const VERSION: u32 = 2;
 const HEADER_SIZE: usize = 128;
 const DESCRIPTOR_SIZE: usize = 40;
 const ENDIAN_MARKER: u32 = 0x0102_0304;
@@ -33,6 +34,7 @@ const DROPPED_OFFSET: usize = 48;
 const TOKEN_OFFSET: usize = 56;
 const TOKEN_SIZE: usize = 16;
 const ATTACHMENTS_OFFSET: usize = 72;
+const NEXT_PHASE_OFFSET: usize = 80;
 
 const COMMIT_OFFSET: usize = 0;
 const KIND_OFFSET: usize = 1;
@@ -48,6 +50,7 @@ const CHECKSUM_OFFSET: usize = 32;
 const KIND_HIT: u8 = 1;
 const KIND_DECISION: u8 = 2;
 const KIND_ORDINAL_HIT: u8 = 3;
+const KIND_PHASE: u8 = 4;
 
 const RUNTIME_TEMPLATE: &str = include_str!("../runtime-assets/rust-mmap-runtime.rs");
 
@@ -55,6 +58,7 @@ const RUNTIME_TEMPLATE: &str = include_str!("../runtime-assets/rust-mmap-runtime
 pub struct RustTransportRead {
     pub observations: Vec<RustTransportObservation>,
     pub ordinal_hits: Vec<RustOrdinalHit>,
+    pub phases: Vec<RustPhaseContext>,
     pub committed: u64,
     pub incomplete: u64,
     pub dropped: u64,
@@ -73,6 +77,15 @@ pub struct RustOrdinalHit {
     pub process_id: u32,
     pub context_id: u64,
     pub ordinal: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustPhaseContext {
+    pub process_id: u32,
+    pub child_context_id: u64,
+    pub parent_context_id: u64,
+    pub invocation_nonce: u64,
+    pub decision_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +124,7 @@ impl std::error::Error for RustTransportError {}
 pub fn rust_assertion_context_id(
     parent: u64,
     decision_id: &str,
+    invocation_nonce: u64,
 ) -> Result<u64, RustTransportError> {
     if parent == 0 {
         return Ok(0);
@@ -139,12 +153,13 @@ pub fn rust_assertion_context_id(
         ))
     })?;
     let mut value = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in b"supercov-rust-assertion-phase-v1"
+    for byte in b"supercov-rust-assertion-phase-v2"
         .iter()
         .copied()
         .chain(parent.to_le_bytes())
         .chain(id_high.to_le_bytes())
         .chain(id_low.to_le_bytes())
+        .chain(invocation_nonce.to_le_bytes())
     {
         value ^= u64::from(byte);
         value = value.wrapping_mul(0x0000_0100_0000_01b3);
@@ -329,8 +344,8 @@ pub fn read_rust_transport(
         || mapping.get(TOKEN_OFFSET..TOKEN_OFFSET + TOKEN_SIZE) != Some(expected_token.as_slice())
         || mapping.get(52..56).is_none_or(|bytes| bytes != [0; 4])
         || mapping
-            .get(80..HEADER_SIZE)
-            .is_none_or(|bytes| bytes != [0; 48])
+            .get(NEXT_PHASE_OFFSET + 8..HEADER_SIZE)
+            .is_none_or(|bytes| bytes != [0; 40])
     {
         return Err(RustTransportError::InvalidHeader);
     }
@@ -352,6 +367,8 @@ pub fn read_rust_transport(
     let payload_base = HEADER_SIZE + descriptors as usize * DESCRIPTOR_SIZE;
     let mut observations = Vec::new();
     let mut ordinal_hits = Vec::new();
+    let mut phases = Vec::new();
+    let mut phase_definitions = BTreeMap::<u64, (u64, u64, String)>::new();
     let mut committed = 0_u64;
     for index in 0..inspect {
         let descriptor = HEADER_SIZE + index as usize * DESCRIPTOR_SIZE;
@@ -458,6 +475,47 @@ pub fn read_rust_transport(
                     ),
                 });
             }
+            KIND_PHASE
+                if outcome == 0
+                    && id.starts_with("rs:decision:")
+                    && values.len() == 16
+                    && !matches!(context_id, 0 | u64::MAX) =>
+            {
+                let parent_context_id = u64::from_le_bytes(
+                    values[..8]
+                        .try_into()
+                        .map_err(|_| RustTransportError::InvalidRecord(index))?,
+                );
+                let invocation_nonce = u64::from_le_bytes(
+                    values[8..]
+                        .try_into()
+                        .map_err(|_| RustTransportError::InvalidRecord(index))?,
+                );
+                if matches!(parent_context_id, 0 | u64::MAX)
+                    || rust_assertion_context_id(parent_context_id, id, invocation_nonce)?
+                        != context_id
+                {
+                    return Err(RustTransportError::InvalidAssertionContext(format!(
+                        "phase record {index} does not derive child {context_id:016x} from parent {parent_context_id:016x} and {id}"
+                    )));
+                }
+                let definition = (parent_context_id, invocation_nonce, id.to_owned());
+                if phase_definitions
+                    .insert(context_id, definition.clone())
+                    .is_some_and(|existing| existing != definition)
+                {
+                    return Err(RustTransportError::InvalidAssertionContext(format!(
+                        "child {context_id:016x} has conflicting phase definitions"
+                    )));
+                }
+                phases.push(RustPhaseContext {
+                    process_id: pid,
+                    child_context_id: context_id,
+                    parent_context_id,
+                    invocation_nonce,
+                    decision_id: id.into(),
+                });
+            }
             _ => return Err(RustTransportError::InvalidRecord(index)),
         }
     }
@@ -465,11 +523,71 @@ pub fn read_rust_transport(
     Ok(RustTransportRead {
         observations,
         ordinal_hits,
+        phases,
         committed,
         incomplete: inspect.saturating_sub(committed),
         dropped: recorded_dropped.max(overflow),
         attachments,
     })
+}
+
+pub fn validate_rust_phase_contexts(
+    base_context_id: u64,
+    read: &RustTransportRead,
+) -> Result<(), RustTransportError> {
+    if matches!(base_context_id, 0 | u64::MAX) {
+        return Err(RustTransportError::InvalidAssertionContext(
+            "the supervisor base context must be nonzero and not reserved".into(),
+        ));
+    }
+    let mut definitions = BTreeMap::<u64, (u64, u64, &str)>::new();
+    for phase in &read.phases {
+        let definition = (
+            phase.parent_context_id,
+            phase.invocation_nonce,
+            phase.decision_id.as_str(),
+        );
+        if definitions
+            .insert(phase.child_context_id, definition)
+            .is_some_and(|existing| existing != definition)
+        {
+            return Err(RustTransportError::InvalidAssertionContext(format!(
+                "child {:016x} has conflicting phase definitions",
+                phase.child_context_id
+            )));
+        }
+    }
+
+    let used_contexts = read
+        .observations
+        .iter()
+        .map(|observation| observation.context_id)
+        .chain(read.ordinal_hits.iter().map(|hit| hit.context_id))
+        .filter(|context| *context != 0 && *context != base_context_id)
+        .collect::<BTreeSet<_>>();
+    for start in used_contexts {
+        let mut context = start;
+        let mut path = BTreeSet::new();
+        while context != base_context_id {
+            if !path.insert(context) {
+                return Err(RustTransportError::InvalidAssertionContext(format!(
+                    "phase context cycle at {context:016x}"
+                )));
+            }
+            let (parent, _, _) = definitions.get(&context).ok_or_else(|| {
+                RustTransportError::InvalidAssertionContext(format!(
+                    "context {context:016x} does not resolve to base {base_context_id:016x}"
+                ))
+            })?;
+            context = *parent;
+            if matches!(context, 0 | u64::MAX) {
+                return Err(RustTransportError::InvalidAssertionContext(format!(
+                    "context {start:016x} crosses the supervisor attempt boundary"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn render_rust_mmap_runtime(module_name: &str) -> Result<String, String> {
@@ -555,6 +673,13 @@ fn main() {{
         __supercov_runtime_v1::hit("rs:statement:0123456789abcdef01234567");
         __supercov_runtime_v1::exit_context(assertion);
         __supercov_runtime_v1::hit("rs:statement:0123456789abcdef01234567");
+        let repeated_assertion = __supercov_runtime_v1::enter_assertion_context(
+            0x0123_4567_89ab_cdef,
+            0x0123_4567,
+        );
+        __supercov_runtime_v1::hit("rs:statement:0123456789abcdef01234567");
+        __supercov_runtime_v1::exit_context(repeated_assertion);
+        __supercov_runtime_v1::hit("rs:statement:0123456789abcdef01234567");
     }} else if mode == "mir-decisions" {{
         let before_outer = __supercov_runtime_v1::enter_context(901);
         let outer = __supercov_runtime_v1::mir_decision_start(
@@ -624,7 +749,7 @@ fn main() {{
 
     #[test]
     fn implementation_matches_frozen_transport_contract() {
-        let contract = supercov_contracts::rust_probe_transport_contract().unwrap();
+        let contract = supercov_contracts::rust_probe_transport_v2_contract().unwrap();
         assert_eq!(MAGIC.as_slice(), contract.magic.as_bytes());
         assert_eq!(VERSION, contract.protocol_version);
         assert_eq!(HEADER_SIZE, contract.header_size);
@@ -639,6 +764,7 @@ fn main() {{
         assert_eq!(DROPPED_OFFSET, contract.header_offsets.dropped);
         assert_eq!(TOKEN_OFFSET, contract.header_offsets.token);
         assert_eq!(ATTACHMENTS_OFFSET, contract.header_offsets.attachments);
+        assert_eq!(Some(NEXT_PHASE_OFFSET), contract.header_offsets.next_phase);
         assert_eq!(COMMIT_OFFSET, contract.descriptor_offsets.commit);
         assert_eq!(PID_OFFSET, contract.descriptor_offsets.process_id);
         assert_eq!(CONTEXT_OFFSET, contract.descriptor_offsets.context_id);
@@ -650,28 +776,93 @@ fn main() {{
         assert_eq!(KIND_HIT, contract.record_kinds.hit);
         assert_eq!(KIND_DECISION, contract.record_kinds.decision);
         assert_eq!(KIND_ORDINAL_HIT, contract.record_kinds.ordinal_hit);
-        assert!(RUNTIME_TEMPLATE.contains("b\"SCVRUST1\""));
+        assert_eq!(Some(KIND_PHASE), contract.record_kinds.phase);
+        assert!(RUNTIME_TEMPLATE.contains("b\"SCVRUST2\""));
         assert!(RUNTIME_TEMPLATE.contains("const DESCRIPTOR_SIZE: usize = 40;"));
     }
 
     #[test]
     fn assertion_context_derivation_is_exact_nested_and_never_promotes_background() {
         let first =
-            rust_assertion_context_id(CONTEXT, "rs:decision:0123456789abcdef01234567").unwrap();
+            rust_assertion_context_id(CONTEXT, "rs:decision:0123456789abcdef01234567", 0).unwrap();
         let nested =
-            rust_assertion_context_id(first, "rs:decision:fedcba9876543210fedcba98").unwrap();
+            rust_assertion_context_id(first, "rs:decision:fedcba9876543210fedcba98", 1).unwrap();
         assert_ne!(first, CONTEXT);
         assert_ne!(nested, first);
         assert_eq!(
-            rust_assertion_context_id(0, "rs:decision:0123456789abcdef01234567").unwrap(),
+            rust_assertion_context_id(0, "rs:decision:0123456789abcdef01234567", 2).unwrap(),
             0
         );
         assert!(matches!(
-            rust_assertion_context_id(CONTEXT, "not-a-decision"),
+            rust_assertion_context_id(CONTEXT, "not-a-decision", 2),
             Err(RustTransportError::InvalidAssertionContext(_))
         ));
         assert!(matches!(
-            rust_assertion_context_id(u64::MAX, "rs:decision:0123456789abcdef01234567"),
+            rust_assertion_context_id(u64::MAX, "rs:decision:0123456789abcdef01234567", 2),
+            Err(RustTransportError::InvalidAssertionContext(_))
+        ));
+    }
+
+    #[test]
+    fn phase_context_chains_resolve_exactly_to_the_supervisor_attempt() {
+        let outer_id = "rs:decision:0123456789abcdef01234567";
+        let inner_id = "rs:decision:fedcba9876543210fedcba98";
+        let outer = rust_assertion_context_id(CONTEXT, outer_id, 10).unwrap();
+        let inner = rust_assertion_context_id(outer, inner_id, 11).unwrap();
+        let read = RustTransportRead {
+            observations: vec![RustTransportObservation {
+                process_id: 7,
+                context_id: inner,
+                observation: RustProbeObservation::Hit {
+                    id: "rs:statement:0123456789abcdef01234567".into(),
+                },
+            }],
+            ordinal_hits: Vec::new(),
+            phases: vec![
+                RustPhaseContext {
+                    process_id: 7,
+                    child_context_id: outer,
+                    parent_context_id: CONTEXT,
+                    invocation_nonce: 10,
+                    decision_id: outer_id.into(),
+                },
+                RustPhaseContext {
+                    process_id: 7,
+                    child_context_id: inner,
+                    parent_context_id: outer,
+                    invocation_nonce: 11,
+                    decision_id: inner_id.into(),
+                },
+            ],
+            committed: 3,
+            incomplete: 0,
+            dropped: 0,
+            attachments: 1,
+        };
+        validate_rust_phase_contexts(CONTEXT, &read).unwrap();
+
+        let mut invalid = read.clone();
+        invalid.phases[0].parent_context_id = 99;
+        assert!(matches!(
+            validate_rust_phase_contexts(CONTEXT, &invalid),
+            Err(RustTransportError::InvalidAssertionContext(_))
+        ));
+
+        let mut unused = read.clone();
+        let unused_child = rust_assertion_context_id(CONTEXT, inner_id, 12).unwrap();
+        unused.phases.push(RustPhaseContext {
+            process_id: 7,
+            child_context_id: unused_child,
+            parent_context_id: CONTEXT,
+            invocation_nonce: 12,
+            decision_id: inner_id.into(),
+        });
+        validate_rust_phase_contexts(CONTEXT, &unused).unwrap();
+
+        let mut cycle = read;
+        cycle.phases[0].parent_context_id = inner;
+        assert!(matches!(
+            validate_rust_phase_contexts(CONTEXT, &cycle),
             Err(RustTransportError::InvalidAssertionContext(_))
         ));
     }
@@ -806,10 +997,72 @@ fn main() {{
                 200,
                 100,
                 CONTEXT,
-                rust_assertion_context_id(CONTEXT, "rs:decision:0123456789abcdef01234567").unwrap(),
+                rust_assertion_context_id(CONTEXT, "rs:decision:0123456789abcdef01234567", 0)
+                    .unwrap(),
+                CONTEXT,
+                rust_assertion_context_id(CONTEXT, "rs:decision:0123456789abcdef01234567", 1)
+                    .unwrap(),
                 CONTEXT,
             ]
         );
+        let assertion =
+            rust_assertion_context_id(CONTEXT, "rs:decision:0123456789abcdef01234567", 0).unwrap();
+        assert_eq!(read.phases.len(), 2);
+        assert_eq!(read.phases[0].child_context_id, assertion);
+        assert_eq!(read.phases[0].parent_context_id, CONTEXT);
+        assert_eq!(read.phases[0].invocation_nonce, 0);
+        assert_eq!(
+            read.phases[0].decision_id,
+            "rs:decision:0123456789abcdef01234567"
+        );
+        assert_ne!(
+            read.phases[0].child_context_id,
+            read.phases[1].child_context_id
+        );
+        assert_eq!(read.phases[1].parent_context_id, CONTEXT);
+        assert_eq!(read.phases[1].invocation_nonce, 1);
+        assert_eq!(read.phases[1].decision_id, read.phases[0].decision_id);
+        assert_eq!(read.committed, 11);
+
+        let invalid_phase = directory.join("invalid-phase.transport");
+        fs::copy(&nested, &invalid_phase).unwrap();
+        let mut bytes = fs::read(&invalid_phase).unwrap();
+        let descriptor_capacity = get_u32(&bytes, 20).unwrap();
+        let payload_base = HEADER_SIZE + descriptor_capacity as usize * DESCRIPTOR_SIZE;
+        let descriptor = (0..read.committed as usize)
+            .map(|index| HEADER_SIZE + index * DESCRIPTOR_SIZE)
+            .find(|offset| bytes[*offset + KIND_OFFSET] == KIND_PHASE)
+            .unwrap();
+        let payload_offset = get_u32(&bytes, descriptor + PAYLOAD_OFFSET_OFFSET).unwrap();
+        let payload_length = get_u32(&bytes, descriptor + PAYLOAD_LENGTH_OFFSET).unwrap();
+        let id_length = get_u32(&bytes, descriptor + ID_LENGTH_OFFSET).unwrap();
+        let value_length = get_u32(&bytes, descriptor + VALUE_LENGTH_OFFSET).unwrap();
+        let payload = payload_base + payload_offset as usize;
+        let id = bytes[payload..payload + id_length as usize].to_vec();
+        let values =
+            bytes[payload + id_length as usize..payload + payload_length as usize].to_vec();
+        let invalid_child = 7_u64;
+        bytes[descriptor + CONTEXT_OFFSET..descriptor + CONTEXT_OFFSET + 8]
+            .copy_from_slice(&invalid_child.to_le_bytes());
+        let replacement_checksum = checksum(
+            KIND_PHASE,
+            0,
+            get_u32(&bytes, descriptor + PID_OFFSET).unwrap(),
+            invalid_child,
+            payload_offset,
+            payload_length,
+            id_length,
+            value_length,
+            &id,
+            &values,
+        );
+        bytes[descriptor + CHECKSUM_OFFSET..descriptor + CHECKSUM_OFFSET + 8]
+            .copy_from_slice(&replacement_checksum.to_le_bytes());
+        fs::write(&invalid_phase, bytes).unwrap();
+        assert!(matches!(
+            read_rust_transport(&invalid_phase, &TOKEN),
+            Err(RustTransportError::InvalidAssertionContext(_))
+        ));
 
         let rejected = directory.join("rejected-token.transport");
         create_rust_transport(&rejected, TOKEN, 16, 4_096).unwrap();

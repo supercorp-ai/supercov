@@ -282,8 +282,10 @@ an unverified rustc commit.
    once-only left-to-right operand evaluation. Compiler-owned phase boundaries
    now place assertion arguments, conditions and outcomes under a deterministic
    child context, restore on normal and unwind exits, and nest exactly. The
-   supervisor-side collision preflight plus evidence-v3 phase metadata mapping
-   remains the attribution gate. Bind remaining real MIR/CTFE probes to
+   `rust-probe-transport-v2` now carries supervisor-verifiable parent,
+   assertion-decision and transport-global invocation identity, including
+   repeated and nested assertion executions. Evidence-v3 phase metadata
+   projection remains the attribution gate. Bind remaining real MIR/CTFE probes to
    the same manifest IDs. Add
    derive, external expansion, generic/trait, include/module and
    package-fingerprint corpora before treating the candidate as a complete

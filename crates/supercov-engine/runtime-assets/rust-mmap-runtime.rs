@@ -6,8 +6,8 @@ mod __SUPERCOV_MODULE__ {
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
-    const MAGIC: &[u8; 8] = b"SCVRUST1";
-    const VERSION: u32 = 1;
+    const MAGIC: &[u8; 8] = b"SCVRUST2";
+    const VERSION: u32 = 2;
     const HEADER_SIZE: usize = 128;
     const DESCRIPTOR_SIZE: usize = 40;
     const ENDIAN_MARKER: u32 = 0x0102_0304;
@@ -17,10 +17,12 @@ mod __SUPERCOV_MODULE__ {
     const TOKEN_OFFSET: usize = 56;
     const TOKEN_SIZE: usize = 16;
     const ATTACHMENTS_OFFSET: usize = 72;
+    const NEXT_PHASE_OFFSET: usize = 80;
     const CONTEXT_ENV: &str = "SUPERCOV_RUST_CONTEXT_ID";
     const KIND_HIT: u8 = 1;
     const KIND_DECISION: u8 = 2;
     const KIND_ORDINAL_HIT: u8 = 3;
+    const KIND_PHASE: u8 = 4;
     const DECISION_ID_PREFIX: &[u8; 12] = b"rs:decision:";
     const DECISION_ID_LENGTH: u32 = 36;
     const NO_CONTEXT_OVERRIDE: u64 = u64::MAX;
@@ -121,7 +123,7 @@ mod __SUPERCOV_MODULE__ {
                     || read_u32(header, 28)? != ENDIAN_MARKER
                     || header.get(TOKEN_OFFSET..TOKEN_OFFSET + TOKEN_SIZE)? != token
                     || header.get(52..56)? != [0; 4]
-                    || header.get(80..HEADER_SIZE)? != [0; 48]
+                    || header.get(88..HEADER_SIZE)? != [0; 40]
                 {
                     return None;
                 }
@@ -700,14 +702,15 @@ mod __SUPERCOV_MODULE__ {
         value
     }
 
-    fn assertion_context_id(parent: u64, id_high: u64, id_low: u32) -> u64 {
+    fn assertion_context_id(parent: u64, id_high: u64, id_low: u32, nonce: u64) -> u64 {
         let mut value = 0xcbf2_9ce4_8422_2325_u64;
-        for byte in b"supercov-rust-assertion-phase-v1"
+        for byte in b"supercov-rust-assertion-phase-v2"
             .iter()
             .copied()
             .chain(parent.to_le_bytes())
             .chain(id_high.to_le_bytes())
             .chain(id_low.to_le_bytes())
+            .chain(nonce.to_le_bytes())
         {
             value ^= u64::from(byte);
             value = value.wrapping_mul(0x0000_0100_0000_01b3);
@@ -839,6 +842,18 @@ mod __SUPERCOV_MODULE__ {
         if parent == 0 {
             return NO_CONTEXT_OVERRIDE;
         }
-        enter_context(assertion_context_id(parent, id_high, id_low))
+        let nonce = transport
+            .atomic_u64(NEXT_PHASE_OFFSET)
+            .fetch_add(1, Ordering::Relaxed);
+        let child = assertion_context_id(parent, id_high, id_low, nonce);
+        let id = decision_id(id_high, id_low);
+        // SAFETY: decision_id writes only the fixed ASCII prefix and lowercase
+        // hexadecimal digits.
+        let id = unsafe { std::str::from_utf8_unchecked(&id) };
+        let mut definition = [0_u8; 16];
+        definition[..8].copy_from_slice(&parent.to_le_bytes());
+        definition[8..].copy_from_slice(&nonce.to_le_bytes());
+        transport.record_in_context(KIND_PHASE, 0, id, &definition, child);
+        enter_context(child)
     }
 }

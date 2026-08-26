@@ -39,8 +39,8 @@ function createTransport(name, descriptorCapacity = 1024, payloadCapacity = 64 *
   const path = join(scratch, `${name}.transport`);
   const token = randomBytes(16);
   const header = Buffer.alloc(transportHeaderSize);
-  header.write('SCVRUST1', 0, 'ascii');
-  header.writeUInt32LE(1, 8);
+  header.write('SCVRUST2', 0, 'ascii');
+  header.writeUInt32LE(2, 8);
   header.writeUInt32LE(transportHeaderSize, 12);
   header.writeUInt32LE(transportDescriptorSize, 16);
   header.writeUInt32LE(descriptorCapacity, 20);
@@ -60,8 +60,8 @@ function createTransport(name, descriptorCapacity = 1024, payloadCapacity = 64 *
 
 function readTransport(transport) {
   const bytes = readFileSync(transport.path);
-  assert.equal(bytes.subarray(0, 8).toString('ascii'), 'SCVRUST1');
-  assert.equal(bytes.readUInt32LE(8), 1);
+  assert.equal(bytes.subarray(0, 8).toString('ascii'), 'SCVRUST2');
+  assert.equal(bytes.readUInt32LE(8), 2);
   assert.deepEqual(bytes.subarray(56, 72), transport.token);
   const descriptorCapacity = bytes.readUInt32LE(20);
   const payloadCapacity = bytes.readUInt32LE(24);
@@ -70,6 +70,7 @@ function readTransport(transport) {
   const reserved = Number(bytes.readBigUInt64LE(32));
   const ordinals = [];
   const decisions = [];
+  const phases = [];
   let committed = 0;
   for (let index = 0; index < Math.min(reserved, descriptorCapacity); index += 1) {
     const descriptor = transportHeaderSize + index * transportDescriptorSize;
@@ -101,6 +102,17 @@ function readTransport(transport) {
           (value) => (value === 0 ? null : value === 2),
         ),
       });
+    } else if (kind === 4) {
+      assert.equal(bytes[descriptor + 2], 0);
+      assert.equal(valueLength, 16);
+      phases.push({
+        child: context,
+        parent: bytes.readBigUInt64LE(payload + idLength).toString(),
+        nonce: bytes.readBigUInt64LE(payload + idLength + 8).toString(),
+        decisionId: bytes.subarray(payload, payload + idLength).toString('utf8'),
+      });
+    } else {
+      assert.fail(`unexpected Rust transport record kind ${kind}`);
     }
   }
   return {
@@ -110,6 +122,7 @@ function readTransport(transport) {
     incomplete: Math.min(reserved, descriptorCapacity) - committed,
     decisions,
     ordinals,
+    phases,
   };
 }
 
@@ -274,18 +287,20 @@ function testContextId(testName) {
   return value.toString();
 }
 
-function assertionPhaseContextId(parent, decisionId) {
+function assertionPhaseContextId(parent, decisionId, nonce) {
   const digest = decisionId.replace(/^rs:decision:/, '');
   assert.match(digest, /^[0-9a-f]{24}$/);
   const bytes = Buffer.alloc(
-    Buffer.byteLength('supercov-rust-assertion-phase-v1') + 8 + 8 + 4,
+    Buffer.byteLength('supercov-rust-assertion-phase-v2') + 8 + 8 + 4 + 8,
   );
-  let offset = bytes.write('supercov-rust-assertion-phase-v1');
+  let offset = bytes.write('supercov-rust-assertion-phase-v2');
   bytes.writeBigUInt64LE(BigInt(parent), offset);
   offset += 8;
   bytes.writeBigUInt64LE(BigInt(`0x${digest.slice(0, 16)}`), offset);
   offset += 8;
   bytes.writeUInt32LE(Number.parseInt(digest.slice(16), 16), offset);
+  offset += 4;
+  bytes.writeBigUInt64LE(BigInt(nonce), offset);
   let value = 0xcbf29ce484222325n;
   for (const byte of bytes) {
     value ^= BigInt(byte);
@@ -295,6 +310,59 @@ function assertionPhaseContextId(parent, decisionId) {
     value ^= 0xa5a55a5ad3c3b4b4n;
   }
   return value.toString();
+}
+
+function validatePhaseContexts(evidence, baseContexts) {
+  const definitions = new Map();
+  for (const phase of evidence.phases) {
+    assert.equal(
+      phase.child,
+      assertionPhaseContextId(phase.parent, phase.decisionId, phase.nonce),
+      'runtime phase definition failed deterministic authentication',
+    );
+    const serialized = `${phase.parent}:${phase.nonce}:${phase.decisionId}`;
+    assert(
+      !definitions.has(phase.child) || definitions.get(phase.child) === serialized,
+      `phase context collision for ${phase.child}`,
+    );
+    definitions.set(phase.child, serialized);
+  }
+  const roots = new Set([...baseContexts].map(String));
+  for (const start of [
+    ...evidence.decisions.map(({context}) => context),
+    ...evidence.ordinals.map(({context}) => context),
+  ]) {
+    if (start === '0' || roots.has(start)) continue;
+    const path = new Set();
+    let context = start;
+    while (!roots.has(context)) {
+      assert(!path.has(context), `phase context cycle at ${context}`);
+      path.add(context);
+      const definition = definitions.get(context);
+      assert(definition, `phase context ${context} has no authenticated parent`);
+      context = definition.slice(0, definition.indexOf(':'));
+      assert.notEqual(context, '0', 'phase context crossed into background');
+    }
+  }
+}
+
+function assertionPhaseContexts(evidence, parent, decisionId) {
+  return evidence.phases
+    .filter(
+      (phase) =>
+        phase.parent === String(parent) && phase.decisionId === decisionId,
+    )
+    .map(({child}) => child);
+}
+
+function assertionPhaseContext(evidence, parent, decisionId) {
+  const contexts = assertionPhaseContexts(evidence, parent, decisionId);
+  assert.equal(
+    contexts.length,
+    1,
+    `expected one dynamic phase for ${decisionId} under ${parent}`,
+  );
+  return contexts[0];
 }
 
 try {
@@ -908,6 +976,7 @@ try {
     'runtime probe is not bound to its manifest obligation',
   );
   const behaviorEvidence = readTransport(behaviorTransport);
+  validatePhaseContexts(behaviorEvidence, [transportContext, 303, 404]);
   assert.equal(
     behaviorEvidence.attachments,
     2,
@@ -1336,10 +1405,12 @@ try {
     assert(
       behaviorEvidence.decisions
         .filter(({id}) => id === assertion.id)
-        .every(
-          ({context}) =>
-            context ===
-            assertionPhaseContextId(transportContext, assertion.id),
+        .every(({context}) =>
+          assertionPhaseContexts(
+            behaviorEvidence,
+            transportContext,
+            assertion.id,
+          ).includes(context),
         ),
       `${definition} evidence escaped its exact assertion phase`,
     );
@@ -1621,7 +1692,11 @@ try {
   const assertionContextIds = contextNames.map((name, index) => {
     return name === 'tests::panic_context'
       ? null
-      : assertionPhaseContextId(contextIds[index], assertionDecisionIdFor(name));
+      : assertionPhaseContext(
+          concurrentEvidence,
+          contextIds[index],
+          assertionDecisionIdFor(name),
+        );
   });
   const resolvedAssertionContextIds = assertionContextIds.filter(Boolean);
   assert.equal(
@@ -1636,7 +1711,8 @@ try {
     decision.conditions.some(({source}) => source.includes('authored')),
   );
   assert(restoreAuthoredAssertion);
-  const restoreAuthoredContext = assertionPhaseContextId(
+  const restoreAuthoredContext = assertionPhaseContext(
+    concurrentEvidence,
     restoreTestContext,
     restoreAuthoredAssertion.id,
   );
@@ -1650,14 +1726,22 @@ try {
     (decision) => decision.id !== nestedOuterAssertion?.id,
   );
   assert(nestedOuterAssertion && nestedInnerAssertion);
-  const nestedOuterContext = assertionPhaseContextId(
+  const nestedOuterContext = assertionPhaseContext(
+    concurrentEvidence,
     nestedTestContext,
     nestedOuterAssertion.id,
   );
-  const nestedInnerContext = assertionPhaseContextId(
+  const nestedInnerContext = assertionPhaseContext(
+    concurrentEvidence,
     nestedOuterContext,
     nestedInnerAssertion.id,
   );
+  validatePhaseContexts(concurrentEvidence, [
+    ...contextIds,
+    restoreTestContext,
+    nestedTestContext,
+    testContextId('tests::child_context'),
+  ]);
   assert.deepEqual(
     new Set(
       concurrentEvidence.ordinals.map(

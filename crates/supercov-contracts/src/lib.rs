@@ -31,6 +31,8 @@ pub const LANGUAGE_FRONTEND_PROTOCOL_VERSION: u32 = 2;
 pub const RUST_COMPILER_COMPANION_PROTOCOL_VERSION: u32 = 1;
 pub const RUST_PROBE_TRANSPORT_PROTOCOL_VERSION: u32 = 1;
 pub const RUST_PROBE_TRANSPORT_MAGIC: &str = "SCVRUST1";
+pub const RUST_PROBE_TRANSPORT_V2_PROTOCOL_VERSION: u32 = 2;
+pub const RUST_PROBE_TRANSPORT_V2_MAGIC: &str = "SCVRUST2";
 pub const RUST_PROBE_TRANSPORT_HEADER_SIZE: usize = 128;
 pub const RUST_PROBE_TRANSPORT_DESCRIPTOR_SIZE: usize = 40;
 pub const RUST_PROBE_TRANSPORT_TOKEN_SIZE: usize = 16;
@@ -376,6 +378,8 @@ pub struct RustProbeTransportHeaderOffsets {
     pub dropped: usize,
     pub token: usize,
     pub attachments: usize,
+    #[serde(default)]
+    pub next_phase: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -400,6 +404,8 @@ pub struct RustProbeTransportRecordKinds {
     pub hit: u8,
     pub decision: u8,
     pub ordinal_hit: u8,
+    #[serde(default)]
+    pub phase: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -444,6 +450,12 @@ pub struct RustProbeTransportCompleteness {
 pub fn rust_probe_transport_contract() -> Result<RustProbeTransportContract, serde_json::Error> {
     serde_json::from_str(include_str!(
         "../assets/rust-probe-transport-v1/contract.json"
+    ))
+}
+
+pub fn rust_probe_transport_v2_contract() -> Result<RustProbeTransportContract, serde_json::Error> {
+    serde_json::from_str(include_str!(
+        "../assets/rust-probe-transport-v2/contract.json"
     ))
 }
 
@@ -1498,6 +1510,7 @@ mod tests {
         assert_eq!(contract.header_offsets.dropped, 48);
         assert_eq!(contract.header_offsets.token, 56);
         assert_eq!(contract.header_offsets.attachments, 72);
+        assert_eq!(contract.header_offsets.next_phase, None);
         assert_eq!(contract.descriptor_offsets.commit, 0);
         assert_eq!(contract.descriptor_offsets.process_id, 4);
         assert_eq!(contract.descriptor_offsets.context_id, 8);
@@ -1506,6 +1519,7 @@ mod tests {
         assert_eq!(contract.record_kinds.hit, 1);
         assert_eq!(contract.record_kinds.decision, 2);
         assert_eq!(contract.record_kinds.ordinal_hit, 3);
+        assert_eq!(contract.record_kinds.phase, None);
         assert_eq!(contract.publication.commit_value, 1);
         assert_eq!(contract.publication.writer_ordering, "release");
         assert_eq!(contract.publication.reader_ordering, "acquire");
@@ -1553,6 +1567,35 @@ mod tests {
             ]
         );
         assert_eq!(contract.unsupported_target, "fail-closed");
+    }
+
+    #[test]
+    fn rust_probe_transport_v2_adds_authenticated_phase_definitions_only() {
+        let v1 = rust_probe_transport_contract().unwrap();
+        let v2 = rust_probe_transport_v2_contract().unwrap();
+        assert_eq!(v1.protocol_version, RUST_PROBE_TRANSPORT_PROTOCOL_VERSION);
+        assert_eq!(v1.magic, RUST_PROBE_TRANSPORT_MAGIC);
+        assert_eq!(v1.record_kinds.phase, None);
+        assert_eq!(
+            v2.protocol_version,
+            RUST_PROBE_TRANSPORT_V2_PROTOCOL_VERSION
+        );
+        assert_eq!(v2.status, "candidate-private-frontend");
+        assert_eq!(v2.magic, RUST_PROBE_TRANSPORT_V2_MAGIC);
+        assert_eq!(v2.record_kinds.phase, Some(4));
+        assert_eq!(v2.header_offsets.next_phase, Some(80));
+        assert_eq!(v2.header_size, v1.header_size);
+        assert_eq!(v2.descriptor_size, v1.descriptor_size);
+        assert_eq!(v2.token_size, v1.token_size);
+        let mut v2_header = v2.header_offsets.clone();
+        v2_header.next_phase = None;
+        assert_eq!(v2_header, v1.header_offsets);
+        assert_eq!(v2.descriptor_offsets, v1.descriptor_offsets);
+        assert_eq!(v2.publication, v1.publication);
+        assert_eq!(v2.integrity, v1.integrity);
+        assert_eq!(v2.completeness, v1.completeness);
+        assert_eq!(v2.supported_targets, v1.supported_targets);
+        assert_eq!(v2.unsupported_target, v1.unsupported_target);
     }
 
     #[test]

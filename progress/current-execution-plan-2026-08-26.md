@@ -210,8 +210,15 @@ candidate still carries blocking denominator limitations. The authored match
    macros now have exact passed/failed and MC/DC observations, including
    collapsed proc-macro output and panic/evaluation-order goldens. Exact nested
    assertion phase contexts now cover argument evaluation and restore on normal
-   and unwind exits; supervisor collision preflight and evidence-v3 phase
-   metadata mapping, CTFE and doctest obligation/probe mappings,
+   and unwind exits. `rust-probe-transport-v2` now publishes authenticated
+   child-to-parent assertion phase definitions. A transport-global invocation
+   nonce distinguishes repeated executions of the same assertion site and is
+   collision-safe across concurrent processes; malformed derivations, missing
+   parents, cycles and cross-attempt chains fail closed. The real compiler
+   corpus corrected one false premise before freezing: a valid phase definition
+   may have no committed observation when evaluation panics or touches only
+   uninstrumented data. Evidence-v3 phase projection, CTFE and doctest
+   obligation/probe mappings,
 plus full package and compiler fingerprints, remain R1 work. No measurement-
 complete claim is possible yet.
 

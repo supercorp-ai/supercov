@@ -1302,6 +1302,14 @@ miss blocks flipping any default.
   separated. A spawned child thread deliberately remains context zero, proving
   Supercov detects rather than guesses missing propagation; exact child/async
   propagation or automatic process-per-test rerun remains a promotion gate.
+- The private compiler frontend advances the wire to
+  `rust-probe-transport-v2`: assertion phase definitions authenticate their
+  parent, static assertion decision and transport-global dynamic invocation
+  nonce. This distinguishes repeated executions at one source site, preserves
+  nested causality, and avoids PID/counter collisions across concurrent or
+  cloned writers. Orphan observation contexts, cycles and cross-attempt chains
+  fail closed; a definition without an observation remains valid because
+  evaluation can panic before a verdict is committed.
 - Rust source identity v1 is now frozen and executable for compiler-derived
   function/statement points and the first `if`/`if let`/let-chain decision,
   condition and branch shapes. Authored and declarative-expansion tokens use
