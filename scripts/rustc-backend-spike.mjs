@@ -735,7 +735,7 @@ try {
     identityManifestB,
     'manifest candidate changed across clean target directories',
   );
-  assert.equal(identityManifestA.schema, 'supercov-rust-manifest-candidate-v1');
+  assert.equal(identityManifestA.schema, 'supercov-rust-manifest-candidate-v2');
   assert.equal(identityManifestA.model, 'rust-source-v1');
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
@@ -3272,24 +3272,46 @@ try {
     wrappedDoctestDirectory,
     'doctest_bundle_2024',
   );
-  assert.equal(mergedPendingManifest.points.length, 1);
-  assert.equal(mergedPendingManifest.branches.length, 1);
-  assert.equal(mergedPendingManifest.decisions.length, 1);
-  assert(
-    [
+  assert(mergedPendingManifest.points.length >= 2);
+  assert(mergedPendingManifest.branches.length >= 2);
+  assert(mergedPendingManifest.decisions.length >= 2);
+  const invalidPendingObligations = [
       ...mergedPendingManifest.points,
       ...mergedPendingManifest.branches,
       ...mergedPendingManifest.decisions,
-    ].every(
+    ].filter(
       ({sourceKey, provenance, definitions}) =>
-        sourceKey === 'doctest-pending:supercov_rustc_spike_fixture' &&
-        provenance === 'doctest-pending' &&
-        definitions.includes('__doctest_0::main'),
-    ),
+        sourceKey !== 'doctest-pending:supercov_rustc_spike_fixture' ||
+        provenance !== 'doctest-pending' ||
+        !definitions.some(
+          (definition) =>
+            definition === '__doctest_0::main' ||
+            definition.startsWith('__doctest_0::main::'),
+        ),
+    );
+  assert.deepEqual(
+    invalidPendingObligations,
+    [],
     'merged bundle obligations leaked temporary source identity',
   );
+  const pendingSyntheticCanonicals = [
+    ...mergedPendingManifest.points,
+    ...mergedPendingManifest.branches,
+    ...mergedPendingManifest.branches.flatMap(({alternatives}) => alternatives),
+    ...mergedPendingManifest.decisions,
+  ].filter(({canonical}) => canonical.includes('\0synthetic-expansion\0'));
+  assert(
+    pendingSyntheticCanonicals.length >= 4,
+    'the real merged proc-macro expression emitted no complete synthetic identity family',
+  );
+  const authoredPendingPoint = mergedPendingManifest.points.find(
+    (point) =>
+      obligationSource(mergedPendingSources, point) ===
+      'assert_eq!(supercov_rustc_spike_fixture::authored(true), 1)',
+  );
+  assert(authoredPendingPoint, 'merged authored assertion statement is missing');
   assert.equal(
-    obligationSource(mergedPendingSources, mergedPendingManifest.points[0]),
+    obligationSource(mergedPendingSources, authoredPendingPoint),
     'assert_eq!(supercov_rustc_spike_fixture::authored(true), 1)',
   );
   const mergedJoin = JSON.parse(
@@ -3311,9 +3333,18 @@ try {
       }),
     }).stdout,
   );
-  assert.equal(mergedJoin.manifest.points.length, 1);
-  assert.equal(mergedJoin.manifest.branches.length, 1);
-  assert.equal(mergedJoin.manifest.decisions.length, 1);
+  assert.equal(
+    mergedJoin.manifest.points.length,
+    mergedPendingManifest.points.length,
+  );
+  assert.equal(
+    mergedJoin.manifest.branches.length,
+    mergedPendingManifest.branches.length,
+  );
+  assert.equal(
+    mergedJoin.manifest.decisions.length,
+    mergedPendingManifest.decisions.length,
+  );
   assert(
     [
       ...mergedJoin.manifest.points,
@@ -3322,44 +3353,68 @@ try {
     ].every(
       ({sourceKey, provenance, canonical, definitions}) =>
         sourceKey === 'source:src/lib.rs' &&
-        provenance === 'doctest-source' &&
+        ['doctest-source', 'synthetic-expansion'].includes(provenance) &&
         !canonical.includes('doctest-pending:') &&
-        definitions.includes('doctest:src/lib.rs:3'),
+        !canonical.includes('__doctest_0') &&
+        definitions.some(
+          (definition) =>
+            definition === 'doctest:src/lib.rs:3' ||
+            definition.startsWith('doctest:src/lib.rs:3::'),
+        ),
     ),
     'the strict merged-doctest join retained a temporary identity',
   );
+  assert(
+    [
+      ...mergedJoin.manifest.points,
+      ...mergedJoin.manifest.branches,
+      ...mergedJoin.manifest.decisions,
+    ].some(({provenance}) => provenance === 'synthetic-expansion'),
+    'the final merged manifest lost synthetic expansion provenance',
+  );
+  const authoredFinalPoint = mergedJoin.manifest.points.find(
+    ({id}) => id === mergedJoin.obligationIds[authoredPendingPoint.id],
+  );
+  assert(authoredFinalPoint, 'merged authored statement ID was not translated');
   assert.equal(
     obligationSource(
       mergedJoin.sources.sources,
-      mergedJoin.manifest.points[0],
+      authoredFinalPoint,
     ),
     'assert_eq!(supercov_rustc_spike_fixture::authored(true), 1)',
   );
   assert.equal(
-    mergedJoin.obligationIds[mergedPendingManifest.points[0].id],
-    mergedJoin.manifest.points[0].id,
+    mergedJoin.obligationIds[authoredPendingPoint.id],
+    authoredFinalPoint.id,
   );
   assert.equal(
-    mergedJoin.probeOrdinals[mergedPendingManifest.points[0].probeOrdinal],
-    mergedJoin.manifest.points[0].probeOrdinal,
+    mergedJoin.probeOrdinals[authoredPendingPoint.probeOrdinal],
+    authoredFinalPoint.probeOrdinal,
   );
   const mergedRoot = mergedRunnerContext?.testContextId;
   assert(mergedRoot, 'merged doctest test context identity is missing');
-  assert(
-    doctestRuntime.ordinals.some(
-      ({context, ordinal}) =>
-        doctestRootContext(context) === mergedRoot &&
-        ordinal === mergedPendingManifest.points[0].probeOrdinal,
-    ),
-    'merged pending statement probe was not attributed to its exact test root',
+  const observedMergedOrdinals = new Set(
+    doctestRuntime.ordinals
+      .filter(({context}) => doctestRootContext(context) === mergedRoot)
+      .map(({ordinal}) => ordinal),
   );
+  assert(
+    mergedPendingManifest.points.every(({probeOrdinal}) =>
+      observedMergedOrdinals.has(probeOrdinal),
+    ),
+    'merged pending statement probes were not all attributed to their exact test root',
+  );
+  const pendingSyntheticDecision = mergedPendingManifest.decisions.find(
+    ({canonical}) => canonical.includes('\0synthetic-expansion\0'),
+  );
+  assert(pendingSyntheticDecision, 'merged synthetic decision is missing');
   assert(
     doctestRuntime.decisions.some(
       ({context, id}) =>
         doctestRootContext(context) === mergedRoot &&
-        id === mergedPendingManifest.decisions[0].id,
+        id === pendingSyntheticDecision.id,
     ),
-    'merged pending assertion decision was not attributed to its exact test root',
+    'merged pending synthetic decision was not attributed to its exact test root',
   );
   assert.equal(
     createHash('sha256').update(readFileSync(fixtureSourcePath)).digest('hex'),

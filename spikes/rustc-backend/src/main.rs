@@ -1778,10 +1778,11 @@ fn manifest_json(
                 .iter()
                 .map(|alternative| {
                     format!(
-                        "{{\"id\":\"{}\",\"label\":\"{}\",\"probeOrdinal\":\"{}\"}}",
+                        "{{\"id\":\"{}\",\"label\":\"{}\",\"probeOrdinal\":\"{}\",\"canonical\":\"{}\"}}",
                         escape(&alternative.identity.id),
                         alternative.label,
                         alternative.identity.probe_ordinal,
+                        escape(&alternative.identity.canonical),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -1886,7 +1887,7 @@ fn manifest_json(
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"schema\":\"supercov-rust-manifest-candidate-v1\",\"model\":\"rust-source-v1\",\"crate\":\"{}\",\"measurementComplete\":false,\"points\":[{}],\"branches\":[{}],\"decisions\":[{}],\"selectionGroups\":[{}],\"limitations\":[{}]}}\n",
+        "{{\"schema\":\"supercov-rust-manifest-candidate-v2\",\"model\":\"rust-source-v1\",\"crate\":\"{}\",\"measurementComplete\":false,\"points\":[{}],\"branches\":[{}],\"decisions\":[{}],\"selectionGroups\":[{}],\"limitations\":[{}]}}\n",
         escape(crate_name),
         points,
         branches,

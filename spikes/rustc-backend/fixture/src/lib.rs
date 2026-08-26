@@ -2,6 +2,9 @@
 //!
 //! ```
 //! assert_eq!(supercov_rustc_spike_fixture::authored(true), 1);
+//! assert_eq!(probe_macros::generated_expression!(), 41);
+//! probe_macros::generated_local_function!();
+//! assert_eq!(generated_local_by_proc(true), 47);
 //! ```
 
 macro_rules! generated_function {

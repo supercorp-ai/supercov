@@ -628,16 +628,21 @@ an atomically renamed, directory-synced map from each numeric `__doctest_N`
 module to rustdoc's exact original path, line and display name. Only then does
 the engine align the complete extracted `main` body against the runner-bounded
 documentation interval, translate exact subranges (including repeated atoms
-and repeated lines), rebuild every non-synthetic point, branch, alternative,
-decision and match-group identity, and return complete old-to-new ID and
-string-safe ordinal maps for already-emitted evidence. The resulting manifest
-passes the ordinary production validator and normalizer with no temporary
-identity. The real Cargo/rustdoc gate proves statement and assertion evidence
-under the exact merged test root without changing output or checkout bytes.
-Synthetic proc/derive expansion canonicals inside merged bundles,
-outcome/retry archive joining, wrapper composition and the full failure/signal
-corpus remain explicit blockers, so this still does not enable the public
-rustdoc capability.
+and repeated lines), rebuild every point, branch, alternative, decision and
+match-group identity, and return complete old-to-new ID and string-safe
+ordinal maps for already-emitted evidence. Synthetic expansion canonicals are
+strictly parsed and rebuilt too: every expansion callsite is mapped through
+the same full-body alignment, temporary generated owner definitions become
+stable doctest owners, and alternative ordinals are rekeyed without guessing.
+The candidate manifest schema was cleanly replaced by v2 because complete
+alternative canonicals are now mandatory; there is no v1 reader. The resulting
+manifest passes the ordinary production validator and normalizer with no
+temporary identity. The real Cargo/rustdoc gate proves an owned proc-macro-
+generated local decision plus ordinary statement and assertion evidence under
+the exact merged test root without changing output or checkout bytes. Broader
+derive/external/nested expansion coverage, outcome/retry archive joining,
+wrapper composition and the full failure/signal corpus remain explicit
+blockers, so this still does not enable the public rustdoc capability.
 
 Correctness corpus:
 

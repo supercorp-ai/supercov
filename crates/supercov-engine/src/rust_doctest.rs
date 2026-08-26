@@ -450,6 +450,13 @@ fn identity_for_range(
         "{SOURCE_MODEL}\0{kind}\0{}\0{}\0{}\0{discriminator}\0",
         source.source_key, source.start, source.end
     );
+    identity_from_canonical(kind, canonical)
+}
+
+fn identity_from_canonical(
+    kind: &str,
+    canonical: String,
+) -> Result<RustSourceIdentity, RustdocJoinError> {
     let digest = Sha256::digest(canonical.as_bytes());
     let encoded = digest[..12]
         .iter()
@@ -464,6 +471,201 @@ fn identity_for_range(
         id: format!("rs:{kind}:{encoded}"),
         canonical,
         probe_ordinal,
+    })
+}
+
+#[derive(Debug)]
+struct SyntheticExpansionFrame {
+    description: String,
+    source: RustdocMappedRange,
+    definition: String,
+}
+
+#[derive(Debug)]
+struct SyntheticCanonical {
+    frames: Vec<SyntheticExpansionFrame>,
+    definition: String,
+    owner_ordinal: u64,
+}
+
+fn canonical_u32(value: &str, field: &str) -> Result<u32, RustdocJoinError> {
+    let parsed = value.parse::<u32>().map_err(|_| {
+        RustdocJoinError::Invalid(format!("synthetic canonical has invalid {field}"))
+    })?;
+    if value != parsed.to_string() {
+        return Err(RustdocJoinError::Invalid(format!(
+            "synthetic canonical has non-canonical {field}"
+        )));
+    }
+    Ok(parsed)
+}
+
+fn canonical_u64(value: &str, field: &str) -> Result<u64, RustdocJoinError> {
+    let parsed = value.parse::<u64>().map_err(|_| {
+        RustdocJoinError::Invalid(format!("synthetic canonical has invalid {field}"))
+    })?;
+    if value != parsed.to_string() {
+        return Err(RustdocJoinError::Invalid(format!(
+            "synthetic canonical has non-canonical {field}"
+        )));
+    }
+    Ok(parsed)
+}
+
+fn parse_synthetic_canonical(
+    canonical: &str,
+    kind: &str,
+    source_key: &str,
+    start: u32,
+    end: u32,
+    discriminator: &str,
+) -> Result<Option<SyntheticCanonical>, RustdocJoinError> {
+    let parts = canonical.split('\0').collect::<Vec<_>>();
+    if parts.get(6) != Some(&"synthetic-expansion") {
+        return Ok(None);
+    }
+    if parts.last() != Some(&"")
+        || parts.len() < 15
+        || (parts.len() - 10) % 5 != 0
+        || parts[0] != SOURCE_MODEL
+        || parts[1] != kind
+        || parts[2] != source_key
+        || canonical_u32(parts[3], "source start")? != start
+        || canonical_u32(parts[4], "source end")? != end
+        || parts[5] != discriminator
+    {
+        return Err(RustdocJoinError::Invalid(format!(
+            "malformed synthetic canonical for {kind}"
+        )));
+    }
+    let frame_count = (parts.len() - 10) / 5;
+    let mut frames = Vec::with_capacity(frame_count);
+    for frame in parts[7..7 + frame_count * 5].chunks_exact(5) {
+        if frame[0].is_empty() || frame[1].is_empty() || frame[4].is_empty() {
+            return Err(RustdocJoinError::Invalid(
+                "synthetic expansion frame has an empty identity component".into(),
+            ));
+        }
+        frames.push(SyntheticExpansionFrame {
+            description: frame[0].into(),
+            source: RustdocMappedRange {
+                source_key: frame[1].into(),
+                start: canonical_u32(frame[2], "frame start")?,
+                end: canonical_u32(frame[3], "frame end")?,
+            },
+            definition: frame[4].into(),
+        });
+    }
+    let definition_index = 7 + frame_count * 5;
+    let definition = parts[definition_index];
+    let owner_ordinal = canonical_u64(parts[definition_index + 1], "owner ordinal")?;
+    if definition.is_empty() {
+        return Err(RustdocJoinError::Invalid(
+            "synthetic canonical has an empty owner definition".into(),
+        ));
+    }
+    Ok(Some(SyntheticCanonical {
+        frames,
+        definition: definition.into(),
+        owner_ordinal,
+    }))
+}
+
+fn stable_definition(
+    entry: &RustdocMergedEntry,
+    definition: &str,
+) -> Result<String, RustdocJoinError> {
+    let main = format!("{}::main", entry.module);
+    if let Some(suffix) = definition.strip_prefix(&main) {
+        return Ok(format!("doctest:{}:{}{suffix}", entry.path, entry.line));
+    }
+    if definition.is_empty()
+        || definition.chars().any(char::is_control)
+        || definition.contains("doctest_bundle_")
+        || definition.contains("__doctest_")
+    {
+        return Err(RustdocJoinError::Invalid(format!(
+            "synthetic expansion definition {definition} is not stable"
+        )));
+    }
+    Ok(definition.into())
+}
+
+struct RebasedIdentity {
+    identity: RustSourceIdentity,
+    source: RustdocMappedRange,
+    provenance: &'static str,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rebase_identity(
+    map: &RustdocMergedMap,
+    entry: &RustdocMergedEntry,
+    bundle_source: &str,
+    authored_sources: &BTreeMap<String, RustCompilerSource>,
+    kind: &str,
+    source_key: &str,
+    start: u32,
+    end: u32,
+    old_discriminator: &str,
+    new_discriminator: &str,
+    id: &str,
+    canonical: &str,
+    probe_ordinal: &str,
+) -> Result<RebasedIdentity, RustdocJoinError> {
+    let source = map_obligation_range(map, entry, bundle_source, start, end, authored_sources)?;
+    if let Some(synthetic) =
+        parse_synthetic_canonical(canonical, kind, source_key, start, end, old_discriminator)?
+    {
+        let old = identity_from_canonical(kind, canonical.into())?;
+        verify_pending_identity(&old, id, Some(canonical), probe_ordinal)?;
+        let pending_key = format!("doctest-pending:{}", map.group);
+        let mut frame_canonical = String::new();
+        for frame in synthetic.frames {
+            if frame.source.source_key != pending_key {
+                return Err(RustdocJoinError::Invalid(format!(
+                    "synthetic expansion frame escaped pending source {}",
+                    frame.source.source_key
+                )));
+            }
+            let mapped = map_obligation_range(
+                map,
+                entry,
+                bundle_source,
+                frame.source.start,
+                frame.source.end,
+                authored_sources,
+            )?;
+            frame_canonical.push_str(&format!(
+                "{}\0{}\0{}\0{}\0{}\0",
+                frame.description,
+                mapped.source_key,
+                mapped.start,
+                mapped.end,
+                stable_definition(entry, &frame.definition)?,
+            ));
+        }
+        let canonical = format!(
+            "{SOURCE_MODEL}\0{kind}\0{}\0{}\0{}\0{new_discriminator}\0synthetic-expansion\0{}{}\0{}\0",
+            source.source_key,
+            source.start,
+            source.end,
+            frame_canonical,
+            stable_definition(entry, &synthetic.definition)?,
+            synthetic.owner_ordinal,
+        );
+        return Ok(RebasedIdentity {
+            identity: identity_from_canonical(kind, canonical)?,
+            source,
+            provenance: "synthetic-expansion",
+        });
+    }
+    let old = pending_identity(kind, source_key, start, end, old_discriminator)?;
+    verify_pending_identity(&old, id, Some(canonical), probe_ordinal)?;
+    Ok(RebasedIdentity {
+        identity: rust_source_identity(kind, &source, new_discriminator)?,
+        source,
+        provenance: "doctest-source",
     })
 }
 
@@ -682,96 +884,72 @@ pub fn join_merged_doctest(
     let mut ordinals = BTreeMap::new();
 
     for point in &mut manifest.points {
-        if point.canonical.contains("\0synthetic-expansion\0") {
-            return Err(RustdocJoinError::Invalid(
-                "synthetic expansion identity inside a merged doctest is not yet rebased".into(),
-            ));
-        }
-        let old = pending_identity(
+        let entry = definition_module(&map, &point.definitions)?;
+        let rebased = rebase_identity(
+            &map,
+            entry,
+            bundle_source,
+            authored_sources,
             &point.kind,
             &point.source_key,
             point.start,
             point.end,
             &point.discriminator,
-        )?;
-        verify_pending_identity(
-            &old,
+            &point.discriminator,
             &point.id,
-            Some(&point.canonical),
+            &point.canonical,
             &point.probe_ordinal,
         )?;
-        let entry = definition_module(&map, &point.definitions)?;
-        let source = map_obligation_range(
-            &map,
-            entry,
-            bundle_source,
-            point.start,
-            point.end,
-            authored_sources,
-        )?;
-        let new = rust_source_identity(&point.kind, &source, &point.discriminator)?;
         insert_translation(
             &mut ids,
             &mut ordinals,
             &point.id,
             &point.probe_ordinal,
-            &new,
+            &rebased.identity,
         )?;
-        point.id = new.id;
-        point.canonical = new.canonical;
-        point.probe_ordinal = new.probe_ordinal.to_string();
-        point.source_key = source.source_key;
-        point.start = source.start;
-        point.end = source.end;
-        point.provenance = "doctest-source".into();
+        point.id = rebased.identity.id;
+        point.canonical = rebased.identity.canonical;
+        point.probe_ordinal = rebased.identity.probe_ordinal.to_string();
+        point.source_key = rebased.source.source_key;
+        point.start = rebased.source.start;
+        point.end = rebased.source.end;
+        point.provenance = rebased.provenance.into();
         point.definitions = stable_definitions(entry, &point.definitions)?;
     }
 
     let mut group_ids = BTreeMap::new();
     for group in &mut manifest.selection_groups {
-        if group.canonical.contains("\0synthetic-expansion\0") {
-            return Err(RustdocJoinError::Invalid(
-                "synthetic match identity inside a merged doctest is not yet rebased".into(),
-            ));
-        }
-        let old = pending_identity(
+        let entry = definition_module(&map, &group.definitions)?;
+        let rebased = rebase_identity(
+            &map,
+            entry,
+            bundle_source,
+            authored_sources,
             "match-group",
             &group.source_key,
             group.start,
             group.end,
             "match",
-        )?;
-        verify_pending_identity(
-            &old,
+            "match",
             &group.id,
-            Some(&group.canonical),
+            &group.canonical,
             &group.probe_ordinal,
         )?;
-        let entry = definition_module(&map, &group.definitions)?;
-        let source = map_obligation_range(
-            &map,
-            entry,
-            bundle_source,
-            group.start,
-            group.end,
-            authored_sources,
-        )?;
-        let new = rust_source_identity("match-group", &source, "match")?;
         insert_translation(
             &mut ids,
             &mut ordinals,
             &group.id,
             &group.probe_ordinal,
-            &new,
+            &rebased.identity,
         )?;
-        group_ids.insert(group.id.clone(), new.id.clone());
-        group.id = new.id;
-        group.canonical = new.canonical;
-        group.probe_ordinal = new.probe_ordinal.to_string();
-        group.source_key = source.source_key;
-        group.start = source.start;
-        group.end = source.end;
-        group.provenance = "doctest-source".into();
+        group_ids.insert(group.id.clone(), rebased.identity.id.clone());
+        group.id = rebased.identity.id;
+        group.canonical = rebased.identity.canonical;
+        group.probe_ordinal = rebased.identity.probe_ordinal.to_string();
+        group.source_key = rebased.source.source_key;
+        group.start = rebased.source.start;
+        group.end = rebased.source.end;
+        group.provenance = rebased.provenance.into();
         group.definitions = stable_definitions(entry, &group.definitions)?;
         for arm in &mut group.arms {
             let source = map_obligation_range(
@@ -790,37 +968,11 @@ pub fn join_merged_doctest(
 
     let mut branch_ids = BTreeMap::new();
     for branch in &mut manifest.branches {
-        if branch.canonical.contains("\0synthetic-expansion\0") {
-            return Err(RustdocJoinError::Invalid(
-                "synthetic branch identity inside a merged doctest is not yet rebased".into(),
-            ));
-        }
         let old_discriminator = branch.discriminator.clone();
         let old_source_key = branch.source_key.clone();
         let old_start = branch.start;
         let old_end = branch.end;
-        let old = pending_identity(
-            "branch",
-            &old_source_key,
-            old_start,
-            old_end,
-            &old_discriminator,
-        )?;
-        verify_pending_identity(
-            &old,
-            &branch.id,
-            Some(&branch.canonical),
-            &branch.probe_ordinal,
-        )?;
         let entry = definition_module(&map, &branch.definitions)?;
-        let source = map_obligation_range(
-            &map,
-            entry,
-            bundle_source,
-            branch.start,
-            branch.end,
-            authored_sources,
-        )?;
         let discriminator = if branch.kind == "match-arm" {
             let mut translated = old_discriminator.clone();
             for (old_group, new_group) in &group_ids {
@@ -836,95 +988,104 @@ pub fn join_merged_doctest(
         } else {
             old_discriminator.clone()
         };
-        let new = rust_source_identity("branch", &source, &discriminator)?;
+        let rebased = rebase_identity(
+            &map,
+            entry,
+            bundle_source,
+            authored_sources,
+            "branch",
+            &old_source_key,
+            old_start,
+            old_end,
+            &old_discriminator,
+            &discriminator,
+            &branch.id,
+            &branch.canonical,
+            &branch.probe_ordinal,
+        )?;
         insert_translation(
             &mut ids,
             &mut ordinals,
             &branch.id,
             &branch.probe_ordinal,
-            &new,
+            &rebased.identity,
         )?;
-        branch_ids.insert(branch.id.clone(), new.id.clone());
-        branch.id = new.id;
-        branch.canonical = new.canonical;
-        branch.probe_ordinal = new.probe_ordinal.to_string();
-        branch.source_key = source.source_key.clone();
-        branch.start = source.start;
-        branch.end = source.end;
-        branch.provenance = "doctest-source".into();
+        branch_ids.insert(branch.id.clone(), rebased.identity.id.clone());
+        branch.id = rebased.identity.id;
+        branch.canonical = rebased.identity.canonical;
+        branch.probe_ordinal = rebased.identity.probe_ordinal.to_string();
+        branch.source_key = rebased.source.source_key.clone();
+        branch.start = rebased.source.start;
+        branch.end = rebased.source.end;
+        branch.provenance = rebased.provenance.into();
         branch.definitions = stable_definitions(entry, &branch.definitions)?;
         branch.discriminator = discriminator.clone();
         for alternative in &mut branch.alternatives {
             let old_alternative_discriminator =
                 alternative_discriminator(&old_discriminator, &branch.kind, &alternative.label)?;
-            let old = pending_identity(
+            let new_discriminator =
+                alternative_discriminator(&discriminator, &branch.kind, &alternative.label)?;
+            let rebased = rebase_identity(
+                &map,
+                entry,
+                bundle_source,
+                authored_sources,
                 "branch-alternative",
                 &old_source_key,
                 old_start,
                 old_end,
                 &old_alternative_discriminator,
+                &new_discriminator,
+                &alternative.id,
+                &alternative.canonical,
+                &alternative.probe_ordinal,
             )?;
-            verify_pending_identity(&old, &alternative.id, None, &alternative.probe_ordinal)?;
-            let new_discriminator =
-                alternative_discriminator(&discriminator, &branch.kind, &alternative.label)?;
-            let new = rust_source_identity("branch-alternative", &source, &new_discriminator)?;
             insert_translation(
                 &mut ids,
                 &mut ordinals,
                 &alternative.id,
                 &alternative.probe_ordinal,
-                &new,
+                &rebased.identity,
             )?;
-            alternative.id = new.id;
-            alternative.probe_ordinal = new.probe_ordinal.to_string();
+            alternative.id = rebased.identity.id;
+            alternative.probe_ordinal = rebased.identity.probe_ordinal.to_string();
+            alternative.canonical = rebased.identity.canonical;
         }
     }
 
     let mut decision_ids = BTreeMap::new();
     for decision in &mut manifest.decisions {
-        if decision.canonical.contains("\0synthetic-expansion\0") {
-            return Err(RustdocJoinError::Invalid(
-                "synthetic decision identity inside a merged doctest is not yet rebased".into(),
-            ));
-        }
-        let old = pending_identity(
+        let entry = definition_module(&map, &decision.definitions)?;
+        let rebased = rebase_identity(
+            &map,
+            entry,
+            bundle_source,
+            authored_sources,
             "decision",
             &decision.source_key,
             decision.start,
             decision.end,
             &decision.kind,
-        )?;
-        verify_pending_identity(
-            &old,
+            &decision.kind,
             &decision.id,
-            Some(&decision.canonical),
+            &decision.canonical,
             &decision.probe_ordinal,
         )?;
-        let entry = definition_module(&map, &decision.definitions)?;
-        let source = map_obligation_range(
-            &map,
-            entry,
-            bundle_source,
-            decision.start,
-            decision.end,
-            authored_sources,
-        )?;
-        let new = rust_source_identity("decision", &source, &decision.kind)?;
         insert_translation(
             &mut ids,
             &mut ordinals,
             &decision.id,
             &decision.probe_ordinal,
-            &new,
+            &rebased.identity,
         )?;
-        decision_ids.insert(decision.id.clone(), new.id.clone());
-        decision.id = new.id;
-        decision.canonical = new.canonical;
-        decision.probe_ordinal = new.probe_ordinal.to_string();
-        decision.source_key = source.source_key;
-        decision.start = source.start;
-        decision.end = source.end;
-        decision.provenance = "doctest-source".into();
+        decision_ids.insert(decision.id.clone(), rebased.identity.id.clone());
+        decision.id = rebased.identity.id;
+        decision.canonical = rebased.identity.canonical;
+        decision.probe_ordinal = rebased.identity.probe_ordinal.to_string();
+        decision.source_key = rebased.source.source_key;
+        decision.start = rebased.source.start;
+        decision.end = rebased.source.end;
+        decision.provenance = rebased.provenance.into();
         decision.definitions = stable_definitions(entry, &decision.definitions)?;
         decision.outcome_branch_id = branch_ids
             .get(&decision.outcome_branch_id)
@@ -1269,7 +1430,7 @@ mod tests {
         let decision_identity =
             pending_identity("decision", &key, start, end, "assertion").unwrap();
         let manifest = RustCompilerManifest {
-            schema: "supercov-rust-manifest-candidate-v1".into(),
+            schema: "supercov-rust-manifest-candidate-v2".into(),
             model: "rust-source-v1".into(),
             crate_name: "doctest_bundle_2024".into(),
             measurement_complete: false,
@@ -1300,11 +1461,13 @@ mod tests {
                         id: passed_identity.id,
                         label: "passed".into(),
                         probe_ordinal: passed_identity.probe_ordinal.to_string(),
+                        canonical: passed_identity.canonical,
                     },
                     RustCompilerBranchAlternative {
                         id: failed_identity.id,
                         label: "failed".into(),
                         probe_ordinal: failed_identity.probe_ordinal.to_string(),
+                        canonical: failed_identity.canonical,
                     },
                 ],
                 canonical: branch_identity.canonical,
@@ -1407,11 +1570,34 @@ mod tests {
                         id: identity.id,
                         label: label.into(),
                         probe_ordinal: identity.probe_ordinal.to_string(),
+                        canonical: identity.canonical,
                     }
                 })
                 .collect(),
             canonical: identity.canonical,
         }
+    }
+
+    fn synthetic_pending_identity(
+        kind: &str,
+        key: &str,
+        start: u32,
+        end: u32,
+        discriminator: &str,
+        owner_ordinal: u64,
+    ) -> RustSourceIdentity {
+        identity_from_canonical(
+            kind,
+            format!(
+                concat!(
+                    "rust-source-v1\0{}\0{}\0{}\0{}\0{}\0",
+                    "synthetic-expansion\0proc-macro\0{}\0{}\0{}\0probe_macros::generated\0",
+                    "__doctest_0::main\0{}\0"
+                ),
+                kind, key, start, end, discriminator, key, start, end, owner_ordinal,
+            ),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1446,7 +1632,7 @@ mod tests {
     }
 
     #[test]
-    fn merged_join_rejects_tampering_missing_sources_and_synthetic_expansion() {
+    fn merged_join_rejects_tampering_missing_sources_and_malformed_synthetic_expansion() {
         let (manifest, sources, map, authored) = pending_assertion_candidate();
         let mut tampered: serde_json::Value = serde_json::from_slice(&manifest).unwrap();
         tampered["points"][0]["id"] =
@@ -1562,7 +1748,7 @@ mod tests {
         let mut branches = vec![outcome.clone(), first_arm.clone(), second_arm.clone()];
         branches.sort_by(|left, right| left.id.cmp(&right.id));
         let manifest = RustCompilerManifest {
-            schema: "supercov-rust-manifest-candidate-v1".into(),
+            schema: "supercov-rust-manifest-candidate-v2".into(),
             model: "rust-source-v1".into(),
             crate_name: "doctest_bundle_2024".into(),
             measurement_complete: false,
@@ -1718,5 +1904,149 @@ mod tests {
         );
         assert_eq!(joined.obligation_ids.len(), 12);
         assert_eq!(joined.probe_ordinals.len(), 12);
+    }
+
+    #[test]
+    fn rebases_complete_synthetic_expansion_canonicals_without_guessing() {
+        let (manifest, sources, map, authored) = pending_assertion_candidate();
+        let mut manifest = RustCompilerManifest::parse_pending_doctest(&manifest, "fixture")
+            .expect("pending candidate");
+        let key = "doctest-pending:fixture";
+        let mut owner_ordinal = 1;
+        let mut replace = |kind: &str,
+                           start: u32,
+                           end: u32,
+                           discriminator: &str,
+                           id: &mut String,
+                           canonical: &mut String,
+                           ordinal: &mut String| {
+            let identity =
+                synthetic_pending_identity(kind, key, start, end, discriminator, owner_ordinal);
+            owner_ordinal += 1;
+            *id = identity.id;
+            *canonical = identity.canonical;
+            *ordinal = identity.probe_ordinal.to_string();
+        };
+        for point in &mut manifest.points {
+            replace(
+                &point.kind,
+                point.start,
+                point.end,
+                &point.discriminator,
+                &mut point.id,
+                &mut point.canonical,
+                &mut point.probe_ordinal,
+            );
+        }
+        for branch in &mut manifest.branches {
+            replace(
+                "branch",
+                branch.start,
+                branch.end,
+                &branch.discriminator,
+                &mut branch.id,
+                &mut branch.canonical,
+                &mut branch.probe_ordinal,
+            );
+            for alternative in &mut branch.alternatives {
+                let discriminator = alternative_discriminator(
+                    &branch.discriminator,
+                    &branch.kind,
+                    &alternative.label,
+                )
+                .unwrap();
+                replace(
+                    "branch-alternative",
+                    branch.start,
+                    branch.end,
+                    &discriminator,
+                    &mut alternative.id,
+                    &mut alternative.canonical,
+                    &mut alternative.probe_ordinal,
+                );
+            }
+        }
+        let branch_id = manifest.branches[0].id.clone();
+        for decision in &mut manifest.decisions {
+            replace(
+                "decision",
+                decision.start,
+                decision.end,
+                &decision.kind,
+                &mut decision.id,
+                &mut decision.canonical,
+                &mut decision.probe_ordinal,
+            );
+            decision.outcome_branch_id = branch_id.clone();
+        }
+        manifest
+            .points
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        manifest
+            .branches
+            .sort_by(|left, right| left.id.cmp(&right.id));
+        manifest
+            .decisions
+            .sort_by(|left, right| left.id.cmp(&right.id));
+
+        let joined = join_merged_doctest(
+            &serde_json::to_vec(&manifest).unwrap(),
+            &sources,
+            &map,
+            &authored,
+        )
+        .expect("synthetic expansion join");
+        assert!(
+            joined
+                .manifest
+                .points
+                .iter()
+                .all(|point| point.provenance == "synthetic-expansion")
+        );
+        assert!(
+            joined
+                .manifest
+                .branches
+                .iter()
+                .all(|branch| branch.provenance == "synthetic-expansion"
+                    && branch.alternatives.iter().all(|alternative| {
+                        alternative.canonical.contains("source:src/lib.rs")
+                            && !alternative.canonical.contains("doctest-pending:")
+                    }))
+        );
+        assert!(
+            joined
+                .manifest
+                .decisions
+                .iter()
+                .all(|decision| decision.provenance == "synthetic-expansion")
+        );
+        for canonical in joined
+            .manifest
+            .points
+            .iter()
+            .map(|point| &point.canonical)
+            .chain(joined.manifest.branches.iter().flat_map(|branch| {
+                std::iter::once(&branch.canonical).chain(
+                    branch
+                        .alternatives
+                        .iter()
+                        .map(|alternative| &alternative.canonical),
+                )
+            }))
+            .chain(
+                joined
+                    .manifest
+                    .decisions
+                    .iter()
+                    .map(|decision| &decision.canonical),
+            )
+        {
+            assert!(canonical.contains("doctest:src/lib.rs:3"));
+            assert!(!canonical.contains("__doctest_0"));
+            assert!(!canonical.contains("doctest-pending:"));
+        }
+        assert_eq!(joined.obligation_ids.len(), 5);
+        assert_eq!(joined.probe_ordinals.len(), 5);
     }
 }

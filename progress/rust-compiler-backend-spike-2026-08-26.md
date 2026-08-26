@@ -339,12 +339,16 @@ an unverified rustc commit.
    mappings and a strict merged-bundle deferred join. The bundle's temporary
    IDs cannot pass normal ingestion; the later runner atomically publishes its
    module/path/line map, after which the engine aligns the complete extracted
-   body, rebuilds all exercised non-synthetic identities and references, and
-   returns exact old-to-new event translations. The real gate preserves
-   rustdoc output and source bytes. Next rebase synthetic proc/derive canonical
-   expansion chains and their alternative ordinals, connect the join to the
-   production archive/retry path, and prove wrapper, failure, signal and full
-   doctest corpus behavior. Either incomplete area blocks public Rust support.
+   body, rebuilds all exercised identities and references, and returns exact
+   old-to-new event translations. Complete synthetic expansion chains are now
+   strictly parsed and rebased too, including every callsite, generated owner,
+   branch alternative canonical and runtime ordinal. A real proc macro creates
+   a local function and decision inside the merged doctest; the production
+   join accepts the exact result while malformed chains fail closed. The gate
+   preserves rustdoc output and source bytes. Next connect the join to the
+   production archive/retry path, broaden derive/external/nested expansion
+   coverage, and prove wrapper, failure, signal and full doctest corpus
+   behavior. Any incomplete area blocks public Rust support.
 4. Exact selection now independently probes rustc commit/host/driver digest,
    authenticates the companion's executable digest and rejects missing,
    duplicate or incomplete-public candidates. The private Cargo wrapper and

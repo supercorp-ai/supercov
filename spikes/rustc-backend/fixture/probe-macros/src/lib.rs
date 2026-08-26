@@ -84,6 +84,20 @@ pub fn generated_assertion_function(_input: TokenStream) -> TokenStream {
         .expect("valid generated Rust assertion")
 }
 
+#[proc_macro]
+pub fn generated_expression(_input: TokenStream) -> TokenStream {
+    "if true { 41usize } else { 43usize }"
+        .parse()
+        .expect("valid generated Rust expression")
+}
+
+#[proc_macro]
+pub fn generated_local_function(_input: TokenStream) -> TokenStream {
+    "fn generated_local_by_proc(value: bool) -> usize { if value { 47 } else { 53 } }"
+        .parse()
+        .expect("valid generated local Rust function")
+}
+
 #[proc_macro_attribute]
 pub fn generated_test(_attribute: TokenStream, item: TokenStream) -> TokenStream {
     let mut output: TokenStream = "#[test]".parse().expect("valid test attribute");

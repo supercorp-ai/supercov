@@ -1511,14 +1511,18 @@ miss blocks flipping any default.
   which the normal manifest parser rejects. The later runner atomically
   publishes exact `__doctest_N` path/line descriptors; the Rust engine aligns
   each complete extracted `main` body against original documentation, then
-  rebuilds all non-synthetic points, branches, alternatives, decisions,
-  selection groups, cross-references and runtime ordinals. Full-body alignment
-  disambiguates repeated atoms and repeated lines while missing, ambiguous,
-  reordered, tampered or partial inputs fail closed. The joined real-rustdoc
-  manifest passes the production validator/normalizer with no temporary key,
-  and its runtime events retain the exact merged test root. Synthetic
-  proc/derive expansion canonical rebasing plus archive/retry, wrapper and
-  failure/signal corpora remain promotion blockers.
+  rebuilds all points, branches, alternatives, decisions, selection groups,
+  cross-references and runtime ordinals. Complete synthetic expansion chains
+  receive the same exact rebase: callsites map to original documentation,
+  temporary owners become stable doctest definitions, and alternative
+  canonicals/ordinals are rebuilt. Full-body alignment disambiguates repeated
+  atoms and repeated lines while malformed synthetic chains, missing,
+  ambiguous, reordered, tampered or partial inputs fail closed. The joined
+  real-rustdoc manifest, including an owned proc-macro-generated local
+  decision, passes the production validator/normalizer with no temporary key,
+  and its runtime events retain the exact merged test root. Broader derive/
+  external/nested expansion coverage plus archive/retry, wrapper and failure/
+  signal corpora remain promotion blockers.
 
 ## Non-goals and guardrails
 

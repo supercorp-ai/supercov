@@ -12,7 +12,7 @@ use crate::{
     },
 };
 
-const SCHEMA: &str = "supercov-rust-manifest-candidate-v1";
+const SCHEMA: &str = "supercov-rust-manifest-candidate-v2";
 const MODEL: &str = "rust-source-v1";
 const SOURCE_SNAPSHOT_SCHEMA: &str = "supercov-rust-source-snapshots-v1";
 
@@ -52,6 +52,7 @@ pub struct RustCompilerBranchAlternative {
     pub id: String,
     pub label: String,
     pub probe_ordinal: String,
+    pub canonical: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -642,6 +643,7 @@ impl RustCompilerManifest {
             for alternative in &branch.alternatives {
                 if !valid_id(&alternative.id, &["branch-alternative"])
                     || alternative.label.trim().is_empty()
+                    || alternative.canonical.is_empty()
                     || !labels.insert(alternative.label.as_str())
                 {
                     return Err(invalid("malformed branch alternative"));
@@ -1205,8 +1207,8 @@ mod tests {
                 "probeOrdinal": "2",
                 "definitions": ["fixture::function"],
                 "alternatives": [
-                    {"id": "rs:branch-alternative:000000000000000000000003", "label": "condition true", "probeOrdinal": "3"},
-                    {"id": "rs:branch-alternative:000000000000000000000004", "label": "condition false", "probeOrdinal": "4"}
+                    {"id": "rs:branch-alternative:000000000000000000000003", "label": "condition true", "probeOrdinal": "3", "canonical": "true"},
+                    {"id": "rs:branch-alternative:000000000000000000000004", "label": "condition false", "probeOrdinal": "4", "canonical": "false"}
                 ],
                 "canonical": "branch"
             }],
@@ -1234,6 +1236,25 @@ mod tests {
         let manifest =
             RustCompilerManifest::parse(&serde_json::to_vec(&valid_manifest()).unwrap()).unwrap();
         assert_eq!(manifest.crate_name, "fixture");
+
+        let mut legacy_schema = valid_manifest();
+        legacy_schema["schema"] = json!("supercov-rust-manifest-candidate-v1");
+        assert!(matches!(
+            RustCompilerManifest::parse(&serde_json::to_vec(&legacy_schema).unwrap()),
+            Err(RustCompilerManifestError::Invalid(_))
+        ));
+
+        let mut missing_alternative_canonical = valid_manifest();
+        missing_alternative_canonical["branches"][0]["alternatives"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("canonical");
+        assert!(matches!(
+            RustCompilerManifest::parse(
+                &serde_json::to_vec(&missing_alternative_canonical).unwrap()
+            ),
+            Err(RustCompilerManifestError::Json(_))
+        ));
 
         let mut unknown = valid_manifest();
         unknown["unexpected"] = json!(true);
@@ -1273,8 +1294,8 @@ mod tests {
         let mut wrong_outcome_kind = valid_manifest();
         wrong_outcome_kind["branches"][0]["kind"] = json!("loop-entry");
         wrong_outcome_kind["branches"][0]["alternatives"] = json!([
-            {"id": "rs:branch-alternative:000000000000000000000003", "label": "zero iterations", "probeOrdinal": "3"},
-            {"id": "rs:branch-alternative:000000000000000000000004", "label": "entered", "probeOrdinal": "4"}
+            {"id": "rs:branch-alternative:000000000000000000000003", "label": "zero iterations", "probeOrdinal": "3", "canonical": "zero"},
+            {"id": "rs:branch-alternative:000000000000000000000004", "label": "entered", "probeOrdinal": "4", "canonical": "entered"}
         ]);
         assert!(matches!(
             RustCompilerManifest::parse(&serde_json::to_vec(&wrong_outcome_kind).unwrap()),
@@ -1295,8 +1316,8 @@ mod tests {
             "probeOrdinal": "6",
             "definitions": ["fixture::function"],
             "alternatives": [
-                {"id": "rs:branch-alternative:000000000000000000000007", "label": "zero iterations", "probeOrdinal": "7"},
-                {"id": "rs:branch-alternative:000000000000000000000008", "label": "entered", "probeOrdinal": "8"}
+                {"id": "rs:branch-alternative:000000000000000000000007", "label": "zero iterations", "probeOrdinal": "7", "canonical": "zero"},
+                {"id": "rs:branch-alternative:000000000000000000000008", "label": "entered", "probeOrdinal": "8", "canonical": "entered"}
             ],
             "canonical": "loop-entry"
         }));
@@ -1478,8 +1499,8 @@ mod tests {
                 "probeOrdinal": "6",
                 "definitions": ["fixture::function"],
                 "alternatives": [
-                    {"id": "rs:branch-alternative:000000000000000000000007", "label": "not selected", "probeOrdinal": "7"},
-                    {"id": "rs:branch-alternative:000000000000000000000008", "label": "selected", "probeOrdinal": "8"}
+                    {"id": "rs:branch-alternative:000000000000000000000007", "label": "not selected", "probeOrdinal": "7", "canonical": "not selected"},
+                    {"id": "rs:branch-alternative:000000000000000000000008", "label": "selected", "probeOrdinal": "8", "canonical": "selected"}
                 ],
                 "canonical": "first arm"
             },
@@ -1494,8 +1515,8 @@ mod tests {
                 "probeOrdinal": "9",
                 "definitions": ["fixture::function"],
                 "alternatives": [
-                    {"id": "rs:branch-alternative:00000000000000000000000a", "label": "not selected", "probeOrdinal": "10"},
-                    {"id": "rs:branch-alternative:00000000000000000000000b", "label": "selected", "probeOrdinal": "11"}
+                    {"id": "rs:branch-alternative:00000000000000000000000a", "label": "not selected", "probeOrdinal": "10", "canonical": "not selected"},
+                    {"id": "rs:branch-alternative:00000000000000000000000b", "label": "selected", "probeOrdinal": "11", "canonical": "selected"}
                 ],
                 "canonical": "second arm"
             }
