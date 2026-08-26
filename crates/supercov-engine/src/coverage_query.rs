@@ -422,6 +422,11 @@ pub struct CoverageAnchor {
     pub column: usize,
     pub covered: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing: Option<String>,
+    pub covering_tests: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub covered_conditions: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conditions: Option<usize>,
@@ -437,8 +442,15 @@ pub struct CoverageCoversLineData {
     pub confidence: CoverageConfidence,
     pub total_tests: usize,
     pub total_phases: usize,
+    pub total_anchored: usize,
+    pub covered_anchored: usize,
+    pub total_limitations: usize,
+    pub total_remaining: usize,
     pub tests: Vec<CoverageCoveringTest>,
     pub phases: Vec<CoverageCoveringPhase>,
+    pub anchored: Vec<CoverageAnchor>,
+    pub limitations: Vec<CoverageFileLimitation>,
+    pub remaining: Vec<CoverageFileObligation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -450,6 +462,13 @@ pub struct CoverageCoversAnchorsData {
     pub line_obligation: bool,
     pub anchored: Vec<CoverageAnchor>,
     pub total_anchored: usize,
+    pub covered_anchored: usize,
+    pub total_limitations: usize,
+    pub limitations: Vec<CoverageFileLimitation>,
+    pub total_remaining: usize,
+    pub remaining: Vec<CoverageFileObligation>,
+    pub total_tests: usize,
+    pub tests: Vec<CoverageCoveringTest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -528,27 +547,165 @@ pub fn coverage_covers_query(
         file: options.file.into(),
         line: options.line,
     };
+    let metadata = index
+        .hit_metadata(options.view)?
+        .into_iter()
+        .map(|value| (value.id.clone(), value))
+        .collect::<HashMap<_, _>>();
+    let decisions = index
+        .decision_details(options.view)?
+        .into_iter()
+        .map(|value| (value.meta.id.clone(), value))
+        .collect::<HashMap<_, _>>();
+    let anchors = index.anchors(options.view, options.file, options.line)?;
+    let tests_by_id = tests
+        .iter()
+        .map(|test| (test.id.clone(), test.clone()))
+        .collect::<HashMap<_, _>>();
+    let all_anchor_tests = anchors
+        .iter()
+        .flat_map(|anchor| anchor.tests.iter())
+        .filter(|id| selected_includes(id))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|id| {
+            let test = tests_by_id.get(id);
+            CoverageCoveringTest {
+                id: id.clone(),
+                name: test.map_or_else(|| id.clone(), |test| test.name.clone()),
+                provenance: test
+                    .map_or_else(TestProvenance::default, |test| test.provenance.clone()),
+            }
+        })
+        .collect::<Vec<_>>();
+    let total_anchor_tests = all_anchor_tests.len();
+    let anchor_tests_page = all_anchor_tests
+        .iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let render_anchor = |anchor: crate::coverage_index::IndexedAnchor| {
+        let covering_tests = anchor
+            .tests
+            .iter()
+            .filter(|test| selected_includes(test))
+            .count();
+        let detail = metadata.get(&anchor.id);
+        let decision = decisions
+            .get(&anchor.id)
+            .cloned()
+            .map(|decision| selected_decision(decision, selected.as_ref()));
+        let conditions = decision.as_ref().map_or(anchor.conditions, |decision| {
+            Some(decision.conditions.len())
+        });
+        let covered_conditions = decision
+            .as_ref()
+            .map_or(anchor.covered_conditions, |decision| {
+                Some(
+                    decision
+                        .conditions
+                        .iter()
+                        .filter(|condition| condition.covered)
+                        .count(),
+                )
+            });
+        let covered = if anchor.kind == "decision" {
+            conditions == covered_conditions
+        } else {
+            covering_tests > 0
+        };
+        CoverageAnchor {
+            kind: anchor.kind,
+            id: anchor.id,
+            column: anchor.column,
+            covered,
+            source: decision
+                .as_ref()
+                .map(|decision| decision.meta.source.clone())
+                .or_else(|| {
+                    detail.map(|detail| {
+                        detail
+                            .label
+                            .clone()
+                            .unwrap_or_else(|| detail.source.clone())
+                    })
+                })
+                .and_then(|source| compact_source(&source)),
+            missing: detail.and_then(|detail| detail.alternative.clone()),
+            covering_tests,
+            covered_conditions,
+            conditions,
+        }
+    };
+    let rendered_anchors = anchors.into_iter().map(render_anchor).collect::<Vec<_>>();
+    let total_anchored = rendered_anchors.len();
+    let covered_anchored = rendered_anchors
+        .iter()
+        .filter(|anchor| anchor.covered)
+        .count();
+    let all_limitations = index
+        .limitations(options.view)?
+        .into_iter()
+        .filter(|limitation| limitation.file == options.file && limitation.line == options.line)
+        .map(|limitation| CoverageFileLimitation {
+            id: limitation.id,
+            kind: limitation.kind,
+            file: limitation.file,
+            line: limitation.line,
+            column: limitation.column,
+            source: limitation.source,
+            reason: limitation.reason,
+            blocking: true,
+            effect: "outside-measured-denominator".into(),
+        })
+        .collect::<Vec<_>>();
+    let total_limitations = all_limitations.len();
+    let limitations_page = all_limitations
+        .iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .cloned()
+        .collect::<Vec<_>>();
+    let (file_detail, _) = coverage_file_detail_query(
+        index,
+        CoverageFileDetailOptions {
+            run: options.run,
+            view: options.view,
+            kind: options.kind,
+            runner: options.runner,
+            selector: options.file,
+            metric: MinimizeMetric::All,
+            offset: 0,
+            limit: usize::MAX,
+        },
+    )?;
+    let all_remaining = file_detail
+        .gap_lines
+        .into_iter()
+        .find(|gap| gap.line == options.line)
+        .map_or_else(Vec::new, |gap| gap.obligations);
+    let total_remaining = all_remaining.len();
+    let remaining_page = all_remaining
+        .iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .cloned()
+        .collect::<Vec<_>>();
     let Some(line) = index.line(options.view, options.file, options.line)? else {
-        let anchors = index.anchors(options.view, options.file, options.line)?;
-        let total = anchors.len();
-        let anchored = anchors
-            .into_iter()
+        let anchored = rendered_anchors
+            .iter()
             .skip(options.offset)
             .take(options.limit)
-            .map(|anchor| CoverageAnchor {
-                kind: anchor.kind.clone(),
-                id: anchor.id,
-                column: anchor.column,
-                covered: if matches!(anchor.kind.as_str(), "statement" | "function") {
-                    anchor.tests.iter().any(|test| selected_includes(test))
-                } else {
-                    anchor.covered
-                },
-                covered_conditions: anchor.covered_conditions,
-                conditions: anchor.conditions,
-            })
+            .cloned()
             .collect::<Vec<_>>();
-        let returned = anchored.len();
+        let total = total_anchored.max(total_limitations).max(total_remaining);
+        let total = total.max(total_anchor_tests);
+        let returned = anchored
+            .len()
+            .max(limitations_page.len())
+            .max(remaining_page.len())
+            .max(anchor_tests_page.len());
         return Ok((
             CoverageCoversData::Anchors(CoverageCoversAnchorsData {
                 run: options.run.into(),
@@ -556,15 +713,18 @@ pub fn coverage_covers_query(
                 location,
                 line_obligation: false,
                 anchored,
-                total_anchored: total,
+                total_anchored,
+                covered_anchored,
+                total_limitations,
+                limitations: limitations_page,
+                total_remaining,
+                remaining: remaining_page,
+                total_tests: total_anchor_tests,
+                tests: anchor_tests_page,
             }),
             pagination(options.offset, options.limit, returned, total),
         ));
     };
-    let tests_by_id = tests
-        .into_iter()
-        .map(|test| (test.id.clone(), test))
-        .collect::<HashMap<_, _>>();
     let all_tests = line
         .tests
         .iter()
@@ -611,8 +771,23 @@ pub fn coverage_covers_query(
         .take(options.limit)
         .cloned()
         .collect::<Vec<_>>();
-    let total = all_tests.len().max(all_phases.len());
-    let returned = tests_page.len().max(phases_page.len());
+    let anchored_page = rendered_anchors
+        .into_iter()
+        .skip(options.offset)
+        .take(options.limit)
+        .collect::<Vec<_>>();
+    let total = all_tests
+        .len()
+        .max(all_phases.len())
+        .max(total_anchored)
+        .max(total_limitations)
+        .max(total_remaining);
+    let returned = tests_page
+        .len()
+        .max(phases_page.len())
+        .max(anchored_page.len())
+        .max(limitations_page.len())
+        .max(remaining_page.len());
     Ok((
         CoverageCoversData::Line(CoverageCoversLineData {
             run: options.run.into(),
@@ -622,8 +797,15 @@ pub fn coverage_covers_query(
             confidence: line.confidence,
             total_tests: all_tests.len(),
             total_phases: all_phases.len(),
+            total_anchored,
+            covered_anchored,
+            total_limitations,
+            total_remaining,
             tests: tests_page,
             phases: phases_page,
+            anchored: anchored_page,
+            limitations: limitations_page,
+            remaining: remaining_page,
         }),
         pagination(options.offset, options.limit, returned, total),
     ))
@@ -1357,6 +1539,17 @@ pub struct CoverageFileCounts {
     pub measurement_limitations: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageFileGapLine {
+    pub line: usize,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub obligations: Vec<CoverageFileObligation>,
+    pub limitations: Vec<CoverageFileLimitation>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoverageFileDetailData {
@@ -1365,12 +1558,11 @@ pub struct CoverageFileDetailData {
     pub file: String,
     pub metric: MinimizeMetric,
     pub counts: CoverageFileCounts,
-    pub tests: Vec<CoverageFileTest>,
     pub total_tests: usize,
     pub total_obligations: usize,
-    pub obligations: Vec<CoverageFileObligation>,
+    pub total_gap_lines: usize,
+    pub gap_lines: Vec<CoverageFileGapLine>,
     pub total_limitations: usize,
-    pub limitations: Vec<CoverageFileLimitation>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1444,6 +1636,30 @@ fn obligation_matches_metric(obligation: &CoverageFileObligation, metric: Minimi
                 | ("branch", MinimizeMetric::Branches)
                 | ("mcdc", MinimizeMetric::Mcdc)
         )
+}
+
+fn compact_source(value: &str) -> Option<String> {
+    let line = value.lines().find(|line| !line.trim().is_empty())?.trim();
+    let compact = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        None
+    } else if compact.chars().count() > 120 {
+        Some(format!(
+            "{}…",
+            compact.chars().take(119).collect::<String>()
+        ))
+    } else {
+        Some(compact)
+    }
+}
+
+fn obligation_source(obligation: &CoverageFileObligation) -> Option<String> {
+    match obligation {
+        CoverageFileObligation::Line(_) => None,
+        CoverageFileObligation::Point(value) => compact_source(&value.source),
+        CoverageFileObligation::Branch(value) => compact_source(&value.source),
+        CoverageFileObligation::Mcdc(value) => compact_source(&value.decision),
+    }
 }
 
 pub fn coverage_file_detail_query(
@@ -1632,7 +1848,7 @@ pub fn coverage_file_detail_query(
             .then_with(|| left.column.cmp(&right.column))
             .then_with(|| left.id.cmp(&right.id))
     });
-    let all_file_tests = test_details
+    let total_tests = test_details
         .iter()
         .filter(|test| {
             selected
@@ -1640,38 +1856,59 @@ pub fn coverage_file_detail_query(
                 .is_none_or(|selected| selected.contains(&test.summary.id))
                 && test.lines.iter().any(|line| line.file == file)
         })
-        .map(|test| CoverageFileTest {
-            id: test.summary.id.clone(),
-            name: test.summary.name.clone(),
-            provenance: test.summary.provenance.clone(),
+        .count();
+    let total_obligations = obligations.len();
+    let total_limitations = limitations.len();
+    let mut grouped =
+        BTreeMap::<usize, (Vec<CoverageFileObligation>, Vec<CoverageFileLimitation>)>::new();
+    for obligation in obligations {
+        grouped
+            .entry(obligation.line())
+            .or_default()
+            .0
+            .push(obligation);
+    }
+    for limitation in limitations {
+        grouped
+            .entry(limitation.line)
+            .or_default()
+            .1
+            .push(limitation);
+    }
+    let gap_lines = grouped
+        .into_iter()
+        .map(|(line, (obligations, limitations))| {
+            let source = obligations.iter().find_map(obligation_source).or_else(|| {
+                limitations
+                    .iter()
+                    .find_map(|value| compact_source(&value.source))
+            });
+            let state = if obligations
+                .iter()
+                .any(|value| matches!(value, CoverageFileObligation::Line(_)))
+            {
+                "missing"
+            } else if !obligations.is_empty() {
+                "part"
+            } else {
+                "limited"
+            };
+            CoverageFileGapLine {
+                line,
+                state: state.into(),
+                source,
+                obligations,
+                limitations,
+            }
         })
         .collect::<Vec<_>>();
-    let selected_obligations = obligations
-        .iter()
+    let total_gap_lines = gap_lines.len();
+    let selected_gap_lines = gap_lines
+        .into_iter()
         .skip(options.offset)
         .take(options.limit)
-        .cloned()
         .collect::<Vec<_>>();
-    let selected_tests = all_file_tests
-        .iter()
-        .skip(options.offset)
-        .take(options.limit)
-        .cloned()
-        .collect::<Vec<_>>();
-    let selected_limitations = limitations
-        .iter()
-        .skip(options.offset)
-        .take(options.limit)
-        .cloned()
-        .collect::<Vec<_>>();
-    let total = obligations
-        .len()
-        .max(all_file_tests.len())
-        .max(limitations.len());
-    let returned = selected_obligations
-        .len()
-        .max(selected_tests.len())
-        .max(selected_limitations.len());
+    let returned = selected_gap_lines.len();
     Ok((
         CoverageFileDetailData {
             run: options.run.into(),
@@ -1685,16 +1922,15 @@ pub fn coverage_file_detail_query(
                 missing_branches: branches.len(),
                 missing_mcdc_conditions: mcdc.len(),
                 waived_mcdc_conditions: 0,
-                measurement_limitations: limitations.len(),
+                measurement_limitations: total_limitations,
             },
-            tests: selected_tests,
-            total_tests: all_file_tests.len(),
-            total_obligations: obligations.len(),
-            obligations: selected_obligations,
-            total_limitations: limitations.len(),
-            limitations: selected_limitations,
+            total_tests,
+            total_obligations,
+            total_gap_lines,
+            gap_lines: selected_gap_lines,
+            total_limitations,
         },
-        pagination(options.offset, options.limit, returned, total),
+        pagination(options.offset, options.limit, returned, total_gap_lines),
     ))
 }
 

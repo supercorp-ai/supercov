@@ -100,29 +100,29 @@ CLI queries instead of loading the complete derived model into context.
 ```sh
 # Orient using only a few lines.
 npx supercov runs --limit 5
-npx supercov runs latest coverage
-npx supercov runs latest coverage --filter passed
-npx supercov runs latest coverage --filter failed
-npx supercov runs latest coverage kinds
-npx supercov runs latest coverage runners
-npx supercov runs latest coverage scope
-npx supercov runs latest coverage --kind e2e
-npx supercov runs latest coverage files
-npx supercov runs latest coverage gaps
-npx supercov runs latest coverage gaps --metric mcdc
-npx supercov runs latest coverage gaps --kind e2e
+npx supercov runs latest
+npx supercov runs latest --filter passed
+npx supercov runs latest --filter failed
+npx supercov runs latest kinds
+npx supercov runs latest runners
+npx supercov runs latest scope
+npx supercov runs latest --kind e2e
+npx supercov runs latest files
+npx supercov runs latest gaps
+npx supercov runs latest gaps --metric mcdc
+npx supercov runs latest gaps --kind e2e
 
 # Drill into one target selected from the gap list.
-npx supercov runs latest coverage file app/routes/example.ts
-npx supercov runs latest coverage file app/routes/example.ts --metric mcdc
-npx supercov runs latest coverage decision app/routes/example.ts:42
-npx supercov runs latest coverage covers app/routes/example.ts:57
+npx supercov runs latest file app/routes/example.ts
+npx supercov runs latest file app/routes/example.ts --metric mcdc
+npx supercov runs latest decision app/routes/example.ts:42
+npx supercov runs latest line app/routes/example.ts:57
 
 # Understand redundancy/contribution and validate a newly written test. Replace
 # "latest" with the immutable run ID when an agent continues work later.
-npx supercov runs latest coverage test "test title fragment"
-npx supercov runs latest coverage minimize --filter passed
-npx supercov runs latest coverage minimize --filter passed --metric mcdc --target 80
+npx supercov runs latest test "test title fragment"
+npx supercov runs latest minimize --filter passed
+npx supercov runs latest minimize --filter passed --metric mcdc --target 80
 npx supercov diff <older-run> <newer-run>
 
 # Combine compatible shards without deleting their immutable source runs.
@@ -133,7 +133,7 @@ npx supercov merge <first-run-id> <second-run-id>
 missing disposable query view from the run's immutable evidence before printing
 that row; whether the view was already available is never exposed in the CLI.
 `supercov runs <run-id>` prints the same summary as
-`supercov runs <run-id> coverage`.
+`supercov runs <run-id>`.
 
 Coverage queries use `--filter all` by default, matching conventional coverage
 tools: every executed attempt contributes, including attempts that later fail.
@@ -149,14 +149,14 @@ run. `latest` is a convenience selector for interactive use. Every query
 accepts `--json` and—where the result can be long—`--limit` and `--offset`.
 Every collection is paginated at 20 items by default and prints its range plus
 a copyable next-page command; generated commands omit the default limit.
-Agents targeting one coverage dimension can pass `--metric` to `coverage
-files`, `coverage gaps`, or `coverage file`; this ranks and narrows the existing
+Agents targeting one coverage dimension can pass `--metric` to `files`, `gaps`,
+or `file`; this ranks and narrows the existing
 resource instead of requiring a separate MC/DC-specific command.
 Measurement limitations use the same drill-down commands as ordinary gaps.
 The coverage summary reports whether the measured denominator is complete,
-`coverage files` and `coverage gaps` include per-file limitation counts and
-kinds, and `coverage file <path>` returns the bounded source locations, reasons,
-and denominator effect. `coverage scope` attaches the same counts to included,
+`files` and `gaps` include per-file limitation counts and kinds, and `file
+<path>` returns bounded gap lines with consolidated obligations and exact `line
+<file:line>` drill-down commands. `scope` attaches the same counts to included,
 excluded, and ambiguous source entries. A 100% metric with a blocking limitation
 is therefore never reported as structurally complete.
 The summary also exposes provider-neutral transport counters. If Supercov
@@ -207,7 +207,7 @@ For a JavaScript or TypeScript project, the CLI:
 2. inventories first-party source from package entry points, workspaces,
    conventional source directories, and TypeScript roots. Every candidate is
    retained as included, excluded, or ambiguous; ambiguity blocks a complete
-   verdict and is inspectable with `coverage scope`. Set
+   verdict and is inspectable with `scope`. Set
    `SUPERCOV_SOURCE_ROOTS` for an explicit authoritative scope;
 3. instruments through the existing Vite graph when available, or instruments
    only the disposable source copy before the project's unchanged

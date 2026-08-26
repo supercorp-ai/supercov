@@ -65,7 +65,7 @@ export function runMetadata(root, runId) {
 export function coverageQuery(root, runId, ...resource) {
   const result = requireSupercov(
     root,
-    ["runs", runId, "coverage", ...resource, "--json"],
+    ["runs", runId, ...resource, "--json"],
   );
   const envelope = JSON.parse(result.stdout);
   if (envelope.schemaVersion !== 1 || envelope.ok !== true) {

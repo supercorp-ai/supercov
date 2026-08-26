@@ -100,11 +100,11 @@ try {
   const runFiles = readdirSync(runDirectory).sort();
   const metadata = JSON.parse(readFileSync(resolve(runDirectory, "run.json"), "utf8"));
   const summary = json(
-    execute(project, ["runs", runId, "coverage", "--json"]),
+    execute(project, ["runs", runId, "--json"]),
     "coverage summary",
   );
   const files = json(
-    execute(project, ["runs", runId, "coverage", "files", "--json"]),
+    execute(project, ["runs", runId, "files", "--json"]),
     "coverage files",
   );
   const after = sourceFingerprint(project);
@@ -114,7 +114,7 @@ try {
     help: {
       exits: help.status,
       hasRunCommand: help.stdout.includes("supercov -- <test command>"),
-      hasResourceQueries: help.stdout.includes("supercov runs <run-id> coverage"),
+      hasResourceQueries: help.stdout.includes("supercov runs <run-id> [resource]"),
       hasResidentServeCommand: /^\s*supercov serve\b/m.test(help.stdout),
     },
     execution: {

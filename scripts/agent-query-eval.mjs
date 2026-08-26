@@ -42,7 +42,7 @@ function storedRun(id) {
 function query(runId, ...args) {
   const result = spawnSync(
     process.execPath,
-    [cli, "runs", runId, "coverage", ...args, "--json"],
+    [cli, "runs", runId, ...args, "--json"],
     { cwd: fixture, env: queryEnvironment, encoding: "utf8" },
   );
   if (result.status !== 0) {
@@ -81,7 +81,7 @@ function query(runId, ...args) {
 function failingQuery(runId, ...args) {
   const result = spawnSync(
     process.execPath,
-    [cli, "runs", runId, "coverage", ...args, "--json"],
+    [cli, "runs", runId, ...args, "--json"],
     { cwd: fixture, env: queryEnvironment, encoding: "utf8" },
   );
   if (result.status !== 2 || result.stderr !== "") {
@@ -163,8 +163,8 @@ if (files.files.length > 20 || gaps.gaps.length < 1 || gaps.gaps.length > 20) {
 const file = gaps.gaps[0].file;
 const detail = query(partial.id, "file", file);
 requirePagination(detail, "file detail");
-if (detail.obligations.length < 1 || detail.obligations.length > 20) {
-  throw new Error("file query did not expose bounded, actionable obligations");
+if (detail.gapLines.length < 1 || detail.gapLines.length > 20) {
+  throw new Error("file query did not expose bounded, actionable gap lines");
 }
 
 const mcdcGaps = query(partial.id, "gaps", "--metric", "mcdc");
@@ -185,9 +185,10 @@ const mcdcDetail = query(
   "--metric",
   "mcdc",
 );
+const mcdcObligations = mcdcDetail.gapLines.flatMap((gap) => gap.obligations);
 if (
   mcdcDetail.metric !== "mcdc" ||
-  mcdcDetail.obligations.some((obligation) => obligation.kind !== "mcdc")
+  mcdcObligations.some((obligation) => obligation.kind !== "mcdc")
 ) {
   throw new Error("metric-filtered file detail included unrelated obligations");
 }
@@ -245,25 +246,25 @@ if (missingFile.command !== "coverage.file" || missingFile.error.code !== "SOURC
   throw new Error("file query did not expose a stable structured error code");
 }
 
-const malformedRuns = spawnSync(
+const legacyCoverageNamespace = spawnSync(
   process.execPath,
-  [cli, "runs", partial.id, "file", mcdcGaps.gaps[0].file, "--json"],
+  [cli, "runs", partial.id, "coverage", "--json"],
   { cwd: fixture, env: queryEnvironment, encoding: "utf8" },
 );
-if (malformedRuns.status === 0) {
-  throw new Error("runs without the coverage segment must fail, not list runs");
+if (legacyCoverageNamespace.status === 0) {
+  throw new Error("the removed coverage namespace must not remain as an alias");
 }
-const malformedEnvelope = JSON.parse(malformedRuns.stdout);
+const malformedEnvelope = JSON.parse(legacyCoverageNamespace.stdout);
 if (
   malformedEnvelope.ok !== false ||
   malformedEnvelope.error?.code !== "UNKNOWN_COMMAND" ||
-  !malformedEnvelope.error.message.includes("Unknown runs query: file")
+  !malformedEnvelope.error.message.includes("Unknown run query: coverage")
 ) {
   throw new Error("malformed runs query did not return a structured usage error");
 }
 
 const waiversPath = resolve(fixture, "supercov.waivers.json");
-const waivedObligation = mcdcDetail.obligations[0];
+const waivedObligation = mcdcObligations[0];
 try {
   writeFileSync(
     waiversPath,
@@ -302,11 +303,13 @@ try {
     "--metric",
     "mcdc",
   );
-  const annotated = waivedDetail.obligations.find(
-    (obligation) =>
-      obligation.id === waivedObligation.id &&
-      obligation.missingCondition === waivedObligation.missingCondition,
-  );
+  const annotated = waivedDetail.gapLines
+    .flatMap((gap) => gap.obligations)
+    .find(
+      (obligation) =>
+        obligation.id === waivedObligation.id &&
+        obligation.missingCondition === waivedObligation.missingCondition,
+    );
   if (
     !annotated?.waived ||
     annotated.waiverReason !== "agent-query-eval fixture waiver" ||
@@ -345,15 +348,15 @@ if (
   throw new Error("decision query did not expose conditions and witnesses");
 }
 
-const line = detail.obligations.find((obligation) => Number.isSafeInteger(obligation.line));
+const line = detail.gapLines.find((gap) => Number.isSafeInteger(gap.line));
 if (!line) throw new Error("partial run did not contain a queryable source line");
-const covers = query(partial.id, "covers", `${file}:${line.line}`);
-requirePagination(covers, "line attribution");
-if (!Array.isArray(covers.tests)) {
-  throw new Error("covers query did not expose per-test attribution");
+const lineDetail = query(partial.id, "line", `${file}:${line.line}`);
+requirePagination(lineDetail, "line attribution");
+if (!Array.isArray(lineDetail.tests)) {
+  throw new Error("line query did not expose per-test attribution");
 }
 
-const testId = covers.tests[0]?.id;
+const testId = lineDetail.tests[0]?.id;
 if (!testId) throw new Error("partial run did not contain a queryable test");
 const testDetail = query(partial.id, "test", testId);
 requirePagination(testDetail, "test detail");

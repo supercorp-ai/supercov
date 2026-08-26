@@ -320,7 +320,7 @@ pub struct NewerQuery<'a> {
 pub enum IndexedQueryData {
     Summary(Box<CoverageSummaryData>),
     Scope(Box<CoverageScopeData>),
-    Covers(Box<CoverageCoversData>),
+    Line(Box<CoverageCoversData>),
     Test(Box<CoverageTestData>),
     Decision(Box<CoverageDecisionData>),
     FileDetail(Box<CoverageFileDetailData>),
@@ -393,7 +393,7 @@ pub fn query_indexed_with_waivers(
     let gaps_only = match request.command.as_str() {
         "files" => Some(false),
         "gaps" => Some(true),
-        "file-decisions" | "kinds" | "runners" | "summary" | "scope" | "covers" | "test"
+        "file-decisions" | "kinds" | "runners" | "summary" | "scope" | "line" | "test"
         | "decision" | "file-detail" | "minimize" | "diff" => None,
         _ => {
             return Err(IndexedQueryError::UnsupportedCommand(
@@ -495,7 +495,7 @@ pub fn query_indexed_with_waivers(
         });
     }
 
-    if request.command == "covers" {
+    if request.command == "line" {
         let file = request
             .file
             .as_deref()
@@ -503,7 +503,7 @@ pub fn query_indexed_with_waivers(
         let line = request
             .line
             .ok_or(IndexedQueryError::MissingArgument("a line"))?;
-        let (data, page) = coverage_covers_query(
+        let (mut data, page) = coverage_covers_query(
             index,
             CoverageCoversQueryOptions {
                 run: &request.run_id,
@@ -516,9 +516,26 @@ pub fn query_indexed_with_waivers(
                 limit: request.limit,
             },
         )?;
+        if let Some(waivers) = waivers {
+            let remaining = match &mut data {
+                CoverageCoversData::Line(data) => &mut data.remaining,
+                CoverageCoversData::Anchors(data) => &mut data.remaining,
+            };
+            for obligation in remaining {
+                if let crate::coverage_query::CoverageFileObligation::Mcdc(obligation) = obligation
+                    && let Some(waiver) = waivers
+                        .waived_by_decision
+                        .get(&obligation.id)
+                        .and_then(|conditions| conditions.get(&obligation.condition_index))
+                {
+                    obligation.waived = Some(true);
+                    obligation.waiver_reason = Some(waiver.reason.clone());
+                }
+            }
+        }
         return Ok(IndexedQueryOutput {
-            command: "coverage.covers",
-            data: IndexedQueryData::Covers(Box::new(data)),
+            command: "coverage.line",
+            data: IndexedQueryData::Line(Box::new(data)),
             pagination: Some(page),
         });
     }
@@ -609,15 +626,18 @@ pub fn query_indexed_with_waivers(
                 .get(&data.file)
                 .copied()
                 .unwrap_or(0);
-            for obligation in &mut data.obligations {
-                if let crate::coverage_query::CoverageFileObligation::Mcdc(obligation) = obligation
-                    && let Some(waiver) = waivers
-                        .waived_by_decision
-                        .get(&obligation.id)
-                        .and_then(|conditions| conditions.get(&obligation.condition_index))
-                {
-                    obligation.waived = Some(true);
-                    obligation.waiver_reason = Some(waiver.reason.clone());
+            for line in &mut data.gap_lines {
+                for obligation in &mut line.obligations {
+                    if let crate::coverage_query::CoverageFileObligation::Mcdc(obligation) =
+                        obligation
+                        && let Some(waiver) = waivers
+                            .waived_by_decision
+                            .get(&obligation.id)
+                            .and_then(|conditions| conditions.get(&obligation.condition_index))
+                    {
+                        obligation.waived = Some(true);
+                        obligation.waiver_reason = Some(waiver.reason.clone());
+                    }
                 }
             }
         }

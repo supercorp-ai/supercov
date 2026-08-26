@@ -53,7 +53,7 @@ const HELP: &str = "Supercov coverage engine.\n\
 \n\
 Usage:\n\
   supercov -- <test command>\n\
-  supercov runs <run-id> coverage [resource] [--json]\n\
+  supercov runs <run-id> [resource] [--json]\n\
   supercov diff <older-run> <newer-run> [--json]\n\
   supercov merge <run-id> <run-id> [...]\n\
   supercov clean [--keep N] [--dry-run]\n";
@@ -127,7 +127,7 @@ fn merge_command(run_ids: Vec<String>) -> ExitCode {
     match supercov_engine::run_merge::merge_coverage_runs(&root, &run_ids, &run_id, &started_at) {
         Ok(merged) => {
             println!("[supercov] merged run {merged}");
-            println!("npx supercov runs {merged} coverage");
+            println!("npx supercov runs {merged}");
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -1307,7 +1307,7 @@ fn query_index_files() -> ExitCode {
     let gaps_only = match request.command.as_str() {
         "files" => Some(false),
         "gaps" => Some(true),
-        "file-decisions" | "kinds" | "runners" | "summary" | "scope" | "covers" | "test"
+        "file-decisions" | "kinds" | "runners" | "summary" | "scope" | "line" | "test"
         | "decision" | "file-detail" | "minimize" | "diff" => None,
         _ => {
             eprintln!("[supercov] unsupported indexed query");
@@ -1459,14 +1459,14 @@ fn query_index_files() -> ExitCode {
             return agent_json::success("coverage.scope", &data, Some(&page))
                 .map_err(|error| format!("response exceeds {} bytes", error.max_bytes));
         }
-        if request.command == "covers" {
+        if request.command == "line" {
             let file = request
                 .file
                 .as_deref()
-                .ok_or_else(|| "indexed covers query requires a file".to_owned())?;
+                .ok_or_else(|| "indexed line query requires a file".to_owned())?;
             let line = request
                 .line
-                .ok_or_else(|| "indexed covers query requires a line".to_owned())?;
+                .ok_or_else(|| "indexed line query requires a line".to_owned())?;
             let (data, page) = coverage_covers_query(
                 &index,
                 CoverageCoversQueryOptions {
@@ -1481,7 +1481,7 @@ fn query_index_files() -> ExitCode {
                 },
             )
             .map_err(|error| format!("{error:?}"))?;
-            return agent_json::success("coverage.covers", &data, Some(&page))
+            return agent_json::success("coverage.line", &data, Some(&page))
                 .map_err(|error| format!("response exceeds {} bytes", error.max_bytes));
         }
         if request.command == "test" {

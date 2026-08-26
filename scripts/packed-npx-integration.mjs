@@ -131,7 +131,6 @@ try {
       "supercov",
       "runs",
       runIds[0],
-      "coverage",
       "--json",
     ],
     { cwd: project, env: rustEnvironment, encoding: "utf8", stdio: "pipe" },

@@ -27,59 +27,53 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
         .filter(|argument| !argument.starts_with('-'));
     let Some(_) = run else {
         return Some(
-            "Usage: supercov runs [options]\n       supercov runs <run-id> [coverage [query]]\n\nLists runs and lazily calculates their coverage summaries.\n\nOptions:\n  --filter <all|passed|failed>\n  --offset <n>\n  --limit <n>\n  --json\n"
+            "Usage: supercov runs [options]\n       supercov runs <run-id> [query]\n\nLists runs and lazily calculates their coverage summaries.\n\nOptions:\n  --filter <all|passed|failed>\n  --offset <n>\n  --limit <n>\n  --json\n"
                 .into(),
         );
     };
-    if arguments.get(1).map(String::as_str) != Some("coverage") {
-        return Some(
-            "Usage: supercov runs <run-id> [options]\n       supercov runs <run-id> coverage [query] [options]\n\nWithout a query, prints the run's coverage summary.\nUse `supercov runs <run-id> coverage --help` to list coverage queries.\n"
-                .into(),
-        );
-    }
     let child = arguments
-        .get(2)
+        .get(1)
         .filter(|argument| !argument.starts_with('-'))
         .map(String::as_str);
     let Some(child) = child else {
         return Some(
-            "Usage: supercov runs <run-id> coverage [query] [options]\n\nQueries:\n  files                 coverage and remaining obligations by source file\n  gaps                  source files with unresolved obligations\n  file <path>           exact uncovered lines, functions, branches and MC/DC\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  covers <file:line>    tests and phases that cover a source line\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 included, excluded and ambiguous source files\n  minimize              smallest test set for a coverage target\n\nCommon options:\n  --filter <all|passed|failed>\n  --kind <kind>\n  --runner <runner>\n  --offset <n>\n  --limit <n>\n  --json\n\nRun any query with --help for its exact usage.\n"
+            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 coverage and remaining obligations by source file\n  gaps                  source files with unresolved obligations\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 included, excluded and ambiguous source files\n  minimize              smallest test set for a coverage target\n\nCommon options:\n  --filter <all|passed|failed>\n  --kind <kind>\n  --runner <runner>\n  --offset <n>\n  --limit <n>\n  --json\n\nRun any query with --help for its exact usage.\n"
                 .into(),
         );
     };
     let usage = match child {
         "summary" => {
-            "supercov runs <run-id> coverage [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--json]"
+            "supercov runs <run-id> [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--json]"
         }
         "files" => {
-            "supercov runs <run-id> coverage files [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
+            "supercov runs <run-id> files [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
         }
         "gaps" => {
-            "supercov runs <run-id> coverage gaps [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
+            "supercov runs <run-id> gaps [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
         }
         "kinds" => {
-            "supercov runs <run-id> coverage kinds [--filter <all|passed|failed>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
+            "supercov runs <run-id> kinds [--filter <all|passed|failed>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
         }
         "runners" => {
-            "supercov runs <run-id> coverage runners [--filter <all|passed|failed>] [--kind <kind>] [--offset <n>] [--limit <n>] [--json]"
+            "supercov runs <run-id> runners [--filter <all|passed|failed>] [--kind <kind>] [--offset <n>] [--limit <n>] [--json]"
         }
-        "scope" => "supercov runs <run-id> coverage scope [--offset <n>] [--limit <n>] [--json]",
+        "scope" => "supercov runs <run-id> scope [--offset <n>] [--limit <n>] [--json]",
         "file" => {
-            "supercov runs <run-id> coverage file <path> [--group decision] [--sort <location|missing>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
+            "supercov runs <run-id> file <path> [--group decision] [--sort <location|missing>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
         }
         "decision" => {
-            "supercov runs <run-id> coverage decision <id|source-file:line> [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--json]"
+            "supercov runs <run-id> decision <id|source-file:line> [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--json]"
         }
-        "covers" => {
-            "supercov runs <run-id> coverage covers <source-file:line> [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
+        "line" => {
+            "supercov runs <run-id> line <source-file:line> [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--offset <n>] [--limit <n>] [--json]"
         }
         "test" => {
-            "supercov runs <run-id> coverage test <id|name-fragment> [--filter <all|passed|failed>] [--json]"
+            "supercov runs <run-id> test <id|name-fragment> [--filter <all|passed|failed>] [--json]"
         }
         "minimize" => {
-            "supercov runs <run-id> coverage minimize [--target <0..100>] [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--json]"
+            "supercov runs <run-id> minimize [--target <0..100>] [--metric <all|lines|statements|functions|branches|mcdc>] [--filter <all|passed|failed>] [--kind <kind>] [--runner <runner>] [--json]"
         }
-        _ => "supercov runs <run-id> coverage --help",
+        _ => "supercov runs <run-id> --help",
     };
     Some(format!("Usage: {usage}\n"))
 }
@@ -327,7 +321,7 @@ fn parse_options(
                     return Err(PublicQueryError::invalid(
                         Some(&agent_command),
                         json_output,
-                        "--group is only supported by: supercov runs <run-id> coverage file <source-file>",
+                        "--group is only supported by: supercov runs <run-id> file <source-file>",
                     ));
                 }
                 options.group_decision = true;
@@ -424,7 +418,7 @@ fn coverage_invocation(
                 return Err(PublicQueryError::invalid(
                     Some(&agent_command),
                     json_output,
-                    "Usage: supercov runs <run-id> coverage file <source-file>",
+                    "Usage: supercov runs <run-id> file <source-file>",
                 ));
             };
             request.file = Some(file.clone());
@@ -440,17 +434,17 @@ fn coverage_invocation(
                 return Err(PublicQueryError::invalid(
                     Some(&agent_command),
                     json_output,
-                    "Usage: supercov runs <run-id> coverage decision <id|source-file:line>",
+                    "Usage: supercov runs <run-id> decision <id|source-file:line>",
                 ));
             };
             request.selector = Some(selector.clone());
         }
-        "covers" => {
+        "line" => {
             let Some(selector) = options.positional.first() else {
                 return Err(PublicQueryError::invalid(
                     Some(&agent_command),
                     json_output,
-                    "Usage: supercov runs <run-id> coverage covers <source-file:line>",
+                    "Usage: supercov runs <run-id> line <source-file:line>",
                 ));
             };
             let Some((file, line)) = parse_location(selector) else {
@@ -470,7 +464,7 @@ fn coverage_invocation(
                 return Err(PublicQueryError::invalid(
                     Some(&agent_command),
                     json_output,
-                    "Usage: supercov runs <run-id> coverage test <id|name-fragment>",
+                    "Usage: supercov runs <run-id> test <id|name-fragment>",
                 ));
             }
             request.selector = Some(options.positional.join(" ").to_lowercase());
@@ -549,25 +543,7 @@ pub fn parse_public_query(
             json: options.json,
         });
     };
-    let explicit_coverage = arguments.get(1).map(String::as_str) == Some("coverage");
-    if !explicit_coverage
-        && arguments
-            .get(1)
-            .is_some_and(|argument| !argument.starts_with('-'))
-    {
-        let child = arguments.get(1);
-        let message = format!(
-            "Unknown runs query: {}. Expected: supercov runs <run-id> [coverage [<query>]]. Try supercov runs <run-id> --help.",
-            child.expect("present runs child")
-        );
-        return Err(PublicQueryError::unknown(
-            Some("runs"),
-            json_output,
-            message,
-            json!({ "run": run_id, "command": child }),
-        ));
-    }
-    let child_index = if explicit_coverage { 2 } else { 1 };
+    let child_index = 1;
     let child = arguments
         .get(child_index)
         .filter(|child| !child.starts_with('-'))
@@ -582,14 +558,14 @@ pub fn parse_public_query(
             | "gaps"
             | "file"
             | "decision"
-            | "covers"
+            | "line"
             | "test"
             | "minimize"
     ) {
         return Err(PublicQueryError::unknown(
             Some(&format!("coverage.{child}")),
             json_output,
-            format!("Unknown coverage query: {child}. Try supercov help."),
+            format!("Unknown run query: {child}. Try supercov runs <run-id> --help."),
             json!({ "command": child }),
         ));
     }
@@ -619,7 +595,7 @@ mod tests {
             agent_command,
             json,
             ..
-        } = parse_public_query("runs", &args(&["latest", "coverage", "--json"])).unwrap()
+        } = parse_public_query("runs", &args(&["latest", "--json"])).unwrap()
         else {
             panic!("expected coverage invocation");
         };
@@ -645,7 +621,6 @@ mod tests {
             "runs",
             &args(&[
                 "run-1",
-                "coverage",
                 "file",
                 "src/a.ts",
                 "--group",
@@ -678,12 +653,10 @@ mod tests {
     }
 
     #[test]
-    fn splits_cover_locations_without_confusing_an_optional_column() {
-        let PublicQueryInvocation::Coverage { request, .. } = parse_public_query(
-            "runs",
-            &args(&["run-1", "coverage", "covers", "src/a.ts:12:8"]),
-        )
-        .unwrap() else {
+    fn splits_line_locations_without_confusing_an_optional_column() {
+        let PublicQueryInvocation::Coverage { request, .. } =
+            parse_public_query("runs", &args(&["run-1", "line", "src/a.ts:12:8"])).unwrap()
+        else {
             panic!("expected coverage invocation");
         };
         assert_eq!(request.file.as_deref(), Some("src/a.ts"));
@@ -692,23 +665,21 @@ mod tests {
 
     #[test]
     fn refuses_to_degrade_a_malformed_instance_query_to_a_listing() {
-        let error = parse_public_query("runs", &args(&["run-1", "gaps", "--json"])).unwrap_err();
+        let error =
+            parse_public_query("runs", &args(&["run-1", "coverage", "--json"])).unwrap_err();
         assert_eq!(error.error.code, ErrorCode::UnknownCommand);
-        assert_eq!(error.command.as_deref(), Some("runs"));
+        assert_eq!(error.command.as_deref(), Some("coverage.coverage"));
         assert_eq!(
             error.error.message,
-            "Unknown runs query: gaps. Expected: supercov runs <run-id> [coverage [<query>]]. Try supercov runs <run-id> --help."
+            "Unknown run query: coverage. Try supercov runs <run-id> --help."
         );
         assert!(error.json);
     }
 
     #[test]
     fn validates_agent_options_before_storage_access() {
-        let error = parse_public_query(
-            "runs",
-            &args(&["run-1", "coverage", "gaps", "--limit", "0", "--json"]),
-        )
-        .unwrap_err();
+        let error = parse_public_query("runs", &args(&["run-1", "gaps", "--limit", "0", "--json"]))
+            .unwrap_err();
         assert_eq!(error.error.code, ErrorCode::InvalidArgument);
         assert_eq!(error.command.as_deref(), Some("coverage.gaps"));
         assert_eq!(error.error.message, "--limit must be a positive integer");
