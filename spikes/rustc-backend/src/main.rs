@@ -212,6 +212,7 @@ struct DecisionObligation {
     structural_marker: bool,
     assertion_source: Option<StableSourceRange>,
     outcome_branch_id: String,
+    loop_branch_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -639,6 +640,7 @@ struct HirManifestCollector<'a, 'tcx> {
     match_groups: &'a mut BTreeMap<String, MatchSelectionObligation>,
     limitations: &'a mut BTreeSet<String>,
     control_overrides: BTreeMap<u32, &'static str>,
+    loop_branch_overrides: BTreeMap<u32, String>,
     match_context: Option<(String, &'static str, Option<usize>)>,
 }
 
@@ -862,6 +864,23 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             &format!("{branch_kind}:{decision_kind}"),
             &alternatives,
         )?;
+        let loop_branch_id = if decision_kind.starts_with("while") {
+            match self
+                .loop_branch_overrides
+                .remove(&expression.hir_id.local_id.as_u32())
+            {
+                Some(branch_id) => Some(branch_id),
+                None => {
+                    self.limitations.insert(format!(
+                        "RUST_CONTROL_MAPPING_UNRESOLVED: {}: while decision has no exact loop-entry branch",
+                        self.definition
+                    ));
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
         let decision_id = decision.id.clone();
         match self.decisions.get_mut(&decision.id) {
             Some(existing) if existing.identity.canonical != decision.canonical => {
@@ -875,7 +894,8 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     || existing.conditions != conditions
                     || existing.structural_marker != (decision_kind == "assertion")
                     || existing.assertion_source != assertion_source
-                    || existing.outcome_branch_id != outcome_branch_id =>
+                    || existing.outcome_branch_id != outcome_branch_id
+                    || existing.loop_branch_id != loop_branch_id =>
             {
                 self.tcx.dcx().fatal(format!(
                     "Supercov Rust decision aggregation mismatch for {}",
@@ -898,6 +918,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                         structural_marker: decision_kind == "assertion",
                         assertion_source,
                         outcome_branch_id,
+                        loop_branch_id,
                     },
                 );
             }
@@ -986,6 +1007,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                         structural_marker: true,
                         assertion_source: Some(assertion_source),
                         outcome_branch_id,
+                        loop_branch_id: None,
                     },
                 );
             }
@@ -1269,12 +1291,16 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
                     {
                         self.control_overrides
                             .insert(control.hir_id.local_id.as_u32(), "while");
-                        let _ = self.record_branch(
+                        let loop_branch_id = self.record_branch(
                             expression.span.source_callsite(),
                             "loop-entry",
                             "loop-entry:while",
                             &[("zero", "zero iterations"), ("entered", "entered")],
                         );
+                        if let Some(loop_branch_id) = loop_branch_id {
+                            self.loop_branch_overrides
+                                .insert(control.hir_id.local_id.as_u32(), loop_branch_id);
+                        }
                     } else {
                         self.limitations.insert(format!(
                             "RUST_CONTROL_MAPPING_UNRESOLVED: {}: while control is not the expected expanded HIR shape",
@@ -1436,7 +1462,7 @@ fn manifest_json(
                 .collect::<Vec<_>>()
                 .join(",");
             format!(
-                "{{\"id\":\"{}\",\"kind\":\"{}\",\"sourceKey\":\"{}\",\"start\":{},\"end\":{},\"provenance\":\"{}\",\"probeOrdinal\":\"{}\",\"definitions\":{},\"outcomeBranchId\":\"{}\",\"conditions\":[{}],\"canonical\":\"{}\"}}",
+                "{{\"id\":\"{}\",\"kind\":\"{}\",\"sourceKey\":\"{}\",\"start\":{},\"end\":{},\"provenance\":\"{}\",\"probeOrdinal\":\"{}\",\"definitions\":{},\"outcomeBranchId\":\"{}\",\"loopBranchId\":{},\"conditions\":[{}],\"canonical\":\"{}\"}}",
                 escape(&decision.identity.id),
                 decision.decision_kind,
                 escape(&decision.identity.source.key),
@@ -1446,6 +1472,7 @@ fn manifest_json(
                 decision.identity.probe_ordinal,
                 json_strings(&decision.definitions),
                 escape(&decision.outcome_branch_id),
+                json_string(decision.loop_branch_id.as_deref()),
                 conditions,
                 escape(&decision.identity.canonical),
             )
@@ -1765,6 +1792,7 @@ impl Callbacks for ProbeCallbacks {
                     match_groups: &mut match_groups,
                     limitations: &mut manifest_limitations,
                     control_overrides: BTreeMap::new(),
+                    loop_branch_overrides: BTreeMap::new(),
                     match_context: None,
                 };
                 collector.visit_body(body);
@@ -3912,8 +3940,8 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
             "Supercov could not bind Rust CTFE decision probes in {definition}: {error}"
         ))
     });
-    let structural_decision_plans =
-        runtime_marked_decision_plans(tcx, def_id, body).unwrap_or_else(|error| {
+    let structural_decision_plans = runtime_marked_decision_plans(tcx, def_id, body)
+        .unwrap_or_else(|error| {
             tcx.dcx().fatal(format!(
                 "Supercov could not bind marked Rust CTFE decisions in {definition}: {error}"
             ))
@@ -3930,6 +3958,29 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
             ));
         }
         decision_plans.push(plan);
+    }
+    let mut selection_plans = runtime_match_plans(tcx, def_id, body).unwrap_or_else(|error| {
+        tcx.dcx().fatal(format!(
+            "Supercov could not bind Rust CTFE match selections in {definition}: {error}"
+        ))
+    });
+    let let_else_plans = runtime_let_else_plans(tcx, def_id, body).unwrap_or_else(|error| {
+        tcx.dcx().fatal(format!(
+            "Supercov could not bind Rust CTFE let-else selections in {definition}: {error}"
+        ))
+    });
+    let mut selection_ids = selection_plans
+        .iter()
+        .map(|plan| plan.id.clone())
+        .collect::<BTreeSet<_>>();
+    for plan in let_else_plans {
+        if !selection_ids.insert(plan.id.clone()) {
+            tcx.dcx().fatal(format!(
+                "Supercov bound CTFE selection {} through two compiler paths in {definition}",
+                plan.id
+            ));
+        }
+        selection_plans.push(plan);
     }
     let mut hit_ordinals_by_block = BTreeMap::<BasicBlock, BTreeSet<u64>>::new();
     for plan in runtime_statement_plans(tcx, def_id, body).unwrap_or_else(|error| {
@@ -3950,9 +4001,7 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
             .or_default()
             .insert(identity.probe_ordinal);
     }
-    if let Err(error) =
-        strip_structural_decision_markers(&mut instrumented, def_id, &definition)
-    {
+    if let Err(error) = strip_structural_decision_markers(&mut instrumented, def_id, &definition) {
         tcx.dcx().fatal(format!(
             "Supercov could not consume pre-borrow-check Rust CTFE markers in {definition}: {error}"
         ));
@@ -3986,18 +4035,26 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
             .statements
             .insert(0, ctfe_marker_statement(tcx, marker_local, marker, span));
         if matches!(block_data.terminator().kind, TerminatorKind::Return) {
-            let exit = ctfe_marker_identity(
-                tcx,
-                &crate_name,
-                &definition,
-                "exit",
-                block.as_u32(),
-            );
+            let exit = ctfe_marker_identity(tcx, &crate_name, &definition, "exit", block.as_u32());
             block_data
                 .statements
                 .push(ctfe_marker_statement(tcx, marker_local, exit, span));
         }
     }
+    instrument_ctfe_selections(
+        tcx,
+        &mut instrumented,
+        &selection_plans,
+        marker_local,
+        &crate_name,
+        &definition,
+        span,
+    )
+    .unwrap_or_else(|error| {
+        tcx.dcx().fatal(format!(
+            "Supercov could not inject Rust CTFE match selections in {definition}: {error}"
+        ))
+    });
     instrument_ctfe_decisions(
         tcx,
         &mut instrumented,
@@ -4059,6 +4116,59 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
     tcx.arena.alloc(instrumented)
 }
 
+fn instrument_ctfe_selections<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &mut Body<'tcx>,
+    plans: &[RuntimeMatchPlan],
+    marker_local: rustc_middle::mir::Local,
+    crate_name: &str,
+    definition: &str,
+    span: rustc_span::Span,
+) -> Result<(), String> {
+    let mut site = 0_u32;
+    for plan in plans {
+        for arm in &plan.arms {
+            let marker = ctfe_marker_identity(tcx, crate_name, definition, "selection", site);
+            site = site
+                .checked_add(1)
+                .ok_or_else(|| "CTFE selection count exceeds u32".to_owned())?;
+            register_ctfe_hits(tcx, marker, std::iter::once(arm.selected_ordinal));
+            for source in &arm.entry_sources {
+                let cleanup = body.basic_blocks[*source].is_cleanup;
+                let mut bridge = BasicBlockData::new(
+                    Some(Terminator {
+                        source_info: SourceInfo::outermost(span),
+                        kind: TerminatorKind::Goto {
+                            target: arm.entry_block,
+                        },
+                    }),
+                    cleanup,
+                );
+                bridge
+                    .statements
+                    .push(ctfe_marker_statement(tcx, marker_local, marker, span));
+                let bridge = body.basic_blocks_mut().push(bridge);
+                let mut replaced = 0;
+                body.basic_blocks_mut()[*source]
+                    .terminator_mut()
+                    .successors_mut(|edge| {
+                        if *edge == arm.entry_block {
+                            *edge = bridge;
+                            replaced += 1;
+                        }
+                    });
+                if replaced == 0 {
+                    return Err(format!(
+                        "CTFE selection {} arm {} edge from {:?} was not found",
+                        plan.id, arm.branch_id, source
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn instrument_ctfe_decisions<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &mut Body<'tcx>,
@@ -4081,15 +4191,10 @@ fn instrument_ctfe_decisions<'tcx>(
                 first.entry_block
             ));
         }
-        let start_ordinal = u32::try_from(plan_index)
-            .map_err(|_| "CTFE decision count exceeds u32".to_owned())?;
-        let start = ctfe_marker_identity(
-            tcx,
-            crate_name,
-            definition,
-            "decision-start",
-            start_ordinal,
-        );
+        let start_ordinal =
+            u32::try_from(plan_index).map_err(|_| "CTFE decision count exceeds u32".to_owned())?;
+        let start =
+            ctfe_marker_identity(tcx, crate_name, definition, "decision-start", start_ordinal);
         register_ctfe_decision(
             tcx,
             start,
@@ -4101,10 +4206,9 @@ fn instrument_ctfe_decisions<'tcx>(
                 outcome: None,
             },
         );
-        body.basic_blocks_mut()[first.entry_block].statements.insert(
-            1,
-            ctfe_marker_statement(tcx, marker_local, start, span),
-        );
+        body.basic_blocks_mut()[first.entry_block]
+            .statements
+            .insert(1, ctfe_marker_statement(tcx, marker_local, start, span));
 
         for condition in &plan.conditions {
             for (value, sources, target, outcome) in [
@@ -4125,13 +4229,8 @@ fn instrument_ctfe_decisions<'tcx>(
                 condition_site = condition_site
                     .checked_add(1)
                     .ok_or_else(|| "CTFE decision event count exceeds u32".to_owned())?;
-                let condition_marker = ctfe_marker_identity(
-                    tcx,
-                    crate_name,
-                    definition,
-                    "decision-condition",
-                    site,
-                );
+                let condition_marker =
+                    ctfe_marker_identity(tcx, crate_name, definition, "decision-condition", site);
                 register_ctfe_decision(
                     tcx,
                     condition_marker,
@@ -4144,13 +4243,8 @@ fn instrument_ctfe_decisions<'tcx>(
                     },
                 );
                 let finish_marker = outcome.map(|outcome| {
-                    let marker = ctfe_marker_identity(
-                        tcx,
-                        crate_name,
-                        definition,
-                        "decision-finish",
-                        site,
-                    );
+                    let marker =
+                        ctfe_marker_identity(tcx, crate_name, definition, "decision-finish", site);
                     register_ctfe_decision(
                         tcx,
                         marker,
@@ -4162,15 +4256,15 @@ fn instrument_ctfe_decisions<'tcx>(
                             outcome: Some(outcome),
                         },
                     );
-                    register_ctfe_hits(
-                        tcx,
-                        marker,
-                        std::iter::once(if outcome {
-                            plan.true_ordinal
-                        } else {
-                            plan.false_ordinal
-                        }),
-                    );
+                    let mut hits = vec![if outcome {
+                        plan.true_ordinal
+                    } else {
+                        plan.false_ordinal
+                    }];
+                    if let Some((zero, entered)) = plan.loop_alternatives {
+                        hits.push(if outcome { entered } else { zero });
+                    }
+                    register_ctfe_hits(tcx, marker, hits.into_iter());
                     marker
                 });
                 for source in sources {
@@ -4280,17 +4374,14 @@ fn ctfe_marker_identity(
     marker
 }
 
-fn register_ctfe_hits(
-    tcx: TyCtxt<'_>,
-    marker: u64,
-    hits: impl Iterator<Item = u64>,
-) {
+fn register_ctfe_hits(tcx: TyCtxt<'_>, marker: u64, hits: impl Iterator<Item = u64>) {
     let mut mappings = CTFE_MAPPINGS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mapping = mappings
-        .get_mut(&marker)
-        .unwrap_or_else(|| tcx.dcx().fatal(format!("Supercov CTFE marker {marker} has no mapping")));
+    let mapping = mappings.get_mut(&marker).unwrap_or_else(|| {
+        tcx.dcx()
+            .fatal(format!("Supercov CTFE marker {marker} has no mapping"))
+    });
     mapping.hit_ordinals.extend(hits);
 }
 
@@ -4298,9 +4389,10 @@ fn register_ctfe_decision(tcx: TyCtxt<'_>, marker: u64, decision: CtfeDecisionMa
     let mut mappings = CTFE_MAPPINGS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let mapping = mappings
-        .get_mut(&marker)
-        .unwrap_or_else(|| tcx.dcx().fatal(format!("Supercov CTFE marker {marker} has no mapping")));
+    let mapping = mappings.get_mut(&marker).unwrap_or_else(|| {
+        tcx.dcx()
+            .fatal(format!("Supercov CTFE marker {marker} has no mapping"))
+    });
     if let Some(existing) = &mapping.decision
         && existing != &decision
     {
@@ -4421,6 +4513,61 @@ fn decision_outcome_ordinals(
     Ok((ordinal(labels.0)?, ordinal(labels.1)?))
 }
 
+struct RuntimeLoopBinding {
+    alternatives: (u64, u64),
+    source: StableSourceRange,
+}
+
+fn decision_loop_binding(
+    decision: &DecisionObligation,
+    branches: &BTreeMap<String, BranchObligation>,
+) -> Result<Option<RuntimeLoopBinding>, String> {
+    let Some(loop_branch_id) = decision.loop_branch_id.as_deref() else {
+        if decision.decision_kind.starts_with("while") {
+            return Err(format!(
+                "while decision {} has no exact loop-entry branch",
+                decision.identity.id
+            ));
+        }
+        return Ok(None);
+    };
+    if !decision.decision_kind.starts_with("while") {
+        return Err(format!(
+            "non-loop decision {} references loop-entry branch {loop_branch_id}",
+            decision.identity.id
+        ));
+    }
+    let branch = branches.get(loop_branch_id).ok_or_else(|| {
+        format!(
+            "decision {} references missing loop-entry branch {loop_branch_id}",
+            decision.identity.id
+        )
+    })?;
+    if branch.branch_kind != "loop-entry" || branch.discriminator != "loop-entry:while" {
+        return Err(format!(
+            "decision {} references malformed loop-entry branch {loop_branch_id}",
+            decision.identity.id
+        ));
+    }
+    let ordinal = |label: &str| {
+        branch
+            .alternatives
+            .iter()
+            .find(|alternative| alternative.label == label)
+            .map(|alternative| alternative.identity.probe_ordinal)
+            .ok_or_else(|| {
+                format!(
+                    "decision {} loop-entry branch lacks {label}",
+                    decision.identity.id
+                )
+            })
+    };
+    Ok(Some(RuntimeLoopBinding {
+        alternatives: (ordinal("zero iterations")?, ordinal("entered")?),
+        source: branch.identity.source.clone(),
+    }))
+}
+
 fn runtime_body_obligations(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<RuntimeBodyObligations> {
     let definition = tcx.def_path_str(def_id);
     if definition.contains("__supercov_spike_runtime") {
@@ -4446,6 +4593,7 @@ fn runtime_body_obligations(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Runti
         match_groups: &mut match_groups,
         limitations: &mut limitations,
         control_overrides: BTreeMap::new(),
+        loop_branch_overrides: BTreeMap::new(),
         match_context: None,
     }
     .visit_body(hir_body);
@@ -4686,49 +4834,7 @@ fn runtime_decision_plans<'tcx>(
             });
         }
         let (false_ordinal, true_ordinal) = decision_outcome_ordinals(decision, &branches)?;
-        let (loop_alternatives, loop_source) = if decision.decision_kind.starts_with("while") {
-            let candidates = branches
-                .values()
-                .filter(|branch| {
-                    branch.branch_kind == "loop-entry"
-                        && branch.discriminator == "loop-entry:while"
-                        && branch.identity.source.key == decision.identity.source.key
-                        && branch.identity.source.start <= decision.identity.source.start
-                        && branch.identity.source.end >= decision.identity.source.end
-                        && branch.definitions.contains(&definition)
-                })
-                .collect::<Vec<_>>();
-            let [branch] = candidates.as_slice() else {
-                return Err(format!(
-                    "while decision {} maps to {} invocation branches",
-                    decision.identity.id,
-                    candidates.len()
-                ));
-            };
-            let zero = branch
-                .alternatives
-                .iter()
-                .find(|alternative| alternative.label == "zero iterations")
-                .map(|alternative| alternative.identity.probe_ordinal);
-            let entered = branch
-                .alternatives
-                .iter()
-                .find(|alternative| alternative.label == "entered")
-                .map(|alternative| alternative.identity.probe_ordinal);
-            match (zero, entered) {
-                (Some(zero), Some(entered)) => {
-                    (Some((zero, entered)), Some(branch.identity.source.clone()))
-                }
-                _ => {
-                    return Err(format!(
-                        "while invocation branch {} has incomplete alternatives",
-                        branch.identity.id
-                    ));
-                }
-            }
-        } else {
-            (None, None)
-        };
+        let loop_binding = decision_loop_binding(decision, &branches)?;
         plans.push(RuntimeDecisionPlan {
             id: decision.identity.id.clone(),
             id_high,
@@ -4736,8 +4842,8 @@ fn runtime_decision_plans<'tcx>(
             conditions,
             false_ordinal,
             true_ordinal,
-            loop_alternatives,
-            loop_source,
+            loop_alternatives: loop_binding.as_ref().map(|binding| binding.alternatives),
+            loop_source: loop_binding.map(|binding| binding.source),
             loop_token: None,
         });
     }
@@ -4806,19 +4912,23 @@ fn runtime_statement_plans<'tcx>(
             .flat_map(|(_, bcb)| bcb_blocks.get(bcb).into_iter().flatten().copied())
             .collect::<BTreeSet<_>>();
         if candidates.is_empty() {
-            candidates.extend(body.basic_blocks.iter_enumerated().filter_map(|(block, data)| {
-                data.statements
-                    .iter()
-                    .map(|statement| statement.source_info.span)
-                    .chain(std::iter::once(data.terminator().source_info.span))
-                    .filter_map(|span| stable_source_range(tcx, span, &crate_name).ok())
-                    .any(|source| {
-                        source.key == point.source.key
-                            && source.start >= point.source.start
-                            && source.end <= point.source.end
-                    })
-                    .then_some(block)
-            }));
+            candidates.extend(
+                body.basic_blocks
+                    .iter_enumerated()
+                    .filter_map(|(block, data)| {
+                        data.statements
+                            .iter()
+                            .map(|statement| statement.source_info.span)
+                            .chain(std::iter::once(data.terminator().source_info.span))
+                            .filter_map(|span| stable_source_range(tcx, span, &crate_name).ok())
+                            .any(|source| {
+                                source.key == point.source.key
+                                    && source.start >= point.source.start
+                                    && source.end <= point.source.end
+                            })
+                            .then_some(block)
+                    }),
+            );
         }
         let mut candidates = candidates.into_iter();
         let Some(mut block) = candidates.next() else {
@@ -5507,6 +5617,7 @@ fn runtime_marked_decision_plans<'tcx>(
         }
         let (false_ordinal, true_ordinal) =
             decision_outcome_ordinals(decision, &obligations.branches)?;
+        let loop_binding = decision_loop_binding(decision, &obligations.branches)?;
         plans.push(RuntimeDecisionPlan {
             id: decision_id,
             id_high,
@@ -5514,8 +5625,8 @@ fn runtime_marked_decision_plans<'tcx>(
             conditions,
             false_ordinal,
             true_ordinal,
-            loop_alternatives: None,
-            loop_source: None,
+            loop_alternatives: loop_binding.as_ref().map(|binding| binding.alternatives),
+            loop_source: loop_binding.map(|binding| binding.source),
             loop_token: None,
         });
     }
@@ -6727,9 +6838,7 @@ fn runtime_call_block<'tcx>(
 }
 
 fn probe_id_for(tcx: TyCtxt<'_>, def_id: LocalDefId, definition: &str) -> Option<u64> {
-    if definition.contains("__supercov_spike_runtime")
-        || !is_function_body(tcx.def_kind(def_id))
-    {
+    if definition.contains("__supercov_spike_runtime") || !is_function_body(tcx.def_kind(def_id)) {
         return None;
     }
     let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE).to_string();
@@ -7001,19 +7110,15 @@ fn write_new_synced(path: &Path, contents: &[u8]) -> Result<(), String> {
 }
 
 fn write_ctfe_outputs(args: &[String], events: &[CtfeObservation]) -> Result<(), String> {
-    let directory = env::var(OUTPUT_DIRECTORY)
-        .map_err(|_| format!("{OUTPUT_DIRECTORY} is not set"))?;
+    let directory =
+        env::var(OUTPUT_DIRECTORY).map_err(|_| format!("{OUTPUT_DIRECTORY} is not set"))?;
     let directory = PathBuf::from(directory);
     fs::create_dir_all(&directory).map_err(|error| format!("{}: {error}", directory.display()))?;
     let crate_name = args
         .windows(2)
         .find_map(|pair| (pair[0] == "--crate-name").then_some(pair[1].as_str()))
         .unwrap_or("unknown");
-    let identity = format!(
-        "{}-{}",
-        std::process::id(),
-        sanitize(crate_name)
-    );
+    let identity = format!("{}-{}", std::process::id(), sanitize(crate_name));
     let markers = CTFE_MARKERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

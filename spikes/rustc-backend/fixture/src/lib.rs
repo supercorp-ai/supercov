@@ -86,6 +86,41 @@ pub const CONST_NESTED_OUTER_FALSE: usize = const_nested(false, true);
 pub const CONST_NESTED_INNER_FALSE: usize = const_nested(true, false);
 pub const CONST_NESTED_INNER_TRUE: usize = const_nested(true, true);
 
+pub const fn const_match(value: u8) -> usize {
+    match value {
+        0 => 107,
+        1 => 109,
+        _ => 113,
+    }
+}
+
+pub const CONST_MATCH_FIRST: usize = const_match(0);
+pub const CONST_MATCH_SECOND: usize = const_match(1);
+pub const CONST_MATCH_FALLBACK: usize = const_match(2);
+
+pub const fn const_let_else(value: Option<usize>) -> usize {
+    let Some(value) = value else {
+        return 127;
+    };
+    value
+}
+
+pub const CONST_LET_ELSE_MATCHED: usize = const_let_else(Some(131));
+pub const CONST_LET_ELSE_FALLBACK: usize = const_let_else(None);
+
+pub const fn const_while(mut remaining: usize, enabled: bool) -> usize {
+    let mut count = 0;
+    while remaining > 0 && enabled {
+        count += 1;
+        remaining -= 1;
+    }
+    count
+}
+
+pub const CONST_WHILE_ZERO: usize = const_while(0, true);
+pub const CONST_WHILE_ENTERED: usize = const_while(2, true);
+pub const CONST_WHILE_DISABLED: usize = const_while(2, false);
+
 pub struct ConstGenericValue<const ENABLED: bool>;
 
 impl<const ENABLED: bool> ConstGenericValue<ENABLED> {

@@ -75,6 +75,7 @@ struct ActiveDecision {
 struct ActiveInvocation {
     definition: String,
     decisions: Vec<ActiveDecision>,
+    committed_loops: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -229,6 +230,7 @@ fn reconstruct_unit(
                 "entry"
                     | "block"
                     | "edge"
+                    | "selection"
                     | "exit"
                     | "decision-start"
                     | "decision-condition"
@@ -310,11 +312,21 @@ fn reconstruct_unit(
                             .decision_outcome_obligations
                             .get(&decision.id)
                             .expect("validated decision outcome mapping");
-                        BTreeSet::from([if outcome {
+                        let mut expected = BTreeSet::from([if outcome {
                             alternatives.1.as_str()
                         } else {
                             alternatives.0.as_str()
-                        }])
+                        }]);
+                        if let Some(loop_alternatives) =
+                            normalized.decision_loop_obligations.get(&decision.id)
+                        {
+                            expected.insert(if outcome {
+                                loop_alternatives.1.as_str()
+                            } else {
+                                loop_alternatives.0.as_str()
+                            });
+                        }
+                        expected
                     }
                     _ => unreachable!("validated decision event"),
                 };
@@ -355,6 +367,7 @@ fn reconstruct_unit(
     let mut decision_vectors = BTreeMap::<String, BTreeSet<(Vec<Option<bool>>, bool)>>::new();
     let mut runtime_events = Vec::new();
     for event in &events {
+        let mut ignored_hits = BTreeSet::new();
         if event.kind != "ctfe-marker"
             || event.crate_name != map.crate_name
             || event.thread.trim().is_empty()
@@ -381,8 +394,10 @@ fn reconstruct_unit(
             "entry" => stack.push(ActiveInvocation {
                 definition: event.definition.clone(),
                 decisions: Vec::new(),
+                committed_loops: BTreeSet::new(),
             }),
-            "block" | "edge" | "decision-start" | "decision-condition" | "decision-finish" => {
+            "block" | "edge" | "selection" | "decision-start" | "decision-condition"
+            | "decision-finish" => {
                 let Some(invocation) = stack.last_mut() else {
                     return Err(RustCompilerCtfeError::Invalid(format!(
                         "CTFE marker {marker} was observed outside an invocation on {}",
@@ -450,6 +465,16 @@ fn reconstruct_unit(
                                 )));
                             }
                             let outcome = decision.outcome.expect("validated decision outcome");
+                            if let Some(loop_alternatives) =
+                                normalized.decision_loop_obligations.get(&decision.id)
+                                && !invocation.committed_loops.insert(decision.id.clone())
+                            {
+                                ignored_hits.insert(if outcome {
+                                    loop_alternatives.1.clone()
+                                } else {
+                                    loop_alternatives.0.clone()
+                                });
+                            }
                             decision_vectors
                                 .entry(decision.id.clone())
                                 .or_default()
@@ -489,6 +514,9 @@ fn reconstruct_unit(
         for ordinal in &mapping.hit_ordinals {
             let ordinal = parse_u64(ordinal, "CTFE hit ordinal")?;
             for id in &normalized.hit_obligations_by_ordinal[&ordinal] {
+                if ignored_hits.contains(id) {
+                    continue;
+                }
                 hits.insert(id.clone());
                 runtime_events.push(RuntimeEvent {
                     event_type: "hit".into(),
@@ -654,6 +682,7 @@ mod tests {
                 "decision".into(),
                 ("false-alternative".into(), "true-alternative".into()),
             )]),
+            decision_loop_obligations: BTreeMap::new(),
         }
     }
 
@@ -745,6 +774,47 @@ mod tests {
         .collect()
     }
 
+    fn loop_manifest() -> NormalizedRustCompilerManifest {
+        let mut normalized = normalized_manifest();
+        normalized.manifest.decisions[0].kind = "while".into();
+        normalized.manifest.branches.push(BranchMeta {
+            id: "loop-entry".into(),
+            kind: "loop-entry".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            column: 1,
+            source: "while value".into(),
+            alternatives: vec![
+                BranchAlternativeMeta {
+                    id: "zero-iterations".into(),
+                    label: "zero iterations".into(),
+                },
+                BranchAlternativeMeta {
+                    id: "entered".into(),
+                    label: "entered".into(),
+                },
+            ],
+        });
+        normalized
+            .hit_obligations_by_ordinal
+            .insert(301, vec!["zero-iterations".into()]);
+        normalized
+            .hit_obligations_by_ordinal
+            .insert(302, vec!["entered".into()]);
+        normalized.decision_loop_obligations.insert(
+            "decision".into(),
+            ("zero-iterations".into(), "entered".into()),
+        );
+        normalized
+    }
+
+    fn loop_map() -> Value {
+        let mut map = valid_map();
+        map["mappings"][3]["hitOrdinals"] = json!(["201", "301"]);
+        map["mappings"][6]["hitOrdinals"] = json!(["202", "302"]);
+        map
+    }
+
     #[test]
     fn canonical_unsigned_decimal_rejects_aliases() {
         assert_eq!(parse_u64("12", "marker").unwrap(), 12);
@@ -782,6 +852,71 @@ mod tests {
     }
 
     #[test]
+    fn commits_only_the_first_loop_entry_outcome_per_ctfe_invocation() {
+        let scratch = Scratch::new();
+        let events = [
+            ("1", "entry"),
+            ("2", "decision-start"),
+            ("6", "decision-condition"),
+            ("7", "decision-finish"),
+            ("2", "decision-start"),
+            ("3", "decision-condition"),
+            ("4", "decision-finish"),
+            ("5", "exit"),
+        ]
+        .into_iter()
+        .map(|(marker, kind)| event(marker, kind))
+        .collect::<Vec<_>>();
+        scratch.write(loop_map(), &events);
+
+        let units = read_rust_compiler_ctfe(&scratch.0, &loop_manifest(), 42).unwrap();
+        assert_eq!(
+            units[0].snapshot.hits,
+            [
+                "entered",
+                "false-alternative",
+                "function",
+                "true-alternative"
+            ]
+        );
+        assert_eq!(
+            units[0].snapshot.decisions[0].vectors,
+            [
+                McdcVector {
+                    values: vec![Some(false)],
+                    outcome: false,
+                },
+                McdcVector {
+                    values: vec![Some(true)],
+                    outcome: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_a_zero_iteration_loop_outcome() {
+        let scratch = Scratch::new();
+        let events = [
+            ("1", "entry"),
+            ("2", "decision-start"),
+            ("3", "decision-condition"),
+            ("4", "decision-finish"),
+            ("5", "exit"),
+        ]
+        .into_iter()
+        .map(|(marker, kind)| event(marker, kind))
+        .collect::<Vec<_>>();
+        scratch.write(loop_map(), &events);
+
+        let units = read_rust_compiler_ctfe(&scratch.0, &loop_manifest(), 42).unwrap();
+        assert_eq!(
+            units[0].snapshot.hits,
+            ["false-alternative", "function", "zero-iterations"]
+        );
+    }
+
+    #[test]
     fn rejects_semantic_marker_with_unrelated_hit() {
         let scratch = Scratch::new();
         let mut map = valid_map();
@@ -802,6 +937,18 @@ mod tests {
 
         let error = read_rust_compiler_ctfe(&scratch.0, &normalized_manifest(), 42)
             .expect_err("false finish must not map to the true alternative");
+        assert!(error.to_string().contains("wrong coverage obligations"));
+    }
+
+    #[test]
+    fn rejects_finish_mapped_to_the_wrong_loop_alternative() {
+        let scratch = Scratch::new();
+        let mut map = loop_map();
+        map["mappings"][3]["hitOrdinals"] = json!(["201", "302"]);
+        scratch.write(map, &valid_events());
+
+        let error = read_rust_compiler_ctfe(&scratch.0, &loop_manifest(), 42)
+            .expect_err("zero-iteration finish must not map to entered");
         assert!(error.to_string().contains("wrong coverage obligations"));
     }
 

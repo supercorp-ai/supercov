@@ -942,7 +942,7 @@ try {
   assert.match(baselineBehavior.stdout, /try-panic=true/);
   assert.match(
     baselineBehavior.stdout,
-    /ctfe-surfaces=\[17, 29, 31, 43, 47, 53, 59, 61, 2, 67, 79, 89, 83, 89, 83, 103, 101, 97\]/,
+    /ctfe-surfaces=\[17, 29, 31, 43, 47, 53, 59, 61, 2, 67, 79, 89, 83, 89, 83, 103, 101, 97, 107, 109, 113, 131, 127, 0, 2, 0\]/,
   );
   assert.match(baselineBehavior.stdout, /match-unreachable=\[1, 2\]/);
   assert.match(baselineBehavior.stdout, /match-generated=\[23, 29\]/);
@@ -2116,6 +2116,117 @@ try {
       JSON.stringify({values: [false], outcome: false}),
       JSON.stringify({values: [true], outcome: true}),
     ].sort(),
+  );
+  const [constMatchGroup] = matchGroupsFor(runtimeManifest, 'const_match');
+  assert(constMatchGroup, 'const_match has no frozen selection group');
+  const constMatchOrdinals = new Set(
+    constMatchGroup.arms.map(({selectedOrdinal}) => selectedOrdinal),
+  );
+  const constMatchSelections = ctfeInvocations
+    .filter(({definition}) => definition === 'const_match')
+    .map(({records: invocationRecords}) =>
+      invocationRecords
+        .flatMap((record) =>
+          mappingsByMarker.get(`${record.crate}:${record.marker}`).hitOrdinals,
+        )
+        .filter((ordinal) => constMatchOrdinals.has(ordinal)),
+    );
+  assert.deepEqual(
+    constMatchSelections.map((ordinals) => ordinals.join(',')).sort(),
+    [...constMatchOrdinals].sort(),
+    'CTFE match invocations did not select each exact arm once',
+  );
+  for (const selected of constMatchGroup.arms) {
+    const derived = normalized.hitObligationsByOrdinal[selected.selectedOrdinal];
+    assert.equal(
+      derived.length,
+      constMatchGroup.arms.length,
+      `CTFE match selection ${selected.branchId} did not derive every sibling outcome`,
+    );
+    for (const arm of constMatchGroup.arms) {
+      assert(
+        derived.includes(
+          arm.branchId === selected.branchId
+            ? runtimeManifest.branches
+                .find(({id}) => id === arm.branchId)
+                .alternatives.find(({label}) => label === 'selected').id
+            : runtimeManifest.branches
+                .find(({id}) => id === arm.branchId)
+                .alternatives.find(({label}) => label === 'not selected').id,
+        ),
+        `CTFE match selection ${selected.branchId} lost derived arm ${arm.branchId}`,
+      );
+    }
+  }
+  const constLetElse = branchFor(runtimeManifest, 'const_let_else', 'let-else');
+  const constLetElseOrdinals = new Set(
+    constLetElse.alternatives.map(({probeOrdinal}) => probeOrdinal),
+  );
+  assert.deepEqual(
+    ctfeInvocations
+      .filter(({definition}) => definition === 'const_let_else')
+      .map(({records: invocationRecords}) =>
+        invocationRecords
+          .flatMap((record) =>
+            mappingsByMarker.get(`${record.crate}:${record.marker}`).hitOrdinals,
+          )
+          .filter((ordinal) => constLetElseOrdinals.has(ordinal))
+          .join(','),
+      )
+      .sort(),
+    [...constLetElseOrdinals].sort(),
+    'CTFE let-else invocations did not commit matched and fallback alternatives',
+  );
+  const constWhileDecision = decisionForConditions(runtimeManifest, 'const_while', [
+    'remaining > 0',
+    'enabled',
+  ]);
+  assert.deepEqual(
+    ctfeVectorsForDecision('const_while', constWhileDecision),
+    [
+      JSON.stringify({values: [false, null], outcome: false}),
+      JSON.stringify({values: [false, null], outcome: false}),
+      JSON.stringify({values: [true, false], outcome: false}),
+      JSON.stringify({values: [true, true], outcome: true}),
+      JSON.stringify({values: [true, true], outcome: true}),
+    ].sort(),
+    'CTFE while did not preserve every evaluated short-circuit vector',
+  );
+  assert.match(
+    constWhileDecision.loopBranchId,
+    /^rs:branch:/,
+    'CTFE while decision has no exact loop-entry relation',
+  );
+  const constWhileBranch = runtimeManifest.branches.find(
+    ({id}) => id === constWhileDecision.loopBranchId,
+  );
+  assert.equal(constWhileBranch?.kind, 'loop-entry');
+  const whileOrdinals = new Map(
+    constWhileBranch.alternatives.map(({label, probeOrdinal}) => [probeOrdinal, label]),
+  );
+  const whileInvocationOutcomes = ctfeInvocations
+    .filter(({definition}) => definition === 'const_while')
+    .map(({records: invocationRecords}) =>
+      invocationRecords
+        .map((record) => mappingsByMarker.get(`${record.crate}:${record.marker}`))
+        .filter(
+          ({decision}) =>
+            decision?.id === constWhileDecision.id && decision.event === 'finish',
+        )
+        .map(({hitOrdinals}) =>
+          hitOrdinals.map((ordinal) => whileOrdinals.get(ordinal)).find(Boolean),
+        ),
+    );
+  assert.deepEqual(
+    whileInvocationOutcomes.map(([first]) => first).sort(),
+    ['entered', 'zero iterations', 'zero iterations'],
+    'CTFE while did not bind loop-entry to the first condition outcome per invocation',
+  );
+  const enteredWhile = whileInvocationOutcomes.find(([first]) => first === 'entered');
+  assert.deepEqual(
+    enteredWhile,
+    ['entered', 'entered', 'zero iterations'],
+    'entered CTFE while corpus did not exercise its terminating false condition',
   );
   const ctfeDefinitions = new Set(
     ctfeRecordFiles.flatMap(({records: fileRecords}) =>

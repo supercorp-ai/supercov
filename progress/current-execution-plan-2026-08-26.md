@@ -509,6 +509,19 @@ an anonymous array-length decision, two independent inline consts, all four
 masked paths through `(first || second) && third`, and separate outer/inner
 const decisions. The complete CTFE branch-kind and failure corpus remains open.
 
+CTFE now also reconstructs exact `match` and `let else` alternatives through
+the same compiler-owned selection bridge used at runtime. A selected match arm
+derives every sibling's not-selected alternative offline, and both the matched
+and fallback `let else` paths retain their frozen branch identities. Const
+`while` decisions carry an explicit manifest relation to their loop-entry
+branch rather than relying on overlapping source ranges. Each CTFE invocation
+commits only its first loop condition outcome for zero-versus-entered coverage:
+an entered loop's later terminating false condition remains an exact MC/DC
+vector but cannot fabricate a zero-iteration hit. The real corpus proves zero,
+disabled and two-iteration paths with unchanged behavior; strict ingestion
+rejects wrong loop alternatives. CTFE `?`, assertions, promoted/const-trait
+surfaces and the complete failure/platform/performance corpus remain open.
+
 The rustdoc launch boundary is now proven as well. Cargo's ordinary
 `RUSTC_WRAPPER` still does not see synthesized doctest crates, so Supercov uses
 a scoped launcher for the exact ordinary rustdoc and adds its compiler

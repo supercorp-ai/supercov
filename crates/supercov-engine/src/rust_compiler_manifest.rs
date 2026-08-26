@@ -91,6 +91,7 @@ pub struct RustCompilerDecision {
     pub probe_ordinal: String,
     pub definitions: Vec<String>,
     pub outcome_branch_id: String,
+    pub loop_branch_id: Option<String>,
     pub conditions: Vec<RustCompilerCondition>,
     pub canonical: String,
 }
@@ -180,6 +181,7 @@ pub struct NormalizedRustCompilerManifest {
     pub hit_obligations_by_ordinal: BTreeMap<u64, Vec<String>>,
     pub internal_ordinals: BTreeSet<u64>,
     pub decision_outcome_obligations: BTreeMap<String, (String, String)>,
+    pub decision_loop_obligations: BTreeMap<String, (String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -607,6 +609,37 @@ impl RustCompilerManifest {
             {
                 return Err(invalid("decision has a malformed outcome branch"));
             }
+            match (
+                decision.kind.starts_with("while"),
+                decision.loop_branch_id.as_deref(),
+            ) {
+                (true, Some(loop_branch_id)) => {
+                    let Some(loop_branch) = self
+                        .branches
+                        .iter()
+                        .find(|branch| branch.id == loop_branch_id)
+                    else {
+                        return Err(invalid("decision references a missing loop-entry branch"));
+                    };
+                    if loop_branch.kind != "loop-entry"
+                        || loop_branch
+                            .alternatives
+                            .iter()
+                            .map(|alternative| alternative.label.as_str())
+                            .collect::<BTreeSet<_>>()
+                            != BTreeSet::from(["entered", "zero iterations"])
+                    {
+                        return Err(invalid("decision has a malformed loop-entry branch"));
+                    }
+                }
+                (true, None) => {
+                    return Err(invalid("while decision lacks an exact loop-entry branch"));
+                }
+                (false, Some(_)) => {
+                    return Err(invalid("non-while decision references a loop-entry branch"));
+                }
+                (false, None) => {}
+            }
             insert_identity(
                 &mut ids,
                 &mut ordinals,
@@ -849,6 +882,7 @@ impl RustCompilerManifest {
             .map(|branch| (branch.id.as_str(), branch))
             .collect::<BTreeMap<_, _>>();
         let mut decision_outcome_obligations = BTreeMap::new();
+        let mut decision_loop_obligations = BTreeMap::new();
         for decision in &self.decisions {
             let (file, line, column, source) =
                 location(&decision.source_key, decision.start, decision.end)?;
@@ -878,6 +912,25 @@ impl RustCompilerManifest {
                 decision.id.clone(),
                 (alternative(labels.0), alternative(labels.1)),
             );
+            if let Some(loop_branch_id) = decision.loop_branch_id.as_deref() {
+                let loop_branch = branches_by_id[loop_branch_id];
+                let loop_alternative = |label: &str| {
+                    loop_branch
+                        .alternatives
+                        .iter()
+                        .find(|alternative| alternative.label == label)
+                        .expect("validated loop-entry label")
+                        .id
+                        .clone()
+                };
+                decision_loop_obligations.insert(
+                    decision.id.clone(),
+                    (
+                        loop_alternative("zero iterations"),
+                        loop_alternative("entered"),
+                    ),
+                );
+            }
             decisions.push(DecisionMeta {
                 id: decision.id.clone(),
                 file,
@@ -961,6 +1014,7 @@ impl RustCompilerManifest {
                 .collect(),
             internal_ordinals,
             decision_outcome_obligations,
+            decision_loop_obligations,
         })
     }
 }
@@ -1056,6 +1110,7 @@ mod tests {
                 "probeOrdinal": "5",
                 "definitions": ["fixture::function"],
                 "outcomeBranchId": "rs:branch:000000000000000000000002",
+                "loopBranchId": null,
                 "conditions": [{"sourceKey": "source:src/lib.rs", "start": 11, "end": 15, "source": "value"}],
                 "canonical": "decision"
             }],
@@ -1113,6 +1168,62 @@ mod tests {
         ]);
         assert!(matches!(
             RustCompilerManifest::parse(&serde_json::to_vec(&wrong_outcome_kind).unwrap()),
+            Err(RustCompilerManifestError::Invalid(_))
+        ));
+
+        let mut loop_manifest = valid_manifest();
+        loop_manifest["decisions"][0]["kind"] = json!("while");
+        loop_manifest["decisions"][0]["loopBranchId"] = json!("rs:branch:000000000000000000000006");
+        loop_manifest["branches"].as_array_mut().unwrap().push(json!({
+            "id": "rs:branch:000000000000000000000006",
+            "kind": "loop-entry",
+            "discriminator": "loop-entry:while",
+            "sourceKey": "source:src/lib.rs",
+            "start": 11,
+            "end": 20,
+            "provenance": "authored-source",
+            "probeOrdinal": "6",
+            "definitions": ["fixture::function"],
+            "alternatives": [
+                {"id": "rs:branch-alternative:000000000000000000000007", "label": "zero iterations", "probeOrdinal": "7"},
+                {"id": "rs:branch-alternative:000000000000000000000008", "label": "entered", "probeOrdinal": "8"}
+            ],
+            "canonical": "loop-entry"
+        }));
+        let parsed_loop =
+            RustCompilerManifest::parse(&serde_json::to_vec(&loop_manifest).unwrap()).unwrap();
+        assert_eq!(
+            parsed_loop.decisions[0].loop_branch_id.as_deref(),
+            Some("rs:branch:000000000000000000000006")
+        );
+        let normalized_loop = parsed_loop
+            .normalize(&BTreeMap::from([(
+                "source:src/lib.rs".into(),
+                RustCompilerSource {
+                    file: "src/lib.rs".into(),
+                    source: "0123456789 value and more source bytes".into(),
+                },
+            )]))
+            .unwrap();
+        assert_eq!(
+            normalized_loop.decision_loop_obligations["rs:decision:000000000000000000000005"],
+            (
+                "rs:branch-alternative:000000000000000000000007".into(),
+                "rs:branch-alternative:000000000000000000000008".into(),
+            )
+        );
+
+        let mut missing_loop = loop_manifest.clone();
+        missing_loop["decisions"][0]["loopBranchId"] = json!(null);
+        assert!(matches!(
+            RustCompilerManifest::parse(&serde_json::to_vec(&missing_loop).unwrap()),
+            Err(RustCompilerManifestError::Invalid(_))
+        ));
+
+        let mut non_loop_relation = loop_manifest;
+        non_loop_relation["decisions"][0]["kind"] = json!("if");
+        assert!(matches!(
+            RustCompilerManifest::parse(&serde_json::to_vec(&non_loop_relation).unwrap()),
             Err(RustCompilerManifestError::Invalid(_))
         ));
     }
