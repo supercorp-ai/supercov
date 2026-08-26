@@ -254,7 +254,7 @@ fn run_rust_compiler() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let request: supercov_engine::rust_compiler_test_runner::RustCompilerRunRequest =
+    let request: supercov_engine::rust_compiler_run::DirectRustCompilerRunRequest =
         match serde_json::from_str(&input) {
             Ok(request) => request,
             Err(error) => {
@@ -262,7 +262,7 @@ fn run_rust_compiler() -> ExitCode {
                 return ExitCode::from(2);
             }
         };
-    let run = match supercov_engine::rust_compiler_test_runner::run_rust_compiler_frontend(
+    let run = match supercov_engine::rust_compiler_run::run_direct_rust_compiler(
         &request,
         &mut std::io::stderr(),
     ) {
@@ -272,35 +272,7 @@ fn run_rust_compiler() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let report = match supercov_engine::frontend_protocol::analyze_frontend_results(
-        &run.declaration,
-        &run.request,
-    ) {
-        Ok(report) => report,
-        Err(error) => {
-            eprintln!("[supercov] Rust compiler frontend contract failed: {error}");
-            return ExitCode::from(2);
-        }
-    };
-    let output = serde_json::json!({
-        "runId": run.request.run_id,
-        "exitCode": run.exit_code,
-        "selection": run.selection,
-        "artifacts": run.artifacts,
-        "tests": run.request.raw_results.iter().filter(|result| result.role == "test").count(),
-        "backgroundResults": run.request.raw_results.iter().filter(|result| result.role == "background").count(),
-        "attemptHealth": run.attempt_health,
-        "denominator": {
-            "points": run.request.manifest.points.len(),
-            "branches": run.request.manifest.branches.len(),
-            "decisions": run.request.manifest.decisions.len(),
-            "limitations": run.request.manifest.limitations.len(),
-        },
-        "summary": report.view.summary,
-        "buildMs": run.build_ms,
-        "executionMs": run.execution_ms,
-    });
-    match serde_json::to_string(&output) {
+    match serde_json::to_string(&run) {
         Ok(output) => {
             println!("{output}");
             ExitCode::from(run.exit_code.clamp(0, 255) as u8)

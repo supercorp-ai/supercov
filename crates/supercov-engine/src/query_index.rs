@@ -20,7 +20,7 @@ use std::{
 use memmap2::Mmap;
 use sha2::{Digest, Sha256};
 
-pub const QUERY_INDEX_SCHEMA_VERSION: u32 = 1;
+pub const QUERY_INDEX_SCHEMA_VERSION: u32 = 2;
 pub const QUERY_INDEX_HEADER_SIZE: usize = 4_096;
 pub const QUERY_INDEX_PAGE_SIZE: usize = 64 * 1_024;
 pub const QUERY_INDEX_MAX_SECTIONS: usize = 48;

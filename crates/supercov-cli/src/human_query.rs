@@ -605,22 +605,40 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
         IndexedQueryData::Scope(data) => {
             let page = page.expect("scope is paginated");
             let mut lines = vec![format!(
-                "mode {}; roots {}; included {}, excluded {}, ambiguous {}; measurement {}",
-                data.mode,
-                if data.roots.is_empty() {
-                    "none".into()
-                } else {
-                    data.roots.join(", ")
-                },
-                data.counts.included,
-                data.counts.excluded,
-                data.counts.ambiguous,
+                "{} scope; language {}; model {}",
+                data.kind, data.language, data.model
+            )];
+            if let Some(mode) = &data.mode {
+                lines.push(format!(
+                    "mode {}; roots {}; included {}, excluded {}, ambiguous {}",
+                    mode,
+                    if data.roots.is_empty() {
+                        "none".into()
+                    } else {
+                        data.roots.join(", ")
+                    },
+                    data.counts.included,
+                    data.counts.excluded,
+                    data.counts.ambiguous,
+                ));
+            }
+            if let Some(unit) = &data.unit {
+                lines.push(format!("unit {unit}"));
+            }
+            if let Some(complete) = data.measurement_complete {
+                lines.push(format!(
+                    "frontend measurement {}",
+                    if complete { "complete" } else { "incomplete" }
+                ));
+            }
+            lines.push(format!(
+                "measurement {}",
                 if data.measurement.complete {
                     "complete".into()
                 } else {
                     format!("{} blocking limitation(s)", data.measurement.blocking)
                 }
-            )];
+            ));
             lines.extend(data.entries.iter().map(|entry| {
                 format!(
                     "{}  {}  {}{}{}",

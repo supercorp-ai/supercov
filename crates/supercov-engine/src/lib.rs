@@ -33,6 +33,7 @@ pub mod rust_build_cache;
 pub mod rust_compiler_evidence;
 pub mod rust_compiler_manifest;
 pub mod rust_compiler_orchestration;
+pub mod rust_compiler_run;
 pub mod rust_compiler_selection;
 pub mod rust_compiler_test_runner;
 pub mod rust_instrumenter;

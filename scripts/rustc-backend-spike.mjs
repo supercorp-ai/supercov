@@ -4,6 +4,7 @@ import {createHash, randomBytes} from 'node:crypto';
 import {
   closeSync,
   cpSync,
+  existsSync,
   ftruncateSync,
   mkdtempSync,
   openSync,
@@ -137,7 +138,7 @@ function sourceLine(fragment) {
 function run(command, args, options = {}) {
   const commandEnvironment = options.env ?? {};
   const result = spawnSync(command, args, {
-    cwd: root,
+    cwd: options.cwd ?? root,
     encoding: 'utf8',
     input: options.input,
     env: {
@@ -481,10 +482,10 @@ try {
     run(supercov, ['__run-rust-compiler'], {
       env: {RUSTC: rustc},
       input: JSON.stringify({
-        projectRoot: productionFixture,
+        root: productionFixture,
         command: ['cargo', 'test'],
-        runId: 'run_compiler_orchestration',
-        generatedAt: '2026-08-26T00:00:00.000Z',
+        runId: 'run_0123456789abcdef',
+        startedAt: '2026-08-26T00:00:00.000Z',
         wrapperPath: supercov,
         companionCandidates: [wrapper],
         requirePublicCapabilities: false,
@@ -509,6 +510,32 @@ try {
   );
   assert(productionRun.summary.lines.covered > 0);
   assert(productionRun.summary.branches.covered > 0);
+  assert(productionRun.metadata.rawEvidence.files > productionRun.tests);
+  assert(productionRun.metadata.rawEvidence.compressedBytes > 0);
+  assert(
+    productionRun.metadata.rawEvidence.compressedBytes <
+      productionRun.metadata.rawEvidence.uncompressedBytes,
+    'production compiler evidence archive was not compressed',
+  );
+  assert(
+    existsSync(join(productionRun.runDirectory, 'evidence.raw.gz')),
+    'production compiler run did not atomically publish its archive',
+  );
+  assert(
+    !existsSync(
+      join(
+        productionFixture,
+        '.supercov/work/run_0123456789abcdef',
+      ),
+    ),
+    'production compiler run left terminal work state behind',
+  );
+  const productionQuery = run(
+    supercov,
+    ['runs', 'run_0123456789abcdef', '--json'],
+    {cwd: productionFixture},
+  );
+  assert.match(productionQuery.stdout, /run_0123456789abcdef/);
   assert.equal(
     createHash('sha256')
       .update(readFileSync(join(productionFixture, 'src/lib.rs')))
@@ -627,7 +654,7 @@ try {
   assert.equal(identityManifestA.model, 'rust-source-v1');
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
-    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: CTFE and doctest obligation/probe mappings and production compiler-supervisor orchestration are not emitted yet',
+    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: CTFE and doctest obligation/probe mappings are not emitted yet',
   ]);
   const allIds = [
     ...identityManifestA.points.map(({id}) => id),

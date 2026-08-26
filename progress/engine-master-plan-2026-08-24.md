@@ -1437,6 +1437,29 @@ miss blocks flipping any default.
   complete semantic, platform and performance matrices. The candidate still
   advertises those incomplete public capabilities as false.
 
+## Checkpoint — 2026-08-26 compiler-run lifecycle and cross-language query scope
+
+- The private compiler frontend now uses the production transactional run
+  lifecycle rather than returning an in-memory report only. It acquires the
+  project lock, recovers abandoned state, prepares the isolated workspace,
+  runs Cargo and the exact compiler companion there, writes one deterministic
+  compressed evidence-v3 archive, re-analyzes that archive, atomically
+  publishes run metadata plus evidence, removes terminal work state and
+  verifies the original checkout hash is unchanged.
+- The production-shaped rustc fixture then resolves that published run through
+  the ordinary `supercov runs <id> --json` path. This exposed a real second-
+  language leak: the immutable query index assumed every scope had JavaScript
+  `mode`, `roots` and classification entries. Query-index schema v2 now stores
+  a typed language/model scope. JavaScript retains source-discovery mode,
+  roots and entries; Rust stores compiler-owned language, model, crate unit and
+  frontend completeness without fabricated JavaScript fields. A direct index
+  regression and the end-to-end spike gate both prove the shape.
+- The compiler-supervisor limitation has therefore been removed from the
+  candidate manifest. CTFE and doctest obligation/probe mapping remain its two
+  honest denominator limitations. Lifecycle promotion is still blocked on the
+  crash, ENOSPC and concurrent-run matrix; public Rust selection remains false
+  until those plus every R1/R2 gate are closed.
+
 ## Non-goals and guardrails
 
 - No accidental behavior change during ports; every future language frontend

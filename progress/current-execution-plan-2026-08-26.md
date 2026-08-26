@@ -315,9 +315,13 @@ passes through the shared frontend validator and analyzer with nonzero line
 and branch coverage and zero dropped records.
 
 This closes the initial Cargo -> companion -> libtest -> evidence-v3 ->
-analyzer path, not R1/R2. The internal run still needs exact capture of Cargo/
-libtest filter and retry semantics, atomic archive/store/query publication,
-build-phase evidence, lifecycle recovery, CTFE publication and doctest
+analyzer path, not R1/R2. The compiler run now also uses the production
+isolated-workspace and atomic archive/store lifecycle, and its published run is
+queryable through the normal CLI. That roundtrip forced query-index schema v2
+to replace the JavaScript-only scope assumption with typed source-discovery
+and compiler-owned language/model scopes. The internal run still needs exact
+capture of Cargo/libtest filter and retry semantics, build-phase evidence, the
+full lifecycle crash/ENOSPC/concurrency matrix, CTFE publication and doctest
 execution. The private companion continues to advertise CTFE and doctest
 capabilities as false, so public selection still fails by construction.
 
