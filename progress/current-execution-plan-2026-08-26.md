@@ -471,20 +471,24 @@ array-length and inline-const owners. It does not yet cover every CTFE branch
 kind, failure mode, target, `RUSTC_LOG` coexistence or acceptable performance.
 
 The first mapped CTFE evidence slice is now carried through the real run
-boundary. Compiler-finalized event and mapping sidecars are published with
-same-filesystem staging/rename and directory sync; marker and hit ordinals are
-lossless decimal strings rather than unsafe JSON numbers. Strict Rust ingestion
-requires one map/event pair per compiler unit, exact crate/definition/kind/site
-identity, balanced per-thread invocation frames, and resolution of every hit
-ordinal to the frozen denominator. Function and statement hits are archived as
-exact `rustc` setup-phase evidence and survive evidence-v3 analysis plus normal
-run querying. CTFE decisions now carry explicit start, condition and finish
-mappings. Strict nested reconstruction produces exact masking-MC/DC vectors
-and commits the frozen true/false outcome branch alternative. Engine corruption
-tests reject semantic markers with unrelated hits, a finish mapped to the wrong
-alternative, a condition without a frame and an invocation that exits with an
-open decision. The real compiler corpus proves independent `[false] -> false`
-and `[true] -> true` const-fn evaluations with unchanged values and output.
+boundary. Each successful compiler unit publishes one strict
+`supercov-rust-ctfe-unit-v1` bundle containing its mappings and observations.
+The bundle is written and synced under a recognizable partial name, exposed by
+one same-filesystem rename, and followed by a directory sync; marker and hit
+ordinals are lossless decimal strings rather than unsafe JSON numbers. There is
+no reader for the old map/event pair. Strict Rust ingestion rejects those old
+files plus partial, non-regular, truncated, unknown-field and malformed unit
+files, and requires exact crate/definition/kind/site identity, balanced
+per-thread invocation frames, and resolution of every hit ordinal to the
+frozen denominator. Function and statement hits are archived as exact `rustc`
+setup-phase evidence and survive evidence-v3 analysis plus normal run querying.
+CTFE decisions now carry explicit start, condition and finish mappings. Strict
+nested reconstruction produces exact masking-MC/DC vectors and commits the
+frozen true/false outcome branch alternative. Engine corruption tests reject
+semantic markers with unrelated hits, a finish mapped to the wrong alternative,
+a condition without a frame and an invocation that exits with an open decision.
+The real compiler corpus proves independent `[false] -> false` and
+`[true] -> true` const-fn evaluations with unchanged values and output.
 
 That outcome relation is frozen directly into every compiler manifest decision
 rather than inferred from overlapping spans. The same relation corrected the
@@ -550,8 +554,7 @@ runs stock rustc and the companion with the same JSON/output-target settings,
 requires requested interpreter records from both, and simultaneously requires
 nonempty Supercov CTFE sidecars. This gate also exposed and fixed acceptance of
 rustc's `--crate-name=value` form in addition to `--crate-name value`.
-Promoted/const-trait surfaces, compiler crash/ENOSPC/concurrency and performance
-remain open.
+Promoted/const-trait surfaces and performance remain open at this checkpoint.
 
 The pinned-toolchain promoted/const-trait ambiguity is now resolved. Rust's
 constant promotion of borrowed literals and arrays is a compiler storage
@@ -562,8 +565,18 @@ does not double-count those owners. The corpus checks all three facts against
 real `promoted_mir`. Rust 1.95 rejects const trait definitions/implementations
 on stable; its checked-in compile-fail oracle preserves E0658/E0015 diagnostics
 and publishes no compiler evidence. Exact companions for future toolchains
-must reclassify this when stable const traits exist. Compiler crash/ENOSPC/
-concurrency, supported-target and performance gates remain open.
+must reclassify this when stable const traits exist. Supported-target and
+performance gates remain open.
+
+CTFE publication now has a deterministic resource/crash/concurrency corpus at
+the real compiler boundary. An injected ENOSPC after a partial write makes the
+compilation fail, removes the partial and publishes no final unit. SIGKILL at a
+barrier after file sync but before rename leaves exactly one recognizable
+partial and no readable final unit. Four simultaneous rustc processes publish
+four distinct complete bundles into one directory with no collision or leftover
+partial. These gates close compiler-unit CTFE publication atomicity; they do
+not replace the broader run-store crash, ENOSPC and concurrent-run lifecycle
+matrix tracked under RCV-ARCHIVE-1.
 
 The rustdoc launch boundary is now proven as well. Cargo's ordinary
 `RUSTC_WRAPPER` still does not see synthesized doctest crates, so Supercov uses

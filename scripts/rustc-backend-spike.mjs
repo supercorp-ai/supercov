@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {spawnSync} from 'node:child_process';
+import {spawn, spawnSync} from 'node:child_process';
 import {createHash, randomBytes} from 'node:crypto';
 import {
   closeSync,
@@ -166,6 +166,53 @@ function run(command, args, options = {}) {
   return result;
 }
 
+function spawnCommand(command, args, options = {}) {
+  const commandEnvironment = options.env ?? {};
+  const child = spawn(command, args, {
+    cwd: options.cwd ?? root,
+    env: {
+      ...process.env,
+      SUPERCOV_RUST_SOURCE_ROOT: fixtureRoot,
+      ...(commandEnvironment.CARGO_TARGET_DIR
+        ? {SUPERCOV_RUST_TARGET_ROOT: commandEnvironment.CARGO_TARGET_DIR}
+        : {}),
+      ...commandEnvironment,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+  const result = new Promise((resolveResult, rejectResult) => {
+    child.once('error', rejectResult);
+    child.once('close', (status, signal) => {
+      resolveResult({status, signal, stdout, stderr});
+    });
+  });
+  return {child, result};
+}
+
+async function runAsync(command, args, options = {}) {
+  const {result} = spawnCommand(command, args, options);
+  const completed = await result;
+  if (completed.status !== 0) {
+    process.stderr.write(completed.stdout);
+    process.stderr.write(completed.stderr);
+    throw new Error(`${command} exited ${completed.status ?? completed.signal}`);
+  }
+  return completed;
+}
+
+const delay = (milliseconds) =>
+  new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+
 function compilerSources(directory, crate) {
   const snapshots = readdirSync(directory)
     .filter(
@@ -309,6 +356,15 @@ function recordFiles(directory) {
         .split('\n')
         .filter(Boolean)
         .map((line) => JSON.parse(line)),
+    }));
+}
+
+function ctfeBundles(directory) {
+  return readdirSync(directory)
+    .filter((name) => name.startsWith('ctfe-unit-') && name.endsWith('.json'))
+    .map((name) => ({
+      name,
+      value: JSON.parse(readFileSync(join(directory, name), 'utf8')),
     }));
 }
 
@@ -968,6 +1024,18 @@ try {
     RUSTC_LOG_FORMAT_JSON: '1',
     RUSTC_LOG_OUTPUT_TARGET: output,
   });
+  const ctfeCompilerEnvironment = (output, extra = {}) => ({
+    SUPERCOV_RUST_COMPILER_OUTPUT: output,
+    SUPERCOV_RUST_INSTRUMENT_MIR: '1',
+    SUPERCOV_RUST_INSTRUMENT_CTFE: '1',
+    DYLD_LIBRARY_PATH: [rustcTargetLibdir, process.env.DYLD_LIBRARY_PATH]
+      .filter(Boolean)
+      .join(':'),
+    LD_LIBRARY_PATH: [rustcTargetLibdir, process.env.LD_LIBRARY_PATH]
+      .filter(Boolean)
+      .join(':'),
+    ...extra,
+  });
   const baselineLoggedCompilation = run(
     'rustc',
     [
@@ -996,15 +1064,7 @@ try {
     {
       env: {
         ...loggingEnvironment(instrumentedLog),
-        SUPERCOV_RUST_COMPILER_OUTPUT: loggingCompilerOutput,
-        SUPERCOV_RUST_INSTRUMENT_MIR: '1',
-        SUPERCOV_RUST_INSTRUMENT_CTFE: '1',
-        DYLD_LIBRARY_PATH: [rustcTargetLibdir, process.env.DYLD_LIBRARY_PATH]
-          .filter(Boolean)
-          .join(':'),
-        LD_LIBRARY_PATH: [rustcTargetLibdir, process.env.LD_LIBRARY_PATH]
-          .filter(Boolean)
-          .join(':'),
+        ...ctfeCompilerEnvironment(loggingCompilerOutput),
       },
     },
   );
@@ -1024,10 +1084,105 @@ try {
     );
   }
   assert(
-    recordFiles(loggingCompilerOutput).some(({name, records}) =>
-      name.startsWith('ctfe-events-') && records.length > 0,
-    ),
+    ctfeBundles(loggingCompilerOutput).some(({value}) => value.events.length > 0),
     'user RUSTC_LOG configuration suppressed Supercov CTFE observations',
+  );
+
+  const directCtfeCompileArguments = (crateName, output) => [
+    'rustc',
+    '--edition=2024',
+    `--crate-name=${crateName}`,
+    '--crate-type=lib',
+    '--emit=metadata',
+    '-o',
+    output,
+    loggingSource,
+  ];
+  const enospcCompilerOutput = join(scratch, 'const-log-enospc-output');
+  const enospcCompilation = run(
+    wrapper,
+    directCtfeCompileArguments(
+      'const_log_enospc',
+      join(scratch, 'const-log-enospc.rmeta'),
+    ),
+    {
+      expectFailure: true,
+      env: ctfeCompilerEnvironment(enospcCompilerOutput, {
+        SUPERCOV_RUSTC_SPIKE_CTFE_WRITE_FAULT: 'enospc',
+      }),
+    },
+  );
+  assert.match(enospcCompilation.stderr, /No space left on device/);
+  assert.deepEqual(
+    readdirSync(enospcCompilerOutput).filter((name) => name.includes('ctfe-unit-')),
+    [],
+    'an ENOSPC publication failure left a final or partial CTFE unit',
+  );
+
+  const killedCompilerOutput = join(scratch, 'const-log-killed-output');
+  const killedCompilerReady = join(scratch, 'const-log-killed.ready');
+  const killedCompilation = spawnCommand(
+    wrapper,
+    directCtfeCompileArguments(
+      'const_log_killed',
+      join(scratch, 'const-log-killed.rmeta'),
+    ),
+    {
+      env: ctfeCompilerEnvironment(killedCompilerOutput, {
+        SUPERCOV_RUSTC_SPIKE_CTFE_WRITE_FAULT: 'wait-after-write',
+        SUPERCOV_RUSTC_SPIKE_CTFE_WRITE_READY: killedCompilerReady,
+      }),
+    },
+  );
+  for (let attempt = 0; attempt < 200 && !existsSync(killedCompilerReady); attempt += 1) {
+    assert.equal(
+      killedCompilation.child.exitCode,
+      null,
+      'the compiler exited before reaching the CTFE publication fault point',
+    );
+    await delay(25);
+  }
+  assert(existsSync(killedCompilerReady), 'the CTFE publication fault point was not reached');
+  assert(killedCompilation.child.kill('SIGKILL'), 'failed to kill the CTFE compiler');
+  const killedResult = await killedCompilation.result;
+  assert.equal(killedResult.signal, 'SIGKILL');
+  assert.deepEqual(
+    ctfeBundles(killedCompilerOutput),
+    [],
+    'a killed compiler published a final CTFE unit',
+  );
+  assert.equal(
+    readdirSync(killedCompilerOutput).filter(
+      (name) => name.startsWith('.ctfe-unit-') && name.endsWith('.partial'),
+    ).length,
+    1,
+    'a killed compiler must leave exactly one recognizable unpublished CTFE unit',
+  );
+
+  const concurrentCompilerOutput = join(scratch, 'const-log-concurrent-output');
+  await Promise.all(
+    Array.from({length: 4}, (_, index) =>
+      runAsync(
+        wrapper,
+        directCtfeCompileArguments(
+          'const_log_concurrent',
+          join(scratch, `const-log-concurrent-${index}.rmeta`),
+        ),
+        {env: ctfeCompilerEnvironment(concurrentCompilerOutput)},
+      ),
+    ),
+  );
+  const concurrentBundles = ctfeBundles(concurrentCompilerOutput);
+  assert.equal(concurrentBundles.length, 4);
+  assert.equal(new Set(concurrentBundles.map(({name}) => name)).size, 4);
+  for (const {value} of concurrentBundles) {
+    assert(value.mappings.length > 0, 'concurrent CTFE unit omitted mappings');
+    assert(value.events.length > 0, 'concurrent CTFE unit omitted events');
+  }
+  assert.deepEqual(
+    readdirSync(concurrentCompilerOutput).filter((name) => name.endsWith('.partial')),
+    [],
+    'successful concurrent CTFE publication left partial units',
   );
   assert.deepEqual(
     readdirSync(scratch).filter((name) => name.endsWith('.profraw')),
@@ -2052,21 +2207,18 @@ try {
   assert.equal(ctfeBehavior.stdout, baselineBehavior.stdout);
   assert.equal(ctfeBehavior.stderr, baselineBehavior.stderr);
   assert.match(ctfeBehavior.stdout, /const-values=11,13/);
-  const ctfeRecordFiles = recordFiles(ctfeDirectory).filter(({name}) =>
-    name.startsWith('ctfe-events-'),
-  );
-  const ctfeMaps = readdirSync(ctfeDirectory)
-    .filter((name) => name.startsWith('ctfe-map-') && name.endsWith('.json'))
-    .map((name) => ({
-      name,
-      value: JSON.parse(readFileSync(join(ctfeDirectory, name), 'utf8')),
-    }));
+  const ctfeMaps = ctfeBundles(ctfeDirectory);
+  const ctfeRecordFiles = ctfeMaps.map(({name, value}) => ({
+    name,
+    records: value.events,
+  }));
   assert(ctfeMaps.length > 0, 'compiler emitted no CTFE obligation maps');
   const manifestedCtfeHits = allManifestedHitOrdinals(ctfeDirectory);
   const mappingsByMarker = new Map();
   for (const {name, value} of ctfeMaps) {
-    assert.equal(value.schema, 'supercov-rust-ctfe-map-v1', `${name}: schema`);
+    assert.equal(value.schema, 'supercov-rust-ctfe-unit-v1', `${name}: schema`);
     assert.equal(typeof value.crate, 'string', `${name}: crate`);
+    assert(Array.isArray(value.events), `${name}: events`);
     for (const mapping of value.mappings) {
       assert.match(mapping.marker, /^\d+$/, `${name}: marker must be lossless text`);
       const mappingKey = `${value.crate}:${mapping.marker}`;

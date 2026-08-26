@@ -20,15 +20,16 @@ use crate::{
     rust_compiler_manifest::NormalizedRustCompilerManifest,
 };
 
-const MAP_SCHEMA: &str = "supercov-rust-ctfe-map-v1";
+const BUNDLE_SCHEMA: &str = "supercov-rust-ctfe-unit-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CtfeMapFile {
+struct CtfeBundleFile {
     schema: String,
     #[serde(rename = "crate")]
     crate_name: String,
     mappings: Vec<CtfeMapping>,
+    events: Vec<CtfeEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -130,88 +131,61 @@ fn parse_json<T: for<'de> Deserialize<'de>>(
         .map_err(|error| RustCompilerCtfeError::Invalid(format!("{}: {error}", path.display())))
 }
 
-fn ctfe_files(
-    directory: &Path,
-) -> Result<BTreeMap<String, (PathBuf, PathBuf)>, RustCompilerCtfeError> {
-    let mut maps = BTreeMap::new();
-    let mut events = BTreeMap::new();
+fn ctfe_files(directory: &Path) -> Result<BTreeMap<String, PathBuf>, RustCompilerCtfeError> {
+    let mut units = BTreeMap::new();
     for entry in fs::read_dir(directory)
         .map_err(|error| io_error(directory, error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| io_error(directory, error))?
     {
         let path = entry.path();
-        if !entry
-            .file_type()
-            .map_err(|error| io_error(&path, error))?
-            .is_file()
-        {
-            continue;
-        }
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             return Err(RustCompilerCtfeError::Invalid(
                 "compiler output contains a non-UTF-8 name".into(),
             ));
         };
-        let destination = name
-            .strip_prefix("ctfe-map-")
+        let file_type = entry.file_type().map_err(|error| io_error(&path, error))?;
+        if !file_type.is_file() {
+            if name.starts_with("ctfe-") || name.starts_with(".ctfe-") {
+                return Err(RustCompilerCtfeError::Invalid(format!(
+                    "CTFE compiler artifact is not a regular file: {name}"
+                )));
+            }
+            continue;
+        }
+        let identity = name
+            .strip_prefix("ctfe-unit-")
             .and_then(|name| name.strip_suffix(".json"))
-            .map(|identity| (&mut maps, identity))
-            .or_else(|| {
-                name.strip_prefix("ctfe-events-")
-                    .and_then(|name| name.strip_suffix(".jsonl"))
-                    .map(|identity| (&mut events, identity))
-            });
-        if let Some((destination, identity)) = destination
-            && destination.insert(identity.to_owned(), path).is_some()
-        {
+            .filter(|identity| !identity.is_empty());
+        if let Some(identity) = identity {
+            if units.insert(identity.to_owned(), path).is_some() {
+                return Err(RustCompilerCtfeError::Invalid(format!(
+                    "duplicate CTFE compiler unit {identity}"
+                )));
+            }
+        } else if name.starts_with("ctfe-") || name.starts_with(".ctfe-") {
             return Err(RustCompilerCtfeError::Invalid(format!(
-                "duplicate CTFE compiler unit {identity}"
+                "unrecognized or incomplete CTFE compiler artifact {name}"
             )));
         }
     }
-    if maps.keys().ne(events.keys()) {
-        return Err(RustCompilerCtfeError::Invalid(format!(
-            "CTFE map/event identities differ (maps: {}, events: {})",
-            maps.len(),
-            events.len()
-        )));
-    }
-    Ok(maps
-        .into_iter()
-        .map(|(identity, map)| (identity.clone(), (map, events.remove(&identity).unwrap())))
-        .collect())
-}
-
-fn parse_events(path: &Path) -> Result<Vec<CtfeEvent>, RustCompilerCtfeError> {
-    let bytes = fs::read(path).map_err(|error| io_error(path, error))?;
-    bytes
-        .split(|byte| *byte == b'\n')
-        .enumerate()
-        .filter(|(_, line)| !line.is_empty())
-        .map(|(index, line)| {
-            serde_json::from_slice(line).map_err(|error| {
-                RustCompilerCtfeError::Invalid(format!("{}:{}: {error}", path.display(), index + 1))
-            })
-        })
-        .collect()
+    Ok(units)
 }
 
 fn reconstruct_unit(
     identity: String,
-    map_path: &Path,
-    event_path: &Path,
+    bundle_path: &Path,
     normalized: &NormalizedRustCompilerManifest,
     timestamp_ms: i64,
 ) -> Result<RustCompilerCtfeUnit, RustCompilerCtfeError> {
-    let map: CtfeMapFile = parse_json(
-        map_path,
-        &fs::read(map_path).map_err(|error| io_error(map_path, error))?,
+    let bundle: CtfeBundleFile = parse_json(
+        bundle_path,
+        &fs::read(bundle_path).map_err(|error| io_error(bundle_path, error))?,
     )?;
-    if map.schema != MAP_SCHEMA || map.crate_name.trim().is_empty() {
+    if bundle.schema != BUNDLE_SCHEMA || bundle.crate_name.trim().is_empty() {
         return Err(RustCompilerCtfeError::Invalid(format!(
             "{} has an unsupported schema or empty crate",
-            map_path.display()
+            bundle_path.display()
         )));
     }
     let decisions = normalized
@@ -221,7 +195,7 @@ fn reconstruct_unit(
         .map(|decision| (decision.id.as_str(), decision))
         .collect::<BTreeMap<_, _>>();
     let mut mappings = BTreeMap::<u64, CtfeMapping>::new();
-    for mapping in map.mappings {
+    for mapping in bundle.mappings {
         let marker = parse_u64(&mapping.marker, "CTFE marker")?;
         if marker == 0
             || mapping.definition.trim().is_empty()
@@ -357,11 +331,11 @@ fn reconstruct_unit(
     if mappings.is_empty() {
         return Err(RustCompilerCtfeError::Invalid(format!(
             "{} contains no mappings",
-            map_path.display()
+            bundle_path.display()
         )));
     }
 
-    let events = parse_events(event_path)?;
+    let events = bundle.events;
     let mut stacks = BTreeMap::<String, Vec<ActiveInvocation>>::new();
     let mut hits = BTreeSet::new();
     let mut decision_vectors = BTreeMap::<String, BTreeSet<(Vec<Option<bool>>, bool)>>::new();
@@ -369,12 +343,12 @@ fn reconstruct_unit(
     for event in &events {
         let mut ignored_hits = BTreeSet::new();
         if event.kind != "ctfe-marker"
-            || event.crate_name != map.crate_name
+            || event.crate_name != bundle.crate_name
             || event.thread.trim().is_empty()
         {
             return Err(RustCompilerCtfeError::Invalid(format!(
                 "{} contains malformed event identity",
-                event_path.display()
+                bundle_path.display()
             )));
         }
         let marker = parse_u64(&event.marker, "observed CTFE marker")?;
@@ -537,7 +511,7 @@ fn reconstruct_unit(
     }
     Ok(RustCompilerCtfeUnit {
         identity,
-        crate_name: map.crate_name,
+        crate_name: bundle.crate_name,
         snapshot: RuntimeSnapshot {
             decisions: decision_vectors
                 .into_iter()
@@ -563,9 +537,7 @@ pub fn read_rust_compiler_ctfe(
 ) -> Result<Vec<RustCompilerCtfeUnit>, RustCompilerCtfeError> {
     ctfe_files(directory)?
         .into_iter()
-        .map(|(identity, (map, events))| {
-            reconstruct_unit(identity, &map, &events, normalized, timestamp_ms)
-        })
+        .map(|(identity, bundle)| reconstruct_unit(identity, &bundle, normalized, timestamp_ms))
         .collect()
 }
 
@@ -606,19 +578,17 @@ mod tests {
         }
 
         fn write(&self, map: Value, events: &[Value]) {
+            let mut bundle = map;
+            bundle["events"] = Value::Array(events.to_vec());
             fs::write(
-                self.0.join("ctfe-map-unit.json"),
-                serde_json::to_vec(&map).expect("serialize CTFE map"),
+                self.0.join("ctfe-unit-unit.json"),
+                serde_json::to_vec(&bundle).expect("serialize CTFE bundle"),
             )
-            .expect("write CTFE map");
-            let mut bytes = events
-                .iter()
-                .map(|event| serde_json::to_string(event).expect("serialize CTFE event"))
-                .collect::<Vec<_>>()
-                .join("\n")
-                .into_bytes();
-            bytes.push(b'\n');
-            fs::write(self.0.join("ctfe-events-unit.jsonl"), bytes).expect("write CTFE events");
+            .expect("write CTFE bundle");
+        }
+
+        fn write_raw(&self, name: &str, bytes: &[u8]) {
+            fs::write(self.0.join(name), bytes).expect("write raw CTFE artifact");
         }
     }
 
@@ -732,7 +702,7 @@ mod tests {
 
     fn valid_map() -> Value {
         json!({
-            "schema": MAP_SCHEMA,
+            "schema": BUNDLE_SCHEMA,
             "crate": "fixture",
             "mappings": [
                 mapping("1", "entry", &["101"], None),
@@ -977,5 +947,49 @@ mod tests {
         let error = read_rust_compiler_ctfe(&scratch.0, &normalized_manifest(), 42)
             .expect_err("invocation exit with an open decision must fail closed");
         assert!(error.to_string().contains("wrong or incomplete invocation"));
+    }
+
+    #[test]
+    fn rejects_legacy_partial_nonregular_and_truncated_units() {
+        for (name, bytes, expected) in [
+            ("ctfe-map-unit.json", b"{}".as_slice(), "unrecognized"),
+            (".ctfe-unit-unit.partial", b"{}".as_slice(), "unrecognized"),
+            ("ctfe-unit-unit.json", b"{", "EOF"),
+        ] {
+            let scratch = Scratch::new();
+            scratch.write_raw(name, bytes);
+            let error = read_rust_compiler_ctfe(&scratch.0, &normalized_manifest(), 42)
+                .expect_err("recognized invalid CTFE artifact must fail closed");
+            assert!(
+                error.to_string().contains(expected),
+                "unexpected {name} error: {error}"
+            );
+        }
+
+        let scratch = Scratch::new();
+        fs::create_dir(scratch.0.join("ctfe-unit-unit.json"))
+            .expect("create nonregular CTFE artifact");
+        let error = read_rust_compiler_ctfe(&scratch.0, &normalized_manifest(), 42)
+            .expect_err("nonregular CTFE artifact must fail closed");
+        assert!(error.to_string().contains("not a regular file"));
+    }
+
+    #[test]
+    fn rejects_unknown_bundle_and_event_fields() {
+        let scratch = Scratch::new();
+        let mut map = valid_map();
+        map["unknown"] = json!(true);
+        scratch.write(map, &valid_events());
+        let error = read_rust_compiler_ctfe(&scratch.0, &normalized_manifest(), 42)
+            .expect_err("unknown bundle field must fail closed");
+        assert!(error.to_string().contains("unknown field"));
+
+        let scratch = Scratch::new();
+        let mut events = valid_events();
+        events[0]["unknown"] = json!(true);
+        scratch.write(valid_map(), &events);
+        let error = read_rust_compiler_ctfe(&scratch.0, &normalized_manifest(), 42)
+            .expect_err("unknown event field must fail closed");
+        assert!(error.to_string().contains("unknown field"));
     }
 }

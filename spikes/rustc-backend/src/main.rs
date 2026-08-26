@@ -80,6 +80,8 @@ const SOURCE_ROOT: &str = "SUPERCOV_RUST_SOURCE_ROOT";
 const TARGET_ROOT: &str = "SUPERCOV_RUST_TARGET_ROOT";
 const FORCE_ID_COLLISION: &str = "SUPERCOV_RUSTC_SPIKE_FORCE_ID_COLLISION";
 const FORCE_PROBE_COLLISION: &str = "SUPERCOV_RUSTC_SPIKE_FORCE_PROBE_COLLISION";
+const CTFE_WRITE_FAULT: &str = "SUPERCOV_RUSTC_SPIKE_CTFE_WRITE_FAULT";
+const CTFE_WRITE_READY: &str = "SUPERCOV_RUSTC_SPIKE_CTFE_WRITE_READY";
 const PROBE_FUNCTION: &str = "__supercov_spike_runtime::ordinal_hit";
 const ENTER_CONTEXT_FUNCTION: &str = "__supercov_spike_runtime::enter_context";
 const ENTER_ASSERTION_CONTEXT_FUNCTION: &str = "__supercov_spike_runtime::enter_assertion_context";
@@ -7257,12 +7259,33 @@ fn write_new_synced(path: &Path, contents: &[u8]) -> Result<(), String> {
         .write(true)
         .open(path)
         .map_err(|error| format!("{}: {error}", path.display()))?;
+    if env::var(CTFE_WRITE_FAULT).as_deref() == Ok("enospc") {
+        output
+            .write_all(&contents[..contents.len() / 2])
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        output
+            .flush()
+            .map_err(|error| format!("{}: {error}", path.display()))?;
+        return Err(format!(
+            "{}: No space left on device (injected CTFE publication fault)",
+            path.display()
+        ));
+    }
     output
         .write_all(contents)
         .map_err(|error| format!("{}: {error}", path.display()))?;
     output
         .sync_all()
-        .map_err(|error| format!("{}: {error}", path.display()))
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    if env::var(CTFE_WRITE_FAULT).as_deref() == Ok("wait-after-write") {
+        let ready = env::var(CTFE_WRITE_READY)
+            .map_err(|_| format!("{CTFE_WRITE_READY} is required for wait-after-write"))?;
+        fs::write(&ready, b"ready").map_err(|error| format!("{ready}: {error}"))?;
+        loop {
+            std::thread::park();
+        }
+    }
+    Ok(())
 }
 
 fn write_ctfe_outputs(args: &[String], events: &[CtfeObservation]) -> Result<(), String> {
@@ -7305,25 +7328,27 @@ fn write_ctfe_outputs(args: &[String], events: &[CtfeObservation]) -> Result<(),
             "CTFE mappings crossed compiler crate identity {crate_name}"
         ));
     }
-    let mut event_bytes = Vec::new();
-    for observation in events {
+    let event_records = events
+        .iter()
+        .map(|observation| {
         let Some(identity) = markers.get(&observation.marker) else {
             return Err(format!(
                 "observed unregistered CTFE marker {}",
                 observation.marker
             ));
         };
-        let record = format!(
-            "{{\"crate\":\"{}\",\"kind\":\"ctfe-marker\",\"marker\":\"{}\",\"definition\":\"{}\",\"observationKind\":\"{}\",\"ordinal\":{},\"thread\":\"{}\"}}\n",
+        Ok(format!(
+            "{{\"crate\":\"{}\",\"kind\":\"ctfe-marker\",\"marker\":\"{}\",\"definition\":\"{}\",\"observationKind\":\"{}\",\"ordinal\":{},\"thread\":\"{}\"}}",
             escape(&identity.crate_name),
             observation.marker,
             escape(&identity.definition),
             identity.observation_kind,
             identity.local_ordinal,
             escape(&observation.thread),
-        );
-        event_bytes.extend_from_slice(record.as_bytes());
-    }
+        ))
+    })
+        .collect::<Result<Vec<_>, String>>()?
+        .join(",");
     let mapping_records = mappings
         .iter()
         .map(|(marker, mapping)| {
@@ -7362,28 +7387,26 @@ fn write_ctfe_outputs(args: &[String], events: &[CtfeObservation]) -> Result<(),
         })
         .collect::<Vec<_>>()
         .join(",");
-    let mapping_bytes = format!(
-        "{{\"schema\":\"supercov-rust-ctfe-map-v1\",\"crate\":\"{}\",\"mappings\":[{mapping_records}]}}\n",
+    let bundle_bytes = format!(
+        "{{\"schema\":\"supercov-rust-ctfe-unit-v1\",\"crate\":\"{}\",\"mappings\":[{mapping_records}],\"events\":[{event_records}]}}\n",
         escape(crate_name),
     );
-    let events_final = directory.join(format!("ctfe-events-{identity}.jsonl"));
-    let mappings_final = directory.join(format!("ctfe-map-{identity}.json"));
-    let events_partial = directory.join(format!(".ctfe-events-{identity}.partial"));
-    let mappings_partial = directory.join(format!(".ctfe-map-{identity}.partial"));
-    write_new_synced(&events_partial, &event_bytes)?;
-    if let Err(error) = write_new_synced(&mappings_partial, mapping_bytes.as_bytes()) {
-        let _ = fs::remove_file(&events_partial);
-        return Err(error);
+    let final_path = directory.join(format!("ctfe-unit-{identity}.json"));
+    let partial_path = directory.join(format!(".ctfe-unit-{identity}.partial"));
+    let publication = (|| {
+        write_new_synced(&partial_path, bundle_bytes.as_bytes())?;
+        fs::rename(&partial_path, &final_path)
+            .map_err(|error| format!("{}: {error}", final_path.display()))?;
+        let directory_file = OpenOptions::new()
+            .read(true)
+            .open(&directory)
+            .map_err(|error| format!("{}: {error}", directory.display()))?;
+        directory_file
+            .sync_all()
+            .map_err(|error| format!("{}: {error}", directory.display()))
+    })();
+    if publication.is_err() {
+        let _ = fs::remove_file(&partial_path);
     }
-    fs::rename(&mappings_partial, &mappings_final)
-        .map_err(|error| format!("{}: {error}", mappings_final.display()))?;
-    fs::rename(&events_partial, &events_final)
-        .map_err(|error| format!("{}: {error}", events_final.display()))?;
-    let directory_file = OpenOptions::new()
-        .read(true)
-        .open(&directory)
-        .map_err(|error| format!("{}: {error}", directory.display()))?;
-    directory_file
-        .sync_all()
-        .map_err(|error| format!("{}: {error}", directory.display()))
+    publication
 }

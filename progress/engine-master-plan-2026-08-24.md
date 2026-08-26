@@ -1486,8 +1486,11 @@ miss blocks flipping any default.
   than one CTFE definition is observed. This is framing groundwork only: marker-to-
   frozen-obligation mapping and crash-safe evidence-v3 build-phase publication
   were subsequently completed for function and statement points. Compiler-finalized
-  sidecars are atomically renamed, use lossless textual identities, and are
-  rejected unless every event, frame and hit ordinal resolves exactly. A real
+  compiler unit bundle is atomically renamed, uses lossless textual identities,
+  and is rejected unless every event, frame and hit ordinal resolves exactly.
+  The non-atomic map/event pair has no compatibility reader. Real compiler
+  gates prove ENOSPC cleanup, SIGKILL-before-rename visibility and collision-free
+  simultaneous publishers. A real
   compiler run now archives and re-queries those observations as `rustc` setup
   evidence. CTFE semantic start/condition/finish markers now reconstruct exact
   nested vectors and commit the explicitly frozen decision-outcome alternative;
@@ -1501,9 +1504,8 @@ miss blocks flipping any default.
   markers are now inserted into built MIR, required to survive exactly once,
   consumed from CTFE MIR and removed before evaluation. Multi-condition
   masking and separate nested decisions are exact as well. Remaining CTFE
-  branch kinds, failure/resource/concurrency cases and performance are active
-  blockers; the candidate therefore reports incomplete CTFE mapping and stays
-  private.
+  branch kinds, supported-target coverage and performance are active blockers;
+  the candidate therefore reports incomplete CTFE mapping and stays private.
 
 ## Non-goals and guardrails
 
