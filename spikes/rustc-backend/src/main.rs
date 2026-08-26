@@ -84,7 +84,7 @@ static ORIGINAL_OPTIMIZED_MIR: OnceLock<OptimizedMirProvider> = OnceLock::new();
 static ORIGINAL_MIR_FOR_CTFE: OnceLock<MirForCtfeProvider> = OnceLock::new();
 static ORIGINAL_MIR_BUILT: OnceLock<MirBuiltProvider> = OnceLock::new();
 static ORIGINAL_MIR_DROPS: OnceLock<MirDropsProvider> = OnceLock::new();
-static CTFE_EVENTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+static CTFE_EVENTS: Mutex<Vec<CtfeObservation>> = Mutex::new(Vec::new());
 static CTFE_MARKERS: Mutex<BTreeMap<u64, CtfeMarkerIdentity>> = Mutex::new(BTreeMap::new());
 static MATCH_ARM_MARKERS: LazyLock<Mutex<HashMap<LocalDefId, BTreeMap<u32, u64>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -113,6 +113,12 @@ struct CtfeMarkerIdentity {
     definition: String,
     observation_kind: &'static str,
     local_ordinal: u32,
+}
+
+#[derive(Clone, Debug)]
+struct CtfeObservation {
+    marker: u64,
+    thread: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -274,7 +280,13 @@ where
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .contains_key(&marker)
         {
-            CTFE_EVENTS.lock().expect("CTFE events lock").push(marker);
+            CTFE_EVENTS
+                .lock()
+                .expect("CTFE events lock")
+                .push(CtfeObservation {
+                    marker,
+                    thread: format!("{:?}", std::thread::current().id()),
+                });
         }
     }
 }
@@ -3784,16 +3796,33 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
         .local_decls
         .push(LocalDecl::new(tcx.types.u64, span));
     for (block, block_data) in instrumented.basic_blocks_mut().iter_enumerated_mut() {
+        let observation_kind = if block == rustc_middle::mir::START_BLOCK {
+            "entry"
+        } else {
+            "block"
+        };
         let marker = ctfe_marker_identity(
             tcx,
             &crate_name,
             &definition,
-            "block",
+            observation_kind,
             block.as_u32(),
         );
         block_data
             .statements
             .insert(0, ctfe_marker_statement(tcx, marker_local, marker, span));
+        if matches!(block_data.terminator().kind, TerminatorKind::Return) {
+            let exit = ctfe_marker_identity(
+                tcx,
+                &crate_name,
+                &definition,
+                "exit",
+                block.as_u32(),
+            );
+            block_data
+                .statements
+                .push(ctfe_marker_statement(tcx, marker_local, exit, span));
+        }
     }
 
     let decision_edges = instrumented
@@ -6480,7 +6509,7 @@ fn strip_injected_rustdoc_unstable_option(args: &mut [String]) {
     }
 }
 
-fn write_ctfe_events(args: &[String], events: &[u64]) {
+fn write_ctfe_events(args: &[String], events: &[CtfeObservation]) {
     if events.is_empty() {
         return;
     }
@@ -6506,17 +6535,18 @@ fn write_ctfe_events(args: &[String], events: &[u64]) {
     let markers = CTFE_MARKERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    for marker in events {
-        let Some(identity) = markers.get(marker) else {
+    for observation in events {
+        let Some(identity) = markers.get(&observation.marker) else {
             continue;
         };
         let record = format!(
-            "{{\"crate\":\"{}\",\"kind\":\"ctfe-marker\",\"marker\":{},\"definition\":\"{}\",\"observationKind\":\"{}\",\"ordinal\":{}}}\n",
+            "{{\"crate\":\"{}\",\"kind\":\"ctfe-marker\",\"marker\":{},\"definition\":\"{}\",\"observationKind\":\"{}\",\"ordinal\":{},\"thread\":\"{}\"}}\n",
             escape(&identity.crate_name),
-            marker,
+            observation.marker,
             escape(&identity.definition),
             identity.observation_kind,
             identity.local_ordinal,
+            escape(&observation.thread),
         );
         let _ = output.write_all(record.as_bytes());
     }

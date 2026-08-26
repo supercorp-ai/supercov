@@ -1477,9 +1477,13 @@ miss blocks flipping any default.
   domain-separated SHA-256 marker keyed by crate, textual compiler definition,
   observation kind and local ordinal. Registration rejects any 64-bit
   collision, the interpreter observer accepts only registered constants, and
-  records carry the exact definition plus local site. The existing true/false
-  const behavior remains byte-identical and the corpus proves more than one
-  CTFE definition is observed. This is identity groundwork only: marker-to-
+  records carry the exact definition plus local site. Compiler-owned entry and
+  return markers plus the observing compiler thread now frame nested CTFE
+  invocations without relying on rustc tracing spans (the step events expose
+  none). The successful-build corpus requires balanced per-thread stacks and
+  proves two separately framed calls take opposite edges. The existing
+  true/false const behavior remains byte-identical and the corpus proves more
+  than one CTFE definition is observed. This is framing groundwork only: marker-to-
   frozen-obligation mapping and crash-safe evidence-v3 build-phase publication
   remain the active blocker.
 

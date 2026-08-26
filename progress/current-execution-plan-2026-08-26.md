@@ -456,11 +456,18 @@ const values and complete stdout/stderr stayed byte-identical to the ordinary
 build. The one-function/16-bit marker proof has now been generalized to every
 local CTFE body: marker identity is a domain-separated hash of crate,
 definition, block-or-edge kind and local ordinal; collisions are fatal and
-events retain the exact definition. Edge identity is carried by each event, so
-concurrent evaluation does not require guessing from adjacent log records.
+events retain the exact definition. The companion now also inserts explicit
+entry and return markers and records the observing compiler thread. The corpus
+reconstructs a per-thread nested invocation stack, requires balanced frames
+after a successful compilation, and proves that the two `const_decision`
+evaluations are separate frames with opposite edge paths. This replaces the
+unsound idea of assigning flat adjacent events to a definition; missing return
+markers after a panic or compiler crash can instead remain explicitly
+incomplete. Edge identity is carried by each event, so concurrent evaluation
+does not require guessing from adjacent log records.
 Rust still remains private:
 the proof covers one controlled const function and does not yet supply the
-complete const/static/inline-const/const-generic manifest, crash-safe event
+complete marker-to-obligation mapping for const/static/inline-const/const-generic code, crash-safe event
 publication, `RUSTC_LOG` coexistence or acceptable performance corpus.
 
 The rustdoc launch boundary is now proven as well. Cargo's ordinary

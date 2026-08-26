@@ -1824,32 +1824,88 @@ try {
   assert.equal(ctfeBehavior.stdout, baselineBehavior.stdout);
   assert.equal(ctfeBehavior.stderr, baselineBehavior.stderr);
   assert.match(ctfeBehavior.stdout, /const-values=11,13/);
-  const ctfeSequences = recordFiles(ctfeDirectory)
-    .filter(({name}) => name.endsWith('-ctfe.jsonl'))
-    .map(({records: fileRecords}) =>
-      fileRecords
-        .filter(({definition}) => definition.endsWith('const_decision'))
-        .map((record) => `${record.observationKind}:${record.ordinal}`),
-    );
+  const ctfeRecordFiles = recordFiles(ctfeDirectory).filter(({name}) =>
+    name.endsWith('-ctfe.jsonl'),
+  );
+  const ctfeSequences = ctfeRecordFiles.map(({records: fileRecords}) =>
+    fileRecords
+      .filter(({definition}) => definition.endsWith('const_decision'))
+      .map((record) => `${record.observationKind}:${record.ordinal}`),
+  );
   assert(
     ctfeSequences.some((observations) =>
       [
-        'block:0',
+        'entry:0',
         'block:1',
         'block:2',
         'block:3',
         'edge:0',
         'edge:1',
+        'exit:3',
       ].every((observation) => observations.includes(observation)),
     ),
     `expected both concurrency-safe CTFE edges and all original blocks, got ${JSON.stringify(ctfeSequences)}`,
   );
+  const ctfeInvocations = [];
+  for (const {name, records: fileRecords} of ctfeRecordFiles) {
+    const threadStacks = new Map();
+    for (const record of fileRecords) {
+      assert.equal(record.kind, 'ctfe-marker', `${name}: invalid CTFE record kind`);
+      assert.equal(typeof record.thread, 'string', `${name}: CTFE thread missing`);
+      assert(record.thread.length > 0, `${name}: CTFE thread empty`);
+      const stack = threadStacks.get(record.thread) ?? [];
+      threadStacks.set(record.thread, stack);
+      if (record.observationKind === 'entry') {
+        stack.push({definition: record.definition, records: [record]});
+        continue;
+      }
+      assert(
+        stack.length > 0,
+        `${name}: ${record.observationKind} observed outside a CTFE invocation on ${record.thread}`,
+      );
+      const frame = stack.at(-1);
+      assert.equal(
+        frame.definition,
+        record.definition,
+        `${name}: CTFE event crossed invocation identity on ${record.thread}`,
+      );
+      frame.records.push(record);
+      if (record.observationKind === 'exit') {
+        ctfeInvocations.push(stack.pop());
+      }
+    }
+    for (const [thread, stack] of threadStacks) {
+      assert.deepEqual(
+        stack,
+        [],
+        `${name}: successful compilation left incomplete CTFE frames on ${thread}`,
+      );
+    }
+  }
+  const constDecisionInvocations = ctfeInvocations.filter(({definition}) =>
+    definition.endsWith('const_decision'),
+  );
+  assert.equal(
+    constDecisionInvocations.length,
+    2,
+    'expected exactly two independently framed const_decision evaluations',
+  );
+  assert.deepEqual(
+    constDecisionInvocations
+      .map(({records: invocationRecords}) =>
+        invocationRecords
+          .filter(({observationKind}) => observationKind === 'edge')
+          .map(({ordinal}) => ordinal)
+          .join(','),
+      )
+      .sort(),
+    ['0', '1'],
+    'CTFE invocation frames did not preserve the independent false/true paths',
+  );
   const ctfeDefinitions = new Set(
-    recordFiles(ctfeDirectory)
-      .filter(({name}) => name.endsWith('-ctfe.jsonl'))
-      .flatMap(({records: fileRecords}) =>
-        fileRecords.map(({definition}) => definition),
-      ),
+    ctfeRecordFiles.flatMap(({records: fileRecords}) =>
+      fileRecords.map(({definition}) => definition),
+    ),
   );
   assert(
     ctfeDefinitions.size > 1,
