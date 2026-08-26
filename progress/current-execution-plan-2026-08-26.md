@@ -588,9 +588,23 @@ merged `__doctest_N` owners to the runner's source path, line and test name.
 The launcher removes its private unstable-option bootstrap before user code is
 compiled, and a stable `compile_fail` feature-gate case proves there is no
 capability leak. Baseline/intercepted output (excluding elapsed-time values)
-and checkout hashes match. Public tracing still requires real probes, exact
-per-doctest attempt transport, custom rustdoc/wrapper composition and the full
-doctest semantics/crash corpus.
+and checkout hashes match.
+
+The first doctest runtime-attribution slice is now executable. It exposed a
+general cross-crate flaw in the per-crate injected runtime: a harness could set
+TLS context without the called instrumented library seeing it. The corrected
+architecture links one Supercov-owned static runtime into the complete test
+process graph while each crate receives only private declarations/wrappers.
+Standalone synthesized `main` derives a crate/path/line test identity. Rustdoc's
+merged runner and separately executed bundle derive the same crate-group plus
+`__doctest_N` identity independently, so no process-global environment mutation
+or timing join is needed; the runner HIR also maps that key to the exact human
+test name. Two doctests calling one instrumented dependency now publish its
+authored function-entry probe under two distinct exact test contexts with zero
+drops/incomplete records and unchanged output. Unrelated setup evidence remains
+background. Public tracing still requires complete extracted-source obligations
+and probes, outcome/retry archive joining, custom wrapper composition, failure
+and signal forwarding, and the full doctest semantics/crash corpus.
 
 Correctness corpus:
 

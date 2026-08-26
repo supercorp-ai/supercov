@@ -76,12 +76,14 @@ const INSTRUMENT_CTFE: &str = "SUPERCOV_RUST_INSTRUMENT_CTFE";
 const REAL_RUSTDOC: &str = "SUPERCOV_RUST_REAL_RUSTDOC";
 const COMPANION_PATH: &str = "SUPERCOV_RUST_COMPANION_PATH";
 const RUSTDOC_LAUNCHED: &str = "SUPERCOV_RUSTDOC_LAUNCHED";
+const RUSTDOC_GROUP_ID: &str = "SUPERCOV_RUSTDOC_GROUP_ID";
 const SOURCE_ROOT: &str = "SUPERCOV_RUST_SOURCE_ROOT";
 const TARGET_ROOT: &str = "SUPERCOV_RUST_TARGET_ROOT";
 const FORCE_ID_COLLISION: &str = "SUPERCOV_RUSTC_SPIKE_FORCE_ID_COLLISION";
 const FORCE_PROBE_COLLISION: &str = "SUPERCOV_RUSTC_SPIKE_FORCE_PROBE_COLLISION";
 const CTFE_WRITE_FAULT: &str = "SUPERCOV_RUSTC_SPIKE_CTFE_WRITE_FAULT";
 const CTFE_WRITE_READY: &str = "SUPERCOV_RUSTC_SPIKE_CTFE_WRITE_READY";
+const STATIC_RUNTIME_DIRECTORY: &str = "SUPERCOV_RUST_STATIC_RUNTIME_DIRECTORY";
 const PROBE_FUNCTION: &str = "__supercov_spike_runtime::ordinal_hit";
 const ENTER_CONTEXT_FUNCTION: &str = "__supercov_spike_runtime::enter_context";
 const ENTER_ASSERTION_CONTEXT_FUNCTION: &str = "__supercov_spike_runtime::enter_assertion_context";
@@ -94,6 +96,31 @@ const HIT_BRANCH_FUNCTION: &str = "__supercov_spike_runtime::mir_branch_hit";
 const CTFE_EVENT_TARGET: &str = "rustc_const_eval::interpret::step";
 const RUNTIME_TEMPLATE: &str =
     include_str!("../../../crates/supercov-engine/runtime-assets/rust-mmap-runtime.rs");
+const SHARED_RUNTIME_DECLARATIONS: &str = r#"
+#[allow(dead_code)]
+mod __supercov_spike_runtime {
+    unsafe extern "C" {
+        fn __supercov_rt_ordinal_hit(ordinal: u64);
+        fn __supercov_rt_enter_context(context_id: u64) -> u64;
+        fn __supercov_rt_exit_context(previous: u64);
+        fn __supercov_rt_enter_assertion_context(id_high: u64, id_low: u32) -> u64;
+        fn __supercov_rt_decision_start(id_high: u64, id_low: u32, conditions: u64) -> u64;
+        fn __supercov_rt_decision_condition(token: u64, index: u64, value: bool);
+        fn __supercov_rt_decision_finish(token: u64, outcome: bool);
+        fn __supercov_rt_branch_start() -> u64;
+        fn __supercov_rt_branch_hit(token: u64, ordinal: u64);
+    }
+    #[inline] pub fn ordinal_hit(ordinal: u64) { unsafe { __supercov_rt_ordinal_hit(ordinal) } }
+    #[inline(never)] pub fn enter_context(context_id: u64) -> u64 { unsafe { __supercov_rt_enter_context(context_id) } }
+    #[inline(never)] pub fn exit_context(previous: u64) { unsafe { __supercov_rt_exit_context(previous) } }
+    #[inline(never)] pub fn enter_assertion_context(id_high: u64, id_low: u32) -> u64 { unsafe { __supercov_rt_enter_assertion_context(id_high, id_low) } }
+    #[inline(never)] pub fn mir_decision_start(id_high: u64, id_low: u32, conditions: u64) -> u64 { unsafe { __supercov_rt_decision_start(id_high, id_low, conditions) } }
+    #[inline(never)] pub fn mir_decision_condition(token: u64, index: u64, value: bool) { unsafe { __supercov_rt_decision_condition(token, index, value) } }
+    #[inline(never)] pub fn mir_decision_finish(token: u64, outcome: bool) { unsafe { __supercov_rt_decision_finish(token, outcome) } }
+    #[inline(never)] pub fn mir_branch_start() -> u64 { unsafe { __supercov_rt_branch_start() } }
+    #[inline(never)] pub fn mir_branch_hit(token: u64, ordinal: u64) { unsafe { __supercov_rt_branch_hit(token, ordinal) } }
+}
+"#;
 
 type OptimizedMirProvider = for<'tcx> fn(TyCtxt<'tcx>, LocalDefId) -> &'tcx Body<'tcx>;
 type MirForCtfeProvider = for<'tcx> fn(TyCtxt<'tcx>, LocalDefId) -> &'tcx Body<'tcx>;
@@ -1776,7 +1803,11 @@ impl Callbacks for ProbeCallbacks {
         if env::var_os(INSTRUMENT_MIR).is_none() {
             return Compilation::Continue;
         }
-        let runtime = RUNTIME_TEMPLATE.replace("__SUPERCOV_MODULE__", "__supercov_spike_runtime");
+        let runtime = if env::var_os(STATIC_RUNTIME_DIRECTORY).is_some() {
+            SHARED_RUNTIME_DECLARATIONS.to_owned()
+        } else {
+            RUNTIME_TEMPLATE.replace("__SUPERCOV_MODULE__", "__supercov_spike_runtime")
+        };
         let mut parser = rustc_parse::unwrap_or_emit_fatal(new_parser_from_source_str(
             &compiler.sess.psess,
             FileName::Custom("<supercov-rust-runtime>".into()),
@@ -1895,6 +1926,9 @@ impl Callbacks for ProbeCallbacks {
                 .span_to_snippet(tcx.hir_body_owned_by(owner).value.span)
                 .ok();
             let definition = tcx.def_path_str(def_id);
+            let test_name = test_identity_for(tcx, &definition);
+            let test_context_id = test_name.as_deref().map(test_context_id);
+            let doctest_display_name = merged_doctest_display_name(tcx, &definition);
             let owned_body = !definition.contains("__supercov_spike_runtime");
             let function_identity = if is_function_body(kind) && owned_body {
                 match function_identity(tcx, def_id, span, &crate_name_string) {
@@ -1959,7 +1993,7 @@ impl Callbacks for ProbeCallbacks {
                 collector.visit_body(body);
             }
             let record = format!(
-                "{{\"crate\":\"{}\",\"definition\":\"{}\",\"kind\":\"{:?}\",\"span\":\"{}\",\"callsite\":\"{}\",\"expanded\":{},\"mirBlocks\":{},\"mirSpans\":{},\"mirAuthoredLines\":{},\"sourceSnippet\":{},\"bodySnippet\":{},\"doctestRole\":{},\"doctestPath\":{},\"doctestLine\":{},\"functionObligationId\":{},\"sourceKey\":{},\"sourceStart\":{},\"sourceEnd\":{},\"sourceProvenance\":{}}}\n",
+                "{{\"crate\":\"{}\",\"definition\":\"{}\",\"kind\":\"{:?}\",\"span\":\"{}\",\"callsite\":\"{}\",\"expanded\":{},\"mirBlocks\":{},\"mirSpans\":{},\"mirAuthoredLines\":{},\"sourceSnippet\":{},\"bodySnippet\":{},\"doctestRole\":{},\"doctestPath\":{},\"doctestLine\":{},\"testName\":{},\"testContextId\":{},\"doctestDisplayName\":{},\"functionObligationId\":{},\"sourceKey\":{},\"sourceStart\":{},\"sourceEnd\":{},\"sourceProvenance\":{}}}\n",
                 escape(&crate_name_string),
                 escape(&tcx.def_path_str(def_id)),
                 kind,
@@ -1974,6 +2008,9 @@ impl Callbacks for ProbeCallbacks {
                 json_string(doctest_role),
                 json_string(doctest_path.as_deref()),
                 json_string(doctest_line.as_deref()),
+                json_string(test_name.as_deref()),
+                test_context_id.map_or_else(|| "null".into(), |value| format!("\"{value}\"")),
+                json_string(doctest_display_name.as_deref()),
                 json_string(
                     function_identity
                         .as_ref()
@@ -7014,12 +7051,9 @@ fn probe_id_for(tcx: TyCtxt<'_>, def_id: LocalDefId, definition: &str) -> Option
 
 fn context_id_for(tcx: TyCtxt<'_>, def_id: LocalDefId, definition: &str) -> Option<u64> {
     if matches!(tcx.def_kind(def_id), DefKind::Fn)
-        && let Some(test_name) = tcx.hir_body_owners().find_map(|owner| {
-            rustc_hir::find_attr!(tcx, owner, RustcTestMarker(name) => *name)
-                .filter(|name| name.as_str() == definition)
-        })
+        && let Some(test_name) = test_identity_for(tcx, definition)
     {
-        return Some(test_context_id(test_name.as_str()));
+        return Some(test_context_id(&test_name));
     }
     for (suffix, context_id) in [("context_normal_scope", 303), ("context_panic_scope", 404)] {
         if definition.ends_with(suffix) {
@@ -7027,6 +7061,73 @@ fn context_id_for(tcx: TyCtxt<'_>, def_id: LocalDefId, definition: &str) -> Opti
         }
     }
     None
+}
+
+fn libtest_name_for(tcx: TyCtxt<'_>, definition: &str) -> Option<rustc_span::Symbol> {
+    tcx.hir_body_owners().find_map(|owner| {
+        rustc_hir::find_attr!(tcx, owner, RustcTestMarker(name) => *name)
+            .filter(|name| name.as_str() == definition)
+    })
+}
+
+struct FirstStringLiteral {
+    value: Option<rustc_span::Symbol>,
+}
+
+impl<'tcx> Visitor<'tcx> for FirstStringLiteral {
+    fn visit_expr(&mut self, expression: &'tcx hir::Expr<'tcx>) {
+        if self.value.is_none()
+            && let hir::ExprKind::Lit(literal) = expression.kind
+            && let rustc_ast::LitKind::Str(value, _) = literal.node
+        {
+            self.value = Some(value);
+            return;
+        }
+        intravisit::walk_expr(self, expression);
+    }
+}
+
+fn merged_doctest_display_name(tcx: TyCtxt<'_>, definition: &str) -> Option<String> {
+    if DOCTEST_ROLE.get().copied() != Some("merged-runner") {
+        return None;
+    }
+    let test_definition = definition.strip_suffix("::{closure#0}")?;
+    let owner = tcx
+        .hir_body_owners()
+        .find(|owner| tcx.def_path_str(owner.to_def_id()) == test_definition)?;
+    let body = tcx.hir_body_owned_by(owner);
+    let mut visitor = FirstStringLiteral { value: None };
+    visitor.visit_body(body);
+    visitor.value.map(|value| value.as_str().to_owned())
+}
+
+fn merged_doctest_module<'a>(definition: &'a str, role: &str) -> Option<&'a str> {
+    let module = match role {
+        "merged-runner" => definition.strip_suffix("::TEST::{closure#0}")?,
+        "merged-bundle" => definition.strip_suffix("::main")?,
+        _ => return None,
+    };
+    module.starts_with("__doctest_").then_some(module)
+}
+
+fn test_identity_for(tcx: TyCtxt<'_>, definition: &str) -> Option<String> {
+    if let Some(name) = libtest_name_for(tcx, definition) {
+        return Some(name.as_str().to_owned());
+    }
+    match DOCTEST_ROLE.get().copied() {
+        Some("standalone") if definition == "main" => {
+            let group = env::var(RUSTDOC_GROUP_ID).ok()?;
+            let path = env::var("UNSTABLE_RUSTDOC_TEST_PATH").ok()?;
+            let line = env::var("UNSTABLE_RUSTDOC_TEST_LINE").ok()?;
+            Some(format!("rustdoc:{group}:{path}:{line}"))
+        }
+        Some(role @ ("merged-runner" | "merged-bundle")) => {
+            let group = env::var(RUSTDOC_GROUP_ID).ok()?;
+            let module = merged_doctest_module(definition, role)?;
+            Some(format!("rustdoc:{group}:{module}"))
+        }
+        _ => None,
+    }
 }
 
 fn test_context_id(test_name: &str) -> u64 {
@@ -7174,6 +7275,10 @@ fn main() {
         // of native profile output and symbols in the linked executable.
         args.push("--cfg=supercov_spike_instrumented".into());
         args.push("--check-cfg=cfg(supercov_spike_instrumented)".into());
+        if let Some(directory) = env::var_os(STATIC_RUNTIME_DIRECTORY) {
+            args.push(format!("-Lnative={}", PathBuf::from(directory).display()));
+            args.push("-lstatic=supercov_runtime".into());
+        }
     }
     let early_dcx = EarlyDiagCtxt::new(ErrorOutputType::default());
     if let Err(error) = init_companion_logger(env::var_os(INSTRUMENT_CTFE).is_some()) {
@@ -7193,6 +7298,7 @@ fn main() {
 fn launch_rustdoc(args: &[String]) -> ! {
     let rustdoc = env::var_os(REAL_RUSTDOC).expect("exact rustdoc path");
     let companion = env::var_os(COMPANION_PATH).expect("compiler companion path");
+    let group = argument_value(args, "--crate-name").expect("rustdoc crate name");
     let status = Command::new(rustdoc)
         .args(args)
         .arg("-Zunstable-options")
@@ -7200,9 +7306,19 @@ fn launch_rustdoc(args: &[String]) -> ! {
         .arg(companion)
         .env("RUSTC_BOOTSTRAP", "1")
         .env(RUSTDOC_LAUNCHED, "1")
+        .env(RUSTDOC_GROUP_ID, group)
         .status()
         .expect("launch exact rustdoc");
     std::process::exit(status.code().unwrap_or(1));
+}
+
+fn argument_value<'a>(args: &'a [String], option: &str) -> Option<&'a str> {
+    args.iter()
+        .find_map(|argument| argument.strip_prefix(&format!("{option}=")))
+        .or_else(|| {
+            args.windows(2)
+                .find_map(|pair| (pair[0] == option).then_some(pair[1].as_str()))
+        })
 }
 
 fn doctest_role(args: &[String]) -> &'static str {

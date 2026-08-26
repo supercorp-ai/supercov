@@ -46,9 +46,19 @@ HIR binds the same ordinal to rustdoc's source path and line. The launcher's
 private unstable-option bootstrap is removed before compiling user doctest
 code; a `compile_fail` feature-gate test proves it does not enable unstable
 Rust. Normal and intercepted doctest output match after replacing elapsed-time
-values, and the checkout hash remains exact.
+values, and the checkout hash remains exact. The first runtime slice is now
+real as well. The spike links one Supercov-owned static runtime into the whole
+doctest process graph, so an instrumented dependency and its rustdoc harness do
+not get disconnected TLS state from duplicate per-crate runtimes. Standalone
+tests enter a crate/path/line identity in their synthesized `main`. Merged
+runner and bundle compilations independently derive the same crate-group plus
+`__doctest_N` identity; the bundle child enters it itself, while the runner HIR
+maps it to rustdoc's human test name. Calls into an instrumented dependency
+publish under two distinct exact contexts with no drops or incomplete records.
+Unrelated setup observations remain background rather than being reassigned.
 
-Doctest runtime probes, per-test transport, custom rustdoc/wrapper composition,
-failure/signal forwarding and the full hidden/merged/compile-fail/no_std corpus
-remain promotion gates. This spike proves automatic interception and source
-identity, not the complete `rustdocDoctestTracing` capability.
+Complete extracted-source obligations/probes, outcome/retry archive joining,
+custom rustdoc/wrapper composition, failure/signal forwarding and the full
+hidden/merged/compile-fail/no_std corpus remain promotion gates. This spike
+proves automatic interception, source identity and the first exact runtime
+attribution slice, not the complete `rustdocDoctestTracing` capability.

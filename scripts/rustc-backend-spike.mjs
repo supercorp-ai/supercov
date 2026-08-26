@@ -6,12 +6,14 @@ import {
   cpSync,
   existsSync,
   ftruncateSync,
+  mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
   readdirSync,
   rmSync,
   symlinkSync,
+  writeFileSync,
   writeSync,
 } from 'node:fs';
 import {tmpdir} from 'node:os';
@@ -2997,7 +2999,39 @@ try {
   const rustdocLauncher = join(scratch, 'supercov-rustdoc-backend-spike');
   symlinkSync(wrapper, rustdocLauncher);
   const realRustdoc = run('rustup', ['which', 'rustdoc']).stdout.trim();
+  const sharedRuntimeDirectory = join(scratch, 'shared-rust-runtime');
+  const sharedRuntimeSource = join(sharedRuntimeDirectory, 'runtime.rs');
+  const sharedRuntimeArchive = join(
+    sharedRuntimeDirectory,
+    'libsupercov_runtime.a',
+  );
+  mkdirSync(sharedRuntimeDirectory);
+  const runtimeModule = readFileSync(
+    join(root, 'crates/supercov-engine/runtime-assets/rust-mmap-runtime.rs'),
+    'utf8',
+  ).replace('__SUPERCOV_MODULE__', '__supercov_shared_runtime');
+  const runtimeExports = `
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_ordinal_hit(ordinal: u64) { __supercov_shared_runtime::ordinal_hit(ordinal) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_enter_context(context_id: u64) -> u64 { __supercov_shared_runtime::enter_context(context_id) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_exit_context(previous: u64) { __supercov_shared_runtime::exit_context(previous) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_enter_assertion_context(id_high: u64, id_low: u32) -> u64 { __supercov_shared_runtime::enter_assertion_context(id_high, id_low) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_decision_start(id_high: u64, id_low: u32, conditions: u64) -> u64 { __supercov_shared_runtime::mir_decision_start(id_high, id_low, conditions) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_decision_condition(token: u64, index: u64, value: bool) { __supercov_shared_runtime::mir_decision_condition(token, index, value) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_decision_finish(token: u64, outcome: bool) { __supercov_shared_runtime::mir_decision_finish(token, outcome) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_branch_start() -> u64 { __supercov_shared_runtime::mir_branch_start() }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_branch_hit(token: u64, ordinal: u64) { __supercov_shared_runtime::mir_branch_hit(token, ordinal) }
+`;
+  writeFileSync(sharedRuntimeSource, `${runtimeModule}\n${runtimeExports}`);
+  run('rustc', [
+    '--edition=2024',
+    '--crate-name=supercov_runtime',
+    '--crate-type=staticlib',
+    '-o',
+    sharedRuntimeArchive,
+    sharedRuntimeSource,
+  ]);
   const wrappedDoctestDirectory = join(scratch, 'wrapped-doctest');
+  const doctestTransport = createTransport('wrapped-doctest');
   const wrappedDoctest = run(
     'cargo',
     ['test', '--quiet', '--manifest-path', fixture, '--doc'],
@@ -3005,9 +3039,15 @@ try {
       env: {
         CARGO_TARGET_DIR: join(scratch, 'wrapped-doctest-target'),
         RUSTDOC: rustdocLauncher,
+        RUSTC_WRAPPER: wrapper,
         SUPERCOV_RUST_COMPANION_PATH: wrapper,
         SUPERCOV_RUST_COMPILER_OUTPUT: wrappedDoctestDirectory,
+        SUPERCOV_RUST_CONTEXT_ID: transportContext.toString(16).padStart(16, '0'),
+        SUPERCOV_RUST_INSTRUMENT_MIR: '1',
         SUPERCOV_RUST_REAL_RUSTDOC: realRustdoc,
+        SUPERCOV_RUST_STATIC_RUNTIME_DIRECTORY: sharedRuntimeDirectory,
+        SUPERCOV_RUST_TRANSPORT_FILE: doctestTransport.path,
+        SUPERCOV_RUST_TRANSPORT_TOKEN: doctestTransport.tokenHex,
       },
     },
   );
@@ -3020,6 +3060,59 @@ try {
     normalizeTestOutput(doctest.stderr),
   );
   const wrappedDoctestRecords = records(wrappedDoctestDirectory);
+  const doctestTestRecords = wrappedDoctestRecords.filter(
+    ({testName, testContextId}) => testName && testContextId,
+  );
+  assert(
+    doctestTestRecords.length >= 2,
+    `rustdoc test markers were not preserved: ${JSON.stringify(
+      wrappedDoctestRecords
+        .filter(({doctestRole}) => doctestRole)
+        .map(({definition, doctestRole, bodySnippet, testName}) => ({
+          definition,
+          doctestRole,
+          bodySnippet,
+          testName,
+        })),
+    )}`,
+  );
+  const doctestContexts = new Set(
+    doctestTestRecords.map(({testName, testContextId: compilerContext}) => {
+      const expected = testContextId(testName).toString();
+      assert.equal(compilerContext, expected, `wrong compiler context for ${testName}`);
+      return expected;
+    }),
+  );
+  const doctestRuntime = readTransport(doctestTransport);
+  assert.equal(doctestRuntime.dropped, 0);
+  assert.equal(doctestRuntime.incomplete, 0);
+  assert(doctestRuntime.ordinals.length >= 2, 'doctests emitted no runtime probes');
+  const authoredDoctestOrdinals = new Set(
+    manifests(wrappedDoctestDirectory).flatMap((manifestRecord) =>
+      manifestRecord.points
+        .filter(
+          ({kind, definitions}) =>
+            kind === 'function' && definitions.includes('authored'),
+        )
+        .map(({probeOrdinal}) => probeOrdinal),
+    ),
+  );
+  assert.equal(authoredDoctestOrdinals.size, 1);
+  const authoredDoctestHits = doctestRuntime.ordinals.filter(({ordinal}) =>
+    authoredDoctestOrdinals.has(ordinal),
+  );
+  assert(authoredDoctestHits.length >= 2, 'authored doctest calls emitted no probes');
+  const observedDoctestContexts = new Set(
+    authoredDoctestHits.map(({context}) => context),
+  );
+  assert(
+    [...observedDoctestContexts].every((context) => doctestContexts.has(context)),
+    `doctest probes escaped exact test contexts: ${JSON.stringify([...observedDoctestContexts])}`,
+  );
+  assert(
+    observedDoctestContexts.size >= 2,
+    'standalone and merged doctest probes did not retain distinct contexts',
+  );
   const standalone = wrappedDoctestRecords.find(
     (record) => record.doctestRole === 'standalone',
   );
@@ -3059,6 +3152,23 @@ try {
   );
   assert.match(mergedIdentity?.bodySnippet ?? '', /src\/lib\.rs/);
   assert.match(mergedIdentity?.bodySnippet ?? '', /line 3/);
+  const mergedRunnerContext = wrappedDoctestRecords.find(
+    (record) =>
+      record.doctestRole === 'merged-runner' &&
+      record.definition === '__doctest_0::TEST::{closure#0}',
+  );
+  const mergedBundleContext = wrappedDoctestRecords.find(
+    (record) =>
+      record.doctestRole === 'merged-bundle' &&
+      record.definition === '__doctest_0::main',
+  );
+  assert.equal(
+    mergedRunnerContext?.testName,
+    'rustdoc:supercov_rustc_spike_fixture:__doctest_0',
+  );
+  assert.equal(mergedBundleContext?.testName, mergedRunnerContext?.testName);
+  assert.equal(mergedBundleContext?.testContextId, mergedRunnerContext?.testContextId);
+  assert.equal(mergedRunnerContext?.doctestDisplayName, 'src/lib.rs - (line 3)');
   assert.equal(
     createHash('sha256').update(readFileSync(fixtureSourcePath)).digest('hex'),
     fixtureSourceDigest,
