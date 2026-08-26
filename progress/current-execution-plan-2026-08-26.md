@@ -541,6 +541,18 @@ during compilation, but atomic sidecar publication is gated on successful
 analysis. Promoted/const-trait surfaces, the remaining failure/resource/
 concurrency matrix, `RUSTC_LOG` coexistence and performance remain open.
 
+`RUSTC_LOG` coexistence is now closed at the exact-version companion boundary.
+The companion reproduces rustc 1.95's logger configuration and formatting but
+applies the user's filter only to the ordinary logging layer; an independent
+target-and-level filter enables the private CTFE observer without printing
+extra interpreter events or suppressing requested logs. A direct compile gate
+runs stock rustc and the companion with the same JSON/output-target settings,
+requires requested interpreter records from both, and simultaneously requires
+nonempty Supercov CTFE sidecars. This gate also exposed and fixed acceptance of
+rustc's `--crate-name=value` form in addition to `--crate-name value`.
+Promoted/const-trait surfaces, compiler crash/ENOSPC/concurrency and performance
+remain open.
+
 The rustdoc launch boundary is now proven as well. Cargo's ordinary
 `RUSTC_WRAPPER` still does not see synthesized doctest crates, so Supercov uses
 a scoped launcher for the exact ordinary rustdoc and adds its compiler

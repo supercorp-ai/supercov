@@ -954,6 +954,77 @@ try {
     assert.match(baseline.stderr, /assert_failed/);
     assert.match(baseline.stderr, /cannot call non-const function/);
   }
+  const loggingSource = join(fixtureRoot, 'compile-pass/const-log.rs');
+  const baselineLog = join(scratch, 'const-log-baseline.jsonl');
+  const instrumentedLog = join(scratch, 'const-log-instrumented.jsonl');
+  const loggingCompilerOutput = join(scratch, 'const-log-output');
+  const loggingEnvironment = (output) => ({
+    RUSTC_LOG: 'rustc_const_eval::interpret::step=info',
+    RUSTC_LOG_COLOR: 'never',
+    RUSTC_LOG_FORMAT_JSON: '1',
+    RUSTC_LOG_OUTPUT_TARGET: output,
+  });
+  const baselineLoggedCompilation = run(
+    'rustc',
+    [
+      '--edition=2024',
+      '--crate-name=const_log',
+      '--crate-type=lib',
+      '--emit=metadata',
+      '-o',
+      join(scratch, 'const-log-baseline.rmeta'),
+      loggingSource,
+    ],
+    {env: loggingEnvironment(baselineLog)},
+  );
+  const instrumentedLoggedCompilation = run(
+    wrapper,
+    [
+      'rustc',
+      '--edition=2024',
+      '--crate-name=const_log',
+      '--crate-type=lib',
+      '--emit=metadata',
+      '-o',
+      join(scratch, 'const-log-instrumented.rmeta'),
+      loggingSource,
+    ],
+    {
+      env: {
+        ...loggingEnvironment(instrumentedLog),
+        SUPERCOV_RUST_COMPILER_OUTPUT: loggingCompilerOutput,
+        SUPERCOV_RUST_INSTRUMENT_MIR: '1',
+        SUPERCOV_RUST_INSTRUMENT_CTFE: '1',
+        DYLD_LIBRARY_PATH: [rustcTargetLibdir, process.env.DYLD_LIBRARY_PATH]
+          .filter(Boolean)
+          .join(':'),
+        LD_LIBRARY_PATH: [rustcTargetLibdir, process.env.LD_LIBRARY_PATH]
+          .filter(Boolean)
+          .join(':'),
+      },
+    },
+  );
+  assert.equal(baselineLoggedCompilation.stdout, '');
+  assert.equal(baselineLoggedCompilation.stderr, '');
+  assert.equal(instrumentedLoggedCompilation.stdout, '');
+  assert.equal(instrumentedLoggedCompilation.stderr, '');
+  for (const [kind, path] of [
+    ['baseline', baselineLog],
+    ['instrumented', instrumentedLog],
+  ]) {
+    const records = readFileSync(path, 'utf8').trim().split('\n').map(JSON.parse);
+    assert(records.length > 0, `${kind} RUSTC_LOG output was empty`);
+    assert(
+      records.some(({target}) => target === 'rustc_const_eval::interpret::step'),
+      `${kind} RUSTC_LOG output omitted the requested CTFE target`,
+    );
+  }
+  assert(
+    recordFiles(loggingCompilerOutput).some(({name, records}) =>
+      name.startsWith('ctfe-events-') && records.length > 0,
+    ),
+    'user RUSTC_LOG configuration suppressed Supercov CTFE observations',
+  );
   assert.deepEqual(
     readdirSync(scratch).filter((name) => name.endsWith('.profraw')),
     [],

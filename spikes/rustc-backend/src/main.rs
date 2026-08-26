@@ -12,12 +12,13 @@ extern crate rustc_middle;
 extern crate rustc_parse;
 extern crate rustc_session;
 extern crate rustc_span;
+extern crate tracing_tree;
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    env,
-    fs::{self, OpenOptions},
-    io::Write,
+    env, fmt,
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
     path::{Component, Path, PathBuf},
     process::Command,
     sync::{
@@ -46,14 +47,25 @@ use rustc_middle::{
     util::Providers,
 };
 use rustc_session::{
-    Session,
-    config::{CoverageLevel, InstrumentCoverage},
+    EarlyDiagCtxt, Session,
+    config::{CoverageLevel, ErrorOutputType, InstrumentCoverage},
 };
 use rustc_span::{DUMMY_SP, DesugaringKind, FileName, def_id::LocalDefId, source_map::Spanned};
 
 use rustc_log::{
-    tracing::{Event, Metadata, Subscriber, field},
-    tracing_subscriber::{Layer, layer::SubscriberExt, registry::LookupSpan},
+    LoggerConfig,
+    tracing::{Event, Subscriber, field},
+    tracing_subscriber::{
+        Layer, Registry,
+        filter::{Directive, EnvFilter, LevelFilter, filter_fn},
+        fmt::{
+            FmtContext,
+            format::{self, FmtSpan, FormatEvent, FormatFields},
+            writer::BoxMakeWriter,
+        },
+        layer::SubscriberExt,
+        registry::LookupSpan,
+    },
 };
 use rustc_parse::{lexer::StripTokens, new_parser_from_source_str};
 use sha2::{Digest, Sha256};
@@ -284,20 +296,16 @@ impl<S> Layer<S> for CtfeLayer
 where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
-    fn enabled(
-        &self,
-        metadata: &Metadata<'_>,
-        _context: rustc_log::tracing_subscriber::layer::Context<'_, S>,
-    ) -> bool {
-        metadata.target() == CTFE_EVENT_TARGET
-            && *metadata.level() == rustc_log::tracing::Level::INFO
-    }
-
     fn on_event(
         &self,
         event: &Event<'_>,
         _context: rustc_log::tracing_subscriber::layer::Context<'_, S>,
     ) {
+        if event.metadata().target() != CTFE_EVENT_TARGET
+            || *event.metadata().level() != rustc_log::tracing::Level::INFO
+        {
+            return;
+        }
         let mut visitor = CtfeEventVisitor::default();
         event.record(&mut visitor);
         if let Some(marker) = parse_ctfe_marker(&visitor.fields)
@@ -327,6 +335,137 @@ impl field::Visit for CtfeEventVisitor {
         use std::fmt::Write as _;
         let _ = write!(&mut self.fields, "{}={value:?};", field.name());
     }
+}
+
+struct CompanionBacktraceFormatter {
+    target: String,
+}
+
+impl<S, N> FormatEvent<S, N> for CompanionBacktraceFormatter
+where
+    S: Subscriber + for<'span> LookupSpan<'span>,
+    N: for<'writer> FormatFields<'writer> + 'static,
+{
+    fn format_event(
+        &self,
+        _context: &FmtContext<'_, S, N>,
+        mut writer: format::Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        if !event.metadata().target().contains(&self.target) {
+            return Ok(());
+        }
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        writeln!(writer, "stack backtrace: \n{backtrace:?}")
+    }
+}
+
+fn init_companion_logger(capture_ctfe: bool) -> Result<(), String> {
+    let LoggerConfig {
+        filter,
+        color_logs,
+        verbose_entry_exit,
+        verbose_thread_ids,
+        backtrace,
+        json,
+        output_target,
+        wraptree,
+        lines,
+    } = LoggerConfig::from_env("RUSTC_LOG");
+    let user_filter = match filter {
+        Ok(value) => EnvFilter::new(value),
+        Err(_) => EnvFilter::default().add_directive(Directive::from(LevelFilter::WARN)),
+    };
+    let color_logs = match color_logs {
+        Ok(value) => match value.as_str() {
+            "always" => true,
+            "never" => false,
+            "auto" => rustc_log::stderr_isatty(),
+            _ => {
+                return Err(format!(
+                    "invalid log color value '{value}': expected one of always, never, or auto"
+                ));
+            }
+        },
+        Err(env::VarError::NotPresent) => rustc_log::stderr_isatty(),
+        Err(env::VarError::NotUnicode(_)) => {
+            return Err(
+                "non-Unicode log color value: expected one of always, never, or auto".into(),
+            );
+        }
+    };
+    let verbose_entry_exit = verbose_entry_exit.is_ok_and(|value| value != "0");
+    let verbose_thread_ids = verbose_thread_ids.is_ok_and(|value| value == "1");
+    let lines = lines.is_ok_and(|value| value == "1");
+    let json = json.is_ok_and(|value| value == "1");
+    let output_target: BoxMakeWriter = match output_target {
+        Ok(path) => match File::options()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+        {
+            Ok(file) => BoxMakeWriter::new(Mutex::new(file)),
+            Err(error) => {
+                eprintln!("couldn't open {path} as a log target: {error:?}");
+                BoxMakeWriter::new(io::stderr)
+            }
+        },
+        Err(_) => BoxMakeWriter::new(io::stderr),
+    };
+    let user_layer = if json {
+        let formatter = rustc_log::tracing_subscriber::fmt::format()
+            .json()
+            .with_span_list(true)
+            .with_source_location(true);
+        let layer = rustc_log::tracing_subscriber::fmt::layer()
+            .json()
+            .event_format(formatter)
+            .with_writer(output_target)
+            .with_target(true)
+            .with_ansi(false)
+            .with_thread_ids(verbose_thread_ids)
+            .with_thread_names(verbose_thread_ids)
+            .with_span_events(FmtSpan::ACTIVE);
+        Layer::boxed(layer)
+    } else {
+        let mut layer = tracing_tree::HierarchicalLayer::default()
+            .with_writer(output_target)
+            .with_ansi(color_logs)
+            .with_targets(true)
+            .with_verbose_exit(verbose_entry_exit)
+            .with_verbose_entry(verbose_entry_exit)
+            .with_indent_amount(2)
+            .with_indent_lines(lines)
+            .with_thread_ids(verbose_thread_ids)
+            .with_thread_names(verbose_thread_ids);
+        if let Ok(value) = wraptree {
+            let width = value.parse::<usize>().map_err(|_| {
+                format!("invalid log WRAPTREE value '{value}': expected a non-negative integer")
+            })?;
+            layer = layer.with_wraparound(width);
+        }
+        Layer::boxed(layer)
+    };
+    let backtrace_layer = backtrace.ok().map(|target| {
+        rustc_log::tracing_subscriber::fmt::layer()
+            .with_writer(io::stderr)
+            .without_time()
+            .event_format(CompanionBacktraceFormatter { target })
+            .with_filter(user_filter.clone())
+    });
+    let ctfe_layer = capture_ctfe.then(|| {
+        CtfeLayer.with_filter(filter_fn(|metadata| {
+            metadata.target() == CTFE_EVENT_TARGET
+                && *metadata.level() == rustc_log::tracing::Level::INFO
+        }))
+    });
+    let subscriber = Registry::default()
+        .with(user_layer.with_filter(user_filter))
+        .with(backtrace_layer)
+        .with(ctfe_layer);
+    rustc_log::tracing::subscriber::set_global_default(subscriber)
+        .map_err(|error| error.to_string())
 }
 
 fn normalized_path(path: &Path) -> PathBuf {
@@ -7034,10 +7173,9 @@ fn main() {
         args.push("--cfg=supercov_spike_instrumented".into());
         args.push("--check-cfg=cfg(supercov_spike_instrumented)".into());
     }
-    if env::var_os(INSTRUMENT_CTFE).is_some() {
-        let subscriber = rustc_log::tracing_subscriber::Registry::default().with(CtfeLayer);
-        rustc_log::tracing::subscriber::set_global_default(subscriber)
-            .expect("install CTFE event observer");
+    let early_dcx = EarlyDiagCtxt::new(ErrorOutputType::default());
+    if let Err(error) = init_companion_logger(env::var_os(INSTRUMENT_CTFE).is_some()) {
+        early_dcx.early_fatal(error);
     }
     let mut callbacks = ProbeCallbacks;
     rustc_driver::run_compiler(&args, &mut callbacks);
@@ -7133,8 +7271,12 @@ fn write_ctfe_outputs(args: &[String], events: &[CtfeObservation]) -> Result<(),
     let directory = PathBuf::from(directory);
     fs::create_dir_all(&directory).map_err(|error| format!("{}: {error}", directory.display()))?;
     let crate_name = args
-        .windows(2)
-        .find_map(|pair| (pair[0] == "--crate-name").then_some(pair[1].as_str()))
+        .iter()
+        .find_map(|argument| argument.strip_prefix("--crate-name="))
+        .or_else(|| {
+            args.windows(2)
+                .find_map(|pair| (pair[0] == "--crate-name").then_some(pair[1].as_str()))
+        })
         .unwrap_or("unknown");
     let identity = format!("{}-{}", std::process::id(), sanitize(crate_name));
     let markers = CTFE_MARKERS
