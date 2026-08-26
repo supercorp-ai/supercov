@@ -1300,6 +1300,15 @@ miss blocks flipping any default.
   separated. A spawned child thread deliberately remains context zero, proving
   Supercov detects rather than guesses missing propagation; exact child/async
   propagation or automatic process-per-test rerun remains a promotion gate.
+- Rust source identity v1 is now frozen and executable for compiler-derived
+  function entries. Authored and declarative-expansion tokens use normalized
+  project source ranges and repeated expansions aggregate; synthetic proc-
+  macro output adds its callsite, stable expansion chain and textual owner
+  path; owned `OUT_DIR` source uses project-relative package and generated
+  paths. The compiler rejects digest collisions, and two clean target
+  directories emit byte-identical candidates without ephemeral paths. The
+  manifest remains deliberately incomplete until the same identity covers all
+  statements, branches, decisions, conditions, CTFE and doctest obligations.
 
 ## Non-goals and guardrails
 

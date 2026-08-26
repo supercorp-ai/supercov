@@ -183,6 +183,21 @@ context zero rather than inheriting by timing or global state. Public R2 still
 requires owned child/async/subprocess propagation or an automatic switch to the
 existing exact process-per-test path whenever that explicit gap appears.
 
+The compiler now also emits the first strict manifest candidate under the
+frozen Rust source-identity-v1 rules. Function-entry obligations use
+project-relative original byte ranges for authored, included and declarative-
+macro tokens; two expansions of the same declarative macro body aggregate to
+one obligation. Proc-macro output that collapses to its invocation is instead
+bound to the stable callsite, complete expansion chain and textual compiler
+owner path, so repeated invocations remain distinct. Owned `OUT_DIR` source is
+keyed by project-relative package root and out-relative path. Two entirely
+clean Cargo target directories produced byte-identical candidates, with no
+target hash or absolute scratch path. IDs are SHA-256-derived and any in-run
+digest collision is fatal. The candidate deliberately carries a blocking
+functions-only limitation: statements, branches, decisions, derives, nested
+expansion shapes and full package/compiler fingerprints remain R1 work and no
+measurement-complete claim is possible yet.
+
 The CTFE provider spike is now executable rather than hypothetical. The
 companion overrides `mir_for_ctfe`, inserts execution markers in original
 blocks, splits multi-successor edges for independently identifiable edge

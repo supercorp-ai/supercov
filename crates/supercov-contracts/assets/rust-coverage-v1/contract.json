@@ -7,6 +7,19 @@
   "conditionOrder": "source-evaluation-order",
   "probeModel": "ternary-decision-v2",
   "genericAggregation": "authored-source-obligation",
+  "sourceIdentity": {
+    "version": 1,
+    "digest": "sha256",
+    "idDigestBytes": 12,
+    "separator": "nul",
+    "authoredCanonicalFields": ["model", "obligation-kind", "source-key", "start-byte", "end-byte"],
+    "syntheticExpansionCanonicalFields": ["model", "obligation-kind", "callsite-source-key", "start-byte", "end-byte", "expansion-chain", "stable-owner-path"],
+    "generatedSourceKeyFields": ["project-relative-package-root", "out-relative-path"],
+    "repeatedAuthoredExpansionsAggregate": true,
+    "distinctSyntheticInvocationsRemainDistinct": true,
+    "ephemeralPathsForbidden": true,
+    "collisionPolicy": "fatal"
+  },
   "pointKinds": ["statement", "function"],
   "controlDecisionKinds": [
     "if",

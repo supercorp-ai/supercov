@@ -12,10 +12,11 @@ extern crate rustc_session;
 extern crate rustc_span;
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     env,
     fs::{self, OpenOptions},
     io::Write,
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     process::Command,
     sync::{Mutex, OnceLock},
 };
@@ -40,6 +41,7 @@ use rustc_log::{
     tracing_subscriber::{Layer, layer::SubscriberExt, registry::LookupSpan},
 };
 use rustc_parse::{lexer::StripTokens, new_parser_from_source_str};
+use sha2::{Digest, Sha256};
 
 const OUTPUT_DIRECTORY: &str = "SUPERCOV_RUSTC_SPIKE_OUTPUT";
 const INSTRUMENT_MIR: &str = "SUPERCOV_RUSTC_SPIKE_INSTRUMENT_MIR";
@@ -47,6 +49,9 @@ const INSTRUMENT_CTFE: &str = "SUPERCOV_RUSTC_SPIKE_INSTRUMENT_CTFE";
 const REAL_RUSTDOC: &str = "SUPERCOV_RUSTC_SPIKE_REAL_RUSTDOC";
 const COMPANION_PATH: &str = "SUPERCOV_RUSTC_SPIKE_COMPANION_PATH";
 const RUSTDOC_LAUNCHED: &str = "SUPERCOV_RUSTC_SPIKE_RUSTDOC_LAUNCHED";
+const SOURCE_ROOT: &str = "SUPERCOV_RUSTC_SPIKE_SOURCE_ROOT";
+const TARGET_ROOT: &str = "SUPERCOV_RUSTC_SPIKE_TARGET_ROOT";
+const FORCE_ID_COLLISION: &str = "SUPERCOV_RUSTC_SPIKE_FORCE_ID_COLLISION";
 const PROBE_FUNCTION: &str = "__supercov_spike_runtime::ordinal_hit";
 const ENTER_CONTEXT_FUNCTION: &str = "__supercov_spike_runtime::enter_context";
 const EXIT_CONTEXT_FUNCTION: &str = "__supercov_spike_runtime::exit_context";
@@ -63,6 +68,31 @@ static ORIGINAL_OPTIMIZED_MIR: OnceLock<OptimizedMirProvider> = OnceLock::new();
 static ORIGINAL_MIR_FOR_CTFE: OnceLock<MirForCtfeProvider> = OnceLock::new();
 static CTFE_EVENTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 static DOCTEST_ROLE: OnceLock<&'static str> = OnceLock::new();
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StableSourceRange {
+    key: String,
+    start: u32,
+    end: u32,
+    class: &'static str,
+    owned: bool,
+}
+
+#[derive(Debug)]
+struct FunctionObligation {
+    canonical: String,
+    source: StableSourceRange,
+    provenance: &'static str,
+    definitions: Vec<String>,
+}
+
+#[derive(Debug)]
+struct FunctionIdentity {
+    id: String,
+    canonical: String,
+    source: StableSourceRange,
+    provenance: &'static str,
+}
 
 struct CtfeLayer;
 
@@ -102,6 +132,279 @@ impl field::Visit for CtfeEventVisitor {
         use std::fmt::Write as _;
         let _ = write!(&mut self.fields, "{}={value:?};", field.name());
     }
+}
+
+fn normalized_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn normalized_root(variable: &str) -> Option<PathBuf> {
+    env::var_os(variable)
+        .map(PathBuf::from)
+        .map(|path| normalized_path(&path))
+}
+
+fn generated_relative_path(path: &Path) -> Option<PathBuf> {
+    let components = path.components().collect::<Vec<_>>();
+    let out = components
+        .iter()
+        .position(|component| component.as_os_str() == "out")?;
+    (out + 1 < components.len()).then(|| {
+        components[out + 1..]
+            .iter()
+            .fold(PathBuf::new(), |mut path, component| {
+                path.push(component.as_os_str());
+                path
+            })
+    })
+}
+
+fn package_identity(crate_name: &str) -> (String, bool) {
+    let Some(manifest_directory) = env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .map(|path| normalized_path(&path))
+    else {
+        return (format!("crate:{crate_name}"), false);
+    };
+    let Some(source_root) = normalized_root(SOURCE_ROOT) else {
+        return (format!("crate:{crate_name}"), false);
+    };
+    let Ok(relative) = manifest_directory.strip_prefix(source_root) else {
+        return (format!("crate:{crate_name}"), false);
+    };
+    let package = if relative.as_os_str().is_empty() {
+        ".".into()
+    } else {
+        relative.to_string_lossy().replace('\\', "/")
+    };
+    (format!("package:{package}"), true)
+}
+
+fn stable_source_range(
+    tcx: TyCtxt<'_>,
+    span: rustc_span::Span,
+    crate_name: &str,
+) -> Result<StableSourceRange, String> {
+    if span.is_dummy() {
+        return Err("dummy source span".into());
+    }
+    let source_map = tcx.sess.source_map();
+    let file = source_map.lookup_source_file(span.lo());
+    if !file.contains(span.hi()) {
+        return Err(format!(
+            "cross-file source span {}",
+            source_map.span_to_diagnostic_string(span)
+        ));
+    }
+    let start = file.original_relative_byte_pos(span.lo()).0;
+    let end = file.original_relative_byte_pos(span.hi()).0;
+    let (key, class, owned) = match &file.name {
+        FileName::Real(name) => {
+            let local_name = FileName::Real(name.clone())
+                .prefer_local_unconditionally()
+                .to_string_lossy()
+                .into_owned();
+            let path = normalized_path(Path::new(&local_name));
+            if let Some(root) = normalized_root(SOURCE_ROOT)
+                && let Ok(relative) = path.strip_prefix(&root)
+            {
+                (
+                    format!("source:{}", relative.to_string_lossy().replace('\\', "/")),
+                    "authored",
+                    true,
+                )
+            } else if let Some(root) = normalized_root(TARGET_ROOT)
+                && let Ok(relative) = path.strip_prefix(&root)
+                && let Some(generated) = generated_relative_path(relative)
+            {
+                let (package, owned) = package_identity(crate_name);
+                (
+                    format!(
+                        "generated:{package}:{}",
+                        generated.to_string_lossy().replace('\\', "/")
+                    ),
+                    "generated",
+                    owned,
+                )
+            } else {
+                (
+                    format!("external:{}", path.to_string_lossy().replace('\\', "/")),
+                    "external",
+                    false,
+                )
+            }
+        }
+        FileName::DocTest(path, line) => (
+            format!(
+                "doctest:{}:{line}",
+                path.to_string_lossy().replace('\\', "/")
+            ),
+            "doctest",
+            false,
+        ),
+        FileName::Custom(name) if name == "supercov-rust-runtime" => {
+            ("injected:supercov-rust-runtime".into(), "injected", false)
+        }
+        other => (
+            format!("virtual:{}", other.prefer_remapped_unconditionally()),
+            "virtual",
+            false,
+        ),
+    };
+    Ok(StableSourceRange {
+        key,
+        start,
+        end,
+        class,
+        owned,
+    })
+}
+
+fn expansion_identity(
+    tcx: TyCtxt<'_>,
+    span: rustc_span::Span,
+    crate_name: &str,
+) -> Result<String, String> {
+    let mut frames = Vec::new();
+    let mut cursor = span;
+    while !cursor.ctxt().is_root() {
+        if frames.len() == 1024 {
+            return Err("expansion chain exceeds 1024 frames".into());
+        }
+        let frame = cursor.ctxt().outer_expn_data();
+        let callsite = stable_source_range(tcx, frame.call_site, crate_name)?;
+        let definition = frame
+            .macro_def_id
+            .map(|def_id| tcx.def_path_str(def_id))
+            .unwrap_or_else(|| "<compiler>".into());
+        frames.push(format!(
+            "{}\0{}\0{}\0{}\0{}",
+            frame.kind.descr(),
+            callsite.key,
+            callsite.start,
+            callsite.end,
+            definition
+        ));
+        cursor = frame.call_site;
+    }
+    if frames.is_empty() {
+        return Err("expanded span has no expansion backtrace".into());
+    }
+    Ok(frames.join("\0"))
+}
+
+fn function_identity(
+    tcx: TyCtxt<'_>,
+    def_id: rustc_span::def_id::DefId,
+    span: rustc_span::Span,
+    crate_name: &str,
+) -> Result<FunctionIdentity, String> {
+    let source = stable_source_range(tcx, span, crate_name)?;
+    if !source.owned {
+        return Err(format!("unowned {} source {}", source.class, source.key));
+    }
+    let callsite = stable_source_range(tcx, span.source_callsite(), crate_name)?;
+    let synthetic_expansion = span.from_expansion() && source == callsite;
+    let provenance = if synthetic_expansion {
+        "synthetic-expansion"
+    } else if span.from_expansion() {
+        "authored-expansion"
+    } else if source.class == "generated" {
+        "generated-source"
+    } else {
+        "authored-source"
+    };
+    let canonical = if synthetic_expansion {
+        let expansion = expansion_identity(tcx, span, crate_name)?;
+        format!(
+            "rust-source-v1\0function\0{}\0{}\0{}\0synthetic-expansion\0{}\0{}\0",
+            source.key,
+            source.start,
+            source.end,
+            expansion,
+            tcx.def_path_str(def_id)
+        )
+    } else {
+        format!(
+            "rust-source-v1\0function\0{}\0{}\0{}\0",
+            source.key, source.start, source.end
+        )
+    };
+    let mut hash = Sha256::new();
+    hash.update(canonical.as_bytes());
+    let digest = hash.finalize();
+    let encoded = if env::var_os(FORCE_ID_COLLISION).is_some() {
+        "000000000000000000000000".into()
+    } else {
+        digest[..12]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    Ok(FunctionIdentity {
+        id: format!("rs:function:{encoded}"),
+        canonical,
+        source,
+        provenance,
+    })
+}
+
+fn is_function_body(kind: DefKind) -> bool {
+    matches!(
+        kind,
+        DefKind::Fn | DefKind::AssocFn | DefKind::Closure | DefKind::SyntheticCoroutineBody
+    )
+}
+
+fn manifest_json(
+    crate_name: &str,
+    obligations: &BTreeMap<String, FunctionObligation>,
+    limitations: &[String],
+) -> String {
+    let obligations = obligations
+        .iter()
+        .map(|(id, obligation)| {
+            format!(
+                "{{\"id\":\"{}\",\"kind\":\"function\",\"sourceKey\":\"{}\",\"start\":{},\"end\":{},\"provenance\":\"{}\",\"definitions\":{},\"canonical\":\"{}\"}}",
+                escape(id),
+                escape(&obligation.source.key),
+                obligation.source.start,
+                obligation.source.end,
+                obligation.provenance,
+                json_strings(&obligation.definitions),
+                escape(&obligation.canonical),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let limitations = limitations
+        .iter()
+        .map(|limitation| format!("\"{}\"", escape(limitation)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"schema\":\"supercov-rust-manifest-candidate-v1\",\"model\":\"rust-source-v1\",\"crate\":\"{}\",\"measurementComplete\":false,\"obligations\":[{}],\"limitations\":[{}]}}\n",
+        escape(crate_name),
+        obligations,
+        limitations
+    )
 }
 
 fn parse_ctfe_marker(fields: &str) -> Option<u64> {
@@ -150,8 +453,10 @@ impl Callbacks for ProbeCallbacks {
             return Compilation::Continue;
         };
         let directory = PathBuf::from(directory);
-        if fs::create_dir_all(&directory).is_err() {
-            return Compilation::Continue;
+        if let Err(error) = fs::create_dir_all(&directory) {
+            tcx.dcx().fatal(format!(
+                "Supercov could not create the Rust compiler output directory: {error}"
+            ));
         }
 
         let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE);
@@ -161,12 +466,18 @@ impl Callbacks for ProbeCallbacks {
             sanitize(&crate_name.to_string())
         ));
         let Ok(mut output) = OpenOptions::new().create_new(true).write(true).open(output) else {
-            return Compilation::Continue;
+            tcx.dcx()
+                .fatal("Supercov could not create a unique Rust compiler trace");
         };
         let source_map = tcx.sess.source_map();
         let doctest_role = DOCTEST_ROLE.get().copied();
         let doctest_path = env::var("UNSTABLE_RUSTDOC_TEST_PATH").ok();
         let doctest_line = env::var("UNSTABLE_RUSTDOC_TEST_LINE").ok();
+        let mut function_obligations = BTreeMap::<String, FunctionObligation>::new();
+        let mut manifest_limitations = BTreeSet::from([
+            "RUST_MANIFEST_CANDIDATE_FUNCTIONS_ONLY: statement, branch and decision obligations are not emitted yet"
+                .to_owned(),
+        ]);
 
         for owner in tcx.hir_body_owners() {
             let def_id = owner.to_def_id();
@@ -233,8 +544,52 @@ impl Callbacks for ProbeCallbacks {
             let body_snippet = source_map
                 .span_to_snippet(tcx.hir_body_owned_by(owner).value.span)
                 .ok();
+            let function_identity = if is_function_body(kind)
+                && !tcx
+                    .def_path_str(def_id)
+                    .contains("__supercov_spike_runtime")
+            {
+                match function_identity(tcx, def_id, span, &crate_name.to_string()) {
+                    Ok(identity) => {
+                        match function_obligations.get_mut(&identity.id) {
+                            Some(existing) if existing.canonical != identity.canonical => {
+                                tcx.dcx().fatal(format!(
+                                    "Supercov Rust obligation ID collision for {}",
+                                    identity.id
+                                ))
+                            }
+                            Some(existing) => {
+                                existing.definitions.push(tcx.def_path_str(def_id));
+                                existing.definitions.sort();
+                                existing.definitions.dedup();
+                            }
+                            None => {
+                                function_obligations.insert(
+                                    identity.id.clone(),
+                                    FunctionObligation {
+                                        canonical: identity.canonical.clone(),
+                                        source: identity.source.clone(),
+                                        provenance: identity.provenance,
+                                        definitions: vec![tcx.def_path_str(def_id)],
+                                    },
+                                );
+                            }
+                        }
+                        Some(identity)
+                    }
+                    Err(error) => {
+                        manifest_limitations.insert(format!(
+                            "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: {error}",
+                            tcx.def_path_str(def_id)
+                        ));
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             let record = format!(
-                "{{\"crate\":\"{}\",\"definition\":\"{}\",\"kind\":\"{:?}\",\"span\":\"{}\",\"callsite\":\"{}\",\"expanded\":{},\"mirBlocks\":{},\"mirSpans\":{},\"mirAuthoredLines\":{},\"sourceSnippet\":{},\"bodySnippet\":{},\"doctestRole\":{},\"doctestPath\":{},\"doctestLine\":{}}}\n",
+                "{{\"crate\":\"{}\",\"definition\":\"{}\",\"kind\":\"{:?}\",\"span\":\"{}\",\"callsite\":\"{}\",\"expanded\":{},\"mirBlocks\":{},\"mirSpans\":{},\"mirAuthoredLines\":{},\"sourceSnippet\":{},\"bodySnippet\":{},\"doctestRole\":{},\"doctestPath\":{},\"doctestLine\":{},\"functionObligationId\":{},\"sourceKey\":{},\"sourceStart\":{},\"sourceEnd\":{},\"sourceProvenance\":{}}}\n",
                 escape(&crate_name.to_string()),
                 escape(&tcx.def_path_str(def_id)),
                 kind,
@@ -249,10 +604,59 @@ impl Callbacks for ProbeCallbacks {
                 json_string(doctest_role),
                 json_string(doctest_path.as_deref()),
                 json_string(doctest_line.as_deref()),
+                json_string(
+                    function_identity
+                        .as_ref()
+                        .map(|identity| identity.id.as_str())
+                ),
+                json_string(
+                    function_identity
+                        .as_ref()
+                        .map(|identity| identity.source.key.as_str()),
+                ),
+                function_identity.as_ref().map_or_else(
+                    || "null".into(),
+                    |identity| identity.source.start.to_string(),
+                ),
+                function_identity
+                    .as_ref()
+                    .map_or_else(|| "null".into(), |identity| identity.source.end.to_string(),),
+                json_string(
+                    function_identity
+                        .as_ref()
+                        .map(|identity| identity.provenance),
+                ),
             );
-            let _ = output.write_all(record.as_bytes());
+            if output.write_all(record.as_bytes()).is_err() {
+                tcx.dcx()
+                    .fatal("Supercov could not persist the Rust compiler trace");
+            }
         }
-        let _ = output.flush();
+        if output.flush().is_err() {
+            tcx.dcx()
+                .fatal("Supercov could not flush the Rust compiler trace");
+        }
+        let manifest_path = directory.join(format!(
+            "manifest-{}-{}.json",
+            std::process::id(),
+            sanitize(&crate_name.to_string())
+        ));
+        let limitations = manifest_limitations.into_iter().collect::<Vec<_>>();
+        let manifest = manifest_json(&crate_name.to_string(), &function_obligations, &limitations);
+        let Ok(mut manifest_output) = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(manifest_path)
+        else {
+            tcx.dcx()
+                .fatal("Supercov could not create a unique Rust manifest candidate");
+        };
+        if manifest_output.write_all(manifest.as_bytes()).is_err()
+            || manifest_output.flush().is_err()
+        {
+            tcx.dcx()
+                .fatal("Supercov could not persist the Rust manifest candidate");
+        }
         Compilation::Continue
     }
 }
@@ -592,12 +996,23 @@ fn sanitize(value: &str) -> String {
 }
 
 fn escape(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character <= '\u{001f}' => {
+                use std::fmt::Write as _;
+                write!(&mut escaped, "\\u{:04x}", character as u32)
+                    .expect("writing to a string cannot fail");
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 fn json_string(value: Option<&str>) -> String {

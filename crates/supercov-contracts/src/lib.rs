@@ -285,6 +285,7 @@ pub struct RustCoverageV1Contract {
     pub condition_order: String,
     pub probe_model: String,
     pub generic_aggregation: String,
+    pub source_identity: RustSourceIdentityContract,
     pub point_kinds: Vec<String>,
     pub control_decision_kinds: Vec<String>,
     pub branch_kinds: Vec<String>,
@@ -292,6 +293,22 @@ pub struct RustCoverageV1Contract {
     pub required_identity_axes: Vec<String>,
     pub completeness_requires: Vec<String>,
     pub external_coverage_in_product: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustSourceIdentityContract {
+    pub version: u32,
+    pub digest: String,
+    pub id_digest_bytes: usize,
+    pub separator: String,
+    pub authored_canonical_fields: Vec<String>,
+    pub synthetic_expansion_canonical_fields: Vec<String>,
+    pub generated_source_key_fields: Vec<String>,
+    pub repeated_authored_expansions_aggregate: bool,
+    pub distinct_synthetic_invocations_remain_distinct: bool,
+    pub ephemeral_paths_forbidden: bool,
+    pub collision_policy: String,
 }
 
 pub fn rust_coverage_v1_contract() -> Result<RustCoverageV1Contract, serde_json::Error> {
@@ -1343,6 +1360,22 @@ mod tests {
         assert_eq!(contract.decision_semantics, "masking-mcdc");
         assert_eq!(contract.condition_order, "source-evaluation-order");
         assert_eq!(contract.probe_model, "ternary-decision-v2");
+        assert_eq!(contract.source_identity.version, 1);
+        assert_eq!(contract.source_identity.digest, "sha256");
+        assert_eq!(contract.source_identity.id_digest_bytes, 12);
+        assert_eq!(contract.source_identity.separator, "nul");
+        assert!(
+            contract
+                .source_identity
+                .repeated_authored_expansions_aggregate
+        );
+        assert!(
+            contract
+                .source_identity
+                .distinct_synthetic_invocations_remain_distinct
+        );
+        assert!(contract.source_identity.ephemeral_paths_forbidden);
+        assert_eq!(contract.source_identity.collision_policy, "fatal");
         assert_eq!(
             contract.required_identity_axes,
             ["run", "worker", "test", "retry", "phase"]

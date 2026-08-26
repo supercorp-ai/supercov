@@ -15,6 +15,11 @@ macro_rules! generated_function {
 generated_function!();
 probe_macros::generated_function!();
 
+pub mod repeated_expansions {
+    generated_function!();
+    probe_macros::generated_function!();
+}
+
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 
 pub const fn const_decision(value: bool) -> usize {

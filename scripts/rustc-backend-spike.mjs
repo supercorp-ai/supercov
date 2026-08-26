@@ -13,12 +13,13 @@ import {
   writeSync,
 } from 'node:fs';
 import {tmpdir} from 'node:os';
-import {join, resolve} from 'node:path';
+import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const manifest = join(root, 'spikes/rustc-backend/Cargo.toml');
 const fixture = join(root, 'spikes/rustc-backend/fixture/Cargo.toml');
+const fixtureRoot = dirname(fixture);
 const wrapper = join(
   root,
   'spikes/rustc-backend/target/debug/supercov-rustc-backend-spike',
@@ -105,17 +106,51 @@ function sourceLine(fragment) {
 }
 
 function run(command, args, options = {}) {
+  const commandEnvironment = options.env ?? {};
   const result = spawnSync(command, args, {
     cwd: root,
     encoding: 'utf8',
-    env: {...process.env, ...options.env},
+    env: {
+      ...process.env,
+      SUPERCOV_RUSTC_SPIKE_SOURCE_ROOT: fixtureRoot,
+      ...(commandEnvironment.CARGO_TARGET_DIR
+        ? {SUPERCOV_RUSTC_SPIKE_TARGET_ROOT: commandEnvironment.CARGO_TARGET_DIR}
+        : {}),
+      ...commandEnvironment,
+    },
   });
-  if (result.status !== 0) {
+  if (options.expectFailure) {
+    assert.notEqual(result.status, 0, `${command} unexpectedly succeeded`);
+  } else if (result.status !== 0) {
     process.stderr.write(result.stdout ?? '');
     process.stderr.write(result.stderr ?? '');
     throw new Error(`${command} exited ${result.status}`);
   }
   return result;
+}
+
+function manifests(directory) {
+  return readdirSync(directory)
+    .filter((name) => name.startsWith('manifest-') && name.endsWith('.json'))
+    .map((name) => JSON.parse(readFileSync(join(directory, name), 'utf8')));
+}
+
+function crateManifest(directory, crate) {
+  const matches = manifests(directory).filter(
+    (manifestRecord) => manifestRecord.crate === crate,
+  );
+  assert.equal(
+    matches.length,
+    1,
+    `expected one manifest candidate for ${crate}, found ${matches.length}`,
+  );
+  return matches[0];
+}
+
+function obligationFor(manifestRecord, definition) {
+  return manifestRecord.obligations.find((obligation) =>
+    obligation.definitions.includes(definition),
+  );
 }
 
 function records(directory) {
@@ -215,6 +250,93 @@ try {
   assert.equal(find('const_decision')?.kind, 'Fn');
   assert.equal(find('CONST_VALUE')?.kind, 'Const');
   assert.equal(find('authored')?.expanded, false);
+
+  const identityDirectoryA = join(scratch, 'identity-a');
+  const identityDirectoryB = join(scratch, 'identity-b');
+  run('cargo', ['build', '--quiet', '--manifest-path', fixture, '--lib'], {
+    env: {
+      CARGO_TARGET_DIR: join(scratch, 'identity-target-a'),
+      RUSTC_WRAPPER: wrapper,
+      SUPERCOV_RUSTC_SPIKE_OUTPUT: identityDirectoryA,
+    },
+  });
+  run('cargo', ['build', '--quiet', '--manifest-path', fixture, '--lib'], {
+    env: {
+      CARGO_TARGET_DIR: join(scratch, 'identity-target-b'),
+      RUSTC_WRAPPER: wrapper,
+      SUPERCOV_RUSTC_SPIKE_OUTPUT: identityDirectoryB,
+    },
+  });
+  const identityManifestA = crateManifest(
+    identityDirectoryA,
+    'supercov_rustc_spike_fixture',
+  );
+  const identityManifestB = crateManifest(
+    identityDirectoryB,
+    'supercov_rustc_spike_fixture',
+  );
+  assert.deepEqual(
+    identityManifestA,
+    identityManifestB,
+    'manifest candidate changed across clean target directories',
+  );
+  assert.equal(identityManifestA.schema, 'supercov-rust-manifest-candidate-v1');
+  assert.equal(identityManifestA.model, 'rust-source-v1');
+  assert.equal(identityManifestA.measurementComplete, false);
+  assert.deepEqual(identityManifestA.limitations, [
+    'RUST_MANIFEST_CANDIDATE_FUNCTIONS_ONLY: statement, branch and decision obligations are not emitted yet',
+  ]);
+  assert.equal(
+    new Set(identityManifestA.obligations.map(({id}) => id)).size,
+    identityManifestA.obligations.length,
+    'manifest candidate contains colliding obligation IDs',
+  );
+  const declarativeRoot = obligationFor(
+    identityManifestA,
+    'generated_by_rules',
+  );
+  const declarativeRepeated = obligationFor(
+    identityManifestA,
+    'repeated_expansions::generated_by_rules',
+  );
+  assert.equal(declarativeRoot?.id, declarativeRepeated?.id);
+  assert.equal(declarativeRoot?.provenance, 'authored-expansion');
+  assert.equal(declarativeRoot?.definitions.length, 2);
+  const proceduralRoot = obligationFor(identityManifestA, 'generated_by_proc');
+  const proceduralRepeated = obligationFor(
+    identityManifestA,
+    'repeated_expansions::generated_by_proc',
+  );
+  assert.equal(proceduralRoot?.provenance, 'synthetic-expansion');
+  assert.equal(proceduralRepeated?.provenance, 'synthetic-expansion');
+  assert.notEqual(proceduralRoot?.id, proceduralRepeated?.id);
+  const generatedObligation = obligationFor(
+    identityManifestA,
+    'generated_by_build_script',
+  );
+  assert.equal(generatedObligation?.provenance, 'generated-source');
+  assert.equal(
+    generatedObligation?.sourceKey,
+    'generated:package:.:generated.rs',
+  );
+  assert(
+    !JSON.stringify(identityManifestA).includes(scratch),
+    'manifest candidate leaked an ephemeral target path',
+  );
+  const collision = run(
+    'cargo',
+    ['build', '--quiet', '--manifest-path', fixture, '--lib'],
+    {
+      expectFailure: true,
+      env: {
+        CARGO_TARGET_DIR: join(scratch, 'collision-target'),
+        RUSTC_WRAPPER: wrapper,
+        SUPERCOV_RUSTC_SPIKE_OUTPUT: join(scratch, 'collision-output'),
+        SUPERCOV_RUSTC_SPIKE_FORCE_ID_COLLISION: '1',
+      },
+    },
+  );
+  assert.match(collision.stderr, /Supercov Rust obligation ID collision/);
 
   const baselineBehavior = run(
     'cargo',
@@ -473,7 +595,7 @@ try {
   );
 
   console.log(
-    '[rustc-backend-spike] expanded provenance, mmap runtime MIR probes and CTFE markers preserve behavior; a scoped rustdoc test-builder companion observes standalone and merged doctest identities without output or checkout changes',
+    '[rustc-backend-spike] deterministic authored, repeated-expansion, proc-macro and generated-source identities survive clean target directories; mmap MIR/CTFE probes and scoped rustdoc interception preserve behavior and source',
   );
 } finally {
   rmSync(scratch, {recursive: true, force: true});

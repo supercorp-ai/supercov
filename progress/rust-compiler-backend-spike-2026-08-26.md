@@ -88,6 +88,15 @@ The spike proved:
     is retained as context zero rather than guessed; that explicit health is
     the trigger for an exact process-per-test rerun until child/async context
     propagation is independently proven.
+14. Compiler source identity no longer depends on diagnostic strings, Cargo
+    target hashes or process paths. A strict manifest candidate hashes frozen
+    canonical tuples for function entries, rejects digest collisions, merges
+    two declarative expansions of the same authored token range, separates two
+    proc-macro invocations whose output spans collapse to their callsites, and
+    maps `OUT_DIR` source through project-relative package and generated paths.
+    Two clean builds with unrelated target directories emit byte-identical
+    candidates. The candidate is explicitly measurement-incomplete until all
+    remaining point, branch and decision obligations use the same identity.
 
 The companion executable is about 600 KiB on arm64 macOS and dynamically uses
 the exact `librustc_driver` already shipped by the user's `rustc` component.
@@ -118,7 +127,12 @@ an unverified rustc commit.
    closed; Rust remains private until the supported matrix is shipped.
 2. The companion derives the denominator from expanded compiler structures and
    emits frozen source/expansion/generated provenance. It inserts Supercov
-   runtime probes into runtime MIR only after semantic analysis.
+   runtime probes into runtime MIR only after semantic analysis. Source
+   identity v1 is now executable for function entries: authored and
+   declarative-expansion ranges aggregate by stable source tuple, synthetic
+   proc/derive output adds expansion-chain and owner identity, and generated
+   output uses package/out-relative provenance. Unknown or colliding identity
+   fails manifest publication.
 3. A separate CTFE provider path records compile-time execution. Runtime calls
    in const MIR are invalid. The first exact-version experiment now injects
    block and split-edge markers into `mir_for_ctfe` and captures their
@@ -148,8 +162,10 @@ an unverified rustc commit.
 
 ## Next implementation gates
 
-1. Derive stable expansion identities and complete branch/condition mappings
-   from expanded HIR plus MIR source info.
+1. Extend the now-proven stable function-entry identities to every statement,
+   branch, decision and condition from expanded HIR plus MIR source info. Add
+   derive, nested/external expansion, generic/trait, include/module and package-
+   fingerprint corpora before treating the candidate as a complete manifest.
 2. Extend the proven libtest entry/unwind carrier through child threads, async
    executors, subprocesses, retry, late work and phases, or activate the exact
    process-per-test fallback whenever context-zero work is observed. Prove
