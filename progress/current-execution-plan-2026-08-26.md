@@ -205,10 +205,11 @@ display comes from rustc's expanded HIR instead of falsely printing the macro
 invocation as the condition. The exploratory 0/1/2/3 function ordinals are
 gone: runtime MIR hits now carry the u64 prefix of the exact manifest point ID,
 and the compiler rejects both full-ID and probe-prefix collisions. The
-candidate still carries a blocking denominator limitation: match, let-else,
-`?`, assertion, CTFE and doctest obligation/probe mappings, plus full package
-and compiler fingerprints, remain R1 work. No measurement-complete claim is
-possible yet.
+candidate still carries blocking denominator limitations. The authored match
+slice below has since narrowed that surface, but synthetic/unreachable match
+arms, let-else, `?`, assertion, CTFE and doctest obligation/probe mappings,
+plus full package and compiler fingerprints, remain R1 work. No measurement-
+complete claim is possible yet.
 
 The first dynamic decision slice is now executable as well. The companion
 uses rustc's exact source-to-optimized-MIR branch regions to locate each
@@ -265,6 +266,24 @@ Nested switches bind to the smallest enclosing authored loop. The panic leaves
 an incomplete frame and no false alternative. Compiler-generated for/while
 scaffolding is no longer counted as authored statement coverage, and candidate
 branch/decision kinds are gated against the frozen contract enums.
+
+Reachable authored `match` arms and match guards now have a first exact
+compiler-backed slice. The candidate manifest persists one stable selection
+group relating every frozen `match-arm` branch and both of its alternatives.
+At runtime, one crash-visible frame begins after the scrutinee has evaluated
+and commits only when an arm is actually selected; the language-neutral
+frontend can derive that arm's selected alternative and every sibling's
+not-selected alternative from the single raw ordinal. Exact goldens cover a
+two-condition guard and all of its ternary vectors, guard rejection, nested
+matches, identical and empty bodies, a local declarative-macro match and an
+irrefutable one-arm match that correctly creates no branch. A panicking guard
+leaves an incomplete selection frame and no fabricated alternative, while
+baseline/instrumented values and output remain identical. Synthetic
+proc-macro match tokens expose the next real blocker: their arm spans collapse
+to one invocation location. Those arms remain in the candidate denominator,
+emit no raw selection evidence and carry an explicit runtime-unresolved
+limitation. Pre-borrow-check semantic arm markers and rustc-backed unreachable-
+arm classification must close that gap before `match` is promotion-complete.
 
 The CTFE provider spike is now executable rather than hypothetical. The
 companion overrides `mir_for_ctfe`, inserts execution markers in original

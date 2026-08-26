@@ -206,6 +206,15 @@ function branchesFor(manifestRecord, definition, kind) {
   ).sort((left, right) => left.start - right.start || left.end - right.end);
 }
 
+function matchGroupsFor(manifestRecord, definition) {
+  return manifestRecord.selectionGroups
+    .filter(
+      (group) =>
+        group.kind === 'match' && group.definitions.includes(definition),
+    )
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+}
+
 function loopAlternativeOrdinals(branch) {
   const zero = branch.alternatives.find(
     ({label}) => label === 'zero iterations',
@@ -348,7 +357,8 @@ try {
   assert.equal(identityManifestA.model, 'rust-source-v1');
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
-    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: match, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
+    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: synthetic and unreachable match-arm runtime mappings, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
+    'RUST_MATCH_RUNTIME_UNRESOLVED: generated_match_by_proc: synthetic match expansion requires semantic arm markers before span information collapses',
   ]);
   const allIds = [
     ...identityManifestA.points.map(({id}) => id),
@@ -357,6 +367,7 @@ try {
       ...branch.alternatives.map(({id}) => id),
     ]),
     ...identityManifestA.decisions.map(({id}) => id),
+    ...identityManifestA.selectionGroups.map(({id}) => id),
   ];
   assert.equal(
     new Set(allIds).size,
@@ -369,13 +380,15 @@ try {
   );
   assert(
     identityManifestA.branches.every(({kind}) =>
-      ['decision-outcome', 'loop-entry'].includes(kind),
+      ['decision-outcome', 'loop-entry', 'match-arm'].includes(kind),
     ),
     'compiler manifest emitted a branch kind outside the frozen Rust contract',
   );
   assert(
     identityManifestA.decisions.every(({kind}) =>
-      ['if', 'if-let', 'while', 'while-let', 'let-chain'].includes(kind),
+      ['if', 'if-let', 'while', 'while-let', 'let-chain', 'match-guard'].includes(
+        kind,
+      ),
     ),
     'compiler manifest emitted a decision kind outside the frozen Rust contract',
   );
@@ -549,6 +562,14 @@ try {
   assert.match(baselineBehavior.stdout, /for-two=\[2, 3\]/);
   assert.match(baselineBehavior.stdout, /for-nested=\[0, 5\]/);
   assert.match(baselineBehavior.stdout, /for-panic=true/);
+  assert.match(baselineBehavior.stdout, /match-panic=true/);
+  assert.match(baselineBehavior.stdout, /match=\[3, 2, 2, 0\]/);
+  assert.match(baselineBehavior.stdout, /match-identical=\[7, 7, 9\]/);
+  assert.match(baselineBehavior.stdout, /match-empty=true/);
+  assert.match(baselineBehavior.stdout, /match-irrefutable=5/);
+  assert.match(baselineBehavior.stdout, /match-generated=\[23, 29\]/);
+  assert.match(baselineBehavior.stdout, /match-generated-proc=\[31, 37\]/);
+  assert.match(baselineBehavior.stdout, /match-nested=\[3, 14, 0\]/);
   const runtimeManifest = crateManifest(
     instrumentedDirectory,
     'supercov_rustc_spike_fixture',
@@ -608,6 +629,44 @@ try {
   const interruptedForOrdinals = loopAlternativeOrdinals(
     branchFor(runtimeManifest, 'interrupted_for', 'loop-entry'),
   );
+  const matchValueGroups = matchGroupsFor(runtimeManifest, 'match_value');
+  const matchIdenticalGroups = matchGroupsFor(runtimeManifest, 'match_identical');
+  const matchEmptyGroups = matchGroupsFor(runtimeManifest, 'match_empty');
+  const generatedMatchGroups = matchGroupsFor(runtimeManifest, 'generated_match');
+  const generatedProcMatchGroups = matchGroupsFor(
+    runtimeManifest,
+    'generated_match_by_proc',
+  );
+  const nestedMatchGroups = matchGroupsFor(runtimeManifest, 'nested_match');
+  const interruptedMatchGroups = matchGroupsFor(
+    runtimeManifest,
+    'interrupted_match',
+  );
+  assert.equal(matchValueGroups.length, 1);
+  assert.equal(matchIdenticalGroups.length, 1);
+  assert.equal(matchEmptyGroups.length, 1);
+  assert.equal(generatedMatchGroups.length, 1);
+  assert.equal(generatedProcMatchGroups.length, 1);
+  assert.equal(
+    matchGroupsFor(runtimeManifest, 'match_irrefutable').length,
+    0,
+    'an irrefutable single-arm match created an impossible branch obligation',
+  );
+  assert.equal(nestedMatchGroups.length, 2);
+  assert.equal(interruptedMatchGroups.length, 1);
+  const matchSelectedOrdinals = [
+    ...matchValueGroups,
+    ...matchIdenticalGroups,
+    ...matchEmptyGroups,
+    ...generatedMatchGroups,
+    ...nestedMatchGroups,
+  ].flatMap((group) => group.arms.map(({selectedOrdinal}) => selectedOrdinal));
+  const interruptedMatchOrdinals = interruptedMatchGroups[0].arms.flatMap(
+    ({selectedOrdinal, notSelectedOrdinal}) => [
+      selectedOrdinal,
+      notSelectedOrdinal,
+    ],
+  );
   const committedForOrdinals = [
     forZero,
     forEntered,
@@ -627,6 +686,7 @@ try {
       whileLetZero,
       whileLetEntered,
       ...committedForOrdinals,
+      ...matchSelectedOrdinals,
     ].every(Boolean),
     'runtime probe is not bound to its manifest obligation',
   );
@@ -635,8 +695,8 @@ try {
   assert.equal(behaviorEvidence.dropped, 0);
   assert.equal(
     behaviorEvidence.incomplete,
-    2,
-    'decision-condition and iterator-next panics must remain explicit incomplete health',
+    3,
+    'decision-condition, iterator-next and match-guard panics must remain explicit incomplete health',
   );
   assert.deepEqual(
     new Set(behaviorEvidence.ordinals.map(({ordinal}) => ordinal)),
@@ -650,6 +710,7 @@ try {
       whileLetZero,
       whileLetEntered,
       ...committedForOrdinals,
+      ...matchSelectedOrdinals,
     ]),
   );
   assert.equal(
@@ -701,6 +762,98 @@ try {
     ),
     'a panicking iterator committed a false zero/entered alternative',
   );
+  assert(
+    !behaviorEvidence.ordinals.some(({ordinal}) =>
+      interruptedMatchOrdinals.includes(ordinal),
+    ),
+    'a panicking match guard committed a false selected/not-selected alternative',
+  );
+  const generatedProcMatchOrdinals = generatedProcMatchGroups[0].arms.flatMap(
+    ({selectedOrdinal, notSelectedOrdinal}) => [
+      selectedOrdinal,
+      notSelectedOrdinal,
+    ],
+  );
+  assert(
+    !behaviorEvidence.ordinals.some(({ordinal}) =>
+      generatedProcMatchOrdinals.includes(ordinal),
+    ),
+    'an unresolved synthetic proc-macro match fabricated arm evidence',
+  );
+  const allMatchGroups = runtimeManifest.selectionGroups.filter(
+    ({kind}) => kind === 'match',
+  );
+  const allNotSelectedOrdinals = allMatchGroups.flatMap((group) =>
+    group.arms.map(({notSelectedOrdinal}) => notSelectedOrdinal),
+  );
+  assert(
+    !behaviorEvidence.ordinals.some(({ordinal}) =>
+      allNotSelectedOrdinals.includes(ordinal),
+    ),
+    'derived match not-selected alternatives leaked into raw evidence',
+  );
+  const ordinalCount = (ordinal) =>
+    behaviorEvidence.ordinals.filter((hit) => hit.ordinal === ordinal).length;
+  assert.deepEqual(
+    matchValueGroups[0].arms.map(({selectedOrdinal}) => ordinalCount(selectedOrdinal)),
+    [1, 2, 1],
+    'guarded match invocations did not select the exact authored arms',
+  );
+  assert.deepEqual(
+    matchIdenticalGroups[0].arms.map(({selectedOrdinal}) =>
+      ordinalCount(selectedOrdinal),
+    ),
+    [1, 1, 1],
+    'identical match bodies lost distinct arm selection identity',
+  );
+  assert.deepEqual(
+    matchEmptyGroups[0].arms.map(({selectedOrdinal}) =>
+      ordinalCount(selectedOrdinal),
+    ),
+    [1, 1],
+    'empty match bodies lost distinct arm selection identity',
+  );
+  assert.deepEqual(
+    generatedMatchGroups[0].arms.map(({selectedOrdinal}) =>
+      ordinalCount(selectedOrdinal),
+    ),
+    [1, 1],
+    'a declarative-macro match lost authored arm selection identity',
+  );
+  assert.deepEqual(
+    nestedMatchGroups.map((group) =>
+      group.arms.map(({selectedOrdinal}) => ordinalCount(selectedOrdinal)),
+    ),
+    [
+      [2, 1],
+      [1, 1],
+    ],
+    'nested matches did not preserve independent outer and inner selections',
+  );
+  for (const group of allMatchGroups) {
+    for (const selected of group.arms) {
+      const rawSelections = ordinalCount(selected.selectedOrdinal);
+      const derived = new Map(
+        group.arms.map((arm) => [
+          arm.branchId,
+          {
+            selected: arm.branchId === selected.branchId ? rawSelections : 0,
+            notSelected: arm.branchId === selected.branchId ? 0 : rawSelections,
+          },
+        ]),
+      );
+      assert.equal(
+        [...derived.values()].filter(({selected}) => selected > 0).length,
+        rawSelections > 0 ? 1 : 0,
+        `match selection ${group.id}/${selected.branchId} did not derive one selected arm`,
+      );
+      assert.equal(
+        [...derived.values()].filter(({notSelected}) => notSelected > 0).length,
+        rawSelections > 0 ? group.arms.length - 1 : 0,
+        `match selection ${group.id}/${selected.branchId} did not derive every sibling rejection`,
+      );
+    }
+  }
   const vectorsForDecision = (decision) => {
     const id = decision?.id;
     assert(id, 'missing runtime decision');
@@ -742,6 +895,25 @@ try {
     JSON.stringify({values: [true, false, null], outcome: false}),
     JSON.stringify({values: [true, true, true], outcome: true}),
   ].sort());
+  assert.deepEqual(
+    vectorsForDecision(
+      decisionForConditions(runtimeManifest, 'match_value', [
+        'value > 0',
+        'enabled',
+      ]),
+    ),
+    [
+      JSON.stringify({values: [false, null], outcome: false}),
+      JSON.stringify({values: [true, false], outcome: false}),
+      JSON.stringify({values: [true, true], outcome: true}),
+    ].sort(),
+  );
+  assert(
+    !behaviorEvidence.decisions.some(
+      ({id}) => id === decisionFor(runtimeManifest, 'interrupted_match')?.id,
+    ),
+    'a panicking match guard was incorrectly committed as a complete decision vector',
+  );
   assert.deepEqual(decisionVectors('generated_by_rules'), [
     JSON.stringify({values: [false], outcome: false}),
     JSON.stringify({values: [true], outcome: true}),
@@ -1087,7 +1259,7 @@ try {
   );
 
   console.log(
-    '[rustc-backend-spike] expanded-HIR obligations keep deterministic identities; compiler mappings become exact Supercov nested/short-circuit/pattern/while ternary vectors and pre-optimization for-loop plus per-invocation loop branches with libtest contexts, while MIR/CTFE/rustdoc interception preserves behavior and source',
+    '[rustc-backend-spike] expanded-HIR obligations keep deterministic identities; compiler mappings become exact Supercov nested/short-circuit/pattern/while/match-guard ternary vectors and pre-optimization for-loop/match first-commit branches with libtest contexts, while MIR/CTFE/rustdoc interception preserves behavior and source',
   );
 } finally {
   rmSync(scratch, {recursive: true, force: true});

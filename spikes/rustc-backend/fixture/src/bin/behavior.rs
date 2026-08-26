@@ -2,10 +2,12 @@ use std::{cell::RefCell, panic};
 
 use supercov_rustc_spike_fixture::{
     CONST_FALSE_VALUE, CONST_VALUE, authored, chained, compound, context_normal_scope,
-    context_panic_scope, disjoined, drop_order, fallible, generated_by_build_script,
-    for_break, for_values, generated_by_proc, generated_by_rules, interrupted_decision,
-    interrupted_for, mixed, nested, nested_expression, nested_for_values, panic_path, pattern,
-    repeated_expansions, two_for_values, while_compound, while_let_chain,
+    context_panic_scope, disjoined, drop_order, fallible, for_break, for_values,
+    generated_by_build_script, generated_by_proc, generated_by_rules, generated_match,
+    generated_match_by_proc, interrupted_decision,
+    interrupted_for, interrupted_match, match_empty, match_identical, match_irrefutable,
+    match_value, mixed, nested, nested_expression, nested_for_values, nested_match, panic_path,
+    pattern, repeated_expansions, two_for_values, while_compound, while_let_chain,
 };
 
 fn main() {
@@ -20,6 +22,7 @@ fn main() {
     }));
     let interrupted = panic::catch_unwind(|| interrupted_decision(true));
     let interrupted_for = panic::catch_unwind(interrupted_for);
+    let interrupted_match = panic::catch_unwind(|| interrupted_match(Some(3)));
     panic::set_hook(previous_hook);
     assert!(context_panic.is_err());
     assert_eq!(authored(true), 1);
@@ -30,6 +33,7 @@ fn main() {
     println!("panic={}", panic.is_err());
     println!("decision-panic={}", interrupted.is_err());
     println!("for-panic={}", interrupted_for.is_err());
+    println!("match-panic={}", interrupted_match.is_err());
     println!("drop-order={:?}", log.into_inner());
     println!("const-values={CONST_VALUE:?},{CONST_FALSE_VALUE:?}");
     println!(
@@ -117,6 +121,36 @@ fn main() {
         [
             nested_for_values(Vec::new()),
             nested_for_values(vec![Vec::new(), vec![2, 3]]),
+        ]
+    );
+    println!(
+        "match={:?}",
+        [
+            match_value(Some(3), true),
+            match_value(Some(0), true),
+            match_value(Some(3), false),
+            match_value(None, true),
+        ]
+    );
+    println!(
+        "match-identical={:?}",
+        [match_identical(0), match_identical(1), match_identical(2)]
+    );
+    match_empty(true);
+    match_empty(false);
+    println!("match-empty=true");
+    println!("match-irrefutable={}", match_irrefutable(4));
+    println!("match-generated={:?}", [generated_match(true), generated_match(false)]);
+    println!(
+        "match-generated-proc={:?}",
+        [generated_match_by_proc(true), generated_match_by_proc(false)]
+    );
+    println!(
+        "match-nested={:?}",
+        [
+            nested_match(Some(Ok(3))),
+            nested_match(Some(Err(4))),
+            nested_match(None),
         ]
     );
 }

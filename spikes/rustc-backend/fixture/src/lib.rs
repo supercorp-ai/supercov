@@ -12,8 +12,21 @@ macro_rules! generated_function {
     };
 }
 
+macro_rules! generated_match_function {
+    () => {
+        pub fn generated_match(value: bool) -> usize {
+            match value {
+                true => 23,
+                false => 29,
+            }
+        }
+    };
+}
+
 generated_function!();
+generated_match_function!();
 probe_macros::generated_function!();
+probe_macros::generated_match_function!();
 
 pub mod repeated_expansions {
     generated_function!();
@@ -147,6 +160,57 @@ impl Iterator for PanicOnNext {
 
 pub fn interrupted_for() {
     for _value in PanicOnNext {}
+}
+
+pub fn match_value(value: Option<usize>, enabled: bool) -> usize {
+    match value {
+        Some(value) if value > 0 && enabled => value,
+        Some(_) => 2,
+        None => 0,
+    }
+}
+
+pub fn match_identical(value: u8) -> usize {
+    match value {
+        0 => 7,
+        1 => 7,
+        _ => 9,
+    }
+}
+
+pub fn match_empty(value: bool) {
+    match value {
+        true => {},
+        false => {},
+    }
+}
+
+pub fn match_irrefutable(value: usize) -> usize {
+    match value {
+        value => value + 1,
+    }
+}
+
+pub fn nested_match(value: Option<Result<usize, usize>>) -> usize {
+    match value {
+        Some(result) => match result {
+            Ok(value) => value,
+            Err(value) => value + 10,
+        },
+        None => 0,
+    }
+}
+
+#[inline(never)]
+fn panic_guard() -> bool {
+    panic!("match-guard-panic")
+}
+
+pub fn interrupted_match(value: Option<usize>) -> usize {
+    match value {
+        Some(value) if panic_guard() => value,
+        _ => 0,
+    }
 }
 
 #[inline(never)]
