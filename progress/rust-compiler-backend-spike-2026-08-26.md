@@ -379,10 +379,21 @@ an unverified rustc commit.
    survive the process-per-test split; zero selected tests are valid and
    unsupported scheduling/presentation modes fail closed. A real production
    run selects and executes one ignored test through arguments on both sides of
-   `--`. Preserve exact output/order, cross-artifact fail-fast and retries;
+   `--`. The production wrapper now builds one static probe runtime using the
+   exact rustc path supplied by Cargo; four concurrent wrapper builders publish
+   one atomic archive with no lock or partial debris, and every instrumented
+   crate links the shared ABI needed for cross-crate doctest assertion context.
+   The target planner exactly distinguishes default/doc and explicit non-doc
+   target selection; doc-only currently fails closed. Preserve exact
+   output/order, cross-artifact fail-fast and retries;
    integrate atomic store/query
    lifecycle, and add the packaged custom-toolchain/platform matrix before
    connecting the companion to public `npx supercov -- cargo test`.
+   The local gate no longer sends large hidden-command requests through
+   `spawnSync`'s pipe-backed `input`: one real run left the projector waiting
+   indefinitely for EOF. Requests now use create-new, mode-0600 temporary input
+   files and every synchronous child has a 120-second hard bound, so this gate
+   cannot silently hang and always removes its request file.
 
 ## Primary references
 

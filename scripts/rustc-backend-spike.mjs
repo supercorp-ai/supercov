@@ -45,6 +45,7 @@ const fixtureSource = fixtureSourceBytes.toString('utf8').split('\n');
 const transportHeaderSize = 128;
 const transportDescriptorSize = 40;
 const transportContext = 42;
+let commandInputOrdinal = 0;
 
 function createTransport(name, descriptorCapacity = 1024, payloadCapacity = 64 * 1024) {
   const path = join(scratch, `${name}.transport`);
@@ -145,19 +146,42 @@ function sourceLine(fragment) {
 
 function run(command, args, options = {}) {
   const commandEnvironment = options.env ?? {};
-  const result = spawnSync(command, args, {
-    cwd: options.cwd ?? root,
-    encoding: 'utf8',
-    input: options.input,
-    env: {
-      ...process.env,
-      SUPERCOV_RUST_SOURCE_ROOT: fixtureRoot,
-      ...(commandEnvironment.CARGO_TARGET_DIR
-        ? {SUPERCOV_RUST_TARGET_ROOT: commandEnvironment.CARGO_TARGET_DIR}
-        : {}),
-      ...commandEnvironment,
-    },
-  });
+  let inputFile = null;
+  let inputDescriptor = null;
+  if (options.input !== undefined) {
+    inputFile = join(scratch, `.command-input-${commandInputOrdinal++}`);
+    writeFileSync(inputFile, options.input, {flag: 'wx', mode: 0o600});
+    inputDescriptor = openSync(inputFile, 'r');
+  }
+  let result;
+  try {
+    result = spawnSync(command, args, {
+      cwd: options.cwd ?? root,
+      encoding: 'utf8',
+      timeout: options.timeout ?? 120_000,
+      killSignal: 'SIGKILL',
+      ...(inputDescriptor === null
+        ? {}
+        : {stdio: [inputDescriptor, 'pipe', 'pipe']}),
+      env: {
+        ...process.env,
+        SUPERCOV_RUST_SOURCE_ROOT: fixtureRoot,
+        ...(commandEnvironment.CARGO_TARGET_DIR
+          ? {SUPERCOV_RUST_TARGET_ROOT: commandEnvironment.CARGO_TARGET_DIR}
+          : {}),
+        ...commandEnvironment,
+      },
+    });
+  } finally {
+    if (inputDescriptor !== null) closeSync(inputDescriptor);
+    if (inputFile !== null) rmSync(inputFile, {force: true});
+  }
+  if (result.error) {
+    throw new Error(
+      `${command} could not complete: ${result.error.message}`,
+      {cause: result.error},
+    );
+  }
   if (options.expectFailure) {
     assert.notEqual(result.status, 0, `${command} unexpectedly succeeded`);
   } else if (result.status !== 0) {

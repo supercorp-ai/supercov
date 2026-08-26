@@ -11,7 +11,8 @@ use std::{
     io::Write,
     path::{Component, Path, PathBuf},
     process::Command,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -24,7 +25,7 @@ use crate::{
         RustdocOutcomeResolution, join_rustdoc_outcomes, read_rustdoc_outcome_units,
         resolve_merged_doctest_candidates,
     },
-    rust_test_runner::cargo_invocation,
+    rust_test_runner::{cargo_invocation, rust_cargo_execution_selection},
 };
 
 pub const RUST_COMPILER_WRAPPER_CONFIG_ENV: &str = "SUPERCOV_RUST_COMPILER_WRAPPER_CONFIG";
@@ -33,6 +34,19 @@ pub const RUST_SOURCE_ROOT_ENV: &str = "SUPERCOV_RUST_SOURCE_ROOT";
 pub const RUST_TARGET_ROOT_ENV: &str = "SUPERCOV_RUST_TARGET_ROOT";
 pub const RUST_INSTRUMENT_MIR_ENV: &str = "SUPERCOV_RUST_INSTRUMENT_MIR";
 pub const RUST_INSTRUMENT_CTFE_ENV: &str = "SUPERCOV_RUST_INSTRUMENT_CTFE";
+pub const RUST_STATIC_RUNTIME_DIRECTORY_ENV: &str = "SUPERCOV_RUST_STATIC_RUNTIME_DIRECTORY";
+const SHARED_RUNTIME_TEMPLATE: &str = include_str!("../runtime-assets/rust-mmap-runtime.rs");
+const SHARED_RUNTIME_EXPORTS: &str = r#"
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_ordinal_hit(ordinal: u64) { __supercov_shared_runtime::ordinal_hit(ordinal) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_enter_context(context_id: u64) -> u64 { __supercov_shared_runtime::enter_context(context_id) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_exit_context(previous: u64) { __supercov_shared_runtime::exit_context(previous) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_enter_assertion_context(id_high: u64, id_low: u32) -> u64 { __supercov_shared_runtime::enter_assertion_context(id_high, id_low) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_decision_start(id_high: u64, id_low: u32, conditions: u64) -> u64 { __supercov_shared_runtime::mir_decision_start(id_high, id_low, conditions) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_decision_condition(token: u64, index: u64, value: bool) { __supercov_shared_runtime::mir_decision_condition(token, index, value) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_decision_finish(token: u64, outcome: bool) { __supercov_shared_runtime::mir_decision_finish(token, outcome) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_branch_start() -> u64 { __supercov_shared_runtime::mir_branch_start() }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_branch_hit(token: u64, ordinal: u64) { __supercov_shared_runtime::mir_branch_hit(token, ordinal) }
+"#;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -40,6 +54,7 @@ pub struct RustCompilerWrapperConfig {
     pub candidates: Vec<PathBuf>,
     pub require_public_capabilities: bool,
     pub selection_directory: PathBuf,
+    pub shared_runtime_directory: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -72,6 +87,8 @@ pub struct RustCompilerBuild {
     pub compiler_output_directory: PathBuf,
     pub ctfe_units: Vec<RustCompilerCtfeUnit>,
     pub doctest_outcomes: RustdocOutcomeResolution,
+    pub run_doctests: bool,
+    pub doctest_arguments: Vec<String>,
     pub build_started_at_ms: i64,
     pub build_ended_at_ms: i64,
     pub build_ms: f64,
@@ -216,6 +233,196 @@ fn write_wrapper_config(
     file.write_all(&bytes)
         .map_err(|error| io_error(path, error))?;
     file.sync_all().map_err(|error| io_error(path, error))
+}
+
+fn write_shared_runtime_source(directory: &Path) -> Result<(), RustCompilerOrchestrationError> {
+    let source = directory.join("runtime.rs");
+    let runtime = format!(
+        "{}\n{}",
+        SHARED_RUNTIME_TEMPLATE.replace("__SUPERCOV_MODULE__", "__supercov_shared_runtime"),
+        SHARED_RUNTIME_EXPORTS
+    );
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&source)
+        .map_err(|error| io_error(&source, error))?;
+    file.write_all(runtime.as_bytes())
+        .map_err(|error| io_error(&source, error))?;
+    file.sync_all().map_err(|error| io_error(&source, error))
+}
+
+fn shared_runtime_archive(directory: &Path) -> PathBuf {
+    #[cfg(windows)]
+    let name = "supercov_runtime.lib";
+    #[cfg(not(windows))]
+    let name = "libsupercov_runtime.a";
+    directory.join(name)
+}
+
+fn valid_shared_runtime_archive(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() != 0)
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), RustCompilerOrchestrationError> {
+    let directory = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(|error| io_error(path, error))?;
+    directory.sync_all().map_err(|error| io_error(path, error))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), RustCompilerOrchestrationError> {
+    Ok(())
+}
+
+struct RemoveFileOnDrop(Option<PathBuf>);
+
+impl Drop for RemoveFileOnDrop {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+struct RuntimeBuildLock {
+    path: PathBuf,
+    file: Option<fs::File>,
+}
+
+impl Drop for RuntimeBuildLock {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Compile the one process-wide Rust probe runtime with the exact rustc path
+/// Cargo supplied to its wrapper. Concurrent rustc wrapper processes converge
+/// on one atomically published archive; a killed builder cannot create a
+/// partially valid archive or make peers wait indefinitely.
+pub fn prepare_shared_rust_runtime(
+    rustc: &Path,
+    directory: &Path,
+) -> Result<PathBuf, RustCompilerOrchestrationError> {
+    let metadata = fs::symlink_metadata(directory).map_err(|error| io_error(directory, error))?;
+    if !metadata.file_type().is_dir() {
+        return Err(io_error(
+            directory,
+            "shared Rust runtime root is not a directory",
+        ));
+    }
+    let source = directory.join("runtime.rs");
+    if !fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.file_type().is_file()) {
+        return Err(io_error(
+            &source,
+            "shared Rust runtime source is not a regular file",
+        ));
+    }
+    let archive = shared_runtime_archive(directory);
+    if valid_shared_runtime_archive(&archive) {
+        return Ok(archive);
+    }
+    let lock = directory.join("build.lock");
+    let started = Instant::now();
+    loop {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(&lock) {
+            Ok(lock_file) => {
+                let mut lock_guard = RuntimeBuildLock {
+                    path: lock.clone(),
+                    file: Some(lock_file),
+                };
+                writeln!(
+                    lock_guard.file.as_mut().expect("runtime build lock file"),
+                    "{}",
+                    std::process::id()
+                )
+                .and_then(|()| {
+                    lock_guard
+                        .file
+                        .as_ref()
+                        .expect("runtime build lock file")
+                        .sync_all()
+                })
+                .map_err(|error| io_error(&lock, error))?;
+                let partial = directory.join(format!(
+                    ".supercov-runtime-{}-{}.partial",
+                    std::process::id(),
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(|error| RustCompilerOrchestrationError::Cargo(error.to_string()))?
+                        .as_nanos()
+                ));
+                let mut partial_cleanup = RemoveFileOnDrop(Some(partial.clone()));
+                let output = Command::new(rustc)
+                    .args([
+                        "--edition=2024",
+                        "--crate-name=supercov_runtime",
+                        "--crate-type=staticlib",
+                        "-o",
+                    ])
+                    .arg(&partial)
+                    .arg(&source)
+                    .env_remove("RUSTC_WRAPPER")
+                    .env_remove("RUSTC_WORKSPACE_WRAPPER")
+                    .env_remove(RUST_COMPILER_WRAPPER_CONFIG_ENV)
+                    .env_remove(RUST_INSTRUMENT_MIR_ENV)
+                    .env_remove(RUST_INSTRUMENT_CTFE_ENV)
+                    .output()
+                    .map_err(|error| io_error(rustc, error));
+                let result = match output {
+                    Ok(output) if output.status.success() => {
+                        let file = OpenOptions::new()
+                            .read(true)
+                            .open(&partial)
+                            .map_err(|error| io_error(&partial, error))?;
+                        file.sync_all().map_err(|error| io_error(&partial, error))?;
+                        fs::rename(&partial, &archive)
+                            .map_err(|error| io_error(&archive, error))?;
+                        sync_directory(directory)?;
+                        partial_cleanup.0 = None;
+                        Ok(archive.clone())
+                    }
+                    Ok(output) => Err(RustCompilerOrchestrationError::Cargo(format!(
+                        "exact rustc could not compile the shared Supercov runtime: {}{}",
+                        String::from_utf8_lossy(&output.stderr),
+                        String::from_utf8_lossy(&output.stdout)
+                    ))),
+                    Err(error) => Err(error),
+                };
+                return result;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if valid_shared_runtime_archive(&archive) {
+                    return Ok(archive);
+                }
+                if started.elapsed() >= Duration::from_secs(30) {
+                    return Err(io_error(
+                        &lock,
+                        "timed out waiting for the exact shared Rust runtime build",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(io_error(&lock, error)),
+        }
+    }
 }
 
 fn compiler_candidates(
@@ -438,6 +645,10 @@ pub fn build_with_rust_compiler_companion(
     fs::create_dir(&candidate_directory).map_err(|error| io_error(&candidate_directory, error))?;
     let target_directory = run_root.join("rust-target");
     fs::create_dir(&target_directory).map_err(|error| io_error(&target_directory, error))?;
+    let shared_runtime_directory = compiler_output_directory.join("shared-runtime");
+    fs::create_dir(&shared_runtime_directory)
+        .map_err(|error| io_error(&shared_runtime_directory, error))?;
+    write_shared_runtime_source(&shared_runtime_directory)?;
     let config_path = compiler_output_directory.join("wrapper.json");
     write_wrapper_config(
         &config_path,
@@ -445,11 +656,20 @@ pub fn build_with_rust_compiler_companion(
             candidates: request.companion_candidates.clone(),
             require_public_capabilities: request.require_public_capabilities,
             selection_directory: selection_directory.clone(),
+            shared_runtime_directory: shared_runtime_directory.clone(),
         },
     )?;
 
     let mut invocation = cargo_invocation(&project_root, &request.command)
         .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
+    let execution = rust_cargo_execution_selection(&invocation)
+        .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
+    if !execution.run_libtests {
+        return Err(RustCompilerOrchestrationError::InvalidRequest(
+            "doc-only Cargo execution is not connected to the production rustdoc supervisor yet"
+                .into(),
+        ));
+    }
     invocation
         .arguments
         .retain(|argument| argument != "--no-run" && !argument.starts_with("--message-format="));
@@ -512,8 +732,96 @@ pub fn build_with_rust_compiler_companion(
         compiler_output_directory,
         ctfe_units,
         doctest_outcomes,
+        run_doctests: execution.run_doctests,
+        doctest_arguments: execution.doctest_arguments,
         build_started_at_ms,
         build_ended_at_ms,
         build_ms,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::BTreeSet,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use super::*;
+
+    struct TemporaryDirectory(PathBuf);
+
+    static TEMPORARY_DIRECTORY_NONCE: AtomicU64 = AtomicU64::new(0);
+
+    impl TemporaryDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "supercov-shared-rust-runtime-{}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                TEMPORARY_DIRECTORY_NONCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TemporaryDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn exact_rustc_concurrently_publishes_one_shared_runtime_without_debris() {
+        let directory = TemporaryDirectory::new();
+        write_shared_runtime_source(&directory.0).unwrap();
+        let archives = std::thread::scope(|scope| {
+            (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        prepare_shared_rust_runtime(Path::new("rustc"), &directory.0).unwrap()
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(archives.windows(2).all(|pair| pair[0] == pair[1]));
+        assert!(valid_shared_runtime_archive(&archives[0]));
+        let names = fs::read_dir(&directory.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            names,
+            BTreeSet::from([
+                "runtime.rs".into(),
+                archives[0]
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn failed_shared_runtime_builder_leaves_no_lock_or_partial_archive() {
+        let directory = TemporaryDirectory::new();
+        write_shared_runtime_source(&directory.0).unwrap();
+        let missing_rustc = directory.0.join("missing-rustc");
+        let error = prepare_shared_rust_runtime(&missing_rustc, &directory.0).unwrap_err();
+        assert!(error.to_string().contains("missing-rustc"));
+        let names = fs::read_dir(&directory.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(names, BTreeSet::from(["runtime.rs".into()]));
+    }
 }

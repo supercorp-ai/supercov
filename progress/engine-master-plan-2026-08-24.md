@@ -1438,6 +1438,14 @@ miss blocks flipping any default.
   valid, and Supercov no longer injects `--nocapture`. Options whose scheduling
   or presentation semantics are not yet reproducible fail closed. The real
   compiler gate runs exactly one ignored test selected on both sides of `--`.
+- The Cargo wrapper now compiles a single shared probe runtime with the exact
+  rustc path Cargo supplied. Concurrent compiler processes converge through a
+  bounded create-new lock and atomic archive rename; the gate proves one
+  archive and no terminal lock/partial debris. Every instrumented crate links
+  that ABI, closing the per-crate TLS split before production doctests are
+  enabled. The pinned target planner also distinguishes Cargo's default/doc
+  selection from explicit non-doc targets; doc-only remains fail-closed until
+  its supervisor is connected.
 - Public Rust remains blocked on full Cargo/libtest output/order and retry
   capture, remaining doctest execution integration, compiler-build evidence,
   atomic store/query lifecycle and the

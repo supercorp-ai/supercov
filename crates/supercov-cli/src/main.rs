@@ -178,10 +178,22 @@ fn rust_compiler_wrapper(arguments: Vec<String>) -> ExitCode {
         file.write_all(&bytes).map_err(|error| error.to_string())?;
         file.sync_all().map_err(|error| error.to_string())?;
 
+        supercov_engine::rust_compiler_orchestration::prepare_shared_rust_runtime(
+            Path::new(rustc),
+            &config.shared_runtime_directory,
+        )
+        .map_err(|error| error.to_string())?;
+
         let mut command = Command::new(&selection.companion_path);
-        command.args(&arguments).env_remove(
-            supercov_engine::rust_compiler_orchestration::RUST_COMPILER_WRAPPER_CONFIG_ENV,
-        );
+        command
+            .args(&arguments)
+            .env_remove(
+                supercov_engine::rust_compiler_orchestration::RUST_COMPILER_WRAPPER_CONFIG_ENV,
+            )
+            .env(
+                supercov_engine::rust_compiler_orchestration::RUST_STATIC_RUNTIME_DIRECTORY_ENV,
+                &config.shared_runtime_directory,
+            );
         supercov_engine::rust_compiler_selection::configure_companion_loader_environment(
             &mut command,
             &selection.compiler_library_directory,

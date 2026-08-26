@@ -252,6 +252,13 @@ pub(crate) struct RustLibtestSelection {
     pub run_arguments: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RustCargoExecutionSelection {
+    pub run_libtests: bool,
+    pub run_doctests: bool,
+    pub doctest_arguments: Vec<String>,
+}
+
 pub(crate) fn cargo_invocation(
     root: &Path,
     command: &[String],
@@ -426,6 +433,71 @@ pub(crate) fn rust_libtest_selection(
     Ok(RustLibtestSelection {
         list_arguments,
         run_arguments,
+    })
+}
+
+pub(crate) fn rust_cargo_execution_selection(
+    invocation: &CargoTestInvocation,
+) -> Result<RustCargoExecutionSelection, RustTestRunnerError> {
+    let test = invocation
+        .arguments
+        .iter()
+        .position(|argument| argument == "test")
+        .ok_or_else(|| {
+            RustTestRunnerError::UnsupportedCommand(
+                "the expanded Cargo invocation lost its test subcommand".into(),
+            )
+        })?;
+    let mut doc = false;
+    let mut other_target = false;
+    let mut index = test + 1;
+    while index < invocation.arguments.len() {
+        let argument = &invocation.arguments[index];
+        let name = argument
+            .split_once('=')
+            .map_or(argument.as_str(), |(name, _)| name);
+        match name {
+            "--doc" => doc = true,
+            "--lib" | "--bins" | "--bin" | "--examples" | "--example" | "--tests" | "--test"
+            | "--benches" | "--bench" | "--all-targets" => other_target = true,
+            _ => {}
+        }
+        if argument.starts_with('-') {
+            let takes_value = cargo_option_takes_value(argument).ok_or_else(|| {
+                RustTestRunnerError::UnsupportedCommand(format!(
+                    "the pinned Cargo test contract does not recognize option {argument}"
+                ))
+            })?;
+            if takes_value {
+                index += 1;
+                if index == invocation.arguments.len() {
+                    return Err(RustTestRunnerError::UnsupportedCommand(format!(
+                        "Cargo option {argument} has no value"
+                    )));
+                }
+            }
+        }
+        index += 1;
+    }
+    if doc && other_target {
+        return Err(RustTestRunnerError::UnsupportedCommand(
+            "Cargo --doc cannot be combined with another explicit target selection".into(),
+        ));
+    }
+    let run_doctests = doc || !other_target;
+    let run_libtests = !doc;
+    let mut doctest_arguments = invocation.arguments.clone();
+    if run_doctests && !doc {
+        doctest_arguments.insert(test + 1, "--doc".into());
+    }
+    if !invocation.runner_arguments.is_empty() {
+        doctest_arguments.push("--".into());
+        doctest_arguments.extend(invocation.runner_arguments.iter().cloned());
+    }
+    Ok(RustCargoExecutionSelection {
+        run_libtests,
+        run_doctests,
+        doctest_arguments,
     })
 }
 
@@ -948,6 +1020,49 @@ mod tests {
         let selection = rust_libtest_selection(&invocation).unwrap();
         assert_eq!(selection.list_arguments, ["needle", "--ignored", "other"]);
         assert_eq!(selection.run_arguments, ["--ignored"]);
+    }
+
+    #[test]
+    fn cargo_target_selection_reproduces_when_cargo_runs_doctests() {
+        let invocation = CargoTestInvocation {
+            program: "cargo".into(),
+            arguments: vec![
+                "test".into(),
+                "-p".into(),
+                "fixture".into(),
+                "needle".into(),
+            ],
+            runner_arguments: vec!["--include-ignored".into()],
+        };
+        let selection = rust_cargo_execution_selection(&invocation).unwrap();
+        assert!(selection.run_libtests);
+        assert!(selection.run_doctests);
+        assert_eq!(
+            selection.doctest_arguments,
+            [
+                "test",
+                "--doc",
+                "-p",
+                "fixture",
+                "needle",
+                "--",
+                "--include-ignored"
+            ]
+        );
+
+        let mut explicit_doc = invocation.clone();
+        explicit_doc.arguments.insert(1, "--doc".into());
+        let selection = rust_cargo_execution_selection(&explicit_doc).unwrap();
+        assert!(!selection.run_libtests);
+        assert!(selection.run_doctests);
+
+        for target in ["--lib", "--tests", "--all-targets", "--example=demo"] {
+            let mut selected = invocation.clone();
+            selected.arguments.insert(1, target.into());
+            let selection = rust_cargo_execution_selection(&selected).unwrap();
+            assert!(selection.run_libtests);
+            assert!(!selection.run_doctests);
+        }
     }
 
     #[test]

@@ -757,6 +757,16 @@ than being discarded. A real compiler run proves
 the one requested ignored test with authenticated evidence. Full output/order,
 cross-artifact fail-fast, retries and custom-runner composition remain open.
 
+The production wrapper now also builds one shared static probe runtime with the
+exact `rustc` executable supplied by Cargo. Concurrent wrapper processes use a
+bounded create-new lock and atomic archive rename; four real builders converge
+on one nonempty archive with no partial or lock debris. All instrumented crates
+link the shared ABI, so dependency probes and doctest assertion contexts cannot
+silently split across per-crate thread-local runtimes. Cargo target planning is
+now explicit and tested: default and `--doc` select doctests, while explicit
+non-doc targets do not. Doc-only execution still fails closed until the next
+production-supervisor increment; it is never approximated as libtest.
+
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.
 
