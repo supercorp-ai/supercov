@@ -245,13 +245,10 @@ fn compiler_pairs(
             .and_then(|name| name.strip_suffix(".json"))
         {
             Some((&mut manifests, key))
-        } else if let Some(key) = name
-            .strip_prefix("sources-")
-            .and_then(|name| name.strip_suffix(".json"))
-        {
-            Some((&mut snapshots, key))
         } else {
-            None
+            name.strip_prefix("sources-")
+                .and_then(|name| name.strip_suffix(".json"))
+                .map(|key| (&mut snapshots, key))
         };
         if let Some((destination, key)) = destination
             && destination.insert(key.into(), path.clone()).is_some()

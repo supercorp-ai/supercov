@@ -126,6 +126,16 @@ struct CtfeObservation {
 struct CtfeMarkerMapping {
     identity: CtfeMarkerIdentity,
     hit_ordinals: BTreeSet<u64>,
+    decision: Option<CtfeDecisionMapping>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CtfeDecisionMapping {
+    id: String,
+    event: &'static str,
+    condition_index: Option<u64>,
+    value: Option<bool>,
+    outcome: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -201,6 +211,7 @@ struct DecisionObligation {
     definitions: Vec<String>,
     structural_marker: bool,
     assertion_source: Option<StableSourceRange>,
+    outcome_branch_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -829,6 +840,28 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             ));
             return None;
         }
+        let decision_span = if control_kind == "while" || decision_kind == "assertion" {
+            expression.span.source_callsite()
+        } else {
+            expression.span
+        };
+        let (branch_kind, alternatives) = if decision_kind == "assertion" {
+            (
+                "assertion-outcome",
+                [("passed", "passed"), ("failed", "failed")],
+            )
+        } else {
+            (
+                "decision-outcome",
+                [("true", "condition true"), ("false", "condition false")],
+            )
+        };
+        let outcome_branch_id = self.record_branch(
+            decision_span,
+            branch_kind,
+            &format!("{branch_kind}:{decision_kind}"),
+            &alternatives,
+        )?;
         let decision_id = decision.id.clone();
         match self.decisions.get_mut(&decision.id) {
             Some(existing) if existing.identity.canonical != decision.canonical => {
@@ -841,7 +874,8 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 if existing.decision_kind != decision_kind
                     || existing.conditions != conditions
                     || existing.structural_marker != (decision_kind == "assertion")
-                    || existing.assertion_source != assertion_source =>
+                    || existing.assertion_source != assertion_source
+                    || existing.outcome_branch_id != outcome_branch_id =>
             {
                 self.tcx.dcx().fatal(format!(
                     "Supercov Rust decision aggregation mismatch for {}",
@@ -863,33 +897,11 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                         definitions: vec![self.definition.clone()],
                         structural_marker: decision_kind == "assertion",
                         assertion_source,
+                        outcome_branch_id,
                     },
                 );
             }
         }
-
-        let decision_span = if control_kind == "while" || decision_kind == "assertion" {
-            expression.span.source_callsite()
-        } else {
-            expression.span
-        };
-        let (branch_kind, alternatives) = if decision_kind == "assertion" {
-            (
-                "assertion-outcome",
-                [("passed", "passed"), ("failed", "failed")],
-            )
-        } else {
-            (
-                "decision-outcome",
-                [("true", "condition true"), ("false", "condition false")],
-            )
-        };
-        let _ = self.record_branch(
-            decision_span,
-            branch_kind,
-            &format!("{branch_kind}:{decision_kind}"),
-            &alternatives,
-        );
         Some(decision_id)
     }
 
@@ -932,6 +944,12 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             false_outcome: Some(false),
             invert_value,
         };
+        let outcome_branch_id = self.record_branch(
+            span,
+            "assertion-outcome",
+            "assertion-outcome:assertion",
+            &[("passed", "passed"), ("failed", "failed")],
+        )?;
         let decision_id = decision.id.clone();
         match self.decisions.get_mut(&decision.id) {
             Some(existing) if existing.identity.canonical != decision.canonical => {
@@ -944,7 +962,8 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 if existing.decision_kind != "assertion"
                     || existing.conditions.as_slice() != std::slice::from_ref(&condition)
                     || !existing.structural_marker
-                    || existing.assertion_source.as_ref() != Some(&assertion_source) =>
+                    || existing.assertion_source.as_ref() != Some(&assertion_source)
+                    || existing.outcome_branch_id != outcome_branch_id =>
             {
                 self.tcx.dcx().fatal(format!(
                     "Supercov Rust assertion aggregation mismatch for {}",
@@ -966,16 +985,11 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                         definitions: vec![self.definition.clone()],
                         structural_marker: true,
                         assertion_source: Some(assertion_source),
+                        outcome_branch_id,
                     },
                 );
             }
         }
-        let _ = self.record_branch(
-            span,
-            "assertion-outcome",
-            "assertion-outcome:assertion",
-            &[("passed", "passed"), ("failed", "failed")],
-        );
         Some(decision_id)
     }
 
@@ -1422,7 +1436,7 @@ fn manifest_json(
                 .collect::<Vec<_>>()
                 .join(",");
             format!(
-                "{{\"id\":\"{}\",\"kind\":\"{}\",\"sourceKey\":\"{}\",\"start\":{},\"end\":{},\"provenance\":\"{}\",\"probeOrdinal\":\"{}\",\"definitions\":{},\"conditions\":[{}],\"canonical\":\"{}\"}}",
+                "{{\"id\":\"{}\",\"kind\":\"{}\",\"sourceKey\":\"{}\",\"start\":{},\"end\":{},\"provenance\":\"{}\",\"probeOrdinal\":\"{}\",\"definitions\":{},\"outcomeBranchId\":\"{}\",\"conditions\":[{}],\"canonical\":\"{}\"}}",
                 escape(&decision.identity.id),
                 decision.decision_kind,
                 escape(&decision.identity.source.key),
@@ -1431,6 +1445,7 @@ fn manifest_json(
                 decision.identity.provenance,
                 decision.identity.probe_ordinal,
                 json_strings(&decision.definitions),
+                escape(&decision.outcome_branch_id),
                 conditions,
                 escape(&decision.identity.canonical),
             )
@@ -1623,7 +1638,7 @@ impl Callbacks for ProbeCallbacks {
         let mut decisions = BTreeMap::<String, DecisionObligation>::new();
         let mut match_groups = BTreeMap::<String, MatchSelectionObligation>::new();
         let mut manifest_limitations = BTreeSet::from([
-            "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
+            "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: complete CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
         ]);
 
         for owner in tcx.hir_body_owners() {
@@ -3580,6 +3595,9 @@ fn mir_drops_with_structural_probes<'tcx>(
         .then(|| find_runtime_function(tcx, HIT_BRANCH_FUNCTION))
         .flatten();
     let has_guard_plans = !guard_plans.is_empty();
+    let ordinal_hit = has_guard_plans
+        .then(|| find_runtime_function(tcx, PROBE_FUNCTION))
+        .flatten();
     let start_decision = has_guard_plans
         .then(|| find_runtime_function(tcx, START_DECISION_FUNCTION))
         .flatten();
@@ -3598,7 +3616,10 @@ fn mir_drops_with_structural_probes<'tcx>(
         .flatten();
     if has_branch_plans != (start_branch.is_some() && hit_branch.is_some())
         || has_guard_plans
-            != (start_decision.is_some() && record_condition.is_some() && finish_decision.is_some())
+            != (start_decision.is_some()
+                && record_condition.is_some()
+                && finish_decision.is_some()
+                && ordinal_hit.is_some())
         || has_assertion_phases != (enter_assertion_context.is_some() && exit_context.is_some())
     {
         tcx.dcx().fatal(format!(
@@ -3663,7 +3684,8 @@ fn mir_drops_with_structural_probes<'tcx>(
                 start,
                 condition,
                 finish,
-                branch_hit: None,
+                ordinal_hit: ordinal_hit.expect("validated structural decision ordinal runtime"),
+                branch_hit: hit_branch,
                 unit,
             },
             span,
@@ -3799,6 +3821,11 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
     let span = tcx.def_span(def_id);
     let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE).to_string();
     let definition = tcx.def_path_str(def_id);
+    let decision_plans = runtime_decision_plans(tcx, def_id, body).unwrap_or_else(|error| {
+        tcx.dcx().fatal(format!(
+            "Supercov could not bind Rust CTFE decision probes in {definition}: {error}"
+        ))
+    });
     let mut hit_ordinals_by_block = BTreeMap::<BasicBlock, BTreeSet<u64>>::new();
     for plan in runtime_statement_plans(tcx, def_id, body).unwrap_or_else(|error| {
         tcx.dcx().fatal(format!(
@@ -3859,6 +3886,20 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
                 .push(ctfe_marker_statement(tcx, marker_local, exit, span));
         }
     }
+    instrument_ctfe_decisions(
+        tcx,
+        &mut instrumented,
+        &decision_plans,
+        marker_local,
+        &crate_name,
+        &definition,
+        span,
+    )
+    .unwrap_or_else(|error| {
+        tcx.dcx().fatal(format!(
+            "Supercov could not inject Rust CTFE decision probes in {definition}: {error}"
+        ))
+    });
 
     let decision_edges = instrumented
         .basic_blocks
@@ -3904,6 +3945,165 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
             });
     }
     tcx.arena.alloc(instrumented)
+}
+
+fn instrument_ctfe_decisions<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &mut Body<'tcx>,
+    plans: &[RuntimeDecisionPlan],
+    marker_local: rustc_middle::mir::Local,
+    crate_name: &str,
+    definition: &str,
+    span: rustc_span::Span,
+) -> Result<(), String> {
+    let mut starts = BTreeSet::new();
+    let mut condition_site = 0_u32;
+    for (plan_index, plan) in plans.iter().enumerate() {
+        let first = plan
+            .conditions
+            .first()
+            .ok_or_else(|| format!("decision {} has no conditions", plan.id))?;
+        if !starts.insert(first.entry_block) {
+            return Err(format!(
+                "multiple CTFE decisions begin in MIR block {:?}",
+                first.entry_block
+            ));
+        }
+        let start_ordinal = u32::try_from(plan_index)
+            .map_err(|_| "CTFE decision count exceeds u32".to_owned())?;
+        let start = ctfe_marker_identity(
+            tcx,
+            crate_name,
+            definition,
+            "decision-start",
+            start_ordinal,
+        );
+        register_ctfe_decision(
+            tcx,
+            start,
+            CtfeDecisionMapping {
+                id: plan.id.clone(),
+                event: "start",
+                condition_index: None,
+                value: None,
+                outcome: None,
+            },
+        );
+        body.basic_blocks_mut()[first.entry_block].statements.insert(
+            1,
+            ctfe_marker_statement(tcx, marker_local, start, span),
+        );
+
+        for condition in &plan.conditions {
+            for (value, sources, target, outcome) in [
+                (
+                    true,
+                    condition.true_sources.as_slice(),
+                    condition.true_target,
+                    condition.true_outcome,
+                ),
+                (
+                    false,
+                    condition.false_sources.as_slice(),
+                    condition.false_target,
+                    condition.false_outcome,
+                ),
+            ] {
+                let site = condition_site;
+                condition_site = condition_site
+                    .checked_add(1)
+                    .ok_or_else(|| "CTFE decision event count exceeds u32".to_owned())?;
+                let condition_marker = ctfe_marker_identity(
+                    tcx,
+                    crate_name,
+                    definition,
+                    "decision-condition",
+                    site,
+                );
+                register_ctfe_decision(
+                    tcx,
+                    condition_marker,
+                    CtfeDecisionMapping {
+                        id: plan.id.clone(),
+                        event: "condition",
+                        condition_index: Some(condition.index),
+                        value: Some(value),
+                        outcome: None,
+                    },
+                );
+                let finish_marker = outcome.map(|outcome| {
+                    let marker = ctfe_marker_identity(
+                        tcx,
+                        crate_name,
+                        definition,
+                        "decision-finish",
+                        site,
+                    );
+                    register_ctfe_decision(
+                        tcx,
+                        marker,
+                        CtfeDecisionMapping {
+                            id: plan.id.clone(),
+                            event: "finish",
+                            condition_index: None,
+                            value: None,
+                            outcome: Some(outcome),
+                        },
+                    );
+                    register_ctfe_hits(
+                        tcx,
+                        marker,
+                        std::iter::once(if outcome {
+                            plan.true_ordinal
+                        } else {
+                            plan.false_ordinal
+                        }),
+                    );
+                    marker
+                });
+                for source in sources {
+                    let mut bridge = BasicBlockData::new(
+                        Some(Terminator {
+                            source_info: SourceInfo::outermost(span),
+                            kind: TerminatorKind::Goto { target },
+                        }),
+                        body.basic_blocks[*source].is_cleanup,
+                    );
+                    bridge.statements.push(ctfe_marker_statement(
+                        tcx,
+                        marker_local,
+                        condition_marker,
+                        span,
+                    ));
+                    if let Some(finish_marker) = finish_marker {
+                        bridge.statements.push(ctfe_marker_statement(
+                            tcx,
+                            marker_local,
+                            finish_marker,
+                            span,
+                        ));
+                    }
+                    let bridge = body.basic_blocks_mut().push(bridge);
+                    let mut replaced = 0;
+                    body.basic_blocks_mut()[*source]
+                        .terminator_mut()
+                        .successors_mut(|edge| {
+                            if *edge == target {
+                                *edge = bridge;
+                                replaced += 1;
+                            }
+                        });
+                    if replaced == 0 {
+                        return Err(format!(
+                            "decision {} condition {} {:?} edge from {:?} was not found",
+                            plan.id, condition.index, value, source
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn ctfe_marker_identity(
@@ -3960,6 +4160,7 @@ fn ctfe_marker_identity(
                 CtfeMarkerMapping {
                     identity,
                     hit_ordinals: BTreeSet::new(),
+                    decision: None,
                 },
             );
         }
@@ -3979,6 +4180,23 @@ fn register_ctfe_hits(
         .get_mut(&marker)
         .unwrap_or_else(|| tcx.dcx().fatal(format!("Supercov CTFE marker {marker} has no mapping")));
     mapping.hit_ordinals.extend(hits);
+}
+
+fn register_ctfe_decision(tcx: TyCtxt<'_>, marker: u64, decision: CtfeDecisionMapping) {
+    let mut mappings = CTFE_MAPPINGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mapping = mappings
+        .get_mut(&marker)
+        .unwrap_or_else(|| tcx.dcx().fatal(format!("Supercov CTFE marker {marker} has no mapping")));
+    if let Some(existing) = &mapping.decision
+        && existing != &decision
+    {
+        tcx.dcx().fatal(format!(
+            "Supercov CTFE marker {marker} maps to both {existing:?} and {decision:?}"
+        ));
+    }
+    mapping.decision = Some(decision);
 }
 
 fn ctfe_marker_statement<'tcx>(
@@ -4033,6 +4251,8 @@ struct RuntimeDecisionPlan {
     id_high: u64,
     id_low: u32,
     conditions: Vec<RuntimeDecisionCondition>,
+    false_ordinal: u64,
+    true_ordinal: u64,
     loop_alternatives: Option<(u64, u64)>,
     loop_source: Option<StableSourceRange>,
     loop_token: Option<rustc_middle::mir::Local>,
@@ -4045,6 +4265,48 @@ struct RuntimeBodyObligations {
     branches: BTreeMap<String, BranchObligation>,
     decisions: BTreeMap<String, DecisionObligation>,
     match_groups: BTreeMap<String, MatchSelectionObligation>,
+}
+
+fn decision_outcome_ordinals(
+    decision: &DecisionObligation,
+    branches: &BTreeMap<String, BranchObligation>,
+) -> Result<(u64, u64), String> {
+    let outcome_branch = branches.get(&decision.outcome_branch_id).ok_or_else(|| {
+        format!(
+            "decision {} references missing outcome branch {}",
+            decision.identity.id, decision.outcome_branch_id
+        )
+    })?;
+    let expected_kind = if decision.decision_kind == "assertion" {
+        "assertion-outcome"
+    } else {
+        "decision-outcome"
+    };
+    if outcome_branch.branch_kind != expected_kind {
+        return Err(format!(
+            "decision {} references {} instead of {expected_kind}",
+            decision.identity.id, outcome_branch.branch_kind
+        ));
+    }
+    let labels = if expected_kind == "assertion-outcome" {
+        ("failed", "passed")
+    } else {
+        ("condition false", "condition true")
+    };
+    let ordinal = |label: &str| {
+        outcome_branch
+            .alternatives
+            .iter()
+            .find(|alternative| alternative.label == label)
+            .map(|alternative| alternative.identity.probe_ordinal)
+            .ok_or_else(|| {
+                format!(
+                    "decision {} outcome branch lacks {label}",
+                    decision.identity.id
+                )
+            })
+    };
+    Ok((ordinal(labels.0)?, ordinal(labels.1)?))
 }
 
 fn runtime_body_obligations(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<RuntimeBodyObligations> {
@@ -4307,6 +4569,7 @@ fn runtime_decision_plans<'tcx>(
                 false_outcome: condition.false_outcome,
             });
         }
+        let (false_ordinal, true_ordinal) = decision_outcome_ordinals(decision, &branches)?;
         let (loop_alternatives, loop_source) = if decision.decision_kind.starts_with("while") {
             let candidates = branches
                 .values()
@@ -4355,6 +4618,8 @@ fn runtime_decision_plans<'tcx>(
             id_high,
             id_low,
             conditions,
+            false_ordinal,
+            true_ordinal,
             loop_alternatives,
             loop_source,
             loop_token: None,
@@ -5124,11 +5389,15 @@ fn runtime_marked_decision_plans<'tcx>(
                 false_outcome: condition.false_outcome,
             });
         }
+        let (false_ordinal, true_ordinal) =
+            decision_outcome_ordinals(decision, &obligations.branches)?;
         plans.push(RuntimeDecisionPlan {
             id: decision_id,
             id_high,
             id_low,
             conditions,
+            false_ordinal,
+            true_ordinal,
             loop_alternatives: None,
             loop_source: None,
             loop_token: None,
@@ -5851,6 +6120,24 @@ fn instrument_runtime_decisions<'tcx>(
                     let cleanup = body.basic_blocks[*source].is_cleanup;
                     let mut continuation = target;
                     if let Some(outcome) = outcome {
+                        continuation = body.basic_blocks_mut().push(runtime_call_block(
+                            tcx,
+                            runtime.finish,
+                            [
+                                Operand::Copy(Place::from(token)),
+                                Operand::const_from_scalar(
+                                    tcx,
+                                    tcx.types.bool,
+                                    Scalar::from_bool(outcome),
+                                    span,
+                                ),
+                            ]
+                            .into_iter(),
+                            Place::from(runtime.unit),
+                            continuation,
+                            span,
+                            cleanup,
+                        ));
                         if let (Some(token), Some((zero, entered))) =
                             (plan.loop_token, plan.loop_alternatives)
                         {
@@ -5881,17 +6168,17 @@ fn instrument_runtime_decisions<'tcx>(
                         }
                         continuation = body.basic_blocks_mut().push(runtime_call_block(
                             tcx,
-                            runtime.finish,
-                            [
-                                Operand::Copy(Place::from(token)),
-                                Operand::const_from_scalar(
-                                    tcx,
-                                    tcx.types.bool,
-                                    Scalar::from_bool(outcome),
-                                    span,
-                                ),
-                            ]
-                            .into_iter(),
+                            runtime.ordinal_hit,
+                            std::iter::once(Operand::const_from_scalar(
+                                tcx,
+                                tcx.types.u64,
+                                Scalar::from_u64(if outcome {
+                                    plan.true_ordinal
+                                } else {
+                                    plan.false_ordinal
+                                }),
+                                span,
+                            )),
                             Place::from(runtime.unit),
                             continuation,
                             span,
@@ -5984,6 +6271,7 @@ struct DecisionRuntime {
     start: LocalDefId,
     condition: LocalDefId,
     finish: LocalDefId,
+    ordinal_hit: LocalDefId,
     branch_hit: Option<LocalDefId>,
     unit: rustc_middle::mir::Local,
 }
@@ -6014,8 +6302,9 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
     });
     let probe_id = probe_id_for(tcx, def_id, &definition);
     let context_id = context_id_for(tcx, def_id, &definition);
-    let has_point_probes = probe_id.is_some() || !statement_plans.is_empty();
-    let probe_function = has_point_probes
+    let has_ordinal_probes =
+        probe_id.is_some() || !statement_plans.is_empty() || !decision_plans.is_empty();
+    let probe_function = has_ordinal_probes
         .then(|| find_runtime_function(tcx, PROBE_FUNCTION))
         .flatten();
     let enter_context = context_id.and_then(|_| find_runtime_function(tcx, ENTER_CONTEXT_FUNCTION));
@@ -6039,7 +6328,7 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
     let hit_branch = has_branch_plans
         .then(|| find_runtime_function(tcx, HIT_BRANCH_FUNCTION))
         .flatten();
-    if has_point_probes != probe_function.is_some()
+    if has_ordinal_probes != probe_function.is_some()
         || context_id.is_some() != (enter_context.is_some() && exit_context.is_some())
         || (!decision_plans.is_empty()
             && (start_decision.is_none()
@@ -6104,6 +6393,7 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
                 start,
                 condition,
                 finish,
+                ordinal_hit: probe_function.expect("validated decision ordinal runtime"),
                 branch_hit: hit_branch,
                 unit,
             },
@@ -6663,8 +6953,27 @@ fn write_ctfe_outputs(args: &[String], events: &[CtfeObservation]) -> Result<(),
                 .map(|ordinal| format!("\"{ordinal}\""))
                 .collect::<Vec<_>>()
                 .join(",");
+            let decision = mapping.decision.as_ref().map_or_else(
+                || "null".into(),
+                |decision| {
+                    format!(
+                        "{{\"id\":\"{}\",\"event\":\"{}\",\"conditionIndex\":{},\"value\":{},\"outcome\":{}}}",
+                        escape(&decision.id),
+                        decision.event,
+                        decision
+                            .condition_index
+                            .map_or_else(|| "null".into(), |value| value.to_string()),
+                        decision
+                            .value
+                            .map_or_else(|| "null".into(), |value| value.to_string()),
+                        decision
+                            .outcome
+                            .map_or_else(|| "null".into(), |value| value.to_string()),
+                    )
+                },
+            );
             format!(
-                "{{\"marker\":\"{marker}\",\"definition\":\"{}\",\"observationKind\":\"{}\",\"ordinal\":{},\"hitOrdinals\":[{hit_ordinals}]}}",
+                "{{\"marker\":\"{marker}\",\"definition\":\"{}\",\"observationKind\":\"{}\",\"ordinal\":{},\"hitOrdinals\":[{hit_ordinals}],\"decision\":{decision}}}",
                 escape(&mapping.identity.definition),
                 mapping.identity.observation_kind,
                 mapping.identity.local_ordinal,

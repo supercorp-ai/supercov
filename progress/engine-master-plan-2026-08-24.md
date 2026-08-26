@@ -1489,9 +1489,14 @@ miss blocks flipping any default.
   sidecars are atomically renamed, use lossless textual identities, and are
   rejected unless every event, frame and hit ordinal resolves exactly. A real
   compiler run now archives and re-queries those observations as `rustc` setup
-  evidence. Exact CTFE branch/decision vectors and the broader const corpus
-  remain the active blocker; the candidate therefore still reports the CTFE
-  limitation and stays private.
+  evidence. CTFE semantic start/condition/finish markers now reconstruct exact
+  nested vectors and commit the explicitly frozen decision-outcome alternative;
+  the controlled const-fn corpus proves independent false and true evaluations.
+  The direct decision-to-outcome-branch relation also removed a runtime
+  token-domain error and now guarantees the branch observation is committed
+  before a decision vector can become complete. The broader
+  const/static/inline-const/const-generic corpus remains the active blocker;
+  the candidate therefore reports incomplete CTFE mapping and stays private.
 
 ## Non-goals and guardrails
 

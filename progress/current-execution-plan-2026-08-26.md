@@ -465,10 +465,10 @@ unsound idea of assigning flat adjacent events to a definition; missing return
 markers after a panic or compiler crash can instead remain explicitly
 incomplete. Edge identity is carried by each event, so concurrent evaluation
 does not require guessing from adjacent log records.
-Rust still remains private:
-the proof covers one controlled const function and does not yet supply the
-complete marker-to-obligation mapping for const/static/inline-const/const-generic code, crash-safe event
-publication, `RUSTC_LOG` coexistence or acceptable performance corpus.
+Rust still remains private: the proof covers one controlled const function and
+does not yet supply the complete denominator and corpus for
+const/static/inline-const/const-generic code, `RUSTC_LOG` coexistence or
+acceptable performance.
 
 The first mapped CTFE evidence slice is now carried through the real run
 boundary. Compiler-finalized event and mapping sidecars are published with
@@ -478,8 +478,23 @@ requires one map/event pair per compiler unit, exact crate/definition/kind/site
 identity, balanced per-thread invocation frames, and resolution of every hit
 ordinal to the frozen denominator. Function and statement hits are archived as
 exact `rustc` setup-phase evidence and survive evidence-v3 analysis plus normal
-run querying. CTFE decision/branch reconstruction is still deliberately absent
-and the manifest limitation remains, so this is not yet a completeness claim.
+run querying. CTFE decisions now carry explicit start, condition and finish
+mappings. Strict nested reconstruction produces exact masking-MC/DC vectors
+and commits the frozen true/false outcome branch alternative. Engine corruption
+tests reject semantic markers with unrelated hits, a finish mapped to the wrong
+alternative, a condition without a frame and an invocation that exits with an
+open decision. The real compiler corpus proves independent `[false] -> false`
+and `[true] -> true` const-fn evaluations with unchanged values and output.
+
+That outcome relation is frozen directly into every compiler manifest decision
+rather than inferred from overlapping spans. The same relation corrected the
+ordinary runtime path: decision outcomes now use an atomic ordinal observation
+before the MC/DC frame is committed, while loop-entry alternatives retain their
+separate first-commit frame. A crash can therefore leave a truthful outcome hit
+plus an explicitly incomplete vector, but never a complete vector whose
+outcome branch is missing. The manifest limitation now says *complete* CTFE and
+doctest mapping remain; the controlled CTFE slice is real, but the wider const
+corpus is still a release blocker and this is not a completeness claim.
 
 The rustdoc launch boundary is now proven as well. Cargo's ordinary
 `RUSTC_WRAPPER` still does not see synthesized doctest crates, so Supercov uses

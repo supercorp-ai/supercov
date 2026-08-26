@@ -90,6 +90,7 @@ pub struct RustCompilerDecision {
     pub provenance: String,
     pub probe_ordinal: String,
     pub definitions: Vec<String>,
+    pub outcome_branch_id: String,
     pub conditions: Vec<RustCompilerCondition>,
     pub canonical: String,
 }
@@ -178,6 +179,7 @@ pub struct NormalizedRustCompilerManifest {
     pub manifest: CoverageManifest,
     pub hit_obligations_by_ordinal: BTreeMap<u64, Vec<String>>,
     pub internal_ordinals: BTreeSet<u64>,
+    pub decision_outcome_obligations: BTreeMap<String, (String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -578,6 +580,33 @@ impl RustCompilerManifest {
             {
                 return Err(invalid("malformed decision obligation"));
             }
+            let Some(outcome_branch) = self
+                .branches
+                .iter()
+                .find(|branch| branch.id == decision.outcome_branch_id)
+            else {
+                return Err(invalid("decision references a missing outcome branch"));
+            };
+            let expected_kind = if decision.kind == "assertion" {
+                "assertion-outcome"
+            } else {
+                "decision-outcome"
+            };
+            let expected_labels = if decision.kind == "assertion" {
+                BTreeSet::from(["failed", "passed"])
+            } else {
+                BTreeSet::from(["condition false", "condition true"])
+            };
+            if outcome_branch.kind != expected_kind
+                || outcome_branch
+                    .alternatives
+                    .iter()
+                    .map(|alternative| alternative.label.as_str())
+                    .collect::<BTreeSet<_>>()
+                    != expected_labels
+            {
+                return Err(invalid("decision has a malformed outcome branch"));
+            }
             insert_identity(
                 &mut ids,
                 &mut ordinals,
@@ -814,6 +843,12 @@ impl RustCompilerManifest {
         }
 
         let mut decisions = Vec::with_capacity(self.decisions.len());
+        let branches_by_id = self
+            .branches
+            .iter()
+            .map(|branch| (branch.id.as_str(), branch))
+            .collect::<BTreeMap<_, _>>();
+        let mut decision_outcome_obligations = BTreeMap::new();
         for decision in &self.decisions {
             let (file, line, column, source) =
                 location(&decision.source_key, decision.start, decision.end)?;
@@ -824,6 +859,25 @@ impl RustCompilerManifest {
             }
             internal_ordinals
                 .insert(ordinal(&decision.probe_ordinal).expect("validated decision ordinal"));
+            let outcome_branch = branches_by_id[decision.outcome_branch_id.as_str()];
+            let labels = if decision.kind == "assertion" {
+                ("failed", "passed")
+            } else {
+                ("condition false", "condition true")
+            };
+            let alternative = |label: &str| {
+                outcome_branch
+                    .alternatives
+                    .iter()
+                    .find(|alternative| alternative.label == label)
+                    .expect("validated decision outcome label")
+                    .id
+                    .clone()
+            };
+            decision_outcome_obligations.insert(
+                decision.id.clone(),
+                (alternative(labels.0), alternative(labels.1)),
+            );
             decisions.push(DecisionMeta {
                 id: decision.id.clone(),
                 file,
@@ -839,11 +893,6 @@ impl RustCompilerManifest {
             });
         }
 
-        let branches_by_id = self
-            .branches
-            .iter()
-            .map(|branch| (branch.id.as_str(), branch))
-            .collect::<BTreeMap<_, _>>();
         for group in &self.selection_groups {
             internal_ordinals
                 .insert(ordinal(&group.probe_ordinal).expect("validated selection group ordinal"));
@@ -911,6 +960,7 @@ impl RustCompilerManifest {
                 .map(|(ordinal, ids)| (ordinal, ids.into_iter().collect()))
                 .collect(),
             internal_ordinals,
+            decision_outcome_obligations,
         })
     }
 }
@@ -1005,6 +1055,7 @@ mod tests {
                 "provenance": "authored-source",
                 "probeOrdinal": "5",
                 "definitions": ["fixture::function"],
+                "outcomeBranchId": "rs:branch:000000000000000000000002",
                 "conditions": [{"sourceKey": "source:src/lib.rs", "start": 11, "end": 15, "source": "value"}],
                 "canonical": "decision"
             }],
@@ -1044,6 +1095,24 @@ mod tests {
         traversal["points"][0]["sourceKey"] = json!("source:../outside.rs");
         assert!(matches!(
             RustCompilerManifest::parse(&serde_json::to_vec(&traversal).unwrap()),
+            Err(RustCompilerManifestError::Invalid(_))
+        ));
+
+        let mut missing_outcome = valid_manifest();
+        missing_outcome["decisions"][0]["outcomeBranchId"] = json!("rs:branch:missing");
+        assert!(matches!(
+            RustCompilerManifest::parse(&serde_json::to_vec(&missing_outcome).unwrap()),
+            Err(RustCompilerManifestError::Invalid(_))
+        ));
+
+        let mut wrong_outcome_kind = valid_manifest();
+        wrong_outcome_kind["branches"][0]["kind"] = json!("loop-entry");
+        wrong_outcome_kind["branches"][0]["alternatives"] = json!([
+            {"id": "rs:branch-alternative:000000000000000000000003", "label": "zero iterations", "probeOrdinal": "3"},
+            {"id": "rs:branch-alternative:000000000000000000000004", "label": "entered", "probeOrdinal": "4"}
+        ]);
+        assert!(matches!(
+            RustCompilerManifest::parse(&serde_json::to_vec(&wrong_outcome_kind).unwrap()),
             Err(RustCompilerManifestError::Invalid(_))
         ));
     }
@@ -1152,13 +1221,22 @@ mod tests {
             ["rs:branch-alternative:000000000000000000000003"]
         );
         assert_eq!(normalized.internal_ordinals, BTreeSet::from([2, 5]));
+        assert_eq!(
+            normalized.decision_outcome_obligations["rs:decision:000000000000000000000005"],
+            (
+                "rs:branch-alternative:000000000000000000000004".into(),
+                "rs:branch-alternative:000000000000000000000003".into(),
+            )
+        );
         assert_eq!(normalized.manifest.limitations.len(), 1);
     }
 
     #[test]
     fn match_selection_expands_to_sibling_not_selected_obligations() {
         let mut candidate = valid_manifest();
+        let outcome_branch = candidate["branches"][0].clone();
         candidate["branches"] = json!([
+            outcome_branch,
             {
                 "id": "rs:branch:000000000000000000000006",
                 "kind": "match-arm",

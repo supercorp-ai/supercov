@@ -15,7 +15,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    coverage_report::{RuntimeEvent, RuntimeSnapshot},
+    coverage_analysis::McdcVector,
+    coverage_report::{DecisionSnapshot, RuntimeEvent, RuntimeSnapshot},
     rust_compiler_manifest::NormalizedRustCompilerManifest,
 };
 
@@ -38,6 +39,17 @@ struct CtfeMapping {
     observation_kind: String,
     ordinal: u32,
     hit_ordinals: Vec<String>,
+    decision: Option<CtfeDecisionMapping>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CtfeDecisionMapping {
+    id: String,
+    event: String,
+    condition_index: Option<u64>,
+    value: Option<bool>,
+    outcome: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -51,6 +63,18 @@ struct CtfeEvent {
     observation_kind: String,
     ordinal: u32,
     thread: String,
+}
+
+#[derive(Debug)]
+struct ActiveDecision {
+    id: String,
+    values: Vec<Option<bool>>,
+}
+
+#[derive(Debug)]
+struct ActiveInvocation {
+    definition: String,
+    decisions: Vec<ActiveDecision>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -189,6 +213,12 @@ fn reconstruct_unit(
             map_path.display()
         )));
     }
+    let decisions = normalized
+        .manifest
+        .decisions
+        .iter()
+        .map(|decision| (decision.id.as_str(), decision))
+        .collect::<BTreeMap<_, _>>();
     let mut mappings = BTreeMap::<u64, CtfeMapping>::new();
     for mapping in map.mappings {
         let marker = parse_u64(&mapping.marker, "CTFE marker")?;
@@ -196,7 +226,13 @@ fn reconstruct_unit(
             || mapping.definition.trim().is_empty()
             || !matches!(
                 mapping.observation_kind.as_str(),
-                "entry" | "block" | "edge" | "exit"
+                "entry"
+                    | "block"
+                    | "edge"
+                    | "exit"
+                    | "decision-start"
+                    | "decision-condition"
+                    | "decision-finish"
             )
         {
             return Err(RustCompilerCtfeError::Invalid(format!(
@@ -220,6 +256,86 @@ fn reconstruct_unit(
             }
             previous = Some(hit);
         }
+        match &mapping.decision {
+            None if mapping.observation_kind.starts_with("decision-") => {
+                return Err(RustCompilerCtfeError::Invalid(format!(
+                    "semantic marker {marker} has no decision mapping"
+                )));
+            }
+            Some(_) if !mapping.observation_kind.starts_with("decision-") => {
+                return Err(RustCompilerCtfeError::Invalid(format!(
+                    "non-decision marker {marker} carries a decision mapping"
+                )));
+            }
+            Some(decision) => {
+                let meta = decisions.get(decision.id.as_str()).ok_or_else(|| {
+                    RustCompilerCtfeError::Invalid(format!(
+                        "marker {marker} references unknown decision {}",
+                        decision.id
+                    ))
+                })?;
+                let valid_shape = match decision.event.as_str() {
+                    "start" => {
+                        mapping.observation_kind == "decision-start"
+                            && decision.condition_index.is_none()
+                            && decision.value.is_none()
+                            && decision.outcome.is_none()
+                    }
+                    "condition" => {
+                        mapping.observation_kind == "decision-condition"
+                            && decision
+                                .condition_index
+                                .is_some_and(|index| index < meta.conditions.len() as u64)
+                            && decision.value.is_some()
+                            && decision.outcome.is_none()
+                    }
+                    "finish" => {
+                        mapping.observation_kind == "decision-finish"
+                            && decision.condition_index.is_none()
+                            && decision.value.is_none()
+                            && decision.outcome.is_some()
+                    }
+                    _ => false,
+                };
+                if !valid_shape {
+                    return Err(RustCompilerCtfeError::Invalid(format!(
+                        "marker {marker} has a malformed decision event"
+                    )));
+                }
+                let expected_hits = match decision.event.as_str() {
+                    "start" | "condition" => BTreeSet::new(),
+                    "finish" => {
+                        let outcome = decision.outcome.expect("validated decision outcome");
+                        let alternatives = normalized
+                            .decision_outcome_obligations
+                            .get(&decision.id)
+                            .expect("validated decision outcome mapping");
+                        BTreeSet::from([if outcome {
+                            alternatives.1.as_str()
+                        } else {
+                            alternatives.0.as_str()
+                        }])
+                    }
+                    _ => unreachable!("validated decision event"),
+                };
+                let mapped_hits = mapping
+                    .hit_ordinals
+                    .iter()
+                    .map(|ordinal| parse_u64(ordinal, "CTFE hit ordinal"))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flat_map(|ordinal| normalized.hit_obligations_by_ordinal[&ordinal].iter())
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>();
+                if mapped_hits != expected_hits {
+                    return Err(RustCompilerCtfeError::Invalid(format!(
+                        "decision {} {} marker maps to the wrong coverage obligations",
+                        decision.id, decision.event
+                    )));
+                }
+            }
+            None => {}
+        }
         if mappings.insert(marker, mapping).is_some() {
             return Err(RustCompilerCtfeError::Invalid(format!(
                 "duplicate CTFE marker {marker}"
@@ -234,8 +350,9 @@ fn reconstruct_unit(
     }
 
     let events = parse_events(event_path)?;
-    let mut stacks = BTreeMap::<String, Vec<String>>::new();
+    let mut stacks = BTreeMap::<String, Vec<ActiveInvocation>>::new();
     let mut hits = BTreeSet::new();
+    let mut decision_vectors = BTreeMap::<String, BTreeSet<(Vec<Option<bool>>, bool)>>::new();
     let mut runtime_events = Vec::new();
     for event in &events {
         if event.kind != "ctfe-marker"
@@ -261,19 +378,108 @@ fn reconstruct_unit(
         }
         let stack = stacks.entry(event.thread.clone()).or_default();
         match event.observation_kind.as_str() {
-            "entry" => stack.push(event.definition.clone()),
-            "block" | "edge" => {
-                if stack.last() != Some(&event.definition) {
+            "entry" => stack.push(ActiveInvocation {
+                definition: event.definition.clone(),
+                decisions: Vec::new(),
+            }),
+            "block" | "edge" | "decision-start" | "decision-condition" | "decision-finish" => {
+                let Some(invocation) = stack.last_mut() else {
+                    return Err(RustCompilerCtfeError::Invalid(format!(
+                        "CTFE marker {marker} was observed outside an invocation on {}",
+                        event.thread
+                    )));
+                };
+                if invocation.definition != event.definition {
                     return Err(RustCompilerCtfeError::Invalid(format!(
                         "CTFE marker {marker} crossed invocation identity on {}",
                         event.thread
                     )));
                 }
+                if let Some(decision) = &mapping.decision {
+                    match decision.event.as_str() {
+                        "start" => {
+                            let meta = decisions[decision.id.as_str()];
+                            invocation.decisions.push(ActiveDecision {
+                                id: decision.id.clone(),
+                                values: vec![None; meta.conditions.len()],
+                            });
+                        }
+                        "condition" => {
+                            let active = invocation.decisions.last_mut().ok_or_else(|| {
+                                RustCompilerCtfeError::Invalid(format!(
+                                    "decision condition {} has no active frame",
+                                    decision.id
+                                ))
+                            })?;
+                            if active.id != decision.id {
+                                return Err(RustCompilerCtfeError::Invalid(format!(
+                                    "decision condition {} crossed active decision {}",
+                                    decision.id, active.id
+                                )));
+                            }
+                            let index = usize::try_from(
+                                decision.condition_index.expect("validated condition index"),
+                            )
+                            .map_err(|_| {
+                                RustCompilerCtfeError::Invalid(format!(
+                                    "decision {} condition index exceeds usize",
+                                    decision.id
+                                ))
+                            })?;
+                            if active.values[index]
+                                .replace(decision.value.expect("validated condition value"))
+                                .is_some()
+                            {
+                                return Err(RustCompilerCtfeError::Invalid(format!(
+                                    "decision {} condition {index} was observed twice",
+                                    decision.id
+                                )));
+                            }
+                        }
+                        "finish" => {
+                            let active = invocation.decisions.pop().ok_or_else(|| {
+                                RustCompilerCtfeError::Invalid(format!(
+                                    "decision finish {} has no active frame",
+                                    decision.id
+                                ))
+                            })?;
+                            if active.id != decision.id {
+                                return Err(RustCompilerCtfeError::Invalid(format!(
+                                    "decision finish {} closed active decision {}",
+                                    decision.id, active.id
+                                )));
+                            }
+                            let outcome = decision.outcome.expect("validated decision outcome");
+                            decision_vectors
+                                .entry(decision.id.clone())
+                                .or_default()
+                                .insert((active.values.clone(), outcome));
+                            runtime_events.push(RuntimeEvent {
+                                event_type: "decision".into(),
+                                id: decision.id.clone(),
+                                vector: Some(McdcVector {
+                                    values: active.values,
+                                    outcome,
+                                }),
+                                timestamp_ms,
+                                phase_id: None,
+                                environment: "rust-ctfe".into(),
+                            });
+                        }
+                        _ => unreachable!("validated decision event"),
+                    }
+                }
             }
             "exit" => {
-                if stack.pop().as_deref() != Some(event.definition.as_str()) {
+                let Some(invocation) = stack.pop() else {
                     return Err(RustCompilerCtfeError::Invalid(format!(
-                        "CTFE marker {marker} closed the wrong invocation on {}",
+                        "CTFE marker {marker} closed an absent invocation on {}",
+                        event.thread
+                    )));
+                };
+                if invocation.definition != event.definition || !invocation.decisions.is_empty() {
+                    return Err(RustCompilerCtfeError::Invalid(format!(
+                        "CTFE marker {marker} closed the wrong or incomplete invocation on {}",
                         event.thread
                     )));
                 }
@@ -305,7 +511,16 @@ fn reconstruct_unit(
         identity,
         crate_name: map.crate_name,
         snapshot: RuntimeSnapshot {
-            decisions: Vec::new(),
+            decisions: decision_vectors
+                .into_iter()
+                .map(|(id, vectors)| DecisionSnapshot {
+                    meta: decisions[id.as_str()].clone(),
+                    vectors: vectors
+                        .into_iter()
+                        .map(|(values, outcome)| McdcVector { values, outcome })
+                        .collect(),
+                })
+                .collect(),
             hits: hits.into_iter().collect(),
             events: runtime_events,
         },
@@ -329,6 +544,206 @@ pub fn read_rust_compiler_ctfe(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use serde_json::{Value, json};
+
+    use crate::{
+        coverage_analysis::PointKind,
+        coverage_report::{
+            BranchAlternativeMeta, BranchMeta, CoverageManifest, DecisionMeta, PointMeta,
+        },
+    };
+
+    static SCRATCH_NONCE: AtomicU64 = AtomicU64::new(0);
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            let epoch = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock before epoch")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "supercov-rust-ctfe-{}-{epoch}-{}",
+                std::process::id(),
+                SCRATCH_NONCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).expect("create CTFE scratch directory");
+            Self(path)
+        }
+
+        fn write(&self, map: Value, events: &[Value]) {
+            fs::write(
+                self.0.join("ctfe-map-unit.json"),
+                serde_json::to_vec(&map).expect("serialize CTFE map"),
+            )
+            .expect("write CTFE map");
+            let mut bytes = events
+                .iter()
+                .map(|event| serde_json::to_string(event).expect("serialize CTFE event"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into_bytes();
+            bytes.push(b'\n');
+            fs::write(self.0.join("ctfe-events-unit.jsonl"), bytes).expect("write CTFE events");
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn normalized_manifest() -> NormalizedRustCompilerManifest {
+        let decision = DecisionMeta {
+            id: "decision".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            column: 1,
+            source: "value".into(),
+            conditions: vec!["value".into()],
+            kind: "control".into(),
+        };
+        let branch = BranchMeta {
+            id: "outcome".into(),
+            kind: "decision-outcome".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            column: 1,
+            source: "value".into(),
+            alternatives: vec![
+                BranchAlternativeMeta {
+                    id: "false-alternative".into(),
+                    label: "condition false".into(),
+                },
+                BranchAlternativeMeta {
+                    id: "true-alternative".into(),
+                    label: "condition true".into(),
+                },
+            ],
+        };
+        NormalizedRustCompilerManifest {
+            manifest: CoverageManifest {
+                decisions: vec![decision],
+                points: vec![PointMeta {
+                    id: "function".into(),
+                    kind: PointKind::Function,
+                    file: "src/lib.rs".into(),
+                    line: 1,
+                    column: 1,
+                    source: "const fn evaluated(value: bool) -> bool".into(),
+                    label: None,
+                }],
+                branches: vec![branch],
+                limitations: Vec::new(),
+                scope: None,
+            },
+            hit_obligations_by_ordinal: BTreeMap::from([
+                (101, vec!["function".into()]),
+                (201, vec!["false-alternative".into()]),
+                (202, vec!["true-alternative".into()]),
+            ]),
+            internal_ordinals: BTreeSet::new(),
+            decision_outcome_obligations: BTreeMap::from([(
+                "decision".into(),
+                ("false-alternative".into(), "true-alternative".into()),
+            )]),
+        }
+    }
+
+    fn mapping(
+        marker: &str,
+        observation_kind: &str,
+        hit_ordinals: &[&str],
+        decision: Option<Value>,
+    ) -> Value {
+        json!({
+            "marker": marker,
+            "definition": "fixture::evaluated",
+            "observationKind": observation_kind,
+            "ordinal": 0,
+            "hitOrdinals": hit_ordinals,
+            "decision": decision,
+        })
+    }
+
+    fn event(marker: &str, observation_kind: &str) -> Value {
+        json!({
+            "crate": "fixture",
+            "kind": "ctfe-marker",
+            "marker": marker,
+            "definition": "fixture::evaluated",
+            "observationKind": observation_kind,
+            "ordinal": 0,
+            "thread": "compiler-thread-1",
+        })
+    }
+
+    fn decision_event(
+        id: &str,
+        event: &str,
+        condition_index: Option<u64>,
+        value: Option<bool>,
+        outcome: Option<bool>,
+    ) -> Value {
+        json!({
+            "id": id,
+            "event": event,
+            "conditionIndex": condition_index,
+            "value": value,
+            "outcome": outcome,
+        })
+    }
+
+    fn valid_map() -> Value {
+        json!({
+            "schema": MAP_SCHEMA,
+            "crate": "fixture",
+            "mappings": [
+                mapping("1", "entry", &["101"], None),
+                mapping("2", "decision-start", &[], Some(decision_event(
+                    "decision", "start", None, None, None,
+                ))),
+                mapping("3", "decision-condition", &[], Some(decision_event(
+                    "decision", "condition", Some(0), Some(false), None,
+                ))),
+                mapping("4", "decision-finish", &["201"], Some(decision_event(
+                    "decision", "finish", None, None, Some(false),
+                ))),
+                mapping("5", "exit", &[], None),
+                mapping("6", "decision-condition", &[], Some(decision_event(
+                    "decision", "condition", Some(0), Some(true), None,
+                ))),
+                mapping("7", "decision-finish", &["202"], Some(decision_event(
+                    "decision", "finish", None, None, Some(true),
+                ))),
+            ],
+        })
+    }
+
+    fn valid_events() -> Vec<Value> {
+        [
+            ("1", "entry"),
+            ("2", "decision-start"),
+            ("3", "decision-condition"),
+            ("4", "decision-finish"),
+            ("5", "exit"),
+            ("1", "entry"),
+            ("2", "decision-start"),
+            ("6", "decision-condition"),
+            ("7", "decision-finish"),
+            ("5", "exit"),
+        ]
+        .into_iter()
+        .map(|(marker, kind)| event(marker, kind))
+        .collect()
+    }
 
     #[test]
     fn canonical_unsigned_decimal_rejects_aliases() {
@@ -336,5 +751,84 @@ mod tests {
         assert!(parse_u64("012", "marker").is_err());
         assert!(parse_u64("-1", "marker").is_err());
         assert!(parse_u64("", "marker").is_err());
+    }
+
+    #[test]
+    fn reconstructs_exact_independent_ctfe_vectors_and_outcome_hits() {
+        let scratch = Scratch::new();
+        scratch.write(valid_map(), &valid_events());
+
+        let units = read_rust_compiler_ctfe(&scratch.0, &normalized_manifest(), 42).unwrap();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].observations, 10);
+        assert_eq!(
+            units[0].snapshot.hits,
+            ["false-alternative", "function", "true-alternative"]
+        );
+        assert_eq!(units[0].snapshot.decisions.len(), 1);
+        assert_eq!(
+            units[0].snapshot.decisions[0].vectors,
+            [
+                McdcVector {
+                    values: vec![Some(false)],
+                    outcome: false,
+                },
+                McdcVector {
+                    values: vec![Some(true)],
+                    outcome: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_semantic_marker_with_unrelated_hit() {
+        let scratch = Scratch::new();
+        let mut map = valid_map();
+        map["mappings"][1]["hitOrdinals"] = json!(["201"]);
+        scratch.write(map, &valid_events());
+
+        let error = read_rust_compiler_ctfe(&scratch.0, &normalized_manifest(), 42)
+            .expect_err("semantic start marker must not carry a coverage hit");
+        assert!(error.to_string().contains("wrong coverage obligations"));
+    }
+
+    #[test]
+    fn rejects_finish_mapped_to_the_wrong_outcome_alternative() {
+        let scratch = Scratch::new();
+        let mut map = valid_map();
+        map["mappings"][3]["hitOrdinals"] = json!(["202"]);
+        scratch.write(map, &valid_events());
+
+        let error = read_rust_compiler_ctfe(&scratch.0, &normalized_manifest(), 42)
+            .expect_err("false finish must not map to the true alternative");
+        assert!(error.to_string().contains("wrong coverage obligations"));
+    }
+
+    #[test]
+    fn rejects_condition_without_an_active_decision() {
+        let scratch = Scratch::new();
+        let mut events = valid_events();
+        events.remove(1);
+        scratch.write(valid_map(), &events);
+
+        let error = read_rust_compiler_ctfe(&scratch.0, &normalized_manifest(), 42)
+            .expect_err("condition without start must fail closed");
+        assert!(error.to_string().contains("has no active frame"));
+    }
+
+    #[test]
+    fn rejects_exit_with_an_incomplete_decision() {
+        let scratch = Scratch::new();
+        let events = valid_events()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, event)| (index != 3).then_some(event))
+            .collect::<Vec<_>>();
+        scratch.write(valid_map(), &events);
+
+        let error = read_rust_compiler_ctfe(&scratch.0, &normalized_manifest(), 42)
+            .expect_err("invocation exit with an open decision must fail closed");
+        assert!(error.to_string().contains("wrong or incomplete invocation"));
     }
 }

@@ -675,7 +675,7 @@ try {
   assert.equal(identityManifestA.model, 'rust-source-v1');
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
-    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: CTFE and doctest obligation/probe mappings are not emitted yet',
+    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: complete CTFE and doctest obligation/probe mappings are not emitted yet',
   ]);
   const allIds = [
     ...identityManifestA.points.map(({id}) => id),
@@ -1241,6 +1241,34 @@ try {
     [...previouslyProvenOrdinals].every((ordinal) => observedOrdinals.has(ordinal)),
     'general point instrumentation lost a previously proven branch or function observation',
   );
+  const instrumentedManifests = manifests(instrumentedDirectory);
+  const instrumentedDecisions = instrumentedManifests.flatMap(
+    (manifestRecord) => manifestRecord.decisions,
+  );
+  const instrumentedBranches = instrumentedManifests.flatMap(
+    (manifestRecord) => manifestRecord.branches,
+  );
+  for (const observed of behaviorEvidence.decisions) {
+    const decision = instrumentedDecisions.find(({id}) => id === observed.id);
+    assert(decision, `runtime emitted unknown decision ${observed.id}`);
+    const outcomeBranch = instrumentedBranches.find(
+      ({id}) => id === decision.outcomeBranchId,
+    );
+    assert(
+      outcomeBranch,
+      `decision ${decision.id} has no exact outcome branch relation`,
+    );
+    const label = decision.kind === 'assertion'
+      ? (observed.outcome ? 'passed' : 'failed')
+      : (observed.outcome ? 'condition true' : 'condition false');
+    const outcomeOrdinal = outcomeBranch.alternatives.find(
+      (alternative) => alternative.label === label,
+    )?.probeOrdinal;
+    assert(
+      outcomeOrdinal && observedOrdinals.has(outcomeOrdinal),
+      `decision ${decision.id} did not commit its exact ${label} branch alternative`,
+    );
+  }
   const manifestedHitOrdinals = allManifestedHitOrdinals(instrumentedDirectory);
   assert(
     [...observedOrdinals].every((ordinal) => manifestedHitOrdinals.has(ordinal)),
@@ -1821,6 +1849,7 @@ try {
         CARGO_TARGET_DIR: join(scratch, 'ctfe-target'),
         RUSTC_WRAPPER: wrapper,
         SUPERCOV_RUST_COMPILER_OUTPUT: ctfeDirectory,
+        SUPERCOV_RUST_INSTRUMENT_MIR: '1',
         SUPERCOV_RUST_INSTRUMENT_CTFE: '1',
       },
     },
@@ -1953,6 +1982,50 @@ try {
       .sort(),
     ['0', '1'],
     'CTFE invocation frames did not preserve the independent false/true paths',
+  );
+  const constDecision = decisionFor(runtimeManifest, 'const_decision');
+  assert(constDecision, 'const_decision has no frozen decision obligation');
+  const ctfeVectors = constDecisionInvocations.map(({records: invocationRecords}) => {
+    let active;
+    let completed;
+    for (const record of invocationRecords) {
+      const semantic = mappingsByMarker.get(
+        `${record.crate}:${record.marker}`,
+      ).decision;
+      if (!semantic) continue;
+      assert.equal(
+        semantic.id,
+        constDecision.id,
+        'const_decision CTFE frame crossed decision identity',
+      );
+      if (semantic.event === 'start') {
+        assert.equal(active, undefined, 'nested duplicate const decision start');
+        active = Array(constDecision.conditions.length).fill(null);
+      } else if (semantic.event === 'condition') {
+        assert(active, 'CTFE condition has no active decision');
+        assert.equal(
+          active[semantic.conditionIndex],
+          null,
+          'CTFE condition was observed twice',
+        );
+        active[semantic.conditionIndex] = semantic.value;
+      } else if (semantic.event === 'finish') {
+        assert(active, 'CTFE finish has no active decision');
+        completed = {values: active, outcome: semantic.outcome};
+        active = undefined;
+      }
+    }
+    assert.equal(active, undefined, 'CTFE decision frame remained open');
+    assert(completed, 'CTFE decision frame never completed');
+    return JSON.stringify(completed);
+  });
+  assert.deepEqual(
+    ctfeVectors.sort(),
+    [
+      JSON.stringify({values: [false], outcome: false}),
+      JSON.stringify({values: [true], outcome: true}),
+    ].sort(),
+    'CTFE semantic mappings did not reconstruct the exact false/true vectors',
   );
   const ctfeDefinitions = new Set(
     ctfeRecordFiles.flatMap(({records: fileRecords}) =>

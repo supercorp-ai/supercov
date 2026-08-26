@@ -348,6 +348,7 @@ mod tests {
                 ),
             ]),
             internal_ordinals: BTreeSet::from([100]),
+            decision_outcome_obligations: BTreeMap::new(),
         }
     }
 
