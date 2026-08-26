@@ -32,8 +32,10 @@ use rustc_hir::{
 use rustc_interface::interface::{Compiler, Config};
 use rustc_middle::{
     mir::{
-        BasicBlockData, Body, CallSource, LocalDecl, Operand, Place, Rvalue, SourceInfo, Statement,
-        StatementKind, Terminator, TerminatorKind, UnwindAction, interpret::Scalar,
+        BasicBlock, BasicBlockData, Body, CallSource, LocalDecl, Operand, Place, Rvalue,
+        SourceInfo, Statement, StatementKind, Terminator, TerminatorKind, UnwindAction,
+        coverage::{CoverageKind, MappingKind},
+        interpret::Scalar,
     },
     ty::TyCtxt,
     util::Providers,
@@ -61,6 +63,9 @@ const FORCE_PROBE_COLLISION: &str = "SUPERCOV_RUSTC_SPIKE_FORCE_PROBE_COLLISION"
 const PROBE_FUNCTION: &str = "__supercov_spike_runtime::ordinal_hit";
 const ENTER_CONTEXT_FUNCTION: &str = "__supercov_spike_runtime::enter_context";
 const EXIT_CONTEXT_FUNCTION: &str = "__supercov_spike_runtime::exit_context";
+const START_DECISION_FUNCTION: &str = "__supercov_spike_runtime::mir_decision_start";
+const RECORD_CONDITION_FUNCTION: &str = "__supercov_spike_runtime::mir_decision_condition";
+const FINISH_DECISION_FUNCTION: &str = "__supercov_spike_runtime::mir_decision_finish";
 const CTFE_EVENT_TARGET: &str = "rustc_const_eval::interpret::step";
 const CTFE_MARKER_PREFIX: u64 = 0x5355_5045_5243_0000;
 const CTFE_EDGE_MARKER_OFFSET: u64 = 0x8000;
@@ -112,7 +117,10 @@ struct BranchObligation {
 #[derive(Debug, PartialEq, Eq)]
 struct DecisionCondition {
     source: StableSourceRange,
+    branch_source: StableSourceRange,
     text: String,
+    true_outcome: Option<bool>,
+    false_outcome: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -518,10 +526,25 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
 
     fn record_if(&mut self, expression: &'tcx hir::Expr<'tcx>, condition: &'tcx hir::Expr<'tcx>) {
         let mut atomic = Vec::new();
-        flatten_boolean_conditions(condition, &mut atomic);
+        flatten_decision_expression(condition, Some(true), Some(false), &mut atomic);
+        if atomic.iter().any(|condition| {
+            let span = condition.expression.span;
+            span.from_expansion()
+                && !self.tcx.def_span(self.def_id).from_expansion()
+                && !span
+                    .ctxt()
+                    .outer_expn_data()
+                    .macro_def_id
+                    .is_some_and(|macro_def| macro_def.is_local())
+        }) {
+            // Hidden control flow emitted by an external macro (for example
+            // assert! or println!) is implementation code of that macro, not
+            // an authored decision in the caller's denominator.
+            return;
+        }
         let has_let = atomic
             .iter()
-            .any(|condition| matches!(condition.kind, hir::ExprKind::Let(_)));
+            .any(|condition| matches!(condition.expression.kind, hir::ExprKind::Let(_)));
         let decision_kind = if has_let && atomic.len() > 1 {
             "let-chain"
         } else if has_let {
@@ -529,48 +552,72 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
         } else {
             "if"
         };
-        let conditions = atomic
-            .into_iter()
-            .filter_map(|condition| {
-                match stable_source_range(self.tcx, condition.span, self.crate_name) {
-                    Ok(source) if source.owned => Some(DecisionCondition {
-                        text: if condition.span.from_expansion()
-                            && stable_source_range(
-                                self.tcx,
-                                condition.span.source_callsite(),
-                                self.crate_name,
-                            )
-                            .is_ok_and(|callsite| callsite == source)
-                        {
-                            rustc_hir_pretty::expr_to_string(&self.tcx, condition)
-                        } else {
-                            self.tcx
-                                .sess
-                                .source_map()
-                                .span_to_snippet(condition.span)
-                                .unwrap_or_else(|_| "<source unavailable>".into())
-                        },
-                        source,
-                    }),
+        let mut conditions = Vec::with_capacity(atomic.len());
+        for condition in atomic {
+            let source =
+                match stable_source_range(self.tcx, condition.expression.span, self.crate_name) {
+                    Ok(source) if source.owned => source,
                     Ok(source) => {
                         self.limitations.insert(format!(
                             "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: condition: unowned {} source {}",
                             self.definition, source.class, source.key
                         ));
-                        None
+                        return;
                     }
                     Err(error) => {
                         self.limitations.insert(format!(
                             "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: condition: {error}",
                             self.definition
                         ));
-                        None
+                        return;
                     }
+                };
+            let branch_source = match stable_source_range(
+                self.tcx,
+                match condition.expression.kind {
+                    hir::ExprKind::Let(let_expression) => let_expression.pat.span,
+                    _ => condition.expression.span,
+                },
+                self.crate_name,
+            ) {
+                Ok(branch_source) if branch_source.owned => branch_source,
+                Ok(branch_source) => {
+                    self.limitations.insert(format!(
+                        "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: branch condition: unowned {} source {}",
+                        self.definition, branch_source.class, branch_source.key
+                    ));
+                    return;
                 }
-            })
-            .collect::<Vec<_>>();
-        if conditions.is_empty() {
-            return;
+                Err(error) => {
+                    self.limitations.insert(format!(
+                        "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: branch condition: {error}",
+                        self.definition
+                    ));
+                    return;
+                }
+            };
+            conditions.push(DecisionCondition {
+                branch_source,
+                text: if condition.expression.span.from_expansion()
+                    && stable_source_range(
+                        self.tcx,
+                        condition.expression.span.source_callsite(),
+                        self.crate_name,
+                    )
+                    .is_ok_and(|callsite| callsite == source)
+                {
+                    rustc_hir_pretty::expr_to_string(&self.tcx, condition.expression)
+                } else {
+                    self.tcx
+                        .sess
+                        .source_map()
+                        .span_to_snippet(condition.expression.span)
+                        .unwrap_or_else(|_| "<source unavailable>".into())
+                },
+                source,
+                true_outcome: condition.true_outcome,
+                false_outcome: condition.false_outcome,
+            });
         }
         let Some(decision) = self.identity("decision", condition.span, decision_kind) else {
             return;
@@ -680,21 +727,39 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
     }
 }
 
-fn flatten_boolean_conditions<'tcx>(
+struct AtomicDecisionExpression<'tcx> {
     expression: &'tcx hir::Expr<'tcx>,
-    output: &mut Vec<&'tcx hir::Expr<'tcx>>,
+    true_outcome: Option<bool>,
+    false_outcome: Option<bool>,
+}
+
+fn flatten_decision_expression<'tcx>(
+    expression: &'tcx hir::Expr<'tcx>,
+    true_outcome: Option<bool>,
+    false_outcome: Option<bool>,
+    output: &mut Vec<AtomicDecisionExpression<'tcx>>,
 ) {
     match expression.kind {
-        hir::ExprKind::Binary(operator, left, right)
-            if matches!(
-                operator.node,
-                rustc_ast::BinOpKind::And | rustc_ast::BinOpKind::Or
-            ) =>
-        {
-            flatten_boolean_conditions(left, output);
-            flatten_boolean_conditions(right, output);
-        }
-        _ => output.push(expression),
+        hir::ExprKind::Binary(operator, left, right) => match operator.node {
+            rustc_ast::BinOpKind::And => {
+                flatten_decision_expression(left, None, false_outcome, output);
+                flatten_decision_expression(right, true_outcome, false_outcome, output);
+            }
+            rustc_ast::BinOpKind::Or => {
+                flatten_decision_expression(left, true_outcome, None, output);
+                flatten_decision_expression(right, true_outcome, false_outcome, output);
+            }
+            _ => output.push(AtomicDecisionExpression {
+                expression,
+                true_outcome,
+                false_outcome,
+            }),
+        },
+        _ => output.push(AtomicDecisionExpression {
+            expression,
+            true_outcome,
+            false_outcome,
+        }),
     }
 }
 
@@ -935,6 +1000,7 @@ impl Callbacks for ProbeCallbacks {
         let mut decisions = BTreeMap::<String, DecisionObligation>::new();
         let mut manifest_limitations = BTreeSet::from([
             "RUST_MANIFEST_CANDIDATE_IF_SLICE_ONLY: loop, match, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
+            "RUST_NATIVE_PROFILE_LINK_ELIMINATION_UNPROVEN: rustc branch-region retention still enables an ignored LLVM profile runtime whose output must remain inside the ephemeral run directory".to_owned(),
         ]);
 
         for owner in tcx.hir_body_owners() {
@@ -1236,6 +1302,369 @@ fn ctfe_marker_statement<'tcx>(
     )
 }
 
+#[derive(Debug)]
+struct RuntimeDecisionCondition {
+    index: u64,
+    source_block: BasicBlock,
+    true_target: BasicBlock,
+    false_target: BasicBlock,
+    true_outcome: Option<bool>,
+    false_outcome: Option<bool>,
+}
+
+#[derive(Debug)]
+struct RuntimeDecisionPlan {
+    id: String,
+    id_high: u64,
+    id_low: u32,
+    conditions: Vec<RuntimeDecisionCondition>,
+}
+
+fn runtime_decision_plans<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: LocalDefId,
+    body: &Body<'tcx>,
+) -> Result<Vec<RuntimeDecisionPlan>, String> {
+    let definition = tcx.def_path_str(def_id);
+    if definition.contains("__supercov_spike_runtime") {
+        return Ok(Vec::new());
+    }
+    let Some(hir_body) = tcx.hir_maybe_body_owned_by(def_id) else {
+        return Ok(Vec::new());
+    };
+    let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE).to_string();
+    let mut points = BTreeMap::new();
+    let mut branches = BTreeMap::new();
+    let mut decisions = BTreeMap::new();
+    let mut limitations = BTreeSet::new();
+    HirManifestCollector {
+        tcx,
+        def_id: def_id.to_def_id(),
+        crate_name: &crate_name,
+        definition: definition.clone(),
+        // Function identity occupies the stable owner-local ordinal zero.
+        ordinal: 1,
+        points: &mut points,
+        branches: &mut branches,
+        decisions: &mut decisions,
+        limitations: &mut limitations,
+    }
+    .visit_body(hir_body);
+    if decisions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let coverage = body.function_coverage_info.as_deref();
+    if coverage.is_none() && !tcx.def_span(def_id).from_expansion() {
+        return Err(format!(
+            "rustc did not retain branch mappings for decision-bearing function {definition}"
+        ));
+    }
+    let mut bcb_blocks = BTreeMap::<u32, Vec<BasicBlock>>::new();
+    for (block, data) in body.basic_blocks.iter_enumerated() {
+        for statement in &data.statements {
+            if let StatementKind::Coverage(CoverageKind::VirtualCounter { bcb }) = statement.kind {
+                bcb_blocks.entry(bcb.as_u32()).or_default().push(block);
+            }
+        }
+    }
+    let mut branch_mappings = coverage
+        .into_iter()
+        .flat_map(|coverage| coverage.mappings.iter())
+        .filter_map(|mapping| match mapping.kind {
+            MappingKind::Branch {
+                true_bcb,
+                false_bcb,
+            } => Some((mapping.span, true_bcb.as_u32(), false_bcb.as_u32())),
+            MappingKind::Code { .. } => None,
+        })
+        .map(|(span, true_bcb, false_bcb)| {
+            stable_source_range(tcx, span, &crate_name).map(|source| (source, true_bcb, false_bcb))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut plans = Vec::new();
+    let mut fallback_blocks = BTreeSet::new();
+    for decision in decisions.values() {
+        let digest = decision
+            .identity
+            .id
+            .strip_prefix("rs:decision:")
+            .ok_or_else(|| format!("invalid Rust decision ID {}", decision.identity.id))?;
+        if digest.len() != 24 {
+            return Err(format!("invalid Rust decision digest {digest}"));
+        }
+        let id_high = u64::from_str_radix(&digest[..16], 16).map_err(|error| {
+            format!("invalid Rust decision ID {}: {error}", decision.identity.id)
+        })?;
+        let id_low = u32::from_str_radix(&digest[16..], 16).map_err(|error| {
+            format!("invalid Rust decision ID {}: {error}", decision.identity.id)
+        })?;
+        let mut conditions = Vec::new();
+        for (index, condition) in decision.conditions.iter().enumerate() {
+            let mapping_index = branch_mappings
+                .iter()
+                .position(|(source, _, _)| source == &condition.branch_source);
+            let (source_block, true_target, false_target) = if let Some(mapping_index) =
+                mapping_index
+            {
+                let (_, true_bcb, false_bcb) = branch_mappings.remove(mapping_index);
+                let unique_block = |bcb: u32| -> Result<BasicBlock, String> {
+                    let blocks = bcb_blocks.get(&bcb).cloned().unwrap_or_default();
+                    match blocks.as_slice() {
+                        [block] => Ok(*block),
+                        _ => Err(format!(
+                            "coverage block {bcb} for {} maps to {} MIR blocks",
+                            decision.identity.id,
+                            blocks.len()
+                        )),
+                    }
+                };
+                let true_target = unique_block(true_bcb)?;
+                let false_target = unique_block(false_bcb)?;
+                let source_blocks = body
+                    .basic_blocks
+                    .iter_enumerated()
+                    .filter_map(|(block, data)| match &data.terminator().kind {
+                        TerminatorKind::SwitchInt { targets, .. }
+                            if targets.all_targets().contains(&true_target)
+                                && targets.all_targets().contains(&false_target) =>
+                        {
+                            Some(block)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let [source_block] = source_blocks.as_slice() else {
+                    return Err(format!(
+                        "could not identify one optimized MIR branch for {} condition {}; found {}",
+                        decision.identity.id,
+                        index,
+                        source_blocks.len()
+                    ));
+                };
+                (*source_block, true_target, false_target)
+            } else if tcx.def_span(def_id).from_expansion() {
+                let source_blocks = body
+                    .basic_blocks
+                    .iter_enumerated()
+                    .filter_map(|(block, data)| {
+                        if fallback_blocks.contains(&block.as_u32()) {
+                            return None;
+                        }
+                        let TerminatorKind::SwitchInt { discr, targets } = &data.terminator().kind
+                        else {
+                            return None;
+                        };
+                        if discr.ty(&body.local_decls, tcx) != tcx.types.bool {
+                            return None;
+                        }
+                        let source = stable_source_range(
+                            tcx,
+                            data.terminator().source_info.span,
+                            &crate_name,
+                        )
+                        .ok()?;
+                        (source == condition.branch_source || source == condition.source).then_some(
+                            (
+                                block,
+                                targets.target_for_value(1),
+                                targets.target_for_value(0),
+                            ),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let [(source_block, true_target, false_target)] = source_blocks.as_slice() else {
+                    return Err(format!(
+                        "could not bind one expanded boolean MIR branch for {} condition {}; found {}",
+                        decision.identity.id,
+                        index,
+                        source_blocks.len()
+                    ));
+                };
+                fallback_blocks.insert(source_block.as_u32());
+                (*source_block, *true_target, *false_target)
+            } else {
+                return Err(format!(
+                    "rustc branch mapping missing for {} condition {} at {}:{}-{}; available: {:?}",
+                    decision.identity.id,
+                    index,
+                    condition.branch_source.key,
+                    condition.branch_source.start,
+                    condition.branch_source.end,
+                    branch_mappings
+                        .iter()
+                        .map(|(source, _, _)| format!(
+                            "{}:{}-{}:{}",
+                            source.key, source.start, source.end, source.class
+                        ))
+                        .collect::<Vec<_>>(),
+                ));
+            };
+            conditions.push(RuntimeDecisionCondition {
+                index: index as u64,
+                source_block,
+                true_target,
+                false_target,
+                true_outcome: condition.true_outcome,
+                false_outcome: condition.false_outcome,
+            });
+        }
+        plans.push(RuntimeDecisionPlan {
+            id: decision.identity.id.clone(),
+            id_high,
+            id_low,
+            conditions,
+        });
+    }
+    Ok(plans)
+}
+
+fn strip_native_coverage(body: &mut Body<'_>) {
+    for data in body.basic_blocks_mut() {
+        data.statements
+            .retain(|statement| !matches!(statement.kind, StatementKind::Coverage(_)));
+    }
+    body.coverage_info_hi = None;
+    body.function_coverage_info = None;
+}
+
+fn instrument_runtime_decisions<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &mut Body<'tcx>,
+    plans: &[RuntimeDecisionPlan],
+    start: LocalDefId,
+    condition: LocalDefId,
+    finish: LocalDefId,
+    unit: rustc_middle::mir::Local,
+    span: rustc_span::Span,
+) -> Result<(), String> {
+    let mut starts = BTreeSet::new();
+    for plan in plans {
+        let Some(first) = plan.conditions.first() else {
+            return Err(format!("decision {} has no conditions", plan.id));
+        };
+        if !starts.insert(first.source_block.as_u32()) {
+            return Err(format!(
+                "multiple decisions begin in MIR block {:?}; nested/shared starts require an explicit ordering",
+                first.source_block
+            ));
+        }
+        let token = body.local_decls.push(LocalDecl::new(tcx.types.u64, span));
+        for mapped in &plan.conditions {
+            for (value, target, outcome) in [
+                (true, mapped.true_target, mapped.true_outcome),
+                (false, mapped.false_target, mapped.false_outcome),
+            ] {
+                let cleanup = body.basic_blocks[mapped.source_block].is_cleanup;
+                let mut continuation = target;
+                if let Some(outcome) = outcome {
+                    continuation = body.basic_blocks_mut().push(runtime_call_block(
+                        tcx,
+                        finish,
+                        [
+                            Operand::Copy(Place::from(token)),
+                            Operand::const_from_scalar(
+                                tcx,
+                                tcx.types.bool,
+                                Scalar::from_bool(outcome),
+                                span,
+                            ),
+                        ]
+                        .into_iter(),
+                        Place::from(unit),
+                        continuation,
+                        span,
+                        cleanup,
+                    ));
+                }
+                let bridge = body.basic_blocks_mut().push(runtime_call_block(
+                    tcx,
+                    condition,
+                    [
+                        Operand::Copy(Place::from(token)),
+                        Operand::const_from_scalar(
+                            tcx,
+                            tcx.types.u64,
+                            Scalar::from_u64(mapped.index),
+                            span,
+                        ),
+                        Operand::const_from_scalar(
+                            tcx,
+                            tcx.types.bool,
+                            Scalar::from_bool(value),
+                            span,
+                        ),
+                    ]
+                    .into_iter(),
+                    Place::from(unit),
+                    continuation,
+                    span,
+                    cleanup,
+                ));
+                let TerminatorKind::SwitchInt { targets, .. } = &mut body.basic_blocks_mut()
+                    [mapped.source_block]
+                    .terminator_mut()
+                    .kind
+                else {
+                    return Err(format!(
+                        "decision {} condition {} is no longer a SwitchInt",
+                        plan.id, mapped.index
+                    ));
+                };
+                let mut replaced = 0;
+                for edge in targets.all_targets_mut() {
+                    if *edge == target {
+                        *edge = bridge;
+                        replaced += 1;
+                    }
+                }
+                if replaced != 1 {
+                    return Err(format!(
+                        "decision {} condition {} {:?} edge replacement count was {replaced}",
+                        plan.id, mapped.index, value
+                    ));
+                }
+            }
+        }
+
+        let source = first.source_block;
+        let cleanup = body.basic_blocks[source].is_cleanup;
+        let original = body.basic_blocks_mut()[source]
+            .terminator
+            .take()
+            .ok_or_else(|| format!("decision {} start block has no terminator", plan.id))?;
+        let continuation = body
+            .basic_blocks_mut()
+            .push(BasicBlockData::new(Some(original), cleanup));
+        let call = runtime_call_block(
+            tcx,
+            start,
+            [
+                Operand::const_from_scalar(
+                    tcx,
+                    tcx.types.u64,
+                    Scalar::from_u64(plan.id_high),
+                    span,
+                ),
+                Operand::const_from_scalar(tcx, tcx.types.u32, Scalar::from_u32(plan.id_low), span),
+                Operand::const_from_scalar(
+                    tcx,
+                    tcx.types.u64,
+                    Scalar::from_u64(plan.conditions.len() as u64),
+                    span,
+                ),
+            ]
+            .into_iter(),
+            Place::from(token),
+            continuation,
+            span,
+            cleanup,
+        );
+        body.basic_blocks_mut()[source].terminator = call.terminator;
+    }
+    Ok(())
+}
+
 fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tcx Body<'tcx> {
     let original = ORIGINAL_OPTIMIZED_MIR
         .get()
@@ -1245,25 +1674,63 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
         return body;
     }
     let definition = tcx.def_path_str(def_id);
+    let decision_plans = runtime_decision_plans(tcx, def_id, body).unwrap_or_else(|error| {
+        tcx.dcx().fatal(format!(
+            "Supercov could not bind Rust decision probes in {definition}: {error}"
+        ))
+    });
     let probe_id = probe_id_for(tcx, def_id, &definition);
     let context_id = context_id_for(tcx, def_id, &definition);
-    if probe_id.is_none() && context_id.is_none() {
-        return body;
-    }
     let probe_function = probe_id.and_then(|_| find_runtime_function(tcx, PROBE_FUNCTION));
     let enter_context = context_id.and_then(|_| find_runtime_function(tcx, ENTER_CONTEXT_FUNCTION));
     let exit_context = context_id.and_then(|_| find_runtime_function(tcx, EXIT_CONTEXT_FUNCTION));
+    let start_decision = (!decision_plans.is_empty())
+        .then(|| find_runtime_function(tcx, START_DECISION_FUNCTION))
+        .flatten();
+    let record_condition = (!decision_plans.is_empty())
+        .then(|| find_runtime_function(tcx, RECORD_CONDITION_FUNCTION))
+        .flatten();
+    let finish_decision = (!decision_plans.is_empty())
+        .then(|| find_runtime_function(tcx, FINISH_DECISION_FUNCTION))
+        .flatten();
     if probe_id.is_some() != probe_function.is_some()
         || context_id.is_some() != (enter_context.is_some() && exit_context.is_some())
+        || (!decision_plans.is_empty()
+            && (start_decision.is_none()
+                || record_condition.is_none()
+                || finish_decision.is_none()))
     {
-        return body;
+        tcx.dcx().fatal(format!(
+            "Supercov injected runtime functions are incomplete while instrumenting {definition}"
+        ));
     }
 
     let mut instrumented = body.clone();
+    strip_native_coverage(&mut instrumented);
     let span = tcx.def_span(def_id);
+    if probe_id.is_none() && context_id.is_none() && decision_plans.is_empty() {
+        return tcx.arena.alloc(instrumented);
+    }
     let unit = instrumented
         .local_decls
         .push(LocalDecl::new(tcx.types.unit, span));
+    if let (Some(start), Some(condition), Some(finish)) =
+        (start_decision, record_condition, finish_decision)
+        && let Err(error) = instrument_runtime_decisions(
+            tcx,
+            &mut instrumented,
+            &decision_plans,
+            start,
+            condition,
+            finish,
+            unit,
+            span,
+        )
+    {
+        tcx.dcx().fatal(format!(
+            "Supercov could not inject Rust decision probes in {definition}: {error}"
+        ));
+    }
     let previous_context = context_id.map(|_| {
         instrumented
             .local_decls
@@ -1543,6 +2010,15 @@ fn main() {
         }
     }
     if env::var_os(INSTRUMENT_MIR).is_some() {
+        // Ask the exact rustc companion to retain its THIR-to-MIR branch
+        // regions. optimized_mir_with_probe translates those regions into
+        // Supercov probes and removes every native coverage artifact before
+        // codegen. No LLVM profile is imported; eliminating the compiler's
+        // still-linked profile-runtime byproduct is a blocking next step.
+        // SAFETY: the compiler companion has not created any threads yet.
+        unsafe { env::set_var("RUSTC_BOOTSTRAP", "1") };
+        args.push("-Cinstrument-coverage".into());
+        args.push("-Zcoverage-options=branch".into());
         args.push("--cfg=supercov_spike_instrumented".into());
         args.push("--check-cfg=cfg(supercov_spike_instrumented)".into());
     }

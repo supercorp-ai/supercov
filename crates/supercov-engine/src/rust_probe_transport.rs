@@ -496,8 +496,37 @@ fn main() {{
         __supercov_runtime_v1::hit("rs:statement:0123456789abcdef01234567");
         __supercov_runtime_v1::exit_context(outer);
         __supercov_runtime_v1::hit("rs:statement:0123456789abcdef01234567");
+    }} else if mode == "mir-decisions" {{
+        let before_outer = __supercov_runtime_v1::enter_context(901);
+        let outer = __supercov_runtime_v1::mir_decision_start(
+            0x0123_4567_89ab_cdef,
+            0x0123_4567,
+            2,
+        );
+        __supercov_runtime_v1::mir_decision_condition(outer, 0, true);
+        let before_inner = __supercov_runtime_v1::enter_context(902);
+        let inner = __supercov_runtime_v1::mir_decision_start(
+            0xfedc_ba98_7654_3210,
+            0xfedc_ba98,
+            1,
+        );
+        let migrated = std::thread::spawn(move || {{
+            __supercov_runtime_v1::mir_decision_condition(inner, 0, false);
+            __supercov_runtime_v1::mir_decision_finish(inner, false);
+        }});
+        __supercov_runtime_v1::exit_context(before_inner);
+        __supercov_runtime_v1::mir_decision_condition(outer, 1, true);
+        __supercov_runtime_v1::exit_context(before_outer);
+        __supercov_runtime_v1::mir_decision_finish(outer, true);
+        migrated.join().unwrap();
     }} else if mode == "kill" {{
         __supercov_runtime_v1::hit("rs:function:fedcba9876543210fedcba98");
+        let interrupted = __supercov_runtime_v1::mir_decision_start(
+            0x1111_1111_1111_1111,
+            0x2222_2222,
+            2,
+        );
+        __supercov_runtime_v1::mir_decision_condition(interrupted, 0, true);
         println!("ready");
         use std::io::Write as _;
         std::io::stdout().flush().unwrap();
@@ -594,6 +623,41 @@ fn main() {{
             Err(RustTransportError::InvalidHeader),
             "a supervisor must never accept evidence from another task token"
         );
+
+        let mir_decisions = directory.join("mir-decisions.transport");
+        create_rust_transport(&mir_decisions, TOKEN, 16, 4_096).unwrap();
+        let output = Command::new(&binary)
+            .arg("mir-decisions")
+            .env(RUST_TRANSPORT_ENV, &mir_decisions)
+            .env(RUST_TRANSPORT_TOKEN_ENV, token_hex())
+            .env(RUST_CONTEXT_ENV, format!("{CONTEXT:016x}"))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let read = read_rust_transport(&mir_decisions, &TOKEN).unwrap();
+        assert_eq!(read.committed, 2);
+        assert_eq!(read.dropped, 0);
+        assert_eq!(read.incomplete, 0);
+        assert!(read.observations.iter().any(|observation| matches!(
+            observation,
+            RustTransportObservation {
+                context_id: 901,
+                observation: RustProbeObservation::Decision { id, values, outcome: true },
+                ..
+            }
+                if id == "rs:decision:0123456789abcdef01234567"
+                    && values == &[Some(true), Some(true)]
+        )));
+        assert!(read.observations.iter().any(|observation| matches!(
+            observation,
+            RustTransportObservation {
+                context_id: 902,
+                observation: RustProbeObservation::Decision { id, values, outcome: false },
+                ..
+            }
+                if id == "rs:decision:fedcba9876543210fedcba98"
+                    && values == &[Some(false)]
+        )));
 
         let processes = directory.join("processes.transport");
         create_rust_transport(&processes, TOKEN, 64, 8 * 1024).unwrap();
@@ -716,6 +780,8 @@ fn main() {{
         child.wait().unwrap();
         let read = read_rust_transport(&killed, &TOKEN).unwrap();
         assert_eq!(read.committed, 1);
+        assert_eq!(read.incomplete, 1);
+        assert_eq!(read.dropped, 0);
         assert_eq!(
             read.observations,
             [RustTransportObservation {

@@ -69,32 +69,46 @@ function readTransport(transport) {
   assert.equal(bytes.length, payloadBase + payloadCapacity);
   const reserved = Number(bytes.readBigUInt64LE(32));
   const ordinals = [];
+  const decisions = [];
   let committed = 0;
   for (let index = 0; index < Math.min(reserved, descriptorCapacity); index += 1) {
     const descriptor = transportHeaderSize + index * transportDescriptorSize;
     if (bytes[descriptor] === 0) continue;
     committed += 1;
     const kind = bytes[descriptor + 1];
-    if (kind !== 3) continue;
     const context = bytes.readBigUInt64LE(descriptor + 8).toString();
     const payloadOffset = bytes.readUInt32LE(descriptor + 16);
     const payloadLength = bytes.readUInt32LE(descriptor + 20);
     const idLength = bytes.readUInt32LE(descriptor + 24);
     const valueLength = bytes.readUInt32LE(descriptor + 28);
-    assert.equal(payloadLength, 8);
-    assert.equal(idLength, 0);
-    assert.equal(valueLength, 8);
     assert(payloadOffset + payloadLength <= payloadCapacity);
-    ordinals.push({
-      context,
-      ordinal: bytes.readBigUInt64LE(payloadBase + payloadOffset).toString(),
-    });
+    assert.equal(payloadLength, idLength + valueLength);
+    const payload = payloadBase + payloadOffset;
+    if (kind === 3) {
+      assert.equal(payloadLength, 8);
+      assert.equal(idLength, 0);
+      assert.equal(valueLength, 8);
+      ordinals.push({
+        context,
+        ordinal: bytes.readBigUInt64LE(payload).toString(),
+      });
+    } else if (kind === 2) {
+      decisions.push({
+        context,
+        id: bytes.subarray(payload, payload + idLength).toString('utf8'),
+        outcome: bytes[descriptor + 2] !== 0,
+        values: [...bytes.subarray(payload + idLength, payload + payloadLength)].map(
+          (value) => (value === 0 ? null : value === 2),
+        ),
+      });
+    }
   }
   return {
     attachments: Number(bytes.readBigUInt64LE(72)),
     committed,
     dropped: Number(bytes.readBigUInt64LE(48)),
     incomplete: Math.min(reserved, descriptorCapacity) - committed,
+    decisions,
     ordinals,
   };
 }
@@ -293,6 +307,7 @@ try {
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
     'RUST_MANIFEST_CANDIDATE_IF_SLICE_ONLY: loop, match, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
+    'RUST_NATIVE_PROFILE_LINK_ELIMINATION_UNPROVEN: rustc branch-region retention still enables an ignored LLVM profile runtime whose output must remain inside the ephemeral run directory',
   ]);
   const allIds = [
     ...identityManifestA.points.map(({id}) => id),
@@ -317,6 +332,14 @@ try {
   assert.deepEqual(
     compoundDecision?.conditions.map(({source}) => source),
     ['left', 'right'],
+  );
+  assert.deepEqual(
+    decisionFor(identityManifestA, 'disjoined')?.conditions.map(({source}) => source),
+    ['left', 'right'],
+  );
+  assert.deepEqual(
+    decisionFor(identityManifestA, 'mixed')?.conditions.map(({source}) => source),
+    ['first', 'second', 'third'],
   );
   const patternDecision = decisionFor(identityManifestA, 'pattern');
   assert.equal(patternDecision?.kind, 'if-let');
@@ -421,6 +444,7 @@ try {
     SUPERCOV_RUST_TRANSPORT_FILE: behaviorTransport.path,
     SUPERCOV_RUST_TRANSPORT_TOKEN: behaviorTransport.tokenHex,
     SUPERCOV_RUST_CONTEXT_ID: transportContext.toString(16).padStart(16, '0'),
+    LLVM_PROFILE_FILE: join(scratch, 'ignored-native-profile-%p.profraw'),
   };
   const instrumentedBehavior = run(
     'cargo',
@@ -430,11 +454,20 @@ try {
   assert.equal(instrumentedBehavior.stdout, baselineBehavior.stdout);
   assert.equal(instrumentedBehavior.stderr, baselineBehavior.stderr);
   assert.match(baselineBehavior.stdout, /drop-order=\["panic-drop", "second", "first"\]/);
+  assert.match(baselineBehavior.stdout, /decision-panic=true/);
   assert.match(baselineBehavior.stdout, /expanded=\[5, 3, 19, 17, 9\]/);
-  assert.match(baselineBehavior.stdout, /conditions=\[29, 31, 37, 41, 43\]/);
+  assert.match(baselineBehavior.stdout, /conditions=\[29, 31, 31, 1, 37, 41, 43, 43\]/);
+  assert.match(baselineBehavior.stdout, /or-mixed=\[47, 47, 49, 53, 59, 53, 59\]/);
   const runtimeManifest = crateManifest(
     instrumentedDirectory,
     'supercov_rustc_spike_fixture',
+  );
+  const behaviorManifest = crateManifest(instrumentedDirectory, 'behavior');
+  assert(
+    !behaviorManifest.decisions.some((decision) =>
+      decision.definitions.includes('main'),
+    ),
+    'hidden assert!/println! control flow leaked into the authored decision denominator',
   );
   const runtimeProbe = (definition) =>
     obligationFor(runtimeManifest, definition)?.probeOrdinal;
@@ -449,11 +482,67 @@ try {
   const behaviorEvidence = readTransport(behaviorTransport);
   assert.equal(behaviorEvidence.attachments, 1);
   assert.equal(behaviorEvidence.dropped, 0);
-  assert.equal(behaviorEvidence.incomplete, 0);
+  assert.equal(
+    behaviorEvidence.incomplete,
+    1,
+    'a panic during an active compound decision must remain explicit incomplete health',
+  );
   assert.deepEqual(
     new Set(behaviorEvidence.ordinals.map(({ordinal}) => ordinal)),
     new Set([authoredProbe, fallibleProbe, dropOrderProbe, panicProbe]),
   );
+  const decisionVectors = (definition) => {
+    const id = decisionFor(runtimeManifest, definition)?.id;
+    assert(id, `missing runtime decision for ${definition}`);
+    return behaviorEvidence.decisions
+      .filter((decision) => decision.id === id)
+      .map(({values, outcome}) => JSON.stringify({values, outcome}))
+      .sort();
+  };
+  assert(
+    !behaviorEvidence.decisions.some(
+      ({id}) => id === decisionFor(runtimeManifest, 'interrupted_decision')?.id,
+    ),
+    'an interrupted decision was incorrectly committed as a complete vector',
+  );
+  assert.deepEqual(decisionVectors('compound'), [
+    JSON.stringify({values: [false, null], outcome: false}),
+    JSON.stringify({values: [true, false], outcome: false}),
+    JSON.stringify({values: [true, true], outcome: true}),
+  ].sort());
+  assert.deepEqual(decisionVectors('disjoined'), [
+    JSON.stringify({values: [false, false], outcome: false}),
+    JSON.stringify({values: [false, true], outcome: true}),
+    JSON.stringify({values: [true, null], outcome: true}),
+  ].sort());
+  assert.deepEqual(decisionVectors('mixed'), [
+    JSON.stringify({values: [false, false, null], outcome: false}),
+    JSON.stringify({values: [false, true, true], outcome: true}),
+    JSON.stringify({values: [true, null, false], outcome: false}),
+    JSON.stringify({values: [true, null, true], outcome: true}),
+  ].sort());
+  assert.deepEqual(decisionVectors('pattern'), [
+    JSON.stringify({values: [false], outcome: false}),
+    JSON.stringify({values: [true], outcome: true}),
+  ].sort());
+  assert.deepEqual(decisionVectors('chained'), [
+    JSON.stringify({values: [false, null, null], outcome: false}),
+    JSON.stringify({values: [true, false, null], outcome: false}),
+    JSON.stringify({values: [true, true, true], outcome: true}),
+  ].sort());
+  assert.deepEqual(decisionVectors('generated_by_rules'), [
+    JSON.stringify({values: [false], outcome: false}),
+    JSON.stringify({values: [true], outcome: true}),
+  ].sort());
+  assert.deepEqual(decisionVectors('generated_by_proc'), [
+    JSON.stringify({values: [false], outcome: false}),
+  ]);
+  assert.deepEqual(decisionVectors('repeated_expansions::generated_by_proc'), [
+    JSON.stringify({values: [true], outcome: true}),
+  ]);
+  assert.deepEqual(decisionVectors('generated_by_build_script'), [
+    JSON.stringify({values: [false], outcome: false}),
+  ]);
   const behaviorPairs = new Set(
     behaviorEvidence.ordinals.map(({context, ordinal}) => `${context}:${ordinal}`),
   );
@@ -559,7 +648,7 @@ try {
       },
     },
   );
-  assert.match(concurrentTests.stdout, /5 passed/);
+  assert.match(concurrentTests.stdout, /7 passed/);
   const concurrentEvidence = readTransport(concurrentTransport);
   assert.equal(concurrentEvidence.attachments, 1);
   assert.equal(concurrentEvidence.dropped, 0);
@@ -569,6 +658,8 @@ try {
     'tests::context_two',
     'tests::attribute_context',
     'tests::panic_context',
+    'tests::decision_context_true',
+    'tests::decision_context_short_circuit',
   ];
   const contextIds = contextNames.map(testContextId);
   assert.equal(new Set(contextIds).size, contextIds.length, 'test context collision');
@@ -585,6 +676,28 @@ try {
       `${contextIds[3]}:${panicProbe}`,
       `0:${authoredProbe}`,
     ]),
+  );
+  const compoundDecisionId = decisionFor(runtimeManifest, 'compound')?.id;
+  assert(compoundDecisionId);
+  assert(
+    concurrentEvidence.decisions.some(
+      ({context, id, values, outcome}) =>
+        context === contextIds[4] &&
+        id === compoundDecisionId &&
+        JSON.stringify(values) === JSON.stringify([true, true]) &&
+        outcome === true,
+    ),
+    'concurrent true decision vector lost its exact libtest context',
+  );
+  assert(
+    concurrentEvidence.decisions.some(
+      ({context, id, values, outcome}) =>
+        context === contextIds[5] &&
+        id === compoundDecisionId &&
+        JSON.stringify(values) === JSON.stringify([false, null]) &&
+        outcome === false,
+    ),
+    'concurrent short-circuit vector lost its exact libtest context',
   );
   const instrumentedRecords = records(instrumentedDirectory);
   assert(instrumentedRecords.some((record) => record.definition === 'authored'));
@@ -685,7 +798,7 @@ try {
   );
 
   console.log(
-    '[rustc-backend-spike] compiler points, if/if-let/let-chain decisions and branches keep deterministic authored/macro/generated identities across clean targets; mmap function probes bind to manifest ordinals while MIR/CTFE/rustdoc interception preserves behavior and source',
+    '[rustc-backend-spike] expanded-HIR points and if/if-let/let-chain obligations keep deterministic identities; compiler branch regions become exact Supercov &&/||/mixed/pattern ternary vectors with libtest contexts, while MIR/CTFE/rustdoc interception preserves behavior and source',
   );
 } finally {
   rmSync(scratch, {recursive: true, force: true});

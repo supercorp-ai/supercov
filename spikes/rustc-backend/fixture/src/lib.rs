@@ -54,6 +54,23 @@ pub fn compound(left: bool, right: bool) -> usize {
     if left && right { 29 } else { 31 }
 }
 
+pub fn disjoined(left: bool, right: bool) -> usize {
+    if left || right { 47 } else { 49 }
+}
+
+pub fn mixed(first: bool, second: bool, third: bool) -> usize {
+    if (first || second) && third { 53 } else { 59 }
+}
+
+#[inline(never)]
+fn panic_condition() -> bool {
+    panic!("decision-condition-panic")
+}
+
+pub fn interrupted_decision(first: bool) -> usize {
+    if first && panic_condition() { 61 } else { 67 }
+}
+
 pub fn pattern(value: Option<bool>) -> usize {
     if let Some(value) = value {
         usize::from(value)
@@ -136,6 +153,10 @@ mod tests {
         assert_eq!(CONST_FALSE_VALUE, 13);
         assert_eq!(compound(true, true), 29);
         assert_eq!(compound(true, false), 31);
+        assert_eq!(disjoined(true, false), 47);
+        assert_eq!(disjoined(false, false), 49);
+        assert_eq!(mixed(false, true, true), 53);
+        assert_eq!(mixed(false, false, true), 59);
         assert_eq!(pattern(Some(true)), 1);
         assert_eq!(pattern(None), 37);
         assert_eq!(chained(Some(true), true), 41);
@@ -168,6 +189,20 @@ mod tests {
     fn context_two() {
         CONTEXT_BARRIER.wait();
         assert_eq!(fallible(2), Ok(3));
+    }
+
+    #[cfg(supercov_spike_instrumented)]
+    #[test]
+    #[ignore = "requires compiler-spike context instrumentation"]
+    fn decision_context_true() {
+        assert_eq!(compound(true, true), 29);
+    }
+
+    #[cfg(supercov_spike_instrumented)]
+    #[test]
+    #[ignore = "requires compiler-spike context instrumentation"]
+    fn decision_context_short_circuit() {
+        assert_eq!(compound(false, true), 31);
     }
 
     #[cfg(supercov_spike_instrumented)]

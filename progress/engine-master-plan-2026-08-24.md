@@ -1200,13 +1200,15 @@ miss blocks flipping any default.
   stdlib dynamic-import hook and generated pytest context feeding evidence v3;
   coverage.py remains development-only.
 - Rust-language coverage work started on 2026-08-26 with the accepted private
-  architecture in `progress/rust-frontend-adr-2026-08-26.md`. The first owned
-  path is a lossless, ahead-of-run source frontend plus a generated std-only
-  probe runtime and one supervised process per discovered libtest case. This
-  provides exact cross-thread/async/workspace attribution on stable Cargo
-  without consuming rustc/LLVM profiles. Compiler-generated macros, const,
-  no_std, doctests and generated source remain explicit release blockers, not
-  silently missing denominator. Supercov itself is the first dogfood target.
+  architecture in `progress/rust-frontend-adr-2026-08-26.md`, subsequently
+  refined by the compiler spike. The intended owned path is now an exact rustc-
+  commit/host companion plus the generated std-only probe runtime; the stable
+  concrete-source frontend is only a differential reference. Libtest marker
+  contexts are the primary in-process attribution path, with process-per-test
+  retained as an automatic exact fallback where child/async propagation is not
+  proven. Compiler-generated macros, const, no_std, doctests and generated
+  source remain explicit release blockers, not silently missing denominator.
+  Supercov itself is the first dogfood target.
 
 ## Checkpoint — 2026-08-26 sole evidence v3 and frozen Rust model
 
@@ -1312,6 +1314,21 @@ miss blocks flipping any default.
   selected function MIR probes now emit manifest-derived ordinals. The manifest
   remains deliberately incomplete until the same identity and real probes
   cover loops, match, let-else, `?`, assertions, CTFE and doctest obligations.
+- The next private slice translates rustc's authored branch regions into
+  Supercov-owned MIR decision frames rather than importing a rustc/LLVM
+  profile. Exact goldens now cover all exercised ternary shapes for `&&`, `||`,
+  mixed `(a || b) && c`, `if let` and a let chain, nested/thread-migrated runtime
+  frames and parallel libtest contexts. An mmap descriptor reserved at decision
+  start and committed only at its outcome makes condition panic and process
+  kill explicit incomplete health. External macro implementation control flow
+  no longer pollutes an authored caller's denominator. Declarative, procedural
+  and build-generated owners now bind only through a unique compiler-typed
+  boolean branch at the exact expanded span, with their runtime vectors gated
+  in the spike. The broader nested/derive/external macro corpus remains open.
+  Promotion also remains blocked until branch-region retention no longer links
+  the currently ignored LLVM profile runtime. Its byproduct is redirected to
+  ephemeral spike storage and never consumed, but that is not the accepted end
+  state.
 
 ## Non-goals and guardrails
 

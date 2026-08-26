@@ -62,6 +62,12 @@ Nested `&&` and `||` are flattened in source evaluation order; parentheses do
 not create conditions. A pattern/let condition is one atomic match-success
 condition unless it contains a separately evaluated boolean guard.
 
+Control flow hidden inside an external macro implementation is not attributed
+to the caller merely because its expansion span collapses to the invocation.
+An owned assertion invocation contributes the frozen assertion pass/panic
+alternatives, but private `if` expressions used to implement `assert!`,
+`println!` or another external macro are not extra authored decisions.
+
 Instrumentation must preserve short-circuiting, evaluation count/order,
 temporaries, borrows, moves, autoderef/autoref, `Drop`, panic/unwind behavior,
 async suspension, inferred names/types and diagnostic outcomes.

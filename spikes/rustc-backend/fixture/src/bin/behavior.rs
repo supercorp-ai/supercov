@@ -2,8 +2,9 @@ use std::{cell::RefCell, panic};
 
 use supercov_rustc_spike_fixture::{
     CONST_FALSE_VALUE, CONST_VALUE, authored, chained, compound, context_normal_scope,
-    context_panic_scope, drop_order, fallible, generated_by_build_script, generated_by_proc,
-    generated_by_rules, panic_path, pattern, repeated_expansions,
+    context_panic_scope, disjoined, drop_order, fallible, generated_by_build_script,
+    generated_by_proc, generated_by_rules, interrupted_decision, mixed, panic_path, pattern,
+    repeated_expansions,
 };
 
 fn main() {
@@ -16,6 +17,7 @@ fn main() {
     let context_panic = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         context_panic_scope(&context_log)
     }));
+    let interrupted = panic::catch_unwind(|| interrupted_decision(true));
     panic::set_hook(previous_hook);
     assert!(context_panic.is_err());
     assert_eq!(authored(true), 1);
@@ -24,6 +26,7 @@ fn main() {
     println!("fallible={:?}", [fallible(0), fallible(4)]);
     println!("drop-value={}", drop_order(&log));
     println!("panic={}", panic.is_err());
+    println!("decision-panic={}", interrupted.is_err());
     println!("drop-order={:?}", log.into_inner());
     println!("const-values={CONST_VALUE:?},{CONST_FALSE_VALUE:?}");
     println!(
@@ -41,9 +44,24 @@ fn main() {
         [
             compound(true, true),
             compound(true, false),
+            compound(false, true),
+            pattern(Some(true)),
             pattern(None),
             chained(Some(true), true),
             chained(Some(false), true),
+            chained(None, true),
+        ]
+    );
+    println!(
+        "or-mixed={:?}",
+        [
+            disjoined(true, false),
+            disjoined(false, true),
+            disjoined(false, false),
+            mixed(true, false, true),
+            mixed(true, false, false),
+            mixed(false, true, true),
+            mixed(false, false, true),
         ]
     );
 }

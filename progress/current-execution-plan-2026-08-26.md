@@ -210,6 +210,35 @@ candidate still carries a blocking if-slice limitation: loop, match, let-else,
 and compiler fingerprints, remain R1 work. No measurement-complete claim is
 possible yet.
 
+The first dynamic decision slice is now executable as well. The companion
+uses rustc's exact source-to-optimized-MIR branch regions to locate each
+authored condition edge, translates those edges into Supercov-owned
+token-bearing frames, and emits frozen string decision IDs plus ternary values
+through `rust-probe-transport-v1`. Exact goldens cover `&&`, `||`, mixed
+`(a || b) && c`, `if let` and a three-atom let chain, including every exercised
+short-circuit vector and parallel libtest attribution. Baseline and
+instrumented behavior remain exact.
+The work also removed hidden control flow from external macro implementations
+such as `assert!` and `println!` from the caller's authored denominator.
+Generated owners use a fail-closed expanded-span fallback that accepts only
+one compiler-typed boolean MIR branch for the exact condition. Declarative
+macro expansions sharing an authored identity, distinct proc-macro
+invocations and build-script generated source now all emit gated exact
+decision vectors.
+
+Decision frames reserve their bounded mmap descriptor at evaluation start and
+commit only at the final outcome. A compiler-level condition panic and a
+killed process now leave explicit incomplete health without publishing a false
+complete vector.
+
+This is not R1 completion. Retaining rustc branch regions currently links an
+ignored LLVM profile runtime. The spike redirects that unused profile output
+into its ephemeral directory and never imports it, so it leaves no checkout
+debris, but the native runtime link itself must be eliminated before this can
+be a product path. A broader nested/derive/external expansion corpus is also
+still required before the generated-owner mapping can be generalized. Rust
+remains private and measurement-incomplete.
+
 The CTFE provider spike is now executable rather than hypothetical. The
 companion overrides `mir_for_ctfe`, inserts execution markers in original
 blocks, splits multi-successor edges for independently identifiable edge

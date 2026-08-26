@@ -1,8 +1,8 @@
 #[doc(hidden)]
 #[allow(dead_code)]
 mod __SUPERCOV_MODULE__ {
-    use std::fs::OpenOptions;
     use std::cell::Cell;
+    use std::fs::OpenOptions;
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
@@ -21,6 +21,8 @@ mod __SUPERCOV_MODULE__ {
     const KIND_HIT: u8 = 1;
     const KIND_DECISION: u8 = 2;
     const KIND_ORDINAL_HIT: u8 = 3;
+    const DECISION_ID_PREFIX: &[u8; 12] = b"rs:decision:";
+    const DECISION_ID_LENGTH: u32 = 36;
     const NO_CONTEXT_OVERRIDE: u64 = u64::MAX;
 
     std::thread_local! {
@@ -165,7 +167,22 @@ mod __SUPERCOV_MODULE__ {
             self.atomic_u64(DROPPED_OFFSET).fetch_add(1, Ordering::Relaxed);
         }
 
-        fn record(&self, kind: u8, outcome: u8, id: &'static str, values: &[u8]) {
+        fn active_context(&self) -> u64 {
+            CONTEXT_OVERRIDE.with(Cell::get).unwrap_or(self.context_id)
+        }
+
+        fn record(&self, kind: u8, outcome: u8, id: &str, values: &[u8]) {
+            self.record_in_context(kind, outcome, id, values, self.active_context());
+        }
+
+        fn record_in_context(
+            &self,
+            kind: u8,
+            outcome: u8,
+            id: &str,
+            values: &[u8],
+            context_id: u64,
+        ) {
             let Ok(id_length) = u32::try_from(id.len()) else {
                 self.dropped();
                 return;
@@ -194,9 +211,6 @@ mod __SUPERCOV_MODULE__ {
                 self.dropped();
                 return;
             }
-            let context_id = CONTEXT_OVERRIDE
-                .with(Cell::get)
-                .unwrap_or(self.context_id);
             let descriptor_offset = HEADER_SIZE + descriptor as usize * DESCRIPTOR_SIZE;
             let payload_offset = self.payload_base + payload as usize;
             // SAFETY: the two atomic reservations prove these descriptor and
@@ -237,6 +251,185 @@ mod __SUPERCOV_MODULE__ {
                 (&*descriptor_pointer.cast::<AtomicU8>()).store(1, Ordering::Release);
             }
         }
+
+        fn reserve_decision(
+            &self,
+            id_high: u64,
+            id_low: u32,
+            conditions: usize,
+        ) -> u64 {
+            let id = decision_id(id_high, id_low);
+            let id_length = DECISION_ID_LENGTH;
+            let Ok(value_length) = u32::try_from(conditions) else {
+                self.dropped();
+                return 0;
+            };
+            let Some(payload_length) = id_length.checked_add(value_length) else {
+                self.dropped();
+                return 0;
+            };
+            let descriptor = self
+                .atomic_u64(NEXT_DESCRIPTOR_OFFSET)
+                .fetch_add(1, Ordering::Relaxed);
+            if descriptor >= u64::from(self.descriptor_capacity) {
+                self.dropped();
+                return 0;
+            }
+            let payload = self
+                .atomic_u64(NEXT_PAYLOAD_OFFSET)
+                .fetch_add(u64::from(payload_length), Ordering::Relaxed);
+            if payload.saturating_add(u64::from(payload_length))
+                > u64::from(self.payload_capacity)
+            {
+                self.dropped();
+                return 0;
+            }
+            let descriptor_offset = HEADER_SIZE + descriptor as usize * DESCRIPTOR_SIZE;
+            let payload_offset = self.payload_base + payload as usize;
+            let context_id = self.active_context();
+            // SAFETY: reservations are in-bounds and private to this frame.
+            // The commit byte remains zero until decision_finish publishes the
+            // complete vector; process death therefore becomes explicit
+            // incomplete health instead of silent loss.
+            unsafe {
+                let descriptor_pointer = self.pointer.add(descriptor_offset);
+                descriptor_pointer.add(1).write(KIND_DECISION);
+                descriptor_pointer.add(2).write(0);
+                descriptor_pointer.add(3).write(0);
+                write_u32(descriptor_pointer, 4, std::process::id());
+                write_u64(descriptor_pointer, 8, context_id);
+                write_u32(descriptor_pointer, 16, payload as u32);
+                write_u32(descriptor_pointer, 20, payload_length);
+                write_u32(descriptor_pointer, 24, id_length);
+                write_u32(descriptor_pointer, 28, value_length);
+                write_u64(descriptor_pointer, 32, 0);
+                std::ptr::copy_nonoverlapping(id.as_ptr(), self.pointer.add(payload_offset), id.len());
+                std::ptr::write_bytes(
+                    self.pointer.add(payload_offset + id.len()),
+                    0,
+                    conditions,
+                );
+            }
+            descriptor + 1
+        }
+
+        fn decision_condition(&self, token: u64, index: usize, value: bool) {
+            let Some(descriptor) = token.checked_sub(1) else {
+                return;
+            };
+            if descriptor >= u64::from(self.descriptor_capacity) {
+                return;
+            }
+            let descriptor_offset = HEADER_SIZE + descriptor as usize * DESCRIPTOR_SIZE;
+            // SAFETY: the descriptor index is in-bounds. Only the evaluation
+            // owning this token mutates its uncommitted value bytes.
+            unsafe {
+                let pointer = self.pointer.add(descriptor_offset);
+                if (&*pointer.cast::<AtomicU8>()).load(Ordering::Acquire) != 0 {
+                    return;
+                }
+                let bytes = std::slice::from_raw_parts(pointer, DESCRIPTOR_SIZE);
+                if bytes[1] != KIND_DECISION
+                    || read_u32(bytes, 4) != Some(std::process::id())
+                {
+                    return;
+                }
+                let Some(payload) = read_u32(bytes, 16).map(usize::try_from).and_then(Result::ok)
+                else {
+                    return;
+                };
+                let Some(id_length) = read_u32(bytes, 24).map(usize::try_from).and_then(Result::ok)
+                else {
+                    return;
+                };
+                let Some(value_length) =
+                    read_u32(bytes, 28).map(usize::try_from).and_then(Result::ok)
+                else {
+                    return;
+                };
+                if index >= value_length
+                    || payload
+                        .checked_add(id_length)
+                        .and_then(|start| start.checked_add(value_length))
+                        .is_none_or(|end| end > self.payload_capacity as usize)
+                {
+                    return;
+                }
+                self.pointer
+                    .add(self.payload_base + payload + id_length + index)
+                    .write(if value { 2 } else { 1 });
+            }
+        }
+
+        fn finish_decision(&self, token: u64, outcome: bool) {
+            let Some(descriptor) = token.checked_sub(1) else {
+                return;
+            };
+            if descriptor >= u64::from(self.descriptor_capacity) {
+                return;
+            }
+            let descriptor_offset = HEADER_SIZE + descriptor as usize * DESCRIPTOR_SIZE;
+            // SAFETY: the descriptor and its reserved payload are in-bounds;
+            // this evaluation is the sole writer before the release commit.
+            unsafe {
+                let pointer = self.pointer.add(descriptor_offset);
+                if (&*pointer.cast::<AtomicU8>()).load(Ordering::Acquire) != 0 {
+                    return;
+                }
+                let bytes = std::slice::from_raw_parts(pointer, DESCRIPTOR_SIZE);
+                if bytes[1] != KIND_DECISION
+                    || read_u32(bytes, 4) != Some(std::process::id())
+                {
+                    return;
+                }
+                let Some(context_id) = read_u64(bytes, 8) else {
+                    return;
+                };
+                let Some(payload) = read_u32(bytes, 16) else {
+                    return;
+                };
+                let Some(payload_length) = read_u32(bytes, 20) else {
+                    return;
+                };
+                let Some(id_length) = read_u32(bytes, 24) else {
+                    return;
+                };
+                let Some(value_length) = read_u32(bytes, 28) else {
+                    return;
+                };
+                if id_length.checked_add(value_length) != Some(payload_length)
+                    || u64::from(payload).saturating_add(u64::from(payload_length))
+                        > u64::from(self.payload_capacity)
+                {
+                    return;
+                }
+                let payload_pointer = self.pointer.add(self.payload_base + payload as usize);
+                let id = std::slice::from_raw_parts(payload_pointer, id_length as usize);
+                let values = std::slice::from_raw_parts(
+                    payload_pointer.add(id_length as usize),
+                    value_length as usize,
+                );
+                let outcome = u8::from(outcome);
+                pointer.add(2).write(outcome);
+                write_u64(
+                    pointer,
+                    32,
+                    checksum(
+                        KIND_DECISION,
+                        outcome,
+                        std::process::id(),
+                        context_id,
+                        payload,
+                        payload_length,
+                        id_length,
+                        value_length,
+                        id,
+                        values,
+                    ),
+                );
+                (&*pointer.cast::<AtomicU8>()).store(1, Ordering::Release);
+            }
+        }
     }
 
     #[cfg(not(any(
@@ -255,7 +448,34 @@ mod __SUPERCOV_MODULE__ {
             None
         }
 
-        fn record(&self, _kind: u8, _outcome: u8, _id: &'static str, _values: &[u8]) {}
+        fn record(&self, _kind: u8, _outcome: u8, _id: &str, _values: &[u8]) {}
+
+        fn active_context(&self) -> u64 {
+            0
+        }
+
+        fn record_in_context(
+            &self,
+            _kind: u8,
+            _outcome: u8,
+            _id: &str,
+            _values: &[u8],
+            _context_id: u64,
+        ) {
+        }
+
+        fn reserve_decision(
+            &self,
+            _id_high: u64,
+            _id_low: u32,
+            _conditions: usize,
+        ) -> u64 {
+            0
+        }
+
+        fn decision_condition(&self, _token: u64, _index: usize, _value: bool) {}
+
+        fn finish_decision(&self, _token: u64, _outcome: bool) {}
     }
 
     impl Drop for Transport {
@@ -299,6 +519,26 @@ mod __SUPERCOV_MODULE__ {
 
     fn read_u32(source: &[u8], offset: usize) -> Option<u32> {
         Some(u32::from_le_bytes(source.get(offset..offset + 4)?.try_into().ok()?))
+    }
+
+    fn read_u64(source: &[u8], offset: usize) -> Option<u64> {
+        Some(u64::from_le_bytes(source.get(offset..offset + 8)?.try_into().ok()?))
+    }
+
+    fn decision_id(id_high: u64, id_low: u32) -> [u8; DECISION_ID_LENGTH as usize] {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut output = [0; DECISION_ID_LENGTH as usize];
+        output[..DECISION_ID_PREFIX.len()].copy_from_slice(DECISION_ID_PREFIX);
+        let mut offset = DECISION_ID_PREFIX.len();
+        for shift in (0..16).rev() {
+            output[offset] = HEX[((id_high >> (shift * 4)) & 0xf) as usize];
+            offset += 1;
+        }
+        for shift in (0..8).rev() {
+            output[offset] = HEX[((u64::from(id_low) >> (shift * 4)) & 0xf) as usize];
+            offset += 1;
+        }
+        output
     }
 
     fn parse_token(value: &str) -> Option<[u8; TOKEN_SIZE]> {
@@ -403,6 +643,38 @@ mod __SUPERCOV_MODULE__ {
             transport.record(KIND_DECISION, u8::from(value), frame.id, &frame.values);
         }
         value
+    }
+
+    /// Begins one compiler-injected decision evaluation. The token is carried
+    /// in a MIR local, so nested evaluations, parallel tests and thread
+    /// migration cannot merge their ternary vectors. Its transport descriptor
+    /// remains uncommitted until the decision outcome, making interrupted
+    /// evaluations explicit reader health.
+    #[inline(never)]
+    pub fn mir_decision_start(id_high: u64, id_low: u32, conditions: u64) -> u64 {
+        let Ok(conditions) = usize::try_from(conditions) else {
+            return 0;
+        };
+        transport().map_or(0, |transport| {
+            transport.reserve_decision(id_high, id_low, conditions)
+        })
+    }
+
+    #[inline(never)]
+    pub fn mir_decision_condition(token: u64, index: u64, value: bool) {
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        if let Some(transport) = transport() {
+            transport.decision_condition(token, index, value);
+        }
+    }
+
+    #[inline(never)]
+    pub fn mir_decision_finish(token: u64, outcome: bool) {
+        if let Some(transport) = transport() {
+            transport.finish_decision(token, outcome);
+        }
     }
 
     #[inline]
