@@ -20,7 +20,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Component, Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{
         LazyLock, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -77,6 +77,8 @@ const REAL_RUSTDOC: &str = "SUPERCOV_RUST_REAL_RUSTDOC";
 const COMPANION_PATH: &str = "SUPERCOV_RUST_COMPANION_PATH";
 const RUSTDOC_LAUNCHED: &str = "SUPERCOV_RUSTDOC_LAUNCHED";
 const RUSTDOC_GROUP_ID: &str = "SUPERCOV_RUSTDOC_GROUP_ID";
+const RUSTDOC_CAPTURE_OUTCOMES: &str = "SUPERCOV_RUSTDOC_CAPTURE_OUTCOMES";
+const RUSTDOC_ENGINE_PATH: &str = "SUPERCOV_RUSTDOC_ENGINE_PATH";
 const SOURCE_ROOT: &str = "SUPERCOV_RUST_SOURCE_ROOT";
 const TARGET_ROOT: &str = "SUPERCOV_RUST_TARGET_ROOT";
 const FORCE_ID_COLLISION: &str = "SUPERCOV_RUSTC_SPIKE_FORCE_ID_COLLISION";
@@ -7417,27 +7419,42 @@ struct MergedDoctestDescriptor {
     display_name: String,
     path: String,
     line: u64,
+    ignored: bool,
+    no_run: bool,
+    should_panic: bool,
 }
 
 #[derive(Default)]
 struct MergedDoctestCallVisitor {
-    values: Vec<(String, String, u64)>,
+    values: Vec<(String, String, u64, bool, bool, bool)>,
 }
 
 impl<'tcx> Visitor<'tcx> for MergedDoctestCallVisitor {
     fn visit_expr(&mut self, expression: &'tcx hir::Expr<'tcx>) {
         if let hir::ExprKind::Call(_, arguments) = expression.kind
-            && arguments.len() >= 4
+            && arguments.len() == 7
             && let hir::ExprKind::Lit(display) = arguments[0].kind
             && let rustc_ast::LitKind::Str(display, _) = display.node
+            && let hir::ExprKind::Lit(ignored) = arguments[1].kind
+            && let rustc_ast::LitKind::Bool(ignored) = ignored.node
             && let hir::ExprKind::Lit(path) = arguments[2].kind
             && let rustc_ast::LitKind::Str(path, _) = path.node
             && let hir::ExprKind::Lit(line) = arguments[3].kind
             && let rustc_ast::LitKind::Int(line, _) = line.node
+            && let hir::ExprKind::Lit(no_run) = arguments[4].kind
+            && let rustc_ast::LitKind::Bool(no_run) = no_run.node
+            && let hir::ExprKind::Lit(should_panic) = arguments[5].kind
+            && let rustc_ast::LitKind::Bool(should_panic) = should_panic.node
             && let Ok(line) = u64::try_from(line.get())
         {
-            self.values
-                .push((display.as_str().to_owned(), path.as_str().to_owned(), line));
+            self.values.push((
+                display.as_str().to_owned(),
+                path.as_str().to_owned(),
+                line,
+                ignored,
+                no_run,
+                should_panic,
+            ));
         }
         intravisit::walk_expr(self, expression);
     }
@@ -7462,7 +7479,8 @@ fn merged_doctest_descriptor(
         .ok_or_else(|| format!("merged doctest descriptor {definition} has no HIR owner"))?;
     let mut visitor = MergedDoctestCallVisitor::default();
     visitor.visit_body(tcx.hir_body_owned_by(owner));
-    let [(display_name, path, line)] = visitor.values.as_slice() else {
+    let [(display_name, path, line, ignored, no_run, should_panic)] = visitor.values.as_slice()
+    else {
         return Err(format!(
             "merged doctest descriptor {definition} contains {} candidate constructor calls",
             visitor.values.len()
@@ -7473,6 +7491,9 @@ fn merged_doctest_descriptor(
         display_name: display_name.clone(),
         path: path.clone(),
         line: *line,
+        ignored: *ignored,
+        no_run: *no_run,
+        should_panic: *should_panic,
     }))
 }
 
@@ -7494,13 +7515,19 @@ fn write_merged_doctest_map(
                     "\"module\":\"{}\",",
                     "\"displayName\":\"{}\",",
                     "\"path\":\"{}\",",
-                    "\"line\":{}",
+                    "\"line\":{},",
+                    "\"ignored\":{},",
+                    "\"noRun\":{},",
+                    "\"shouldPanic\":{}",
                     "}}"
                 ),
                 escape(&descriptor.module),
                 escape(&descriptor.display_name),
                 escape(&descriptor.path),
                 descriptor.line,
+                descriptor.ignored,
+                descriptor.no_run,
+                descriptor.should_panic,
             )
         })
         .collect::<Vec<_>>()
@@ -7508,7 +7535,7 @@ fn write_merged_doctest_map(
     let payload = format!(
         concat!(
             "{{",
-            "\"schema\":\"supercov-rustdoc-merged-map-v1\",",
+            "\"schema\":\"supercov-rustdoc-merged-map-v2\",",
             "\"group\":\"{}\",",
             "\"entries\":[{}]",
             "}}"
@@ -7759,17 +7786,67 @@ fn launch_rustdoc(args: &[String]) -> ! {
     let rustdoc = env::var_os(REAL_RUSTDOC).expect("exact rustdoc path");
     let companion = env::var_os(COMPANION_PATH).expect("compiler companion path");
     let group = argument_value(args, "--crate-name").expect("rustdoc crate name");
-    let status = Command::new(rustdoc)
+    let mut command = Command::new(rustdoc);
+    command
         .args(args)
         .arg("-Zunstable-options")
         .arg("--test-builder-wrapper")
         .arg(companion)
         .env("RUSTC_BOOTSTRAP", "1")
         .env(RUSTDOC_LAUNCHED, "1")
-        .env(RUSTDOC_GROUP_ID, group)
-        .status()
-        .expect("launch exact rustdoc");
-    std::process::exit(status.code().unwrap_or(1));
+        .env(RUSTDOC_GROUP_ID, group);
+    if env::var_os(RUSTDOC_CAPTURE_OUTCOMES).is_none() {
+        let status = command.status().expect("launch exact rustdoc");
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    command
+        .arg("--test-args=-Z unstable-options")
+        .arg("--test-args=--format=json")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = command.output().expect("capture exact rustdoc outcomes");
+    let mut invocation = Sha256::new();
+    invocation.update(b"supercov-rustdoc-invocation-v1\0");
+    for argument in args {
+        invocation.update(argument.as_bytes());
+        invocation.update(b"\0");
+    }
+    let invocation = format!("{:x}", invocation.finalize());
+    let executable = env::current_exe().expect("resolve compiler companion executable");
+    let build_id = format!(
+        "{:x}",
+        Sha256::digest(fs::read(executable).expect("read compiler companion executable"))
+    );
+    let engine = env::var_os(RUSTDOC_ENGINE_PATH).expect("Supercov engine path");
+    let directory = env::var_os(OUTPUT_DIRECTORY).expect("compiler output directory");
+    let mut publisher = Command::new(engine)
+        .arg("__publish-rustdoc-outcome")
+        .arg(directory)
+        .arg(invocation)
+        .arg(group)
+        .arg(build_id)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch rustdoc outcome publisher");
+    publisher
+        .stdin
+        .take()
+        .expect("publisher stdin")
+        .write_all(&output.stdout)
+        .expect("write rustdoc outcome events");
+    let publication = publisher
+        .wait_with_output()
+        .expect("wait for rustdoc outcome publisher");
+    if !publication.status.success() {
+        let _ = io::stderr().write_all(&publication.stderr);
+        std::process::exit(1);
+    }
+    let _ = io::stdout().write_all(&output.stdout);
+    let _ = io::stderr().write_all(&output.stderr);
+    std::process::exit(output.status.code().unwrap_or(1));
 }
 
 fn argument_value<'a>(args: &'a [String], option: &str) -> Option<&'a str> {

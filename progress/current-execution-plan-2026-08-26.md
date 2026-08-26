@@ -653,9 +653,31 @@ for outcome attribution. Only joined final candidates reach workspace
 normalization. A transport translator also rekeys string observations and
 numeric ordinals and recursively rebuilds nested assertion context IDs, whose
 derivation includes the translated decision identity; descriptor order is not
-assumed and collisions fail closed. Exact per-doctest terminal outcomes and
-preservation of the user's ordinary visible output are still required before
-these candidates can enter a published run.
+assumed and collisions fail closed.
+
+The exact outcome boundary is now implemented through the pinned Rust 1.95
+libtest JSON event model. It validates suite/test ordering and arithmetic,
+distinguishes timeout warnings from terminal failures, preserves ignored test
+details and represents fail-fast tests as completed, started-but-unfinished or
+unstarted without inventing verdicts. Each raw event stream becomes one
+create-new/fsync/rename/directory-fsync outcome unit authenticated by the exact
+companion digest and raw-stream SHA-256; partial, duplicate, malformed,
+truncated and future-incompatible units fail closed. The real rustdoc gate
+captures five passed and one ignored doctest and verifies that unit against the
+raw bytes.
+
+The engine losslessly joins every merged descriptor by exact rustdoc display
+name. Named standalone/compile-fail results, unfinished names and anonymous
+fail-fast counts remain explicit rather than being dropped. Matched merged
+tests now project exact pass/fail/skipped/unknown status, retry zero, source and
+phase identity into evidence v3; an unstarted test creates no fictitious phase.
+The archive is deliberately marked with
+`rust-doctest-outcome-catalog-incomplete` until compiler-owned standalone and
+compile-fail catalogs close those unmatched results. Exact runtime transport
+attachment, stable multi-package invocation identity, retry policy and
+preservation of the user's ordinary human output across pass/fail/signal cases
+remain required before these candidates can enter a measurement-complete
+public run.
 
 Correctness corpus:
 

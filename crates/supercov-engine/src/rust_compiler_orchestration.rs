@@ -20,7 +20,10 @@ use crate::{
     rust_compiler_ctfe::{RustCompilerCtfeUnit, read_rust_compiler_ctfe},
     rust_compiler_manifest::{NormalizedRustCompilerManifest, normalize_rust_compiler_candidates},
     rust_compiler_selection::{SelectedRustCompilerCompanion, select_rust_compiler_companion},
-    rust_doctest::{RustdocMergedUnit, resolve_merged_doctest_candidates},
+    rust_doctest::{
+        RustdocOutcomeResolution, join_rustdoc_outcomes, read_rustdoc_outcome_units,
+        resolve_merged_doctest_candidates,
+    },
     rust_test_runner::cargo_invocation,
 };
 
@@ -68,7 +71,7 @@ pub struct RustCompilerBuild {
     pub target_directory: PathBuf,
     pub compiler_output_directory: PathBuf,
     pub ctfe_units: Vec<RustCompilerCtfeUnit>,
-    pub doctest_units: Vec<RustdocMergedUnit>,
+    pub doctest_outcomes: RustdocOutcomeResolution,
     pub build_started_at_ms: i64,
     pub build_ended_at_ms: i64,
     pub build_ms: f64,
@@ -488,6 +491,18 @@ pub fn build_with_rust_compiler_companion(
     let ctfe_units =
         read_rust_compiler_ctfe(&candidate_directory, &normalized, build_started_at_ms)
             .map_err(|error| RustCompilerOrchestrationError::CompilerOutput(error.to_string()))?;
+    let doctest_outcomes = read_rustdoc_outcome_units(&candidate_directory)
+        .map_err(|error| RustCompilerOrchestrationError::CompilerOutput(error.to_string()))?;
+    if doctest_outcomes
+        .iter()
+        .any(|unit| unit.companion_build_id != selection.handshake.companion_build_id)
+    {
+        return Err(RustCompilerOrchestrationError::CompilerOutput(
+            "rustdoc outcome unit was produced by a different compiler companion".into(),
+        ));
+    }
+    let doctest_outcomes = join_rustdoc_outcomes(resolved.merged_units, doctest_outcomes)
+        .map_err(|error| RustCompilerOrchestrationError::CompilerOutput(error.to_string()))?;
     let artifacts = cargo_artifacts(&output.stdout, &target_directory)?;
     Ok(RustCompilerBuild {
         selection,
@@ -496,7 +511,7 @@ pub fn build_with_rust_compiler_companion(
         target_directory,
         compiler_output_directory,
         ctfe_units,
-        doctest_units: resolved.merged_units,
+        doctest_outcomes,
         build_started_at_ms,
         build_ended_at_ms,
         build_ms,

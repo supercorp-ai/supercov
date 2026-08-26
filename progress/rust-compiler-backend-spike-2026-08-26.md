@@ -355,8 +355,15 @@ an unverified rustc commit.
    attribution. A production transport translator rekeys string IDs, numeric
    ordinals and nested assertion context chains without assuming descriptor
    order; malformed parents and post-translation collisions fail closed.
-   Exact machine-readable terminal outcomes with ordinary-output equivalence
-   are the next archive integration boundary.
+   Pinned libtest JSON terminal outcomes are now parsed strictly and published
+   as atomic units bound to the exact companion and raw event SHA. A lossless
+   join maps merged descriptors to completed, unfinished-started or unstarted
+   states while retaining standalone/compile-fail outcomes and unknown
+   fail-fast counts separately. Matched statuses already project into
+   evidence-v3 test records with retry zero and exact source identity. The next
+   archive boundary is compiler-owned standalone/compile-fail cataloging plus
+   translated runtime-evidence attachment; ordinary human-output equivalence,
+   wrapper composition, retries and failure/signal behavior remain blocking.
 4. Exact selection now independently probes rustc commit/host/driver digest,
    authenticates the companion's executable digest and rejects missing,
    duplicate or incomplete-public candidates. The private Cargo wrapper and

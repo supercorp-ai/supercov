@@ -6,7 +6,12 @@
 //! the later runner map and resolves extracted byte ranges back to immutable
 //! authored source before the ordinary compiler-manifest parser sees them.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use ra_ap_syntax::{
     AstNode, Edition, SourceFile,
@@ -26,7 +31,9 @@ use crate::{
     rust_runtime::RustProbeObservation,
 };
 
-const MAP_SCHEMA: &str = "supercov-rustdoc-merged-map-v1";
+const MAP_SCHEMA: &str = "supercov-rustdoc-merged-map-v2";
+const OUTCOME_SCHEMA: &str = "supercov-rustdoc-outcome-unit-v1";
+const MAX_OUTCOME_UNIT_BYTES: u64 = 16 * 1024 * 1024;
 const SOURCE_MODEL: &str = "rust-source-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -44,6 +51,9 @@ pub struct RustdocMergedEntry {
     pub display_name: String,
     pub path: String,
     pub line: u64,
+    pub ignored: bool,
+    pub no_run: bool,
+    pub should_panic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +95,941 @@ pub struct RustdocMergedUnit {
 pub struct RustdocResolvedCandidates {
     pub candidates: Vec<(RustCompilerManifest, RustCompilerSourceSnapshots)>,
     pub merged_units: Vec<RustdocMergedUnit>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
+pub enum RustdocOutcomeStatus {
+    Passed,
+    Failed,
+    Ignored,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustdocTestOutcome {
+    pub display_name: String,
+    pub status: RustdocOutcomeStatus,
+    pub execution_seconds: Option<f64>,
+    pub stdout: Option<String>,
+    pub message: Option<String>,
+    pub reason: Option<String>,
+    /// Libtest's `timeout` event is a long-running-test notification. It does
+    /// not itself determine the eventual result.
+    pub timeout_warning: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustdocOutcomeReport {
+    pub outcomes: Vec<RustdocTestOutcome>,
+    pub suites: usize,
+    pub planned_tests: u64,
+    pub filtered_out: u64,
+    /// Tests that emitted `started` but no terminal event before a failed
+    /// fail-fast suite ended.
+    pub unfinished_started: Vec<String>,
+    /// Planned tests for which libtest emitted neither a start nor a terminal
+    /// event because a failed suite stopped early.
+    pub unstarted_tests: u64,
+    pub total_seconds: Option<f64>,
+    pub compilation_seconds: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustdocOutcomeUnit {
+    pub schema: String,
+    pub invocation_id: String,
+    pub group: String,
+    pub companion_build_id: String,
+    pub raw_events_sha256: String,
+    pub report: RustdocOutcomeReport,
+}
+
+/// The exact execution state for one compiler-described merged doctest.
+///
+/// A fail-fast libtest suite can stop after announcing its total test count.
+/// `Unstarted` is therefore distinct from `Ignored`: it has no terminal
+/// outcome and must never be treated as skipped or passing.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "state")]
+pub enum RustdocJoinedOutcomeState {
+    Completed { outcome: RustdocTestOutcome },
+    UnfinishedStarted,
+    Unstarted,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustdocJoinedOutcome {
+    pub entry: RustdocMergedEntry,
+    pub state: RustdocJoinedOutcomeState,
+}
+
+/// Lossless join of one authenticated rustdoc invocation to the subset of
+/// tests described by its merged-runner map. Standalone and compile-fail
+/// doctests are intentionally retained as unmatched until their own compiler
+/// catalog is available; dropping them would make fail-fast arithmetic and
+/// test outcomes unsound.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustdocOutcomeGroupJoin {
+    pub invocation_id: String,
+    pub group: String,
+    pub companion_build_id: String,
+    pub raw_events_sha256: String,
+    /// Identity/ordinal translation for the merged bundle. `None` is valid
+    /// only when every mapped doctest has zero executable obligations.
+    pub join: Option<RustdocMergedJoin>,
+    pub entries: Vec<RustdocJoinedOutcome>,
+    pub unmatched_outcomes: Vec<RustdocTestOutcome>,
+    pub unmatched_unfinished_started: Vec<String>,
+    pub unmatched_unstarted_tests: u64,
+}
+
+impl RustdocOutcomeGroupJoin {
+    pub fn is_fully_catalogued(&self) -> bool {
+        self.unmatched_outcomes.is_empty()
+            && self.unmatched_unfinished_started.is_empty()
+            && self.unmatched_unstarted_tests == 0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustdocOutcomeResolution {
+    pub groups: Vec<RustdocOutcomeGroupJoin>,
+    /// Runner maps for which no authenticated terminal outcome unit exists.
+    pub unmatched_maps: Vec<RustdocMergedUnit>,
+    /// Outcome units for which no merged-runner map exists. These usually
+    /// represent crates containing only standalone/compile-fail doctests.
+    pub unmatched_units: Vec<RustdocOutcomeUnit>,
+}
+
+impl RustdocOutcomeResolution {
+    pub fn is_fully_catalogued(&self) -> bool {
+        self.unmatched_maps.is_empty()
+            && self.unmatched_units.is_empty()
+            && self
+                .groups
+                .iter()
+                .all(RustdocOutcomeGroupJoin::is_fully_catalogued)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RustdocOutcomeError {
+    Io { path: PathBuf, reason: String },
+    Json(String),
+    Invalid(String),
+}
+
+impl std::fmt::Display for RustdocOutcomeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io { path, reason } => write!(formatter, "{}: {reason}", path.display()),
+            Self::Json(reason) => write!(formatter, "invalid rustdoc outcome JSON: {reason}"),
+            Self::Invalid(reason) => write!(formatter, "invalid rustdoc outcome: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for RustdocOutcomeError {}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+enum StrictField<T> {
+    #[default]
+    Missing,
+    Value(T),
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for StrictField<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        T::deserialize(deserializer).map(Self::Value)
+    }
+}
+
+impl<T> StrictField<T> {
+    fn take(self) -> Option<T> {
+        match self {
+            Self::Missing => None,
+            Self::Value(value) => Some(value),
+        }
+    }
+
+    fn is_missing(&self) -> bool {
+        matches!(self, Self::Missing)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLibtestEvent {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    event: StrictField<String>,
+    #[serde(default)]
+    name: StrictField<String>,
+    #[serde(default)]
+    test_count: StrictField<u64>,
+    #[serde(default)]
+    shuffle_seed: StrictField<u64>,
+    #[serde(default)]
+    passed: StrictField<u64>,
+    #[serde(default)]
+    failed: StrictField<u64>,
+    #[serde(default)]
+    ignored: StrictField<u64>,
+    #[serde(default)]
+    measured: StrictField<u64>,
+    #[serde(default)]
+    filtered_out: StrictField<u64>,
+    #[serde(default)]
+    exec_time: StrictField<f64>,
+    #[serde(default)]
+    stdout: StrictField<String>,
+    #[serde(default)]
+    message: StrictField<String>,
+    #[serde(default)]
+    reason: StrictField<String>,
+    #[serde(default)]
+    total_time: StrictField<f64>,
+    #[serde(default)]
+    compilation_time: StrictField<f64>,
+}
+
+impl RawLibtestEvent {
+    fn has_only(&self, fields: &[&str]) -> bool {
+        let present = [
+            ("event", !self.event.is_missing()),
+            ("name", !self.name.is_missing()),
+            ("test_count", !self.test_count.is_missing()),
+            ("shuffle_seed", !self.shuffle_seed.is_missing()),
+            ("passed", !self.passed.is_missing()),
+            ("failed", !self.failed.is_missing()),
+            ("ignored", !self.ignored.is_missing()),
+            ("measured", !self.measured.is_missing()),
+            ("filtered_out", !self.filtered_out.is_missing()),
+            ("exec_time", !self.exec_time.is_missing()),
+            ("stdout", !self.stdout.is_missing()),
+            ("message", !self.message.is_missing()),
+            ("reason", !self.reason.is_missing()),
+            ("total_time", !self.total_time.is_missing()),
+            ("compilation_time", !self.compilation_time.is_missing()),
+        ];
+        present
+            .into_iter()
+            .all(|(field, present)| !present || fields.contains(&field))
+    }
+}
+
+#[derive(Debug)]
+struct ActiveSuite {
+    expected: u64,
+    outcomes: BTreeMap<String, RustdocOutcomeStatus>,
+    started: BTreeSet<String>,
+    timed_out: BTreeSet<String>,
+}
+
+fn nonnegative_finite(value: Option<f64>) -> bool {
+    value.is_none_or(|value| value.is_finite() && value >= 0.0)
+}
+
+/// Parse the exact JSON event stream emitted by the pinned Rust libtest
+/// formatter. The parser validates field shapes, event ordering, terminal
+/// uniqueness and suite arithmetic; a truncated or future-incompatible stream
+/// cannot silently become passing coverage.
+pub fn parse_rustdoc_libtest_json(bytes: &[u8]) -> Result<RustdocOutcomeReport, RustdocJoinError> {
+    let source =
+        std::str::from_utf8(bytes).map_err(|error| RustdocJoinError::Json(error.to_string()))?;
+    let mut active: Option<ActiveSuite> = None;
+    let mut outcomes = BTreeMap::<String, RustdocTestOutcome>::new();
+    let mut suites = 0_usize;
+    let mut planned_tests = 0_u64;
+    let mut filtered_out = 0_u64;
+    let mut unfinished_started = BTreeSet::new();
+    let mut unstarted_tests = 0_u64;
+    let mut report = None;
+    for (index, line) in source.lines().enumerate() {
+        if line.trim().is_empty() {
+            return Err(RustdocJoinError::Json(format!(
+                "libtest event {} is empty",
+                index + 1
+            )));
+        }
+        let raw: RawLibtestEvent = serde_json::from_str(line).map_err(|error| {
+            RustdocJoinError::Json(format!("libtest event {}: {error}", index + 1))
+        })?;
+        let event = raw.event.clone().take();
+        match (raw.kind.as_str(), event.as_deref()) {
+            ("suite", Some("started")) => {
+                if active.is_some()
+                    || report.is_some()
+                    || !raw.has_only(&["event", "test_count", "shuffle_seed"])
+                {
+                    return Err(RustdocJoinError::Invalid(format!(
+                        "libtest suite start {} is out of order or malformed",
+                        index + 1
+                    )));
+                }
+                let expected = raw.test_count.take().ok_or_else(|| {
+                    RustdocJoinError::Invalid("libtest suite start has no test count".into())
+                })?;
+                active = Some(ActiveSuite {
+                    expected,
+                    outcomes: BTreeMap::new(),
+                    started: BTreeSet::new(),
+                    timed_out: BTreeSet::new(),
+                });
+            }
+            ("test", Some("started")) => {
+                if !raw.has_only(&["event", "name"]) {
+                    return Err(RustdocJoinError::Invalid(
+                        "libtest test start has unexpected fields".into(),
+                    ));
+                }
+                let name = raw
+                    .name
+                    .take()
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| {
+                        RustdocJoinError::Invalid("libtest test start has no name".into())
+                    })?;
+                let suite = active.as_mut().ok_or_else(|| {
+                    RustdocJoinError::Invalid("libtest test started outside a suite".into())
+                })?;
+                if !suite.started.insert(name.clone()) || suite.outcomes.contains_key(&name) {
+                    return Err(RustdocJoinError::Invalid(format!(
+                        "libtest test {name} started more than once"
+                    )));
+                }
+            }
+            ("test", Some("timeout")) => {
+                if !raw.has_only(&["event", "name"]) {
+                    return Err(RustdocJoinError::Invalid(
+                        "libtest timeout has unexpected fields".into(),
+                    ));
+                }
+                let name = raw
+                    .name
+                    .take()
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| {
+                        RustdocJoinError::Invalid("libtest timeout has no name".into())
+                    })?;
+                let suite = active.as_mut().ok_or_else(|| {
+                    RustdocJoinError::Invalid("libtest timeout is outside a suite".into())
+                })?;
+                if !suite.started.contains(&name) || !suite.timed_out.insert(name.clone()) {
+                    return Err(RustdocJoinError::Invalid(format!(
+                        "libtest timeout for {name} has no unique start"
+                    )));
+                }
+            }
+            ("test", Some(status @ ("ok" | "failed" | "ignored"))) => {
+                if !raw.has_only(&["event", "name", "exec_time", "stdout", "message", "reason"]) {
+                    return Err(RustdocJoinError::Invalid(
+                        "libtest terminal test event has unexpected fields".into(),
+                    ));
+                }
+                let name = raw
+                    .name
+                    .take()
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| {
+                        RustdocJoinError::Invalid("libtest terminal event has no name".into())
+                    })?;
+                let execution_seconds = raw.exec_time.take();
+                if !nonnegative_finite(execution_seconds) {
+                    return Err(RustdocJoinError::Invalid(format!(
+                        "libtest test {name} has invalid execution time"
+                    )));
+                }
+                let message = raw.message.take();
+                let reason = raw.reason.take();
+                if (status == "ok" && (message.is_some() || reason.is_some()))
+                    || (status == "ignored" && reason.is_some())
+                    || (status == "failed" && message.is_some() && reason.is_some())
+                {
+                    return Err(RustdocJoinError::Invalid(format!(
+                        "libtest test {name} has impossible terminal details"
+                    )));
+                }
+                let status = match status {
+                    "ok" => RustdocOutcomeStatus::Passed,
+                    "failed" => RustdocOutcomeStatus::Failed,
+                    "ignored" => RustdocOutcomeStatus::Ignored,
+                    _ => unreachable!(),
+                };
+                let suite = active.as_mut().ok_or_else(|| {
+                    RustdocJoinError::Invalid("libtest result is outside a suite".into())
+                })?;
+                if !suite.started.contains(&name) {
+                    return Err(RustdocJoinError::Invalid(format!(
+                        "libtest test {name} has a terminal result without a start"
+                    )));
+                }
+                if suite.outcomes.insert(name.clone(), status).is_some()
+                    || outcomes.contains_key(&name)
+                {
+                    return Err(RustdocJoinError::Invalid(format!(
+                        "libtest test {name} has more than one terminal result"
+                    )));
+                }
+                if reason
+                    .as_deref()
+                    .is_some_and(|reason| reason != "time limit exceeded")
+                {
+                    return Err(RustdocJoinError::Invalid(format!(
+                        "libtest test {name} has an unknown failure reason"
+                    )));
+                }
+                let timeout_warning = suite.timed_out.contains(&name);
+                let stdout = raw.stdout.take();
+                if status == RustdocOutcomeStatus::Ignored
+                    && (execution_seconds.is_some() || stdout.is_some())
+                {
+                    return Err(RustdocJoinError::Invalid(format!(
+                        "ignored libtest {name} has impossible execution details"
+                    )));
+                }
+                outcomes.insert(
+                    name.clone(),
+                    RustdocTestOutcome {
+                        display_name: name,
+                        status,
+                        execution_seconds,
+                        stdout,
+                        message,
+                        reason,
+                        timeout_warning,
+                    },
+                );
+            }
+            ("suite", Some(status @ ("ok" | "failed"))) => {
+                if !raw.has_only(&[
+                    "event",
+                    "passed",
+                    "failed",
+                    "ignored",
+                    "measured",
+                    "filtered_out",
+                    "exec_time",
+                ]) {
+                    return Err(RustdocJoinError::Invalid(
+                        "libtest suite result has unexpected fields".into(),
+                    ));
+                }
+                let suite = active.take().ok_or_else(|| {
+                    RustdocJoinError::Invalid("libtest suite ended without a start".into())
+                })?;
+                let passed = raw.passed.take();
+                let failed = raw.failed.take();
+                let ignored = raw.ignored.take();
+                let measured = raw.measured.take();
+                let filtered = raw.filtered_out.take();
+                let execution = raw.exec_time.take();
+                if passed.is_none()
+                    || failed.is_none()
+                    || ignored.is_none()
+                    || measured.is_none()
+                    || filtered.is_none()
+                    || !nonnegative_finite(execution)
+                {
+                    return Err(RustdocJoinError::Invalid(
+                        "libtest suite result is incomplete".into(),
+                    ));
+                }
+                let actual_passed = suite
+                    .outcomes
+                    .values()
+                    .filter(|outcome| **outcome == RustdocOutcomeStatus::Passed)
+                    .count() as u64;
+                let actual_failed = suite
+                    .outcomes
+                    .values()
+                    .filter(|outcome| **outcome == RustdocOutcomeStatus::Failed)
+                    .count() as u64;
+                let actual_ignored = suite
+                    .outcomes
+                    .values()
+                    .filter(|outcome| **outcome == RustdocOutcomeStatus::Ignored)
+                    .count() as u64;
+                let actual_completed = actual_passed + actual_failed + actual_ignored;
+                let suite_unfinished = suite
+                    .started
+                    .iter()
+                    .filter(|name| !suite.outcomes.contains_key(*name))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                if suite.expected < suite.started.len() as u64
+                    || suite.expected < actual_completed
+                    || actual_completed != suite.outcomes.len() as u64
+                {
+                    return Err(RustdocJoinError::Invalid(
+                        "libtest suite contains more events than planned tests".into(),
+                    ));
+                }
+                let stopped_early = actual_completed != suite.expected;
+                if passed != Some(actual_passed)
+                    || failed != Some(actual_failed)
+                    || ignored != Some(actual_ignored)
+                    || measured != Some(0)
+                    || (status == "ok") != (actual_failed == 0)
+                    || (stopped_early && actual_failed == 0)
+                {
+                    return Err(RustdocJoinError::Invalid(
+                        "libtest suite arithmetic does not match terminal events".into(),
+                    ));
+                }
+                planned_tests = planned_tests.checked_add(suite.expected).ok_or_else(|| {
+                    RustdocJoinError::Invalid("libtest planned-test count overflow".into())
+                })?;
+                filtered_out = filtered_out
+                    .checked_add(filtered.expect("validated above"))
+                    .ok_or_else(|| {
+                        RustdocJoinError::Invalid("libtest filtered-test count overflow".into())
+                    })?;
+                unstarted_tests = unstarted_tests
+                    .checked_add(
+                        suite
+                            .expected
+                            .checked_sub(suite.started.len() as u64)
+                            .expect("event count validated above"),
+                    )
+                    .ok_or_else(|| {
+                        RustdocJoinError::Invalid("libtest unstarted-test count overflow".into())
+                    })?;
+                for name in suite_unfinished {
+                    if !unfinished_started.insert(name.clone()) {
+                        return Err(RustdocJoinError::Invalid(format!(
+                            "libtest unfinished test {name} appeared in more than one suite"
+                        )));
+                    }
+                }
+                suites += 1;
+            }
+            ("report", None) => {
+                if active.is_some()
+                    || suites == 0
+                    || report.is_some()
+                    || !raw.has_only(&["total_time", "compilation_time"])
+                {
+                    return Err(RustdocJoinError::Invalid(
+                        "libtest merged report is out of order or malformed".into(),
+                    ));
+                }
+                let total = raw.total_time.take();
+                let compilation = raw.compilation_time.take();
+                if total.is_none()
+                    || compilation.is_none()
+                    || !nonnegative_finite(total)
+                    || !nonnegative_finite(compilation)
+                    || compilation > total
+                {
+                    return Err(RustdocJoinError::Invalid(
+                        "libtest merged report has invalid timings".into(),
+                    ));
+                }
+                report = Some((total, compilation));
+            }
+            _ => {
+                return Err(RustdocJoinError::Invalid(format!(
+                    "unsupported libtest event {} ({:?})",
+                    raw.kind, event
+                )));
+            }
+        }
+    }
+    if active.is_some() || suites == 0 {
+        return Err(RustdocJoinError::Invalid(
+            "libtest event stream is truncated or contains no suite".into(),
+        ));
+    }
+    let (total_seconds, compilation_seconds) = report.unwrap_or((None, None));
+    let report = RustdocOutcomeReport {
+        outcomes: outcomes.into_values().collect(),
+        suites,
+        planned_tests,
+        filtered_out,
+        unfinished_started: unfinished_started.into_iter().collect(),
+        unstarted_tests,
+        total_seconds,
+        compilation_seconds,
+    };
+    report
+        .validate()
+        .map_err(|error| RustdocJoinError::Invalid(error.to_string()))?;
+    Ok(report)
+}
+
+fn canonical_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+impl RustdocOutcomeReport {
+    pub fn validate(&self) -> Result<(), RustdocOutcomeError> {
+        if self.suites == 0
+            || !nonnegative_finite(self.total_seconds)
+            || !nonnegative_finite(self.compilation_seconds)
+            || self.total_seconds.is_some() != self.compilation_seconds.is_some()
+            || self.compilation_seconds > self.total_seconds
+        {
+            return Err(RustdocOutcomeError::Invalid(
+                "report has invalid suite or timing metadata".into(),
+            ));
+        }
+        let mut previous = None;
+        let mut completed = BTreeSet::new();
+        let mut has_failure = false;
+        for outcome in &self.outcomes {
+            if outcome.display_name.trim().is_empty()
+                || outcome.display_name.chars().any(char::is_control)
+                || previous.is_some_and(|previous| previous >= outcome.display_name.as_str())
+                || !completed.insert(outcome.display_name.as_str())
+                || !nonnegative_finite(outcome.execution_seconds)
+            {
+                return Err(RustdocOutcomeError::Invalid(
+                    "report outcomes are malformed, duplicated or unsorted".into(),
+                ));
+            }
+            previous = Some(outcome.display_name.as_str());
+            match outcome.status {
+                RustdocOutcomeStatus::Passed
+                    if outcome.message.is_some() || outcome.reason.is_some() =>
+                {
+                    return Err(RustdocOutcomeError::Invalid(format!(
+                        "passed doctest {} has failure details",
+                        outcome.display_name
+                    )));
+                }
+                RustdocOutcomeStatus::Failed => {
+                    has_failure = true;
+                    if (outcome.message.is_some() && outcome.reason.is_some())
+                        || outcome
+                            .reason
+                            .as_deref()
+                            .is_some_and(|reason| reason != "time limit exceeded")
+                    {
+                        return Err(RustdocOutcomeError::Invalid(format!(
+                            "failed doctest {} has incompatible details",
+                            outcome.display_name
+                        )));
+                    }
+                }
+                RustdocOutcomeStatus::Ignored
+                    if outcome.execution_seconds.is_some()
+                        || outcome.stdout.is_some()
+                        || outcome.reason.is_some() =>
+                {
+                    return Err(RustdocOutcomeError::Invalid(format!(
+                        "ignored doctest {} has execution details",
+                        outcome.display_name
+                    )));
+                }
+                _ => {}
+            }
+        }
+        let mut previous: Option<&str> = None;
+        for name in &self.unfinished_started {
+            if name.trim().is_empty()
+                || name.chars().any(char::is_control)
+                || previous.is_some_and(|previous| previous >= name.as_str())
+                || completed.contains(name.as_str())
+            {
+                return Err(RustdocOutcomeError::Invalid(
+                    "unfinished doctest identities are malformed, duplicated or completed".into(),
+                ));
+            }
+            previous = Some(name.as_str());
+        }
+        let completed = u64::try_from(self.outcomes.len()).map_err(|_| {
+            RustdocOutcomeError::Invalid("completed doctest count exceeds u64".into())
+        })?;
+        let unfinished = u64::try_from(self.unfinished_started.len()).map_err(|_| {
+            RustdocOutcomeError::Invalid("unfinished doctest count exceeds u64".into())
+        })?;
+        let accounted = completed
+            .checked_add(unfinished)
+            .and_then(|count| count.checked_add(self.unstarted_tests))
+            .ok_or_else(|| RustdocOutcomeError::Invalid("doctest count overflow".into()))?;
+        if accounted != self.planned_tests
+            || ((unfinished != 0 || self.unstarted_tests != 0) && !has_failure)
+        {
+            return Err(RustdocOutcomeError::Invalid(
+                "planned, completed and fail-fast doctest counts disagree".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl RustdocOutcomeUnit {
+    pub fn validate(&self) -> Result<(), RustdocOutcomeError> {
+        if self.schema != OUTCOME_SCHEMA
+            || !canonical_sha256(&self.invocation_id)
+            || !safe_group(&self.group)
+            || !canonical_sha256(&self.companion_build_id)
+            || !canonical_sha256(&self.raw_events_sha256)
+        {
+            return Err(RustdocOutcomeError::Invalid(
+                "outcome unit has an unsupported schema or invalid identity binding".into(),
+            ));
+        }
+        self.report.validate()
+    }
+}
+
+pub fn rustdoc_outcome_unit_from_libtest(
+    invocation_id: String,
+    group: String,
+    companion_build_id: String,
+    raw_events: &[u8],
+) -> Result<RustdocOutcomeUnit, RustdocOutcomeError> {
+    let report = parse_rustdoc_libtest_json(raw_events)
+        .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?;
+    let unit = RustdocOutcomeUnit {
+        schema: OUTCOME_SCHEMA.into(),
+        invocation_id,
+        group,
+        companion_build_id,
+        raw_events_sha256: format!("{:x}", Sha256::digest(raw_events)),
+        report,
+    };
+    unit.validate()?;
+    Ok(unit)
+}
+
+fn outcome_io(path: &Path, error: impl std::fmt::Display) -> RustdocOutcomeError {
+    RustdocOutcomeError::Io {
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    }
+}
+
+fn validate_outcome_directory(directory: &Path) -> Result<(), RustdocOutcomeError> {
+    let metadata = fs::symlink_metadata(directory).map_err(|error| outcome_io(directory, error))?;
+    if !metadata.file_type().is_dir() {
+        return Err(outcome_io(
+            directory,
+            "rustdoc outcome destination is not a non-symlink directory",
+        ));
+    }
+    Ok(())
+}
+
+pub fn publish_rustdoc_outcome_unit(
+    directory: &Path,
+    unit: &RustdocOutcomeUnit,
+) -> Result<PathBuf, RustdocOutcomeError> {
+    unit.validate()?;
+    validate_outcome_directory(directory)?;
+    let name = format!("doctest-outcome-{}.json", unit.invocation_id);
+    let destination = directory.join(&name);
+    let partial = directory.join(format!(".{name}.partial"));
+    let bytes =
+        serde_json::to_vec(unit).map_err(|error| RustdocOutcomeError::Json(error.to_string()))?;
+    let publication = (|| {
+        if fs::symlink_metadata(&destination).is_ok() {
+            return Err(outcome_io(&destination, "outcome unit already exists"));
+        }
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut output = options
+            .open(&partial)
+            .map_err(|error| outcome_io(&partial, error))?;
+        output
+            .write_all(&bytes)
+            .and_then(|()| output.sync_all())
+            .map_err(|error| outcome_io(&partial, error))?;
+        if fs::symlink_metadata(&destination).is_ok() {
+            return Err(outcome_io(
+                &destination,
+                "outcome unit appeared during publication",
+            ));
+        }
+        fs::rename(&partial, &destination).map_err(|error| outcome_io(&destination, error))?;
+        OpenOptions::new()
+            .read(true)
+            .open(directory)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| outcome_io(directory, error))?;
+        Ok(destination.clone())
+    })();
+    if publication.is_err() {
+        let _ = fs::remove_file(&partial);
+    }
+    publication
+}
+
+pub fn read_rustdoc_outcome_units(
+    directory: &Path,
+) -> Result<Vec<RustdocOutcomeUnit>, RustdocOutcomeError> {
+    validate_outcome_directory(directory)?;
+    let mut units = BTreeMap::new();
+    for entry in fs::read_dir(directory)
+        .map_err(|error| outcome_io(directory, error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| outcome_io(directory, error))?
+    {
+        let path = entry.path();
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            return Err(RustdocOutcomeError::Invalid(
+                "rustdoc outcome directory contains a non-UTF-8 name".into(),
+            ));
+        };
+        let relevant =
+            name.starts_with("doctest-outcome-") || name.starts_with(".doctest-outcome-");
+        if !relevant {
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|error| outcome_io(&path, error))?;
+        if !file_type.is_file() {
+            return Err(outcome_io(
+                &path,
+                "rustdoc outcome artifact is not a regular file",
+            ));
+        }
+        let Some(invocation_id) = name
+            .strip_prefix("doctest-outcome-")
+            .and_then(|name| name.strip_suffix(".json"))
+            .filter(|identity| canonical_sha256(identity))
+        else {
+            return Err(RustdocOutcomeError::Invalid(format!(
+                "unrecognized or incomplete rustdoc outcome artifact {name}"
+            )));
+        };
+        let metadata = entry.metadata().map_err(|error| outcome_io(&path, error))?;
+        if metadata.len() == 0 || metadata.len() > MAX_OUTCOME_UNIT_BYTES {
+            return Err(RustdocOutcomeError::Invalid(format!(
+                "rustdoc outcome artifact {name} has invalid size"
+            )));
+        }
+        let bytes = fs::read(&path).map_err(|error| outcome_io(&path, error))?;
+        let unit: RustdocOutcomeUnit = serde_json::from_slice(&bytes)
+            .map_err(|error| RustdocOutcomeError::Json(format!("{name}: {error}")))?;
+        unit.validate()?;
+        if unit.invocation_id != invocation_id {
+            return Err(RustdocOutcomeError::Invalid(format!(
+                "rustdoc outcome filename does not match {}",
+                unit.invocation_id
+            )));
+        }
+        if units.insert(invocation_id.to_owned(), unit).is_some() {
+            return Err(RustdocOutcomeError::Invalid(format!(
+                "duplicate rustdoc outcome invocation {invocation_id}"
+            )));
+        }
+    }
+    Ok(units.into_values().collect())
+}
+
+/// Join compiler-described merged doctests to authenticated libtest outcomes
+/// without discarding any part of the rustdoc invocation.
+///
+/// Rustdoc can execute merged, standalone and compile-fail doctests in one
+/// invocation. The merged map names only the first category. This operation
+/// therefore returns unmatched named/unfinished/unstarted results explicitly;
+/// a caller may project matched entries, but may claim a complete doctest
+/// catalog only when `is_fully_catalogued()` is true.
+pub fn join_rustdoc_outcomes(
+    merged_units: Vec<RustdocMergedUnit>,
+    outcome_units: Vec<RustdocOutcomeUnit>,
+) -> Result<RustdocOutcomeResolution, RustdocOutcomeError> {
+    let mut maps = BTreeMap::new();
+    for unit in merged_units {
+        unit.map
+            .validate()
+            .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?;
+        let group = unit.map.group.clone();
+        if maps.insert(group.clone(), unit).is_some() {
+            return Err(RustdocOutcomeError::Invalid(format!(
+                "duplicate merged rustdoc outcome group {group}"
+            )));
+        }
+    }
+
+    let mut outcomes = BTreeMap::new();
+    for unit in outcome_units {
+        unit.validate()?;
+        let group = unit.group.clone();
+        if outcomes.insert(group.clone(), unit).is_some() {
+            return Err(RustdocOutcomeError::Invalid(format!(
+                "more than one rustdoc outcome invocation uses group {group}"
+            )));
+        }
+    }
+
+    let mut groups = Vec::new();
+    let mut unmatched_maps = Vec::new();
+    for (group, map_unit) in maps {
+        let Some(outcome_unit) = outcomes.remove(&group) else {
+            unmatched_maps.push(map_unit);
+            continue;
+        };
+        let mut terminal = outcome_unit
+            .report
+            .outcomes
+            .iter()
+            .cloned()
+            .map(|outcome| (outcome.display_name.clone(), outcome))
+            .collect::<BTreeMap<_, _>>();
+        let mut unfinished = outcome_unit
+            .report
+            .unfinished_started
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut unmatched_unstarted_tests = outcome_unit.report.unstarted_tests;
+        let mut entries = Vec::with_capacity(map_unit.map.entries.len());
+        for entry in map_unit.map.entries {
+            let state = if let Some(outcome) = terminal.remove(&entry.display_name) {
+                RustdocJoinedOutcomeState::Completed { outcome }
+            } else if unfinished.remove(&entry.display_name) {
+                RustdocJoinedOutcomeState::UnfinishedStarted
+            } else {
+                unmatched_unstarted_tests = unmatched_unstarted_tests.checked_sub(1).ok_or_else(
+                    || {
+                        RustdocOutcomeError::Invalid(format!(
+                            "merged doctest {} has no outcome, but rustdoc reported no remaining unstarted test",
+                            entry.display_name
+                        ))
+                    },
+                )?;
+                RustdocJoinedOutcomeState::Unstarted
+            };
+            entries.push(RustdocJoinedOutcome { entry, state });
+        }
+        groups.push(RustdocOutcomeGroupJoin {
+            invocation_id: outcome_unit.invocation_id,
+            group,
+            companion_build_id: outcome_unit.companion_build_id,
+            raw_events_sha256: outcome_unit.raw_events_sha256,
+            join: map_unit.join,
+            entries,
+            unmatched_outcomes: terminal.into_values().collect(),
+            unmatched_unfinished_started: unfinished.into_iter().collect(),
+            unmatched_unstarted_tests,
+        });
+    }
+
+    Ok(RustdocOutcomeResolution {
+        groups,
+        unmatched_maps,
+        unmatched_units: outcomes.into_values().collect(),
+    })
 }
 
 impl RustdocMergedJoin {
@@ -397,6 +1342,7 @@ impl RustdocMergedMap {
             ));
         }
         let mut modules = BTreeSet::new();
+        let mut display_names = BTreeSet::new();
         let mut source_sites = BTreeSet::new();
         let mut previous = None;
         for entry in &self.entries {
@@ -413,6 +1359,7 @@ impl RustdocMergedMap {
             }
             previous = Some(index);
             if !modules.insert(entry.module.as_str())
+                || !display_names.insert(entry.display_name.as_str())
                 || !source_sites.insert((entry.path.as_str(), entry.line))
                 || !normalized_relative_path(&entry.path)
                 || entry.line == 0
@@ -1516,11 +2463,11 @@ mod tests {
     fn map() -> RustdocMergedMap {
         RustdocMergedMap::parse(
             br#"{
-                "schema":"supercov-rustdoc-merged-map-v1",
+                "schema":"supercov-rustdoc-merged-map-v2",
                 "group":"fixture",
                 "entries":[
-                    {"module":"__doctest_0","displayName":"src/lib.rs - (line 3)","path":"src/lib.rs","line":3},
-                    {"module":"__doctest_1","displayName":"src/lib.rs - (line 10)","path":"src/lib.rs","line":10}
+                    {"module":"__doctest_0","displayName":"src/lib.rs - (line 3)","path":"src/lib.rs","line":3,"ignored":false,"noRun":false,"shouldPanic":false},
+                    {"module":"__doctest_1","displayName":"src/lib.rs - (line 10)","path":"src/lib.rs","line":10,"ignored":false,"noRun":true,"shouldPanic":true}
                 ]
             }"#,
         )
@@ -1533,15 +2480,427 @@ mod tests {
         )
     }
 
+    fn libtest_stream(lines: &[&str]) -> Vec<u8> {
+        lines.join("\n").into_bytes()
+    }
+
+    struct OutcomeDirectory(PathBuf);
+
+    impl OutcomeDirectory {
+        fn new() -> Self {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "supercov-rustdoc-outcome-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).expect("create outcome test directory");
+            Self(path)
+        }
+    }
+
+    impl Drop for OutcomeDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn passing_outcome_unit() -> RustdocOutcomeUnit {
+        RustdocOutcomeUnit {
+            schema: OUTCOME_SCHEMA.into(),
+            invocation_id: "1".repeat(64),
+            group: "fixture".into(),
+            companion_build_id: "2".repeat(64),
+            raw_events_sha256: "3".repeat(64),
+            report: RustdocOutcomeReport {
+                outcomes: vec![RustdocTestOutcome {
+                    display_name: "src/lib.rs - example (line 3)".into(),
+                    status: RustdocOutcomeStatus::Passed,
+                    execution_seconds: Some(0.25),
+                    stdout: None,
+                    message: None,
+                    reason: None,
+                    timeout_warning: false,
+                }],
+                suites: 1,
+                planned_tests: 1,
+                filtered_out: 0,
+                unfinished_started: Vec::new(),
+                unstarted_tests: 0,
+                total_seconds: None,
+                compilation_seconds: None,
+            },
+        }
+    }
+
+    fn merged_unit() -> RustdocMergedUnit {
+        RustdocMergedUnit {
+            map: map(),
+            join: None,
+        }
+    }
+
+    fn outcome(display_name: &str, status: RustdocOutcomeStatus) -> RustdocTestOutcome {
+        RustdocTestOutcome {
+            display_name: display_name.into(),
+            status,
+            execution_seconds: (status != RustdocOutcomeStatus::Ignored).then_some(0.25),
+            stdout: None,
+            message: None,
+            reason: None,
+            timeout_warning: false,
+        }
+    }
+
+    #[test]
+    fn parses_exact_libtest_outcomes_across_merged_suites() {
+        let report = parse_rustdoc_libtest_json(&libtest_stream(&[
+            r#"{"type":"suite","event":"started","test_count":3,"shuffle_seed":17}"#,
+            r#"{"type":"test","event":"started","name":"alpha"}"#,
+            r#"{"type":"test","event":"timeout","name":"alpha"}"#,
+            r#"{"type":"test","name":"alpha","event":"ok","exec_time":1.25,"stdout":"visible\noutput"}"#,
+            r#"{"type":"test","event":"started","name":"beta"}"#,
+            r#"{"type":"test","name":"beta","event":"failed","exec_time":0.5,"stdout":"failure","reason":"time limit exceeded"}"#,
+            r#"{"type":"test","event":"started","name":"ignored"}"#,
+            r#"{"type":"test","name":"ignored","event":"ignored","message":"platform"}"#,
+            r#"{"type":"suite","event":"failed","passed":1,"failed":1,"ignored":1,"measured":0,"filtered_out":2,"exec_time":1.75}"#,
+            r#"{"type":"suite","event":"started","test_count":0}"#,
+            r#"{"type":"suite","event":"ok","passed":0,"failed":0,"ignored":0,"measured":0,"filtered_out":3}"#,
+            r#"{"type":"report","total_time":2.5,"compilation_time":0.75}"#,
+        ]))
+        .expect("pinned libtest stream");
+
+        assert_eq!(report.suites, 2);
+        assert_eq!(report.planned_tests, 3);
+        assert_eq!(report.filtered_out, 5);
+        assert!(report.unfinished_started.is_empty());
+        assert_eq!(report.unstarted_tests, 0);
+        assert_eq!(report.total_seconds, Some(2.5));
+        assert_eq!(report.compilation_seconds, Some(0.75));
+        assert_eq!(
+            report
+                .outcomes
+                .iter()
+                .map(|outcome| (
+                    outcome.display_name.as_str(),
+                    outcome.status,
+                    outcome.timeout_warning,
+                    outcome.message.as_deref(),
+                    outcome.reason.as_deref(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("alpha", RustdocOutcomeStatus::Passed, true, None, None),
+                (
+                    "beta",
+                    RustdocOutcomeStatus::Failed,
+                    false,
+                    None,
+                    Some("time limit exceeded"),
+                ),
+                (
+                    "ignored",
+                    RustdocOutcomeStatus::Ignored,
+                    false,
+                    Some("platform"),
+                    None,
+                ),
+            ]
+        );
+        assert_eq!(report.outcomes[0].execution_seconds, Some(1.25));
+        assert_eq!(
+            report.outcomes[0].stdout.as_deref(),
+            Some("visible\noutput")
+        );
+    }
+
+    #[test]
+    fn represents_failed_fail_fast_suites_without_inventing_outcomes() {
+        let report = parse_rustdoc_libtest_json(&libtest_stream(&[
+            r#"{"type":"suite","event":"started","test_count":4}"#,
+            r#"{"type":"test","event":"started","name":"failing"}"#,
+            r#"{"type":"test","event":"started","name":"still-running"}"#,
+            r#"{"type":"test","name":"failing","event":"failed","message":"boom"}"#,
+            r#"{"type":"suite","event":"failed","passed":0,"failed":1,"ignored":0,"measured":0,"filtered_out":7}"#,
+        ]))
+        .expect("valid fail-fast stream");
+
+        assert_eq!(report.planned_tests, 4);
+        assert_eq!(report.filtered_out, 7);
+        assert_eq!(report.unfinished_started, ["still-running"]);
+        assert_eq!(report.unstarted_tests, 2);
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.outcomes[0].status, RustdocOutcomeStatus::Failed);
+        assert_eq!(report.outcomes[0].message.as_deref(), Some("boom"));
+        assert_eq!(report.total_seconds, None);
+    }
+
+    #[test]
+    fn rejects_malformed_truncated_or_semantically_impossible_libtest_streams() {
+        let cases = [
+            vec![],
+            vec![r#"{"type":"suite","event":"started","test_count":0,"extra":true}"#],
+            vec![r#"{"type":"suite","event":null,"test_count":0}"#],
+            vec![r#"{"type":"suite","event":"started","event":"started","test_count":0}"#],
+            vec![
+                r#"{"type":"suite","event":"started","test_count":1}"#,
+                r#"{"type":"test","name":"missing-start","event":"ok"}"#,
+                r#"{"type":"suite","event":"ok","passed":1,"failed":0,"ignored":0,"measured":0,"filtered_out":0}"#,
+            ],
+            vec![
+                r#"{"type":"suite","event":"started","test_count":1}"#,
+                r#"{"type":"test","event":"started","name":"duplicate"}"#,
+                r#"{"type":"test","event":"started","name":"duplicate"}"#,
+            ],
+            vec![
+                r#"{"type":"suite","event":"started","test_count":1}"#,
+                r#"{"type":"test","event":"timeout","name":"missing-start"}"#,
+            ],
+            vec![
+                r#"{"type":"suite","event":"started","test_count":1}"#,
+                r#"{"type":"test","event":"started","name":"unknown-reason"}"#,
+                r#"{"type":"test","name":"unknown-reason","event":"failed","reason":"new reason"}"#,
+                r#"{"type":"suite","event":"failed","passed":0,"failed":1,"ignored":0,"measured":0,"filtered_out":0}"#,
+            ],
+            vec![
+                r#"{"type":"suite","event":"started","test_count":1}"#,
+                r#"{"type":"test","event":"started","name":"ignored"}"#,
+                r#"{"type":"test","name":"ignored","event":"ignored","stdout":"impossible"}"#,
+                r#"{"type":"suite","event":"ok","passed":0,"failed":0,"ignored":1,"measured":0,"filtered_out":0}"#,
+            ],
+            vec![
+                r#"{"type":"suite","event":"started","test_count":1}"#,
+                r#"{"type":"test","event":"started","name":"unfinished"}"#,
+                r#"{"type":"suite","event":"ok","passed":0,"failed":0,"ignored":0,"measured":0,"filtered_out":0}"#,
+            ],
+            vec![
+                r#"{"type":"suite","event":"started","test_count":1}"#,
+                r#"{"type":"test","event":"started","name":"wrong-count"}"#,
+                r#"{"type":"test","name":"wrong-count","event":"ok"}"#,
+                r#"{"type":"suite","event":"ok","passed":0,"failed":0,"ignored":0,"measured":0,"filtered_out":0}"#,
+            ],
+            vec![
+                r#"{"type":"suite","event":"started","test_count":0}"#,
+                r#"{"type":"suite","event":"ok","passed":0,"failed":0,"ignored":0,"measured":1,"filtered_out":0}"#,
+            ],
+            vec![
+                r#"{"type":"suite","event":"started","test_count":0}"#,
+                r#"{"type":"suite","event":"ok","passed":0,"failed":0,"ignored":0,"measured":0,"filtered_out":0}"#,
+                r#"{"type":"report","total_time":1.0,"compilation_time":2.0}"#,
+            ],
+            vec![r#"{"type":"suite","event":"discovery"}"#],
+            vec![r#"{"type":"suite","event":"started","test_count":0}"#],
+        ];
+        for lines in cases {
+            assert!(
+                parse_rustdoc_libtest_json(&libtest_stream(&lines)).is_err(),
+                "accepted invalid libtest stream: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn publishes_and_reads_exact_atomic_rustdoc_outcome_units() {
+        let directory = OutcomeDirectory::new();
+        let unit = passing_outcome_unit();
+        let path = publish_rustdoc_outcome_unit(&directory.0, &unit).expect("publish outcome");
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(format!("doctest-outcome-{}.json", unit.invocation_id).as_str())
+        );
+        assert_eq!(
+            read_rustdoc_outcome_units(&directory.0).expect("read outcome"),
+            std::slice::from_ref(&unit)
+        );
+        assert!(publish_rustdoc_outcome_unit(&directory.0, &unit).is_err());
+        assert_eq!(
+            read_rustdoc_outcome_units(&directory.0).expect("published outcome stayed intact"),
+            [unit]
+        );
+    }
+
+    #[test]
+    fn joins_merged_outcomes_without_dropping_standalone_or_fail_fast_state() {
+        let mut unit = passing_outcome_unit();
+        unit.report = RustdocOutcomeReport {
+            outcomes: vec![
+                outcome("src/lib.rs - (line 10)", RustdocOutcomeStatus::Ignored),
+                outcome("src/lib.rs - (line 3)", RustdocOutcomeStatus::Passed),
+                outcome(
+                    "src/lib.rs - standalone (line 20)",
+                    RustdocOutcomeStatus::Failed,
+                ),
+            ],
+            suites: 1,
+            planned_tests: 5,
+            filtered_out: 0,
+            unfinished_started: vec!["src/lib.rs - compile_fail (line 30)".into()],
+            unstarted_tests: 1,
+            total_seconds: None,
+            compilation_seconds: None,
+        };
+        unit.validate().expect("valid mixed rustdoc outcome unit");
+
+        let resolution = join_rustdoc_outcomes(vec![merged_unit()], vec![unit])
+            .expect("lossless merged outcome join");
+        assert!(!resolution.is_fully_catalogued());
+        assert!(resolution.unmatched_maps.is_empty());
+        assert!(resolution.unmatched_units.is_empty());
+        let [group] = resolution.groups.as_slice() else {
+            panic!("expected one joined rustdoc group")
+        };
+        assert_eq!(group.entries.len(), 2);
+        assert!(matches!(
+            &group.entries[0].state,
+            RustdocJoinedOutcomeState::Completed { outcome }
+                if outcome.status == RustdocOutcomeStatus::Passed
+        ));
+        assert!(matches!(
+            &group.entries[1].state,
+            RustdocJoinedOutcomeState::Completed { outcome }
+                if outcome.status == RustdocOutcomeStatus::Ignored
+        ));
+        assert_eq!(
+            group
+                .unmatched_outcomes
+                .iter()
+                .map(|outcome| outcome.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["src/lib.rs - standalone (line 20)"]
+        );
+        assert_eq!(
+            group.unmatched_unfinished_started,
+            ["src/lib.rs - compile_fail (line 30)"]
+        );
+        assert_eq!(group.unmatched_unstarted_tests, 1);
+    }
+
+    #[test]
+    fn joins_named_fail_fast_states_without_inventing_terminal_outcomes() {
+        let mut unit = passing_outcome_unit();
+        unit.report = RustdocOutcomeReport {
+            outcomes: vec![outcome(
+                "src/lib.rs - (line 3)",
+                RustdocOutcomeStatus::Failed,
+            )],
+            suites: 1,
+            planned_tests: 2,
+            filtered_out: 0,
+            unfinished_started: vec!["src/lib.rs - (line 10)".into()],
+            unstarted_tests: 0,
+            total_seconds: None,
+            compilation_seconds: None,
+        };
+        let resolution = join_rustdoc_outcomes(vec![merged_unit()], vec![unit])
+            .expect("join fail-fast identities");
+        assert!(resolution.is_fully_catalogued());
+        assert!(matches!(
+            resolution.groups[0].entries[1].state,
+            RustdocJoinedOutcomeState::UnfinishedStarted
+        ));
+
+        let mut unit = passing_outcome_unit();
+        unit.report = RustdocOutcomeReport {
+            outcomes: vec![outcome(
+                "src/lib.rs - (line 3)",
+                RustdocOutcomeStatus::Failed,
+            )],
+            suites: 1,
+            planned_tests: 2,
+            filtered_out: 0,
+            unfinished_started: Vec::new(),
+            unstarted_tests: 1,
+            total_seconds: None,
+            compilation_seconds: None,
+        };
+        let resolution = join_rustdoc_outcomes(vec![merged_unit()], vec![unit])
+            .expect("join unstarted identity");
+        assert!(resolution.is_fully_catalogued());
+        assert!(matches!(
+            resolution.groups[0].entries[1].state,
+            RustdocJoinedOutcomeState::Unstarted
+        ));
+    }
+
+    #[test]
+    fn outcome_join_rejects_ambiguous_groups_and_impossible_missing_entries() {
+        let unit = passing_outcome_unit();
+        assert!(
+            join_rustdoc_outcomes(vec![merged_unit(), merged_unit()], vec![unit.clone()]).is_err()
+        );
+        assert!(join_rustdoc_outcomes(vec![merged_unit()], vec![unit.clone(), unit]).is_err());
+
+        let mut incomplete = passing_outcome_unit();
+        incomplete.report.outcomes[0].display_name = "src/lib.rs - (line 3)".into();
+        assert!(join_rustdoc_outcomes(vec![merged_unit()], vec![incomplete]).is_err());
+    }
+
+    #[test]
+    fn outcome_join_retains_maps_and_units_without_a_counterpart() {
+        let maps_only = join_rustdoc_outcomes(vec![merged_unit()], Vec::new()).unwrap();
+        assert_eq!(maps_only.unmatched_maps.len(), 1);
+        assert!(!maps_only.is_fully_catalogued());
+
+        let units_only = join_rustdoc_outcomes(Vec::new(), vec![passing_outcome_unit()]).unwrap();
+        assert_eq!(units_only.unmatched_units.len(), 1);
+        assert!(!units_only.is_fully_catalogued());
+    }
+
+    #[test]
+    fn rejects_incomplete_tampered_or_inconsistent_rustdoc_outcome_units() {
+        let mut invalid = Vec::new();
+
+        let mut unit = passing_outcome_unit();
+        unit.schema = "supercov-rustdoc-outcome-unit-v0".into();
+        invalid.push(unit);
+
+        let mut unit = passing_outcome_unit();
+        unit.invocation_id = "A".repeat(64);
+        invalid.push(unit);
+
+        let mut unit = passing_outcome_unit();
+        unit.report.planned_tests = 2;
+        invalid.push(unit);
+
+        let mut unit = passing_outcome_unit();
+        unit.report.total_seconds = Some(1.0);
+        invalid.push(unit);
+
+        let mut unit = passing_outcome_unit();
+        unit.report.outcomes[0].status = RustdocOutcomeStatus::Ignored;
+        invalid.push(unit);
+
+        for unit in invalid {
+            assert!(unit.validate().is_err(), "accepted invalid unit: {unit:?}");
+        }
+
+        let directory = OutcomeDirectory::new();
+        let unit = passing_outcome_unit();
+        fs::write(
+            directory.0.join(format!(
+                ".doctest-outcome-{}.json.partial",
+                unit.invocation_id
+            )),
+            b"partial",
+        )
+        .unwrap();
+        assert!(read_rustdoc_outcome_units(&directory.0).is_err());
+    }
+
     #[test]
     fn map_is_strict_sorted_and_path_safe() {
         let valid = map();
         assert_eq!(valid.entry("__doctest_1").expect("entry").line, 10);
+        assert!(valid.entry("__doctest_1").expect("entry").no_run);
+        assert!(valid.entry("__doctest_1").expect("entry").should_panic);
         for invalid in [
             br#"{"schema":"wrong","group":"fixture","entries":[]}"#.as_slice(),
-            br#"{"schema":"supercov-rustdoc-merged-map-v1","group":"fixture","entries":[{"module":"__doctest_1","displayName":"one","path":"src/lib.rs","line":10},{"module":"__doctest_0","displayName":"zero","path":"src/lib.rs","line":3}]}"#.as_slice(),
-            br#"{"schema":"supercov-rustdoc-merged-map-v1","group":"fixture","entries":[{"module":"__doctest_0","displayName":"bad","path":"../src/lib.rs","line":3}]}"#.as_slice(),
-            br#"{"schema":"supercov-rustdoc-merged-map-v1","group":"fixture","entries":[{"module":"__doctest_0","displayName":"bad","path":"src/lib.rs","line":0,"extra":true}]}"#.as_slice(),
+            br#"{"schema":"supercov-rustdoc-merged-map-v1","group":"fixture","entries":[{"module":"__doctest_0","displayName":"old","path":"src/lib.rs","line":3,"ignored":false,"noRun":false,"shouldPanic":false}]}"#.as_slice(),
+            br#"{"schema":"supercov-rustdoc-merged-map-v2","group":"fixture","entries":[{"module":"__doctest_1","displayName":"one","path":"src/lib.rs","line":10,"ignored":false,"noRun":false,"shouldPanic":false},{"module":"__doctest_0","displayName":"zero","path":"src/lib.rs","line":3,"ignored":false,"noRun":false,"shouldPanic":false}]}"#.as_slice(),
+            br#"{"schema":"supercov-rustdoc-merged-map-v2","group":"fixture","entries":[{"module":"__doctest_0","displayName":"duplicate","path":"src/lib.rs","line":3,"ignored":false,"noRun":false,"shouldPanic":false},{"module":"__doctest_1","displayName":"duplicate","path":"src/lib.rs","line":10,"ignored":false,"noRun":false,"shouldPanic":false}]}"#.as_slice(),
+            br#"{"schema":"supercov-rustdoc-merged-map-v2","group":"fixture","entries":[{"module":"__doctest_0","displayName":"bad","path":"../src/lib.rs","line":3,"ignored":false,"noRun":false,"shouldPanic":false}]}"#.as_slice(),
+            br#"{"schema":"supercov-rustdoc-merged-map-v2","group":"fixture","entries":[{"module":"__doctest_0","displayName":"bad","path":"src/lib.rs","line":0,"ignored":false,"noRun":false,"shouldPanic":false,"extra":true}]}"#.as_slice(),
         ] {
             assert!(RustdocMergedMap::parse(invalid).is_err());
         }
@@ -1784,13 +3143,16 @@ mod tests {
             )]),
         };
         let map = br#"{
-            "schema":"supercov-rustdoc-merged-map-v1",
+            "schema":"supercov-rustdoc-merged-map-v2",
             "group":"fixture",
             "entries":[{
                 "module":"__doctest_0",
                 "displayName":"src/lib.rs - (line 3)",
                 "path":"src/lib.rs",
-                "line":3
+                "line":3,
+                "ignored":false,
+                "noRun":false,
+                "shouldPanic":false
             }]
         }"#
         .to_vec();
@@ -2120,13 +3482,16 @@ mod tests {
             "//! ```\n",
         );
         let map = br#"{
-            "schema":"supercov-rustdoc-merged-map-v1",
+            "schema":"supercov-rustdoc-merged-map-v2",
             "group":"fixture",
             "entries":[{
                 "module":"__doctest_0",
                 "displayName":"src/lib.rs - (line 3)",
                 "path":"src/lib.rs",
-                "line":3
+                "line":3,
+                "ignored":false,
+                "noRun":false,
+                "shouldPanic":false
             }]
         }"#;
         let joined = join_merged_doctest(

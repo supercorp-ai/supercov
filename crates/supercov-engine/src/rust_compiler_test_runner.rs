@@ -40,6 +40,7 @@ use crate::{
         RustCompilerBuild, RustCompilerBuildRequest, RustCompilerTestArtifact,
         build_with_rust_compiler_companion,
     },
+    rust_doctest::{RustdocJoinedOutcomeState, RustdocOutcomeResolution, RustdocOutcomeStatus},
     rust_probe_transport::{
         DEFAULT_DESCRIPTOR_CAPACITY, DEFAULT_PAYLOAD_CAPACITY, RUST_CONTEXT_ENV,
         RUST_TRANSPORT_ENV, RUST_TRANSPORT_TOKEN_ENV, RustTransportRead, create_rust_transport,
@@ -417,6 +418,150 @@ fn compiler_runner_declaration() -> FrontendRunnerDeclaration {
     }
 }
 
+fn rustdoc_runner_declaration() -> FrontendRunnerDeclaration {
+    FrontendRunnerDeclaration {
+        runner: "rustdoc".into(),
+        execution_model: ExecutionModel::ParallelContextPropagated,
+        attribution: FrontendAttribution {
+            run: AttributionPrecision::Exact,
+            worker: AttributionPrecision::Exact,
+            test: AttributionPrecision::Exact,
+            retry: AttributionPrecision::Exact,
+            phase: AttributionPrecision::Exact,
+            action: AttributionPrecision::Unavailable,
+            assertion: AttributionPrecision::Exact,
+        },
+        limitations: vec![FrontendLimitation {
+            id: "rustdoc-action-linkage-unavailable".into(),
+            scopes: vec![FrontendLimitationScope::Action],
+            reason: "Rust doctests expose assertions but no general application-action lifecycle"
+                .into(),
+        }],
+    }
+}
+
+fn doctest_raw_results(
+    run_id: &str,
+    resolution: &RustdocOutcomeResolution,
+    started_at_ms: i64,
+    ended_at_ms: i64,
+) -> Vec<RawTestResult> {
+    let mut results = Vec::new();
+    for group in &resolution.groups {
+        let worker_id = format!("rustdoc-{}", &group.invocation_id[..16]);
+        for joined in &group.entries {
+            let entry = &joined.entry;
+            let test_id = format!("rust:doctest:{}:{}:{}", group.group, entry.path, entry.line);
+            let attempt_id = format!("{run_id}:doctest:{}:{}", group.invocation_id, entry.module);
+            let (status, error, started, completed) = match &joined.state {
+                RustdocJoinedOutcomeState::Completed { outcome } => (
+                    match outcome.status {
+                        RustdocOutcomeStatus::Passed => "passed",
+                        RustdocOutcomeStatus::Failed => "failed",
+                        RustdocOutcomeStatus::Ignored => "skipped",
+                    },
+                    (outcome.status == RustdocOutcomeStatus::Failed).then(|| {
+                        outcome
+                            .message
+                            .as_deref()
+                            .or(outcome.reason.as_deref())
+                            .unwrap_or("rustdoc reported a failed doctest")
+                            .to_owned()
+                    }),
+                    true,
+                    true,
+                ),
+                RustdocJoinedOutcomeState::UnfinishedStarted => (
+                    "unknown",
+                    Some("rustdoc fail-fast ended after this doctest started".into()),
+                    true,
+                    false,
+                ),
+                RustdocJoinedOutcomeState::Unstarted => (
+                    "unknown",
+                    Some("rustdoc fail-fast ended before this doctest started".into()),
+                    false,
+                    false,
+                ),
+            };
+            let phases = started
+                .then(|| CoveragePhase {
+                    id: phase_id(run_id, &attempt_id),
+                    kind: "test".into(),
+                    operation: format!("Rust doctest {}", entry.display_name),
+                    source: Some(entry.path.clone()),
+                    caused_by_phase_id: None,
+                    // Pinned libtest reports duration but no wall-clock
+                    // boundaries. The authenticated rustdoc invocation is the
+                    // narrowest non-invented interval available; an unfinished
+                    // test deliberately has no terminal timestamp.
+                    started_at_ms,
+                    ended_at_ms: completed.then_some(ended_at_ms),
+                    status: Some(status.into()),
+                    error: error.clone(),
+                })
+                .into_iter()
+                .collect();
+            results.push(RawTestResult {
+                test_id: Some(test_id.clone()),
+                scope: Some(ExecutionScope {
+                    version: 1,
+                    run_id: run_id.into(),
+                    worker_id: worker_id.clone(),
+                    test_id: test_id.clone(),
+                    test_key: test_id.clone(),
+                    retry: 0,
+                    attempt_id,
+                }),
+                test: test_id,
+                test_file: Some(entry.path.clone()),
+                title: Some(entry.display_name.clone()),
+                retry: Some(0),
+                status: Some(status.into()),
+                expected_status: Some("passed".into()),
+                flaky: false,
+                provenance: TestProvenance {
+                    runner: "rustdoc".into(),
+                    kind: "doctest".into(),
+                    project: Some(group.group.clone()),
+                    source: "supercov-rustdoc-outcome".into(),
+                },
+                role: "test".into(),
+                phases,
+                runtime: Vec::new(),
+                browser: Vec::new(),
+                server: Vec::new(),
+            });
+        }
+    }
+    results
+}
+
+fn doctest_command_failed(resolution: &RustdocOutcomeResolution) -> bool {
+    resolution.groups.iter().any(|group| {
+        group.entries.iter().any(|joined| match &joined.state {
+            RustdocJoinedOutcomeState::Completed { outcome } => {
+                outcome.status == RustdocOutcomeStatus::Failed
+            }
+            RustdocJoinedOutcomeState::UnfinishedStarted | RustdocJoinedOutcomeState::Unstarted => {
+                true
+            }
+        }) || group
+            .unmatched_outcomes
+            .iter()
+            .any(|outcome| outcome.status == RustdocOutcomeStatus::Failed)
+            || !group.unmatched_unfinished_started.is_empty()
+            || group.unmatched_unstarted_tests != 0
+    }) || resolution.unmatched_units.iter().any(|unit| {
+        unit.report
+            .outcomes
+            .iter()
+            .any(|outcome| outcome.status == RustdocOutcomeStatus::Failed)
+            || !unit.report.unfinished_started.is_empty()
+            || unit.report.unstarted_tests != 0
+    })
+}
+
 fn ctfe_raw_results(
     run_id: &str,
     units: Vec<RustCompilerCtfeUnit>,
@@ -674,8 +819,14 @@ fn execute_compiler_build(
         build.build_started_at_ms,
         build.build_ended_at_ms,
     );
+    raw_results.extend(doctest_raw_results(
+        &request.run_id,
+        &build.doctest_outcomes,
+        build.build_started_at_ms,
+        build.build_ended_at_ms,
+    ));
     let mut attempt_health = Vec::new();
-    let mut overall_exit = 0;
+    let mut overall_exit = i32::from(doctest_command_failed(&build.doctest_outcomes));
     for outcome in outcomes {
         let (test_status, exit) = status(&outcome.output);
         if exit != 0 {
@@ -746,7 +897,7 @@ fn execute_compiler_build(
         attempt_health.push(health);
     }
 
-    let structural_limitations = build
+    let mut structural_limitations = build
         .normalized
         .manifest
         .limitations
@@ -757,14 +908,26 @@ fn execute_compiler_build(
                 .and_then(|id| id.as_str())
                 .map(str::to_owned)
         })
-        .collect();
+        .collect::<Vec<_>>();
+    if !build.doctest_outcomes.is_fully_catalogued() {
+        structural_limitations.push("rust-doctest-outcome-catalog-incomplete".into());
+    }
+    structural_limitations.sort();
+    structural_limitations.dedup();
+    let mut runners = vec![compiler_runner_declaration(), runner_declaration()];
+    if !build.doctest_outcomes.groups.is_empty()
+        || !build.doctest_outcomes.unmatched_maps.is_empty()
+        || !build.doctest_outcomes.unmatched_units.is_empty()
+    {
+        runners.push(rustdoc_runner_declaration());
+    }
     let declaration = FrontendRunDeclaration {
         protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
         frontend_id: "rust".into(),
         frontend_version: "rust-compiler-v1".into(),
         language: "rust".into(),
         structural_source: StructuralSource::OwnedProbes,
-        runners: vec![compiler_runner_declaration(), runner_declaration()],
+        runners,
         structural_limitations,
     };
     Ok(RustCompilerFrontendRun {
@@ -794,6 +957,9 @@ fn execute_compiler_build(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rust_doctest::{
+        RustdocJoinedOutcome, RustdocMergedEntry, RustdocOutcomeGroupJoin, RustdocTestOutcome,
+    };
 
     #[test]
     fn tokens_and_phase_ids_are_fixed_width_and_domain_separated() {
@@ -816,5 +982,74 @@ mod tests {
             compiler.attribution.assertion,
             AttributionPrecision::Unavailable
         );
+        let rustdoc = rustdoc_runner_declaration();
+        assert_eq!(
+            rustdoc.execution_model,
+            ExecutionModel::ParallelContextPropagated
+        );
+        assert_eq!(rustdoc.attribution.test, AttributionPrecision::Exact);
+        assert_eq!(rustdoc.attribution.assertion, AttributionPrecision::Exact);
+    }
+
+    #[test]
+    fn doctest_outcomes_project_exact_status_identity_and_fail_fast_state() {
+        let entry = |module: &str, line: u64| RustdocMergedEntry {
+            module: module.into(),
+            display_name: format!("src/lib.rs - (line {line})"),
+            path: "src/lib.rs".into(),
+            line,
+            ignored: false,
+            no_run: false,
+            should_panic: false,
+        };
+        let completed = |entry: RustdocMergedEntry, status| RustdocJoinedOutcome {
+            entry,
+            state: RustdocJoinedOutcomeState::Completed {
+                outcome: RustdocTestOutcome {
+                    display_name: "src/lib.rs - (line 3)".into(),
+                    status,
+                    execution_seconds: Some(0.1),
+                    stdout: None,
+                    message: None,
+                    reason: None,
+                    timeout_warning: false,
+                },
+            },
+        };
+        let resolution = RustdocOutcomeResolution {
+            groups: vec![RustdocOutcomeGroupJoin {
+                invocation_id: "1".repeat(64),
+                group: "fixture".into(),
+                companion_build_id: "2".repeat(64),
+                raw_events_sha256: "3".repeat(64),
+                join: None,
+                entries: vec![
+                    completed(entry("__doctest_0", 3), RustdocOutcomeStatus::Passed),
+                    RustdocJoinedOutcome {
+                        entry: entry("__doctest_1", 10),
+                        state: RustdocJoinedOutcomeState::Unstarted,
+                    },
+                ],
+                unmatched_outcomes: Vec::new(),
+                unmatched_unfinished_started: Vec::new(),
+                unmatched_unstarted_tests: 0,
+            }],
+            unmatched_maps: Vec::new(),
+            unmatched_units: Vec::new(),
+        };
+        let results = doctest_raw_results("run", &resolution, 10, 20);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].status.as_deref(), Some("passed"));
+        assert_eq!(results[1].status.as_deref(), Some("unknown"));
+        assert_eq!(results[0].retry, Some(0));
+        assert_eq!(results[0].test_file.as_deref(), Some("src/lib.rs"));
+        assert_eq!(
+            results[0].test_id.as_deref(),
+            Some("rust:doctest:fixture:src/lib.rs:3")
+        );
+        assert_eq!(results[0].scope.as_ref().unwrap().test_id, results[0].test);
+        assert!(doctest_command_failed(&resolution));
+        assert!(results[1].phases.is_empty());
+        assert!(resolution.is_fully_catalogued());
     }
 }

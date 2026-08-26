@@ -299,6 +299,21 @@ pub fn standalone_doctest_surface() {}
 /// ```
 pub fn stable_feature_gate_doctest_surface() {}
 
+/// Descriptor metadata must survive the compiler-owned merged-doctest map.
+///
+/// ```ignore
+/// panic!("an ignored doctest must not execute");
+/// ```
+///
+/// ```no_run
+/// panic!("a no-run doctest must only compile");
+/// ```
+///
+/// ```should_panic
+/// panic!("an expected panic must count as passing");
+/// ```
+pub fn doctest_execution_modes() {}
+
 pub fn authored(value: bool) -> usize {
     if value { 1 } else { 2 }
 }

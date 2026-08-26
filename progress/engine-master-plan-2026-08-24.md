@@ -1529,8 +1529,16 @@ miss blocks flipping any default.
   tests remain available for later outcome attribution. The corresponding
   transport translator rekeys string IDs and numeric ordinals and recursively
   reconstructs nested assertion contexts because their authenticated identity
-  incorporates the translated decision ID. Exact terminal-outcome capture and
-  visible-output equivalence remain open before public rustdoc execution.
+  incorporates the translated decision ID. The pinned libtest JSON stream now
+  publishes one atomic outcome unit authenticated by companion and raw-stream
+  SHA; strict parsing preserves passed/failed/ignored, timeout-warning and
+  fail-fast completed/unfinished/unstarted states. The lossless join maps exact
+  merged display names and retains unmatched standalone/compile-fail outcomes
+  and counts. Matched tests project status, retry zero and source/phase identity
+  into evidence v3 without inventing a phase for an unstarted test. Standalone
+  compiler catalogs, translated runtime attachment, stable multi-package
+  invocation identity and visible-output equivalence remain open before public
+  rustdoc execution.
 
 ## Non-goals and guardrails
 

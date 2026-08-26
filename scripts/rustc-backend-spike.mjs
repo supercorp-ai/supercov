@@ -2989,7 +2989,7 @@ try {
       SUPERCOV_RUST_COMPILER_OUTPUT: doctestDirectory,
     },
   });
-  assert.equal(passedTests(doctest.stdout), 3);
+  assert.equal(passedTests(doctest.stdout), 5);
   const doctestRecords = records(doctestDirectory);
   assert(
     !doctestRecords.some((record) => record.span.includes('src/lib.rs - (line 3)')),
@@ -3059,6 +3059,74 @@ try {
     normalizeTestOutput(wrappedDoctest.stderr),
     normalizeTestOutput(doctest.stderr),
   );
+  const capturedDoctestDirectory = join(scratch, 'captured-doctest');
+  const capturedDoctestTransport = createTransport('captured-doctest');
+  const capturedDoctest = run(
+    'cargo',
+    ['test', '--quiet', '--manifest-path', fixture, '--doc'],
+    {
+      env: {
+        CARGO_TARGET_DIR: join(scratch, 'captured-doctest-target'),
+        RUSTDOC: rustdocLauncher,
+        RUSTC_WRAPPER: wrapper,
+        SUPERCOV_RUST_COMPANION_PATH: wrapper,
+        SUPERCOV_RUST_COMPILER_OUTPUT: capturedDoctestDirectory,
+        SUPERCOV_RUST_CONTEXT_ID: transportContext
+          .toString(16)
+          .padStart(16, '0'),
+        SUPERCOV_RUST_INSTRUMENT_MIR: '1',
+        SUPERCOV_RUST_REAL_RUSTDOC: realRustdoc,
+        SUPERCOV_RUST_STATIC_RUNTIME_DIRECTORY: sharedRuntimeDirectory,
+        SUPERCOV_RUST_TRANSPORT_FILE: capturedDoctestTransport.path,
+        SUPERCOV_RUST_TRANSPORT_TOKEN: capturedDoctestTransport.tokenHex,
+        SUPERCOV_RUSTDOC_CAPTURE_OUTCOMES: '1',
+        SUPERCOV_RUSTDOC_ENGINE_PATH: supercov,
+      },
+    },
+  );
+  const capturedEvents = capturedDoctest.stdout
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert.equal(
+    capturedEvents.filter(({type, event}) => type === 'test' && event === 'ok')
+      .length,
+    5,
+  );
+  assert.equal(
+    capturedEvents.filter(
+      ({type, event}) => type === 'test' && event === 'ignored',
+    ).length,
+    1,
+  );
+  const outcomeFiles = readdirSync(capturedDoctestDirectory).filter((name) =>
+    name.startsWith('doctest-outcome-') && name.endsWith('.json'),
+  );
+  assert.equal(outcomeFiles.length, 1);
+  assert(
+    !readdirSync(capturedDoctestDirectory).some((name) =>
+      name.startsWith('.doctest-outcome-'),
+    ),
+    'rustdoc outcome publication retained a partial file',
+  );
+  const outcomeUnit = JSON.parse(
+    readFileSync(join(capturedDoctestDirectory, outcomeFiles[0]), 'utf8'),
+  );
+  assert.equal(outcomeUnit.schema, 'supercov-rustdoc-outcome-unit-v1');
+  assert.equal(
+    outcomeUnit.rawEventsSha256,
+    createHash('sha256').update(capturedDoctest.stdout).digest('hex'),
+    'rustdoc outcome unit was not bound to the exact captured libtest stream',
+  );
+  assert.equal(
+    outcomeUnit.companionBuildId,
+    selectedCompanion.handshake.companionBuildId,
+  );
+  assert.equal(outcomeUnit.group, 'supercov_rustc_spike_fixture');
+  assert.equal(outcomeUnit.report.plannedTests, 6);
+  assert.equal(outcomeUnit.report.outcomes.length, 6);
+  assert.equal(outcomeUnit.report.unstartedTests, 0);
+  assert.deepEqual(outcomeUnit.report.unfinishedStarted, []);
   const wrappedDoctestRecords = records(wrappedDoctestDirectory);
   const doctestTestRecords = wrappedDoctestRecords.filter(
     ({testName, testContextId}) => testName && testContextId,
@@ -3252,7 +3320,7 @@ try {
   );
   assert.deepEqual(mergedMaps, [
     {
-      schema: 'supercov-rustdoc-merged-map-v1',
+      schema: 'supercov-rustdoc-merged-map-v2',
       group: 'supercov_rustc_spike_fixture',
       entries: [
         {
@@ -3260,10 +3328,60 @@ try {
           displayName: 'src/lib.rs - (line 3)',
           path: 'src/lib.rs',
           line: 3,
+          ignored: false,
+          noRun: false,
+          shouldPanic: false,
+        },
+        {
+          module: '__doctest_1',
+          displayName:
+            'src/lib.rs - doctest_execution_modes (line 304)',
+          path: 'src/lib.rs',
+          line: 304,
+          ignored: true,
+          noRun: false,
+          shouldPanic: false,
+        },
+        {
+          module: '__doctest_2',
+          displayName:
+            'src/lib.rs - doctest_execution_modes (line 308)',
+          path: 'src/lib.rs',
+          line: 308,
+          ignored: false,
+          noRun: true,
+          shouldPanic: false,
+        },
+        {
+          module: '__doctest_3',
+          displayName:
+            'src/lib.rs - doctest_execution_modes (line 312)',
+          path: 'src/lib.rs',
+          line: 312,
+          ignored: false,
+          noRun: false,
+          shouldPanic: true,
         },
       ],
     },
   ]);
+  const capturedOutcomeNames = new Set(
+    outcomeUnit.report.outcomes.map(({displayName}) => displayName),
+  );
+  assert(
+    mergedMaps[0].entries.every(({displayName}) =>
+      capturedOutcomeNames.has(displayName),
+    ),
+    'merged rustdoc descriptors did not join to exact terminal outcome names',
+  );
+  assert.equal(
+    outcomeUnit.report.outcomes.filter(
+      ({displayName}) =>
+        !mergedMaps[0].entries.some((entry) => entry.displayName === displayName),
+    ).length,
+    2,
+    'standalone/compile-fail rustdoc outcomes were not retained outside the merged map',
+  );
   const mergedPendingManifest = crateManifest(
     wrappedDoctestDirectory,
     'doctest_bundle_2024',
@@ -3285,8 +3403,7 @@ try {
         provenance !== 'doctest-pending' ||
         !definitions.some(
           (definition) =>
-            definition === '__doctest_0::main' ||
-            definition.startsWith('__doctest_0::main::'),
+            /^__doctest_\d+::main(?:$|::)/u.test(definition),
         ),
     );
   assert.deepEqual(
@@ -3345,6 +3462,9 @@ try {
     mergedJoin.manifest.decisions.length,
     mergedPendingManifest.decisions.length,
   );
+  const stableDoctestRoots = mergedMaps[0].entries.map(
+    ({path, line}) => `doctest:${path}:${line}`,
+  );
   assert(
     [
       ...mergedJoin.manifest.points,
@@ -3355,11 +3475,11 @@ try {
         sourceKey === 'source:src/lib.rs' &&
         ['doctest-source', 'synthetic-expansion'].includes(provenance) &&
         !canonical.includes('doctest-pending:') &&
-        !canonical.includes('__doctest_0') &&
+        !canonical.includes('__doctest_') &&
         definitions.some(
-          (definition) =>
-            definition === 'doctest:src/lib.rs:3' ||
-            definition.startsWith('doctest:src/lib.rs:3::'),
+          (definition) => stableDoctestRoots.some(
+            (root) => definition === root || definition.startsWith(`${root}::`),
+          ),
         ),
     ),
     'the strict merged-doctest join retained a temporary identity',
@@ -3391,19 +3511,48 @@ try {
     mergedJoin.probeOrdinals[authoredPendingPoint.probeOrdinal],
     authoredFinalPoint.probeOrdinal,
   );
-  const mergedRoot = mergedRunnerContext?.testContextId;
-  assert(mergedRoot, 'merged doctest test context identity is missing');
-  const observedMergedOrdinals = new Set(
-    doctestRuntime.ordinals
-      .filter(({context}) => doctestRootContext(context) === mergedRoot)
-      .map(({ordinal}) => ordinal),
+  const mergedRoots = new Map(
+    doctestTestRecords
+      .filter(
+        ({doctestRole, definition, testContextId}) =>
+          doctestRole === 'merged-runner' &&
+          definition.endsWith('::TEST::{closure#0}') &&
+          testContextId,
+      )
+      .map(({definition, testContextId}) => [
+        definition.replace(/::TEST::\{closure#0\}$/u, ''),
+        testContextId,
+      ]),
   );
-  assert(
-    mergedPendingManifest.points.every(({probeOrdinal}) =>
-      observedMergedOrdinals.has(probeOrdinal),
-    ),
-    'merged pending statement probes were not all attributed to their exact test root',
-  );
+  for (const entry of mergedMaps[0].entries) {
+    const points = mergedPendingManifest.points.filter(({definitions}) =>
+      definitions.some(
+        (definition) =>
+          definition === `${entry.module}::main` ||
+          definition.startsWith(`${entry.module}::main::`),
+      ),
+    );
+    const root = mergedRoots.get(entry.module);
+    assert(root, `merged doctest ${entry.module} has no exact test context`);
+    const observed = new Set(
+      doctestRuntime.ordinals
+        .filter(({context}) => doctestRootContext(context) === root)
+        .map(({ordinal}) => ordinal),
+    );
+    if (entry.ignored || entry.noRun) {
+      assert(
+        points.every(({probeOrdinal}) => !observed.has(probeOrdinal)),
+        `non-executed merged doctest ${entry.module} emitted source probes`,
+      );
+    } else {
+      assert(
+        points.every(({probeOrdinal}) => observed.has(probeOrdinal)),
+        `executed merged doctest ${entry.module} lost source probes`,
+      );
+    }
+  }
+  const mergedRoot = mergedRoots.get('__doctest_0');
+  assert(mergedRoot, 'primary merged doctest test context is missing');
   const pendingSyntheticDecision = mergedPendingManifest.decisions.find(
     ({canonical}) => canonical.includes('\0synthetic-expansion\0'),
   );

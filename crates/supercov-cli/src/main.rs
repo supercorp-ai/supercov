@@ -102,6 +102,7 @@ fn main() -> ExitCode {
         Some("__validate-rust-compiler-manifest") => validate_rust_compiler_manifest(),
         Some("__normalize-rust-compiler-manifest") => normalize_rust_compiler_manifest(),
         Some("__join-rustdoc-merged-manifest") => join_rustdoc_merged_manifest(),
+        Some("__publish-rustdoc-outcome") => publish_rustdoc_outcome(arguments.collect()),
         Some("__project-rust-compiler-evidence") => project_rust_compiler_evidence(),
         Some("__select-rust-compiler-companion") => select_rust_compiler_companion(),
         Some("__build-rust-compiler") => build_rust_compiler(),
@@ -497,6 +498,51 @@ fn join_rustdoc_merged_manifest() -> ExitCode {
         .map_err(|error| error.to_string())?;
         serde_json::to_string(&joined)
             .map_err(|error| format!("could not serialize merged rustdoc join: {error}"))
+    })();
+    match result {
+        Ok(output) => {
+            println!("{output}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn publish_rustdoc_outcome(arguments: Vec<String>) -> ExitCode {
+    let [directory, invocation_id, group, companion_build_id] = arguments.as_slice() else {
+        eprintln!(
+            "[supercov] rustdoc outcome publication requires directory, invocation, group and companion build identity"
+        );
+        return ExitCode::from(2);
+    };
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let result = (|| {
+        let unit = supercov_engine::rust_doctest::rustdoc_outcome_unit_from_libtest(
+            invocation_id.clone(),
+            group.clone(),
+            companion_build_id.clone(),
+            input.as_bytes(),
+        )?;
+        let path = supercov_engine::rust_doctest::publish_rustdoc_outcome_unit(
+            Path::new(directory),
+            &unit,
+        )?;
+        serde_json::to_string(&serde_json::json!({
+            "path": path,
+            "unit": unit,
+        }))
+        .map_err(|error| {
+            supercov_engine::rust_doctest::RustdocOutcomeError::Json(error.to_string())
+        })
     })();
     match result {
         Ok(output) => {
