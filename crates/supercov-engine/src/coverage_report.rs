@@ -1825,6 +1825,10 @@ fn is_mcdc_result(path: &str) -> bool {
     path == "mcdc.json" || path.ends_with("/mcdc.json")
 }
 
+fn is_mcdc_journal(path: &str) -> bool {
+    path == "mcdc.jsonl" || path.ends_with(".mcdc.jsonl")
+}
+
 pub fn analyze_coverage_archive(
     request: &ArchiveReportRequest,
 ) -> Result<CoverageReport, ReportError> {
@@ -1841,6 +1845,10 @@ pub fn analyze_coverage_archive(
         .filter(|entry| is_mcdc_result(&entry.path))
         .map(parse_entry::<RawTestResult>)
         .collect::<Result<Vec<_>, _>>()?;
+    let (journal_results, journal_corrupt, journal_corrupt_files) = parse_json_lines::<RawTestResult>(
+        entries.iter().filter(|entry| is_mcdc_journal(&entry.path)),
+    );
+    raw_results.extend(journal_results);
 
     let (scoped_records, scoped_corrupt, scoped_corrupt_files) =
         parse_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
@@ -1907,8 +1915,11 @@ pub fn analyze_coverage_archive(
         workspace_capabilities: count_event("workspace-capability"),
         scoped_server_records: scoped_records.len(),
         background_server_records: background_records.len(),
-        corrupt_records: scoped_corrupt + background_corrupt + execution_corrupt,
-        corrupt_files: scoped_corrupt_files + background_corrupt_files + execution_corrupt_files,
+        corrupt_records: journal_corrupt + scoped_corrupt + background_corrupt + execution_corrupt,
+        corrupt_files: journal_corrupt_files
+            + scoped_corrupt_files
+            + background_corrupt_files
+            + execution_corrupt_files,
     };
     let (frontend, coverage_model) = if archive.schema_version == EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION
     {
@@ -2211,7 +2222,7 @@ mod tests {
     fn archive_analysis_keeps_valid_lines_and_reports_transport_corruption() {
         let manifest = CoverageManifest {
             decisions: vec![],
-            points: vec![point("background-hit", 1)],
+            points: vec![point("background-hit", 1), point("test-hit", 2)],
             branches: vec![],
             limitations: vec![],
             scope: None,
@@ -2220,6 +2231,16 @@ mod tests {
             EvidenceArchiveEntry {
                 path: "manifest.json".into(),
                 contents: serde_json::to_vec(&manifest).unwrap(),
+            },
+            EvidenceArchiveEntry {
+                path: "playwright-worker-1.mcdc.jsonl".into(),
+                contents: {
+                    let mut contents =
+                        serde_json::to_vec(&raw("journal-test", 0, "passed", &["test-hit"]))
+                            .unwrap();
+                    contents.extend_from_slice(b"\npartial-final-line");
+                    contents
+                },
             },
             EvidenceArchiveEntry {
                 path: "server/background/worker.jsonl".into(),
@@ -2235,9 +2256,16 @@ mod tests {
         })
         .unwrap();
         assert!(report.view.points[0].covered);
-        assert_eq!(report.view.tests[0].role, "background");
-        assert_eq!(report.view.transport.as_ref().unwrap().corrupt_records, 1);
-        assert_eq!(report.view.transport.as_ref().unwrap().corrupt_files, 1);
+        assert!(report.view.points[1].covered);
+        assert!(
+            report
+                .view
+                .tests
+                .iter()
+                .any(|test| test.role == "background")
+        );
+        assert_eq!(report.view.transport.as_ref().unwrap().corrupt_records, 2);
+        assert_eq!(report.view.transport.as_ref().unwrap().corrupt_files, 2);
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

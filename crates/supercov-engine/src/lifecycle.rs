@@ -849,21 +849,17 @@ fn cleanup_storage(
     remove_build_cache: bool,
     updated_at: &str,
 ) -> Result<CleanupResult, LifecycleError> {
-    let operation = if remove_build_cache { "clean" } else { "prune" };
+    let operation = if remove_build_cache {
+        "clean"
+    } else {
+        "retention"
+    };
     let lock_id = format!("{operation}-{}-{}", std::process::id(), unique_name());
     let mut lock = ProjectLock::acquire(root, &lock_id, updated_at)?;
     recover_abandoned_runs(root, updated_at)?;
     let result = cleanup_storage_locked(root, options, remove_build_cache);
     lock.release()?;
     result
-}
-
-pub fn prune_storage(
-    root: &Path,
-    options: CleanupOptions,
-    updated_at: &str,
-) -> Result<CleanupResult, LifecycleError> {
-    cleanup_storage(root, options, false, updated_at)
 }
 
 pub fn clean_storage(
@@ -1109,18 +1105,6 @@ mod tests {
         ));
         assert!(container.exists());
         active.release().unwrap();
-
-        let pruned = prune_storage(
-            &root,
-            CleanupOptions {
-                keep: 0,
-                dry_run: false,
-            },
-            "now",
-        )
-        .unwrap();
-        assert!(!pruned.removed_build_cache);
-        assert!(container.exists());
 
         let cleaned = clean_storage(
             &root,

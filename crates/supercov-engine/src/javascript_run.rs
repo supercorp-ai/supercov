@@ -14,7 +14,10 @@ use crate::{
     build_cache::{build_cache_key, read_build_cache, reuse_paths, write_build_cache},
     evidence_archive::{EvidenceArchiveSource, collect_sources, write_archive},
     integrity::{FrontendIntegrityInputs, create_run_integrity},
-    javascript_frontend::prepare_javascript_frontend,
+    javascript_frontend::{
+        javascript_frontend_reuse_paths, load_cached_javascript_frontend,
+        prepare_javascript_frontend, read_javascript_frontend_cache,
+    },
     lifecycle::{
         ProjectLock, RunState, RunStateStatus, finalize_published_run, interrupt_run_state,
         publish_run, recover_abandoned_runs, remove_stored_tree_deferred, update_run_state,
@@ -298,13 +301,23 @@ pub fn run_direct_javascript(
         .map_err(|error| error.to_string())?;
     let integrity = javascript_integrity_for_project(&root, &project)?;
     let build_cache_key = build_cache_key(&integrity, &project)?;
+    let frontend_cache_key = format!(
+        "{}:{}",
+        integrity.fingerprint.combined, integrity.fingerprint.execution
+    );
     let prior_workspace = cached_workspace_path(&root).map_err(|error| error.to_string())?;
     let reusable_build = if project.build_adapter == BuildAdapter::Direct {
         None
     } else {
         read_build_cache(&prior_workspace, &build_cache_key)
     };
-    let cached_paths = reusable_build.as_ref().map(reuse_paths).unwrap_or_default();
+    let reusable_frontend = read_javascript_frontend_cache(&prior_workspace, &frontend_cache_key);
+    let mut cached_paths = reusable_build.as_ref().map(reuse_paths).unwrap_or_default();
+    if let Some(frontend) = &reusable_frontend {
+        cached_paths.extend(javascript_frontend_reuse_paths(frontend));
+        cached_paths.sort();
+        cached_paths.dedup();
+    }
     let initialization_ms = elapsed_ms(initialization_started);
 
     let workspace_started = Instant::now();
@@ -337,8 +350,12 @@ pub fn run_direct_javascript(
 
     let adapter_started = Instant::now();
     let collector_id = format!("collector-{}", integrity.fingerprint.execution);
-    let frontend = prepare_javascript_frontend(&workspace, &project, &collector_id)
-        .map_err(|error| error.to_string())?;
+    let frontend = if let Some(cache) = &reusable_frontend {
+        load_cached_javascript_frontend(&workspace, cache)
+    } else {
+        prepare_javascript_frontend(&workspace, &project, &collector_id, &frontend_cache_key)
+    }
+    .map_err(|error| error.to_string())?;
     let adapter_setup_ms = elapsed_ms(adapter_started);
 
     let evidence_relative = format!(".supercov/evidence/{run_id}");

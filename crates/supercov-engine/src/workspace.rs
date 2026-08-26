@@ -677,6 +677,24 @@ struct BuildCacheMetadata {
     artifact_paths: Vec<String>,
 }
 
+fn retain_cached_artifact_roots(
+    keep: &mut BTreeSet<String>,
+    artifact_paths: impl IntoIterator<Item = String>,
+) {
+    for artifact in artifact_paths {
+        if let Some(top) = Path::new(&artifact)
+            .components()
+            .next()
+            .and_then(|component| match component {
+                Component::Normal(value) => value.to_str(),
+                _ => None,
+            })
+        {
+            keep.insert(top.into());
+        }
+    }
+}
+
 pub fn prune_cached_workspace_sources(
     root: &Path,
     lock: &ProjectLock,
@@ -691,18 +709,7 @@ pub fn prune_cached_workspace_sources(
     if let Ok(bytes) = fs::read(&metadata_path) {
         let metadata: BuildCacheMetadata =
             serde_json::from_slice(&bytes).map_err(WorkspaceError::InvalidCacheMetadata)?;
-        for artifact in metadata.artifact_paths {
-            if let Some(top) = Path::new(&artifact)
-                .components()
-                .next()
-                .and_then(|component| match component {
-                    Component::Normal(value) => value.to_str(),
-                    _ => None,
-                })
-            {
-                keep.insert(top.into());
-            }
-        }
+        retain_cached_artifact_roots(&mut keep, metadata.artifact_paths);
     }
     let mut removed = Vec::new();
     for entry in fs::read_dir(&workspace).map_err(|error| io_error(&workspace, error))? {
@@ -827,6 +834,31 @@ mod tests {
             "instrumented"
         );
         assert!(!second.join("stale.txt").exists());
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn terminal_workspace_keeps_flat_frontend_cache_without_discoverable_test_sources() {
+        let root = project();
+        fs::create_dir_all(root.join("tests/e2e")).unwrap();
+        fs::write(root.join("tests/e2e/app.spec.js"), "test source").unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+        let artifacts = workspace.join(".supercov/frontend-cache-artifacts");
+        fs::create_dir_all(&artifacts).unwrap();
+        fs::write(artifacts.join("digest"), "instrumented test").unwrap();
+        fs::write(
+            workspace.join(".supercov/frontend-cache.json"),
+            "{\"schemaVersion\":2}",
+        )
+        .unwrap();
+        prune_cached_workspace_sources(&root, &lock).unwrap();
+        assert!(!workspace.join("tests/e2e/app.spec.js").exists());
+        assert_eq!(
+            fs::read_to_string(artifacts.join("digest")).unwrap(),
+            "instrumented test"
+        );
         lock.release().unwrap();
         fs::remove_dir_all(root).unwrap();
     }

@@ -33,7 +33,12 @@ function run(arguments_) {
 }
 
 function publishedRuns() {
-  return readdirSync(resolve(project, '.supercov/runs')).sort();
+  const root = resolve(project, '.supercov/runs');
+  return readdirSync(root).sort((left, right) => {
+    const leftRun = JSON.parse(readFileSync(resolve(root, left, 'run.json'), 'utf8'));
+    const rightRun = JSON.parse(readFileSync(resolve(root, right, 'run.json'), 'utf8'));
+    return leftRun.startedAt.localeCompare(rightRun.startedAt) || left.localeCompare(right);
+  });
 }
 
 try {
@@ -53,7 +58,7 @@ try {
   assert.match(successful.stdout, /tests 4/);
   assert.match(
     successful.stdout,
-    /\[coverage\] evidence: .*\/\.supercov\/runs\/2026-\d\d-\d\dT\d\d-\d\d-\d\d-\d\d\dZ\/evidence\.raw\.gz/,
+    /\[coverage\] evidence: .*\/\.supercov\/runs\/run_[a-f0-9]{16}\/evidence\.raw\.gz/,
   );
   assert.match(successful.stderr, /\[supercov\] instrumenting isolated workspace /);
   assert.match(successful.stderr, /\[supercov\] attributed \d+ native node:assert call\(s\)/);
@@ -63,7 +68,7 @@ try {
     /\[supercov\] timings initialization=\d+(?:\.\d)?ms workspace=\d+(?:\.\d)?ms setup=\d+(?:\.\d)?ms build=\d+(?:\.\d)?ms tests=\d+(?:\.\d)?ms evidence=\d+(?:\.\d)?ms total=\d+(?:\.\d)?ms/,
   );
   const [successfulId] = publishedRuns();
-  assert.match(successfulId, /^2026-\d\d-\d\dT\d\d-\d\d-\d\d-\d\d\dZ$/);
+  assert.match(successfulId, /^run_[a-f0-9]{16}$/);
   const successfulMetadata = JSON.parse(
     readFileSync(resolve(project, '.supercov/runs', successfulId, 'run.json'), 'utf8'),
   );

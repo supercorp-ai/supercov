@@ -16,7 +16,7 @@ is below the project's `.supercov/` directory:
 | `work/<run>/state.json` | In-flight lifecycle record; removed after atomic run publication. |
 | `work/<run>/run-publication/` | Incomplete run staging; atomically renamed or removed on recovery. |
 | `evidence/<run>/` | Loose in-flight evidence; packed and removed after publication. |
-| `runs/<run>/` | Immutable `evidence.raw.gz` (manifest plus raw execution evidence) and `run.json`; retained until explicit prune/clean. Derived query views are never cached. |
+| `runs/<run>/` | Immutable `evidence.raw.gz` (manifest plus raw execution evidence) and `run.json`; retained until explicit `clean`. Derived query views are cached only after their first query. |
 | `cache/instrumented-workspace/<project>/` | Stable physical fallback and provider snapshot cache. |
 | `cache/instrumented-workspace/.<project>.staging-*` | Unpublished cache transaction; removed on error or recovery. |
 | `cache/instrumented-workspace/.<project>.previous-*` | Last complete cache generation during publication; restored or removed on recovery. |

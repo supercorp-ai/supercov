@@ -64,11 +64,18 @@ if (verboseDiagnostics && !process.__SUPERCOV_DIAGNOSTIC_REPORTER__) {
         });
     }
 }
-// Assertion-call instrumentation also uses this runtime in test processes
-// whose application build is handled by Vite or another compiler. Loading it
-// for every isolated test launch keeps node:assert attribution runner-agnostic.
-globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.js");
-process.__SUPERCOV_DIRECT_RUNTIME__ ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__;
+// Runner adapters and instrumented modules import the runtime when they need
+// it. Keeping the preload itself thin avoids evaluating the full collector in
+// npm launchers, web-server supervisors, and other Node children that never
+// execute measured JavaScript.
+if (process.env.SUPERCOV_DURABLE_EVIDENCE_EACH_TEST === "1") {
+    // A translated remote/VM command can execute an ahead-of-run transformed
+    // test through an opaque runner that bypasses the ordinary Playwright or
+    // node:test import boundary. The remote-launch adapter marks that process;
+    // initialize the runtime before its transformed module can evaluate.
+    globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.js");
+    process.__SUPERCOV_DIRECT_RUNTIME__ ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__;
+}
 // Workers are independent Node processes and an explicit `execArgv: []`
 // otherwise strips the preload that supplies the isolated runtime. Preserve
 // every user option while adding exactly one Supercov import.
@@ -107,6 +114,7 @@ const generatedPlaywrightConfig = process.env.SUPERCOV_GENERATED_PLAYWRIGHT_CONF
 const generatedJestConfig = process.env.SUPERCOV_GENERATED_JEST_CONFIG;
 const entrypoint = process.argv[1]?.replaceAll("\\", "/") ?? "";
 const playwrightTarget = process.env.SUPERCOV_PLAYWRIGHT_MODULE;
+const projectRoot = process.env.SUPERCOV_PROJECT_ROOT?.replaceAll("\\", "/").replace(/\/$/, "");
 const nodeTestWrapper = new URL("./nodeTest.js", import.meta.url).href;
 const nodeAssertWrapper = new URL("./nodeAssert.js", import.meta.url).href;
 const nodeAssertStrictWrapper = new URL("./nodeAssertStrict.js", import.meta.url).href;
@@ -190,6 +198,7 @@ if (generatedPlaywrightConfig &&
 }
 if (process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
     process.env.SUPERCOV_INSIDE_PLAYWRIGHT === "1" &&
+    !isPlaywrightEntrypoint &&
     process.env.SUPERCOV_INSIDE_VITEST !== "1" &&
     process.env.VITEST !== "true") {
     const target = playwrightTarget ?? "@playwright/test";
@@ -222,7 +231,18 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
 // itself imports the native built-in from Supercov's generated directory, so
 // only first-party callers are redirected and recursion is impossible.
 if (process.env.SUPERCOV_CJS_INTERCEPT === "1") {
-    const projectRoot = process.env.SUPERCOV_PROJECT_ROOT?.replaceAll("\\", "/").replace(/\/$/, "");
+    const entrypointBelongsToProject = Boolean(projectRoot && entrypoint.startsWith(`${projectRoot}/`));
+    const runnerCanLoadProjectCode = entrypointBelongsToProject ||
+        entrypoint === "" ||
+        process.env.SUPERCOV_INSIDE_VITEST === "1" ||
+        (process.env.SUPERCOV_INSIDE_PLAYWRIGHT === "1" && !isPlaywrightEntrypoint);
+    if (!runnerCanLoadProjectCode) {
+        // Package-manager and Playwright coordinator processes propagate the
+        // preload to their children but never evaluate project test modules.
+        // Their worker/child entrypoints install these synchronous CJS hooks.
+        // Avoid paying to import three runner adapters in every launcher.
+    }
+    else {
     const nodeTestAdapter = await import(__rewriteRelativeImportExtension(nodeTestWrapper));
     const cjsNodeTestAdapter = Object.assign(nodeTestAdapter.test, nodeTestAdapter);
     const nodeAssertAdapter = await import(__rewriteRelativeImportExtension(nodeAssertWrapper));
@@ -248,4 +268,5 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1") {
                 : cjsNodeAssertAdapter;
         return originalLoad.call(this, request, parent, isMain);
     };
+    }
 }

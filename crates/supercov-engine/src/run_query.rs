@@ -9,8 +9,8 @@ use crate::{
     coverage_index::{CoverageIndex, CoverageViewId},
     coverage_query::CoverageQueryFilters,
     run_store::{
-        RawEvidenceMetadata, RunIntegrity, RunInventory, RunTimings, StoredRun,
-        compare_run_integrity, open_existing_query_index,
+        RawEvidenceMetadata, RunIndexError, RunIntegrity, RunInventory, RunTimings, StoredRun,
+        compare_run_integrity, open_or_rebuild_query_index,
     },
 };
 
@@ -19,13 +19,14 @@ use crate::{
 pub struct RunListEntry {
     pub id: String,
     pub generated_at: String,
-    pub coverage_indexed: bool,
-    #[serde(serialize_with = "serialize_optional_javascript_number")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub lines: Option<f64>,
-    #[serde(serialize_with = "serialize_optional_javascript_number")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub branches: Option<f64>,
-    #[serde(serialize_with = "serialize_optional_javascript_number")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mcdc: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage_error: Option<String>,
     pub command: Vec<String>,
     #[serde(serialize_with = "serialize_javascript_number")]
     pub duration_ms: f64,
@@ -38,19 +39,6 @@ pub struct RunListEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale: Option<bool>,
     pub reasons: Vec<String>,
-}
-
-fn serialize_optional_javascript_number<S>(
-    value: &Option<f64>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    match value {
-        Some(value) => serialize_javascript_number(value, serializer),
-        None => serializer.serialize_none(),
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -66,28 +54,35 @@ pub fn run_list_query(
     view: CoverageViewId,
     offset: usize,
     limit: usize,
-) -> (RunListData, AgentPagination) {
+) -> Result<(RunListData, AgentPagination), RunIndexError> {
     let runs = inventory
         .runs
         .iter()
         .skip(offset)
         .take(limit)
-        .map(|run| {
-            let summary = open_existing_query_index(run)
-                .ok()
-                .flatten()
-                .and_then(|container| CoverageIndex::new(&container).ok()?.summary(view).ok());
+        .map(|run| -> Result<RunListEntry, RunIndexError> {
+            let summary = open_or_rebuild_query_index(run).and_then(|container| {
+                let index = CoverageIndex::new(&container)?;
+                Ok(index.summary(view)?)
+            });
+            let (lines, branches, mcdc, coverage_error) = match summary {
+                Ok(summary) => (
+                    Some(summary.lines.percentage),
+                    Some(summary.branches.percentage),
+                    Some(summary.condition_coverage_pct),
+                    None,
+                ),
+                Err(error) => (None, None, None, Some(error.to_string())),
+            };
             let comparison = current_integrity(run)
                 .map(|current| compare_run_integrity(Some(&run.metadata.integrity), &current));
-            RunListEntry {
+            Ok(RunListEntry {
                 id: run.id.clone(),
                 generated_at: run.metadata.started_at.clone(),
-                coverage_indexed: summary.is_some(),
-                lines: summary.as_ref().map(|summary| summary.lines.percentage),
-                branches: summary.as_ref().map(|summary| summary.branches.percentage),
-                mcdc: summary
-                    .as_ref()
-                    .map(|summary| summary.condition_coverage_pct),
+                lines,
+                branches,
+                mcdc,
+                coverage_error,
                 command: run.metadata.command.clone(),
                 duration_ms: run.metadata.duration_ms,
                 timings: run.metadata.timings.clone(),
@@ -102,11 +97,11 @@ pub fn run_list_query(
                 reasons: comparison
                     .map(|comparison| comparison.reasons)
                     .unwrap_or_default(),
-            }
+            })
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     let page = agent_json::pagination(offset, limit, runs.len(), inventory.runs.len());
-    (
+    Ok((
         RunListData {
             filters: CoverageQueryFilters {
                 outcome: match view {
@@ -121,7 +116,7 @@ pub fn run_list_query(
             runs,
         },
         page,
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -155,34 +150,22 @@ mod tests {
     }
 
     #[test]
-    fn lists_persisted_metadata_without_building_an_index_then_reads_the_typed_index() {
+    fn lists_persisted_metadata_and_lazily_builds_the_typed_index() {
         let root = temporary_directory();
         let inventory = create_indexable_run(&root);
         let run = &inventory.runs[0];
-        let (before, page) = run_list_query(&inventory, &|_| None, CoverageViewId::All, 0, 20);
+        let (listing, page) =
+            run_list_query(&inventory, &|_| None, CoverageViewId::All, 0, 20).unwrap();
         assert_eq!(page.total, 1);
-        assert!(!before.runs[0].coverage_indexed);
-        assert_eq!(before.runs[0].lines, None);
-        assert!(!run.query_index_path.exists());
+        assert_eq!(listing.runs[0].lines, Some(100.0));
+        assert_eq!(listing.runs[0].branches, Some(100.0));
+        assert_eq!(listing.runs[0].mcdc, Some(100.0));
+        assert_eq!(listing.runs[0].coverage_error, None);
+        assert!(run.query_index_path.exists());
+        assert!(agent_json::success("runs", &listing, Some(&page)).is_ok());
 
-        open_or_rebuild_query_index(run).unwrap();
-        let (after, page) = run_list_query(
-            &inventory,
-            &|_| Some(run.metadata.integrity.clone()),
-            CoverageViewId::Passed,
-            0,
-            20,
-        );
-        assert!(after.runs[0].coverage_indexed);
-        assert_eq!(after.runs[0].lines, Some(100.0));
-        assert_eq!(after.runs[0].branches, Some(100.0));
-        assert_eq!(after.runs[0].mcdc, Some(100.0));
-        assert_eq!(after.runs[0].stale, Some(false));
-        assert!(after.runs[0].reasons.is_empty());
-        assert_eq!(after.filters.outcome, "passed");
-        assert!(agent_json::success("runs", &after, Some(&page)).is_ok());
-
-        let (_, empty_page) = run_list_query(&inventory, &|_| None, CoverageViewId::All, 20, 20);
+        let (_, empty_page) =
+            run_list_query(&inventory, &|_| None, CoverageViewId::All, 20, 20).unwrap();
         assert_eq!(empty_page.returned, 0);
         assert!(!empty_page.has_more);
         fs::remove_dir_all(root).unwrap();
@@ -205,13 +188,14 @@ mod tests {
             CoverageViewId::All,
             0,
             20,
-        );
-        assert!(!listing.runs[0].coverage_indexed);
+        )
+        .unwrap();
+        assert_eq!(listing.runs[0].lines, Some(100.0));
         assert_eq!(
             listing.runs[0].reasons,
             ["instrumented source changed", "test files changed"]
         );
-        assert_eq!(
+        assert_ne!(
             fs::read(&run.query_index_path).unwrap(),
             b"broken disposable index"
         );

@@ -7,6 +7,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use supercov_engine::{
     agent_json,
     coverage_analysis::{CoverageCoreInput, analyze_core},
@@ -37,7 +38,7 @@ use supercov_engine::{
     query_index::{QueryIndex, QueryIndexIdentity, write_query_index},
     run_query::{RunListData, run_list_query},
     run_store::{
-        RunStoreError, StoredRun, compare_run_integrity, discover_runs,
+        RunInventory, RunStoreError, StoredRun, compare_run_integrity, discover_runs,
         open_or_rebuild_query_index, select_run,
     },
 };
@@ -46,7 +47,7 @@ use time::{OffsetDateTime, macros::format_description};
 mod human_query;
 mod public_query;
 use human_query::render_human;
-use public_query::{PublicQueryInvocation, parse_public_query};
+use public_query::{PublicQueryInvocation, help_for, parse_public_query};
 
 const HELP: &str = "Supercov coverage engine.\n\
 \n\
@@ -55,7 +56,7 @@ Usage:\n\
   supercov runs <run-id> coverage [resource] [--json]\n\
   supercov diff <older-run> <newer-run> [--json]\n\
   supercov merge <run-id> <run-id> [...]\n\
-  supercov prune|clean [--keep N] [--dry-run]\n";
+  supercov clean [--keep N] [--dry-run]\n";
 
 fn main() -> ExitCode {
     let mut arguments = std::env::args().skip(1);
@@ -90,8 +91,7 @@ fn main() -> ExitCode {
         Some("__sweep-trash") => sweep_trash(),
         Some("__benchmark-js-transform") => benchmark_js_transform(),
         Some("__pack-evidence") => pack_evidence(),
-        Some("prune") => cleanup_command("prune", arguments.collect()),
-        Some("clean") => cleanup_command("clean", arguments.collect()),
+        Some("clean") => cleanup_command(arguments.collect()),
         Some("runs") => public_query_command("runs", arguments.collect()),
         Some("diff") => public_query_command("diff", arguments.collect()),
         Some("merge") => merge_command(arguments.collect()),
@@ -103,6 +103,13 @@ fn main() -> ExitCode {
 }
 
 fn merge_command(run_ids: Vec<String>) -> ExitCode {
+    if run_ids
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
+    {
+        println!("Usage: supercov merge <run-id> <run-id> [...]");
+        return ExitCode::SUCCESS;
+    }
     let root = match std::env::current_dir() {
         Ok(root) => root,
         Err(error) => {
@@ -110,8 +117,8 @@ fn merge_command(run_ids: Vec<String>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let (run_id, started_at) = match public_timestamp() {
-        Ok((run_id, started_at)) => (format!("{run_id}-merge"), started_at),
+    let (run_id, started_at) = match public_run_identity() {
+        Ok(identity) => identity,
         Err(error) => {
             eprintln!("[supercov] {error}");
             return ExitCode::from(2);
@@ -133,12 +140,38 @@ fn merge_command(run_ids: Vec<String>) -> ExitCode {
 const PUBLIC_TIMESTAMP_FORMAT: &[time::format_description::BorrowedFormatItem<'static>] =
     format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z");
 
-fn public_timestamp() -> Result<(String, String), String> {
+fn public_run_identity() -> Result<(String, String), String> {
     let started_at = OffsetDateTime::now_utc()
         .format(PUBLIC_TIMESTAMP_FORMAT)
-        .map_err(|error| format!("could not generate the run timestamp: {error}"))?;
-    let run_id = started_at.replace([':', '.'], "-");
+        .map_err(|error| format!("could not generate the run identity: {error}"))?;
+    let identity = format!(
+        "{started_at}\0{}\0{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
+    let run_id = format!("run_{}", &digest[..16]);
     Ok((run_id, started_at))
+}
+
+fn public_run_id(value: &str) -> bool {
+    value.len() == 20
+        && value.starts_with("run_")
+        && value[4..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn public_run_inventory(root: &Path) -> Result<RunInventory, RunStoreError> {
+    let mut inventory = discover_runs(root)?;
+    // Timestamp-named runs belonged to the pre-release local store contract.
+    // They are intentionally not a public compatibility surface: the CLI has
+    // one stable identity shape and `supercov clean` removes old stores.
+    inventory.runs.retain(|run| public_run_id(&run.id));
+    Ok(inventory)
 }
 
 fn javascript_number(value: f64) -> String {
@@ -179,7 +212,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let (run_id, started_at) = match public_timestamp() {
+    let (run_id, started_at) = match public_run_identity() {
         Ok(timestamp) => timestamp,
         Err(error) => {
             eprintln!("[supercov] {error}");
@@ -288,8 +321,8 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
     }
 }
 
-fn parse_cleanup_options(command: &str, arguments: &[String]) -> Result<(usize, bool), String> {
-    let mut keep = 20;
+fn parse_cleanup_options(arguments: &[String]) -> Result<(usize, bool), String> {
+    let mut keep = 0;
     let mut dry_run = false;
     let mut index = 0;
     while index < arguments.len() {
@@ -305,7 +338,7 @@ fn parse_cleanup_options(command: &str, arguments: &[String]) -> Result<(usize, 
                 .parse::<usize>()
                 .map_err(|_| "--keep must be a non-negative integer".to_owned())?;
         } else {
-            return Err(format!("Unknown {command} option: {argument}"));
+            return Err(format!("Unknown clean option: {argument}"));
         }
         index += 1;
     }
@@ -313,48 +346,35 @@ fn parse_cleanup_options(command: &str, arguments: &[String]) -> Result<(usize, 
 }
 
 fn cleanup_summary(
-    command: &str,
     keep: usize,
     dry_run: bool,
     result: &supercov_engine::lifecycle::CleanupResult,
 ) -> String {
-    if command == "prune" {
-        format!(
-            "[supercov] {} {} stored run(s), {} terminal/orphan work director{}, and {} loose evidence director{}; keeping {} newest run(s) and preserving the shared cache",
-            if dry_run { "would remove" } else { "removed" },
-            result.removed_runs.len(),
-            result.removed_workspaces.len(),
-            if result.removed_workspaces.len() == 1 {
-                "y"
-            } else {
-                "ies"
-            },
-            result.removed_evidence.len(),
-            if result.removed_evidence.len() == 1 {
-                "y"
-            } else {
-                "ies"
-            },
-            keep,
-        )
-    } else {
-        format!(
-            "[supercov] {} {} stored run(s), {} per-run workspace(s), and {} isolated build cache; keeping {} newest run(s)",
-            if dry_run { "would remove" } else { "removed" },
-            result.removed_runs.len(),
-            result.removed_workspaces.len(),
-            if result.removed_build_cache {
-                "the"
-            } else {
-                "no"
-            },
-            keep,
-        )
-    }
+    format!(
+        "[supercov] {} {} stored run(s), {} per-run workspace(s), and {} isolated build cache; keeping {} newest run(s)",
+        if dry_run { "would remove" } else { "removed" },
+        result.removed_runs.len(),
+        result.removed_workspaces.len(),
+        if result.removed_build_cache {
+            "the"
+        } else {
+            "no"
+        },
+        keep,
+    )
 }
 
-fn cleanup_command(command: &str, arguments: Vec<String>) -> ExitCode {
-    let (keep, dry_run) = match parse_cleanup_options(command, &arguments) {
+fn cleanup_command(arguments: Vec<String>) -> ExitCode {
+    if arguments
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
+    {
+        print!(
+            "Usage: supercov clean [--keep N] [--dry-run]\n\nRemoves all stored runs and Supercov's isolated build cache by default.\nUse --keep N to retain the N newest runs.\n"
+        );
+        return ExitCode::SUCCESS;
+    }
+    let (keep, dry_run) = match parse_cleanup_options(&arguments) {
         Ok(options) => options,
         Err(error) => {
             eprintln!("[supercov] {error}");
@@ -377,20 +397,16 @@ fn cleanup_command(command: &str, arguments: Vec<String>) -> ExitCode {
             .unwrap_or_default()
             .as_secs()
     );
-    let result = if command == "prune" {
-        supercov_engine::lifecycle::prune_storage(&root, options, &updated_at)
-    } else {
-        supercov_engine::lifecycle::clean_storage(&root, options, &updated_at)
-    };
+    let result = supercov_engine::lifecycle::clean_storage(&root, options, &updated_at);
     let result = match result {
         Ok(result) => result,
         Err(error) => {
-            eprintln!("[supercov] {command} failed: {error}");
+            eprintln!("[supercov] clean failed: {error}");
             return ExitCode::from(2);
         }
     };
     spawn_trash_sweeper(&root);
-    println!("{}", cleanup_summary(command, keep, dry_run, &result));
+    println!("{}", cleanup_summary(keep, dry_run, &result));
     for id in result.removed_runs {
         println!("{id}");
     }
@@ -424,8 +440,11 @@ fn run_store_agent_error(error: RunStoreError) -> agent_json::AgentError {
     }
 }
 
-fn current_javascript_integrity(root: &Path) -> Option<supercov_engine::run_store::RunIntegrity> {
-    supercov_engine::javascript_run::current_javascript_integrity(root, &[]).ok()
+fn current_javascript_integrity(
+    root: &Path,
+    command: &[String],
+) -> Option<supercov_engine::run_store::RunIntegrity> {
+    supercov_engine::javascript_run::current_javascript_integrity(root, command).ok()
 }
 
 fn current_integrity_for_run(
@@ -440,7 +459,7 @@ fn current_integrity_for_run(
     {
         supercov_engine::rust_run::current_rust_integrity(root, &run.metadata.command).ok()
     } else {
-        current_javascript_integrity(root)
+        current_javascript_integrity(root, &run.metadata.command)
     }
 }
 
@@ -502,7 +521,7 @@ fn execute_public_query(
             limit,
             ..
         } => {
-            let inventory = discover_runs(root).map_err(run_store_agent_error)?;
+            let inventory = public_run_inventory(root).map_err(run_store_agent_error)?;
             let view = match filter.as_str() {
                 "all" => supercov_engine::coverage_index::CoverageViewId::All,
                 "passed" => supercov_engine::coverage_index::CoverageViewId::Passed,
@@ -515,7 +534,10 @@ fn execute_public_query(
                 view,
                 *offset,
                 *limit,
-            );
+            )
+            .map_err(|error| {
+                internal_agent_error(format!("Failed to prepare run summaries: {error}"))
+            })?;
             Ok(PublicQueryOutput::Runs {
                 data,
                 pagination: page,
@@ -527,7 +549,7 @@ fn execute_public_query(
             ..
         } => {
             let mut request = (**request).clone();
-            let inventory = discover_runs(root).map_err(run_store_agent_error)?;
+            let inventory = public_run_inventory(root).map_err(run_store_agent_error)?;
             let run =
                 select_run(&inventory, Some(&request.run_id)).map_err(run_store_agent_error)?;
             request.run_id.clone_from(&run.id);
@@ -656,6 +678,10 @@ fn execute_public_query(
 }
 
 fn public_query_command(command: &str, arguments: Vec<String>) -> ExitCode {
+    if let Some(help) = help_for(command, &arguments) {
+        print!("{help}");
+        return ExitCode::SUCCESS;
+    }
     let invocation = match parse_public_query(command, &arguments) {
         Ok(invocation) => invocation,
         Err(error) => {
@@ -983,21 +1009,18 @@ fn lifecycle() -> ExitCode {
     };
     spawn_trash_sweeper(&request.root);
     let result = match request.action.as_str() {
-        "prune" | "clean" => {
+        "clean" => {
             let options = supercov_engine::lifecycle::CleanupOptions {
-                keep: request.keep.unwrap_or(20),
+                keep: request.keep.unwrap_or(0),
                 dry_run: request.dry_run.unwrap_or(false),
             };
             let updated_at = request.updated_at.as_deref().unwrap_or("internal");
-            if request.action == "prune" {
-                supercov_engine::lifecycle::prune_storage(&request.root, options, updated_at)
-            } else {
-                supercov_engine::lifecycle::clean_storage(&request.root, options, updated_at)
-            }
-            .and_then(|result| {
-                serde_json::to_value(result)
-                    .map_err(supercov_engine::lifecycle::LifecycleError::Metadata)
-            })
+            supercov_engine::lifecycle::clean_storage(&request.root, options, updated_at).and_then(
+                |result| {
+                    serde_json::to_value(result)
+                        .map_err(supercov_engine::lifecycle::LifecycleError::Metadata)
+                },
+            )
         }
         "recover" => supercov_engine::lifecycle::recover_abandoned_runs(
             &request.root,
@@ -2024,18 +2047,17 @@ mod tests {
 
     #[test]
     fn cleanup_options_preserve_the_frozen_cli_contract() {
-        assert_eq!(parse_cleanup_options("prune", &[]).unwrap(), (20, false));
+        assert_eq!(parse_cleanup_options(&[]).unwrap(), (0, false));
         assert_eq!(
-            parse_cleanup_options("clean", &["--keep".into(), "0".into(), "--dry-run".into()])
-                .unwrap(),
-            (0, true)
+            parse_cleanup_options(&["--keep".into(), "20".into(), "--dry-run".into()]).unwrap(),
+            (20, true)
         );
         assert_eq!(
-            parse_cleanup_options("prune", &["--keep".into()]).unwrap_err(),
+            parse_cleanup_options(&["--keep".into()]).unwrap_err(),
             "--keep must be a non-negative integer"
         );
         assert_eq!(
-            parse_cleanup_options("clean", &["--unknown".into()]).unwrap_err(),
+            parse_cleanup_options(&["--unknown".into()]).unwrap_err(),
             "Unknown clean option: --unknown"
         );
         let result = supercov_engine::lifecycle::CleanupResult {
@@ -2045,12 +2067,22 @@ mod tests {
             removed_build_cache: false,
         };
         assert_eq!(
-            cleanup_summary("prune", 20, true, &result),
-            "[supercov] would remove 2 stored run(s), 1 terminal/orphan work directory, and 0 loose evidence directories; keeping 20 newest run(s) and preserving the shared cache"
-        );
-        assert_eq!(
-            cleanup_summary("clean", 0, false, &result),
+            cleanup_summary(0, false, &result),
             "[supercov] removed 2 stored run(s), 1 per-run workspace(s), and no isolated build cache; keeping 0 newest run(s)"
         );
+    }
+
+    #[test]
+    fn public_run_ids_are_short_opaque_and_unique() {
+        let (first, first_started_at) = public_run_identity().unwrap();
+        let (second, second_started_at) = public_run_identity().unwrap();
+        assert!(first.starts_with("run_"));
+        assert_eq!(first.len(), 20);
+        assert!(public_run_id(&first));
+        assert_ne!(first, second);
+        assert!(!public_run_id("2026-08-25T23-33-12-211Z"));
+        assert!(!public_run_id("run_35c35ceeaf4b843Z"));
+        assert!(first_started_at.contains('T'));
+        assert!(second_started_at.contains('T'));
     }
 }

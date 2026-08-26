@@ -1,10 +1,12 @@
-import { mkdirSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { inferTestProvenance } from "./provenance.js";
-import { atomicWriteFileSync } from "./atomic.js";
+import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.js";
 const GENERATED_EVIDENCE_DIRECTORY = "__SUPERCOV_EVIDENCE_DIRECTORY__";
+const evidenceWriterIdentity = () => (process.env.SUPERCOV_EXECUTION_LOG_SHARD ?? `pid-${process.pid}`)
+    .replace(/[^A-Za-z0-9_-]/g, "_");
 /** Records outcomes even when browser or fixture startup fails before coverage. */
 export default class SupercovPlaywrightReporter {
+    records = [];
     onTestEnd(test, result) {
         const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"] ??
             (GENERATED_EVIDENCE_DIRECTORY.startsWith("__")
@@ -32,9 +34,18 @@ export default class SupercovPlaywrightReporter {
             browser: [],
             server: [],
         };
-        const safeId = test.id.replace(/[^a-zA-Z0-9_-]/g, "_");
-        const directory = resolve(process.cwd(), evidenceDirectory, `playwright-${safeId}-${result.retry}-status`);
-        mkdirSync(directory, { recursive: true });
-        atomicWriteFileSync(resolve(directory, "mcdc.json"), `${JSON.stringify(payload)}\n`);
+        this.records.push(payload);
+    }
+    onEnd() {
+        const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"] ??
+            (GENERATED_EVIDENCE_DIRECTORY.startsWith("__")
+                ? undefined
+                : GENERATED_EVIDENCE_DIRECTORY);
+        if (!evidenceDirectory || this.records.length === 0)
+            return;
+        const append = process.env.SUPERCOV_DURABLE_EVIDENCE_EACH_TEST === "1"
+            ? appendJsonLineDurableSync
+            : appendJsonLineSync;
+        append(resolve(process.cwd(), evidenceDirectory, `playwright-status-${evidenceWriterIdentity()}-${process.pid}.mcdc.jsonl`), `${this.records.map(record => JSON.stringify(record)).join("\n")}\n`);
     }
 }

@@ -17,6 +17,18 @@ fn percentage(value: f64) -> String {
     format!("{value:.2}%")
 }
 
+fn optional_percentage(value: Option<f64>) -> String {
+    value.map(percentage).unwrap_or_else(|| "—".into())
+}
+
+fn readable_timestamp(value: &str) -> String {
+    if value.len() >= 20 && value.as_bytes().get(10) == Some(&b'T') {
+        format!("{} {} UTC", &value[..10], &value[11..19])
+    } else {
+        value.to_owned()
+    }
+}
+
 fn number(value: f64) -> String {
     if value == 0.0 {
         "0".into()
@@ -254,29 +266,32 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             };
             let mut lines = vec![
                 first,
+                String::new(),
+                "Coverage".into(),
                 format!(
-                    "lines {} ({}/{})",
+                    "  Lines      {} ({}/{})",
                     percentage(data.coverage.lines.percentage),
                     data.coverage.lines.covered,
                     data.coverage.lines.total
                 ),
                 format!(
-                    "branches {} ({}/{})",
+                    "  Branches   {} ({}/{})",
                     percentage(data.coverage.branches.percentage),
                     data.coverage.branches.covered,
                     data.coverage.branches.total
                 ),
                 format!(
-                    "MC/DC {} ({}/{})",
+                    "  MC/DC      {} ({}/{})",
                     percentage(data.coverage.condition_coverage_pct),
                     data.coverage.covered_conditions,
                     data.coverage.conditions
                 ),
-                format!("measurement: {measurement}"),
+                String::new(),
+                format!("Measurement  {measurement}"),
             ];
             if let Some(waivers) = &data.waivers {
                 lines.push(format!(
-                    "waivers: {} applied, {} contradicted, {} unmatched; MC/DC excluding waived {} ({}/{})",
+                    "Waivers      {} applied, {} contradicted, {} unmatched; MC/DC excluding waived {} ({}/{})",
                     waivers.applied,
                     waivers.contradicted.len(),
                     waivers.unmatched.len(),
@@ -303,7 +318,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             }
             if !data.diagnostics.is_empty() {
                 lines.push(format!(
-                    "diagnostic: {}",
+                    "Diagnostic   {}",
                     data.diagnostics
                         .iter()
                         .map(|item| format!("{}: {}", item.code, item.message))
@@ -313,7 +328,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             }
             if let Some(confidence) = &data.confidence {
                 lines.push(format!(
-                    "confidence: {} asserted lines, {} action-linked, {} execution-only; {} assertion-linked MC/DC conditions",
+                    "Confidence   {} asserted lines, {} action-linked, {} execution-only; {} assertion-linked MC/DC conditions",
                     confidence.lines.asserted,
                     confidence.lines.action,
                     confidence.lines.executed,
@@ -334,7 +349,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             .map(|(outcome, count)| format!("{outcome}={count}"))
             .collect::<Vec<_>>();
             lines.push(format!(
-                "{} test(s){}; outcomes {}; {} file(s) have unresolved coverage or measurement gaps",
+                "Tests        {}{}; outcomes {}; {} file(s) have unresolved coverage or measurement gaps",
                 data.tests,
                 if data.setups == 0 {
                     String::new()
@@ -348,6 +363,16 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 },
                 data.files_with_gaps
             ));
+            lines.extend([
+                String::new(),
+                "Commands".into(),
+                format!("  npx supercov runs {} coverage files", data.run),
+                format!("  npx supercov runs {} coverage gaps", data.run),
+                format!("  npx supercov runs {} coverage kinds", data.run),
+                format!("  npx supercov runs {} coverage runners", data.run),
+                format!("  npx supercov runs {} coverage scope", data.run),
+                format!("  npx supercov runs {} coverage --help", data.run),
+            ]);
             lines.join("\n")
         }
         IndexedQueryData::Files(data) => render_files(
@@ -980,31 +1005,34 @@ pub fn render_human(invocation: &PublicQueryInvocation, output: &PublicQueryOutp
             PublicQueryInvocation::Runs { filter, .. },
             PublicQueryOutput::Runs { data, pagination },
         ) => {
-            let mut lines = data
+            let id_width = data
                 .runs
                 .iter()
-                .map(|run| {
-                    format!(
-                        "{}  {}{}",
-                        run.id,
-                        if run.coverage_indexed {
-                            format!(
-                                "lines {}  branches {}  MC/DC {}",
-                                percentage(run.lines.unwrap_or(0.0)),
-                                percentage(run.branches.unwrap_or(0.0)),
-                                percentage(run.mcdc.unwrap_or(0.0))
-                            )
-                        } else {
-                            "coverage not indexed".into()
-                        },
-                        if run.stale == Some(true) {
-                            format!("  STALE ({})", run.reasons.join(", "))
-                        } else {
-                            String::new()
-                        }
-                    )
-                })
-                .collect::<Vec<_>>();
+                .map(|run| run.id.len())
+                .max()
+                .unwrap_or(2)
+                .max(2);
+            let mut lines = vec![format!(
+                "{:<id_width$}  {:>8}  {:>8}  {:>8}  {}",
+                "ID", "LINES", "BRANCH", "MC/DC", "STARTED"
+            )];
+            lines.extend(data.runs.iter().map(|run| {
+                format!(
+                    "{:<id_width$}  {:>8}  {:>8}  {:>8}  {}{}",
+                    run.id,
+                    optional_percentage(run.lines),
+                    optional_percentage(run.branches),
+                    optional_percentage(run.mcdc),
+                    readable_timestamp(&run.generated_at),
+                    if run.coverage_error.is_some() {
+                        "  INVALID COVERAGE".into()
+                    } else if run.stale == Some(true) {
+                        format!("  STALE ({})", run.reasons.join(", "))
+                    } else {
+                        String::new()
+                    }
+                )
+            }));
             lines.push(page_label(pagination));
             let mut base = "npx supercov runs".to_owned();
             if filter != "all" {

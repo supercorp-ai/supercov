@@ -75,6 +75,7 @@ test("remote launch mapping is provider-neutral and scopes reusable snapshots", 
     SUPERCOV_PROJECT_ROOT: "/host/project",
   });
   assert.equal(environment.SUPERCOV_PROJECT_ROOT, "/guest/workspace");
+  assert.equal(environment.SUPERCOV_DURABLE_EVIDENCE_EACH_TEST, "1");
   assert.match(environment.NODE_OPTIONS, /\/guest\/workspace\/\.supercov\/register\.mjs/);
 });
 

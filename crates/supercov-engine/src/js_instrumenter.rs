@@ -994,6 +994,28 @@ pub fn instrument_node_assertion_phases_with_runtime_hooks(
     extra_expect_modules: &[String],
     capability_wrapper: Option<&str>,
 ) -> Result<NodeAssertionInstrumentation, CandidateError> {
+    instrument_node_assertion_phases_with_runtime_imports(
+        source,
+        file,
+        extra_expect_modules,
+        capability_wrapper,
+        None,
+    )
+}
+
+/// Attribute assertions and, for an ESM test module, make the runtime
+/// dependency explicit in the transformed module itself. This is required for
+/// opaque runners which copy an already-instrumented workspace into another
+/// process, container, or VM while constructing a fresh environment. Static
+/// imports preserve ESM evaluation ordering and do not depend on runner-specific
+/// environment forwarding.
+pub fn instrument_node_assertion_phases_with_runtime_imports(
+    source: &str,
+    file: &str,
+    extra_expect_modules: &[String],
+    capability_wrapper: Option<&str>,
+    assertion_runtime: Option<&str>,
+) -> Result<NodeAssertionInstrumentation, CandidateError> {
     let assertion_candidate = source.contains("assert") || source.contains("expect");
     let capability_candidate = capability_wrapper.is_some() && capability_source_candidate(source);
     if !assertion_candidate && !capability_candidate {
@@ -1048,7 +1070,21 @@ pub fn instrument_node_assertion_phases_with_runtime_hooks(
             capability_imports: 0,
         });
     }
+    let module_assertion_runtime = (assertions > 0 && parsed.program.source_type.is_module())
+        .then_some(assertion_runtime)
+        .flatten();
     let (mut code, map) = generate_candidate(&parsed.program, file)?;
+    // Append instead of prepend so every generated source-map location for
+    // user code remains unchanged. Import declarations are instantiated before
+    // module evaluation regardless of their textual position.
+    if let Some(runtime) = module_assertion_runtime {
+        code.push_str("\nimport ");
+        code.push_str(
+            &serde_json::to_string(runtime)
+                .expect("a JavaScript module specifier always serializes as a string"),
+        );
+        code.push_str(";\n");
+    }
     let mut map = map.expect("assertion source maps are enabled");
     // An inline map is resolved relative to the transformed file itself. The
     // code generator receives a project-relative path for manifest identity,
@@ -6703,6 +6739,22 @@ mod tests {
         assert!(output.code.contains("node:assert/strict.equal"));
         assert!(output.code.contains("tests/value.test.mjs:2:1"));
         assert!(output.code.contains("assert.equal(value(), 1)"));
+    }
+
+    #[test]
+    fn esm_assertion_transform_carries_its_runtime_across_opaque_launches() {
+        let source = "import assert from 'node:assert';\nassert.equal(value(), 1);\n";
+        let output = instrument_node_assertion_phases_with_runtime_imports(
+            source,
+            "tests/value.test.mjs",
+            &[],
+            None,
+            Some("../.supercov/runtime.js"),
+        )
+        .unwrap();
+        assert_eq!(output.assertions, 1);
+        assert!(output.code.contains("withNodeAssertionPhase"));
+        assert!(output.code.contains("import \"../.supercov/runtime.js\";"));
     }
 
     #[test]

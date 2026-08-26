@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 supercov-contracts.workspace = true
 supercov-engine.workspace = true
 time.workspace = true

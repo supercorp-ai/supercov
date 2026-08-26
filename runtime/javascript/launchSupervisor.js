@@ -190,6 +190,7 @@ export function guestCoverageEnvironment(mapping, coverageEnvironment = process.
         ...translated,
         SUPERCOV_PROJECT_ROOT: mapping.guestRoot,
         SUPERCOV_CJS_INTERCEPT: "1",
+        SUPERCOV_DURABLE_EVIDENCE_EACH_TEST: "1",
         NODE_OPTIONS: appendNodeImport(existingEnvironment.NODE_OPTIONS, registerUrl),
     };
 }
@@ -556,6 +557,11 @@ export function installLaunchSupervisor() {
     const originalLoad = moduleLoader._load;
     moduleLoader._load = function supercovCapabilityLoad(request, parent, isMain) {
         const exports = originalLoad.call(this, request, parent, isMain);
+        // A user's test command may itself be implemented by an installed
+        // package. That package can import a VM/container/process SDK without
+        // any project-owned module ever crossing the SDK boundary. Inspect all
+        // newly loaded export graphs (deduplicated by `exportedValues`) so
+        // capability discovery remains provider- and runner-neutral.
         inspectExports(exports);
         return exports;
     };

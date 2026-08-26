@@ -41,7 +41,13 @@ export function requireSupercov(root, args, options = {}) {
 
 export function runIds(root) {
   const runs = resolve(root, ".supercov/runs");
-  return existsSync(runs) ? readdirSync(runs).sort() : [];
+  return existsSync(runs)
+    ? readdirSync(runs).sort((left, right) => {
+        const leftRun = runMetadata(root, left);
+        const rightRun = runMetadata(root, right);
+        return leftRun.startedAt.localeCompare(rightRun.startedAt) || left.localeCompare(right);
+      })
+    : [];
 }
 
 export function latestRun(root) {

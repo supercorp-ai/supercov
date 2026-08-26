@@ -1014,6 +1014,52 @@ function mcdcEnd(frame, value) {
   }
   return value;
 }
+const directRuntimeApi = {
+  activateCoverageScope,
+  beginBufferedServerEvidence,
+  bindCoverageContext,
+  coverageCarrier,
+  coverageContextEnvironment,
+  coverageContextHeaders,
+  coverageHit,
+  coverageHitV2,
+  coverageSnapshot,
+  decodeProbeV2Vector,
+  defaultEntered,
+  defaultSelected,
+  enableRuntimeSnapshotEvidence,
+  flushBufferedBackgroundEvidence,
+  flushBufferedServerEvidence,
+  loopBegin,
+  loopEnd,
+  loopEntered,
+  mcdcBegin,
+  mcdcCondition,
+  mcdcEnd,
+  mcdcEndV2,
+  optionalCallBegin,
+  optionalCallContinued,
+  optionalCallEnd,
+  optionalCallReached,
+  optionalSelect,
+  parenthesizedAssignmentValue,
+  registerProbeV2,
+  resetCoverage,
+  selectionBegin,
+  selectionEnd,
+  selectionRight,
+  takeNodeAssertionPhases,
+  tryBegin,
+  tryCatch,
+  tryEnd,
+  withCoverageCarrier,
+  withNodeAssertionPhase,
+  withRequestPhase,
+  writeExclusiveBackgroundRecord
+};
+globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= directRuntimeApi;
+if (typeof process !== "undefined")
+  process.__SUPERCOV_DIRECT_RUNTIME__ ??= directRuntimeApi;
 export {
   activateCoverageScope,
   beginBufferedServerEvidence,

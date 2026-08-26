@@ -129,10 +129,11 @@ npx supercov diff <older-run> <newer-run>
 npx supercov merge <first-run-id> <second-run-id>
 ```
 
-`supercov runs` is metadata-only for uncached history and never reconstructs
-coverage for twenty runs merely to list them. Runs whose disposable query index
-already exists include their metrics; other rows say `coverage not indexed`.
-Selecting a run with `runs <run-id> coverage` materializes its index lazily.
+`supercov runs` always includes coverage percentages. Supercov derives a
+missing disposable query view from the run's immutable evidence before printing
+that row; whether the view was already available is never exposed in the CLI.
+`supercov runs <run-id>` prints the same summary as
+`supercov runs <run-id> coverage`.
 
 Coverage queries use `--filter all` by default, matching conventional coverage
 tools: every executed attempt contributes, including attempts that later fail.
@@ -244,17 +245,17 @@ state writes use sibling-temp files, fsync, and atomic rename; lock acquisition
 uses exclusive creation and fsync. Published `run.json` is the durable terminal
 record, so terminal work state is not retained.
 
-Retention is deterministic because UTC run IDs sort chronologically:
+Retention is deterministic because run records store their UTC start time:
 
 ```sh
-npx supercov prune --keep 20
-npx supercov prune --keep 20 --dry-run
-npx supercov clean --keep 20   # also removes the shared build cache
+npx supercov clean             # removes all stored runs and the shared build cache
+npx supercov clean --dry-run   # previews the default full cleanup
+npx supercov clean --keep 20   # explicitly retains the 20 newest runs
 ```
 
-Neither operation runs automatically. `prune` removes explicit history beyond
-the requested retention and orphan/terminal transient data while preserving
-the shared cache. `clean` also removes that cache. Both acquire the same lock
+Cleanup never runs automatically. `clean` removes explicit history beyond the
+requested retention, orphan/terminal transient data, and the shared build
+cache. It acquires the same lock
 as a coverage run, refuse to race an active run, and never touch files outside
 `.supercov/`.
 

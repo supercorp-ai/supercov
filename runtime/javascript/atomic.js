@@ -1,4 +1,4 @@
-import { mkdirSync, openSync, closeSync, fsyncSync, renameSync, rmSync, writeFileSync, } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, openSync, closeSync, fsyncSync, renameSync, rmSync, writeFileSync, } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 function fsyncDirectory(path) {
@@ -37,6 +37,26 @@ export function atomicWriteFileSync(path, data, options) {
             closeSync(descriptor);
         rmSync(temporary, { force: true });
     }
+}
+/** Append one recoverable JSONL record and make the completed line durable. */
+export function appendJsonLineDurableSync(path, data) {
+    mkdirSync(dirname(path), { recursive: true });
+    const existed = existsSync(path);
+    const descriptor = openSync(path, "a", 0o600);
+    try {
+        writeFileSync(descriptor, data.endsWith("\n") ? data : `${data}\n`);
+        fsyncSync(descriptor);
+    }
+    finally {
+        closeSync(descriptor);
+    }
+    if (!existed)
+        fsyncDirectory(dirname(path));
+}
+/** Append a complete local record; process exit closes it before publication. */
+export function appendJsonLineSync(path, data) {
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, data.endsWith("\n") ? data : `${data}\n`, { mode: 0o600 });
 }
 /** Atomically publish a fully prepared file or directory and persist its entry. */
 export function atomicRenameSync(source, destination) {

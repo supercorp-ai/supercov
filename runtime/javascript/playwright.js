@@ -12,10 +12,11 @@ import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import { syncBuiltinESMExports } from "node:module";
-import { dirname, relative, resolve, sep } from "node:path";
+import { relative, resolve, sep } from "node:path";
 import * as standardPlaywright from "@playwright/test";
+import * as coverageRuntime from "./runtime.js";
 import { inferTestProvenance } from "./provenance.js";
-import { atomicWriteFileSync } from "./atomic.js";
+import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.js";
 import { COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, } from "./transport.js";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
@@ -32,6 +33,8 @@ const adapter = (targetModule === "@playwright/test"
 const base = (adapter[targetTestExport] ?? adapter.test);
 const baseExpect = adapter.expect;
 const GENERATED_EVIDENCE_DIRECTORY = "__SUPERCOV_EVIDENCE_DIRECTORY__";
+const evidenceWriterIdentity = () => (process.env.SUPERCOV_EXECUTION_LOG_SHARD ?? `pid-${process.pid}`)
+    .replace(/[^A-Za-z0-9_-]/g, "_");
 const GENERATED_RUN_ID = "__SUPERCOV_RUN_ID__";
 const PHASE_STORAGE_KEY = "__supercov_phase";
 const ACTION_METHODS = new Set([
@@ -329,6 +332,11 @@ class CoveragePhaseController {
             },
         });
         this.proxyCache.set(target, proxy);
+        // Playwright's built-in `page` fixture is created through the wrapped
+        // worker-scoped browser. The test-scoped fixture sees that proxy again;
+        // treating our own proxy as a fresh target would nest wrappers, emit two
+        // phases for one operation, and perform every browser activation twice.
+        this.proxyCache.set(proxy, proxy);
         return proxy;
     }
     createPhase(kind, operation, causedByPhaseId, source = callerSource()) {
@@ -467,7 +475,7 @@ class CoveragePhaseController {
 let activeController;
 let bridgedAssertionDepth = 0;
 const controllers = new Map();
-const directRuntime = () => globalThis.__SUPERCOV_DIRECT_RUNTIME__;
+const directRuntime = () => globalThis.__SUPERCOV_DIRECT_RUNTIME__ ?? coverageRuntime;
 globalThis.__SUPERCOV_ASSERTION_PHASE_BRIDGE__ = (operation, source, callback) => {
     const controller = activeController;
     const runtime = directRuntime();
@@ -829,8 +837,6 @@ const instrumentedTest = base.extend({
                     // Emit an artifact even when this test touched no application source.
                     // A complete test-to-coverage matrix must also identify tests that are
                     // removable without changing coverage.
-                    const outputPath = testInfo.outputPath("mcdc.json");
-                    mkdirSync(dirname(outputPath), { recursive: true });
                     const testFile = relative(process.cwd(), testInfo.file)
                         .split(sep)
                         .join("/");
@@ -854,7 +860,6 @@ const instrumentedTest = base.extend({
                         server,
                     };
                     const serialized = `${JSON.stringify(payload)}\n`;
-                    atomicWriteFileSync(outputPath, serialized);
                     // Pool runners may cycle-restore a VM immediately after Playwright
                     // exits, which can discard or overwrite the normal artifact copy.
                     // Write one uniquely named, one-shot evidence file to the runner's
@@ -865,10 +870,10 @@ const instrumentedTest = base.extend({
                             : GENERATED_EVIDENCE_DIRECTORY);
                     if (evidenceDirectory) {
                         const resolvedDirectory = resolve(process.cwd(), evidenceDirectory);
-                        const safeTestId = testInfo.testId.replace(/[^a-zA-Z0-9_-]/g, "_");
-                        const testEvidenceDirectory = resolve(resolvedDirectory, `${safeTestId}-${testInfo.retry}`);
-                        mkdirSync(testEvidenceDirectory, { recursive: true });
-                        atomicWriteFileSync(resolve(testEvidenceDirectory, "mcdc.json"), serialized);
+                        const append = process.env.SUPERCOV_DURABLE_EVIDENCE_EACH_TEST === "1"
+                            ? appendJsonLineDurableSync
+                            : appendJsonLineSync;
+                        append(resolve(resolvedDirectory, `playwright-worker-${evidenceWriterIdentity()}-${process.pid}.mcdc.jsonl`), serialized);
                     }
                 }
                 finally {

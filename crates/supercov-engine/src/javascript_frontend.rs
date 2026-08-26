@@ -20,13 +20,15 @@ use crate::{
     js_instrumenter::{
         CandidateBranch, CandidateDecision, CandidateError, CandidateLimitation, CandidatePoint,
         instrument_candidate_with_runtime_hooks, instrument_direct_candidate_with_runtime_hooks,
-        instrument_node_assertion_phases_with_runtime_hooks,
     },
     project_discovery::{BuildAdapter, CoverageProject},
     source_discovery::{SourceLimitation, SourceScope},
 };
 
 const RUNTIME_INSTANCE_MARKER: &str = "__SUPERCOV_RUNTIME_INSTANCE__";
+const FRONTEND_CACHE_SCHEMA_VERSION: u32 = 2;
+const FRONTEND_CACHE_FILE: &str = ".supercov/frontend-cache.json";
+const FRONTEND_CACHE_DIRECTORY: &str = ".supercov/frontend-cache-artifacts";
 const RUNTIME_FILES: &[&str] = &[
     "atomic.js",
     "launchSupervisor.js",
@@ -107,6 +109,219 @@ pub struct PreparedJavascriptFrontend {
     pub vite_config_path: PathBuf,
     pub vitest_config_path: PathBuf,
     pub assertion_calls: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct JavascriptFrontendCache {
+    schema_version: u32,
+    key: String,
+    assertion_calls: usize,
+    artifacts: Vec<JavascriptFrontendCacheArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct JavascriptFrontendCacheArtifact {
+    path: String,
+    cache_file: String,
+    sha256: String,
+}
+
+fn safe_relative(path: &Path) -> bool {
+    path.components().next().is_some()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+fn regular_file(workspace: &Path, relative: &str) -> bool {
+    safe_relative(Path::new(relative))
+        && fs::symlink_metadata(workspace.join(relative))
+            .is_ok_and(|metadata| metadata.file_type().is_file())
+}
+
+fn valid_cached_artifact(workspace: &Path, artifact: &JavascriptFrontendCacheArtifact) -> bool {
+    let expected_cache_file = format!("{FRONTEND_CACHE_DIRECTORY}/{}", artifact.sha256);
+    if !safe_relative(Path::new(&artifact.path))
+        || !safe_relative(Path::new(&artifact.cache_file))
+        || artifact.cache_file != expected_cache_file
+        || artifact.sha256.len() != 64
+        || !artifact
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return false;
+    }
+    let Ok(contents) = fs::read(workspace.join(&artifact.cache_file)) else {
+        return false;
+    };
+    format!("{:x}", Sha256::digest(&contents)) == artifact.sha256
+}
+
+pub fn read_javascript_frontend_cache(
+    workspace: &Path,
+    key: &str,
+) -> Option<JavascriptFrontendCache> {
+    let metadata: JavascriptFrontendCache =
+        serde_json::from_slice(&fs::read(workspace.join(FRONTEND_CACHE_FILE)).ok()?).ok()?;
+    if metadata.schema_version != FRONTEND_CACHE_SCHEMA_VERSION
+        || metadata.key != key
+        || metadata.artifacts.is_empty()
+        || metadata
+            .artifacts
+            .iter()
+            .any(|artifact| !valid_cached_artifact(workspace, artifact))
+    {
+        return None;
+    }
+    Some(metadata)
+}
+
+pub fn javascript_frontend_reuse_paths(cache: &JavascriptFrontendCache) -> Vec<PathBuf> {
+    let _ = cache;
+    vec![
+        PathBuf::from(FRONTEND_CACHE_FILE),
+        PathBuf::from(FRONTEND_CACHE_DIRECTORY),
+    ]
+}
+
+fn restore_cached_file(path: &Path, contents: &[u8]) -> Result<(), JavascriptFrontendError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| JavascriptFrontendError::UnsafeSourcePath(path.display().to_string()))?;
+    create_directory_all(parent)?;
+    let temporary = parent.join(format!(".supercov-restore-{}", unique()));
+    let result = (|| {
+        fs::write(&temporary, contents).map_err(|source| io_error(&temporary, source))?;
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {
+                fs::remove_file(path).map_err(|source| io_error(path, source))?;
+            }
+            Ok(_) => {
+                return Err(JavascriptFrontendError::UnsafeSourcePath(
+                    path.display().to_string(),
+                ));
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(io_error(path, source)),
+        }
+        fs::rename(&temporary, path).map_err(|source| io_error(path, source))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+pub fn load_cached_javascript_frontend(
+    workspace: &Path,
+    cache: &JavascriptFrontendCache,
+) -> Result<PreparedJavascriptFrontend, JavascriptFrontendError> {
+    for artifact in &cache.artifacts {
+        let cache_path = workspace.join(&artifact.cache_file);
+        let contents = fs::read(&cache_path).map_err(|source| io_error(&cache_path, source))?;
+        if format!("{:x}", Sha256::digest(&contents)) != artifact.sha256 {
+            return Err(JavascriptFrontendError::UnsafeSourcePath(format!(
+                "corrupt frontend cache artifact {}",
+                artifact.cache_file
+            )));
+        }
+        restore_cached_file(&workspace.join(&artifact.path), &contents)?;
+    }
+    let generated = workspace.join(".supercov");
+    let manifest_path = generated.join("manifest.json");
+    let manifest = serde_json::from_slice(
+        &fs::read(&manifest_path).map_err(|source| io_error(&manifest_path, source))?,
+    )
+    .map_err(JavascriptFrontendError::Serialize)?;
+    Ok(PreparedJavascriptFrontend {
+        manifest,
+        manifest_path,
+        preload_path: generated.join("register.mjs"),
+        playwright_config_path: generated.join("playwright.config.mjs"),
+        vite_config_path: generated.join("vite.config.mjs"),
+        vitest_config_path: generated.join("vitest.config.mjs"),
+        assertion_calls: cache.assertion_calls,
+    })
+}
+
+fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<String> {
+    let mut artifacts = vec![
+        ".supercov/package.json".to_owned(),
+        ".supercov/applicationRuntime.js".to_owned(),
+        ".supercov/runtime.d.ts".to_owned(),
+        ".supercov/playwright.config.mjs".to_owned(),
+        ".supercov/vite.config.mjs".to_owned(),
+        ".supercov/vitest.config.mjs".to_owned(),
+        ".supercov/vite-transforms.json".to_owned(),
+        ".supercov/viteInstrumentation.mjs".to_owned(),
+        ".supercov/manifest.json".to_owned(),
+        ".supercov/instrumentation-complete".to_owned(),
+    ];
+    artifacts.extend(RUNTIME_FILES.iter().map(|name| format!(".supercov/{name}")));
+    artifacts.extend(project.source_files.iter().cloned());
+    artifacts.extend(
+        project
+            .source_scope
+            .entries
+            .iter()
+            .map(|entry| entry.file.clone()),
+    );
+    for root in &project.source_roots {
+        let host = if workspace.join(root).is_file() {
+            Path::new(root).parent().unwrap_or_else(|| Path::new(""))
+        } else {
+            Path::new(root)
+        };
+        for name in ["runtime.js", "runtime.d.ts"] {
+            let path = host.join(".supercov").join(name);
+            if let Some(path) = path.to_str() {
+                artifacts.push(path.replace('\\', "/"));
+            }
+        }
+    }
+    artifacts.sort();
+    artifacts.dedup();
+    artifacts.retain(|path| regular_file(workspace, path));
+    artifacts
+}
+
+fn write_javascript_frontend_cache(
+    workspace: &Path,
+    project: &CoverageProject,
+    key: &str,
+    assertion_calls: usize,
+) -> Result<(), JavascriptFrontendError> {
+    let cache_directory = workspace.join(FRONTEND_CACHE_DIRECTORY);
+    create_directory_all(&cache_directory)?;
+    let mut artifacts = Vec::new();
+    for path in frontend_artifact_paths(workspace, project) {
+        let contents = fs::read(workspace.join(&path))
+            .map_err(|source| io_error(&workspace.join(&path), source))?;
+        let sha256 = format!("{:x}", Sha256::digest(&contents));
+        let cache_file = format!("{FRONTEND_CACHE_DIRECTORY}/{sha256}");
+        let destination = workspace.join(&cache_file);
+        if !destination.is_file() {
+            atomic_write(&destination, &contents)?;
+        }
+        artifacts.push(JavascriptFrontendCacheArtifact {
+            path,
+            cache_file,
+            sha256,
+        });
+    }
+    let cache = JavascriptFrontendCache {
+        schema_version: FRONTEND_CACHE_SCHEMA_VERSION,
+        key: key.to_owned(),
+        assertion_calls,
+        artifacts,
+    };
+    let mut encoded =
+        serde_json::to_vec_pretty(&cache).map_err(JavascriptFrontendError::Serialize)?;
+    encoded.push(b'\n');
+    atomic_write(&workspace.join(FRONTEND_CACHE_FILE), &encoded)
 }
 
 #[derive(Debug, Serialize)]
@@ -658,6 +873,7 @@ pub fn prepare_javascript_frontend(
     workspace: &Path,
     project: &CoverageProject,
     collector_id: &str,
+    cache_key: &str,
 ) -> Result<PreparedJavascriptFrontend, JavascriptFrontendError> {
     let generated = workspace.join(".supercov");
     copy_runtime(&generated, collector_id)?;
@@ -740,11 +956,13 @@ pub fn prepare_javascript_frontend(
         let capability_wrapper = (!project.source_files.contains(&entry.file))
             .then(|| runtime_specifier(&entry.file, "launchSupervisor.js"))
             .transpose()?;
-        let output = instrument_node_assertion_phases_with_runtime_hooks(
+        let assertion_runtime = runtime_specifier(&entry.file, "runtime.js")?;
+        let output = crate::js_instrumenter::instrument_node_assertion_phases_with_runtime_imports(
             &source,
             &entry.file,
             std::slice::from_ref(&project.playwright_module),
             capability_wrapper.as_deref(),
+            Some(&assertion_runtime),
         )
         .map_err(|source| JavascriptFrontendError::Instrument {
             file: entry.file.clone(),
@@ -808,6 +1026,7 @@ pub fn prepare_javascript_frontend(
         &generated.join("instrumentation-complete"),
         b"coverage-completeness-v2\n",
     )?;
+    write_javascript_frontend_cache(workspace, project, cache_key, assertion_calls)?;
     Ok(PreparedJavascriptFrontend {
         manifest,
         manifest_path,
@@ -887,7 +1106,9 @@ mod tests {
         )
         .unwrap();
         let original = fs::read_to_string(source_root.join("src/example.mjs")).unwrap();
-        let prepared = prepare_javascript_frontend(&workspace, &project, "collector-test").unwrap();
+        let prepared =
+            prepare_javascript_frontend(&workspace, &project, "collector-test", "cache-test")
+                .unwrap();
         assert_eq!(
             fs::read_to_string(source_root.join("src/example.mjs")).unwrap(),
             original
@@ -908,6 +1129,31 @@ mod tests {
         );
         assert!(prepared.vitest_config_path.is_file());
         assert_eq!(prepared.assertion_calls, 0);
+        let cache = read_javascript_frontend_cache(&workspace, "cache-test").unwrap();
+        assert_eq!(
+            javascript_frontend_reuse_paths(&cache),
+            [
+                PathBuf::from(".supercov/frontend-cache.json"),
+                PathBuf::from(".supercov/frontend-cache-artifacts"),
+            ]
+        );
+        assert!(
+            cache
+                .artifacts
+                .iter()
+                .all(|artifact| !artifact.cache_file.contains("src/")
+                    && !artifact.cache_file.contains("tests/"))
+        );
+        fs::write(workspace.join("src/example.mjs"), &original).unwrap();
+        fs::remove_file(&prepared.manifest_path).unwrap();
+        let restored = load_cached_javascript_frontend(&workspace, &cache).unwrap();
+        assert_eq!(restored.manifest, prepared.manifest);
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/example.mjs")).unwrap(),
+            transformed
+        );
+        fs::write(workspace.join(&cache.artifacts[0].cache_file), "corrupt").unwrap();
+        assert!(read_javascript_frontend_cache(&workspace, "cache-test").is_none());
         fs::remove_dir_all(source_root).unwrap();
         fs::remove_dir_all(workspace).unwrap();
     }

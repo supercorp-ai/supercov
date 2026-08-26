@@ -43,6 +43,20 @@ reported separately from Supercov's recorded phases.
 
 ## Reference measurement, not a guarantee
 
+On 2026-08-26, the 30-test Essential SEO Playwright suite running across seven
+cycle-restored VMs produced a 43.02 s uncovered control and two valid warm
+Supercov measurements of 46.30 s and 40.20 s. The slower covered sample is
+1.076x the control and therefore remains below the current 1.1x realistic-suite
+target; the faster result illustrates why multiple alternating pairs are still
+required for a statistically stable benchmark. The 40.20 s run spent 38.63 s
+inside the unchanged test command and 1.04 s total on initialization, workspace
+refresh, adapter restoration and evidence publication. It attributed 6,727
+server records across 30 remote launches with zero corrupt evidence records.
+
+VM-image creation is not included in these warm comparisons. A changed engine
+fingerprint intentionally caused a one-time 119 s rebake before the first
+post-change run; comparing that cold run with a warm control would be invalid.
+
 On 2026-08-24, the 29-test Essential SEO offline suite on the development Mac
 produced this warm pair:
 
@@ -73,8 +87,10 @@ Before raw-evidence-only storage, the reference run retained 4.5 MB of reports
 and 1.7 MB across 178 loose evidence files. Its canonical compressed JSON was
 0.9 MB. The execution evidence alone packed to about 121 KiB; current archives
 also embed the exact denominator manifest and are the sole coverage artifact.
-Every CLI query derives its view from the archive on demand without writing a
-cache.
+Every CLI query derives its view from the archive. The first query builds a
+disposable integrity-bound binary index; later queries reuse it while the run
+identity remains valid. The index is an implementation detail and can always be
+deleted and reconstructed.
 These numbers are application- and filesystem-specific optimization baselines.
 An exact matching Vite build is also reused across runs, removing the measured
 4.87-second repeated build; any source/configuration/toolchain-key change falls
@@ -88,8 +104,8 @@ phase and 40.49 seconds total: 0.07 seconds initialization, 0.36 seconds
 workspace refresh, 0.05 seconds adapter setup, 39.84 seconds in the unchanged
 test command, and 0.12 seconds evidence validation/archive publication. Fresh
 process queries for summary, files, and gaps each took 0.16–0.20 seconds on
-this run while writing no cache. Test execution is still the dominant and
-naturally variable part of the total.
+this run before the reusable query index was introduced. Test execution is
+still the dominant and naturally variable part of the total.
 
 ## Isolation strategy trade-offs
 
