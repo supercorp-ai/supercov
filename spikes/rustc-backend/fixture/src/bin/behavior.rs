@@ -22,8 +22,9 @@ use supercov_rustc_spike_fixture::{
     interrupted_decision, interrupted_for, interrupted_match, let_else_value, match_empty,
     match_identical, match_irrefutable, match_unreachable, match_value, mixed, nested,
     nested_expression, nested_for_values, nested_let_else, nested_match, nested_try_result,
-    panic_before_try, panic_path, pattern, repeated_expansions, try_option, try_result,
-    two_for_values, two_let_else, two_try_results, while_compound, while_let_chain,
+    panic_before_try, panic_path, pattern, promoted_array, promoted_literal, repeated_expansions,
+    try_option, try_result, two_for_values, two_let_else, two_try_results, while_compound,
+    while_let_chain,
 };
 
 fn main() {
@@ -84,6 +85,10 @@ fn main() {
     println!("assertion-order={:?}", assertion_order.into_inner());
     println!("drop-order={:?}", log.into_inner());
     println!("const-values={CONST_VALUE:?},{CONST_FALSE_VALUE:?}");
+    println!(
+        "promoted={:?}",
+        [*promoted_literal(), promoted_array()[1]]
+    );
     println!(
         "ctfe-surfaces={:?}",
         [

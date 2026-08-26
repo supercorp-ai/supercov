@@ -954,6 +954,10 @@ try {
     assert.match(baseline.stderr, /assert_failed/);
     assert.match(baseline.stderr, /cannot call non-const function/);
   }
+  const {baseline: constTraitBaseline} = compileFailCase('const-trait');
+  assert.match(constTraitBaseline.stderr, /E0658/);
+  assert.match(constTraitBaseline.stderr, /const trait impls are experimental/);
+  assert.match(constTraitBaseline.stderr, /const traits are not yet supported on stable Rust/);
   const loggingSource = join(fixtureRoot, 'compile-pass/const-log.rs');
   const baselineLog = join(scratch, 'const-log-baseline.jsonl');
   const instrumentedLog = join(scratch, 'const-log-instrumented.jsonl');
@@ -1100,6 +1104,7 @@ try {
     /try-generated-nested-proc=\[Ok\(8\), Err\("inner"\), Err\("outer"\)\]/,
   );
   assert.match(baselineBehavior.stdout, /try-panic=true/);
+  assert.match(baselineBehavior.stdout, /promoted=\[157, 3\]/);
   assert.match(
     baselineBehavior.stdout,
     /ctfe-surfaces=\[17, 29, 31, 43, 47, 53, 59, 61, 2, 67, 79, 89, 83, 89, 83, 103, 101, 97, 107, 109, 113, 131, 127, 0, 2, 0, 137, 137, 139, 149, 149, 151\]/,
@@ -1133,6 +1138,28 @@ try {
   const fallibleProbe = runtimeProbe('fallible');
   const dropOrderProbe = runtimeProbe('drop_order');
   const panicProbe = runtimeProbe('panic_path');
+  const promotedDefinitions = ['promoted_literal', 'promoted_array'];
+  const promotedPoints = runtimeManifest.points.filter(({definitions}) =>
+    definitions.some((definition) => promotedDefinitions.includes(definition)),
+  );
+  assert(
+    promotedPoints.length >= 4,
+    'promoted expressions lost their authored function/statement denominator',
+  );
+  assert.equal(
+    runtimeManifest.decisions.filter(({definitions}) =>
+      definitions.some((definition) => promotedDefinitions.includes(definition)),
+    ).length,
+    0,
+    'constant promotion invented a source control decision',
+  );
+  assert.equal(
+    runtimeManifest.branches.filter(({definitions}) =>
+      definitions.some((definition) => promotedDefinitions.includes(definition)),
+    ).length,
+    0,
+    'constant promotion invented a source branch alternative',
+  );
   const whileInvocation = branchFor(
     runtimeManifest,
     'while_compound',
@@ -1449,6 +1476,10 @@ try {
   assert(
     fullyExecutedPointOrdinals.every((ordinal) => observedOrdinals.has(ordinal)),
     'executed function/statement points did not all publish their manifest ordinals',
+  );
+  assert(
+    promotedPoints.every(({probeOrdinal}) => observedOrdinals.has(probeOrdinal)),
+    'runtime execution did not cover every authored point containing a promoted value',
   );
   assert.equal(
     behaviorEvidence.ordinals.filter(({ordinal}) => ordinal === letElseMatched).length,
@@ -2448,6 +2479,12 @@ try {
     ctfeRecordFiles.flatMap(({records: fileRecords}) =>
       fileRecords.map(({definition}) => definition),
     ),
+  );
+  assert(
+    promotedDefinitions.every(
+      (definition) => ![...ctfeDefinitions].some((name) => name.endsWith(definition)),
+    ),
+    'compiler implementation promotion was exposed as a second authored CTFE execution',
   );
   assert(
     ctfeDefinitions.size > 1,

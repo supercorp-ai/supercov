@@ -163,6 +163,14 @@ pub fn inline_const_values() -> [usize; 2] {
     ]
 }
 
+pub fn promoted_literal() -> &'static usize {
+    &157
+}
+
+pub fn promoted_array() -> &'static [usize; 3] {
+    &[2, 3, 5]
+}
+
 pub fn let_else_value(value: Option<usize>) -> usize {
     let Some(value) = value else {
         return 0;

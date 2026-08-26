@@ -553,6 +553,18 @@ rustc's `--crate-name=value` form in addition to `--crate-name value`.
 Promoted/const-trait surfaces, compiler crash/ENOSPC/concurrency and performance
 remain open.
 
+The pinned-toolchain promoted/const-trait ambiguity is now resolved. Rust's
+constant promotion of borrowed literals and arrays is a compiler storage
+choice, not a second authored execution in `rust-source-v1`: the enclosing
+runtime functions retain and emit every authored function/statement point,
+promotion adds no fictitious source decision or branch, and the CTFE stream
+does not double-count those owners. The corpus checks all three facts against
+real `promoted_mir`. Rust 1.95 rejects const trait definitions/implementations
+on stable; its checked-in compile-fail oracle preserves E0658/E0015 diagnostics
+and publishes no compiler evidence. Exact companions for future toolchains
+must reclassify this when stable const traits exist. Compiler crash/ENOSPC/
+concurrency, supported-target and performance gates remain open.
+
 The rustdoc launch boundary is now proven as well. Cargo's ordinary
 `RUSTC_WRAPPER` still does not see synthesized doctest crates, so Supercov uses
 a scoped launcher for the exact ordinary rustdoc and adds its compiler
