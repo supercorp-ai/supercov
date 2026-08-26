@@ -91,12 +91,33 @@ fn main() -> ExitCode {
         Some("__sweep-trash") => sweep_trash(),
         Some("__benchmark-js-transform") => benchmark_js_transform(),
         Some("__pack-evidence") => pack_evidence(),
+        Some("__validate-rust-compiler-manifest") => validate_rust_compiler_manifest(),
         Some("clean") => cleanup_command(arguments.collect()),
         Some("runs") => public_query_command("runs", arguments.collect()),
         Some("diff") => public_query_command("diff", arguments.collect()),
         Some("merge") => merge_command(arguments.collect()),
         Some(command) => {
             eprintln!("[supercov] Unknown command: {command}. Try supercov help.");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn validate_rust_compiler_manifest() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    match supercov_engine::rust_compiler_manifest::RustCompilerManifest::parse(input.as_bytes()) {
+        Ok(manifest) => {
+            println!("{}", manifest.crate_name);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[supercov] {error}");
             ExitCode::from(2)
         }
     }

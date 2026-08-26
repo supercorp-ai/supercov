@@ -230,7 +230,12 @@ candidate. Unknown fields/schema/model, premature completeness, malformed or
 noncanonical source identities, duplicate IDs or probe ordinals, unsupported
 obligation kinds, dangling/cyclic match ownership and mismatched match-arm
 ordinals fail before evidence can be analyzed. The companion must still be
-moved out of the development spike and connected to this boundary.
+moved out of the development spike and connected to this boundary. The real
+clean-build companion manifest now passes this production parser on every
+spike run. That integration caught and specified three shapes a synthetic unit
+fixture had missed: `authored-expansion` provenance, distinct
+`branch-alternative` IDs, and nested matches owned by a parent scrutinee without
+an arm index.
 
 The first real-probe doctest attempt was deliberately rejected. It exposed and
 fixed an unstable-feature capability leak by adding rustc's empty

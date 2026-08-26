@@ -24,6 +24,7 @@ const wrapper = join(
   root,
   'spikes/rustc-backend/target/debug/supercov-rustc-backend-spike',
 );
+const supercov = join(root, 'target/debug/supercov');
 const scratch = mkdtempSync(join(tmpdir(), 'supercov-rustc-spike-'));
 const fixtureSourcePath = join(root, 'spikes/rustc-backend/fixture/src/lib.rs');
 const fixtureSourceBytes = readFileSync(fixtureSourcePath);
@@ -369,6 +370,7 @@ try {
   run('cargo', ['build', '--manifest-path', manifest], {
     env: {RUSTC_BOOTSTRAP: '1'},
   });
+  run('cargo', ['build', '-p', 'supercov']);
 
   const observedDirectory = join(scratch, 'observed');
   const observedTarget = join(scratch, 'observed-target');
@@ -439,6 +441,20 @@ try {
     identityDirectoryB,
     'supercov_rustc_spike_fixture',
   );
+  const identityManifestPath = join(
+    identityDirectoryA,
+    readdirSync(identityDirectoryA).find(
+      (name) =>
+        name.startsWith('manifest-') &&
+        name.endsWith('-supercov_rustc_spike_fixture.json'),
+    ),
+  );
+  const productionValidation = run(
+    supercov,
+    ['__validate-rust-compiler-manifest'],
+    {env: {SUPERCOV_INTERNAL_INPUT_FILE: identityManifestPath}},
+  );
+  assert.equal(productionValidation.stdout.trim(), 'supercov_rustc_spike_fixture');
   assert.deepEqual(
     identityManifestA,
     identityManifestB,

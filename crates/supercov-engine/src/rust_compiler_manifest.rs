@@ -160,7 +160,7 @@ fn ordinal(value: &str) -> Option<u64> {
 fn provenance(value: &str) -> bool {
     matches!(
         value,
-        "authored-source" | "synthetic-expansion" | "generated-source"
+        "authored-source" | "authored-expansion" | "synthetic-expansion" | "generated-source"
     )
 }
 
@@ -263,7 +263,7 @@ impl RustCompilerManifest {
             branch_ids.insert(branch.id.as_str());
             let mut labels = BTreeSet::new();
             for alternative in &branch.alternatives {
-                if !valid_id(&alternative.id, &["branch"])
+                if !valid_id(&alternative.id, &["branch-alternative"])
                     || alternative.label.trim().is_empty()
                     || !labels.insert(alternative.label.as_str())
                 {
@@ -330,13 +330,30 @@ impl RustCompilerManifest {
                     .as_ref()
                     .is_some_and(|parent| !selection_ids.contains(parent.as_str()))
                 || group.parent_site.is_some() != group.parent_group_id.is_some()
-                || group.parent_arm_index.is_some() != group.parent_group_id.is_some()
                 || group
                     .parent_site
                     .as_deref()
-                    .is_some_and(|site| !matches!(site, "guard" | "body"))
+                    .is_some_and(|site| !matches!(site, "scrutinee" | "guard" | "body"))
+                || match group.parent_site.as_deref() {
+                    Some("scrutinee") => group.parent_arm_index.is_some(),
+                    Some("guard" | "body") => group.parent_arm_index.is_none(),
+                    _ => false,
+                }
             {
-                return Err(invalid("malformed match selection group"));
+                return Err(RustCompilerManifestError::Invalid(format!(
+                    "malformed match selection group {}: id={} kind={} range={} provenance={} definitions={} arms={} canonical={} parent={} site={} arm={}",
+                    group.id,
+                    valid_id(&group.id, &["match-group"]),
+                    group.kind == "match",
+                    source_range(&group.source_key, group.start, group.end),
+                    provenance(&group.provenance),
+                    sorted_unique_nonempty(&group.definitions),
+                    group.arms.len(),
+                    !group.canonical.is_empty(),
+                    group.parent_group_id.is_some(),
+                    group.parent_site.is_some(),
+                    group.parent_arm_index.is_some(),
+                )));
             }
             insert_identity(&mut ids, &mut ordinals, &group.id, &group.probe_ordinal)?;
             let mut arm_branches = BTreeSet::new();
@@ -388,7 +405,7 @@ impl RustCompilerManifest {
                     .expect("validated parent group reference");
                 if current
                     .parent_arm_index
-                    .is_none_or(|index| index >= parent.arms.len())
+                    .is_some_and(|index| index >= parent.arms.len())
                 {
                     return Err(invalid("match selection parent arm is out of range"));
                 }
@@ -434,8 +451,8 @@ mod tests {
                 "probeOrdinal": "2",
                 "definitions": ["fixture::function"],
                 "alternatives": [
-                    {"id": "rs:branch:000000000000000000000003", "label": "condition true", "probeOrdinal": "3"},
-                    {"id": "rs:branch:000000000000000000000004", "label": "condition false", "probeOrdinal": "4"}
+                    {"id": "rs:branch-alternative:000000000000000000000003", "label": "condition true", "probeOrdinal": "3"},
+                    {"id": "rs:branch-alternative:000000000000000000000004", "label": "condition false", "probeOrdinal": "4"}
                 ],
                 "canonical": "branch"
             }],
