@@ -1238,7 +1238,10 @@ miss blocks flipping any default.
 
 - The R1 expansion spike proved that an exact-version `rustc_driver` wrapper
   can observe authored, declarative-macro, procedural-macro and build-script-
-  generated HIR/MIR and can replace optimized runtime MIR before codegen.
+  generated HIR/MIR and can inject real calls into optimized runtime MIR
+  before codegen. Its private runtime is inserted into the in-memory crate AST,
+  not the checkout; probe observations arrive while values, errors, caught
+  panic status, drops, stdout and stderr remain equal to the baseline fixture.
 - The public Rust frontend will therefore use an automatically selected,
   Supercov-owned compiler companion matched by rustc commit, host and the
   exact `librustc_driver` digest. It is an injection/provenance frontend only;

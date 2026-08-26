@@ -36,13 +36,18 @@ The spike proved:
    the checkout.
 4. Const functions and const items expose MIR, but `optimized_mir` is invalid
    for const items. Runtime and CTFE bodies require separate provider paths.
-5. Overriding the local `optimized_mir` query changes emitted code. The spike
-   swaps the `authored` boolean branch and the compiled test observes `2`
-   instead of `1`. This establishes a viable owned runtime probe-insertion
-   boundary after expansion and type/borrow analysis.
+5. Overriding the local `optimized_mir` query can insert a real call to a
+   Supercov probe after expansion and type/borrow analysis. The companion
+   injects the probe runtime into the in-memory crate AST, so the fixture does
+   not define or install it and its source hash remains unchanged. An
+   instrumented-only test observes all four probe bits.
 6. Cargo's ordinary `RUSTC_WRAPPER` does not receive the compiler invocation
    for rustdoc's extracted doctest crate. Doctests need a matched rustdoc/test-
    builder companion or an independently equivalent owned extraction path.
+7. The ordinary and instrumented behavior binaries have identical stdout,
+   stderr, values, `Result` errors, caught panic status and drop ordering. The
+   synthetic runtime is tagged by a compiler-only source name and can be
+   excluded from the user denominator without a path heuristic.
 
 The companion executable is about 600 KiB on arm64 macOS and dynamically uses
 the exact `librustc_driver` already shipped by the user's `rustc` component.
@@ -91,15 +96,13 @@ an unverified rustc commit.
 
 ## Next implementation gates
 
-1. Replace the deliberate branch swap with a real side-effecting Supercov MIR
-   probe call and prove values, panics, drops and output remain identical.
-2. Freeze compiler-companion capability/handshake JSON keyed by rustc commit,
-   host, target and frontend build ID.
-3. Derive stable expansion identities and complete branch/condition mappings
+1. Replace the atomic spike mask with the bounded, lock-free evidence transport
+   and prove collision, unsupported-atomic, no_std and target behavior.
+2. Derive stable expansion identities and complete branch/condition mappings
    from expanded HIR plus MIR source info.
-4. Spike CTFE path tracing and rustdoc interception; either unresolved item
+3. Spike CTFE path tracing and rustdoc interception; either unresolved item
    blocks public Rust support.
-5. Add exact-version mismatch, missing-companion and custom-toolchain failure
+4. Add exact-version mismatch, missing-companion and custom-toolchain failure
    tests before connecting the companion to `npx supercov -- cargo test`.
 
 ## Primary references

@@ -16,6 +16,9 @@ RUSTC_BOOTSTRAP=1 cargo build --manifest-path spikes/rustc-backend/Cargo.toml
 `npm run test:rustc-backend-spike` runs the checked-in
 macro/generated/const/doctest fixture through the resulting binary as
 `RUSTC_WRAPPER`, validates compiler provenance, and proves that an optimized
-MIR query replacement reaches emitted code. External LLVM/rustc coverage is
-not used. All fixture targets and observations live in a temporary directory
-and are deleted after the spike.
+MIR query replacement reaches emitted code. The companion injects its probe
+runtime as an in-memory crate item, calls it from MIR, proves the observations
+arrive, compares values/errors/panics/drop order/stdout/stderr to an ordinary
+build, and verifies the fixture source hash is unchanged. External LLVM/rustc
+coverage is not used. All fixture targets and observations live in a temporary
+directory and are deleted after the spike.

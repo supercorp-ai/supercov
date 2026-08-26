@@ -150,6 +150,16 @@ doctests and exact test attribution are all present. The concrete-source Rust
 transformer remains only a private differential reference and will not be the
 public injection authority.
 
+The next spike increment removed the fixture-defined runtime: the companion
+now appends a synthetic private runtime module to the in-memory crate AST and
+inserts real side-effecting calls into optimized MIR. An instrumented test
+observed the expected probe bitmap, the checkout hash stayed exact, and an
+ordinary-versus-instrumented binary comparison preserved values, `Result`
+errors, caught panic status, drop ordering, stdout and stderr. This proves the
+zero-configuration injection boundary, not public completeness: the temporary
+atomic bitmap must still become the bounded production transport and pass the
+full semantic/property corpus.
+
 Correctness corpus:
 
 - original-versus-instrumented differential programs checking values, panics,
