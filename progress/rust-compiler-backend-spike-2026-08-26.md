@@ -38,9 +38,10 @@ The spike proved:
    for const items. Runtime and CTFE bodies require separate provider paths.
 5. Overriding the local `optimized_mir` query can insert a real call to a
    Supercov probe after expansion and type/borrow analysis. The companion
-   injects the probe runtime into the in-memory crate AST, so the fixture does
-   not define or install it and its source hash remains unchanged. An
-   instrumented-only test observes all four probe bits.
+   injects the same std-only mmap runtime used by the engine into the in-memory
+   crate AST, so the fixture does not define or install it and its source hash
+   remains unchanged. Both a normal binary and an actual test process publish
+   all four expected ordinals through the authenticated transport.
 6. Cargo's ordinary `RUSTC_WRAPPER` does not receive the compiler invocation
    for rustdoc's extracted doctest crate. A scoped exact-rustdoc launcher can,
    however, install the same companion through rustdoc's test-builder-wrapper
@@ -70,6 +71,13 @@ The spike proved:
     rustdoc's own merged runner bootstrap. A stable `compile_fail` feature
     gate, ordinary/intercepted output comparison and source hash guard all
     pass.
+12. The frozen `rust-probe-transport-v1` is a fixed-layout, bounded mmap file
+    created and authenticated by the supervisor. Release/acquire descriptor
+    commits preserve every completed observation after process kill. Per-record
+    process and context IDs prevent the wire format from relying on timing.
+    Thread and process concurrency, descriptor and payload exhaustion, wrong
+    token/context, corrupt/truncated records, symlinks and an uncommitted
+    descriptor all fail closed or produce explicit loss health as specified.
 
 The companion executable is about 600 KiB on arm64 macOS and dynamically uses
 the exact `librustc_driver` already shipped by the user's `rustc` component.
@@ -108,24 +116,30 @@ an unverified rustc commit.
    avoids a copied CTFE machine or bundled compiler fork. It remains private
    until the full const/static/const-generic corpus, manifest mapping,
    crash-safe publication, `RUSTC_LOG` coexistence and performance gates pass.
-4. A scoped rustdoc launcher selects the exact ordinary rustdoc and injects
+4. Runtime probes publish into the frozen bounded transport. Each record binds
+   the task token, process ID, and a supervisor-resolved 64-bit context ID; the
+   shared engine alone maps that context to run/worker/test/retry/phase and
+   converts valid observations into evidence v3. A dynamic in-process context
+   carrier remains required before concurrent libtest can be exact.
+5. A scoped rustdoc launcher selects the exact ordinary rustdoc and injects
    the compiler companion as its test-builder wrapper. The first proof maps
    standalone hidden lines and joins merged bundle/runner identities without a
    second extraction pass. Runtime probes, exact test attempt context, custom
    wrapper composition and the full doctest corpus remain required.
-5. Generated files are captured in the isolated Cargo target after build
+6. Generated files are captured in the isolated Cargo target after build
    scripts and before crate compilation. External symlinks and provenance
    ambiguity fail closed.
-6. The companion emits only frontend obligations and observations through
+7. The companion emits only frontend obligations and observations through
    evidence v3. MC/DC solving, attribution merging, persistence and queries
    remain in the shared Rust engine.
 
 ## Next implementation gates
 
-1. Replace the atomic spike mask with the bounded, lock-free evidence transport
-   and prove collision, unsupported-atomic, no_std and target behavior.
-2. Derive stable expansion identities and complete branch/condition mappings
+1. Derive stable expansion identities and complete branch/condition mappings
    from expanded HIR plus MIR source info.
+2. Build the dynamic test/retry/phase context carrier on the frozen transport;
+   prove concurrent libtest, async, subprocess, retry, late-work, no_std and
+   supported-target behavior. Windows remains a separate explicit target gate.
 3. Generalize the proven CTFE marker path across every frozen compile-time
    surface, map every marker into the frozen manifest, and make publication
    crash-safe. Extend the proven rustdoc interception/mapping path with runtime

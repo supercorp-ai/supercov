@@ -102,13 +102,11 @@ mod tests {
     #[test]
     #[ignore = "requires compiler-spike MIR instrumentation"]
     fn records_real_runtime_probes() {
-        assert_eq!(crate::__supercov_spike_runtime::probe_mask(), 0);
         assert_eq!(authored(true), 1);
         assert_eq!(fallible(2), Ok(3));
         let log = std::cell::RefCell::new(Vec::new());
         assert_eq!(drop_order(&log), 23);
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| panic_path(&log)));
         assert!(panic.is_err());
-        assert_eq!(crate::__supercov_spike_runtime::probe_mask(), 0b1111);
     }
 }

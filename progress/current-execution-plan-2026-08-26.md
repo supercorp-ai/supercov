@@ -152,13 +152,24 @@ public injection authority.
 
 The next spike increment removed the fixture-defined runtime: the companion
 now appends a synthetic private runtime module to the in-memory crate AST and
-inserts real side-effecting calls into optimized MIR. An instrumented test
-observed the expected probe bitmap, the checkout hash stayed exact, and an
-ordinary-versus-instrumented binary comparison preserved values, `Result`
-errors, caught panic status, drop ordering, stdout and stderr. This proves the
-zero-configuration injection boundary, not public completeness: the temporary
-atomic bitmap must still become the bounded production transport and pass the
-full semantic/property corpus.
+inserts real side-effecting calls into optimized MIR. The temporary bitmask has
+also been removed. The companion injects the same std-only mmap runtime used
+by the engine, and both a normal binary and an actual test process publish all
+four expected MIR ordinals through an authenticated supervisor-created file.
+The checkout hash stayed exact, and ordinary-versus-instrumented behavior
+preserved values, `Result` errors, caught panic status, drop ordering, stdout
+and stderr.
+
+`rust-probe-transport-v1` now freezes the 128-byte header, 40-byte descriptors,
+record kinds, per-record process/context identity, bounded payload, 128-bit
+task binding, release/acquire publication, 64-bit metadata/payload checksum and
+fail-closed health rules. Executable tests cover eight concurrent threads,
+eight concurrent processes, descriptor and payload exhaustion, wrong token,
+malformed context, corrupt/truncated headers and descriptors, symlink refusal,
+an uncommitted reservation and process kill after a committed observation.
+This closes the wire/crash slice, not R1/R2: exact dynamic context propagation,
+the complete Rust denominator, CTFE/doctest publication, no_std and the target
+matrix remain release blockers.
 
 The CTFE provider spike is now executable rather than hypothetical. The
 companion overrides `mir_for_ctfe`, inserts execution markers in original
@@ -219,8 +230,9 @@ Work:
 - attribute assertion/action phases for Rust assertions and common test
   frameworks without hardcoding application code;
 - persist background and late evidence without assigning it to the wrong test;
-- design kill-resilient observation transport so SIGKILL cannot turn executed
-  obligations into silent absence;
+- integrate the frozen kill-resilient transport with dynamic context carriers
+  so committed observations survive termination and any uncommitted/lost work
+  becomes explicit health rather than silent absence;
 - fail closed for genuinely ambiguous mixed-language or unsupported runners.
 
 Prefer an owned in-process context carrier once it proves the same isolation as

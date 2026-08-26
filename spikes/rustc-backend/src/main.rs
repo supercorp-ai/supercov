@@ -47,28 +47,12 @@ const INSTRUMENT_CTFE: &str = "SUPERCOV_RUSTC_SPIKE_INSTRUMENT_CTFE";
 const REAL_RUSTDOC: &str = "SUPERCOV_RUSTC_SPIKE_REAL_RUSTDOC";
 const COMPANION_PATH: &str = "SUPERCOV_RUSTC_SPIKE_COMPANION_PATH";
 const RUSTDOC_LAUNCHED: &str = "SUPERCOV_RUSTC_SPIKE_RUSTDOC_LAUNCHED";
-const PROBE_FUNCTION: &str = "__supercov_spike_runtime::probe";
+const PROBE_FUNCTION: &str = "__supercov_spike_runtime::ordinal_hit";
 const CTFE_EVENT_TARGET: &str = "rustc_const_eval::interpret::step";
 const CTFE_MARKER_PREFIX: u64 = 0x5355_5045_5243_0000;
 const CTFE_EDGE_MARKER_OFFSET: u64 = 0x8000;
-const INJECTED_RUNTIME: &str = r#"
-#[doc(hidden)]
-#[allow(dead_code)]
-mod __supercov_spike_runtime {
-    use core::sync::atomic::{AtomicU64, Ordering};
-
-    static PROBE_MASK: AtomicU64 = AtomicU64::new(0);
-
-    #[inline(never)]
-    pub(crate) fn probe(probe_id: u64) {
-        PROBE_MASK.fetch_or(1_u64 << probe_id, Ordering::Relaxed);
-    }
-
-    pub(crate) fn probe_mask() -> u64 {
-        PROBE_MASK.load(Ordering::Relaxed)
-    }
-}
-"#;
+const RUNTIME_TEMPLATE: &str =
+    include_str!("../../../crates/supercov-engine/runtime-assets/rust-mmap-runtime.rs");
 
 type OptimizedMirProvider = for<'tcx> fn(TyCtxt<'tcx>, LocalDefId) -> &'tcx Body<'tcx>;
 type MirForCtfeProvider = for<'tcx> fn(TyCtxt<'tcx>, LocalDefId) -> &'tcx Body<'tcx>;
@@ -144,10 +128,11 @@ impl Callbacks for ProbeCallbacks {
         if env::var_os(INSTRUMENT_MIR).is_none() {
             return Compilation::Continue;
         }
+        let runtime = RUNTIME_TEMPLATE.replace("__SUPERCOV_MODULE__", "__supercov_spike_runtime");
         let mut parser = rustc_parse::unwrap_or_emit_fatal(new_parser_from_source_str(
             &compiler.sess.psess,
             FileName::Custom("<supercov-rust-runtime>".into()),
-            INJECTED_RUNTIME.into(),
+            runtime,
             StripTokens::Nothing,
         ));
         let injected = parser.parse_crate_mod().unwrap_or_else(|error| {

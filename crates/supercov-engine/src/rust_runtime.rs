@@ -47,7 +47,7 @@ impl std::fmt::Display for RustProbeReadError {
 
 impl std::error::Error for RustProbeReadError {}
 
-fn valid_probe_id(id: &str) -> bool {
+pub(crate) fn valid_probe_id(id: &str) -> bool {
     let mut parts = id.split(':');
     matches!(parts.next(), Some("rs"))
         && matches!(

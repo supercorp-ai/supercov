@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {createHash} from 'node:crypto';
+import {createHash, randomBytes} from 'node:crypto';
 import {
+  closeSync,
+  ftruncateSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   rmSync,
   symlinkSync,
+  writeSync,
 } from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
@@ -26,6 +30,70 @@ const fixtureSourceDigest = createHash('sha256')
   .update(fixtureSourceBytes)
   .digest('hex');
 const fixtureSource = fixtureSourceBytes.toString('utf8').split('\n');
+const transportHeaderSize = 128;
+const transportDescriptorSize = 40;
+const transportContext = 42;
+
+function createTransport(name, descriptorCapacity = 1024, payloadCapacity = 64 * 1024) {
+  const path = join(scratch, `${name}.transport`);
+  const token = randomBytes(16);
+  const header = Buffer.alloc(transportHeaderSize);
+  header.write('SCVRUST1', 0, 'ascii');
+  header.writeUInt32LE(1, 8);
+  header.writeUInt32LE(transportHeaderSize, 12);
+  header.writeUInt32LE(transportDescriptorSize, 16);
+  header.writeUInt32LE(descriptorCapacity, 20);
+  header.writeUInt32LE(payloadCapacity, 24);
+  header.writeUInt32LE(0x01020304, 28);
+  token.copy(header, 56);
+  const descriptorBytes = descriptorCapacity * transportDescriptorSize;
+  const file = openSync(path, 'wx+');
+  try {
+    ftruncateSync(file, transportHeaderSize + descriptorBytes + payloadCapacity);
+    writeSync(file, header, 0, header.length, 0);
+  } finally {
+    closeSync(file);
+  }
+  return {path, token, tokenHex: token.toString('hex')};
+}
+
+function readTransport(transport) {
+  const bytes = readFileSync(transport.path);
+  assert.equal(bytes.subarray(0, 8).toString('ascii'), 'SCVRUST1');
+  assert.equal(bytes.readUInt32LE(8), 1);
+  assert.deepEqual(bytes.subarray(56, 72), transport.token);
+  const descriptorCapacity = bytes.readUInt32LE(20);
+  const payloadCapacity = bytes.readUInt32LE(24);
+  const payloadBase = transportHeaderSize + descriptorCapacity * transportDescriptorSize;
+  assert.equal(bytes.length, payloadBase + payloadCapacity);
+  const reserved = Number(bytes.readBigUInt64LE(32));
+  const ordinals = [];
+  let committed = 0;
+  for (let index = 0; index < Math.min(reserved, descriptorCapacity); index += 1) {
+    const descriptor = transportHeaderSize + index * transportDescriptorSize;
+    if (bytes[descriptor] === 0) continue;
+    committed += 1;
+    const kind = bytes[descriptor + 1];
+    if (kind !== 3) continue;
+    assert.equal(Number(bytes.readBigUInt64LE(descriptor + 8)), transportContext);
+    const payloadOffset = bytes.readUInt32LE(descriptor + 16);
+    const payloadLength = bytes.readUInt32LE(descriptor + 20);
+    const idLength = bytes.readUInt32LE(descriptor + 24);
+    const valueLength = bytes.readUInt32LE(descriptor + 28);
+    assert.equal(payloadLength, 8);
+    assert.equal(idLength, 0);
+    assert.equal(valueLength, 8);
+    assert(payloadOffset + payloadLength <= payloadCapacity);
+    ordinals.push(Number(bytes.readBigUInt64LE(payloadBase + payloadOffset)));
+  }
+  return {
+    attachments: Number(bytes.readBigUInt64LE(72)),
+    committed,
+    dropped: Number(bytes.readBigUInt64LE(48)),
+    incomplete: Math.min(reserved, descriptorCapacity) - committed,
+    ordinals,
+  };
+}
 
 function sourceLine(fragment) {
   const index = fixtureSource.findIndex((line) => line.includes(fragment));
@@ -139,11 +207,15 @@ try {
     {env: {CARGO_TARGET_DIR: join(scratch, 'baseline-behavior-target')}},
   );
   const instrumentedDirectory = join(scratch, 'instrumented');
+  const behaviorTransport = createTransport('instrumented-behavior');
   const instrumentedEnvironment = {
     CARGO_TARGET_DIR: join(scratch, 'instrumented-target'),
     RUSTC_WRAPPER: wrapper,
     SUPERCOV_RUSTC_SPIKE_OUTPUT: instrumentedDirectory,
     SUPERCOV_RUSTC_SPIKE_INSTRUMENT_MIR: '1',
+    SUPERCOV_RUST_TRANSPORT_FILE: behaviorTransport.path,
+    SUPERCOV_RUST_TRANSPORT_TOKEN: behaviorTransport.tokenHex,
+    SUPERCOV_RUST_CONTEXT_ID: transportContext.toString(16).padStart(16, '0'),
   };
   const instrumentedBehavior = run(
     'cargo',
@@ -153,6 +225,11 @@ try {
   assert.equal(instrumentedBehavior.stdout, baselineBehavior.stdout);
   assert.equal(instrumentedBehavior.stderr, baselineBehavior.stderr);
   assert.match(baselineBehavior.stdout, /drop-order=\["panic-drop", "second", "first"\]/);
+  const behaviorEvidence = readTransport(behaviorTransport);
+  assert.equal(behaviorEvidence.attachments, 1);
+  assert.equal(behaviorEvidence.dropped, 0);
+  assert.equal(behaviorEvidence.incomplete, 0);
+  assert.deepEqual(new Set(behaviorEvidence.ordinals), new Set([0, 1, 2, 3]));
 
   const ctfeDirectory = join(scratch, 'ctfe');
   const ctfeBehavior = run(
@@ -189,6 +266,7 @@ try {
     `expected both concurrency-safe CTFE edges and all original blocks, got ${JSON.stringify(ctfeSequences)}`,
   );
 
+  const testTransport = createTransport('instrumented-test');
   const probeTest = run(
     'cargo',
     [
@@ -201,13 +279,24 @@ try {
       '--',
       '--ignored',
     ],
-    {env: instrumentedEnvironment},
+    {
+      env: {
+        ...instrumentedEnvironment,
+        SUPERCOV_RUST_TRANSPORT_FILE: testTransport.path,
+        SUPERCOV_RUST_TRANSPORT_TOKEN: testTransport.tokenHex,
+      },
+    },
   );
   assert.match(probeTest.stdout, /1 passed/);
+  const testEvidence = readTransport(testTransport);
+  assert.equal(testEvidence.attachments, 1);
+  assert.equal(testEvidence.dropped, 0);
+  assert.equal(testEvidence.incomplete, 0);
+  assert.deepEqual(new Set(testEvidence.ordinals), new Set([0, 1, 2, 3]));
   const instrumentedRecords = records(instrumentedDirectory);
   assert(instrumentedRecords.some((record) => record.definition === 'authored'));
   const injectedProbe = instrumentedRecords.find((record) =>
-    record.definition.endsWith('__supercov_spike_runtime::probe'),
+    record.definition.endsWith('__supercov_spike_runtime::ordinal_hit'),
   );
   assert.match(injectedProbe?.span ?? '', /<supercov-rust-runtime>/);
   assert.equal(
@@ -303,7 +392,7 @@ try {
   );
 
   console.log(
-    '[rustc-backend-spike] expanded provenance, runtime MIR probes and CTFE markers preserve behavior; a scoped rustdoc test-builder companion observes standalone and merged doctest identities without output or checkout changes',
+    '[rustc-backend-spike] expanded provenance, mmap runtime MIR probes and CTFE markers preserve behavior; a scoped rustdoc test-builder companion observes standalone and merged doctest identities without output or checkout changes',
   );
 } finally {
   rmSync(scratch, {recursive: true, force: true});

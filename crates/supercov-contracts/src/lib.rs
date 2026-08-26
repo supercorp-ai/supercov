@@ -29,6 +29,11 @@ pub const PROBE_V2_RADIX: u32 = 3;
 pub const PROBE_V2_JS_MAX_CONDITIONS: usize = 32;
 pub const LANGUAGE_FRONTEND_PROTOCOL_VERSION: u32 = 2;
 pub const RUST_COMPILER_COMPANION_PROTOCOL_VERSION: u32 = 1;
+pub const RUST_PROBE_TRANSPORT_PROTOCOL_VERSION: u32 = 1;
+pub const RUST_PROBE_TRANSPORT_MAGIC: &str = "SCVRUST1";
+pub const RUST_PROBE_TRANSPORT_HEADER_SIZE: usize = 128;
+pub const RUST_PROBE_TRANSPORT_DESCRIPTOR_SIZE: usize = 40;
+pub const RUST_PROBE_TRANSPORT_TOKEN_SIZE: usize = 16;
 
 pub const ERROR_CODES: &[&str] = &[
     "AMBIGUOUS_SELECTOR",
@@ -315,6 +320,112 @@ pub fn rust_compiler_companion_contract() -> Result<RustCompilerCompanionContrac
 {
     serde_json::from_str(include_str!(
         "../assets/rust-compiler-companion-v1/contract.json"
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustProbeTransportContract {
+    pub protocol_version: u32,
+    pub status: String,
+    pub magic: String,
+    pub byte_order: String,
+    pub header_size: usize,
+    pub descriptor_size: usize,
+    pub token_size: usize,
+    pub endian_marker: u32,
+    pub header_offsets: RustProbeTransportHeaderOffsets,
+    pub descriptor_offsets: RustProbeTransportDescriptorOffsets,
+    pub record_kinds: RustProbeTransportRecordKinds,
+    pub context: RustProbeTransportContext,
+    pub publication: RustProbeTransportPublication,
+    pub integrity: RustProbeTransportIntegrity,
+    pub completeness: RustProbeTransportCompleteness,
+    pub supported_targets: Vec<String>,
+    pub unsupported_target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustProbeTransportHeaderOffsets {
+    pub version: usize,
+    pub header_size: usize,
+    pub descriptor_size: usize,
+    pub descriptor_capacity: usize,
+    pub payload_capacity: usize,
+    pub endian_marker: usize,
+    pub next_descriptor: usize,
+    pub next_payload: usize,
+    pub dropped: usize,
+    pub token: usize,
+    pub attachments: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustProbeTransportDescriptorOffsets {
+    pub commit: usize,
+    pub kind: usize,
+    pub outcome: usize,
+    pub flags: usize,
+    pub process_id: usize,
+    pub context_id: usize,
+    pub payload_offset: usize,
+    pub payload_length: usize,
+    pub id_length: usize,
+    pub value_length: usize,
+    pub checksum: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustProbeTransportRecordKinds {
+    pub hit: u8,
+    pub decision: u8,
+    pub ordinal_hit: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustProbeTransportContext {
+    pub zero: String,
+    pub nonzero: String,
+    pub published_identity: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustProbeTransportPublication {
+    pub reservation_order: Vec<String>,
+    pub commit_value: u8,
+    pub writer_ordering: String,
+    pub reader_ordering: String,
+    pub complete_descriptors_independently_recoverable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustProbeTransportIntegrity {
+    pub authentication: String,
+    pub checksum: String,
+    pub unknown_record_kind_fatal: bool,
+    pub nonzero_reserved_byte_fatal: bool,
+    pub symlink_transport_fatal: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustProbeTransportCompleteness {
+    pub zero_attachments_blocks_terminal_passing_attempt: bool,
+    pub dropped_records_block_terminal_passing_attempt: bool,
+    pub incomplete_records_block_terminal_passing_attempt: bool,
+    pub context_zero_excluded_from_passed_per_test_coverage: bool,
+    pub malformed_record_fatal: bool,
+}
+
+pub fn rust_probe_transport_contract() -> Result<RustProbeTransportContract, serde_json::Error> {
+    serde_json::from_str(include_str!(
+        "../assets/rust-probe-transport-v1/contract.json"
     ))
 }
 
@@ -1315,6 +1426,83 @@ mod tests {
         assert_eq!(contract.missing_or_mismatched_companion, "fail-closed");
         assert_eq!(contract.user_runtime_components, ["cargo", "rustc"]);
         assert!(contract.user_development_components.is_empty());
+    }
+
+    #[test]
+    fn rust_probe_transport_contract_fixes_layout_and_fail_closed_health() {
+        let contract = rust_probe_transport_contract().unwrap();
+        assert_eq!(
+            contract.protocol_version,
+            RUST_PROBE_TRANSPORT_PROTOCOL_VERSION
+        );
+        assert_eq!(contract.status, "frozen-private-frontend");
+        assert_eq!(contract.magic, RUST_PROBE_TRANSPORT_MAGIC);
+        assert_eq!(contract.byte_order, "little-endian");
+        assert_eq!(contract.header_size, RUST_PROBE_TRANSPORT_HEADER_SIZE);
+        assert_eq!(
+            contract.descriptor_size,
+            RUST_PROBE_TRANSPORT_DESCRIPTOR_SIZE
+        );
+        assert_eq!(contract.token_size, RUST_PROBE_TRANSPORT_TOKEN_SIZE);
+        assert_eq!(contract.endian_marker, 0x0102_0304);
+        assert_eq!(contract.header_offsets.next_descriptor, 32);
+        assert_eq!(contract.header_offsets.next_payload, 40);
+        assert_eq!(contract.header_offsets.dropped, 48);
+        assert_eq!(contract.header_offsets.token, 56);
+        assert_eq!(contract.header_offsets.attachments, 72);
+        assert_eq!(contract.descriptor_offsets.commit, 0);
+        assert_eq!(contract.descriptor_offsets.process_id, 4);
+        assert_eq!(contract.descriptor_offsets.context_id, 8);
+        assert_eq!(contract.descriptor_offsets.payload_offset, 16);
+        assert_eq!(contract.descriptor_offsets.checksum, 32);
+        assert_eq!(contract.record_kinds.hit, 1);
+        assert_eq!(contract.record_kinds.decision, 2);
+        assert_eq!(contract.record_kinds.ordinal_hit, 3);
+        assert_eq!(contract.publication.commit_value, 1);
+        assert_eq!(contract.publication.writer_ordering, "release");
+        assert_eq!(contract.publication.reader_ordering, "acquire");
+        assert!(
+            contract
+                .publication
+                .complete_descriptors_independently_recoverable
+        );
+        assert_eq!(
+            contract.context.published_identity,
+            ["run", "worker", "test", "retry", "phase"]
+        );
+        assert!(
+            contract
+                .completeness
+                .zero_attachments_blocks_terminal_passing_attempt
+        );
+        assert!(
+            contract
+                .completeness
+                .dropped_records_block_terminal_passing_attempt
+        );
+        assert!(
+            contract
+                .completeness
+                .incomplete_records_block_terminal_passing_attempt
+        );
+        assert!(
+            contract
+                .completeness
+                .context_zero_excluded_from_passed_per_test_coverage
+        );
+        assert!(contract.integrity.symlink_transport_fatal);
+        assert_eq!(
+            contract.supported_targets,
+            [
+                "aarch64-apple-darwin",
+                "x86_64-apple-darwin",
+                "aarch64-unknown-linux-gnu",
+                "aarch64-unknown-linux-musl",
+                "x86_64-unknown-linux-gnu",
+                "x86_64-unknown-linux-musl",
+            ]
+        );
+        assert_eq!(contract.unsupported_target, "fail-closed");
     }
 
     #[test]
