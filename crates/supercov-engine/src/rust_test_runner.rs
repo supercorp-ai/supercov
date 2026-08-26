@@ -49,13 +49,14 @@ pub struct RustFrontendRun {
 }
 
 impl RustFrontendRun {
-    pub fn archive_v3_entries(&self) -> Result<Vec<EvidenceArchiveEntry>, serde_json::Error> {
+    pub fn archive_entries(&self) -> Result<Vec<EvidenceArchiveEntry>, serde_json::Error> {
         let model = PersistedCoverageModel::from_declaration(
             self.request
                 .coverage_model
                 .as_ref()
                 .expect("Rust frontend always declares a coverage model"),
-        );
+        )
+        .expect("Rust coverage model is contract-valid");
         let mut entries = vec![
             EvidenceArchiveEntry {
                 path: "coverage-model.json".into(),
@@ -447,6 +448,7 @@ fn snapshot(
 
 fn rust_coverage_model() -> CoverageModelDeclaration {
     CoverageModelDeclaration {
+        language: "rust".into(),
         variant: "rust-owned-probes-v1".into(),
         name: "supercov-rust-owned-v1".into(),
         completeness_meaning: "Every semantics-proven Rust obligation in the owned source denominator was observed; explicit manifest limitations identify unmeasured Rust surfaces.".into(),
@@ -688,7 +690,7 @@ mod tests {
     use super::*;
     use crate::{
         coverage_report::{ArchiveReportRequest, analyze_coverage_archive},
-        evidence_archive::write_archive_v3,
+        evidence_archive::write_archive,
         frontend_protocol::validate_frontend_report_request,
         rust_project::prepare_rust_project,
     };
@@ -745,7 +747,7 @@ mod tests {
         );
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
         let archive = root.join("evidence.raw.gz");
-        write_archive_v3(run.archive_v3_entries().unwrap(), &archive).unwrap();
+        write_archive(run.archive_entries().unwrap(), &archive).unwrap();
         let report = analyze_coverage_archive(&ArchiveReportRequest {
             archive_path: archive,
             run_id: "rust-fixture".into(),

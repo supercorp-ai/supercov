@@ -1,12 +1,12 @@
 # Evidence archive contract v1
 
 The immutable published evidence artifact is `evidence.raw.gz`. Its evidence
-schema version is `2`; this is independent of the encompassing contract
+schema version is `3`; this is independent of the encompassing contract
 version.
 
 After gzip decompression the byte stream is:
 
-1. ASCII magic `SUPERCOV-EVIDENCE-2\n`.
+1. ASCII magic `SUPERCOV-EVIDENCE-3\n`.
 2. Zero or more entries sorted by archive path using Unicode code-point order.
 3. For each entry:
    - a four-byte unsigned big-endian header length;

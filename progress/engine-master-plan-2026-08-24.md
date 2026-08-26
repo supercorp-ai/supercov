@@ -1208,6 +1208,32 @@ miss blocks flipping any default.
   no_std, doctests and generated source remain explicit release blockers, not
   silently missing denominator. Supercov itself is the first dogfood target.
 
+## Checkpoint — 2026-08-26 sole evidence v3 and frozen Rust model
+
+- The user explicitly removed the pre-release backward-compatibility
+  requirement. This checkpoint supersedes the earlier v2/v3 dual-reader
+  migration notes: evidence v3 is now the sole product archive, and the old v2
+  reader/writer and frontend-v1 contract have been removed rather than carried
+  indefinitely.
+- Every archive requires strict `frontend.json`, `coverage-model.json` and
+  `manifest.json` identities. The persisted model now includes an exact
+  language token; frontend/model language mismatch, unknown fields, malformed
+  or partial recognized JSONL and incompatible merge declarations are fatal.
+  JavaScript/TypeScript emits the same v3 boundary that private Rust and later
+  languages must use.
+- The target `rust-source-v1` semantic model is frozen separately from the
+  incomplete private implementation variant. It fixes authored-source
+  identity, point/branch/decision obligations, masking-MC/DC semantics,
+  generated/macro/const/doctest surfaces, attribution axes and completeness
+  meaning. Open implementation gates remain visible in
+  `contracts/rust-coverage-v1/traceability.md` and block promotion.
+- Real v3 migration tests exposed two historical ambiguities and converted
+  them into enforced behavior: Playwright server evidence joins only on the
+  full execution scope, and commands that terminate before a test starts
+  retain a command-level setup outcome without inventing test coverage. The
+  complete local JavaScript engine, merge, query, watchdog and isolation
+  matrices remain green after the cutover.
+
 ## Non-goals and guardrails
 
 - No accidental behavior change during ports; every future language frontend

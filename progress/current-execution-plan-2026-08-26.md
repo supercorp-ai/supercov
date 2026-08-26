@@ -80,8 +80,8 @@ Work:
 
 - define exact Rust statement, function, branch and masking-MC/DC obligations,
   source locations, stable identities and reachability semantics;
-- define language/frontend/model identity in evidence v3, including strict
-  dual-read behavior for existing JavaScript evidence v2;
+- define language/frontend/model identity in evidence v3 and make it the sole
+  archive format; this pre-1.0 repository has no legacy v2 reader or writer;
 - specify limitation severity and when `measurement: complete` is legal;
 - freeze runner/test/outcome/assertion/action identity and archive/query JSON;
 - add malformed, truncated, mixed-language and unknown-version rejection
@@ -92,6 +92,24 @@ Work:
 Exit gate: no implementation-defined semantics remain in the public Rust
 coverage model or evidence envelope, and all frozen contract fixtures pass
 through the shared analyzer.
+
+Checkpoint (2026-08-26): the evidence-v3 envelope, coverage-model-v1
+declaration and target Rust source model are frozen. V3 is the sole archive;
+frontend/model language mismatch, unknown declaration fields, malformed or
+partial recognized JSONL, missing identities and incompatible merged models
+fail closed. JavaScript/TypeScript now publishes v3 and passed the complete
+node:test, Vitest, Playwright, build-adapter, merge, agent-query, watchdog and
+isolation matrices. The Playwright migration exposed and fixed a real scoped-
+record merge bug: server evidence now attaches only to the exact full
+execution scope rather than the first equal test/retry status record. Timeout
+runs publish a command-level setup outcome without inventing test coverage.
+`contracts/rust-coverage-v1/traceability.md` records every still-open Rust
+implementation/promotion gate; those open rows keep Rust private.
+
+R0 exit gate: **green locally on 2026-08-26**. `npm run check`, the full
+fixture/browser/build/merge/isolation/watchdog matrix, the frozen engine
+contract and the bounded agent-query evaluation all passed. Hosted workflows
+remain manual-only and were intentionally not invoked.
 
 ### R1 — Complete the Rust denominator and semantics-preserving probes
 

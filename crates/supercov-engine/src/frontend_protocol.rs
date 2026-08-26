@@ -139,6 +139,16 @@ fn present(value: &str) -> bool {
     !value.trim().is_empty() && !value.chars().any(char::is_control)
 }
 
+fn has_attributable_observations(raw: &RawTestResult) -> bool {
+    !raw.phases.is_empty()
+        || !raw.server.is_empty()
+        || raw.runtime.iter().chain(&raw.browser).any(|snapshot| {
+            !snapshot.decisions.is_empty()
+                || !snapshot.hits.is_empty()
+                || !snapshot.events.is_empty()
+        })
+}
+
 fn require_exact_identities(
     runner: &FrontendRunnerDeclaration,
     raw: &RawTestResult,
@@ -154,6 +164,7 @@ fn require_exact_identities(
     {
         return Err(missing("test"));
     }
+    let has_observations = has_attributable_observations(raw);
     if let Some(scope) = &raw.scope {
         if scope.run_id != run_id {
             return Err(FrontendProtocolError::ScopeRunMismatch {
@@ -179,7 +190,7 @@ fn require_exact_identities(
                 });
             }
         }
-    } else if runner.attribution.worker == AttributionPrecision::Exact {
+    } else if runner.attribution.worker == AttributionPrecision::Exact && has_observations {
         return Err(missing("worker"));
     } else if runner.attribution.retry == AttributionPrecision::Exact && raw.retry.is_none() {
         return Err(missing("retry"));

@@ -1,12 +1,14 @@
 {
   "schemaVersion": 3,
-  "status": "private-candidate",
+  "status": "frozen",
   "magic": "SUPERCOV-EVIDENCE-3\n",
-  "framing": "evidence-v2-compatible-after-magic",
+  "framing": "canonical-sorted-length-framed-gzip",
   "requiredEntries": ["coverage-model.json", "frontend.json", "manifest.json"],
   "frontendProtocolVersion": 2,
   "coverageModelSchemaVersion": 1,
-  "v2ReaderRequired": true,
   "unknownFrontendFieldsFatal": true,
-  "unknownCoverageModelFieldsFatal": true
+  "unknownCoverageModelFieldsFatal": true,
+  "frontendLanguageMustMatchCoverageModel": true,
+  "malformedRecognizedJsonlFatal": true,
+  "recognizedJsonlRequiresFinalNewline": true
 }

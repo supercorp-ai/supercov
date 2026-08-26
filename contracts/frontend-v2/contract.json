@@ -2,7 +2,7 @@
   "frontendProtocolVersion": 2,
   "status": "frozen",
   "manifestModel": "coverage-manifest-v1",
-  "observationModel": "evidence-schema-v2",
+  "observationModel": "evidence-archive-v3",
   "probeModel": "ternary-decision-v2",
   "identityAxes": ["run", "worker", "test", "retry", "phase"],
   "transitionKinds": ["setup", "test", "action", "assertion", "teardown", "background"],

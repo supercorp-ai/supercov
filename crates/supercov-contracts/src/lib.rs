@@ -10,11 +10,12 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 pub const CONTRACT_VERSION: u32 = 1;
-pub const EVIDENCE_ARCHIVE_SCHEMA_VERSION: u32 = 2;
-pub const EVIDENCE_ARCHIVE_MAGIC: &str = "SUPERCOV-EVIDENCE-2\n";
-pub const EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION: u32 = 3;
-pub const EVIDENCE_ARCHIVE_V3_MAGIC: &str = "SUPERCOV-EVIDENCE-3\n";
+pub const EVIDENCE_ARCHIVE_SCHEMA_VERSION: u32 = 3;
+pub const EVIDENCE_ARCHIVE_MAGIC: &str = "SUPERCOV-EVIDENCE-3\n";
 pub const COVERAGE_MODEL_SCHEMA_VERSION: u32 = 1;
+pub const COVERAGE_MODEL_MAX_IDENTIFIER_BYTES: usize = 64;
+pub const COVERAGE_MODEL_MAX_DESCRIPTION_BYTES: usize = 4_096;
+pub const COVERAGE_MODEL_MAX_SURFACES_PER_LIST: usize = 256;
 pub const AGENT_JSON_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_JSON_MAX_BYTES: usize = 65_536;
 pub const DEFAULT_PAGE_SIZE: usize = 20;
@@ -234,13 +235,61 @@ pub struct EvidenceV3Contract {
     pub required_entries: Vec<String>,
     pub frontend_protocol_version: u32,
     pub coverage_model_schema_version: u32,
-    pub v2_reader_required: bool,
     pub unknown_frontend_fields_fatal: bool,
     pub unknown_coverage_model_fields_fatal: bool,
+    pub frontend_language_must_match_coverage_model: bool,
+    pub malformed_recognized_jsonl_fatal: bool,
+    pub recognized_jsonl_requires_final_newline: bool,
 }
 
 pub fn evidence_v3_contract() -> Result<EvidenceV3Contract, serde_json::Error> {
     serde_json::from_str(include_str!("../assets/evidence-v3/contract.json"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoverageModelV1Contract {
+    pub schema_version: u32,
+    pub status: String,
+    pub persisted_entry: String,
+    pub required_fields: Vec<String>,
+    pub unknown_fields_fatal: bool,
+    pub frontend_language_must_match: bool,
+    pub measured_must_be_nonempty: bool,
+    pub surface_lists_must_be_unique: bool,
+    pub surface_lists_must_be_disjoint: bool,
+    pub strings_must_be_trimmed_single_line: bool,
+    pub max_identifier_bytes: usize,
+    pub max_description_bytes: usize,
+    pub max_surfaces_per_list: usize,
+}
+
+pub fn coverage_model_v1_contract() -> Result<CoverageModelV1Contract, serde_json::Error> {
+    serde_json::from_str(include_str!("../assets/coverage-model-v1/contract.json"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCoverageV1Contract {
+    pub model_version: u32,
+    pub status: String,
+    pub language: String,
+    pub variant: String,
+    pub decision_semantics: String,
+    pub condition_order: String,
+    pub probe_model: String,
+    pub generic_aggregation: String,
+    pub point_kinds: Vec<String>,
+    pub control_decision_kinds: Vec<String>,
+    pub branch_kinds: Vec<String>,
+    pub required_owned_surfaces: Vec<String>,
+    pub required_identity_axes: Vec<String>,
+    pub completeness_requires: Vec<String>,
+    pub external_coverage_in_product: bool,
+}
+
+pub fn rust_coverage_v1_contract() -> Result<RustCoverageV1Contract, serde_json::Error> {
+    serde_json::from_str(include_str!("../assets/rust-coverage-v1/contract.json"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -455,7 +504,7 @@ fn validate_frontend_runner(
     runner: &FrontendRunnerDeclaration,
     limitation_ids: &mut BTreeSet<String>,
 ) -> Result<(), FrontendDeclarationError> {
-    if !valid_frontend_token(&runner.runner) {
+    if !valid_frontend_runner_token(&runner.runner) {
         return Err(FrontendDeclarationError::InvalidToken("runner"));
     }
     if runner.attribution.run != AttributionPrecision::Exact {
@@ -521,6 +570,16 @@ fn valid_frontend_token(value: &str) -> bool {
         && value.as_bytes()[0].is_ascii_lowercase()
         && value.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'+' | b'-')
+        })
+}
+
+fn valid_frontend_runner_token(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value.as_bytes()[0].is_ascii_lowercase()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'.' | b'+' | b'-' | b':')
         })
 }
 
@@ -671,7 +730,7 @@ mod tests {
         );
         assert_eq!(contract.status, "frozen");
         assert_eq!(contract.manifest_model, "coverage-manifest-v1");
-        assert_eq!(contract.observation_model, "evidence-schema-v2");
+        assert_eq!(contract.observation_model, "evidence-archive-v3");
         assert_eq!(contract.probe_model, "ternary-decision-v2");
         assert_eq!(
             contract.identity_axes,
@@ -786,6 +845,13 @@ mod tests {
             reason: "The runner exposes assertions but no action lifecycle".into(),
         });
         validate_frontend_run_declaration(&degraded).unwrap();
+    }
+
+    #[test]
+    fn accepts_the_canonical_node_test_runner_name() {
+        let mut declaration = exact_frontend_declaration();
+        declaration.runners[0].runner = "node:test".into();
+        validate_frontend_run_declaration(&declaration).unwrap();
     }
 
     #[test]
@@ -907,12 +973,12 @@ mod tests {
     }
 
     #[test]
-    fn evidence_v3_requires_language_identity_without_rewriting_v2() {
+    fn evidence_v3_is_the_frozen_language_bound_archive() {
         let contract = evidence_v3_contract().unwrap();
-        assert_eq!(contract.schema_version, EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION);
-        assert_eq!(contract.status, "private-candidate");
-        assert_eq!(contract.magic, EVIDENCE_ARCHIVE_V3_MAGIC);
-        assert_eq!(contract.framing, "evidence-v2-compatible-after-magic");
+        assert_eq!(contract.schema_version, EVIDENCE_ARCHIVE_SCHEMA_VERSION);
+        assert_eq!(contract.status, "frozen");
+        assert_eq!(contract.magic, EVIDENCE_ARCHIVE_MAGIC);
+        assert_eq!(contract.framing, "canonical-sorted-length-framed-gzip");
         assert_eq!(
             contract.required_entries,
             ["coverage-model.json", "frontend.json", "manifest.json"]
@@ -925,10 +991,75 @@ mod tests {
             contract.coverage_model_schema_version,
             COVERAGE_MODEL_SCHEMA_VERSION
         );
-        assert!(contract.v2_reader_required);
         assert!(contract.unknown_frontend_fields_fatal);
         assert!(contract.unknown_coverage_model_fields_fatal);
-        assert_eq!(EVIDENCE_ARCHIVE_SCHEMA_VERSION, 2);
-        assert_eq!(EVIDENCE_ARCHIVE_MAGIC, "SUPERCOV-EVIDENCE-2\n");
+        assert!(contract.frontend_language_must_match_coverage_model);
+        assert!(contract.malformed_recognized_jsonl_fatal);
+        assert!(contract.recognized_jsonl_requires_final_newline);
+        assert_eq!(EVIDENCE_ARCHIVE_SCHEMA_VERSION, 3);
+        assert_eq!(EVIDENCE_ARCHIVE_MAGIC, "SUPERCOV-EVIDENCE-3\n");
+    }
+
+    #[test]
+    fn coverage_model_v1_contract_is_frozen_and_bounded() {
+        let contract = coverage_model_v1_contract().unwrap();
+        assert_eq!(contract.schema_version, COVERAGE_MODEL_SCHEMA_VERSION);
+        assert_eq!(contract.status, "frozen");
+        assert_eq!(contract.persisted_entry, "coverage-model.json");
+        assert_eq!(
+            contract.required_fields,
+            [
+                "schemaVersion",
+                "language",
+                "variant",
+                "name",
+                "completenessMeaning",
+                "measured",
+                "notMeasured",
+            ]
+        );
+        assert!(contract.unknown_fields_fatal);
+        assert!(contract.frontend_language_must_match);
+        assert!(contract.measured_must_be_nonempty);
+        assert!(contract.surface_lists_must_be_unique);
+        assert!(contract.surface_lists_must_be_disjoint);
+        assert!(contract.strings_must_be_trimmed_single_line);
+        assert_eq!(contract.max_identifier_bytes, 64);
+        assert_eq!(contract.max_description_bytes, 4096);
+        assert_eq!(contract.max_surfaces_per_list, 256);
+    }
+
+    #[test]
+    fn rust_coverage_v1_contract_fixes_the_complete_target_model() {
+        let contract = rust_coverage_v1_contract().unwrap();
+        assert_eq!(contract.model_version, 1);
+        assert_eq!(contract.status, "frozen-private-frontend");
+        assert_eq!(contract.language, "rust");
+        assert_eq!(contract.variant, "rust-source-v1");
+        assert_eq!(contract.decision_semantics, "masking-mcdc");
+        assert_eq!(contract.condition_order, "source-evaluation-order");
+        assert_eq!(contract.probe_model, "ternary-decision-v2");
+        assert_eq!(
+            contract.required_identity_axes,
+            ["run", "worker", "test", "retry", "phase"]
+        );
+        for surface in [
+            "authored-source",
+            "declarative-macro-expansion",
+            "procedural-macro-expansion",
+            "derive-expansion",
+            "build-script-generated-source",
+            "included-source",
+            "const-evaluation",
+            "doctest-source",
+        ] {
+            assert!(
+                contract
+                    .required_owned_surfaces
+                    .iter()
+                    .any(|item| item == surface)
+            );
+        }
+        assert!(!contract.external_coverage_in_product);
     }
 }

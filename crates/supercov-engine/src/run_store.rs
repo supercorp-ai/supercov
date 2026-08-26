@@ -12,7 +12,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use supercov_contracts::{EVIDENCE_ARCHIVE_SCHEMA_VERSION, EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION};
+use supercov_contracts::EVIDENCE_ARCHIVE_SCHEMA_VERSION;
 
 use crate::query_index::{QUERY_INDEX_SCHEMA_VERSION, QueryIndexIdentity};
 use crate::{
@@ -229,6 +229,49 @@ pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
     let archive = write_archive(
         vec![
             EvidenceArchiveEntry {
+                path: "coverage-model.json".into(),
+                contents: serde_json::to_vec(&serde_json::json!({
+                    "schemaVersion": 1,
+                    "language": "javascript",
+                    "variant": "fixture-v1",
+                    "name": "Fixture model",
+                    "completenessMeaning": "Every fixture obligation was observed.",
+                    "measured": ["fixture obligations"],
+                    "notMeasured": []
+                }))
+                .unwrap(),
+            },
+            EvidenceArchiveEntry {
+                path: "frontend.json".into(),
+                contents: serde_json::to_vec(&serde_json::json!({
+                    "protocolVersion": 2,
+                    "frontendId": "javascript",
+                    "frontendVersion": "fixture-v1",
+                    "language": "javascript",
+                    "structuralSource": "owned-probes",
+                    "runners": [{
+                        "runner": "node:test",
+                        "executionModel": "serial-in-process",
+                        "attribution": {
+                            "run": "exact",
+                            "worker": "unavailable",
+                            "test": "exact",
+                            "retry": "exact",
+                            "phase": "exact",
+                            "action": "exact",
+                            "assertion": "exact"
+                        },
+                        "limitations": [{
+                            "id": "fixture-worker-unavailable",
+                            "scopes": ["worker"],
+                            "reason": "The fixture intentionally has no worker identity"
+                        }]
+                    }],
+                    "structuralLimitations": []
+                }))
+                .unwrap(),
+            },
+            EvidenceArchiveEntry {
                 path: "manifest.json".into(),
                 contents: serde_json::to_vec(&manifest).unwrap(),
             },
@@ -429,10 +472,8 @@ fn load_run(directory: &Path, entry: &str) -> Result<StoredRun, RunStoreError> {
             "metadata ID differs from directory",
         ));
     }
-    if !matches!(
-        metadata.raw_evidence.schema_version,
-        EVIDENCE_ARCHIVE_SCHEMA_VERSION | EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION
-    ) || metadata.raw_evidence.format != "framed+gzip"
+    if metadata.raw_evidence.schema_version != EVIDENCE_ARCHIVE_SCHEMA_VERSION
+        || metadata.raw_evidence.format != "framed+gzip"
         || metadata.raw_evidence.file != "evidence.raw.gz"
         || metadata.raw_evidence.files == 0
     {
@@ -728,9 +769,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use crate::evidence_archive::{
-        EvidenceArchiveEntry, read_archive, write_archive, write_archive_v3,
-    };
+    use crate::evidence_archive::{EvidenceArchiveEntry, read_archive, write_archive};
 
     use super::*;
 
@@ -780,10 +819,20 @@ mod tests {
         let directory = root.join(".supercov/runs").join(id);
         fs::create_dir_all(&directory).unwrap();
         let archive = write_archive(
-            vec![EvidenceArchiveEntry {
-                path: "manifest.json".into(),
-                contents: b"{}".to_vec(),
-            }],
+            vec![
+                EvidenceArchiveEntry {
+                    path: "coverage-model.json".into(),
+                    contents: br#"{"schemaVersion":1,"language":"fixture","variant":"fixture-v1","name":"Fixture model","completenessMeaning":"Fixture archive identity only.","measured":["fixture"],"notMeasured":[]}"#.to_vec(),
+                },
+                EvidenceArchiveEntry {
+                    path: "frontend.json".into(),
+                    contents: br#"{"protocolVersion":2,"frontendId":"fixture","frontendVersion":"fixture-v1","language":"fixture","structuralSource":"owned-probes","runners":[{"runner":"fixture","executionModel":"serial-in-process","attribution":{"run":"exact","worker":"unavailable","test":"unavailable","retry":"unavailable","phase":"unavailable","action":"unavailable","assertion":"unavailable"},"limitations":[{"id":"fixture-identities-unavailable","scopes":["worker","test","retry","phase","action","assertion"],"reason":"This store-only fixture has no execution evidence"}]}],"structuralLimitations":[]}"#.to_vec(),
+                },
+                EvidenceArchiveEntry {
+                    path: "manifest.json".into(),
+                    contents: b"{}".to_vec(),
+                },
+            ],
             &directory.join("evidence.raw.gz"),
         )
         .unwrap();
@@ -821,7 +870,7 @@ mod tests {
         discover_runs(root).unwrap().runs.remove(0)
     }
 
-    fn create_indexable_v3_run(root: &Path) -> StoredRun {
+    fn create_indexable_python_run(root: &Path) -> StoredRun {
         let directory = create_analyzable_test_run(root, "python-run");
         let evidence_path = directory.join("evidence.raw.gz");
         let mut entries = read_archive(&evidence_path).unwrap();
@@ -835,49 +884,52 @@ mod tests {
                 entry.contents = serde_json::to_vec(&result).unwrap();
             }
         }
-        entries.push(EvidenceArchiveEntry {
-            path: "frontend.json".into(),
-            contents: serde_json::to_vec(&serde_json::json!({
-                "protocolVersion": 2,
-                "frontendId": "python",
-                "frontendVersion": "python-owned-v1",
-                "language": "python",
-                "structuralSource": "owned-probes",
-                "runners": [{
-                    "runner": "pytest",
-                    "executionModel": "serial-in-process",
-                    "attribution": {
-                        "run": "exact",
-                        "worker": "unavailable",
-                        "test": "exact",
-                        "retry": "exact",
-                        "phase": "exact",
-                        "action": "exact",
-                        "assertion": "exact"
-                    },
-                    "limitations": [{
-                        "id": "test-fixture-worker-unavailable",
-                        "scopes": ["worker"],
-                        "reason": "The persisted-run fixture intentionally has no worker identity"
-                    }]
-                }],
-                "structuralLimitations": []
-            }))
-            .unwrap(),
-        });
-        entries.push(EvidenceArchiveEntry {
-            path: "coverage-model.json".into(),
-            contents: serde_json::to_vec(&serde_json::json!({
-                "schemaVersion": 1,
-                "variant": "all",
-                "name": "python-owned-control-flow",
-                "completenessMeaning": "Every declared owned-probe obligation was observed.",
-                "measured": ["owned statements", "owned decisions"],
-                "notMeasured": []
-            }))
-            .unwrap(),
-        });
-        let archive = write_archive_v3(entries, &evidence_path).unwrap();
+        entries
+            .iter_mut()
+            .find(|entry| entry.path == "frontend.json")
+            .unwrap()
+            .contents = serde_json::to_vec(&serde_json::json!({
+            "protocolVersion": 2,
+            "frontendId": "python",
+            "frontendVersion": "python-owned-v1",
+            "language": "python",
+            "structuralSource": "owned-probes",
+            "runners": [{
+                "runner": "pytest",
+                "executionModel": "serial-in-process",
+                "attribution": {
+                    "run": "exact",
+                    "worker": "unavailable",
+                    "test": "exact",
+                    "retry": "exact",
+                    "phase": "exact",
+                    "action": "exact",
+                    "assertion": "exact"
+                },
+                "limitations": [{
+                    "id": "test-fixture-worker-unavailable",
+                    "scopes": ["worker"],
+                    "reason": "The persisted-run fixture intentionally has no worker identity"
+                }]
+            }],
+            "structuralLimitations": []
+        }))
+        .unwrap();
+        entries
+            .iter_mut()
+            .find(|entry| entry.path == "coverage-model.json")
+            .unwrap()
+            .contents = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 1,
+            "language": "python",
+            "variant": "all",
+            "name": "python-owned-control-flow",
+            "completenessMeaning": "Every declared owned-probe obligation was observed.",
+            "measured": ["owned statements", "owned decisions"],
+            "notMeasured": []
+        }))
+        .unwrap();
+        let archive = write_archive(entries, &evidence_path).unwrap();
         let metadata_path = directory.join("run.json");
         let mut metadata: RunMetadata =
             serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
@@ -956,7 +1008,7 @@ mod tests {
         let metadata_path = schema_mismatch.join("run.json");
         let mut metadata: serde_json::Value =
             serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
-        metadata["rawEvidence"]["schemaVersion"] = EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION.into();
+        metadata["rawEvidence"]["schemaVersion"] = 2.into();
         fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
 
         let inventory = discover_runs(&root).unwrap();
@@ -968,7 +1020,7 @@ mod tests {
             inventory
                 .rejected
                 .iter()
-                .any(|run| run.reason.contains("raw evidence schema mismatch"))
+                .any(|run| run.reason.contains("raw evidence metadata"))
         );
         assert!(
             inventory
@@ -1078,16 +1130,16 @@ mod tests {
     }
 
     #[test]
-    fn indexes_v3_runs_without_misclassifying_them_as_javascript_v2() {
+    fn indexes_the_declared_language_model() {
         let root = temporary_directory("v3-index");
-        let run = create_indexable_v3_run(&root);
+        let run = create_indexable_python_run(&root);
         assert_eq!(
             run.metadata.raw_evidence.schema_version,
-            EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION
+            EVIDENCE_ARCHIVE_SCHEMA_VERSION
         );
         assert_eq!(
             query_index_identity(&run).unwrap().archive_schema_version,
-            EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION
+            EVIDENCE_ARCHIVE_SCHEMA_VERSION
         );
         let index = open_or_rebuild_query_index(&run).unwrap();
         index.verify_all().unwrap();

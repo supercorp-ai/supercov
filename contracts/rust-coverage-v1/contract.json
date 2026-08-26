@@ -1,0 +1,48 @@
+{
+  "modelVersion": 1,
+  "status": "frozen-private-frontend",
+  "language": "rust",
+  "variant": "rust-source-v1",
+  "decisionSemantics": "masking-mcdc",
+  "conditionOrder": "source-evaluation-order",
+  "probeModel": "ternary-decision-v2",
+  "genericAggregation": "authored-source-obligation",
+  "pointKinds": ["statement", "function"],
+  "controlDecisionKinds": [
+    "if",
+    "if-let",
+    "while",
+    "while-let",
+    "let-chain",
+    "match-guard",
+    "assertion"
+  ],
+  "branchKinds": [
+    "decision-outcome",
+    "logical-selection",
+    "loop-entry",
+    "match-arm",
+    "let-else",
+    "try-operator",
+    "assertion-outcome"
+  ],
+  "requiredOwnedSurfaces": [
+    "authored-source",
+    "declarative-macro-expansion",
+    "procedural-macro-expansion",
+    "derive-expansion",
+    "build-script-generated-source",
+    "included-source",
+    "const-evaluation",
+    "doctest-source"
+  ],
+  "requiredIdentityAxes": ["run", "worker", "test", "retry", "phase"],
+  "completenessRequires": [
+    "all-obligations-observed",
+    "masking-mcdc-witness-per-condition",
+    "zero-blocking-limitations",
+    "zero-corrupt-recognized-evidence",
+    "exact-required-identity"
+  ],
+  "externalCoverageInProduct": false
+}

@@ -40,6 +40,7 @@ const HARD_KILL_LIMITATION: &str = "python-hard-kill-evidence-unflushable";
 
 fn python_coverage_model() -> CoverageModelDeclaration {
     CoverageModelDeclaration {
+        language: "python".into(),
         variant: "python-native-branch".into(),
         name: "python-coverage-py-tier-a-v1".into(),
         completeness_meaning: "Every executable statement and branch arc reported by the coverage.py oracle was observed; MC/DC, exact columns, assertion strength and product correctness remain separate limitations.".into(),
@@ -148,16 +149,19 @@ pub struct PythonFrontendImport {
 }
 
 impl PythonFrontendImport {
-    pub fn archive_v3_entries(&self) -> Result<Vec<EvidenceArchiveEntry>, serde_json::Error> {
+    pub fn archive_entries(&self) -> Result<Vec<EvidenceArchiveEntry>, serde_json::Error> {
         let mut entries = vec![
             EvidenceArchiveEntry {
                 path: "coverage-model.json".into(),
-                contents: serde_json::to_vec(&PersistedCoverageModel::from_declaration(
-                    self.request
-                        .coverage_model
-                        .as_ref()
-                        .expect("Python imports always declare a coverage model"),
-                ))?,
+                contents: serde_json::to_vec(
+                    &PersistedCoverageModel::from_declaration(
+                        self.request
+                            .coverage_model
+                            .as_ref()
+                            .expect("Python imports always declare a coverage model"),
+                    )
+                    .expect("Python coverage model is contract-valid"),
+                )?,
             },
             EvidenceArchiveEntry {
                 path: "frontend.json".into(),
@@ -857,7 +861,7 @@ mod tests {
     use super::*;
     use crate::{
         coverage_report::{ArchiveReportRequest, analyze_coverage_archive},
-        evidence_archive::write_archive_v3,
+        evidence_archive::write_archive,
         frontend_protocol::{analyze_frontend_results, validate_frontend_report_request},
     };
 
@@ -1308,7 +1312,7 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         let archive = root.join("evidence.raw.gz");
-        write_archive_v3(imported.archive_v3_entries().unwrap(), &archive).unwrap();
+        write_archive(imported.archive_entries().unwrap(), &archive).unwrap();
         let report = analyze_coverage_archive(&ArchiveReportRequest {
             archive_path: archive,
             run_id: "python-tier-a-ctrace".into(),
@@ -1330,7 +1334,7 @@ mod tests {
         assert!(!report.view.summary.coverage_complete);
 
         let invalid_archive = root.join("invalid-evidence.raw.gz");
-        let mut invalid_entries = imported.archive_v3_entries().unwrap();
+        let mut invalid_entries = imported.archive_entries().unwrap();
         let model = invalid_entries
             .iter_mut()
             .find(|entry| entry.path == "coverage-model.json")
@@ -1338,7 +1342,7 @@ mod tests {
         let mut invalid_model: serde_json::Value = serde_json::from_slice(&model.contents).unwrap();
         invalid_model["coverageVerdict"] = serde_json::json!(100);
         model.contents = serde_json::to_vec(&invalid_model).unwrap();
-        write_archive_v3(invalid_entries, &invalid_archive).unwrap();
+        write_archive(invalid_entries, &invalid_archive).unwrap();
         assert!(matches!(
             analyze_coverage_archive(&ArchiveReportRequest {
                 archive_path: invalid_archive,

@@ -15,10 +15,7 @@ use std::{
 
 use flate2::{Compression, GzBuilder, bufread::GzDecoder};
 use serde::{Deserialize, Serialize};
-use supercov_contracts::{
-    EVIDENCE_ARCHIVE_MAGIC, EVIDENCE_ARCHIVE_SCHEMA_VERSION, EVIDENCE_ARCHIVE_V3_MAGIC,
-    EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION,
-};
+use supercov_contracts::{EVIDENCE_ARCHIVE_MAGIC, EVIDENCE_ARCHIVE_SCHEMA_VERSION};
 
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const MAX_ENTRY_HEADER_BYTES: usize = 64 * 1024;
@@ -136,12 +133,6 @@ pub struct EvidenceArchiveMetadata {
     pub files: usize,
     pub uncompressed_bytes: u64,
     pub compressed_bytes: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VersionedEvidenceArchive {
-    pub schema_version: u32,
-    pub entries: Vec<EvidenceArchiveEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,18 +359,6 @@ pub fn write_archive(
     entries: Vec<EvidenceArchiveEntry>,
     destination: &Path,
 ) -> Result<EvidenceArchiveMetadata, EvidenceArchiveError> {
-    write_archive_version(
-        entries,
-        destination,
-        EVIDENCE_ARCHIVE_SCHEMA_VERSION,
-        EVIDENCE_ARCHIVE_MAGIC,
-    )
-}
-
-pub fn write_archive_v3(
-    entries: Vec<EvidenceArchiveEntry>,
-    destination: &Path,
-) -> Result<EvidenceArchiveMetadata, EvidenceArchiveError> {
     let paths = entries
         .iter()
         .map(|entry| entry.path.as_str())
@@ -393,8 +372,8 @@ pub fn write_archive_v3(
     write_archive_version(
         entries,
         destination,
-        EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION,
-        EVIDENCE_ARCHIVE_V3_MAGIC,
+        EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+        EVIDENCE_ARCHIVE_MAGIC,
     )
 }
 
@@ -536,18 +515,33 @@ fn read_framed_entries<R: Read>(
 }
 
 pub fn read_archive(path: &Path) -> Result<Vec<EvidenceArchiveEntry>, EvidenceArchiveError> {
-    let archive = read_versioned_archive(path)?;
-    if archive.schema_version != EVIDENCE_ARCHIVE_SCHEMA_VERSION {
-        return Err(EvidenceArchiveError::InvalidMagic);
+    let input = BufReader::new(File::open(path)?);
+    let mut decoder = GzDecoder::new(input);
+    let mut magic = vec![0; EVIDENCE_ARCHIVE_MAGIC.len()];
+    read_exact_or_truncated(&mut decoder, &mut magic, "magic")?;
+    schema_version_from_magic(&magic)?;
+    let entries = read_framed_entries(&mut decoder)?;
+    let paths = entries
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect::<BTreeSet<_>>();
+    if !paths.contains("frontend.json") {
+        return Err(EvidenceArchiveError::MissingFrontend);
     }
-    Ok(archive.entries)
+    if !paths.contains("coverage-model.json") {
+        return Err(EvidenceArchiveError::MissingCoverageModel);
+    }
+    let mut input = decoder.into_inner();
+    let mut trailing = [0; 1];
+    if input.read(&mut trailing)? != 0 {
+        return Err(EvidenceArchiveError::TrailingCompressedData);
+    }
+    Ok(entries)
 }
 
 fn schema_version_from_magic(magic: &[u8]) -> Result<u32, EvidenceArchiveError> {
     if magic == EVIDENCE_ARCHIVE_MAGIC.as_bytes() {
         Ok(EVIDENCE_ARCHIVE_SCHEMA_VERSION)
-    } else if magic == EVIDENCE_ARCHIVE_V3_MAGIC.as_bytes() {
-        Ok(EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION)
     } else {
         Err(EvidenceArchiveError::InvalidMagic)
     }
@@ -559,45 +553,6 @@ pub fn read_archive_schema_version(path: &Path) -> Result<u32, EvidenceArchiveEr
     let mut magic = vec![0; EVIDENCE_ARCHIVE_MAGIC.len()];
     read_exact_or_truncated(&mut decoder, &mut magic, "magic")?;
     schema_version_from_magic(&magic)
-}
-
-pub fn read_versioned_archive(
-    path: &Path,
-) -> Result<VersionedEvidenceArchive, EvidenceArchiveError> {
-    let input = BufReader::new(File::open(path)?);
-    let mut decoder = GzDecoder::new(input);
-    assert_eq!(
-        EVIDENCE_ARCHIVE_MAGIC.len(),
-        EVIDENCE_ARCHIVE_V3_MAGIC.len()
-    );
-    let mut magic = vec![0; EVIDENCE_ARCHIVE_MAGIC.len()];
-    read_exact_or_truncated(&mut decoder, &mut magic, "magic")?;
-    let schema_version = schema_version_from_magic(&magic)?;
-    let entries = read_framed_entries(&mut decoder)?;
-    if schema_version == EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION {
-        let paths = entries
-            .iter()
-            .map(|entry| entry.path.as_str())
-            .collect::<BTreeSet<_>>();
-        if !paths.contains("frontend.json") {
-            return Err(EvidenceArchiveError::MissingFrontend);
-        }
-        if !paths.contains("coverage-model.json") {
-            return Err(EvidenceArchiveError::MissingCoverageModel);
-        }
-    }
-    // bufread::GzDecoder deliberately stops at the end of one member without
-    // consuming following bytes, which lets us reject concatenated members or
-    // arbitrary trailing compressed data instead of silently trusting them.
-    let mut input = decoder.into_inner();
-    let mut trailing = [0; 1];
-    if input.read(&mut trailing)? != 0 {
-        return Err(EvidenceArchiveError::TrailingCompressedData);
-    }
-    Ok(VersionedEvidenceArchive {
-        schema_version,
-        entries,
-    })
 }
 
 #[cfg(test)]
@@ -644,10 +599,12 @@ mod tests {
         bytes
     }
 
-    fn frame_v3(entries: &[EvidenceArchiveEntry]) -> Vec<u8> {
-        let (bytes, _) =
-            write_framed_with_magic(entries, Vec::new(), EVIDENCE_ARCHIVE_V3_MAGIC).unwrap();
-        bytes
+    fn identity_entries() -> Vec<EvidenceArchiveEntry> {
+        vec![
+            entry("coverage-model.json", b"{}"),
+            entry("frontend.json", b"{}"),
+            entry("manifest.json", b"{}"),
+        ]
     }
 
     fn write_compressed(root: &Path, bytes: &[u8]) -> PathBuf {
@@ -662,6 +619,8 @@ mod tests {
         let first = root.join("first.gz");
         let second = root.join("second.gz");
         let entries = vec![
+            entry("coverage-model.json", b"{}"),
+            entry("frontend.json", b"{}"),
             entry("𐀀/result.bin", &[0, 255, b'\n']),
             entry("manifest.json", br#"{"decisions":[]}"#),
             entry("é/result.jsonl", b"{}\n"),
@@ -672,13 +631,15 @@ mod tests {
         write_archive(entries, &second).unwrap();
         assert_eq!(fs::read(&first).unwrap(), fs::read(&second).unwrap());
         assert_eq!(metadata.schema_version, EVIDENCE_ARCHIVE_SCHEMA_VERSION);
-        assert_eq!(metadata.files, 5);
+        assert_eq!(metadata.files, 7);
         assert!(metadata.uncompressed_bytes > 0);
         assert!(metadata.compressed_bytes > 0);
         assert_eq!(
             read_archive(&first).unwrap(),
             vec![
                 entry("a/result.jsonl", b"{\"hit\":true}\n"),
+                entry("coverage-model.json", b"{}"),
+                entry("frontend.json", b"{}"),
                 entry("manifest.json", br#"{"decisions":[]}"#),
                 entry("é/result.jsonl", b"{}\n"),
                 entry("\u{e000}/result.jsonl", b"private\n"),
@@ -691,8 +652,8 @@ mod tests {
     #[test]
     fn rejects_every_noncanonical_framing_boundary() {
         let root = temporary_directory("archive-invalid");
-        let manifest = entry("manifest.json", b"{}");
-        let valid = frame(std::slice::from_ref(&manifest));
+        let identities = identity_entries();
+        let valid = frame(&identities);
         let cases: Vec<(&str, Vec<u8>)> = vec![
             (
                 "invalid magic",
@@ -735,9 +696,18 @@ mod tests {
             assert!(read_archive(&path).is_err(), "{label}");
         }
 
-        let duplicate = frame(&[manifest.clone(), manifest.clone()]);
+        let duplicate = frame(&[
+            entry("coverage-model.json", b"{}"),
+            entry("frontend.json", b"{}"),
+            entry("manifest.json", b"{}"),
+            entry("manifest.json", b"{}"),
+        ]);
         assert!(read_archive(&write_compressed(&root, &duplicate)).is_err());
-        let unsorted = frame(&[manifest.clone(), entry("a", b"")]);
+        let unsorted = frame(&[
+            entry("frontend.json", b"{}"),
+            entry("coverage-model.json", b"{}"),
+            entry("manifest.json", b"{}"),
+        ]);
         assert!(read_archive(&write_compressed(&root, &unsorted)).is_err());
         let missing = frame(&[entry("result.json", b"{}")]);
         assert!(read_archive(&write_compressed(&root, &missing)).is_err());
@@ -845,27 +815,21 @@ mod tests {
     }
 
     #[test]
-    fn v3_is_explicit_dual_read_and_never_accepted_as_v2() {
-        let root = temporary_directory("archive-v3");
+    fn sole_archive_requires_and_round_trips_language_identity() {
+        let root = temporary_directory("archive-identity");
         let destination = root.join("evidence.raw.gz");
         let entries = vec![
             entry("coverage-model.json", b"{}"),
             entry("frontend.json", b"{}"),
             entry("manifest.json", b"{}"),
         ];
-        let metadata = write_archive_v3(entries.clone(), &destination).unwrap();
-        assert_eq!(metadata.schema_version, EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION);
-        let archive = read_versioned_archive(&destination).unwrap();
-        assert_eq!(archive.schema_version, EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION);
-        assert_eq!(archive.entries, entries);
-        assert!(matches!(
-            read_archive(&destination),
-            Err(EvidenceArchiveError::InvalidMagic)
-        ));
+        let metadata = write_archive(entries.clone(), &destination).unwrap();
+        assert_eq!(metadata.schema_version, EVIDENCE_ARCHIVE_SCHEMA_VERSION);
+        assert_eq!(read_archive(&destination).unwrap(), entries);
 
         let missing = root.join("missing.raw.gz");
         assert!(matches!(
-            write_archive_v3(vec![entry("manifest.json", b"{}")], &missing),
+            write_archive(vec![entry("manifest.json", b"{}")], &missing),
             Err(EvidenceArchiveError::MissingFrontend)
         ));
         assert!(!missing.exists());
@@ -873,34 +837,31 @@ mod tests {
     }
 
     #[test]
-    fn v3_reader_rejects_all_truncations_oversized_headers_and_missing_identity() {
-        let root = temporary_directory("archive-v3-corruption");
+    fn reader_rejects_all_truncations_oversized_headers_and_missing_identity() {
+        let root = temporary_directory("archive-corruption");
         let entries = vec![
             entry("coverage-model.json", br#"{"schemaVersion":1}"#),
             entry("frontend.json", br#"{"protocolVersion":2}"#),
             entry("manifest.json", br#"{"decisions":[]}"#),
         ];
-        let framed = frame_v3(&entries);
+        let framed = frame(&entries);
         for end in 0..framed.len() {
             let path = write_compressed(&root, &framed[..end]);
             assert!(
-                read_versioned_archive(&path).is_err(),
-                "accepted v3 truncation at byte {end}"
+                read_archive(&path).is_err(),
+                "accepted truncation at byte {end}"
             );
         }
         let complete = write_compressed(&root, &framed);
-        assert_eq!(
-            read_versioned_archive(&complete).unwrap().schema_version,
-            EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION
-        );
+        assert_eq!(read_archive(&complete).unwrap(), entries);
 
         let oversized_header = [
-            EVIDENCE_ARCHIVE_V3_MAGIC.as_bytes(),
+            EVIDENCE_ARCHIVE_MAGIC.as_bytes(),
             &((MAX_ENTRY_HEADER_BYTES as u32 + 1).to_be_bytes()),
         ]
         .concat();
         assert!(matches!(
-            read_versioned_archive(&write_compressed(&root, &oversized_header)),
+            read_archive(&write_compressed(&root, &oversized_header)),
             Err(EvidenceArchiveError::InvalidHeader("header is too large"))
         ));
 
@@ -911,8 +872,8 @@ mod tests {
                 .cloned()
                 .collect::<Vec<_>>();
             assert!(
-                read_versioned_archive(&write_compressed(&root, &frame_v3(&incomplete))).is_err(),
-                "accepted v3 archive without {missing}"
+                read_archive(&write_compressed(&root, &frame(&incomplete))).is_err(),
+                "accepted archive without {missing}"
             );
         }
         fs::remove_dir_all(root).unwrap();

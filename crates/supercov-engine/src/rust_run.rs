@@ -11,7 +11,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    evidence_archive::write_archive_v3,
+    evidence_archive::write_archive,
     integrity::{ExplicitIntegrityInputs, FrontendIntegrityInputs, create_explicit_run_integrity},
     lifecycle::{
         ProjectLock, finalize_published_run, publish_run, recover_abandoned_runs,
@@ -322,9 +322,8 @@ pub fn run_direct_rust(
             .join(".supercov/work")
             .join(&request.run_id)
             .join("evidence.raw.gz");
-        let raw = write_archive_v3(
-            run.archive_v3_entries()
-                .map_err(|error| error.to_string())?,
+        let raw = write_archive(
+            run.archive_entries().map_err(|error| error.to_string())?,
             &archive_path,
         )
         .map_err(|error| error.to_string())?;

@@ -11,15 +11,13 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use supercov_contracts::{
-    COVERAGE_MODEL_SCHEMA_VERSION, EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION, FrontendRunDeclaration,
-};
+use supercov_contracts::{COVERAGE_MODEL_SCHEMA_VERSION, FrontendRunDeclaration};
 
 use crate::coverage_analysis::{
     AnalysisError, BranchCoverage, CoverageCoreInput, CoverageSummary, DecisionCoverage,
     McdcVector, PointCoverage, PointKind, analyze_core, find_witnesses_for_conditions,
 };
-use crate::evidence_archive::{EvidenceArchiveEntry, read_versioned_archive};
+use crate::evidence_archive::{EvidenceArchiveEntry, read_archive};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -399,6 +397,7 @@ pub struct DimensionCoverage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoverageModel {
+    pub language: String,
     pub name: String,
     pub completeness_meaning: String,
     pub measured: Vec<String>,
@@ -408,6 +407,7 @@ pub struct CoverageModel {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CoverageModelDeclaration {
+    pub language: String,
     pub variant: String,
     pub name: String,
     pub completeness_meaning: String,
@@ -419,6 +419,7 @@ pub struct CoverageModelDeclaration {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PersistedCoverageModel {
     pub schema_version: u32,
+    pub language: String,
     pub variant: String,
     pub name: String,
     pub completeness_meaning: String,
@@ -427,39 +428,64 @@ pub struct PersistedCoverageModel {
 }
 
 impl PersistedCoverageModel {
-    pub fn from_declaration(value: &CoverageModelDeclaration) -> Self {
-        Self {
+    pub fn from_declaration(value: &CoverageModelDeclaration) -> Result<Self, &'static str> {
+        let persisted = Self {
             schema_version: COVERAGE_MODEL_SCHEMA_VERSION,
+            language: value.language.clone(),
             variant: value.variant.clone(),
             name: value.name.clone(),
             completeness_meaning: value.completeness_meaning.clone(),
             measured: value.measured.clone(),
             not_measured: value.not_measured.clone(),
-        }
+        };
+        persisted.clone().into_declaration()?;
+        Ok(persisted)
     }
 
     fn into_declaration(self) -> Result<CoverageModelDeclaration, &'static str> {
         if self.schema_version != COVERAGE_MODEL_SCHEMA_VERSION {
             return Err("unsupported coverage model schema");
         }
-        let fields = [
-            self.variant.as_str(),
-            self.name.as_str(),
-            self.completeness_meaning.as_str(),
-        ];
-        if fields.iter().any(|field| field.trim().is_empty())
+        let valid_identifier = |value: &str| {
+            (1..=supercov_contracts::COVERAGE_MODEL_MAX_IDENTIFIER_BYTES).contains(&value.len())
+                && value.as_bytes()[0].is_ascii_lowercase()
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'.' | b'+' | b'-')
+                })
+        };
+        let valid_description = |value: &str| {
+            !value.is_empty()
+                && value.trim().len() == value.len()
+                && value.len() <= supercov_contracts::COVERAGE_MODEL_MAX_DESCRIPTION_BYTES
+                && !value.chars().any(char::is_control)
+        };
+        if !valid_identifier(&self.language)
+            || !valid_identifier(&self.variant)
+            || !valid_description(&self.name)
+            || !valid_description(&self.completeness_meaning)
             || self.measured.is_empty()
+            || self.measured.len() > supercov_contracts::COVERAGE_MODEL_MAX_SURFACES_PER_LIST
+            || self.not_measured.len() > supercov_contracts::COVERAGE_MODEL_MAX_SURFACES_PER_LIST
             || self
                 .measured
                 .iter()
                 .chain(&self.not_measured)
-                .any(|item| item.trim().is_empty())
-            || self.measured.iter().collect::<BTreeSet<_>>().len() != self.measured.len()
-            || self.not_measured.iter().collect::<BTreeSet<_>>().len() != self.not_measured.len()
+                .any(|item| !valid_description(item))
         {
             return Err("invalid coverage model declaration");
         }
+        let measured = self.measured.iter().collect::<BTreeSet<_>>();
+        let not_measured = self.not_measured.iter().collect::<BTreeSet<_>>();
+        if measured.len() != self.measured.len()
+            || not_measured.len() != self.not_measured.len()
+            || !measured.is_disjoint(&not_measured)
+        {
+            return Err("invalid coverage model surface partition");
+        }
         Ok(CoverageModelDeclaration {
+            language: self.language,
             variant: self.variant,
             name: self.name,
             completeness_meaning: self.completeness_meaning,
@@ -529,6 +555,81 @@ pub struct TransportStats {
     pub background_server_records: usize,
     pub corrupt_records: usize,
     pub corrupt_files: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+enum ExecutionSafeArgument {
+    Text(String),
+    Digest(ExecutionArgumentDigest),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExecutionArgumentDigest {
+    bytes: usize,
+    sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ExecutionCommandSummary {
+    #[serde(default)]
+    executable: Option<ExecutionSafeArgument>,
+    arguments: Vec<ExecutionSafeArgument>,
+    argument_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(
+    tag = "event",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum ExecutionTraceEvent {
+    Process {
+        at: String,
+        pid: u32,
+        ppid: u32,
+        cwd: String,
+        command: ExecutionCommandSummary,
+        #[serde(default)]
+        entrypoint: Option<String>,
+    },
+    ChildLaunch {
+        at: String,
+        pid: u32,
+        ppid: u32,
+        method: String,
+        command: ExecutionSafeArgument,
+    },
+    RemoteLaunch {
+        at: String,
+        pid: u32,
+        ppid: u32,
+        command: ExecutionCommandSummary,
+        guest_root: String,
+    },
+    WorkspaceCapability {
+        at: String,
+        pid: u32,
+        ppid: u32,
+        host_root: String,
+        guest_root: String,
+        cache_identities: Vec<String>,
+    },
+}
+
+impl ExecutionTraceEvent {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Process { .. } => "process",
+            Self::ChildLaunch { .. } => "child-launch",
+            Self::RemoteLaunch { .. } => "remote-launch",
+            Self::WorkspaceCapability { .. } => "workspace-capability",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -767,8 +868,9 @@ pub fn failed_coverage_results(raw_results: &[RawTestResult]) -> Vec<RawTestResu
         .collect()
 }
 
-fn javascript_coverage_model() -> CoverageModelDeclaration {
+pub(crate) fn javascript_coverage_model() -> CoverageModelDeclaration {
     CoverageModelDeclaration {
+        language: "javascript".into(),
         variant: "masking-short-circuit".into(),
         name: "coverage-completeness-v2".into(),
         completeness_meaning: "Every obligation in the measured model was observed by at least one existing test; test assertions and product correctness are separate assumptions.".into(),
@@ -1709,6 +1811,7 @@ fn create_coverage_view_with_model(
         variant: coverage_model.variant.clone(),
         scope: manifest.scope.clone(),
         model: CoverageModel {
+            language: coverage_model.language.clone(),
             name: coverage_model.name.clone(),
             completeness_meaning: coverage_model.completeness_meaning.clone(),
             measured: coverage_model.measured.clone(),
@@ -1749,6 +1852,12 @@ pub fn analyze_coverage_results(
     }
     let default_model = javascript_coverage_model();
     let coverage_model = request.coverage_model.as_ref().unwrap_or(&default_model);
+    PersistedCoverageModel::from_declaration(coverage_model).map_err(|reason| {
+        ReportError::InvalidJson {
+            path: "coverage-model.json".into(),
+            reason: reason.into(),
+        }
+    })?;
     let view = create_coverage_view_with_model(
         &request.manifest,
         &request.raw_results,
@@ -1800,25 +1909,37 @@ fn parse_entry<T: for<'de> Deserialize<'de>>(
 
 fn parse_json_lines<'a, T: for<'de> Deserialize<'de>>(
     entries: impl Iterator<Item = &'a EvidenceArchiveEntry>,
-) -> (Vec<T>, usize, usize) {
+) -> Result<Vec<T>, ReportError> {
     let mut records = Vec::new();
-    let mut corrupt_records = 0;
-    let mut corrupt_files = BTreeSet::new();
     for entry in entries {
-        for line in entry.contents.split(|byte| *byte == b'\n') {
+        let Some(contents) = entry.contents.strip_suffix(b"\n") else {
+            return Err(ReportError::InvalidJson {
+                path: entry.path.clone(),
+                reason: "recognized JSONL evidence must end with a newline".into(),
+            });
+        };
+        if contents.is_empty() {
+            return Err(ReportError::InvalidJson {
+                path: entry.path.clone(),
+                reason: "recognized JSONL evidence must contain at least one record".into(),
+            });
+        }
+        for (index, line) in contents.split(|byte| *byte == b'\n').enumerate() {
             if line.is_empty() {
-                continue;
+                return Err(ReportError::InvalidJson {
+                    path: entry.path.clone(),
+                    reason: format!("blank JSONL record at line {}", index + 1),
+                });
             }
-            match serde_json::from_slice(line) {
-                Ok(record) => records.push(record),
-                Err(_) => {
-                    corrupt_records += 1;
-                    corrupt_files.insert(entry.path.clone());
+            records.push(serde_json::from_slice(line).map_err(|error| {
+                ReportError::InvalidJson {
+                    path: entry.path.clone(),
+                    reason: format!("invalid JSONL record at line {}: {error}", index + 1),
                 }
-            }
+            })?);
         }
     }
-    (records, corrupt_records, corrupt_files.len())
+    Ok(records)
 }
 
 fn is_mcdc_result(path: &str) -> bool {
@@ -1832,9 +1953,8 @@ fn is_mcdc_journal(path: &str) -> bool {
 pub fn analyze_coverage_archive(
     request: &ArchiveReportRequest,
 ) -> Result<CoverageReport, ReportError> {
-    let archive = read_versioned_archive(Path::new(&request.archive_path))
+    let entries = read_archive(Path::new(&request.archive_path))
         .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
-    let entries = archive.entries;
     let manifest = entries
         .iter()
         .find(|entry| entry.path == "manifest.json")
@@ -1845,22 +1965,21 @@ pub fn analyze_coverage_archive(
         .filter(|entry| is_mcdc_result(&entry.path))
         .map(parse_entry::<RawTestResult>)
         .collect::<Result<Vec<_>, _>>()?;
-    let (journal_results, journal_corrupt, journal_corrupt_files) = parse_json_lines::<RawTestResult>(
+    let journal_results = parse_json_lines::<RawTestResult>(
         entries.iter().filter(|entry| is_mcdc_journal(&entry.path)),
-    );
+    )?;
     raw_results.extend(journal_results);
 
-    let (scoped_records, scoped_corrupt, scoped_corrupt_files) =
-        parse_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
-            entry.path.starts_with("server/")
-                && !entry.path.starts_with("server/background/")
-                && entry.path.ends_with(".jsonl")
-        }));
+    let scoped_records = parse_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
+        entry.path.starts_with("server/")
+            && !entry.path.starts_with("server/background/")
+            && entry.path.ends_with(".jsonl")
+    }))?;
     for record in &scoped_records {
         let Some(scope) = &record.scope else { continue };
         let Some(raw) = raw_results
             .iter_mut()
-            .find(|raw| raw_test_id(raw) == scope.test_id && raw.retry.unwrap_or(0) == scope.retry)
+            .find(|raw| raw.scope.as_ref() == Some(scope))
         else {
             continue;
         };
@@ -1869,10 +1988,9 @@ pub fn analyze_coverage_archive(
         }
     }
 
-    let (background_records, background_corrupt, background_corrupt_files) =
-        parse_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
-            entry.path.starts_with("server/background/") && entry.path.ends_with(".jsonl")
-        }));
+    let background_records = parse_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
+        entry.path.starts_with("server/background/") && entry.path.ends_with(".jsonl")
+    }))?;
     if !background_records.is_empty() {
         raw_results.push(RawTestResult {
             test_id: Some(format!("background:{}", request.run_id)),
@@ -1898,14 +2016,14 @@ pub fn analyze_coverage_archive(
         });
     }
 
-    let (execution_events, execution_corrupt, execution_corrupt_files) =
-        parse_json_lines::<Value>(entries.iter().filter(|entry| {
+    let execution_events =
+        parse_json_lines::<ExecutionTraceEvent>(entries.iter().filter(|entry| {
             entry.path.starts_with("execution.") && entry.path.ends_with(".jsonl")
-        }));
+        }))?;
     let count_event = |name: &str| {
         execution_events
             .iter()
-            .filter(|event| event.get("event").and_then(Value::as_str) == Some(name))
+            .filter(|event| event.kind() == name)
             .count()
     };
     let transport = TransportStats {
@@ -1915,49 +2033,43 @@ pub fn analyze_coverage_archive(
         workspace_capabilities: count_event("workspace-capability"),
         scoped_server_records: scoped_records.len(),
         background_server_records: background_records.len(),
-        corrupt_records: journal_corrupt + scoped_corrupt + background_corrupt + execution_corrupt,
-        corrupt_files: journal_corrupt_files
-            + scoped_corrupt_files
-            + background_corrupt_files
-            + execution_corrupt_files,
+        corrupt_records: 0,
+        corrupt_files: 0,
     };
-    let (frontend, coverage_model) = if archive.schema_version == EVIDENCE_ARCHIVE_V3_SCHEMA_VERSION
-    {
-        let frontend = entries
-            .iter()
-            .find(|entry| entry.path == "frontend.json")
-            .ok_or_else(|| ReportError::InvalidArchive("missing frontend.json".into()))
-            .and_then(parse_entry::<FrontendRunDeclaration>)?;
-        let persisted = entries
-            .iter()
-            .find(|entry| entry.path == "coverage-model.json")
-            .ok_or_else(|| ReportError::InvalidArchive("missing coverage-model.json".into()))
-            .and_then(parse_entry::<PersistedCoverageModel>)?;
-        let model = persisted
+    let frontend = entries
+        .iter()
+        .find(|entry| entry.path == "frontend.json")
+        .ok_or_else(|| ReportError::InvalidArchive("missing frontend.json".into()))
+        .and_then(parse_entry::<FrontendRunDeclaration>)?;
+    let persisted = entries
+        .iter()
+        .find(|entry| entry.path == "coverage-model.json")
+        .ok_or_else(|| ReportError::InvalidArchive("missing coverage-model.json".into()))
+        .and_then(parse_entry::<PersistedCoverageModel>)?;
+    let coverage_model =
+        persisted
             .into_declaration()
             .map_err(|reason| ReportError::InvalidJson {
                 path: "coverage-model.json".into(),
                 reason: reason.into(),
             })?;
-        (Some(frontend), Some(model))
-    } else {
-        (None, None)
-    };
+    if frontend.language != coverage_model.language {
+        return Err(ReportError::InvalidArchive(format!(
+            "frontend language {} differs from coverage model language {}",
+            frontend.language, coverage_model.language
+        )));
+    }
     let normalized = CoverageReportRequest {
         run_id: request.run_id.clone(),
         manifest,
         raw_results,
         generated_at: request.generated_at.clone(),
-        coverage_model,
+        coverage_model: Some(coverage_model),
         integrity: request.integrity.clone(),
         test_exit_code: request.test_exit_code.clone(),
     };
-    let mut report = if let Some(frontend) = frontend {
-        crate::frontend_protocol::analyze_frontend_results(&frontend, &normalized)
-            .map_err(|error| ReportError::InvalidArchive(error.to_string()))?
-    } else {
-        analyze_coverage_results(&normalized)?
-    };
+    let mut report = crate::frontend_protocol::analyze_frontend_results(&frontend, &normalized)
+        .map_err(|error| ReportError::InvalidArchive(error.to_string()))?;
     report.view.transport = Some(transport.clone());
     report.filters.passed.transport = Some(transport.clone());
     report.filters.failed.transport = Some(transport);
@@ -2203,7 +2315,7 @@ mod tests {
         assert_eq!(report.view.tests[1].outcome, "flaky");
     }
 
-    fn archive(entries: Vec<EvidenceArchiveEntry>) -> PathBuf {
+    fn archive(mut entries: Vec<EvidenceArchiveEntry>) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
@@ -2214,12 +2326,57 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("evidence.raw.gz");
+        if !entries
+            .iter()
+            .any(|entry| entry.path == "coverage-model.json")
+        {
+            entries.push(EvidenceArchiveEntry {
+                path: "coverage-model.json".into(),
+                contents: serde_json::to_vec(
+                    &PersistedCoverageModel::from_declaration(&javascript_coverage_model())
+                        .unwrap(),
+                )
+                .unwrap(),
+            });
+        }
+        if !entries.iter().any(|entry| entry.path == "frontend.json") {
+            entries.push(EvidenceArchiveEntry {
+                path: "frontend.json".into(),
+                contents: serde_json::to_vec(&serde_json::json!({
+                    "protocolVersion": 2,
+                    "frontendId": "javascript",
+                    "frontendVersion": "fixture-v1",
+                    "language": "javascript",
+                    "structuralSource": "owned-probes",
+                    "runners": [{
+                        "runner": "node:test",
+                        "executionModel": "serial-in-process",
+                        "attribution": {
+                            "run": "exact",
+                            "worker": "unavailable",
+                            "test": "exact",
+                            "retry": "exact",
+                            "phase": "exact",
+                            "action": "exact",
+                            "assertion": "exact"
+                        },
+                        "limitations": [{
+                            "id": "fixture-worker-unavailable",
+                            "scopes": ["worker"],
+                            "reason": "The fixture does not require worker identity"
+                        }]
+                    }],
+                    "structuralLimitations": []
+                }))
+                .unwrap(),
+            });
+        }
         write_archive(entries, &path).unwrap();
         path
     }
 
     #[test]
-    fn archive_analysis_keeps_valid_lines_and_reports_transport_corruption() {
+    fn archive_analysis_rejects_any_malformed_recognized_jsonl() {
         let manifest = CoverageManifest {
             decisions: vec![],
             points: vec![point("background-hit", 1), point("test-hit", 2)],
@@ -2247,25 +2404,18 @@ mod tests {
                 contents: b"{\"type\":\"hit\",\"id\":\"background-hit\"}\nnot-json\n".to_vec(),
             },
         ]);
-        let report = analyze_coverage_archive(&ArchiveReportRequest {
+        let result = analyze_coverage_archive(&ArchiveReportRequest {
             archive_path: path.clone(),
             run_id: "run".into(),
             generated_at: "time".into(),
             integrity: None,
             test_exit_code: ExitCodeInput::Missing,
-        })
-        .unwrap();
-        assert!(report.view.points[0].covered);
-        assert!(report.view.points[1].covered);
-        assert!(
-            report
-                .view
-                .tests
-                .iter()
-                .any(|test| test.role == "background")
-        );
-        assert_eq!(report.view.transport.as_ref().unwrap().corrupt_records, 2);
-        assert_eq!(report.view.transport.as_ref().unwrap().corrupt_files, 2);
+        });
+        assert!(matches!(
+            result,
+            Err(ReportError::InvalidJson { path, .. })
+                if path == "playwright-worker-1.mcdc.jsonl"
+        ));
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -2298,7 +2448,7 @@ mod tests {
                 contents: serde_json::to_vec(&result).unwrap(),
             },
         ]);
-        assert_eq!(
+        assert!(matches!(
             analyze_coverage_archive(&ArchiveReportRequest {
                 archive_path: path.clone(),
                 run_id: "run".into(),
@@ -2306,11 +2456,70 @@ mod tests {
                 integrity: None,
                 test_exit_code: ExitCodeInput::Missing,
             }),
-            Err(ReportError::ScopeMismatch {
-                expected: "run".into(),
-                actual: "other-run".into(),
-            })
-        );
+            Err(ReportError::InvalidArchive(reason))
+                if reason.contains("expected=run actual=other-run")
+        ));
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn coverage_model_vectors_are_strict_and_language_binding_is_fatal() {
+        let vectors: Value = serde_json::from_str(include_str!(
+            "../test-assets/coverage-model-v1/vectors.json"
+        ))
+        .unwrap();
+        for value in vectors["valid"].as_array().unwrap() {
+            let model: PersistedCoverageModel = serde_json::from_value(value.clone()).unwrap();
+            model.into_declaration().unwrap();
+        }
+        for vector in vectors["invalid"].as_array().unwrap() {
+            let value = vector["value"].clone();
+            if let Ok(model) = serde_json::from_value::<PersistedCoverageModel>(value) {
+                assert!(
+                    model.into_declaration().is_err(),
+                    "accepted invalid model vector: {}",
+                    vector["reason"]
+                );
+            }
+        }
+
+        let manifest = CoverageManifest {
+            decisions: vec![],
+            points: vec![],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+        };
+        let path = archive(vec![
+            EvidenceArchiveEntry {
+                path: "coverage-model.json".into(),
+                contents: serde_json::to_vec(&PersistedCoverageModel {
+                    schema_version: COVERAGE_MODEL_SCHEMA_VERSION,
+                    language: "rust".into(),
+                    variant: "rust-source-v1".into(),
+                    name: "Rust source coverage".into(),
+                    completeness_meaning: "Every Rust obligation was satisfied.".into(),
+                    measured: vec!["Rust statements".into()],
+                    not_measured: vec![],
+                })
+                .unwrap(),
+            },
+            EvidenceArchiveEntry {
+                path: "manifest.json".into(),
+                contents: serde_json::to_vec(&manifest).unwrap(),
+            },
+        ]);
+        assert!(matches!(
+            analyze_coverage_archive(&ArchiveReportRequest {
+                archive_path: path.clone(),
+                run_id: "run".into(),
+                generated_at: "time".into(),
+                integrity: None,
+                test_exit_code: ExitCodeInput::Missing,
+            }),
+            Err(ReportError::InvalidArchive(reason))
+                if reason.contains("javascript differs from coverage model language rust")
+        ));
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

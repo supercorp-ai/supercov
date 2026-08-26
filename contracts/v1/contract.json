@@ -3,10 +3,10 @@
   "status": "frozen",
   "residentProcess": false,
   "evidenceArchive": {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "file": "evidence.raw.gz",
     "format": "framed+gzip",
-    "magic": "SUPERCOV-EVIDENCE-2\n"
+    "magic": "SUPERCOV-EVIDENCE-3\n"
   },
   "runStore": {
     "schemaVersion": 1,

@@ -9,10 +9,18 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use supercov_contracts::{
+    AttributionPrecision, ExecutionModel, FrontendAttribution, FrontendLimitation,
+    FrontendLimitationScope, FrontendRunDeclaration, FrontendRunnerDeclaration,
+    LANGUAGE_FRONTEND_PROTOCOL_VERSION, StructuralSource,
+};
 
 use crate::{
     build_cache::{build_cache_key, read_build_cache, reuse_paths, write_build_cache},
-    evidence_archive::{EvidenceArchiveSource, collect_sources, write_archive},
+    coverage_report::{PersistedCoverageModel, RawTestResult, javascript_coverage_model},
+    evidence_archive::{
+        EvidenceArchiveEntry, EvidenceArchiveSource, collect_sources, write_archive,
+    },
     integrity::{FrontendIntegrityInputs, create_run_integrity},
     javascript_frontend::{
         javascript_frontend_reuse_paths, load_cached_javascript_frontend,
@@ -93,6 +101,206 @@ fn signal_name(signal: ForwardedSignal) -> &'static str {
         ForwardedSignal::Sigint => "SIGINT",
         ForwardedSignal::Sigterm => "SIGTERM",
     }
+}
+
+fn javascript_runner_declaration(
+    runner: String,
+    results: &[&RawTestResult],
+) -> FrontendRunnerDeclaration {
+    let has_observations = |raw: &&RawTestResult| {
+        !raw.phases.is_empty()
+            || !raw.server.is_empty()
+            || raw.runtime.iter().chain(&raw.browser).any(|snapshot| {
+                !snapshot.decisions.is_empty()
+                    || !snapshot.hits.is_empty()
+                    || !snapshot.events.is_empty()
+            })
+    };
+    let exact_test = results.iter().all(|raw| {
+        raw.test_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+            && raw
+                .scope
+                .as_ref()
+                .is_none_or(|scope| raw.test_id.as_deref() == Some(scope.test_id.as_str()))
+    });
+    let exact_worker = results.iter().all(|raw| {
+        !has_observations(raw)
+            || raw
+                .scope
+                .as_ref()
+                .is_some_and(|scope| !scope.worker_id.is_empty())
+    });
+    let exact_retry = results.iter().all(|raw| {
+        raw.retry.is_some()
+            && raw
+                .scope
+                .as_ref()
+                .is_none_or(|scope| raw.retry == Some(scope.retry))
+    });
+    let contextual = !results.is_empty() && exact_test && exact_worker && exact_retry;
+    let precision = |exact| {
+        if exact {
+            AttributionPrecision::Exact
+        } else {
+            AttributionPrecision::Unavailable
+        }
+    };
+    let attribution = FrontendAttribution {
+        run: AttributionPrecision::Exact,
+        worker: precision(contextual),
+        test: precision(contextual),
+        retry: precision(contextual),
+        phase: precision(contextual),
+        action: precision(contextual),
+        assertion: precision(contextual),
+    };
+    let mut limitations = Vec::new();
+    if !contextual {
+        for (suffix, scope) in [
+            ("worker", FrontendLimitationScope::Worker),
+            ("test", FrontendLimitationScope::Test),
+            ("retry", FrontendLimitationScope::Retry),
+            ("phase", FrontendLimitationScope::Phase),
+            ("action", FrontendLimitationScope::Action),
+            ("assertion", FrontendLimitationScope::Assertion),
+        ] {
+            limitations.push(FrontendLimitation {
+                id: format!("{runner}-no-{suffix}").replace(':', "-"),
+                scopes: vec![scope],
+                reason: format!(
+                    "Runner {runner} did not expose exact {suffix} identity for every result"
+                ),
+            });
+        }
+    }
+    FrontendRunnerDeclaration {
+        runner,
+        execution_model: if contextual {
+            ExecutionModel::ParallelContextPropagated
+        } else {
+            ExecutionModel::ParallelUnattributed
+        },
+        attribution,
+        limitations,
+    }
+}
+
+fn javascript_archive_entries(
+    mut entries: Vec<EvidenceArchiveEntry>,
+    manifest: &crate::javascript_frontend::JavascriptManifest,
+    run_id: &str,
+    exit_code: i32,
+) -> Result<Vec<EvidenceArchiveEntry>, String> {
+    let mut results = Vec::new();
+    for entry in &entries {
+        if entry.path == "mcdc.json" || entry.path.ends_with("/mcdc.json") {
+            results.push(
+                serde_json::from_slice::<RawTestResult>(&entry.contents)
+                    .map_err(|error| format!("invalid {}: {error}", entry.path))?,
+            );
+        } else if entry.path == "mcdc.jsonl" || entry.path.ends_with(".mcdc.jsonl") {
+            let contents = entry
+                .contents
+                .strip_suffix(b"\n")
+                .ok_or_else(|| format!("{} does not end with a newline", entry.path))?;
+            for (index, line) in contents.split(|byte| *byte == b'\n').enumerate() {
+                if line.is_empty() {
+                    return Err(format!(
+                        "{} contains a blank record at line {}",
+                        entry.path,
+                        index + 1
+                    ));
+                }
+                results.push(
+                    serde_json::from_slice::<RawTestResult>(line).map_err(|error| {
+                        format!(
+                            "invalid {} record at line {}: {error}",
+                            entry.path,
+                            index + 1
+                        )
+                    })?,
+                );
+            }
+        }
+    }
+    if results.is_empty() {
+        let status = match exit_code {
+            0 => "passed",
+            supercov_contracts::COMMAND_TIMEOUT_EXIT_CODE => "timedOut",
+            _ => "failed",
+        };
+        let command_result = RawTestResult {
+            test_id: Some(format!("command:{run_id}")),
+            scope: None,
+            test: "Test command".into(),
+            test_file: None,
+            title: Some("Test command".into()),
+            retry: Some(0),
+            status: Some(status.into()),
+            expected_status: None,
+            flaky: false,
+            provenance: crate::coverage_report::TestProvenance {
+                runner: "command".into(),
+                kind: "setup".into(),
+                project: None,
+                source: "engine".into(),
+            },
+            role: "setup".into(),
+            phases: vec![],
+            runtime: vec![],
+            browser: vec![],
+            server: vec![],
+        };
+        entries.push(EvidenceArchiveEntry {
+            path: "results/command/mcdc.json".into(),
+            contents: serde_json::to_vec(&command_result).map_err(|error| error.to_string())?,
+        });
+        results.push(command_result);
+    }
+    let mut by_runner = BTreeMap::<String, Vec<&RawTestResult>>::new();
+    for result in &results {
+        by_runner
+            .entry(result.provenance.runner.clone())
+            .or_default()
+            .push(result);
+    }
+    if entries
+        .iter()
+        .any(|entry| entry.path.starts_with("server/background/") && entry.path.ends_with(".jsonl"))
+    {
+        by_runner.entry("background".into()).or_default();
+    }
+    let declaration = FrontendRunDeclaration {
+        protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
+        frontend_id: "javascript".into(),
+        frontend_version: "javascript-owned-v1".into(),
+        language: "javascript".into(),
+        structural_source: StructuralSource::OwnedProbes,
+        runners: by_runner
+            .into_iter()
+            .map(|(runner, results)| javascript_runner_declaration(runner, &results))
+            .collect(),
+        structural_limitations: manifest
+            .limitations
+            .iter()
+            .map(|limitation| limitation.id.clone())
+            .collect(),
+    };
+    entries.push(EvidenceArchiveEntry {
+        path: "coverage-model.json".into(),
+        contents: serde_json::to_vec(
+            &PersistedCoverageModel::from_declaration(&javascript_coverage_model())
+                .expect("JavaScript coverage model is contract-valid"),
+        )
+        .map_err(|error| error.to_string())?,
+    });
+    entries.push(EvidenceArchiveEntry {
+        path: "frontend.json".into(),
+        contents: serde_json::to_vec(&declaration).map_err(|error| error.to_string())?,
+    });
+    Ok(entries)
 }
 
 struct RunCleanup {
@@ -611,6 +819,8 @@ pub fn run_direct_javascript(
         },
     ])
     .map_err(|error| error.to_string())?;
+    let entries =
+        javascript_archive_entries(entries, &frontend.manifest, &run_id, execution.exit_code)?;
     let raw = write_archive(entries, &archive_path).map_err(|error| error.to_string())?;
     remove_stored_tree_deferred(&root, &workspace.join(".supercov/evidence"))
         .map_err(|error| error.to_string())?;

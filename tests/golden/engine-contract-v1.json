@@ -15,7 +15,7 @@
     "metadata": {
       "testExitCode": 0,
       "isolatedBuild": true,
-      "evidenceSchemaVersion": 2,
+      "evidenceSchemaVersion": 3,
       "evidenceFormat": "framed+gzip",
       "evidenceFile": "evidence.raw.gz",
       "evidenceSizeMatches": true,

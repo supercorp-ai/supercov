@@ -1,8 +1,12 @@
 //! Atomic, integrity-checked merging of independently executed run shards.
 
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use serde_json::Value;
+use supercov_contracts::FrontendRunDeclaration;
 
 use crate::{
     evidence_archive::{EvidenceArchiveEntry, read_archive, write_archive},
@@ -52,7 +56,12 @@ fn rewritten_contents(contents: &[u8], merged_run_id: &str) -> Result<Vec<u8>, S
                         .map_err(|error| format!("failed to rewrite merged evidence: {error}"))?,
                 );
             }
-            Err(_) => rewritten.extend(line.as_bytes()),
+            Err(error) => {
+                return Err(format!(
+                    "cannot merge malformed recognized JSON evidence at line {}: {error}",
+                    index + 1
+                ));
+            }
         }
     }
     Ok(rewritten)
@@ -139,17 +148,85 @@ pub fn merge_coverage_runs(
     {
         return Err("Cannot merge runs with different coverage denominators".into());
     }
+    let models = archives
+        .iter()
+        .map(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry.path == "coverage-model.json")
+                .map(|entry| entry.contents.as_slice())
+        })
+        .collect::<Vec<_>>();
+    let Some(model) = models[0] else {
+        return Err("Cannot merge runs without a coverage model".into());
+    };
+    if models.iter().any(|candidate| *candidate != Some(model)) {
+        return Err("Cannot merge runs with different coverage models".into());
+    }
+    let declarations = archives
+        .iter()
+        .map(|entries| {
+            let contents = entries
+                .iter()
+                .find(|entry| entry.path == "frontend.json")
+                .ok_or_else(|| "Cannot merge runs without a frontend declaration".to_owned())?;
+            serde_json::from_slice::<FrontendRunDeclaration>(&contents.contents)
+                .map_err(|error| format!("Cannot merge invalid frontend declaration: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut merged_declaration = declarations[0].clone();
+    let mut runners = BTreeMap::new();
+    for declaration in declarations {
+        if declaration.protocol_version != merged_declaration.protocol_version
+            || declaration.frontend_id != merged_declaration.frontend_id
+            || declaration.frontend_version != merged_declaration.frontend_version
+            || declaration.language != merged_declaration.language
+            || declaration.structural_source != merged_declaration.structural_source
+            || declaration.structural_limitations != merged_declaration.structural_limitations
+        {
+            return Err("Cannot merge runs with different frontend declarations".into());
+        }
+        for runner in declaration.runners {
+            if let Some(existing) = runners.get(&runner.runner) {
+                if existing != &runner {
+                    return Err(format!(
+                        "Cannot merge incompatible declarations for runner {}",
+                        runner.runner
+                    ));
+                }
+            } else {
+                runners.insert(runner.runner.clone(), runner);
+            }
+        }
+    }
+    merged_declaration.runners = runners.into_values().collect();
 
     let mut lock = ProjectLock::acquire(root, merged_run_id, started_at)
         .map_err(|error| format!("Cannot lock coverage store for merge: {error}"))?;
     let work = root.join(".supercov/work").join(merged_run_id);
     let result = (|| {
-        let mut entries = vec![EvidenceArchiveEntry {
-            path: "manifest.json".into(),
-            contents: manifest.to_vec(),
-        }];
+        let mut entries = vec![
+            EvidenceArchiveEntry {
+                path: "coverage-model.json".into(),
+                contents: model.to_vec(),
+            },
+            EvidenceArchiveEntry {
+                path: "frontend.json".into(),
+                contents: serde_json::to_vec(&merged_declaration)
+                    .map_err(|error| format!("Could not encode merged frontend: {error}"))?,
+            },
+            EvidenceArchiveEntry {
+                path: "manifest.json".into(),
+                contents: manifest.to_vec(),
+            },
+        ];
         for (shard, archive) in archives.iter().enumerate() {
-            for entry in archive.iter().filter(|entry| entry.path != "manifest.json") {
+            for entry in archive.iter().filter(|entry| {
+                !matches!(
+                    entry.path.as_str(),
+                    "coverage-model.json" | "frontend.json" | "manifest.json"
+                )
+            }) {
                 entries.push(EvidenceArchiveEntry {
                     path: merged_path(&entry.path, shard),
                     contents: rewritten_contents(&entry.contents, merged_run_id)?,
@@ -273,15 +350,16 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_nested_scope_run_ids_without_changing_plain_text() {
+    fn rewrites_nested_scope_run_ids_and_rejects_non_json_records() {
         let rewritten = rewritten_contents(
-            b"{\"scope\":{\"runId\":\"old\",\"testId\":\"test\"},\"nested\":[{\"scope\":{\"runId\":\"old\"}}]}\nplain\n",
+            b"{\"scope\":{\"runId\":\"old\",\"testId\":\"test\"},\"nested\":[{\"scope\":{\"runId\":\"old\"}}]}\n",
             "merged",
         )
         .unwrap();
         assert_eq!(
             std::str::from_utf8(&rewritten).unwrap(),
-            "{\"scope\":{\"runId\":\"merged\",\"testId\":\"test\"},\"nested\":[{\"scope\":{\"runId\":\"merged\"}}]}\nplain\n"
+            "{\"scope\":{\"runId\":\"merged\",\"testId\":\"test\"},\"nested\":[{\"scope\":{\"runId\":\"merged\"}}]}\n"
         );
+        assert!(rewritten_contents(b"plain\n", "merged").is_err());
     }
 }
