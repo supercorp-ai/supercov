@@ -15,6 +15,7 @@ const mappings = [
   ["contracts/evidence-v3/contract.json", "crates/supercov-contracts/assets/evidence-v3/contract.json"],
   ["contracts/coverage-model-v1/contract.json", "crates/supercov-contracts/assets/coverage-model-v1/contract.json"],
   ["contracts/rust-coverage-v1/contract.json", "crates/supercov-contracts/assets/rust-coverage-v1/contract.json"],
+  ["contracts/rust-compiler-companion-v1/contract.json", "crates/supercov-contracts/assets/rust-compiler-companion-v1/contract.json"],
   ["contracts/coverage-model-v1/vectors.json", "crates/supercov-engine/test-assets/coverage-model-v1/vectors.json"],
   ["contracts/probe-v2/vectors.json", "crates/supercov-engine/test-assets/probe-v2/vectors.json"],
   ...[

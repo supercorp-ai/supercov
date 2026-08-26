@@ -11,11 +11,11 @@ private frontend must fail closed for every open row.
 | RCV-MCDC-1 | Source-ordered ternary masking MC/DC | probe-v2 vectors and Rust runtime short-circuit test | Full decision-kind golden corpus plus LLVM cross-check |
 | RCV-SEMANTICS-1 | Preserve values, moves, borrows, drops, panic and ordering | Initial transform behavior test | Property/differential corpus across supported toolchains |
 | RCV-BRANCH-1 | Every frozen branch alternative | Initial `if`, loop and match discovery tests | Exhaustive branch-kind contract vectors |
-| RCV-EXPANSION-1 | Declarative macro expansions | Blocking limitation test | Owned expansion instrumentation and provenance corpus |
-| RCV-EXPANSION-2 | Proc/derive expansions | Blocking limitation test | Owned expansion instrumentation and provenance corpus |
-| RCV-GENERATED-1 | Build-script and included generated source | Blocking limitation path | Generated-source identity and crash corpus |
+| RCV-EXPANSION-1 | Declarative macro expansions | Compiler-backend spike sees expanded HIR/MIR and macro-definition/callsite spans | Stable expansion identity, real probes and provenance corpus |
+| RCV-EXPANSION-2 | Proc/derive expansions | Compiler-backend spike sees proc-macro-generated HIR/MIR and invocation provenance | Stable generated-token identity, real probes and derive corpus |
+| RCV-GENERATED-1 | Build-script and included generated source | Compiler-backend spike sees `OUT_DIR` source and mutates emitted MIR | Generated-source identity, real probes and crash corpus |
 | RCV-CONST-1 | Const/static/const-fn execution | Blocking limitation test | Compile-time probe path and semantics corpus |
-| RCV-DOCTEST-1 | Doctest extraction and attribution | Open | rustdoc mapping and hidden-line golden corpus |
+| RCV-DOCTEST-1 | Doctest extraction and attribution | Spike proves ordinary `RUSTC_WRAPPER` does not observe rustdoc's extracted crate | Owned rustdoc companion, mapping and hidden-line golden corpus |
 | RCV-ATTRIBUTION-1 | Exact run/worker/test/retry/phase identity | Process-per-libtest runner test | Concurrency, retry, crash and late-work corpus |
 | RCV-ARCHIVE-1 | Strict evidence v3 publication and query | Evidence/archive/run-store tests | Full CLI and lifecycle crash matrix |
 | RCV-ORACLE-1 | No external product measurement | Contract assertion | rustc/LLVM oracle-only CI with product-dependency audit |

@@ -135,6 +135,21 @@ maintainable owned backend—potentially a stable source path plus automatically
 selected rustc-versioned compiler components—rather than hiding expansion
 gaps. If exact support is not yet possible, Rust remains private.
 
+Checkpoint (2026-08-26): the compiler-backend spike selected an owned,
+rustc-commit- and host-matched compiler companion as the public architecture.
+An exact Rust 1.95.0 `rustc_driver` wrapper observed authored, declarative-
+macro, procedural-macro and build-script-generated HIR/MIR, and an
+`optimized_mir` provider replacement changed the emitted fixture behavior.
+The same experiment proved that const/CTFE bodies need a separate provider
+path and that Cargo's ordinary `RUSTC_WRAPPER` does not observe rustdoc's
+extracted doctest crate. Those are release blockers, not exclusions. The
+frozen `rust-compiler-companion-v1` envelope now requires exact compiler-driver
+identity, rejects unknown or nearby companions, and cannot claim public
+readiness until expanded provenance, runtime probes, generated sources, CTFE,
+doctests and exact test attribution are all present. The concrete-source Rust
+transformer remains only a private differential reference and will not be the
+public injection authority.
+
 Correctness corpus:
 
 - original-versus-instrumented differential programs checking values, panics,

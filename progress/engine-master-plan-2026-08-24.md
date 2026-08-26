@@ -1234,6 +1234,27 @@ miss blocks flipping any default.
   complete local JavaScript engine, merge, query, watchdog and isolation
   matrices remain green after the cutover.
 
+## Checkpoint — 2026-08-26 Rust compiler-companion boundary
+
+- The R1 expansion spike proved that an exact-version `rustc_driver` wrapper
+  can observe authored, declarative-macro, procedural-macro and build-script-
+  generated HIR/MIR and can replace optimized runtime MIR before codegen.
+- The public Rust frontend will therefore use an automatically selected,
+  Supercov-owned compiler companion matched by rustc commit, host and the
+  exact `librustc_driver` digest. It is an injection/provenance frontend only;
+  the shared Rust engine remains the sole analyzer, attribution, archive and
+  query implementation. LLVM/rustc coverage remains a development oracle.
+- The spike also proved two hard boundaries: CTFE requires a distinct provider
+  path, and Cargo's normal `RUSTC_WRAPPER` does not receive rustdoc's extracted
+  doctest crate. Both remain release blockers. The concrete-source Rust
+  transformer is now a private differential reference, not the intended
+  public denominator or injection authority.
+- `rust-compiler-companion-v1` freezes fail-closed selection and capability
+  negotiation. Public readiness requires expanded provenance, runtime MIR
+  probes, generated-source provenance, CTFE tracing, rustdoc/doctest tracing
+  and exact test-harness attribution together; a private partial companion
+  cannot claim measurement completeness.
+
 ## Non-goals and guardrails
 
 - No accidental behavior change during ports; every future language frontend

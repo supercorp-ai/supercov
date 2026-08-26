@@ -28,6 +28,7 @@ pub const PROBE_V2_VERSION: u32 = 2;
 pub const PROBE_V2_RADIX: u32 = 3;
 pub const PROBE_V2_JS_MAX_CONDITIONS: usize = 32;
 pub const LANGUAGE_FRONTEND_PROTOCOL_VERSION: u32 = 2;
+pub const RUST_COMPILER_COMPANION_PROTOCOL_VERSION: u32 = 1;
 
 pub const ERROR_CODES: &[&str] = &[
     "AMBIGUOUS_SELECTOR",
@@ -290,6 +291,197 @@ pub struct RustCoverageV1Contract {
 
 pub fn rust_coverage_v1_contract() -> Result<RustCoverageV1Contract, serde_json::Error> {
     serde_json::from_str(include_str!("../assets/rust-coverage-v1/contract.json"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCompilerCompanionContract {
+    pub protocol_version: u32,
+    pub status: String,
+    pub frontend_id: String,
+    pub coverage_model_variant: String,
+    pub evidence_schema_version: u32,
+    pub selection_identity: Vec<String>,
+    pub required_public_capabilities: Vec<String>,
+    pub unknown_fields_fatal: bool,
+    pub exact_identity_required: bool,
+    pub external_coverage_engine: bool,
+    pub missing_or_mismatched_companion: String,
+    pub user_runtime_components: Vec<String>,
+    pub user_development_components: Vec<String>,
+}
+
+pub fn rust_compiler_companion_contract() -> Result<RustCompilerCompanionContract, serde_json::Error>
+{
+    serde_json::from_str(include_str!(
+        "../assets/rust-compiler-companion-v1/contract.json"
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCompilerIdentity {
+    pub rustc_commit_hash: String,
+    pub rustc_release: String,
+    pub host_triple: String,
+    pub rustc_driver_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCompilerCompanionCapabilities {
+    pub expanded_hir_provenance: bool,
+    pub runtime_mir_probe_insertion: bool,
+    pub generated_source_provenance: bool,
+    pub ctfe_path_tracing: bool,
+    pub rustdoc_doctest_tracing: bool,
+    pub exact_test_harness_attribution: bool,
+}
+
+impl RustCompilerCompanionCapabilities {
+    pub fn is_public_ready(&self) -> bool {
+        self.expanded_hir_provenance
+            && self.runtime_mir_probe_insertion
+            && self.generated_source_provenance
+            && self.ctfe_path_tracing
+            && self.rustdoc_doctest_tracing
+            && self.exact_test_harness_attribution
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCompilerCompanionHandshake {
+    pub protocol_version: u32,
+    pub frontend_id: String,
+    pub coverage_model_variant: String,
+    pub evidence_schema_version: u32,
+    pub companion_build_id: String,
+    pub compiler: RustCompilerIdentity,
+    pub capabilities: RustCompilerCompanionCapabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RustCompilerCompanionError {
+    UnsupportedProtocolVersion(u32),
+    InvalidFrontend,
+    InvalidCoverageModel,
+    UnsupportedEvidenceSchema(u32),
+    InvalidBuildId,
+    InvalidRustcCommit,
+    InvalidRustcRelease,
+    InvalidHostTriple,
+    InvalidDriverDigest,
+    CompilerMismatch,
+    IncompleteCapabilities,
+}
+
+impl std::fmt::Display for RustCompilerCompanionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedProtocolVersion(version) => {
+                write!(
+                    formatter,
+                    "unsupported Rust compiler companion protocol: {version}"
+                )
+            }
+            Self::InvalidFrontend => formatter.write_str("invalid Rust companion frontend"),
+            Self::InvalidCoverageModel => {
+                formatter.write_str("invalid Rust companion coverage model")
+            }
+            Self::UnsupportedEvidenceSchema(version) => {
+                write!(
+                    formatter,
+                    "unsupported Rust companion evidence schema: {version}"
+                )
+            }
+            Self::InvalidBuildId => formatter.write_str("invalid Rust companion build ID"),
+            Self::InvalidRustcCommit => formatter.write_str("invalid rustc commit hash"),
+            Self::InvalidRustcRelease => formatter.write_str("invalid rustc release"),
+            Self::InvalidHostTriple => formatter.write_str("invalid rustc host triple"),
+            Self::InvalidDriverDigest => formatter.write_str("invalid rustc driver digest"),
+            Self::CompilerMismatch => formatter.write_str("Rust companion compiler mismatch"),
+            Self::IncompleteCapabilities => {
+                formatter.write_str("Rust companion lacks public coverage capabilities")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RustCompilerCompanionError {}
+
+fn valid_lower_hex(value: &str, bytes: usize) -> bool {
+    value.len() == bytes * 2
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_rustc_release(value: &str) -> bool {
+    (1..=64).contains(&value.len()) && value.trim() == value && !value.chars().any(char::is_control)
+}
+
+fn valid_host_triple(value: &str) -> bool {
+    (3..=128).contains(&value.len())
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
+}
+
+pub fn validate_rust_compiler_companion_handshake(
+    handshake: &RustCompilerCompanionHandshake,
+) -> Result<(), RustCompilerCompanionError> {
+    if handshake.protocol_version != RUST_COMPILER_COMPANION_PROTOCOL_VERSION {
+        return Err(RustCompilerCompanionError::UnsupportedProtocolVersion(
+            handshake.protocol_version,
+        ));
+    }
+    if handshake.frontend_id != "rust" {
+        return Err(RustCompilerCompanionError::InvalidFrontend);
+    }
+    if handshake.coverage_model_variant != "rust-source-v1" {
+        return Err(RustCompilerCompanionError::InvalidCoverageModel);
+    }
+    if handshake.evidence_schema_version != EVIDENCE_ARCHIVE_SCHEMA_VERSION {
+        return Err(RustCompilerCompanionError::UnsupportedEvidenceSchema(
+            handshake.evidence_schema_version,
+        ));
+    }
+    if !valid_lower_hex(&handshake.companion_build_id, 32) {
+        return Err(RustCompilerCompanionError::InvalidBuildId);
+    }
+    if !valid_lower_hex(&handshake.compiler.rustc_commit_hash, 20) {
+        return Err(RustCompilerCompanionError::InvalidRustcCommit);
+    }
+    if !valid_rustc_release(&handshake.compiler.rustc_release) {
+        return Err(RustCompilerCompanionError::InvalidRustcRelease);
+    }
+    if !valid_host_triple(&handshake.compiler.host_triple) {
+        return Err(RustCompilerCompanionError::InvalidHostTriple);
+    }
+    if !valid_lower_hex(&handshake.compiler.rustc_driver_sha256, 32) {
+        return Err(RustCompilerCompanionError::InvalidDriverDigest);
+    }
+    Ok(())
+}
+
+pub fn require_matching_rust_compiler_companion(
+    handshake: &RustCompilerCompanionHandshake,
+    compiler: &RustCompilerIdentity,
+    require_public_capabilities: bool,
+) -> Result<(), RustCompilerCompanionError> {
+    validate_rust_compiler_companion_handshake(handshake)?;
+    if handshake.compiler.rustc_commit_hash != compiler.rustc_commit_hash
+        || handshake.compiler.host_triple != compiler.host_triple
+        || handshake.compiler.rustc_driver_sha256 != compiler.rustc_driver_sha256
+    {
+        return Err(RustCompilerCompanionError::CompilerMismatch);
+    }
+    if require_public_capabilities && !handshake.capabilities.is_public_ready() {
+        return Err(RustCompilerCompanionError::IncompleteCapabilities);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1061,5 +1253,104 @@ mod tests {
             );
         }
         assert!(!contract.external_coverage_in_product);
+    }
+
+    fn private_companion_handshake() -> RustCompilerCompanionHandshake {
+        RustCompilerCompanionHandshake {
+            protocol_version: RUST_COMPILER_COMPANION_PROTOCOL_VERSION,
+            frontend_id: "rust".into(),
+            coverage_model_variant: "rust-source-v1".into(),
+            evidence_schema_version: EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+            companion_build_id: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .into(),
+            compiler: RustCompilerIdentity {
+                rustc_commit_hash: "59807616e1fa2540724bfbac14d7976d7e4a3860".into(),
+                rustc_release: "1.95.0".into(),
+                host_triple: "aarch64-apple-darwin".into(),
+                rustc_driver_sha256:
+                    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".into(),
+            },
+            capabilities: RustCompilerCompanionCapabilities {
+                expanded_hir_provenance: true,
+                runtime_mir_probe_insertion: true,
+                generated_source_provenance: true,
+                ctfe_path_tracing: false,
+                rustdoc_doctest_tracing: false,
+                exact_test_harness_attribution: false,
+            },
+        }
+    }
+
+    #[test]
+    fn rust_compiler_companion_contract_is_owned_exact_and_fail_closed() {
+        let contract = rust_compiler_companion_contract().unwrap();
+        assert_eq!(
+            contract.protocol_version,
+            RUST_COMPILER_COMPANION_PROTOCOL_VERSION
+        );
+        assert_eq!(contract.frontend_id, "rust");
+        assert_eq!(contract.coverage_model_variant, "rust-source-v1");
+        assert_eq!(
+            contract.selection_identity,
+            ["rustcCommitHash", "hostTriple", "rustcDriverSha256"]
+        );
+        assert_eq!(
+            contract.evidence_schema_version,
+            EVIDENCE_ARCHIVE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            contract.required_public_capabilities,
+            [
+                "expandedHirProvenance",
+                "runtimeMirProbeInsertion",
+                "generatedSourceProvenance",
+                "ctfePathTracing",
+                "rustdocDoctestTracing",
+                "exactTestHarnessAttribution",
+            ]
+        );
+        assert!(contract.unknown_fields_fatal);
+        assert!(contract.exact_identity_required);
+        assert!(!contract.external_coverage_engine);
+        assert_eq!(contract.missing_or_mismatched_companion, "fail-closed");
+        assert_eq!(contract.user_runtime_components, ["cargo", "rustc"]);
+        assert!(contract.user_development_components.is_empty());
+    }
+
+    #[test]
+    fn rust_compiler_companion_allows_private_spikes_but_blocks_public_readiness() {
+        let handshake = private_companion_handshake();
+        validate_rust_compiler_companion_handshake(&handshake).unwrap();
+        require_matching_rust_compiler_companion(&handshake, &handshake.compiler, false).unwrap();
+        assert_eq!(
+            require_matching_rust_compiler_companion(&handshake, &handshake.compiler, true),
+            Err(RustCompilerCompanionError::IncompleteCapabilities)
+        );
+
+        let mut diagnostic_release = handshake.compiler.clone();
+        diagnostic_release.rustc_release = "1.95.0 (diagnostic alias)".into();
+        require_matching_rust_compiler_companion(&handshake, &diagnostic_release, false).unwrap();
+
+        let mut mismatched = handshake.compiler.clone();
+        mismatched.rustc_driver_sha256 =
+            "0000000000000000000000000000000000000000000000000000000000000000".into();
+        assert_eq!(
+            require_matching_rust_compiler_companion(&handshake, &mismatched, false),
+            Err(RustCompilerCompanionError::CompilerMismatch)
+        );
+    }
+
+    #[test]
+    fn rust_compiler_companion_rejects_malformed_and_unknown_identity() {
+        let mut malformed = private_companion_handshake();
+        malformed.compiler.rustc_commit_hash = "59807616E1FA2540724BFBAC14D7976D7E4A3860".into();
+        assert_eq!(
+            validate_rust_compiler_companion_handshake(&malformed),
+            Err(RustCompilerCompanionError::InvalidRustcCommit)
+        );
+
+        let mut value = serde_json::to_value(private_companion_handshake()).unwrap();
+        value["nearestCompatibleCompiler"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<RustCompilerCompanionHandshake>(value).is_err());
     }
 }

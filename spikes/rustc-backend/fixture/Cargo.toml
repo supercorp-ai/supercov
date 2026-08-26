@@ -1,0 +1,12 @@
+[workspace]
+members = ["probe-macros"]
+resolver = "3"
+
+[package]
+name = "supercov-rustc-spike-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+probe-macros = { path = "probe-macros" }
