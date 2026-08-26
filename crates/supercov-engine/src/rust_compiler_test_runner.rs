@@ -80,8 +80,9 @@ impl RustCompilerRunRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RustCompilerAttemptHealth {
-    pub test_id: String,
+pub struct RustCompilerTransportHealthRecord {
+    pub scope_id: String,
+    pub scope_kind: String,
     pub status: String,
     pub transport: RustCompilerTransportHealth,
 }
@@ -94,7 +95,7 @@ pub struct RustCompilerFrontendRun {
     pub exit_code: i32,
     pub artifacts: usize,
     pub artifact_files: Vec<PathBuf>,
-    pub attempt_health: Vec<RustCompilerAttemptHealth>,
+    pub transport_health: Vec<RustCompilerTransportHealthRecord>,
     pub build_ms: f64,
     pub execution_ms: f64,
 }
@@ -130,7 +131,7 @@ impl RustCompilerFrontendRun {
         }
         entries.push(EvidenceArchiveEntry {
             path: "rust/transport-health.json".into(),
-            contents: serde_json::to_vec(&self.attempt_health)?,
+            contents: serde_json::to_vec(&self.transport_health)?,
         });
         Ok(entries)
     }
@@ -456,7 +457,7 @@ fn doctest_raw_results(
     started_at_ms: i64,
     ended_at_ms: i64,
     normalized: &NormalizedRustCompilerManifest,
-) -> Result<(Vec<RawTestResult>, Vec<RustCompilerAttemptHealth>), RustCompilerTestError> {
+) -> Result<(Vec<RawTestResult>, Vec<RustCompilerTransportHealthRecord>), RustCompilerTestError> {
     let mut results = Vec::new();
     let mut health = Vec::new();
     for group in &resolution.groups {
@@ -687,8 +688,9 @@ fn doctest_raw_results(
                 server: Vec::new(),
             });
         }
-        health.push(RustCompilerAttemptHealth {
-            test_id: format!("rustdoc:{}", group.group),
+        health.push(RustCompilerTransportHealthRecord {
+            scope_id: format!("rustdoc:{}", group.invocation_id),
+            scope_kind: "runner-invocation".into(),
             status: if group.transport.dropped == 0 && group.transport.incomplete == 0 {
                 "passed".into()
             } else {
@@ -811,7 +813,7 @@ fn raw_result(
 ) -> (
     RawTestResult,
     Option<RawTestResult>,
-    RustCompilerAttemptHealth,
+    RustCompilerTransportHealthRecord,
 ) {
     let worker_id = format!("artifact-{:04}", task.artifact_index);
     let attempt_id = format!("{run_id}:{:04}:{:08}", task.artifact_index, task.test_index);
@@ -881,8 +883,9 @@ fn raw_result(
             server: Vec::new(),
         }
     });
-    let health = RustCompilerAttemptHealth {
-        test_id: task.test_id.clone(),
+    let health = RustCompilerTransportHealthRecord {
+        scope_id: task.test_id.clone(),
+        scope_kind: "test-attempt".into(),
         status: status.into(),
         transport: projection.health,
     };
@@ -907,7 +910,10 @@ fn execute_compiler_build(
         .map_err(|error| io_error(&request.project_root, error))?;
     let invocation = cargo_invocation(&project_root, &request.command)
         .map_err(|error| RustCompilerTestError::UnsupportedCommand(error.to_string()))?;
-    let selection = rust_libtest_selection(&invocation)
+    let selection = build
+        .run_libtests
+        .then(|| rust_libtest_selection(&invocation))
+        .transpose()
         .map_err(|error| RustCompilerTestError::UnsupportedCommand(error.to_string()))?;
     let artifacts = normalize_artifacts(&project_root, &build.artifacts)?;
     let evidence_root = build.compiler_output_directory.join("attempts");
@@ -915,6 +921,11 @@ fn execute_compiler_build(
     let mut tasks = Vec::new();
     let mut identities = BTreeSet::new();
     for (artifact_index, artifact) in artifacts.iter().enumerate() {
+        let selection = selection.as_ref().ok_or_else(|| {
+            RustCompilerTestError::UnsupportedCommand(
+                "doc-only execution unexpectedly produced a libtest artifact".into(),
+            )
+        })?;
         let tests = list_tests(artifact, &selection.list_arguments)?;
         let contexts = preflight_rust_test_contexts(tests.clone())
             .map_err(|error| RustCompilerTestError::Context(error.to_string()))?;
@@ -976,7 +987,7 @@ fn execute_compiler_build(
         build.build_started_at_ms,
         build.build_ended_at_ms,
     );
-    let (doctest_results, mut attempt_health) = doctest_raw_results(
+    let (doctest_results, mut transport_health) = doctest_raw_results(
         &request.run_id,
         &build.doctest_outcomes,
         build.build_started_at_ms,
@@ -984,7 +995,25 @@ fn execute_compiler_build(
         &build.normalized,
     )?;
     raw_results.extend(doctest_results);
-    let mut overall_exit = i32::from(doctest_command_failed(&build.doctest_outcomes));
+    let mut overall_exit = if build.run_doctests {
+        build.doctest_exit_code.unwrap_or(1)
+    } else {
+        0
+    };
+    if build.run_doctests && overall_exit != 0 {
+        diagnostics
+            .write_all(&build.doctest_stdout)
+            .and_then(|_| diagnostics.write_all(&build.doctest_stderr))
+            .map_err(|error| RustCompilerTestError::Io {
+                path: build.compiler_output_directory.clone(),
+                reason: error.to_string(),
+            })?;
+    }
+    if (overall_exit == 0) == doctest_command_failed(&build.doctest_outcomes) {
+        return Err(RustCompilerTestError::Context(
+            "Cargo rustdoc exit status disagrees with authenticated doctest outcomes".into(),
+        ));
+    }
     for outcome in outcomes {
         let (test_status, exit) = status(&outcome.output);
         if exit != 0 {
@@ -1052,7 +1081,7 @@ fn execute_compiler_build(
         if let Some(background) = background {
             raw_results.push(background);
         }
-        attempt_health.push(health);
+        transport_health.push(health);
     }
 
     let mut structural_limitations = build
@@ -1075,12 +1104,30 @@ fn execute_compiler_build(
     }
     structural_limitations.sort();
     structural_limitations.dedup();
-    let mut runners = vec![compiler_runner_declaration(), runner_declaration()];
-    if !build.doctest_outcomes.groups.is_empty()
-        || !build.doctest_outcomes.unmatched_maps.is_empty()
+    let observed_runners = raw_results
+        .iter()
+        .map(|result| result.provenance.runner.as_str())
+        .collect::<BTreeSet<_>>();
+    if observed_runners
+        .iter()
+        .any(|runner| !matches!(*runner, "rustc" | "rust-libtest" | "rustdoc"))
     {
-        runners.push(rustdoc_runner_declaration());
+        return Err(RustCompilerTestError::Context(
+            "Rust compiler run produced an unknown runner identity".into(),
+        ));
     }
+    // The frontend contract declares capabilities actually present in this
+    // run. In particular, `cargo test --doc` must not advertise an unobserved
+    // libtest runner, and an explicit non-doc target must not advertise
+    // rustdoc. The shared analyzer deliberately rejects such declarations.
+    let runners = [
+        ("rustc", compiler_runner_declaration()),
+        ("rust-libtest", runner_declaration()),
+        ("rustdoc", rustdoc_runner_declaration()),
+    ]
+    .into_iter()
+    .filter_map(|(name, declaration)| observed_runners.contains(name).then_some(declaration))
+    .collect();
     let declaration = FrontendRunDeclaration {
         protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
         frontend_id: "rust".into(),
@@ -1108,7 +1155,7 @@ fn execute_compiler_build(
             .into_iter()
             .map(|artifact| artifact.executable)
             .collect(),
-        attempt_health,
+        transport_health,
         build_ms: build.build_ms,
         execution_ms: execution_started.elapsed().as_secs_f64() * 1000.0,
     })

@@ -58,8 +58,63 @@ Usage:\n\
   supercov merge <run-id> <run-id> [...]\n\
   supercov clean [--keep N] [--dry-run]\n";
 
+fn is_executable_wrapper_program(argument: &str) -> bool {
+    if argument.starts_with(['-', '@']) {
+        return false;
+    }
+    let path = Path::new(argument);
+    let candidates = if path.is_absolute() || path.components().count() > 1 {
+        vec![path.to_path_buf()]
+    } else {
+        std::env::var_os("PATH")
+            .map(|value| {
+                std::env::split_paths(&value)
+                    .map(|directory| directory.join(path))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    candidates.into_iter().any(|candidate| {
+        let Ok(metadata) = fs::metadata(candidate) else {
+            return false;
+        };
+        if !metadata.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            metadata.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    })
+}
+
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    // Cargo inherits both wrapper-mode variables during a doctest build. Its
+    // rustc wrapper protocol always prepends the real compiler executable,
+    // whereas RUSTDOC receives rustdoc's arguments directly. Dispatch the
+    // nested rustc version/build probes first or the rustdoc path would wait
+    // for the selection attestation that this same process must publish.
+    if std::env::var_os(
+        supercov_engine::rust_compiler_orchestration::RUST_COMPILER_WRAPPER_CONFIG_ENV,
+    )
+    .is_some()
+        && arguments
+            .first()
+            .is_some_and(|argument| is_executable_wrapper_program(argument))
+    {
+        return rust_compiler_wrapper(arguments);
+    }
+    if std::env::var_os(supercov_engine::rust_compiler_orchestration::RUSTDOC_WRAPPER_MODE_ENV)
+        .is_some()
+    {
+        return rustdoc_wrapper(arguments);
+    }
     if std::env::var_os(
         supercov_engine::rust_compiler_orchestration::RUST_COMPILER_WRAPPER_CONFIG_ENV,
     )
@@ -119,6 +174,104 @@ fn main() -> ExitCode {
     }
 }
 
+fn rustdoc_wrapper(arguments: Vec<String>) -> ExitCode {
+    let Some(config_path) = std::env::var_os(
+        supercov_engine::rust_compiler_orchestration::RUST_COMPILER_WRAPPER_CONFIG_ENV,
+    )
+    .map(PathBuf::from) else {
+        eprintln!("[supercov] Cargo rustdoc wrapper configuration is missing");
+        return ExitCode::from(2);
+    };
+    let result = (|| -> Result<ExitCode, String> {
+        let metadata = fs::symlink_metadata(&config_path).map_err(|error| error.to_string())?;
+        if !metadata.file_type().is_file() {
+            return Err(format!(
+                "unsafe Rust compiler wrapper configuration: {}",
+                config_path.display()
+            ));
+        }
+        let config: supercov_engine::rust_compiler_orchestration::RustCompilerWrapperConfig =
+            serde_json::from_slice(&fs::read(&config_path).map_err(|error| error.to_string())?)
+                .map_err(|error| format!("invalid Rust compiler wrapper configuration: {error}"))?;
+        let started = Instant::now();
+        let selection = loop {
+            match supercov_engine::rust_compiler_orchestration::verified_compiler_selection(
+                &config.selection_directory,
+                &config.candidates,
+                config.require_public_capabilities,
+                true,
+            )
+            .map_err(|error| error.to_string())?
+            {
+                Some(selection) => break selection,
+                None if started.elapsed() < Duration::from_secs(30) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                None => {
+                    return Err(
+                        "timed out waiting for Cargo's authenticated rustc selection before rustdoc"
+                            .into(),
+                    );
+                }
+            }
+        };
+        let rustdoc =
+            supercov_engine::rust_compiler_selection::resolve_matching_rustdoc(&selection)
+                .map_err(|error| error.to_string())?;
+        let engine = fs::canonicalize(std::env::current_exe().map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+        let mut command = Command::new(&selection.companion_path);
+        command
+            .args(&arguments)
+            .env_remove(supercov_engine::rust_compiler_orchestration::RUSTDOC_WRAPPER_MODE_ENV)
+            .env(
+                supercov_engine::rust_compiler_orchestration::RUST_REAL_RUSTDOC_ENV,
+                &rustdoc,
+            )
+            .env(
+                supercov_engine::rust_compiler_orchestration::RUST_COMPANION_PATH_ENV,
+                &selection.companion_path,
+            )
+            .env(
+                supercov_engine::rust_compiler_orchestration::RUSTDOC_CAPTURE_OUTCOMES_ENV,
+                "1",
+            )
+            .env(
+                supercov_engine::rust_compiler_orchestration::RUSTDOC_ENGINE_PATH_ENV,
+                &engine,
+            )
+            .env(
+                supercov_engine::rust_compiler_orchestration::RUST_STATIC_RUNTIME_DIRECTORY_ENV,
+                &config.shared_runtime_directory,
+            );
+        supercov_engine::rust_compiler_selection::configure_companion_loader_environment(
+            &mut command,
+            &selection.compiler_library_directory,
+        )
+        .map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.arg0("supercov-rustdoc-backend-spike");
+            let error = command.exec();
+            Err(format!(
+                "could not execute exact Rust rustdoc companion: {error}"
+            ))
+        }
+        #[cfg(not(unix))]
+        {
+            Err("the exact Rust rustdoc wrapper is not yet implemented on Windows".into())
+        }
+    })();
+    match result {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
 fn rust_compiler_wrapper(arguments: Vec<String>) -> ExitCode {
     let Some(rustc) = arguments.first() else {
         eprintln!("[supercov] Cargo compiler wrapper received no rustc path");
@@ -148,35 +301,11 @@ fn rust_compiler_wrapper(arguments: Vec<String>) -> ExitCode {
             config.require_public_capabilities,
         )
         .map_err(|error| error.to_string())?;
-        let selection_metadata =
-            fs::symlink_metadata(&config.selection_directory).map_err(|error| error.to_string())?;
-        if !selection_metadata.file_type().is_dir() {
-            return Err(format!(
-                "unsafe Rust compiler selection directory: {}",
-                config.selection_directory.display()
-            ));
-        }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| error.to_string())?
-            .as_nanos();
-        let attestation = config
-            .selection_directory
-            .join(format!("selection-{}-{now}.json", std::process::id()));
-        let bytes = serde_json::to_vec(&selection).map_err(|error| error.to_string())?;
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&attestation)
-            .map_err(|error| error.to_string())?;
-        use std::io::Write as _;
-        file.write_all(&bytes).map_err(|error| error.to_string())?;
-        file.sync_all().map_err(|error| error.to_string())?;
+        supercov_engine::rust_compiler_orchestration::publish_compiler_selection_attestation(
+            &config.selection_directory,
+            &selection,
+        )
+        .map_err(|error| error.to_string())?;
 
         supercov_engine::rust_compiler_orchestration::prepare_shared_rust_runtime(
             Path::new(rustc),
@@ -2575,6 +2704,15 @@ mod tests {
     #[test]
     fn shell_reports_the_public_engine() {
         assert!(HELP.contains("Supercov coverage engine"));
+    }
+
+    #[test]
+    fn nested_cargo_wrapper_dispatch_requires_a_real_executable() {
+        let executable = std::env::current_exe().unwrap();
+        assert!(is_executable_wrapper_program(&executable.to_string_lossy()));
+        assert!(!is_executable_wrapper_program("--edition=2024"));
+        assert!(!is_executable_wrapper_program("@rustdoc-arguments"));
+        assert!(!is_executable_wrapper_program("Cargo.toml"));
     }
 
     #[test]

@@ -764,8 +764,36 @@ on one nonempty archive with no partial or lock debris. All instrumented crates
 link the shared ABI, so dependency probes and doctest assertion contexts cannot
 silently split across per-crate thread-local runtimes. Cargo target planning is
 now explicit and tested: default and `--doc` select doctests, while explicit
-non-doc targets do not. Doc-only execution still fails closed until the next
-production-supervisor increment; it is never approximated as libtest.
+non-doc targets do not.
+
+The production rustdoc supervisor is now connected. Cargo's nested rustc
+version/build probes publish the exact compiler selection before rustdoc may
+start; the matching rustdoc executable must have the same commit, release and
+host, and the exact companion remains the test-builder wrapper. Default
+`cargo test`, explicit `cargo test --lib` and doc-only `cargo test --doc` all
+run through the transactional compiler lifecycle and ordinary stored-run query
+path. The real gate covers six cataloged doctests, standalone and merged roots,
+ignored/no-run/should-panic/compile-fail identities, compiler dependency hits,
+assertion phases, context-zero background work and CTFE setup evidence.
+
+Rustdoc's version-2 extracted catalog is captured before every instrumented
+execution, including the output-equivalence path that does not capture
+outcomes. Standalone identity is bound from rustdoc's generated HIR marker to
+exact catalog path/line; merged temporary roots are translated and rebased to
+the same canonical test identity. A regression carries runtime evidence under
+both roots for one test and requires both records to survive exactly once.
+Transport health now states whether it describes an exact test attempt or one
+shared runner invocation instead of fabricating one attachment per doctest.
+Frontend runner declarations are likewise derived from observed evidence, so
+doc-only runs cannot claim libtest attribution and explicit non-doc runs cannot
+claim rustdoc attribution.
+
+A deliberately failing real doctest proves the distinction between test
+failure and coverage failure: rustdoc's exact exit 101 is preserved, the failed
+run and outcome remain atomically queryable, authenticated transport is
+complete, and terminal work is removed. Full output/order compatibility,
+cross-artifact fail-fast, retries, multi-package identity, wrapper composition
+and failure/signal recovery remain open.
 
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.

@@ -32,6 +32,9 @@ pub enum RustCompilerSelectionError {
         operation: &'static str,
     },
     InvalidRustcVerbose(String),
+    RustdocCompilerMismatch {
+        path: PathBuf,
+    },
     InvalidSysroot(String),
     InvalidDriverDirectory {
         path: PathBuf,
@@ -90,6 +93,11 @@ impl std::fmt::Display for RustCompilerSelectionError {
             Self::InvalidRustcVerbose(reason) => {
                 write!(formatter, "invalid rustc -vV output: {reason}")
             }
+            Self::RustdocCompilerMismatch { path } => write!(
+                formatter,
+                "rustdoc {} does not match Cargo's exact rustc commit, release and host",
+                path.display()
+            ),
             Self::InvalidSysroot(reason) => write!(formatter, "invalid rustc sysroot: {reason}"),
             Self::InvalidDriverDirectory { path, count } => write!(
                 formatter,
@@ -384,6 +392,35 @@ pub fn probe_rustc_identity(
     rustc_path: &Path,
 ) -> Result<RustCompilerIdentity, RustCompilerSelectionError> {
     Ok(probe_rustc(rustc_path)?.identity)
+}
+
+/// Resolve the rustdoc executable adjacent to Cargo's exact rustc and require
+/// the same compiler commit, release and host. Rustdoc intentionally has no
+/// independent driver digest; the already-authenticated companion remains
+/// bound to rustc's exact driver bytes.
+pub fn resolve_matching_rustdoc(
+    selection: &SelectedRustCompilerCompanion,
+) -> Result<PathBuf, RustCompilerSelectionError> {
+    #[cfg(windows)]
+    let executable = "rustdoc.exe";
+    #[cfg(not(windows))]
+    let executable = "rustdoc";
+    let rustdoc = resolve_program(&selection.rustc_path.with_file_name(executable))?;
+    let verbose = command_output(
+        &rustdoc,
+        &["-vV"],
+        "inspecting rustdoc identity",
+        false,
+        None,
+    )?;
+    let (commit, release, host) = parse_rustc_verbose(&verbose)?;
+    if commit != selection.compiler.rustc_commit_hash
+        || release != selection.compiler.rustc_release
+        || host != selection.compiler.host_triple
+    {
+        return Err(RustCompilerSelectionError::RustdocCompilerMismatch { path: rustdoc });
+    }
+    Ok(rustdoc)
 }
 
 fn inspect_candidate(

@@ -1566,6 +1566,43 @@ miss blocks flipping any default.
   identity and visible-output equivalence remain open before public rustdoc
   execution.
 
+## Checkpoint — 2026-08-27 production Cargo doctest execution
+
+- The production Rust compiler frontend now executes rustdoc rather than only
+  ingesting artifacts from a separate spike. The Cargo wrapper publishes an
+  atomic exact-compiler attestation, resolves a rustdoc with the same commit,
+  release and host, and launches the exact companion as rustdoc's test-builder
+  wrapper. A wrapper-dispatch deadlock discovered by the doc-only gate is
+  closed: inherited rustdoc mode cannot intercept Cargo's nested `rustc -vV`
+  probe before that probe publishes the required selection.
+- Real default, explicit `--lib` and `--doc` Cargo commands run through the
+  same isolated workspace, compiler normalization, evidence-v3 archive,
+  atomic run publication and normal query path. Runner declarations reflect
+  only observed `rustc`, `rust-libtest` and `rustdoc` evidence; doc-only runs no
+  longer make a false libtest capability claim.
+- Rustdoc's exact version-2 catalog is captured before every instrumented
+  execution, even the low-level output-equivalence path. Standalone temporary
+  line metadata is never treated as source identity: generated HIR binds one
+  exact catalog path/line. Merged roots translate obligation IDs, probe
+  ordinals and nested assertion contexts before rebasing to that canonical
+  identity. A focused regression combines canonical and merged evidence for
+  the same doctest and requires both records exactly once.
+- Transport health now has an explicit `test-attempt` or `runner-invocation`
+  scope. One parallel rustdoc invocation is no longer misrepresented as one
+  independent attachment per cataloged test. The real fixture proves six
+  cataloged doctests, ignored/no-run/should-panic/compile-fail states, CTFE
+  setup, compiler dependency hits, assertion phases and context-zero
+  background evidence with no dropped or incomplete record.
+- A deliberately failing doctest preserves rustdoc's exact exit 101 while
+  Supercov atomically publishes a queryable failed run and removes terminal
+  work. The full compiler spike, complete engine tests, clippy, runtime assets and
+  Rust-only package preflight are green locally. No hosted workflow ran.
+- This closes production happy-path and ordinary failed-test execution, not
+  public Rust promotion. Retry/fail-fast orchestration, complete visible-output
+  behavior, multi-package identity, existing-wrapper composition, signal and
+  ENOSPC recovery, remaining semantic corpora, platform matrices and the
+  1.10x performance gate remain blocking.
+
 ## Non-goals and guardrails
 
 - No accidental behavior change during ports; every future language frontend

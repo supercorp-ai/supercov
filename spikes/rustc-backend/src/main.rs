@@ -79,6 +79,8 @@ const RUSTDOC_LAUNCHED: &str = "SUPERCOV_RUSTDOC_LAUNCHED";
 const RUSTDOC_GROUP_ID: &str = "SUPERCOV_RUSTDOC_GROUP_ID";
 const RUSTDOC_CAPTURE_OUTCOMES: &str = "SUPERCOV_RUSTDOC_CAPTURE_OUTCOMES";
 const RUSTDOC_ENGINE_PATH: &str = "SUPERCOV_RUSTDOC_ENGINE_PATH";
+const COMPILER_WRAPPER_CONFIG: &str = "SUPERCOV_RUST_COMPILER_WRAPPER_CONFIG";
+const RUSTDOC_CATALOG_PATH: &str = "SUPERCOV_RUSTDOC_CATALOG_PATH";
 const SOURCE_ROOT: &str = "SUPERCOV_RUST_SOURCE_ROOT";
 const TARGET_ROOT: &str = "SUPERCOV_RUST_TARGET_ROOT";
 const FORCE_ID_COLLISION: &str = "SUPERCOV_RUSTC_SPIKE_FORCE_ID_COLLISION";
@@ -7605,8 +7607,72 @@ fn test_identity_for(tcx: TyCtxt<'_>, definition: &str) -> Option<String> {
         Some("standalone") if definition == "main" => {
             let group = env::var(RUSTDOC_GROUP_ID).ok()?;
             let path = env::var("UNSTABLE_RUSTDOC_TEST_PATH").ok()?;
-            let line = env::var("UNSTABLE_RUSTDOC_TEST_LINE").ok()?;
-            Some(format!("rustdoc:{group}:{path}:{line}"))
+            let catalog_path = env::var_os(RUSTDOC_CATALOG_PATH).map(PathBuf::from)?;
+            let metadata = fs::symlink_metadata(&catalog_path).ok()?;
+            if !metadata.file_type().is_file() {
+                tcx.dcx().fatal(format!(
+                    "Supercov rustdoc catalog is not a regular file: {}",
+                    catalog_path.display()
+                ));
+            }
+            let catalog: serde_json::Value = serde_json::from_slice(
+                &fs::read(&catalog_path).unwrap_or_else(|error| {
+                    tcx.dcx().fatal(format!(
+                        "Supercov could not read rustdoc catalog {}: {error}",
+                        catalog_path.display()
+                    ))
+                }),
+            )
+            .unwrap_or_else(|error| {
+                tcx.dcx().fatal(format!(
+                    "Supercov could not parse rustdoc catalog {}: {error}",
+                    catalog_path.display()
+                ))
+            });
+            if catalog.get("format_version").and_then(serde_json::Value::as_u64) != Some(2) {
+                tcx.dcx()
+                    .fatal("Supercov rustdoc catalog has an unsupported format");
+            }
+            let doctests = catalog
+                .get("doctests")
+                .and_then(serde_json::Value::as_array)
+                .unwrap_or_else(|| tcx.dcx().fatal("Supercov rustdoc catalog has no doctests"));
+            let definitions = tcx
+                .hir_body_owners()
+                .map(|owner| tcx.def_path_str(owner.to_def_id()))
+                .collect::<Vec<_>>();
+            let encoded_path = path
+                .chars()
+                .map(|character| {
+                    if character.is_ascii_alphanumeric() {
+                        character
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>();
+            let matches = doctests
+                .iter()
+                .filter_map(|entry| {
+                    let file = entry.get("file")?.as_str()?;
+                    let line = entry.get("line")?.as_u64()?;
+                    if file.replace('\\', "/") != path.replace('\\', "/") || line == 0 {
+                        return None;
+                    }
+                    let marker = format!("main::_doctest_main_{encoded_path}_{line}_");
+                    definitions
+                        .iter()
+                        .any(|definition| definition.starts_with(&marker))
+                        .then(|| (file.to_owned(), line))
+                })
+                .collect::<Vec<_>>();
+            let [(file, line)] = matches.as_slice() else {
+                tcx.dcx().fatal(format!(
+                    "Supercov could not bind standalone rustdoc compilation to exactly one catalog entry (matched {})",
+                    matches.len()
+                ));
+            };
+            Some(format!("rustdoc:{group}:{file}:{line}"))
         }
         Some(role @ ("merged-runner" | "merged-bundle")) => {
             let group = env::var(RUSTDOC_GROUP_ID).ok()?;
@@ -7802,17 +7868,50 @@ fn launch_rustdoc(args: &[String]) -> ! {
         .env("RUSTC_BOOTSTRAP", "1")
         .env(RUSTDOC_LAUNCHED, "1")
         .env(RUSTDOC_GROUP_ID, group);
+    let directory = env::var_os(OUTPUT_DIRECTORY).expect("compiler output directory");
+    // Rustdoc's own versioned extraction format is the authority for every
+    // test identity and execution attribute. Capture it from the identical
+    // invocation before running libtest; compiler maps then augment only the
+    // merged subset with source/probe translations.
+    let catalog = Command::new(&rustdoc)
+        .args(args)
+        .arg("-Zunstable-options")
+        .arg("--output-format=doctest")
+        .env("RUSTC_BOOTSTRAP", "1")
+        .output()
+        .expect("capture exact rustdoc doctest catalog");
+    if !catalog.status.success() {
+        let _ = io::stdout().write_all(&catalog.stdout);
+        let _ = io::stderr().write_all(&catalog.stderr);
+        std::process::exit(catalog.status.code().unwrap_or(1));
+    }
+    let catalog_path = PathBuf::from(&directory).join(format!(
+        ".rustdoc-catalog-{invocation}.json"
+    ));
+    if let Err(error) = write_new_synced(&catalog_path, &catalog.stdout) {
+        eprintln!("error: Supercov could not persist exact rustdoc catalog: {error}");
+        std::process::exit(1);
+    }
+    command.env(RUSTDOC_CATALOG_PATH, &catalog_path);
+
     if env::var_os(RUSTDOC_CAPTURE_OUTCOMES).is_none() {
         let status = command.status().expect("launch exact rustdoc");
+        if let Err(error) = fs::remove_file(&catalog_path) {
+            eprintln!(
+                "error: Supercov could not remove exact rustdoc catalog {}: {error}",
+                catalog_path.display()
+            );
+            std::process::exit(1);
+        }
         std::process::exit(status.code().unwrap_or(1));
     }
 
     let engine = env::var_os(RUSTDOC_ENGINE_PATH).expect("Supercov engine path");
-    let directory = env::var_os(OUTPUT_DIRECTORY).expect("compiler output directory");
     let reservation = Command::new(&engine)
         .arg("__prepare-rustdoc-transport")
         .arg(&directory)
         .arg(&invocation)
+        .env_remove(COMPILER_WRAPPER_CONFIG)
         .output()
         .expect("prepare rustdoc transport");
     if !reservation.status.success() {
@@ -7830,23 +7929,6 @@ fn launch_rustdoc(args: &[String]) -> ! {
         .and_then(serde_json::Value::as_str)
         .expect("rustdoc transport reservation token");
 
-    // Rustdoc's own versioned extraction format is the authority for every
-    // test identity and execution attribute. Capture it from the identical
-    // invocation before running libtest; compiler maps then augment only the
-    // merged subset with source/probe translations.
-    let catalog = Command::new(&rustdoc)
-        .args(args)
-        .arg("-Zunstable-options")
-        .arg("--output-format=doctest")
-        .env("RUSTC_BOOTSTRAP", "1")
-        .output()
-        .expect("capture exact rustdoc doctest catalog");
-    if !catalog.status.success() {
-        let _ = io::stdout().write_all(&catalog.stdout);
-        let _ = io::stderr().write_all(&catalog.stderr);
-        std::process::exit(catalog.status.code().unwrap_or(1));
-    }
-
     command
         .arg("--test-args=-Z unstable-options")
         .arg("--test-args=--format=json")
@@ -7855,6 +7937,13 @@ fn launch_rustdoc(args: &[String]) -> ! {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let output = command.output().expect("capture exact rustdoc outcomes");
+    if let Err(error) = fs::remove_file(&catalog_path) {
+        eprintln!(
+            "error: Supercov could not remove exact rustdoc catalog {}: {error}",
+            catalog_path.display()
+        );
+        std::process::exit(1);
+    }
     let executable = env::current_exe().expect("resolve compiler companion executable");
     let build_id = format!(
         "{:x}",
@@ -7866,6 +7955,7 @@ fn launch_rustdoc(args: &[String]) -> ! {
         .arg(invocation)
         .arg(group)
         .arg(build_id)
+        .env_remove(COMPILER_WRAPPER_CONFIG)
         .env("SUPERCOV_RUST_TRANSPORT_FILE", transport_path)
         .env("SUPERCOV_RUST_TRANSPORT_TOKEN", transport_token)
         .stdin(Stdio::piped())

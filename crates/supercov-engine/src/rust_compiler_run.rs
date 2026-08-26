@@ -36,12 +36,14 @@ pub struct DirectRustCompilerRunResult {
     pub run_directory: PathBuf,
     pub exit_code: i32,
     pub tests: usize,
+    pub libtests: usize,
+    pub doctests: usize,
     pub setup_results: usize,
     pub background_results: usize,
     pub artifacts: usize,
     pub selection: crate::rust_compiler_selection::SelectedRustCompilerCompanion,
     pub denominator: RustCompilerDenominatorCounts,
-    pub attempt_health: Vec<crate::rust_compiler_test_runner::RustCompilerAttemptHealth>,
+    pub transport_health: Vec<crate::rust_compiler_test_runner::RustCompilerTransportHealthRecord>,
     pub summary: crate::coverage_analysis::CoverageSummary,
     pub recovered_runs: Vec<String>,
     pub metadata: RunMetadata,
@@ -162,6 +164,21 @@ pub fn run_direct_rust_compiler(
             .iter()
             .filter(|result| result.role == "test")
             .count();
+        let libtests = run
+            .request
+            .raw_results
+            .iter()
+            .filter(|result| result.role == "test" && result.provenance.runner == "rust-libtest")
+            .count();
+        let doctests = run
+            .request
+            .raw_results
+            .iter()
+            .filter(|result| result.role == "test" && result.provenance.runner == "rustdoc")
+            .count();
+        if tests != libtests + doctests {
+            return Err("Rust compiler run contains an unclassified test runner".into());
+        }
         let background_results = run
             .request
             .raw_results
@@ -193,12 +210,14 @@ pub fn run_direct_rust_compiler(
             run_directory,
             exit_code: run.exit_code,
             tests,
+            libtests,
+            doctests,
             setup_results,
             background_results,
             artifacts: run.artifacts,
             selection: run.selection,
             denominator,
-            attempt_health: run.attempt_health,
+            transport_health: run.transport_health,
             summary: report.view.summary,
             recovered_runs,
             metadata,

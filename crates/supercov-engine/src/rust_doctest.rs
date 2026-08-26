@@ -281,38 +281,53 @@ impl RustdocOutcomeGroupJoin {
         self.ambiguous_filtered_out != 0 || self.ambiguous_unstarted_tests != 0
     }
 
-    fn temporary_test_name(&self, entry: &RustdocJoinedOutcome) -> String {
-        if let Some(merged) = &entry.merged_entry {
-            format!("rustdoc:{}:{}", self.group, merged.module)
-        } else {
-            format!(
-                "rustdoc:{}:{}:{}",
-                self.group, entry.catalog.file, entry.catalog.line
-            )
-        }
+    fn canonical_test_name(&self, entry: &RustdocJoinedOutcome) -> String {
+        format!(
+            "rustdoc:{}:{}:{}",
+            self.group, entry.catalog.file, entry.catalog.line
+        )
+    }
+
+    fn merged_test_name(&self, entry: &RustdocJoinedOutcome) -> Option<String> {
+        entry
+            .merged_entry
+            .as_ref()
+            .map(|merged| format!("rustdoc:{}:{}", self.group, merged.module))
     }
 
     pub fn attributed_transport(
         &self,
         entry: &RustdocJoinedOutcome,
     ) -> Result<(u64, RustTransportRead), RustdocOutcomeError> {
-        let base = rust_test_context_id(&self.temporary_test_name(entry))
+        let base = rust_test_context_id(&self.canonical_test_name(entry))
             .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?;
-        let read = transport_for_root(&self.transport, base)?;
-        let read = if entry.merged_entry.is_some() && read.committed != 0 {
-            self.join
-                .as_ref()
-                .ok_or_else(|| {
-                    RustdocOutcomeError::Invalid(format!(
-                        "merged doctest {} has runtime evidence but no identity translation",
-                        entry.catalog.name
-                    ))
-                })?
-                .translate_transport(base, &read)
-                .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?
-        } else {
-            read
-        };
+        let mut read = transport_for_root(&self.transport, base)?;
+        if let Some(merged_name) = self.merged_test_name(entry) {
+            let merged_base = rust_test_context_id(&merged_name)
+                .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?;
+            if merged_base == base {
+                return Err(RustdocOutcomeError::Invalid(format!(
+                    "rustdoc test context collision between {} and {merged_name}",
+                    self.canonical_test_name(entry)
+                )));
+            }
+            let mut merged = transport_for_root(&self.transport, merged_base)?;
+            if merged.committed != 0 {
+                merged = self
+                    .join
+                    .as_ref()
+                    .ok_or_else(|| {
+                        RustdocOutcomeError::Invalid(format!(
+                            "merged doctest {} has runtime evidence but no identity translation",
+                            entry.catalog.name
+                        ))
+                    })?
+                    .translate_transport(merged_base, &merged)
+                    .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?;
+                merged = rebase_transport_root(&merged, merged_base, base)?;
+                merge_transport(&mut read, merged)?;
+            }
+        }
         Ok((base, read))
     }
 
@@ -346,14 +361,20 @@ impl RustdocOutcomeGroupJoin {
     }
 
     fn validate_transport_ownership(&self) -> Result<(), RustdocOutcomeError> {
-        let expected = self
-            .entries
-            .iter()
-            .map(|entry| {
-                rust_test_context_id(&self.temporary_test_name(entry))
-                    .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))
-            })
-            .collect::<Result<BTreeSet<_>, _>>()?;
+        let mut expected = BTreeMap::new();
+        for entry in &self.entries {
+            let names = std::iter::once(self.canonical_test_name(entry))
+                .chain(self.merged_test_name(entry));
+            for name in names {
+                let context = rust_test_context_id(&name)
+                    .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?;
+                if let Some(other) = expected.insert(context, name.clone()) {
+                    return Err(RustdocOutcomeError::Invalid(format!(
+                        "rustdoc test context {context:016x} collides between {other} and {name}"
+                    )));
+                }
+            }
+        }
         let phase_parents = phase_parent_map(&self.transport)?;
         for context in self
             .transport
@@ -375,9 +396,14 @@ impl RustdocOutcomeGroupJoin {
             .filter(|context| *context != 0)
         {
             let root = root_context(context, &phase_parents)?;
-            if !expected.contains(&root) {
+            if !expected.contains_key(&root) {
                 return Err(RustdocOutcomeError::Invalid(format!(
-                    "rustdoc transport context {context:016x} has unknown test root {root:016x}"
+                    "rustdoc transport context {context:016x} has unknown test root {root:016x}; expected {}",
+                    expected
+                        .iter()
+                        .map(|(context, name)| format!("{context:016x}={name}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 )));
             }
         }
@@ -471,6 +497,124 @@ fn transport_for_root(
         dropped: 0,
         attachments: 0,
     })
+}
+
+fn rebase_transport_root(
+    read: &RustTransportRead,
+    old_base: u64,
+    new_base: u64,
+) -> Result<RustTransportRead, RustdocOutcomeError> {
+    validate_rust_phase_contexts(old_base, read)
+        .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?;
+    let definitions = read
+        .phases
+        .iter()
+        .map(|phase| (phase.child_context_id, phase))
+        .collect::<BTreeMap<_, _>>();
+    if definitions.len() != read.phases.len() {
+        return Err(RustdocOutcomeError::Invalid(
+            "rustdoc transport has duplicate assertion contexts".into(),
+        ));
+    }
+    fn translate(
+        context: u64,
+        old_base: u64,
+        new_base: u64,
+        definitions: &BTreeMap<u64, &RustPhaseContext>,
+        translated: &mut BTreeMap<u64, u64>,
+        visiting: &mut BTreeSet<u64>,
+    ) -> Result<u64, RustdocOutcomeError> {
+        if context == old_base {
+            return Ok(new_base);
+        }
+        if let Some(context) = translated.get(&context) {
+            return Ok(*context);
+        }
+        if !visiting.insert(context) {
+            return Err(RustdocOutcomeError::Invalid(format!(
+                "rustdoc assertion context cycle at {context:016x}"
+            )));
+        }
+        let phase = definitions.get(&context).ok_or_else(|| {
+            RustdocOutcomeError::Invalid(format!(
+                "rustdoc context {context:016x} has no phase definition"
+            ))
+        })?;
+        let parent = translate(
+            phase.parent_context_id,
+            old_base,
+            new_base,
+            definitions,
+            translated,
+            visiting,
+        )?;
+        let context = rust_assertion_context_id(parent, &phase.decision_id, phase.invocation_nonce)
+            .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?;
+        visiting.remove(&phase.child_context_id);
+        translated.insert(phase.child_context_id, context);
+        Ok(context)
+    }
+    let mut translated = BTreeMap::from([(old_base, new_base)]);
+    let mut visiting = BTreeSet::new();
+    for phase in &read.phases {
+        translate(
+            phase.child_context_id,
+            old_base,
+            new_base,
+            &definitions,
+            &mut translated,
+            &mut visiting,
+        )?;
+    }
+    let map_context = |context: u64| {
+        translated.get(&context).copied().ok_or_else(|| {
+            RustdocOutcomeError::Invalid(format!(
+                "rustdoc record context {context:016x} was not rebased"
+            ))
+        })
+    };
+    let mut rebased = read.clone();
+    for observation in &mut rebased.observations {
+        observation.context_id = map_context(observation.context_id)?;
+    }
+    for hit in &mut rebased.ordinal_hits {
+        hit.context_id = map_context(hit.context_id)?;
+    }
+    for phase in &mut rebased.phases {
+        phase.child_context_id = map_context(phase.child_context_id)?;
+        phase.parent_context_id = map_context(phase.parent_context_id)?;
+    }
+    validate_rust_phase_contexts(new_base, &rebased)
+        .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?;
+    Ok(rebased)
+}
+
+fn merge_transport(
+    destination: &mut RustTransportRead,
+    source: RustTransportRead,
+) -> Result<(), RustdocOutcomeError> {
+    let mut phase_ids = destination
+        .phases
+        .iter()
+        .map(|phase| phase.child_context_id)
+        .collect::<BTreeSet<_>>();
+    if source
+        .phases
+        .iter()
+        .any(|phase| !phase_ids.insert(phase.child_context_id))
+    {
+        return Err(RustdocOutcomeError::Invalid(
+            "rustdoc standalone and merged assertion contexts collide".into(),
+        ));
+    }
+    destination.committed = destination
+        .committed
+        .checked_add(source.committed)
+        .ok_or_else(|| RustdocOutcomeError::Invalid("rustdoc committed count overflow".into()))?;
+    destination.observations.extend(source.observations);
+    destination.ordinal_hits.extend(source.ordinal_hits);
+    destination.phases.extend(source.phases);
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4777,6 +4921,94 @@ mod tests {
         assert_eq!(translated.phases[1].child_context_id, final_outer_context);
         assert_eq!(translated.phases[1].parent_context_id, base);
         assert_eq!(translated.phases[1].decision_id, final_outer);
+    }
+
+    #[test]
+    fn combines_canonical_and_merged_runtime_roots_into_one_exact_doctest() {
+        let (pending_manifest, sources, map_bytes, authored) = pending_assertion_candidate();
+        let pending = RustCompilerManifest::parse_pending_doctest(&pending_manifest, "fixture")
+            .expect("pending candidate");
+        let joined = join_merged_doctest(&pending_manifest, &sources, &map_bytes, &authored)
+            .expect("strict merged join");
+        let final_point = joined.obligation_ids[&pending.points[0].id].clone();
+        let catalog = catalog_doctest(
+            "src/lib.rs - (line 3)",
+            3,
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+        let merged_entry = map().entries[0].clone();
+        let canonical_name = "rustdoc:fixture:src/lib.rs:3";
+        let merged_name = "rustdoc:fixture:__doctest_0";
+        let canonical = rust_test_context_id(canonical_name).expect("canonical context");
+        let merged = rust_test_context_id(merged_name).expect("merged context");
+        assert_ne!(canonical, merged);
+        let entry = RustdocJoinedOutcome {
+            catalog_index: 0,
+            catalog,
+            merged_entry: Some(merged_entry),
+            state: RustdocJoinedOutcomeState::Completed {
+                outcome: outcome("src/lib.rs - (line 3)", RustdocOutcomeStatus::Passed),
+            },
+        };
+        let group = RustdocOutcomeGroupJoin {
+            invocation_id: "1".repeat(64),
+            group: "fixture".into(),
+            companion_build_id: "2".repeat(64),
+            raw_catalog_sha256: "3".repeat(64),
+            raw_events_sha256: "4".repeat(64),
+            transport_sha256: "5".repeat(64),
+            join: Some(joined),
+            transport: RustTransportRead {
+                observations: vec![
+                    RustTransportObservation {
+                        process_id: 10,
+                        context_id: canonical,
+                        observation: RustProbeObservation::Hit {
+                            id: final_point.clone(),
+                        },
+                    },
+                    RustTransportObservation {
+                        process_id: 11,
+                        context_id: merged,
+                        observation: RustProbeObservation::Hit {
+                            id: pending.points[0].id.clone(),
+                        },
+                    },
+                ],
+                ordinal_hits: Vec::new(),
+                phases: Vec::new(),
+                committed: 2,
+                incomplete: 0,
+                dropped: 0,
+                attachments: 2,
+            },
+            entries: vec![entry.clone()],
+            ambiguous_filtered_out: 0,
+            ambiguous_unstarted_tests: 0,
+        };
+
+        let (base, combined) = group
+            .attributed_transport(&entry)
+            .expect("canonical plus merged transport");
+        assert_eq!(base, canonical);
+        assert_eq!(combined.committed, 2);
+        assert_eq!(combined.observations.len(), 2);
+        assert!(
+            combined
+                .observations
+                .iter()
+                .all(|observation| observation.context_id == canonical)
+        );
+        assert!(combined.observations.iter().all(|observation| {
+            matches!(
+                &observation.observation,
+                RustProbeObservation::Hit { id } if id == &final_point
+            )
+        }));
     }
 
     #[test]

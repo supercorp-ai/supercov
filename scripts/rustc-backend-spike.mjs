@@ -502,6 +502,7 @@ try {
   run('cargo', ['build', '-p', 'supercov']);
 
   const rustc = run('rustup', ['which', 'rustc']).stdout.trim();
+  const cargo = run('rustup', ['which', 'cargo']).stdout.trim();
   const selectionRequest = {
     rustcPath: rustc,
     candidates: [wrapper],
@@ -588,7 +589,7 @@ try {
       env: {RUSTC: rustc},
       input: JSON.stringify({
         root: productionFixture,
-        command: ['cargo', 'test'],
+        command: [cargo, 'test'],
         runId: 'run_0123456789abcdef',
         startedAt: '2026-08-26T00:00:00.000Z',
         wrapperPath: supercov,
@@ -608,14 +609,30 @@ try {
     productionRun.setupResults > 0,
     'production compiler run did not publish CTFE build-phase evidence',
   );
-  assert.equal(productionRun.attemptHealth.length, productionRun.tests);
+  assert.equal(productionRun.tests, productionRun.libtests + productionRun.doctests);
+  assert.equal(productionRun.doctests, 6);
+  const productionAttemptHealth = productionRun.transportHealth.filter(
+    ({scopeKind}) => scopeKind === 'test-attempt',
+  );
+  const productionRunnerHealth = productionRun.transportHealth.filter(
+    ({scopeKind}) => scopeKind === 'runner-invocation',
+  );
+  assert.equal(productionAttemptHealth.length, productionRun.libtests);
+  assert.equal(productionRunnerHealth.length, 1);
   assert(
-    productionRun.attemptHealth.every(
-      ({status, transport}) =>
+    productionRun.transportHealth.every(
+      ({scopeKind, status, transport}) =>
         transport.dropped === 0 &&
-        (status === 'skipped' || transport.attachments > 0),
+        transport.incomplete === 0 &&
+        (scopeKind === 'runner-invocation' ||
+          status === 'skipped' ||
+          transport.attachments > 0),
     ),
     'production compiler run lost or dropped authenticated test evidence',
+  );
+  assert(
+    productionRunnerHealth[0].transport.attachments > 0,
+    'production rustdoc invocation published no authenticated transport attachment',
   );
   assert(productionRun.summary.lines.covered > 0);
   assert(productionRun.summary.branches.covered > 0);
@@ -651,8 +668,9 @@ try {
       input: JSON.stringify({
         root: productionFixture,
         command: [
-          'cargo',
+          cargo,
           'test',
+          '--lib',
           'records_real_runtime_probes',
           '--',
           '--include-ignored',
@@ -671,8 +689,11 @@ try {
     1,
     'the production compiler runner discarded Cargo TESTNAME filtering',
   );
-  assert.equal(filteredProductionRun.attemptHealth.length, 1);
-  assert.equal(filteredProductionRun.attemptHealth[0].status, 'passed');
+  assert.equal(filteredProductionRun.libtests, 1);
+  assert.equal(filteredProductionRun.doctests, 0);
+  assert.equal(filteredProductionRun.transportHealth.length, 1);
+  assert.equal(filteredProductionRun.transportHealth[0].scopeKind, 'test-attempt');
+  assert.equal(filteredProductionRun.transportHealth[0].status, 'passed');
   assert(
     !existsSync(
       join(
@@ -682,6 +703,105 @@ try {
     ),
     'filtered production compiler run left terminal work state behind',
   );
+
+  const docOnlyProductionRun = JSON.parse(
+    run(supercov, ['__run-rust-compiler'], {
+      env: {RUSTC: rustc},
+      input: JSON.stringify({
+        root: productionFixture,
+        command: [cargo, 'test', '--doc'],
+        runId: 'run_2123456789abcdef',
+        startedAt: '2026-08-26T00:02:00.000Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+    }).stdout,
+  );
+  assert.equal(docOnlyProductionRun.exitCode, 0);
+  assert.equal(docOnlyProductionRun.tests, 6);
+  assert.equal(docOnlyProductionRun.libtests, 0);
+  assert.equal(docOnlyProductionRun.doctests, 6);
+  assert.equal(docOnlyProductionRun.artifacts, 0);
+  assert.equal(docOnlyProductionRun.transportHealth.length, 1);
+  assert.equal(
+    docOnlyProductionRun.transportHealth[0].scopeKind,
+    'runner-invocation',
+  );
+  assert.equal(docOnlyProductionRun.transportHealth[0].status, 'passed');
+  assert.equal(docOnlyProductionRun.transportHealth[0].transport.dropped, 0);
+  assert.equal(docOnlyProductionRun.transportHealth[0].transport.incomplete, 0);
+  assert(
+    docOnlyProductionRun.transportHealth[0].transport.attachments > 0,
+    'doc-only production run published no authenticated transport attachment',
+  );
+  assert(
+    !existsSync(
+      join(
+        productionFixture,
+        '.supercov/work/run_2123456789abcdef',
+      ),
+    ),
+    'doc-only production compiler run left terminal work state behind',
+  );
+  const docOnlyProductionQuery = run(
+    supercov,
+    ['runs', 'run_2123456789abcdef', '--json'],
+    {cwd: productionFixture},
+  );
+  assert.match(docOnlyProductionQuery.stdout, /run_2123456789abcdef/);
+
+  const failingDoctestFixture = join(scratch, 'failing-doctest-fixture');
+  cpSync(fixtureRoot, failingDoctestFixture, {
+    recursive: true,
+    filter: (path) =>
+      !path.startsWith(join(fixtureRoot, 'target')) &&
+      !path.startsWith(join(fixtureRoot, '.supercov')),
+  });
+  writeFileSync(
+    join(failingDoctestFixture, 'src/lib.rs'),
+    '\n/// ```\n/// assert_eq!(1, 2);\n/// ```\npub fn deliberately_failing_doctest() {}\n',
+    {flag: 'a'},
+  );
+  const failingDoctestRun = JSON.parse(
+    run(supercov, ['__run-rust-compiler'], {
+      env: {RUSTC: rustc},
+      expectFailure: true,
+      input: JSON.stringify({
+        root: failingDoctestFixture,
+        command: [cargo, 'test', '--doc'],
+        runId: 'run_3123456789abcdef',
+        startedAt: '2026-08-26T00:03:00.000Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+    }).stdout,
+  );
+  assert.equal(failingDoctestRun.exitCode, 101);
+  assert.equal(failingDoctestRun.libtests, 0);
+  assert.equal(failingDoctestRun.doctests, 7);
+  assert.equal(failingDoctestRun.metadata.testExitCode, 101);
+  assert.equal(failingDoctestRun.transportHealth.length, 1);
+  assert.equal(failingDoctestRun.transportHealth[0].scopeKind, 'runner-invocation');
+  assert.equal(failingDoctestRun.transportHealth[0].transport.dropped, 0);
+  assert.equal(failingDoctestRun.transportHealth[0].transport.incomplete, 0);
+  assert(
+    !existsSync(
+      join(
+        failingDoctestFixture,
+        '.supercov/work/run_3123456789abcdef',
+      ),
+    ),
+    'failed doctest run left terminal work state behind',
+  );
+  const failingDoctestQuery = run(
+    supercov,
+    ['runs', 'run_3123456789abcdef', '--json'],
+    {cwd: failingDoctestFixture},
+  );
+  assert.match(failingDoctestQuery.stdout, /run_3123456789abcdef/);
+  assert.match(failingDoctestQuery.stdout, /failed/);
   assert.equal(
     createHash('sha256')
       .update(readFileSync(join(productionFixture, 'src/lib.rs')))

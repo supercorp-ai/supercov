@@ -35,6 +35,11 @@ pub const RUST_TARGET_ROOT_ENV: &str = "SUPERCOV_RUST_TARGET_ROOT";
 pub const RUST_INSTRUMENT_MIR_ENV: &str = "SUPERCOV_RUST_INSTRUMENT_MIR";
 pub const RUST_INSTRUMENT_CTFE_ENV: &str = "SUPERCOV_RUST_INSTRUMENT_CTFE";
 pub const RUST_STATIC_RUNTIME_DIRECTORY_ENV: &str = "SUPERCOV_RUST_STATIC_RUNTIME_DIRECTORY";
+pub const RUSTDOC_WRAPPER_MODE_ENV: &str = "SUPERCOV_RUSTDOC_WRAPPER_MODE";
+pub const RUST_REAL_RUSTDOC_ENV: &str = "SUPERCOV_RUST_REAL_RUSTDOC";
+pub const RUST_COMPANION_PATH_ENV: &str = "SUPERCOV_RUST_COMPANION_PATH";
+pub const RUSTDOC_CAPTURE_OUTCOMES_ENV: &str = "SUPERCOV_RUSTDOC_CAPTURE_OUTCOMES";
+pub const RUSTDOC_ENGINE_PATH_ENV: &str = "SUPERCOV_RUSTDOC_ENGINE_PATH";
 const SHARED_RUNTIME_TEMPLATE: &str = include_str!("../runtime-assets/rust-mmap-runtime.rs");
 const SHARED_RUNTIME_EXPORTS: &str = r#"
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_ordinal_hit(ordinal: u64) { __supercov_shared_runtime::ordinal_hit(ordinal) }
@@ -87,8 +92,12 @@ pub struct RustCompilerBuild {
     pub compiler_output_directory: PathBuf,
     pub ctfe_units: Vec<RustCompilerCtfeUnit>,
     pub doctest_outcomes: RustdocOutcomeResolution,
+    pub run_libtests: bool,
     pub run_doctests: bool,
     pub doctest_arguments: Vec<String>,
+    pub doctest_exit_code: Option<i32>,
+    pub doctest_stdout: Vec<u8>,
+    pub doctest_stderr: Vec<u8>,
     pub build_started_at_ms: i64,
     pub build_ended_at_ms: i64,
     pub build_ms: f64,
@@ -233,6 +242,46 @@ fn write_wrapper_config(
     file.write_all(&bytes)
         .map_err(|error| io_error(path, error))?;
     file.sync_all().map_err(|error| io_error(path, error))
+}
+
+pub fn publish_compiler_selection_attestation(
+    directory: &Path,
+    selection: &SelectedRustCompilerCompanion,
+) -> Result<PathBuf, RustCompilerOrchestrationError> {
+    if !fs::symlink_metadata(directory).is_ok_and(|metadata| metadata.file_type().is_dir()) {
+        return Err(io_error(
+            directory,
+            "compiler selection root is not a directory",
+        ));
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| RustCompilerOrchestrationError::Selection(error.to_string()))?
+        .as_nanos();
+    let stem = format!("selection-{}-{now}", std::process::id());
+    let partial = directory.join(format!(".{stem}.partial"));
+    let final_path = directory.join(format!("{stem}.json"));
+    let bytes = serde_json::to_vec(selection)
+        .map_err(|error| RustCompilerOrchestrationError::Selection(error.to_string()))?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut cleanup = RemoveFileOnDrop(Some(partial.clone()));
+    let mut file = options
+        .open(&partial)
+        .map_err(|error| io_error(&partial, error))?;
+    file.write_all(&bytes)
+        .map_err(|error| io_error(&partial, error))?;
+    file.sync_all().map_err(|error| io_error(&partial, error))?;
+    drop(file);
+    fs::rename(&partial, &final_path).map_err(|error| io_error(&final_path, error))?;
+    sync_directory(directory)?;
+    cleanup.0 = None;
+    Ok(final_path)
 }
 
 fn write_shared_runtime_source(directory: &Path) -> Result<(), RustCompilerOrchestrationError> {
@@ -491,11 +540,12 @@ fn compiler_candidates(
         .map_err(|error| RustCompilerOrchestrationError::Manifest(error.to_string()))
 }
 
-fn selections(
+pub fn verified_compiler_selection(
     directory: &Path,
     candidates: &[PathBuf],
     require_public_capabilities: bool,
-) -> Result<SelectedRustCompilerCompanion, RustCompilerOrchestrationError> {
+    allow_in_progress: bool,
+) -> Result<Option<SelectedRustCompilerCompanion>, RustCompilerOrchestrationError> {
     let mut attestations = Vec::new();
     let entries = fs::read_dir(directory)
         .map_err(|error| io_error(directory, error))?
@@ -508,6 +558,9 @@ fn selections(
                 "selection output contains a non-UTF-8 name".into(),
             ));
         };
+        if name.starts_with(".selection-") && name.ends_with(".partial") && allow_in_progress {
+            continue;
+        }
         if !name.starts_with("selection-") || !name.ends_with(".json") {
             return Err(RustCompilerOrchestrationError::CompilerOutput(format!(
                 "unexpected selection output {name}"
@@ -533,11 +586,9 @@ fn selections(
             })?,
         );
     }
-    let first = attestations.first().ok_or_else(|| {
-        RustCompilerOrchestrationError::Selection(
-            "Cargo invoked no authenticated compiler companion".into(),
-        )
-    })?;
+    let Some(first) = attestations.first() else {
+        return Ok(None);
+    };
     if attestations.iter().any(|selection| selection != first) {
         return Err(RustCompilerOrchestrationError::Selection(
             "Cargo used more than one compiler identity or companion".into(),
@@ -551,7 +602,7 @@ fn selections(
             "wrapper attestation changed during post-build verification".into(),
         ));
     }
-    Ok(verified)
+    Ok(Some(verified))
 }
 
 fn cargo_artifacts(
@@ -626,6 +677,12 @@ pub fn build_with_rust_compiler_companion(
     if std::env::var_os("RUSTC_WORKSPACE_WRAPPER").is_some() {
         return Err(RustCompilerOrchestrationError::ExistingWorkspaceWrapper);
     }
+    if std::env::var_os("RUSTDOC").is_some() {
+        return Err(RustCompilerOrchestrationError::InvalidRequest(
+            "an existing RUSTDOC executable cannot yet be composed without changing rustdoc semantics"
+                .into(),
+        ));
+    }
     let project_root = fs::canonicalize(&request.project_root)
         .map_err(|error| io_error(&request.project_root, error))?;
     if !fs::symlink_metadata(&project_root).is_ok_and(|metadata| metadata.file_type().is_dir()) {
@@ -664,47 +721,74 @@ pub fn build_with_rust_compiler_companion(
         .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
     let execution = rust_cargo_execution_selection(&invocation)
         .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
-    if !execution.run_libtests {
-        return Err(RustCompilerOrchestrationError::InvalidRequest(
-            "doc-only Cargo execution is not connected to the production rustdoc supervisor yet"
-                .into(),
-        ));
-    }
-    invocation
-        .arguments
-        .retain(|argument| argument != "--no-run" && !argument.starts_with("--message-format="));
-    invocation
-        .arguments
-        .extend(["--no-run".into(), "--message-format=json".into()]);
     let build_started_at_ms = epoch_ms()?;
     let started = Instant::now();
-    let output = Command::new(&invocation.program)
-        .args(&invocation.arguments)
-        .current_dir(&project_root)
-        .env("CARGO_TARGET_DIR", &target_directory)
-        .env("RUSTC_WORKSPACE_WRAPPER", &wrapper)
-        .env(RUST_COMPILER_WRAPPER_CONFIG_ENV, &config_path)
-        .env(RUST_COMPILER_OUTPUT_ENV, &candidate_directory)
-        .env(RUST_SOURCE_ROOT_ENV, &project_root)
-        .env(RUST_TARGET_ROOT_ENV, &target_directory)
-        .env(RUST_INSTRUMENT_MIR_ENV, "1")
-        .env(RUST_INSTRUMENT_CTFE_ENV, "1")
-        .output()
-        .map_err(|error| RustCompilerOrchestrationError::Cargo(error.to_string()))?;
+    let output = if execution.run_libtests {
+        invocation.arguments.retain(|argument| {
+            argument != "--no-run" && !argument.starts_with("--message-format=")
+        });
+        invocation
+            .arguments
+            .extend(["--no-run".into(), "--message-format=json".into()]);
+        let output = Command::new(&invocation.program)
+            .args(&invocation.arguments)
+            .current_dir(&project_root)
+            .env("CARGO_TARGET_DIR", &target_directory)
+            .env("RUSTC_WORKSPACE_WRAPPER", &wrapper)
+            .env(RUST_COMPILER_WRAPPER_CONFIG_ENV, &config_path)
+            .env(RUST_COMPILER_OUTPUT_ENV, &candidate_directory)
+            .env(RUST_SOURCE_ROOT_ENV, &project_root)
+            .env(RUST_TARGET_ROOT_ENV, &target_directory)
+            .env(RUST_INSTRUMENT_MIR_ENV, "1")
+            .env(RUST_INSTRUMENT_CTFE_ENV, "1")
+            .output()
+            .map_err(|error| RustCompilerOrchestrationError::Cargo(error.to_string()))?;
+        if !output.status.success() {
+            let rendered = rendered_cargo_diagnostics(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(RustCompilerOrchestrationError::Cargo(
+                format!("{stderr}{rendered}").trim().to_owned(),
+            ));
+        }
+        Some(output)
+    } else {
+        None
+    };
+    let doctest_output = if execution.run_doctests {
+        Some(
+            Command::new(&invocation.program)
+                .args(&execution.doctest_arguments)
+                .current_dir(&project_root)
+                .env("CARGO_TARGET_DIR", &target_directory)
+                .env("RUSTC_WORKSPACE_WRAPPER", &wrapper)
+                .env(RUST_COMPILER_WRAPPER_CONFIG_ENV, &config_path)
+                .env(RUST_COMPILER_OUTPUT_ENV, &candidate_directory)
+                .env(RUST_SOURCE_ROOT_ENV, &project_root)
+                .env(RUST_TARGET_ROOT_ENV, &target_directory)
+                .env(RUST_INSTRUMENT_MIR_ENV, "1")
+                .env(RUST_INSTRUMENT_CTFE_ENV, "1")
+                .env(RUST_STATIC_RUNTIME_DIRECTORY_ENV, &shared_runtime_directory)
+                .env("RUSTDOC", &wrapper)
+                .env(RUSTDOC_WRAPPER_MODE_ENV, "1")
+                .output()
+                .map_err(|error| RustCompilerOrchestrationError::Cargo(error.to_string()))?,
+        )
+    } else {
+        None
+    };
     let build_ms = started.elapsed().as_secs_f64() * 1000.0;
     let build_ended_at_ms = epoch_ms()?;
-    if !output.status.success() {
-        let rendered = rendered_cargo_diagnostics(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(RustCompilerOrchestrationError::Cargo(
-            format!("{stderr}{rendered}").trim().to_owned(),
-        ));
-    }
-    let selection = selections(
+    let selection = verified_compiler_selection(
         &selection_directory,
         &request.companion_candidates,
         request.require_public_capabilities,
-    )?;
+        false,
+    )?
+    .ok_or_else(|| {
+        RustCompilerOrchestrationError::Selection(
+            "Cargo invoked no authenticated compiler companion".into(),
+        )
+    })?;
     let resolved = compiler_candidates(&candidate_directory)?;
     let normalized = normalize_rust_compiler_candidates(resolved.candidates)
         .map_err(|error| RustCompilerOrchestrationError::Manifest(error.to_string()))?;
@@ -723,7 +807,15 @@ pub fn build_with_rust_compiler_companion(
     }
     let doctest_outcomes = join_rustdoc_outcomes(resolved.merged_units, doctest_outcomes)
         .map_err(|error| RustCompilerOrchestrationError::CompilerOutput(error.to_string()))?;
-    let artifacts = cargo_artifacts(&output.stdout, &target_directory)?;
+    let artifacts = output
+        .as_ref()
+        .map(|output| cargo_artifacts(&output.stdout, &target_directory))
+        .transpose()?
+        .unwrap_or_default();
+    let (doctest_exit_code, doctest_stdout, doctest_stderr) = doctest_output.map_or_else(
+        || (None, Vec::new(), Vec::new()),
+        |output| (output.status.code(), output.stdout, output.stderr),
+    );
     Ok(RustCompilerBuild {
         selection,
         normalized,
@@ -732,8 +824,12 @@ pub fn build_with_rust_compiler_companion(
         compiler_output_directory,
         ctfe_units,
         doctest_outcomes,
+        run_libtests: execution.run_libtests,
         run_doctests: execution.run_doctests,
         doctest_arguments: execution.doctest_arguments,
+        doctest_exit_code,
+        doctest_stdout,
+        doctest_stderr,
         build_started_at_ms,
         build_ended_at_ms,
         build_ms,
