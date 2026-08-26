@@ -5,6 +5,15 @@ shortcuts. Rewrites are approved. This document fixes the target architecture,
 the acceptance gates, and the order of work. It deliberately does not touch
 code; a compatibility sweep is in flight and Tier 1 (trust) still lands first.
 
+Current sequencing note (2026-08-26): the Rust-only JavaScript cutover described
+in the checkpoint below is complete and published. The active critical path and
+requirement-to-gate ordering now live in
+`progress/current-execution-plan-2026-08-26.md`: finish the owned Rust-language
+frontend and prove it through Supercov-on-Supercov dogfood before resuming
+Python and later languages. This master plan remains the architectural end
+state and invariant set; the current execution plan supersedes only obsolete
+migration sequencing.
+
 ## Committed end-state decisions
 
 1. **Rust core engine, single static binary.** CLI, project discovery,
