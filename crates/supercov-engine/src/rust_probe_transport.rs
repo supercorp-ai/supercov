@@ -83,6 +83,7 @@ pub enum RustTransportError {
     InvalidLength,
     InvalidDescriptor(u64),
     InvalidRecord(u64),
+    InvalidAssertionContext(String),
 }
 
 impl std::fmt::Display for RustTransportError {
@@ -98,11 +99,62 @@ impl std::fmt::Display for RustTransportError {
             Self::InvalidRecord(index) => {
                 write!(formatter, "invalid Rust transport record {index}")
             }
+            Self::InvalidAssertionContext(reason) => {
+                write!(formatter, "invalid Rust assertion context: {reason}")
+            }
         }
     }
 }
 
 impl std::error::Error for RustTransportError {}
+
+pub fn rust_assertion_context_id(
+    parent: u64,
+    decision_id: &str,
+) -> Result<u64, RustTransportError> {
+    if parent == 0 {
+        return Ok(0);
+    }
+    if parent == u64::MAX {
+        return Err(RustTransportError::InvalidAssertionContext(
+            "the reserved nesting sentinel cannot be a parent".into(),
+        ));
+    }
+    let digest = decision_id
+        .strip_prefix("rs:decision:")
+        .filter(|digest| digest.len() == 24 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| {
+            RustTransportError::InvalidAssertionContext(format!(
+                "invalid decision ID {decision_id}"
+            ))
+        })?;
+    let id_high = u64::from_str_radix(&digest[..16], 16).map_err(|error| {
+        RustTransportError::InvalidAssertionContext(format!(
+            "invalid decision ID {decision_id}: {error}"
+        ))
+    })?;
+    let id_low = u32::from_str_radix(&digest[16..], 16).map_err(|error| {
+        RustTransportError::InvalidAssertionContext(format!(
+            "invalid decision ID {decision_id}: {error}"
+        ))
+    })?;
+    let mut value = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in b"supercov-rust-assertion-phase-v1"
+        .iter()
+        .copied()
+        .chain(parent.to_le_bytes())
+        .chain(id_high.to_le_bytes())
+        .chain(id_low.to_le_bytes())
+    {
+        value ^= u64::from(byte);
+        value = value.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Ok(if matches!(value, 0 | u64::MAX) {
+        value ^ 0xa5a5_5a5a_d3c3_b4b4
+    } else {
+        value
+    })
+}
 
 fn put_u32(target: &mut [u8], offset: usize, value: u32) {
     target[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -496,6 +548,13 @@ fn main() {{
         __supercov_runtime_v1::hit("rs:statement:0123456789abcdef01234567");
         __supercov_runtime_v1::exit_context(outer);
         __supercov_runtime_v1::hit("rs:statement:0123456789abcdef01234567");
+        let assertion = __supercov_runtime_v1::enter_assertion_context(
+            0x0123_4567_89ab_cdef,
+            0x0123_4567,
+        );
+        __supercov_runtime_v1::hit("rs:statement:0123456789abcdef01234567");
+        __supercov_runtime_v1::exit_context(assertion);
+        __supercov_runtime_v1::hit("rs:statement:0123456789abcdef01234567");
     }} else if mode == "mir-decisions" {{
         let before_outer = __supercov_runtime_v1::enter_context(901);
         let outer = __supercov_runtime_v1::mir_decision_start(
@@ -593,6 +652,28 @@ fn main() {{
         assert_eq!(KIND_ORDINAL_HIT, contract.record_kinds.ordinal_hit);
         assert!(RUNTIME_TEMPLATE.contains("b\"SCVRUST1\""));
         assert!(RUNTIME_TEMPLATE.contains("const DESCRIPTOR_SIZE: usize = 40;"));
+    }
+
+    #[test]
+    fn assertion_context_derivation_is_exact_nested_and_never_promotes_background() {
+        let first =
+            rust_assertion_context_id(CONTEXT, "rs:decision:0123456789abcdef01234567").unwrap();
+        let nested =
+            rust_assertion_context_id(first, "rs:decision:fedcba9876543210fedcba98").unwrap();
+        assert_ne!(first, CONTEXT);
+        assert_ne!(nested, first);
+        assert_eq!(
+            rust_assertion_context_id(0, "rs:decision:0123456789abcdef01234567").unwrap(),
+            0
+        );
+        assert!(matches!(
+            rust_assertion_context_id(CONTEXT, "not-a-decision"),
+            Err(RustTransportError::InvalidAssertionContext(_))
+        ));
+        assert!(matches!(
+            rust_assertion_context_id(u64::MAX, "rs:decision:0123456789abcdef01234567"),
+            Err(RustTransportError::InvalidAssertionContext(_))
+        ));
     }
 
     #[test]
@@ -719,7 +800,15 @@ fn main() {{
                 .iter()
                 .map(|item| item.context_id)
                 .collect::<Vec<_>>(),
-            [CONTEXT, 100, 200, 100, CONTEXT]
+            [
+                CONTEXT,
+                100,
+                200,
+                100,
+                CONTEXT,
+                rust_assertion_context_id(CONTEXT, "rs:decision:0123456789abcdef01234567").unwrap(),
+                CONTEXT,
+            ]
         );
 
         let rejected = directory.join("rejected-token.transport");

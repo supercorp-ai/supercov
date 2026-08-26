@@ -1392,9 +1392,13 @@ miss blocks flipping any default.
   injection. Goldens prove passed/failed vectors, `assert_ne!`'s inverted
   compiler comparison, collapsed proc-macro source, once-only left-to-right
   operand evaluation, no false failure when condition evaluation panics, and a
-  committed failure before a message argument panics. Assertion-phase identity
-  is deliberately not inferred from these outcomes and remains a separate
-  promotion gate.
+  committed failure before a message argument panics. Compiler-owned phase
+  boundaries now derive a deterministic child transport context from the
+  active test/assertion context and stable decision ID. Exact concurrent
+  goldens prove argument attribution, normal/unwind restoration and nested
+  assertion restoration. Supervisor collision preflight and persistence of
+  those contexts as explicit evidence-v3 assertion phases remain the promotion
+  gate; phase causality is never inferred from outcome timing.
 
 ## Non-goals and guardrails
 

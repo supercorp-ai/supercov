@@ -39,6 +39,17 @@ nonzero ID resolves, through supervisor-owned attempt metadata, to exact run,
 worker, logical test, retry, and phase identity. It is recorded per observation
 so concurrent contexts are never inferred from timestamps or process order.
 
+Rust assertion phases use the same context field without changing this wire
+format. The injected runtime derives a child context from the active nonzero
+parent context and the assertion's stable 96-bit decision ID using FNV-1a over
+`supercov-rust-assertion-phase-v1 || parent-le || id-high-le || id-low-le`.
+Reserved results are remapped with `0xa5a55a5ad3c3b4b4`. Context `0` never
+becomes attributed. The supervisor must derive the same IDs for every
+test/assertion nesting path, reject any collision before execution, and map
+each child to an explicit assertion phase in evidence v3. Enter/exit boundaries
+are compiler-owned and cover assertion argument/condition evaluation through
+normal or unwind completion; nested assertions restore their parent assertion.
+
 ## Publication and crash semantics
 
 A writer atomically reserves a descriptor and payload range, fills both, then

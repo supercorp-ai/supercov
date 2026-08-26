@@ -494,6 +494,25 @@ mod tests {
     }
 
     #[cfg(supercov_spike_instrumented)]
+    #[test]
+    #[ignore = "requires compiler-spike assertion context instrumentation"]
+    fn assertion_restore_context() {
+        assert_eq!(authored(true), 1);
+        let result = fallible(2);
+        assert_eq!(result, Ok(3));
+    }
+
+    #[cfg(supercov_spike_instrumented)]
+    #[test]
+    #[ignore = "requires compiler-spike nested assertion context instrumentation"]
+    fn nested_assertion_context() {
+        assert!({
+            assert_eq!(authored(true), 1);
+            fallible(2) == Ok(3)
+        });
+    }
+
+    #[cfg(supercov_spike_instrumented)]
     #[probe_macros::generated_test]
     #[ignore = "requires compiler-spike context instrumentation"]
     fn attribute_context() {

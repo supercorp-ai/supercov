@@ -208,8 +208,10 @@ and the compiler rejects both full-ID and probe-prefix collisions. The
 candidate still carries blocking denominator limitations. The authored match
    slices below have since narrowed that surface. The six stable assertion
    macros now have exact passed/failed and MC/DC observations, including
-   collapsed proc-macro output and panic/evaluation-order goldens, but exact
-   assertion-phase attribution, CTFE and doctest obligation/probe mappings,
+   collapsed proc-macro output and panic/evaluation-order goldens. Exact nested
+   assertion phase contexts now cover argument evaluation and restore on normal
+   and unwind exits; supervisor collision preflight and evidence-v3 phase
+   metadata mapping, CTFE and doctest obligation/probe mappings,
 plus full package and compiler fingerprints, remain R1 work. No measurement-
 complete claim is possible yet.
 

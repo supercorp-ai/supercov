@@ -700,6 +700,25 @@ mod __SUPERCOV_MODULE__ {
         value
     }
 
+    fn assertion_context_id(parent: u64, id_high: u64, id_low: u32) -> u64 {
+        let mut value = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in b"supercov-rust-assertion-phase-v1"
+            .iter()
+            .copied()
+            .chain(parent.to_le_bytes())
+            .chain(id_high.to_le_bytes())
+            .chain(id_low.to_le_bytes())
+        {
+            value ^= u64::from(byte);
+            value = value.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        if matches!(value, 0 | u64::MAX) {
+            value ^ 0xa5a5_5a5a_d3c3_b4b4
+        } else {
+            value
+        }
+    }
+
     fn transport() -> Option<&'static Transport> {
         static TRANSPORT: OnceLock<Option<Transport>> = OnceLock::new();
         TRANSPORT.get_or_init(Transport::open).as_ref()
@@ -809,5 +828,17 @@ mod __SUPERCOV_MODULE__ {
         CONTEXT_OVERRIDE.with(|current| {
             current.set((previous != NO_CONTEXT_OVERRIDE).then_some(previous));
         });
+    }
+
+    #[inline(never)]
+    pub fn enter_assertion_context(id_high: u64, id_low: u32) -> u64 {
+        let Some(transport) = transport() else {
+            return NO_CONTEXT_OVERRIDE;
+        };
+        let parent = transport.active_context();
+        if parent == 0 {
+            return NO_CONTEXT_OVERRIDE;
+        }
+        enter_context(assertion_context_id(parent, id_high, id_low))
     }
 }

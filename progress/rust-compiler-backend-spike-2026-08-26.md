@@ -279,8 +279,11 @@ an unverified rustc commit.
    semantics. Assertion passed/failed outcomes and MC/DC are now exact for the
    six stable standard macros, including collapsed proc-macro output, inverted
    `assert_ne!` comparison semantics, condition/message panic timing and
-   once-only left-to-right operand evaluation; exact assertion-phase identity
-   remains a separate attribution gate. Bind remaining real MIR/CTFE probes to
+   once-only left-to-right operand evaluation. Compiler-owned phase boundaries
+   now place assertion arguments, conditions and outcomes under a deterministic
+   child context, restore on normal and unwind exits, and nest exactly. The
+   supervisor-side collision preflight plus evidence-v3 phase metadata mapping
+   remains the attribution gate. Bind remaining real MIR/CTFE probes to
    the same manifest IDs. Add
    derive, external expansion, generic/trait, include/module and
    package-fingerprint corpora before treating the candidate as a complete

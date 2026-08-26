@@ -274,6 +274,29 @@ function testContextId(testName) {
   return value.toString();
 }
 
+function assertionPhaseContextId(parent, decisionId) {
+  const digest = decisionId.replace(/^rs:decision:/, '');
+  assert.match(digest, /^[0-9a-f]{24}$/);
+  const bytes = Buffer.alloc(
+    Buffer.byteLength('supercov-rust-assertion-phase-v1') + 8 + 8 + 4,
+  );
+  let offset = bytes.write('supercov-rust-assertion-phase-v1');
+  bytes.writeBigUInt64LE(BigInt(parent), offset);
+  offset += 8;
+  bytes.writeBigUInt64LE(BigInt(`0x${digest.slice(0, 16)}`), offset);
+  offset += 8;
+  bytes.writeUInt32LE(Number.parseInt(digest.slice(16), 16), offset);
+  let value = 0xcbf29ce484222325n;
+  for (const byte of bytes) {
+    value ^= BigInt(byte);
+    value = BigInt.asUintN(64, value * 0x100000001b3n);
+  }
+  if (value === 0n || value === 0xffffffffffffffffn) {
+    value ^= 0xa5a55a5ad3c3b4b4n;
+  }
+  return value.toString();
+}
+
 try {
   run('cargo', ['build', '--manifest-path', manifest], {
     env: {RUSTC_BOOTSTRAP: '1'},
@@ -357,7 +380,7 @@ try {
   assert.equal(identityManifestA.model, 'rust-source-v1');
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
-    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: assertion phase attribution, CTFE and doctest obligation/probe mappings are not emitted yet',
+    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: assertion phase metadata/evidence-v3 mapping, CTFE and doctest obligation/probe mappings are not emitted yet',
   ]);
   const allIds = [
     ...identityManifestA.points.map(({id}) => id),
@@ -1310,6 +1333,16 @@ try {
       outcome.alternatives.map(({label}) => label).sort(),
       ['failed', 'passed'],
     );
+    assert(
+      behaviorEvidence.decisions
+        .filter(({id}) => id === assertion.id)
+        .every(
+          ({context}) =>
+            context ===
+            assertionPhaseContextId(transportContext, assertion.id),
+        ),
+      `${definition} evidence escaped its exact assertion phase`,
+    );
   }
   assert.deepEqual(
     vectorsForDecision(
@@ -1546,7 +1579,7 @@ try {
       },
     },
   );
-  assert.match(concurrentTests.stdout, /7 passed/);
+  assert.match(concurrentTests.stdout, /9 passed/);
   const concurrentEvidence = readTransport(concurrentTransport);
   assert.equal(concurrentEvidence.attachments, 1);
   assert.equal(concurrentEvidence.dropped, 0);
@@ -1561,6 +1594,70 @@ try {
   ];
   const contextIds = contextNames.map(testContextId);
   assert.equal(new Set(contextIds).size, contextIds.length, 'test context collision');
+  const concurrentManifests = manifests(instrumentedDirectory);
+  const assertionDecisionsFor = (name) => {
+    const decisions = new Map(
+      concurrentManifests.flatMap((manifestRecord) =>
+        manifestRecord.decisions
+          .filter(
+            (decision) =>
+              decision.kind === 'assertion' &&
+              decision.definitions.includes(name),
+          )
+          .map((decision) => [decision.id, decision]),
+      ),
+    );
+    return [...decisions.values()].sort(
+      (left, right) =>
+        right.end - right.start - (left.end - left.start) ||
+        left.start - right.start,
+    );
+  };
+  const assertionDecisionIdFor = (name) => {
+    const decisions = assertionDecisionsFor(name);
+    assert.equal(decisions.length, 1, `expected one assertion decision for ${name}`);
+    return decisions[0].id;
+  };
+  const assertionContextIds = contextNames.map((name, index) => {
+    return name === 'tests::panic_context'
+      ? null
+      : assertionPhaseContextId(contextIds[index], assertionDecisionIdFor(name));
+  });
+  const resolvedAssertionContextIds = assertionContextIds.filter(Boolean);
+  assert.equal(
+    new Set([...contextIds, ...resolvedAssertionContextIds]).size,
+    contextIds.length + resolvedAssertionContextIds.length,
+    'test/assertion context collision',
+  );
+  const restoreTestContext = testContextId('tests::assertion_restore_context');
+  const restoreAssertions = assertionDecisionsFor('tests::assertion_restore_context');
+  assert.equal(restoreAssertions.length, 2);
+  const restoreAuthoredAssertion = restoreAssertions.find((decision) =>
+    decision.conditions.some(({source}) => source.includes('authored')),
+  );
+  assert(restoreAuthoredAssertion);
+  const restoreAuthoredContext = assertionPhaseContextId(
+    restoreTestContext,
+    restoreAuthoredAssertion.id,
+  );
+  const nestedTestContext = testContextId('tests::nested_assertion_context');
+  const nestedAssertions = assertionDecisionsFor('tests::nested_assertion_context');
+  assert.equal(nestedAssertions.length, 2);
+  const nestedOuterAssertion = nestedAssertions.find((decision) =>
+    decision.conditions.some(({source}) => source.includes('fallible')),
+  );
+  const nestedInnerAssertion = nestedAssertions.find(
+    (decision) => decision.id !== nestedOuterAssertion?.id,
+  );
+  assert(nestedOuterAssertion && nestedInnerAssertion);
+  const nestedOuterContext = assertionPhaseContextId(
+    nestedTestContext,
+    nestedOuterAssertion.id,
+  );
+  const nestedInnerContext = assertionPhaseContextId(
+    nestedOuterContext,
+    nestedInnerAssertion.id,
+  );
   assert.deepEqual(
     new Set(
       concurrentEvidence.ordinals.map(
@@ -1568,10 +1665,14 @@ try {
       ),
     ),
     new Set([
-      `${contextIds[0]}:${authoredProbe}`,
-      `${contextIds[1]}:${fallibleProbe}`,
-      `${contextIds[2]}:${authoredProbe}`,
+      `${assertionContextIds[0]}:${authoredProbe}`,
+      `${assertionContextIds[1]}:${fallibleProbe}`,
+      `${assertionContextIds[2]}:${authoredProbe}`,
       `${contextIds[3]}:${panicProbe}`,
+      `${restoreAuthoredContext}:${authoredProbe}`,
+      `${restoreTestContext}:${fallibleProbe}`,
+      `${nestedInnerContext}:${authoredProbe}`,
+      `${nestedOuterContext}:${fallibleProbe}`,
       `0:${authoredProbe}`,
     ]),
   );
@@ -1580,7 +1681,7 @@ try {
   assert(
     concurrentEvidence.decisions.some(
       ({context, id, values, outcome}) =>
-        context === contextIds[4] &&
+        context === assertionContextIds[4] &&
         id === compoundDecisionId &&
         JSON.stringify(values) === JSON.stringify([true, true]) &&
         outcome === true,
@@ -1590,7 +1691,7 @@ try {
   assert(
     concurrentEvidence.decisions.some(
       ({context, id, values, outcome}) =>
-        context === contextIds[5] &&
+        context === assertionContextIds[5] &&
         id === compoundDecisionId &&
         JSON.stringify(values) === JSON.stringify([false, null]) &&
         outcome === false,

@@ -64,6 +64,7 @@ const FORCE_ID_COLLISION: &str = "SUPERCOV_RUSTC_SPIKE_FORCE_ID_COLLISION";
 const FORCE_PROBE_COLLISION: &str = "SUPERCOV_RUSTC_SPIKE_FORCE_PROBE_COLLISION";
 const PROBE_FUNCTION: &str = "__supercov_spike_runtime::ordinal_hit";
 const ENTER_CONTEXT_FUNCTION: &str = "__supercov_spike_runtime::enter_context";
+const ENTER_ASSERTION_CONTEXT_FUNCTION: &str = "__supercov_spike_runtime::enter_assertion_context";
 const EXIT_CONTEXT_FUNCTION: &str = "__supercov_spike_runtime::exit_context";
 const START_DECISION_FUNCTION: &str = "__supercov_spike_runtime::mir_decision_start";
 const RECORD_CONDITION_FUNCTION: &str = "__supercov_spike_runtime::mir_decision_condition";
@@ -93,6 +94,8 @@ static STRUCTURAL_DECISION_MARKERS: Mutex<
 static LET_ELSE_MARKERS: Mutex<BTreeMap<String, Vec<StructuralBranchMarker>>> =
     Mutex::new(BTreeMap::new());
 static TRY_OPERATOR_MARKERS: Mutex<BTreeMap<String, Vec<StructuralBranchMarker>>> =
+    Mutex::new(BTreeMap::new());
+static ASSERTION_PHASE_MARKERS: Mutex<BTreeMap<String, Vec<AssertionPhaseMarker>>> =
     Mutex::new(BTreeMap::new());
 static UNREACHABLE_MATCH_ARMS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static DOCTEST_ROLE: OnceLock<&'static str> = OnceLock::new();
@@ -169,6 +172,7 @@ struct DecisionObligation {
     conditions: Vec<DecisionCondition>,
     definitions: Vec<String>,
     structural_marker: bool,
+    assertion_source: Option<StableSourceRange>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,6 +187,12 @@ struct StructuralBranchMarker {
     local: u32,
     branch_id: String,
     alternative_ordinal: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AssertionPhaseMarker {
+    local: u32,
+    decision_id: String,
 }
 
 fn prune_unreachable_match_arms(
@@ -743,6 +753,20 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             });
         }
         let decision = self.identity("decision", condition.span, decision_kind)?;
+        let assertion_source = (decision_kind == "assertion")
+            .then(|| {
+                stable_source_range(self.tcx, expression.span.source_callsite(), self.crate_name)
+            })
+            .transpose()
+            .ok()?
+            .filter(|source| source.owned);
+        if decision_kind == "assertion" && assertion_source.is_none() {
+            self.limitations.insert(format!(
+                "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: assertion phase source",
+                self.definition
+            ));
+            return None;
+        }
         let decision_id = decision.id.clone();
         match self.decisions.get_mut(&decision.id) {
             Some(existing) if existing.identity.canonical != decision.canonical => {
@@ -754,7 +778,8 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             Some(existing)
                 if existing.decision_kind != decision_kind
                     || existing.conditions != conditions
-                    || existing.structural_marker != (decision_kind == "assertion") =>
+                    || existing.structural_marker != (decision_kind == "assertion")
+                    || existing.assertion_source != assertion_source =>
             {
                 self.tcx.dcx().fatal(format!(
                     "Supercov Rust decision aggregation mismatch for {}",
@@ -775,6 +800,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                         conditions,
                         definitions: vec![self.definition.clone()],
                         structural_marker: decision_kind == "assertion",
+                        assertion_source,
                     },
                 );
             }
@@ -830,6 +856,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             }
         };
         let decision = self.identity("decision", span, "assertion")?;
+        let assertion_source = source.clone();
         let condition = DecisionCondition {
             source: source.clone(),
             branch_source: source,
@@ -854,7 +881,8 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             Some(existing)
                 if existing.decision_kind != "assertion"
                     || existing.conditions.as_slice() != std::slice::from_ref(&condition)
-                    || !existing.structural_marker =>
+                    || !existing.structural_marker
+                    || existing.assertion_source.as_ref() != Some(&assertion_source) =>
             {
                 self.tcx.dcx().fatal(format!(
                     "Supercov Rust assertion aggregation mismatch for {}",
@@ -875,6 +903,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                         conditions: vec![condition],
                         definitions: vec![self.definition.clone()],
                         structural_marker: true,
+                        assertion_source: Some(assertion_source),
                     },
                 );
             }
@@ -1510,7 +1539,7 @@ impl Callbacks for ProbeCallbacks {
         let mut decisions = BTreeMap::<String, DecisionObligation>::new();
         let mut match_groups = BTreeMap::<String, MatchSelectionObligation>::new();
         let mut manifest_limitations = BTreeSet::from([
-            "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: assertion phase attribution, CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
+            "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: assertion phase metadata/evidence-v3 mapping, CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
         ]);
 
         for owner in tcx.hir_body_owners() {
@@ -2419,6 +2448,129 @@ fn assertion_condition_marker_assignments<'tcx>(
     Ok(assignments)
 }
 
+fn source_range_contains(owner: &StableSourceRange, candidate: &StableSourceRange) -> bool {
+    owner.key == candidate.key && owner.start <= candidate.start && owner.end >= candidate.end
+}
+
+fn assertion_span_matches(
+    tcx: TyCtxt<'_>,
+    crate_name: &str,
+    owner: &StableSourceRange,
+    span: rustc_span::Span,
+) -> bool {
+    [span, span.source_callsite()].into_iter().any(|candidate| {
+        stable_source_range(tcx, candidate, crate_name)
+            .is_ok_and(|candidate| source_range_contains(owner, &candidate))
+    })
+}
+
+fn install_assertion_phase_markers<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    crate_name: &str,
+    body: &mut Body<'tcx>,
+    decisions: &[&DecisionObligation],
+) -> Result<Vec<AssertionPhaseMarker>, String> {
+    let mut decisions = decisions.to_vec();
+    decisions.sort_by_key(|decision| {
+        let source = decision
+            .assertion_source
+            .as_ref()
+            .expect("assertion decisions have a phase source");
+        (
+            source.end.saturating_sub(source.start),
+            source.start,
+            decision.identity.owner_local_ordinal,
+        )
+    });
+    let mut markers = Vec::new();
+    for decision in decisions {
+        let source = decision
+            .assertion_source
+            .as_ref()
+            .ok_or_else(|| format!("assertion {} has no phase source", decision.identity.id))?;
+        let region = body
+            .basic_blocks
+            .iter_enumerated()
+            .filter_map(|(block, data)| {
+                data.statements
+                    .iter()
+                    .any(|statement| {
+                        assertion_span_matches(tcx, crate_name, source, statement.source_info.span)
+                    })
+                    .then_some(block)
+                    .or_else(|| {
+                        assertion_span_matches(
+                            tcx,
+                            crate_name,
+                            source,
+                            data.terminator().source_info.span,
+                        )
+                        .then_some(block)
+                    })
+            })
+            .collect::<BTreeSet<_>>();
+        if region.is_empty() {
+            return Err(format!(
+                "assertion {} has no built-MIR source region",
+                decision.identity.id
+            ));
+        }
+        let entries = region
+            .iter()
+            .copied()
+            .filter(|block| {
+                *block == rustc_middle::mir::START_BLOCK
+                    || body.basic_blocks.predecessors()[*block]
+                        .iter()
+                        .all(|predecessor| !region.contains(predecessor))
+            })
+            .collect::<Vec<_>>();
+        let [entry] = entries.as_slice() else {
+            return Err(format!(
+                "assertion {} has {} built-MIR region entries",
+                decision.identity.id,
+                entries.len()
+            ));
+        };
+        let entry_index = body.basic_blocks[*entry]
+            .statements
+            .iter()
+            .position(|statement| {
+                assertion_span_matches(tcx, crate_name, source, statement.source_info.span)
+            })
+            .unwrap_or(body.basic_blocks[*entry].statements.len());
+        let entry_local = body
+            .local_decls
+            .push(LocalDecl::new(tcx.types.u64, DUMMY_SP));
+        let (tail, terminator, cleanup) = {
+            let data = &mut body.basic_blocks_mut()[*entry];
+            let tail = data.statements.split_off(entry_index);
+            let terminator = data
+                .terminator
+                .take()
+                .ok_or_else(|| "assertion entry block has no terminator".to_owned())?;
+            (tail, terminator, data.is_cleanup)
+        };
+        let mut continuation_data = BasicBlockData::new(Some(terminator), cleanup);
+        continuation_data.statements = tail;
+        let continuation = body.basic_blocks_mut().push(continuation_data);
+        body.basic_blocks_mut()[*entry]
+            .statements
+            .push(match_arm_marker_statement(tcx, entry_local, 0));
+        body.basic_blocks_mut()[*entry].terminator = Some(Terminator {
+            source_info: SourceInfo::outermost(DUMMY_SP),
+            kind: TerminatorKind::Goto {
+                target: continuation,
+            },
+        });
+        markers.push(AssertionPhaseMarker {
+            local: entry_local.as_u32(),
+            decision_id: decision.identity.id.clone(),
+        });
+    }
+    Ok(markers)
+}
+
 fn synthetic_let_else_assignments(
     tcx: TyCtxt<'_>,
     crate_name: &str,
@@ -2823,6 +2975,18 @@ fn mir_built_with_match_markers<'tcx>(
             });
         }
     }
+    let assertion_phase_markers = install_assertion_phase_markers(
+        tcx,
+        &obligations.crate_name,
+        &mut instrumented,
+        &assertion_decisions,
+    )
+    .unwrap_or_else(|error| {
+        tcx.dcx().fatal(format!(
+            "Supercov could not bind assertion phase boundaries in {}: {error}",
+            obligations.definition
+        ))
+    });
     if !local_ordinals.is_empty() {
         let mut markers = MATCH_ARM_MARKERS
             .lock()
@@ -2878,7 +3042,337 @@ fn mir_built_with_match_markers<'tcx>(
             ));
         }
     }
+    if !assertion_phase_markers.is_empty() {
+        let mut markers = ASSERTION_PHASE_MARKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = markers.insert(
+            obligations.definition.clone(),
+            assertion_phase_markers.clone(),
+        ) && existing != assertion_phase_markers
+        {
+            tcx.dcx().fatal(format!(
+                "Supercov assertion phase marker collision for {}",
+                obligations.definition
+            ));
+        }
+    }
     tcx.alloc_steal_mir(instrumented)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn instrument_assertion_phases<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: LocalDefId,
+    body: &mut Body<'tcx>,
+    definition: &str,
+    markers: &[AssertionPhaseMarker],
+    enter: LocalDefId,
+    exit: LocalDefId,
+    unit: rustc_middle::mir::Local,
+    span: rustc_span::Span,
+) -> Result<(), String> {
+    let obligations = runtime_body_obligations(tcx, def_id)
+        .ok_or_else(|| format!("{definition} has assertion markers without obligations"))?;
+    let marker_by_local = markers
+        .iter()
+        .map(|marker| (marker.local, marker))
+        .collect::<BTreeMap<_, _>>();
+    let mut positions = BTreeMap::<u32, (BasicBlock, usize)>::new();
+    for (block, data) in body.basic_blocks.iter_enumerated() {
+        for (index, statement) in data.statements.iter().enumerate() {
+            let StatementKind::Assign(assignment) = &statement.kind else {
+                continue;
+            };
+            let (destination, _) = &**assignment;
+            let Some(local) = destination.as_local().map(|local| local.as_u32()) else {
+                continue;
+            };
+            if marker_by_local.contains_key(&local)
+                && positions.insert(local, (block, index)).is_some()
+            {
+                return Err(format!(
+                    "assertion phase marker local {local} survived more than once in {definition}"
+                ));
+            }
+        }
+    }
+    if positions.len() != markers.len() {
+        return Err(format!(
+            "assertion phase markers survived {}/{} times in {definition}",
+            positions.len(),
+            markers.len()
+        ));
+    }
+    let mut positions_by_block = BTreeMap::<BasicBlock, Vec<(u32, usize)>>::new();
+    for (local, (block, index)) in &positions {
+        positions_by_block
+            .entry(*block)
+            .or_default()
+            .push((*local, *index));
+    }
+    let mut entries = BTreeMap::<u32, (BasicBlock, BasicBlock)>::new();
+    for (block, mut block_positions) in positions_by_block {
+        block_positions.sort_by_key(|(_, index)| *index);
+        let mut current = block;
+        let mut consumed = 0;
+        for (local, original_index) in block_positions {
+            let index = original_index
+                .checked_sub(consumed)
+                .ok_or_else(|| "assertion phase marker order underflow".to_owned())?;
+            let (mut tail, terminator, cleanup) = {
+                let data = &mut body.basic_blocks_mut()[current];
+                let tail = data.statements.split_off(index);
+                let terminator = data
+                    .terminator
+                    .take()
+                    .ok_or_else(|| "assertion phase marker block has no terminator".to_owned())?;
+                (tail, terminator, data.is_cleanup)
+            };
+            let Some(marker_statement) = tail.first() else {
+                return Err("assertion phase marker disappeared while splitting".into());
+            };
+            let marker_matches = if let StatementKind::Assign(assignment) = &marker_statement.kind {
+                let (destination, _) = &**assignment;
+                destination
+                    .as_local()
+                    .is_some_and(|candidate| candidate.as_u32() == local)
+            } else {
+                false
+            };
+            if !marker_matches {
+                return Err(format!(
+                    "assertion phase marker local {local} changed order in {definition}"
+                ));
+            }
+            tail.remove(0);
+            let mut continuation_data = BasicBlockData::new(Some(terminator), cleanup);
+            continuation_data.statements = tail;
+            let continuation = body.basic_blocks_mut().push(continuation_data);
+            body.basic_blocks_mut()[current].terminator = Some(Terminator {
+                source_info: SourceInfo::outermost(DUMMY_SP),
+                kind: TerminatorKind::Goto {
+                    target: continuation,
+                },
+            });
+            entries.insert(local, (current, continuation));
+            current = continuation;
+            consumed = original_index + 1;
+        }
+    }
+    for marker in markers {
+        let (block, continuation) = entries[&marker.local];
+        let decision = obligations
+            .decisions
+            .get(&marker.decision_id)
+            .ok_or_else(|| {
+                format!(
+                    "assertion phase marker references unknown decision {}",
+                    marker.decision_id
+                )
+            })?;
+        let source = decision
+            .assertion_source
+            .as_ref()
+            .ok_or_else(|| format!("assertion {} has no phase source", marker.decision_id))?;
+        let previous = body.local_decls.push(LocalDecl::new(tcx.types.u64, span));
+        let digest = marker
+            .decision_id
+            .strip_prefix("rs:decision:")
+            .ok_or_else(|| format!("invalid assertion decision ID {}", marker.decision_id))?;
+        if digest.len() != 24 {
+            return Err(format!("invalid assertion decision digest {digest}"));
+        }
+        let id_high = u64::from_str_radix(&digest[..16], 16)
+            .map_err(|error| format!("invalid assertion decision ID: {error}"))?;
+        let id_low = u32::from_str_radix(&digest[16..], 16)
+            .map_err(|error| format!("invalid assertion decision ID: {error}"))?;
+        let cleanup = body.basic_blocks[block].is_cleanup;
+        let call = runtime_call_block(
+            tcx,
+            enter,
+            [
+                Operand::const_from_scalar(tcx, tcx.types.u64, Scalar::from_u64(id_high), span),
+                Operand::const_from_scalar(tcx, tcx.types.u32, Scalar::from_u32(id_low), span),
+            ]
+            .into_iter(),
+            Place::from(previous),
+            continuation,
+            span,
+            cleanup,
+        );
+        body.basic_blocks_mut()[block].terminator = call.terminator;
+
+        let mut region = body
+            .basic_blocks
+            .iter_enumerated()
+            .filter_map(|(candidate, data)| {
+                (candidate != block
+                    && (data.statements.iter().any(|statement| {
+                        assertion_span_matches(
+                            tcx,
+                            &obligations.crate_name,
+                            source,
+                            statement.source_info.span,
+                        )
+                    }) || assertion_span_matches(
+                        tcx,
+                        &obligations.crate_name,
+                        source,
+                        data.terminator().source_info.span,
+                    )))
+                .then_some(candidate)
+            })
+            .collect::<BTreeSet<_>>();
+        region.insert(continuation);
+        loop {
+            let predecessors = body.basic_blocks.predecessors();
+            let additions = body
+                .basic_blocks
+                .iter_enumerated()
+                .filter_map(|(candidate, data)| {
+                    if candidate == block || region.contains(&candidate) {
+                        return None;
+                    }
+                    let entered_from_region = predecessors[candidate]
+                        .iter()
+                        .any(|predecessor| region.contains(predecessor));
+                    let returns_to_region = semantic_successors(data.terminator())
+                        .into_iter()
+                        .any(|target| region.contains(&target))
+                        || data
+                            .terminator()
+                            .unwind()
+                            .is_some_and(|unwind| match unwind {
+                                UnwindAction::Cleanup(target) => region.contains(target),
+                                _ => false,
+                            });
+                    (entered_from_region && returns_to_region).then_some(candidate)
+                })
+                .collect::<Vec<_>>();
+            if additions.is_empty() {
+                break;
+            }
+            region.extend(additions);
+        }
+        let regular_exits = region
+            .iter()
+            .flat_map(|source_block| {
+                semantic_successors(body.basic_blocks[*source_block].terminator())
+                    .into_iter()
+                    .filter(|target| !region.contains(target))
+                    .map(|target| (*source_block, target))
+            })
+            .collect::<BTreeSet<_>>();
+        let unwind_exits = region
+            .iter()
+            .filter_map(|source_block| {
+                body.basic_blocks[*source_block]
+                    .terminator()
+                    .unwind()
+                    .and_then(|unwind| match unwind {
+                        UnwindAction::Continue => Some((*source_block, None)),
+                        UnwindAction::Cleanup(target) if !region.contains(target) => {
+                            Some((*source_block, Some(*target)))
+                        }
+                        _ => None,
+                    })
+            })
+            .collect::<BTreeSet<_>>();
+        let terminal_exits = region
+            .iter()
+            .copied()
+            .filter(|source_block| {
+                matches!(
+                    body.basic_blocks[*source_block].terminator().kind,
+                    TerminatorKind::Return | TerminatorKind::UnwindResume
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        if regular_exits.is_empty() && unwind_exits.is_empty() && terminal_exits.is_empty() {
+            return Err(format!(
+                "assertion {} has no post-borrow-check phase exit",
+                marker.decision_id
+            ));
+        }
+        for (source_block, target) in regular_exits {
+            let cleanup = body.basic_blocks[source_block].is_cleanup;
+            let bridge = body.basic_blocks_mut().push(runtime_call_block(
+                tcx,
+                exit,
+                [Operand::Copy(Place::from(previous))].into_iter(),
+                Place::from(unit),
+                target,
+                span,
+                cleanup,
+            ));
+            let mut replaced = 0;
+            body.basic_blocks_mut()[source_block]
+                .terminator_mut()
+                .successors_mut(|edge| {
+                    if *edge == target {
+                        *edge = bridge;
+                        replaced += 1;
+                    }
+                });
+            if replaced == 0 {
+                return Err(format!(
+                    "assertion {} lost regular phase exit {:?}->{:?}",
+                    marker.decision_id, source_block, target
+                ));
+            }
+        }
+        for (source_block, target) in unwind_exits {
+            let terminal = target.unwrap_or_else(|| {
+                body.basic_blocks_mut().push(BasicBlockData::new(
+                    Some(Terminator {
+                        source_info: SourceInfo::outermost(span),
+                        kind: TerminatorKind::UnwindResume,
+                    }),
+                    true,
+                ))
+            });
+            let bridge = body.basic_blocks_mut().push(runtime_call_block(
+                tcx,
+                exit,
+                [Operand::Copy(Place::from(previous))].into_iter(),
+                Place::from(unit),
+                terminal,
+                span,
+                true,
+            ));
+            *body.basic_blocks_mut()[source_block]
+                .terminator_mut()
+                .unwind_mut()
+                .ok_or_else(|| {
+                    format!(
+                        "assertion {} lost unwind phase exit {:?}",
+                        marker.decision_id, source_block
+                    )
+                })? = UnwindAction::Cleanup(bridge);
+        }
+        for source_block in terminal_exits {
+            let cleanup = body.basic_blocks[source_block].is_cleanup;
+            let original = body.basic_blocks_mut()[source_block]
+                .terminator
+                .take()
+                .ok_or_else(|| "assertion terminal phase block has no terminator".to_owned())?;
+            let terminal = body
+                .basic_blocks_mut()
+                .push(BasicBlockData::new(Some(original), cleanup));
+            body.basic_blocks_mut()[source_block].terminator = runtime_call_block(
+                tcx,
+                exit,
+                [Operand::Copy(Place::from(previous))].into_iter(),
+                Place::from(unit),
+                terminal,
+                span,
+                cleanup,
+            )
+            .terminator;
+        }
+    }
+    Ok(())
 }
 
 fn mir_drops_with_structural_probes<'tcx>(
@@ -2892,6 +3386,12 @@ fn mir_drops_with_structural_probes<'tcx>(
     if env::var_os(INSTRUMENT_MIR).is_none() || tcx.hir_body_const_context(def_id).is_some() {
         return body;
     }
+    let assertion_phase_markers = ASSERTION_PHASE_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&tcx.def_path_str(def_id))
+        .cloned()
+        .unwrap_or_default();
     let (match_plans, for_plans, guard_plans, let_else_plans, try_plans) = {
         let borrowed = body.borrow();
         (
@@ -2937,6 +3437,7 @@ fn mir_drops_with_structural_probes<'tcx>(
         && guard_plans.is_empty()
         && let_else_plans.is_empty()
         && try_plans.is_empty()
+        && assertion_phase_markers.is_empty()
     {
         return body;
     }
@@ -2960,9 +3461,17 @@ fn mir_drops_with_structural_probes<'tcx>(
     let finish_decision = has_guard_plans
         .then(|| find_runtime_function(tcx, FINISH_DECISION_FUNCTION))
         .flatten();
+    let has_assertion_phases = !assertion_phase_markers.is_empty();
+    let enter_assertion_context = has_assertion_phases
+        .then(|| find_runtime_function(tcx, ENTER_ASSERTION_CONTEXT_FUNCTION))
+        .flatten();
+    let exit_context = has_assertion_phases
+        .then(|| find_runtime_function(tcx, EXIT_CONTEXT_FUNCTION))
+        .flatten();
     if has_branch_plans != (start_branch.is_some() && hit_branch.is_some())
         || has_guard_plans
             != (start_decision.is_some() && record_condition.is_some() && finish_decision.is_some())
+        || has_assertion_phases != (enter_assertion_context.is_some() && exit_context.is_some())
     {
         tcx.dcx().fatal(format!(
             "Supercov structural runtimes are incomplete while instrumenting {}",
@@ -3120,6 +3629,24 @@ fn mir_drops_with_structural_probes<'tcx>(
     {
         tcx.dcx().fatal(format!(
             "Supercov could not inject pre-optimization Rust for-loop probes in {}: {error}",
+            tcx.def_path_str(def_id)
+        ));
+    }
+    if let (Some(enter), Some(exit)) = (enter_assertion_context, exit_context)
+        && let Err(error) = instrument_assertion_phases(
+            tcx,
+            def_id,
+            &mut instrumented,
+            &tcx.def_path_str(def_id),
+            &assertion_phase_markers,
+            enter,
+            exit,
+            unit,
+            span,
+        )
+    {
+        tcx.dcx().fatal(format!(
+            "Supercov could not inject Rust assertion phases in {}: {error}",
             tcx.def_path_str(def_id)
         ));
     }
@@ -5327,7 +5854,11 @@ fn runtime_call_block<'tcx>(
                     .collect(),
                 destination,
                 target: Some(target),
-                unwind: UnwindAction::Continue,
+                unwind: if cleanup {
+                    UnwindAction::Unreachable
+                } else {
+                    UnwindAction::Continue
+                },
                 call_source: CallSource::Misc,
                 fn_span: span,
             },
