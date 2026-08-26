@@ -281,6 +281,7 @@ struct StructuralBranchMarker {
 struct AssertionPhaseMarker {
     local: u32,
     decision_id: String,
+    statement_ordinal: Option<u64>,
 }
 
 fn prune_unreachable_match_arms(
@@ -597,15 +598,15 @@ fn stable_source_range(
         let snippet = source_map
             .span_to_snippet(span)
             .map_err(|_| "rustdoc retained no exact extracted snippet".to_owned())?;
-        if snippet.is_empty() || snippet.contains('\r') || snippet.contains('\n') {
-            return Err("multiline or empty extracted doctest span".into());
+        if snippet.is_empty() || snippet.contains('\r') {
+            return Err("empty or carriage-return doctest span".into());
         }
         let start_location = source_map.lookup_char_pos(span.lo());
         let end_location = source_map.lookup_char_pos(span.hi());
         let authored_start = source_map.doctest_offset_line(&file.name, start_location.line);
         let authored_end = source_map.doctest_offset_line(&file.name, end_location.line);
-        if authored_start != authored_end || authored_start == 0 {
-            return Err("doctest span does not map to one authored line".into());
+        if authored_start == 0 || authored_end == 0 {
+            return Err("doctest span has no authored line mapping".into());
         }
         let root = normalized_root(SOURCE_ROOT)
             .ok_or_else(|| "missing normalized Rust source root".to_owned())?;
@@ -616,33 +617,62 @@ fn stable_source_range(
         let original = fs::read_to_string(&original_path)
             .map_err(|error| format!("{}: {error}", original_path.display()))?;
         let mut line_offset = 0_usize;
-        let mut matches = Vec::new();
-        for (index, original_line) in original.split_inclusive('\n').enumerate() {
-            let line = index + 1;
-            if line.abs_diff(authored_start) <= 2 {
-                let mut positions = original_line.match_indices(&snippet);
-                if let Some((first, _)) = positions.next() {
-                    if positions.next().is_some() {
-                        return Err(format!(
-                            "extracted doctest snippet is ambiguous on authored line {line}"
-                        ));
-                    }
-                    matches.push((line_offset, first, line));
-                }
+        let original_lines = original
+            .split_inclusive('\n')
+            .enumerate()
+            .map(|(index, line)| {
+                let entry = (index + 1, line_offset, line);
+                line_offset += line.len();
+                entry
+            })
+            .collect::<Vec<_>>();
+        let mut anchors = Vec::new();
+        for (index, fragment) in snippet.split('\n').enumerate() {
+            if fragment.trim().is_empty() {
+                continue;
             }
-            line_offset += original_line.len();
+            let extracted_line = start_location
+                .line
+                .checked_add(index)
+                .ok_or_else(|| "doctest extracted line overflow".to_owned())?;
+            let expected = source_map.doctest_offset_line(&file.name, extracted_line);
+            if expected == 0 {
+                return Err("doctest fragment has no authored line mapping".into());
+            }
+            let candidates = original_lines
+                .iter()
+                .filter(|(line, _, _)| line.abs_diff(expected) <= 2)
+                .flat_map(|(line, offset, original_line)| {
+                    original_line
+                        .match_indices(fragment)
+                        .map(move |(column, _)| (*line, *offset + column, fragment.len()))
+                })
+                .collect::<Vec<_>>();
+            let [(line, start, length)] = candidates.as_slice() else {
+                return Err(format!(
+                    "extracted doctest line fragment has {} authored matches near line {expected}",
+                    candidates.len()
+                ));
+            };
+            if anchors
+                .last()
+                .is_some_and(|(previous_line, _, _)| previous_line >= line)
+            {
+                return Err("doctest source fragments do not map in authored order".into());
+            }
+            anchors.push((*line, *start, *length));
         }
-        let [(line_offset, first, _authored_line)] = matches.as_slice() else {
-            return Err(format!(
-                "extracted doctest snippet has {} authored matches near line {authored_start}",
-                matches.len()
-            ));
+        let Some((first_line, mapped_start, _)) = anchors.first().copied() else {
+            return Err("doctest span has no non-whitespace authored fragment".into());
         };
-        let mapped_start = line_offset
-            .checked_add(*first)
-            .ok_or_else(|| "doctest source offset overflow".to_owned())?;
-        let mapped_end = mapped_start
-            .checked_add(snippet.len())
+        let Some((last_line, last_start, last_length)) = anchors.last().copied() else {
+            return Err("doctest span has no final authored fragment".into());
+        };
+        if first_line.abs_diff(authored_start) > 2 || last_line.abs_diff(authored_end) > 2 {
+            return Err("doctest span endpoints disagree with authored line metadata".into());
+        }
+        let mapped_end = last_start
+            .checked_add(last_length)
             .ok_or_else(|| "doctest source offset overflow".to_owned())?;
         let key = format!("source:{}", relative.to_string_lossy().replace('\\', "/"));
         let snapshot = ExactSourceSnapshot {
@@ -1530,7 +1560,26 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
 
     fn visit_block(&mut self, block: &'tcx hir::Block<'tcx>) {
         if let Some(tail) = block.expr {
-            self.point(tail.span, "statement", "tail-expression");
+            let assertion = assertion_macro_kind(self.tcx, tail.span).is_some();
+            let span = if assertion {
+                tail.span.source_callsite()
+            } else {
+                tail.span
+            };
+            let duplicate_assertion_statement = assertion
+                && stable_source_range(self.tcx, span, self.crate_name).is_ok_and(|source| {
+                    self.points.values().any(|point| {
+                        point.point_kind == "statement"
+                            && point.source == source
+                            && point
+                                .definitions
+                                .iter()
+                                .any(|definition| definition == &self.definition)
+                    })
+                });
+            if !duplicate_assertion_statement {
+                self.point(span, "statement", "tail-expression");
+            }
         }
         intravisit::walk_block(self, block);
     }
@@ -2937,8 +2986,10 @@ fn assertion_span_matches(
 fn install_assertion_phase_markers<'tcx>(
     tcx: TyCtxt<'tcx>,
     crate_name: &str,
+    definition: &str,
     body: &mut Body<'tcx>,
     decisions: &[&DecisionObligation],
+    points: &BTreeMap<String, PointObligation>,
 ) -> Result<Vec<AssertionPhaseMarker>, String> {
     let mut decisions = decisions.to_vec();
     decisions.sort_by_key(|decision| {
@@ -2958,6 +3009,32 @@ fn install_assertion_phase_markers<'tcx>(
             .assertion_source
             .as_ref()
             .ok_or_else(|| format!("assertion {} has no phase source", decision.identity.id))?;
+        let statement_points = points
+            .iter()
+            .filter(|(_, point)| {
+                point.point_kind == "statement"
+                    && point.source == *source
+                    && point
+                        .definitions
+                        .iter()
+                        .any(|candidate| candidate == definition)
+            })
+            .collect::<Vec<_>>();
+        if statement_points.len() > 1 {
+            return Err(format!(
+                "assertion {} in {definition} maps to {} exact statement obligations: {}",
+                decision.identity.id,
+                statement_points.len(),
+                statement_points
+                    .iter()
+                    .map(|(id, point)| format!("{id} ({})", point.discriminator))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        let statement_ordinal = statement_points
+            .first()
+            .map(|(_, point)| point.probe_ordinal);
         let region = body
             .basic_blocks
             .iter_enumerated()
@@ -3036,6 +3113,7 @@ fn install_assertion_phase_markers<'tcx>(
         markers.push(AssertionPhaseMarker {
             local: entry_local.as_u32(),
             decision_id: decision.identity.id.clone(),
+            statement_ordinal,
         });
     }
     Ok(markers)
@@ -3533,8 +3611,10 @@ fn mir_built_with_match_markers<'tcx>(
     let assertion_phase_markers = install_assertion_phase_markers(
         tcx,
         &obligations.crate_name,
+        &obligations.definition,
         &mut instrumented,
         &assertion_decisions,
+        &obligations.points,
     )
     .unwrap_or_else(|error| {
         tcx.dcx().fatal(format!(
@@ -3619,6 +3699,7 @@ fn instrument_assertion_phases<'tcx>(
     markers: &[AssertionPhaseMarker],
     enter: LocalDefId,
     exit: LocalDefId,
+    ordinal_hit: Option<LocalDefId>,
     unit: rustc_middle::mir::Local,
     span: rustc_span::Span,
 ) -> Result<(), String> {
@@ -3738,6 +3819,30 @@ fn instrument_assertion_phases<'tcx>(
         let id_low = u32::from_str_radix(&digest[16..], 16)
             .map_err(|error| format!("invalid assertion decision ID: {error}"))?;
         let cleanup = body.basic_blocks[block].is_cleanup;
+        let assertion_entry = if let Some(ordinal) = marker.statement_ordinal {
+            let hit = ordinal_hit.ok_or_else(|| {
+                format!(
+                    "assertion {} has a statement obligation without an ordinal runtime",
+                    marker.decision_id
+                )
+            })?;
+            body.basic_blocks_mut().push(runtime_call_block(
+                tcx,
+                hit,
+                std::iter::once(Operand::const_from_scalar(
+                    tcx,
+                    tcx.types.u64,
+                    Scalar::from_u64(ordinal),
+                    span,
+                )),
+                Place::from(unit),
+                continuation,
+                span,
+                cleanup,
+            ))
+        } else {
+            continuation
+        };
         let call = runtime_call_block(
             tcx,
             enter,
@@ -3747,7 +3852,7 @@ fn instrument_assertion_phases<'tcx>(
             ]
             .into_iter(),
             Place::from(previous),
-            continuation,
+            assertion_entry,
             span,
             cleanup,
         );
@@ -4005,7 +4110,10 @@ fn mir_drops_with_structural_probes<'tcx>(
         .then(|| find_runtime_function(tcx, HIT_BRANCH_FUNCTION))
         .flatten();
     let has_guard_plans = !guard_plans.is_empty();
-    let ordinal_hit = has_guard_plans
+    let has_assertion_statement_points = assertion_phase_markers
+        .iter()
+        .any(|marker| marker.statement_ordinal.is_some());
+    let ordinal_hit = (has_guard_plans || has_assertion_statement_points)
         .then(|| find_runtime_function(tcx, PROBE_FUNCTION))
         .flatten();
     let start_decision = has_guard_plans
@@ -4030,6 +4138,7 @@ fn mir_drops_with_structural_probes<'tcx>(
                 && record_condition.is_some()
                 && finish_decision.is_some()
                 && ordinal_hit.is_some())
+        || (has_assertion_statement_points && ordinal_hit.is_none())
         || has_assertion_phases != (enter_assertion_context.is_some() && exit_context.is_some())
     {
         tcx.dcx().fatal(format!(
@@ -4206,6 +4315,7 @@ fn mir_drops_with_structural_probes<'tcx>(
             &assertion_phase_markers,
             enter,
             exit,
+            ordinal_hit,
             unit,
             span,
         )
@@ -5168,9 +5278,20 @@ fn runtime_statement_plans<'tcx>(
         points,
         ..
     } = obligations;
+    let assertion_statement_ordinals = ASSERTION_PHASE_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&def_id)
+        .into_iter()
+        .flatten()
+        .filter_map(|marker| marker.statement_ordinal)
+        .collect::<BTreeSet<_>>();
     let statements = points
         .into_iter()
-        .filter(|(_, point)| point.point_kind == "statement")
+        .filter(|(_, point)| {
+            point.point_kind == "statement"
+                && !assertion_statement_ordinals.contains(&point.probe_ordinal)
+        })
         .collect::<Vec<_>>();
     if statements.is_empty() {
         return Ok(Vec::new());
@@ -5241,8 +5362,31 @@ fn runtime_statement_plans<'tcx>(
         }
         let mut candidates = candidates.into_iter();
         let Some(mut block) = candidates.next() else {
+            let mut mapped = body
+                .basic_blocks
+                .iter()
+                .flat_map(|data| {
+                    data.statements
+                        .iter()
+                        .map(|statement| statement.source_info.span)
+                        .chain(std::iter::once(data.terminator().source_info.span))
+                })
+                .filter_map(|span| {
+                    stable_source_range(tcx, span, &crate_name)
+                        .or_else(|_| stable_source_range(tcx, span.source_callsite(), &crate_name))
+                        .ok()
+                })
+                .filter(|source| source.key == point.source.key)
+                .map(|source| format!("{}..{}", source.start, source.end))
+                .collect::<Vec<_>>();
+            mapped.sort();
+            mapped.dedup();
             return Err(format!(
-                "statement {id} in {definition} has no exact MIR entry mapping"
+                "statement {id} in {definition} at {}:{}..{} has no exact MIR entry mapping; mapped ranges: {}",
+                point.source.key,
+                point.source.start,
+                point.source.end,
+                mapped.join(", ")
             ));
         };
         for candidate in candidates {

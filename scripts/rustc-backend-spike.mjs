@@ -3137,8 +3137,9 @@ try {
   const standaloneDoctestPoints = standaloneManifest.points.filter(
     ({provenance}) => provenance === 'doctest-source',
   );
-  assert(
-    standaloneDoctestPoints.length >= 3,
+  assert.equal(
+    standaloneDoctestPoints.length,
+    5,
     `standalone doctest statements were not added to the owned denominator: ${JSON.stringify(
       standaloneManifest.points.map(({kind, provenance, sourceKey, start, end}) => ({
         kind,
@@ -3155,6 +3156,14 @@ try {
   assert(
     standalonePointSources.some((source) => source.includes('let hidden')),
     `hidden doctest statement was not mapped to authored bytes: ${JSON.stringify(standalonePointSources)}`,
+  );
+  assert(
+    standalonePointSources.some(
+      (source) =>
+        source.includes('let combined = hidden') &&
+        source.includes('std::hint::black_box(2)'),
+    ),
+    `multiline doctest statement was not mapped to authored bytes: ${JSON.stringify(standalonePointSources)}`,
   );
   assert(
     standalonePointSources.some((source) => source.includes('hidden + 2')),
@@ -3175,13 +3184,20 @@ try {
   const standaloneOrdinals = new Set(
     standaloneDoctestPoints.map(({probeOrdinal}) => probeOrdinal),
   );
-  assert(
-    doctestRuntime.ordinals.some(
-      ({context, ordinal}) =>
-        doctestRootContext(context) === standaloneContext &&
-        standaloneOrdinals.has(ordinal),
-    ),
-    'standalone doctest source probes were not attributed to its exact context',
+  const observedStandaloneOrdinals = new Set(
+    doctestRuntime.ordinals
+      .filter(({context}) => doctestRootContext(context) === standaloneContext)
+      .map(({ordinal}) => ordinal),
+  );
+  const missingStandaloneOrdinals = [...standaloneOrdinals].filter(
+    (ordinal) => !observedStandaloneOrdinals.has(ordinal),
+  );
+  assert.deepEqual(
+    missingStandaloneOrdinals,
+    [],
+    `standalone doctest source probes were not all attributed to their exact context: ${JSON.stringify(
+      missingStandaloneOrdinals,
+    )}`,
   );
   assert(
     wrappedDoctestRecords.some(

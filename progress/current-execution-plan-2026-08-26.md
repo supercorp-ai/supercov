@@ -607,14 +607,19 @@ and probes, outcome/retry archive joining, custom wrapper composition, failure
 and signal forwarding, and the full doctest semantics/crash corpus.
 
 The standalone extracted-source slice now carries real owned obligations too.
-For single-line spans, the companion combines rustdoc's original path/line
-metadata with a bounded unique snippet match and emits exact byte ranges against
-the original documentation source snapshot. Hidden setup and both visible
-assertion invocations become authored statement points; each assertion macro is
-one source statement while its generated implementation and rustdoc's synthetic
-`fn main` remain outside the denominator. The corresponding runtime point is
-observed under the exact standalone test context, and ambiguous, missing,
-multiline or synthetic mappings fail closed. Complete multiline and merged
+For single- and multiline spans, the companion combines rustdoc's original
+path/line metadata with bounded unique per-line anchors, requires those anchors
+to remain in authored order and emits one exact byte range against the original
+documentation source snapshot. Hidden setup, one real multiline statement and
+three visible assertion invocations become exactly five authored statement
+points; each assertion macro is one source statement while its generated
+implementation and rustdoc's synthetic `fn main` remain outside the
+denominator. Assertion statement hits enter the authenticated assertion phase
+before argument evaluation, so optimized MIR cannot erase the statement and a
+panicking argument cannot misattribute it. The real rustdoc gate requires all
+five source ordinals under the exact standalone test root with zero dropped or
+incomplete records and unchanged output. Missing, ambiguous, reordered,
+carriage-return or synthetic mappings fail closed. Complete merged
 extracted-source obligations remain open, so this does not enable the public
 rustdoc capability.
 

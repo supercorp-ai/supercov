@@ -279,6 +279,9 @@ pub fn assert_equal_evaluation_order(log: &std::cell::RefCell<Vec<&'static str>>
 ///
 /// ```standalone_crate
 /// # let hidden = std::hint::black_box(20);
+/// let combined = hidden
+///     + std::hint::black_box(2);
+/// assert_eq!(combined, 22);
 /// assert_eq!(hidden + 2, 22);
 /// assert_eq!(supercov_rustc_spike_fixture::authored(false), 2);
 /// ```
