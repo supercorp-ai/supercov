@@ -1532,13 +1532,17 @@ miss blocks flipping any default.
   incorporates the translated decision ID. The pinned libtest JSON stream now
   publishes one atomic outcome unit authenticated by companion and raw-stream
   SHA; strict parsing preserves passed/failed/ignored, timeout-warning and
-  fail-fast completed/unfinished/unstarted states. The lossless join maps exact
-  merged display names and retains unmatched standalone/compile-fail outcomes
-  and counts. Matched tests project status, retry zero and source/phase identity
-  into evidence v3 without inventing a phase for an unstarted test. Standalone
-  compiler catalogs, translated runtime attachment, stable multi-package
-  invocation identity and visible-output equivalence remain open before public
-  rustdoc execution.
+  fail-fast completed/unfinished/unstarted states. The same invocation now
+  captures rustdoc's exact version-2 extracted catalog, and the atomic outcome
+  unit binds catalog plus event bytes independently. The lossless join catalogs
+  every merged, standalone and compile-fail test, validates merged compiler
+  descriptors against exact names/paths/lines/flags and preserves the one
+  identity ambiguity rustdoc leaves when filtered and fail-fast-unstarted
+  counts coexist. Cataloged tests project status, retry zero and source/phase
+  identity into evidence v3 without inventing a phase for a test that never
+  started. Translated runtime attachment, stable multi-package invocation
+  identity and visible-output equivalence remain open before public rustdoc
+  execution.
 
 ## Non-goals and guardrails
 

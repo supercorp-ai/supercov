@@ -450,9 +450,12 @@ fn doctest_raw_results(
     for group in &resolution.groups {
         let worker_id = format!("rustdoc-{}", &group.invocation_id[..16]);
         for joined in &group.entries {
-            let entry = &joined.entry;
-            let test_id = format!("rust:doctest:{}:{}:{}", group.group, entry.path, entry.line);
-            let attempt_id = format!("{run_id}:doctest:{}:{}", group.invocation_id, entry.module);
+            let entry = &joined.catalog;
+            let test_id = format!("rust:doctest:{}:{}:{}", group.group, entry.file, entry.line);
+            let attempt_id = format!(
+                "{run_id}:doctest:{}:{}",
+                group.invocation_id, joined.catalog_index
+            );
             let (status, error, started, completed) = match &joined.state {
                 RustdocJoinedOutcomeState::Completed { outcome } => (
                     match outcome.status {
@@ -483,13 +486,23 @@ fn doctest_raw_results(
                     false,
                     false,
                 ),
+                RustdocJoinedOutcomeState::FilteredOut => ("skipped", None, false, false),
+                RustdocJoinedOutcomeState::NotRunAmbiguous => (
+                    "unknown",
+                    Some(
+                        "rustdoc did not identify whether this doctest was filtered or left unstarted by fail-fast"
+                            .into(),
+                    ),
+                    false,
+                    false,
+                ),
             };
             let phases = started
                 .then(|| CoveragePhase {
                     id: phase_id(run_id, &attempt_id),
                     kind: "test".into(),
-                    operation: format!("Rust doctest {}", entry.display_name),
-                    source: Some(entry.path.clone()),
+                    operation: format!("Rust doctest {}", entry.name),
+                    source: Some(entry.file.clone()),
                     caused_by_phase_id: None,
                     // Pinned libtest reports duration but no wall-clock
                     // boundaries. The authenticated rustdoc invocation is the
@@ -514,8 +527,8 @@ fn doctest_raw_results(
                     attempt_id,
                 }),
                 test: test_id,
-                test_file: Some(entry.path.clone()),
-                title: Some(entry.display_name.clone()),
+                test_file: Some(entry.file.clone()),
+                title: Some(entry.name.clone()),
                 retry: Some(0),
                 status: Some(status.into()),
                 expected_status: Some("passed".into()),
@@ -546,19 +559,9 @@ fn doctest_command_failed(resolution: &RustdocOutcomeResolution) -> bool {
             RustdocJoinedOutcomeState::UnfinishedStarted | RustdocJoinedOutcomeState::Unstarted => {
                 true
             }
-        }) || group
-            .unmatched_outcomes
-            .iter()
-            .any(|outcome| outcome.status == RustdocOutcomeStatus::Failed)
-            || !group.unmatched_unfinished_started.is_empty()
-            || group.unmatched_unstarted_tests != 0
-    }) || resolution.unmatched_units.iter().any(|unit| {
-        unit.report
-            .outcomes
-            .iter()
-            .any(|outcome| outcome.status == RustdocOutcomeStatus::Failed)
-            || !unit.report.unfinished_started.is_empty()
-            || unit.report.unstarted_tests != 0
+            RustdocJoinedOutcomeState::FilteredOut => false,
+            RustdocJoinedOutcomeState::NotRunAmbiguous => true,
+        }) || group.ambiguous_unstarted_tests != 0
     })
 }
 
@@ -912,12 +915,14 @@ fn execute_compiler_build(
     if !build.doctest_outcomes.is_fully_catalogued() {
         structural_limitations.push("rust-doctest-outcome-catalog-incomplete".into());
     }
+    if build.doctest_outcomes.has_ambiguous_outcomes() {
+        structural_limitations.push("rust-doctest-filter-fail-fast-identity-ambiguous".into());
+    }
     structural_limitations.sort();
     structural_limitations.dedup();
     let mut runners = vec![compiler_runner_declaration(), runner_declaration()];
     if !build.doctest_outcomes.groups.is_empty()
         || !build.doctest_outcomes.unmatched_maps.is_empty()
-        || !build.doctest_outcomes.unmatched_units.is_empty()
     {
         runners.push(rustdoc_runner_declaration());
     }
@@ -958,7 +963,9 @@ fn execute_compiler_build(
 mod tests {
     use super::*;
     use crate::rust_doctest::{
-        RustdocJoinedOutcome, RustdocMergedEntry, RustdocOutcomeGroupJoin, RustdocTestOutcome,
+        RustdocDoctestAttributes, RustdocDoctestCode, RustdocDoctestIgnore, RustdocDoctestWrapper,
+        RustdocExtractedDoctest, RustdocJoinedOutcome, RustdocMergedEntry, RustdocOutcomeGroupJoin,
+        RustdocTestOutcome,
     };
 
     #[test]
@@ -1002,11 +1009,42 @@ mod tests {
             no_run: false,
             should_panic: false,
         };
-        let completed = |entry: RustdocMergedEntry, status| RustdocJoinedOutcome {
-            entry,
+        let catalog = |line: u64| RustdocExtractedDoctest {
+            file: "src/lib.rs".into(),
+            line,
+            doctest_attributes: RustdocDoctestAttributes {
+                original: String::new(),
+                should_panic: false,
+                no_run: false,
+                ignore: RustdocDoctestIgnore::None,
+                rust: true,
+                test_harness: false,
+                compile_fail: false,
+                standalone_crate: false,
+                error_codes: Vec::new(),
+                edition: None,
+                added_css_classes: Vec::new(),
+                unknown: Vec::new(),
+            },
+            original_code: "assert!(true);".into(),
+            doctest_code: Some(RustdocDoctestCode {
+                crate_level: String::new(),
+                code: "assert!(true);".into(),
+                wrapper: Some(RustdocDoctestWrapper {
+                    before: "fn main() {".into(),
+                    after: "}".into(),
+                    returns_result: false,
+                }),
+            }),
+            name: format!("src/lib.rs - (line {line})"),
+        };
+        let completed = |catalog_index, entry: RustdocMergedEntry, status| RustdocJoinedOutcome {
+            catalog_index,
+            catalog: catalog(entry.line),
+            merged_entry: Some(entry.clone()),
             state: RustdocJoinedOutcomeState::Completed {
                 outcome: RustdocTestOutcome {
-                    display_name: "src/lib.rs - (line 3)".into(),
+                    display_name: entry.display_name,
                     status,
                     execution_seconds: Some(0.1),
                     stdout: None,
@@ -1021,21 +1059,22 @@ mod tests {
                 invocation_id: "1".repeat(64),
                 group: "fixture".into(),
                 companion_build_id: "2".repeat(64),
+                raw_catalog_sha256: "4".repeat(64),
                 raw_events_sha256: "3".repeat(64),
                 join: None,
                 entries: vec![
-                    completed(entry("__doctest_0", 3), RustdocOutcomeStatus::Passed),
+                    completed(0, entry("__doctest_0", 3), RustdocOutcomeStatus::Passed),
                     RustdocJoinedOutcome {
-                        entry: entry("__doctest_1", 10),
+                        catalog_index: 1,
+                        catalog: catalog(10),
+                        merged_entry: Some(entry("__doctest_1", 10)),
                         state: RustdocJoinedOutcomeState::Unstarted,
                     },
                 ],
-                unmatched_outcomes: Vec::new(),
-                unmatched_unfinished_started: Vec::new(),
-                unmatched_unstarted_tests: 0,
+                ambiguous_filtered_out: 0,
+                ambiguous_unstarted_tests: 0,
             }],
             unmatched_maps: Vec::new(),
-            unmatched_units: Vec::new(),
         };
         let results = doctest_raw_results("run", &resolution, 10, 20);
         assert_eq!(results.len(), 2);

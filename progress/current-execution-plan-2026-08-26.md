@@ -655,29 +655,33 @@ numeric ordinals and recursively rebuilds nested assertion context IDs, whose
 derivation includes the translated decision identity; descriptor order is not
 assumed and collisions fail closed.
 
-The exact outcome boundary is now implemented through the pinned Rust 1.95
-libtest JSON event model. It validates suite/test ordering and arithmetic,
-distinguishes timeout warnings from terminal failures, preserves ignored test
-details and represents fail-fast tests as completed, started-but-unfinished or
-unstarted without inventing verdicts. Each raw event stream becomes one
-create-new/fsync/rename/directory-fsync outcome unit authenticated by the exact
-companion digest and raw-stream SHA-256; partial, duplicate, malformed,
-truncated and future-incompatible units fail closed. The real rustdoc gate
-captures five passed and one ignored doctest and verifies that unit against the
-raw bytes.
+The exact outcome boundary is now implemented through both pinned Rust 1.95
+formats: rustdoc's version-2 `--output-format=doctest` catalog and libtest's
+JSON event stream. The strict catalog preserves every compiler-generated name,
+file, line, execution attribute, original snippet and generated wrapper for
+merged, standalone, compile-fail, ignored, no-run and syntax-error tests. The
+event parser validates suite/test ordering and arithmetic, distinguishes
+timeout warnings from terminal failures, preserves ignored details and
+represents fail-fast tests as completed, started-but-unfinished or unstarted
+without inventing verdicts. One framed publication atomically binds both exact
+byte streams, the invocation and the companion digest; partial, duplicate,
+malformed, truncated and future-incompatible units fail closed. The real
+rustdoc gate captures five passed and one ignored doctest, proves all six
+catalog identities and verifies standalone/compile-fail attributes.
 
-The engine losslessly joins every merged descriptor by exact rustdoc display
-name. Named standalone/compile-fail results, unfinished names and anonymous
-fail-fast counts remain explicit rather than being dropped. Matched merged
-tests now project exact pass/fail/skipped/unknown status, retry zero, source and
-phase identity into evidence v3; an unstarted test creates no fictitious phase.
-The archive is deliberately marked with
-`rust-doctest-outcome-catalog-incomplete` until compiler-owned standalone and
-compile-fail catalogs close those unmatched results. Exact runtime transport
-attachment, stable multi-package invocation identity, retry policy and
-preservation of the user's ordinary human output across pass/fail/signal cases
-remain required before these candidates can enter a measurement-complete
-public run.
+The engine now joins every catalog entry, including standalone and
+compile-fail tests, and augments the merged subset with exact compiler source
+and probe translations. Outcomes absent from the catalog and compiler maps
+that disagree on name, path, line or flags are rejected. Libtest exposes only
+aggregate filtered and fail-fast-unstarted counts; if both are non-zero,
+Supercov retains the exact counts and marks affected identities ambiguous
+instead of assigning states by catalog order. Cataloged tests project exact
+pass/fail/skipped/unknown status, retry zero, source and phase identity into
+evidence v3; a test that never started creates no fictitious phase. Exact
+runtime transport attachment, stable multi-package invocation identity, retry
+policy and preservation of the user's ordinary human output across
+pass/fail/signal cases remain required before these candidates can enter a
+measurement-complete public run.
 
 Correctness corpus:
 

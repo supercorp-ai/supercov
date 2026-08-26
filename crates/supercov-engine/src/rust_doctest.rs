@@ -32,7 +32,8 @@ use crate::{
 };
 
 const MAP_SCHEMA: &str = "supercov-rustdoc-merged-map-v2";
-const OUTCOME_SCHEMA: &str = "supercov-rustdoc-outcome-unit-v1";
+const OUTCOME_SCHEMA: &str = "supercov-rustdoc-outcome-unit-v2";
+const RUSTDOC_CATALOG_FORMAT_VERSION: u32 = 2;
 const MAX_OUTCOME_UNIT_BYTES: u64 = 16 * 1024 * 1024;
 const SOURCE_MODEL: &str = "rust-source-v1";
 
@@ -136,6 +137,71 @@ pub struct RustdocOutcomeReport {
     pub compilation_seconds: Option<f64>,
 }
 
+/// The exact JSON catalog emitted by the pinned rustdoc implementation with
+/// `-Zunstable-options --output-format=doctest`.
+///
+/// This is compiler output, not a Supercov reconstruction. Keeping the full
+/// versioned record lets the outcome join identify merged, standalone,
+/// compile-fail, ignored, no-run and syntax-error doctests without deriving
+/// names or execution attributes from human-readable output.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RustdocExtractedCatalog {
+    pub format_version: u32,
+    pub doctests: Vec<RustdocExtractedDoctest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RustdocExtractedDoctest {
+    pub file: String,
+    pub line: u64,
+    pub doctest_attributes: RustdocDoctestAttributes,
+    pub original_code: String,
+    pub doctest_code: Option<RustdocDoctestCode>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RustdocDoctestAttributes {
+    pub original: String,
+    pub should_panic: bool,
+    pub no_run: bool,
+    pub ignore: RustdocDoctestIgnore,
+    pub rust: bool,
+    pub test_harness: bool,
+    pub compile_fail: bool,
+    pub standalone_crate: bool,
+    pub error_codes: Vec<String>,
+    pub edition: Option<String>,
+    pub added_css_classes: Vec<String>,
+    pub unknown: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub enum RustdocDoctestIgnore {
+    All,
+    None,
+    Some(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RustdocDoctestCode {
+    pub crate_level: String,
+    pub code: String,
+    pub wrapper: Option<RustdocDoctestWrapper>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RustdocDoctestWrapper {
+    pub before: String,
+    pub after: String,
+    pub returns_result: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustdocOutcomeUnit {
@@ -143,7 +209,9 @@ pub struct RustdocOutcomeUnit {
     pub invocation_id: String,
     pub group: String,
     pub companion_build_id: String,
+    pub raw_catalog_sha256: String,
     pub raw_events_sha256: String,
+    pub catalog: RustdocExtractedCatalog,
     pub report: RustdocOutcomeReport,
 }
 
@@ -155,15 +223,24 @@ pub struct RustdocOutcomeUnit {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "state")]
 pub enum RustdocJoinedOutcomeState {
-    Completed { outcome: RustdocTestOutcome },
+    Completed {
+        outcome: RustdocTestOutcome,
+    },
     UnfinishedStarted,
     Unstarted,
+    FilteredOut,
+    /// Libtest reports only aggregate filtered and fail-fast-unstarted counts.
+    /// If both are non-zero, assigning either state to a particular catalog
+    /// identity would be invented attribution.
+    NotRunAmbiguous,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RustdocJoinedOutcome {
-    pub entry: RustdocMergedEntry,
+    pub catalog_index: u64,
+    pub catalog: RustdocExtractedDoctest,
+    pub merged_entry: Option<RustdocMergedEntry>,
     pub state: RustdocJoinedOutcomeState,
 }
 
@@ -178,21 +255,19 @@ pub struct RustdocOutcomeGroupJoin {
     pub invocation_id: String,
     pub group: String,
     pub companion_build_id: String,
+    pub raw_catalog_sha256: String,
     pub raw_events_sha256: String,
     /// Identity/ordinal translation for the merged bundle. `None` is valid
     /// only when every mapped doctest has zero executable obligations.
     pub join: Option<RustdocMergedJoin>,
     pub entries: Vec<RustdocJoinedOutcome>,
-    pub unmatched_outcomes: Vec<RustdocTestOutcome>,
-    pub unmatched_unfinished_started: Vec<String>,
-    pub unmatched_unstarted_tests: u64,
+    pub ambiguous_filtered_out: u64,
+    pub ambiguous_unstarted_tests: u64,
 }
 
 impl RustdocOutcomeGroupJoin {
-    pub fn is_fully_catalogued(&self) -> bool {
-        self.unmatched_outcomes.is_empty()
-            && self.unmatched_unfinished_started.is_empty()
-            && self.unmatched_unstarted_tests == 0
+    pub fn has_ambiguous_outcomes(&self) -> bool {
+        self.ambiguous_filtered_out != 0 || self.ambiguous_unstarted_tests != 0
     }
 }
 
@@ -202,19 +277,17 @@ pub struct RustdocOutcomeResolution {
     pub groups: Vec<RustdocOutcomeGroupJoin>,
     /// Runner maps for which no authenticated terminal outcome unit exists.
     pub unmatched_maps: Vec<RustdocMergedUnit>,
-    /// Outcome units for which no merged-runner map exists. These usually
-    /// represent crates containing only standalone/compile-fail doctests.
-    pub unmatched_units: Vec<RustdocOutcomeUnit>,
 }
 
 impl RustdocOutcomeResolution {
     pub fn is_fully_catalogued(&self) -> bool {
         self.unmatched_maps.is_empty()
-            && self.unmatched_units.is_empty()
-            && self
-                .groups
-                .iter()
-                .all(RustdocOutcomeGroupJoin::is_fully_catalogued)
+    }
+
+    pub fn has_ambiguous_outcomes(&self) -> bool {
+        self.groups
+            .iter()
+            .any(RustdocOutcomeGroupJoin::has_ambiguous_outcomes)
     }
 }
 
@@ -769,18 +842,101 @@ impl RustdocOutcomeReport {
     }
 }
 
+fn clean_catalog_text(value: &str) -> bool {
+    !value.is_empty() && !value.chars().any(char::is_control)
+}
+
+fn clean_catalog_values(values: &[String]) -> bool {
+    values.iter().all(|value| clean_catalog_text(value))
+}
+
+impl RustdocExtractedCatalog {
+    pub fn parse(bytes: &[u8]) -> Result<Self, RustdocOutcomeError> {
+        let catalog: Self = serde_json::from_slice(bytes)
+            .map_err(|error| RustdocOutcomeError::Json(format!("rustdoc catalog: {error}")))?;
+        catalog.validate()?;
+        Ok(catalog)
+    }
+
+    pub fn validate(&self) -> Result<(), RustdocOutcomeError> {
+        if self.format_version != RUSTDOC_CATALOG_FORMAT_VERSION {
+            return Err(RustdocOutcomeError::Invalid(format!(
+                "unsupported rustdoc doctest catalog format {}",
+                self.format_version
+            )));
+        }
+        let mut names = BTreeSet::new();
+        let mut source_sites = BTreeSet::new();
+        for doctest in &self.doctests {
+            doctest.validate()?;
+            if !names.insert(doctest.name.as_str()) {
+                return Err(RustdocOutcomeError::Invalid(format!(
+                    "rustdoc catalog contains duplicate doctest name {}",
+                    doctest.name
+                )));
+            }
+            if !source_sites.insert((doctest.file.as_str(), doctest.line)) {
+                return Err(RustdocOutcomeError::Invalid(format!(
+                    "rustdoc catalog contains duplicate source site {}:{}",
+                    doctest.file, doctest.line
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl RustdocExtractedDoctest {
+    fn validate(&self) -> Result<(), RustdocOutcomeError> {
+        if !clean_catalog_text(&self.file) || self.line == 0 || !clean_catalog_text(&self.name) {
+            return Err(RustdocOutcomeError::Invalid(
+                "rustdoc catalog contains an invalid file, line or name".into(),
+            ));
+        }
+        let prefix = format!("{} - ", self.file);
+        let suffix = format!("(line {})", self.line);
+        if !self.name.starts_with(&prefix) || !self.name.ends_with(&suffix) {
+            return Err(RustdocOutcomeError::Invalid(format!(
+                "rustdoc catalog name {} does not bind to {}:{}",
+                self.name, self.file, self.line
+            )));
+        }
+        let attributes = &self.doctest_attributes;
+        if !matches!(
+            attributes.edition.as_deref(),
+            None | Some("2015" | "2018" | "2021" | "2024")
+        ) || !clean_catalog_values(&attributes.error_codes)
+            || !clean_catalog_values(&attributes.added_css_classes)
+            || !clean_catalog_values(&attributes.unknown)
+            || matches!(&attributes.ignore, RustdocDoctestIgnore::Some(targets) if targets.is_empty() || !clean_catalog_values(targets))
+        {
+            return Err(RustdocOutcomeError::Invalid(format!(
+                "rustdoc catalog attributes are invalid for {}",
+                self.name
+            )));
+        }
+        Ok(())
+    }
+
+    fn ignored(&self) -> bool {
+        !matches!(self.doctest_attributes.ignore, RustdocDoctestIgnore::None)
+    }
+}
+
 impl RustdocOutcomeUnit {
     pub fn validate(&self) -> Result<(), RustdocOutcomeError> {
         if self.schema != OUTCOME_SCHEMA
             || !canonical_sha256(&self.invocation_id)
             || !safe_group(&self.group)
             || !canonical_sha256(&self.companion_build_id)
+            || !canonical_sha256(&self.raw_catalog_sha256)
             || !canonical_sha256(&self.raw_events_sha256)
         {
             return Err(RustdocOutcomeError::Invalid(
                 "outcome unit has an unsupported schema or invalid identity binding".into(),
             ));
         }
+        self.catalog.validate()?;
         self.report.validate()
     }
 }
@@ -789,8 +945,10 @@ pub fn rustdoc_outcome_unit_from_libtest(
     invocation_id: String,
     group: String,
     companion_build_id: String,
+    raw_catalog: &[u8],
     raw_events: &[u8],
 ) -> Result<RustdocOutcomeUnit, RustdocOutcomeError> {
+    let catalog = RustdocExtractedCatalog::parse(raw_catalog)?;
     let report = parse_rustdoc_libtest_json(raw_events)
         .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?;
     let unit = RustdocOutcomeUnit {
@@ -798,11 +956,50 @@ pub fn rustdoc_outcome_unit_from_libtest(
         invocation_id,
         group,
         companion_build_id,
+        raw_catalog_sha256: format!("{:x}", Sha256::digest(raw_catalog)),
         raw_events_sha256: format!("{:x}", Sha256::digest(raw_events)),
+        catalog,
         report,
     };
     unit.validate()?;
     Ok(unit)
+}
+
+/// Decode the private launcher-to-engine frame: an eight-byte big-endian
+/// catalog length, the exact catalog bytes, then the exact libtest JSONL
+/// bytes. The hashes in the published unit bind both compiler outputs.
+pub fn rustdoc_outcome_unit_from_framed_input(
+    invocation_id: String,
+    group: String,
+    companion_build_id: String,
+    input: &[u8],
+) -> Result<RustdocOutcomeUnit, RustdocOutcomeError> {
+    let length = input.get(..8).ok_or_else(|| {
+        RustdocOutcomeError::Invalid("rustdoc outcome input has no catalog frame".into())
+    })?;
+    let catalog_length = usize::try_from(u64::from_be_bytes(
+        length
+            .try_into()
+            .expect("checked eight-byte catalog length"),
+    ))
+    .map_err(|_| {
+        RustdocOutcomeError::Invalid("rustdoc outcome catalog length exceeds this platform".into())
+    })?;
+    let catalog_end = 8usize.checked_add(catalog_length).ok_or_else(|| {
+        RustdocOutcomeError::Invalid("rustdoc outcome catalog frame length overflow".into())
+    })?;
+    let catalog = input.get(8..catalog_end).ok_or_else(|| {
+        RustdocOutcomeError::Invalid("rustdoc outcome catalog frame is truncated".into())
+    })?;
+    let events = input.get(catalog_end..).ok_or_else(|| {
+        RustdocOutcomeError::Invalid("rustdoc outcome event frame is missing".into())
+    })?;
+    if catalog.is_empty() || events.is_empty() {
+        return Err(RustdocOutcomeError::Invalid(
+            "rustdoc outcome catalog and event frames must both be non-empty".into(),
+        ));
+    }
+    rustdoc_outcome_unit_from_libtest(invocation_id, group, companion_build_id, catalog, events)
 }
 
 fn outcome_io(path: &Path, error: impl std::fmt::Display) -> RustdocOutcomeError {
@@ -936,14 +1133,14 @@ pub fn read_rustdoc_outcome_units(
     Ok(units.into_values().collect())
 }
 
-/// Join compiler-described merged doctests to authenticated libtest outcomes
-/// without discarding any part of the rustdoc invocation.
+/// Join rustdoc's authoritative extracted catalog, compiler-described merged
+/// doctests and authenticated libtest outcomes without guessing identities.
 ///
-/// Rustdoc can execute merged, standalone and compile-fail doctests in one
-/// invocation. The merged map names only the first category. This operation
-/// therefore returns unmatched named/unfinished/unstarted results explicitly;
-/// a caller may project matched entries, but may claim a complete doctest
-/// catalog only when `is_fully_catalogued()` is true.
+/// The extracted catalog names every merged, standalone and compile-fail
+/// doctest. The compiler map is required only for merged source/probe identity
+/// translation. Libtest's filtered and fail-fast-unstarted counts are
+/// aggregate-only; when both are non-zero the affected catalog entries remain
+/// explicitly ambiguous instead of receiving an invented status.
 pub fn join_rustdoc_outcomes(
     merged_units: Vec<RustdocMergedUnit>,
     outcome_units: Vec<RustdocOutcomeUnit>,
@@ -973,12 +1170,70 @@ pub fn join_rustdoc_outcomes(
     }
 
     let mut groups = Vec::new();
-    let mut unmatched_maps = Vec::new();
-    for (group, map_unit) in maps {
-        let Some(outcome_unit) = outcomes.remove(&group) else {
-            unmatched_maps.push(map_unit);
-            continue;
+    for (group, outcome_unit) in outcomes {
+        let map_unit = maps.remove(&group);
+        let catalog_count = u64::try_from(outcome_unit.catalog.doctests.len()).map_err(|_| {
+            RustdocOutcomeError::Invalid(format!(
+                "rustdoc catalog for {group} exceeds the supported test count"
+            ))
+        })?;
+        let reported_count = outcome_unit
+            .report
+            .planned_tests
+            .checked_add(outcome_unit.report.filtered_out)
+            .ok_or_else(|| {
+                RustdocOutcomeError::Invalid(format!(
+                    "rustdoc catalog arithmetic overflow for {group}"
+                ))
+            })?;
+        if catalog_count != reported_count {
+            return Err(RustdocOutcomeError::Invalid(format!(
+                "rustdoc catalog for {group} has {catalog_count} tests but libtest accounted for {reported_count}"
+            )));
+        }
+
+        let mut merged_entries = BTreeMap::new();
+        let join = if let Some(map_unit) = map_unit {
+            for entry in &map_unit.map.entries {
+                let catalog = outcome_unit
+                    .catalog
+                    .doctests
+                    .iter()
+                    .find(|candidate| candidate.name == entry.display_name)
+                    .ok_or_else(|| {
+                        RustdocOutcomeError::Invalid(format!(
+                            "merged doctest {} is absent from rustdoc's catalog",
+                            entry.display_name
+                        ))
+                    })?;
+                if catalog.file != entry.path
+                    || catalog.line != entry.line
+                    || catalog.ignored() != entry.ignored
+                    || catalog.doctest_attributes.no_run != entry.no_run
+                    || catalog.doctest_attributes.should_panic != entry.should_panic
+                    || catalog.doctest_attributes.compile_fail
+                    || catalog.doctest_attributes.standalone_crate
+                {
+                    return Err(RustdocOutcomeError::Invalid(format!(
+                        "merged compiler descriptor disagrees with rustdoc's catalog for {}",
+                        entry.display_name
+                    )));
+                }
+                if merged_entries
+                    .insert(entry.display_name.clone(), entry.clone())
+                    .is_some()
+                {
+                    return Err(RustdocOutcomeError::Invalid(format!(
+                        "duplicate merged catalog binding for {}",
+                        entry.display_name
+                    )));
+                }
+            }
+            map_unit.join
+        } else {
+            None
         };
+
         let mut terminal = outcome_unit
             .report
             .outcomes
@@ -992,43 +1247,84 @@ pub fn join_rustdoc_outcomes(
             .iter()
             .cloned()
             .collect::<BTreeSet<_>>();
-        let mut unmatched_unstarted_tests = outcome_unit.report.unstarted_tests;
-        let mut entries = Vec::with_capacity(map_unit.map.entries.len());
-        for entry in map_unit.map.entries {
-            let state = if let Some(outcome) = terminal.remove(&entry.display_name) {
+        let mut entries = Vec::with_capacity(outcome_unit.catalog.doctests.len());
+        for (catalog_index, catalog) in outcome_unit.catalog.doctests.into_iter().enumerate() {
+            let state = if let Some(outcome) = terminal.remove(&catalog.name) {
                 RustdocJoinedOutcomeState::Completed { outcome }
-            } else if unfinished.remove(&entry.display_name) {
+            } else if unfinished.remove(&catalog.name) {
                 RustdocJoinedOutcomeState::UnfinishedStarted
-            } else {
-                unmatched_unstarted_tests = unmatched_unstarted_tests.checked_sub(1).ok_or_else(
-                    || {
-                        RustdocOutcomeError::Invalid(format!(
-                            "merged doctest {} has no outcome, but rustdoc reported no remaining unstarted test",
-                            entry.display_name
-                        ))
-                    },
-                )?;
+            } else if outcome_unit.report.filtered_out == 0 {
                 RustdocJoinedOutcomeState::Unstarted
+            } else if outcome_unit.report.unstarted_tests == 0 {
+                RustdocJoinedOutcomeState::FilteredOut
+            } else {
+                RustdocJoinedOutcomeState::NotRunAmbiguous
             };
-            entries.push(RustdocJoinedOutcome { entry, state });
+            let catalog_index = u64::try_from(catalog_index).map_err(|_| {
+                RustdocOutcomeError::Invalid(format!(
+                    "rustdoc catalog index exceeds u64 for {}",
+                    catalog.name
+                ))
+            })?;
+            let merged_entry = merged_entries.remove(&catalog.name);
+            entries.push(RustdocJoinedOutcome {
+                catalog_index,
+                catalog,
+                merged_entry,
+                state,
+            });
+        }
+        if !terminal.is_empty() || !unfinished.is_empty() || !merged_entries.is_empty() {
+            return Err(RustdocOutcomeError::Invalid(format!(
+                "rustdoc outcomes or compiler descriptors for {group} contain identities absent from the authoritative catalog"
+            )));
+        }
+        let unnamed_count = entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.state,
+                    RustdocJoinedOutcomeState::Unstarted
+                        | RustdocJoinedOutcomeState::FilteredOut
+                        | RustdocJoinedOutcomeState::NotRunAmbiguous
+                )
+            })
+            .count();
+        let expected_unnamed = outcome_unit
+            .report
+            .filtered_out
+            .checked_add(outcome_unit.report.unstarted_tests)
+            .and_then(|count| usize::try_from(count).ok())
+            .ok_or_else(|| {
+                RustdocOutcomeError::Invalid(format!(
+                    "rustdoc unresolved outcome count exceeds this platform for {group}"
+                ))
+            })?;
+        if unnamed_count != expected_unnamed {
+            return Err(RustdocOutcomeError::Invalid(format!(
+                "rustdoc unresolved catalog count disagrees with libtest for {group}"
+            )));
         }
         groups.push(RustdocOutcomeGroupJoin {
             invocation_id: outcome_unit.invocation_id,
             group,
             companion_build_id: outcome_unit.companion_build_id,
+            raw_catalog_sha256: outcome_unit.raw_catalog_sha256,
             raw_events_sha256: outcome_unit.raw_events_sha256,
-            join: map_unit.join,
+            join,
             entries,
-            unmatched_outcomes: terminal.into_values().collect(),
-            unmatched_unfinished_started: unfinished.into_iter().collect(),
-            unmatched_unstarted_tests,
+            ambiguous_filtered_out: outcome_unit.report.filtered_out
+                * u64::from(outcome_unit.report.unstarted_tests != 0),
+            ambiguous_unstarted_tests: outcome_unit.report.unstarted_tests
+                * u64::from(outcome_unit.report.filtered_out != 0),
         });
     }
+
+    let unmatched_maps = maps.into_values().collect();
 
     Ok(RustdocOutcomeResolution {
         groups,
         unmatched_maps,
-        unmatched_units: outcomes.into_values().collect(),
     })
 }
 
@@ -2484,6 +2780,50 @@ mod tests {
         lines.join("\n").into_bytes()
     }
 
+    fn catalog_doctest(
+        name: &str,
+        line: u64,
+        ignored: bool,
+        no_run: bool,
+        should_panic: bool,
+        compile_fail: bool,
+        standalone_crate: bool,
+    ) -> RustdocExtractedDoctest {
+        RustdocExtractedDoctest {
+            file: "src/lib.rs".into(),
+            line,
+            doctest_attributes: RustdocDoctestAttributes {
+                original: String::new(),
+                should_panic,
+                no_run,
+                ignore: if ignored {
+                    RustdocDoctestIgnore::All
+                } else {
+                    RustdocDoctestIgnore::None
+                },
+                rust: true,
+                test_harness: false,
+                compile_fail,
+                standalone_crate,
+                error_codes: Vec::new(),
+                edition: None,
+                added_css_classes: Vec::new(),
+                unknown: Vec::new(),
+            },
+            original_code: "assert!(true);".into(),
+            doctest_code: Some(RustdocDoctestCode {
+                crate_level: "#![allow(unused)]\n".into(),
+                code: "assert!(true);".into(),
+                wrapper: Some(RustdocDoctestWrapper {
+                    before: "fn main() {\n".into(),
+                    after: "\n}".into(),
+                    returns_result: false,
+                }),
+            }),
+            name: name.into(),
+        }
+    }
+
     struct OutcomeDirectory(PathBuf);
 
     impl OutcomeDirectory {
@@ -2512,10 +2852,23 @@ mod tests {
             invocation_id: "1".repeat(64),
             group: "fixture".into(),
             companion_build_id: "2".repeat(64),
+            raw_catalog_sha256: "4".repeat(64),
             raw_events_sha256: "3".repeat(64),
+            catalog: RustdocExtractedCatalog {
+                format_version: RUSTDOC_CATALOG_FORMAT_VERSION,
+                doctests: vec![catalog_doctest(
+                    "src/lib.rs - (line 3)",
+                    3,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                )],
+            },
             report: RustdocOutcomeReport {
                 outcomes: vec![RustdocTestOutcome {
-                    display_name: "src/lib.rs - example (line 3)".into(),
+                    display_name: "src/lib.rs - (line 3)".into(),
                     status: RustdocOutcomeStatus::Passed,
                     execution_seconds: Some(0.25),
                     stdout: None,
@@ -2550,6 +2903,109 @@ mod tests {
             message: None,
             reason: None,
             timeout_warning: false,
+        }
+    }
+
+    #[test]
+    fn parses_the_exact_pinned_rustdoc_catalog_format() {
+        let raw = br##"{
+            "format_version": 2,
+            "doctests": [
+                {
+                    "file": "src/lib.rs",
+                    "line": 3,
+                    "doctest_attributes": {
+                        "original": "ignore-x86_64,edition2024",
+                        "should_panic": false,
+                        "no_run": false,
+                        "ignore": {"Some": ["x86_64"]},
+                        "rust": true,
+                        "test_harness": false,
+                        "compile_fail": false,
+                        "standalone_crate": false,
+                        "error_codes": [],
+                        "edition": "2024",
+                        "added_css_classes": [],
+                        "unknown": []
+                    },
+                    "original_code": "assert!(true);",
+                    "doctest_code": {
+                        "crate_level": "#![allow(unused)]\n",
+                        "code": "assert!(true);",
+                        "wrapper": null
+                    },
+                    "name": "src/lib.rs - example (line 3)"
+                },
+                {
+                    "file": "src/lib.rs",
+                    "line": 10,
+                    "doctest_attributes": {
+                        "original": "compile_fail,E0308",
+                        "should_panic": false,
+                        "no_run": true,
+                        "ignore": "None",
+                        "rust": true,
+                        "test_harness": false,
+                        "compile_fail": true,
+                        "standalone_crate": false,
+                        "error_codes": ["E0308"],
+                        "edition": null,
+                        "added_css_classes": [],
+                        "unknown": []
+                    },
+                    "original_code": "let _: u8 = true;",
+                    "doctest_code": null,
+                    "name": "src/lib.rs - compile_error (line 10)"
+                }
+            ]
+        }"##;
+        let catalog = RustdocExtractedCatalog::parse(raw).expect("pinned catalog v2");
+        assert_eq!(catalog.doctests.len(), 2);
+        assert!(matches!(
+            &catalog.doctests[0].doctest_attributes.ignore,
+            RustdocDoctestIgnore::Some(targets)
+                if targets.len() == 1 && targets[0] == "x86_64"
+        ));
+        assert!(catalog.doctests[1].doctest_code.is_none());
+        assert!(catalog.doctests[1].doctest_attributes.compile_fail);
+    }
+
+    #[test]
+    fn rejects_unknown_malformed_or_ambiguous_rustdoc_catalogs() {
+        let valid = serde_json::to_value(&passing_outcome_unit().catalog).unwrap();
+        let mut cases = Vec::new();
+
+        let mut value = valid.clone();
+        value["format_version"] = serde_json::json!(3);
+        cases.push(value);
+
+        let mut value = valid.clone();
+        value["extra"] = serde_json::json!(true);
+        cases.push(value);
+
+        let mut value = valid.clone();
+        value["doctests"][0]["line"] = serde_json::json!(0);
+        cases.push(value);
+
+        let mut value = valid.clone();
+        value["doctests"][0]["name"] = serde_json::json!("a guessed name");
+        cases.push(value);
+
+        let mut value = valid.clone();
+        let duplicate = value["doctests"][0].clone();
+        value["doctests"].as_array_mut().unwrap().push(duplicate);
+        cases.push(value);
+
+        let mut value = valid;
+        value["doctests"][0]["doctest_attributes"]["edition"] = serde_json::json!("2099");
+        cases.push(value);
+
+        for value in cases {
+            let bytes = serde_json::to_vec(&value).unwrap();
+            assert!(
+                RustdocExtractedCatalog::parse(&bytes).is_err(),
+                "accepted invalid rustdoc catalog: {value}"
+            );
         }
     }
 
@@ -2721,8 +3177,104 @@ mod tests {
     }
 
     #[test]
-    fn joins_merged_outcomes_without_dropping_standalone_or_fail_fast_state() {
+    fn decodes_and_hashes_the_exact_catalog_and_event_frame() {
+        let catalog = serde_json::to_vec(&passing_outcome_unit().catalog).unwrap();
+        let events = libtest_stream(&[
+            r#"{"type":"suite","event":"started","test_count":1}"#,
+            r#"{"type":"test","event":"started","name":"src/lib.rs - (line 3)"}"#,
+            r#"{"type":"test","name":"src/lib.rs - (line 3)","event":"ok"}"#,
+            r#"{"type":"suite","event":"ok","passed":1,"failed":0,"ignored":0,"measured":0,"filtered_out":0}"#,
+        ]);
+        let mut framed = u64::try_from(catalog.len()).unwrap().to_be_bytes().to_vec();
+        framed.extend_from_slice(&catalog);
+        framed.extend_from_slice(&events);
+        let unit = rustdoc_outcome_unit_from_framed_input(
+            "1".repeat(64),
+            "fixture".into(),
+            "2".repeat(64),
+            &framed,
+        )
+        .expect("exact framed rustdoc outputs");
+        assert_eq!(
+            unit.raw_catalog_sha256,
+            format!("{:x}", Sha256::digest(&catalog))
+        );
+        assert_eq!(
+            unit.raw_events_sha256,
+            format!("{:x}", Sha256::digest(&events))
+        );
+        for invalid in [
+            Vec::new(),
+            1u64.to_be_bytes().to_vec(),
+            1000u64.to_be_bytes().into_iter().chain([b'{']).collect(),
+            {
+                let mut only_catalog = u64::try_from(catalog.len()).unwrap().to_be_bytes().to_vec();
+                only_catalog.extend_from_slice(&catalog);
+                only_catalog
+            },
+        ] {
+            assert!(
+                rustdoc_outcome_unit_from_framed_input(
+                    "1".repeat(64),
+                    "fixture".into(),
+                    "2".repeat(64),
+                    &invalid,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn joins_merged_standalone_compile_fail_and_fail_fast_state_from_catalog() {
         let mut unit = passing_outcome_unit();
+        unit.catalog.doctests = vec![
+            catalog_doctest(
+                "src/lib.rs - (line 3)",
+                3,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
+            catalog_doctest(
+                "src/lib.rs - (line 10)",
+                10,
+                false,
+                true,
+                true,
+                false,
+                false,
+            ),
+            catalog_doctest(
+                "src/lib.rs - standalone (line 20)",
+                20,
+                false,
+                false,
+                false,
+                false,
+                true,
+            ),
+            catalog_doctest(
+                "src/lib.rs - compile_fail (line 30)",
+                30,
+                false,
+                true,
+                false,
+                true,
+                false,
+            ),
+            catalog_doctest(
+                "src/lib.rs - later (line 40)",
+                40,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
+        ];
         unit.report = RustdocOutcomeReport {
             outcomes: vec![
                 outcome("src/lib.rs - (line 10)", RustdocOutcomeStatus::Ignored),
@@ -2744,13 +3296,12 @@ mod tests {
 
         let resolution = join_rustdoc_outcomes(vec![merged_unit()], vec![unit])
             .expect("lossless merged outcome join");
-        assert!(!resolution.is_fully_catalogued());
+        assert!(resolution.is_fully_catalogued());
         assert!(resolution.unmatched_maps.is_empty());
-        assert!(resolution.unmatched_units.is_empty());
         let [group] = resolution.groups.as_slice() else {
             panic!("expected one joined rustdoc group")
         };
-        assert_eq!(group.entries.len(), 2);
+        assert_eq!(group.entries.len(), 5);
         assert!(matches!(
             &group.entries[0].state,
             RustdocJoinedOutcomeState::Completed { outcome }
@@ -2761,24 +3312,41 @@ mod tests {
             RustdocJoinedOutcomeState::Completed { outcome }
                 if outcome.status == RustdocOutcomeStatus::Ignored
         ));
+        assert!(matches!(
+            &group.entries[2].state,
+            RustdocJoinedOutcomeState::Completed { outcome }
+                if outcome.status == RustdocOutcomeStatus::Failed
+        ));
+        assert!(group.entries[2].merged_entry.is_none());
+        assert!(matches!(
+            group.entries[3].state,
+            RustdocJoinedOutcomeState::UnfinishedStarted
+        ));
+        assert!(group.entries[3].catalog.doctest_attributes.compile_fail);
+        assert!(matches!(
+            group.entries[4].state,
+            RustdocJoinedOutcomeState::Unstarted
+        ));
         assert_eq!(
-            group
-                .unmatched_outcomes
-                .iter()
-                .map(|outcome| outcome.display_name.as_str())
-                .collect::<Vec<_>>(),
-            ["src/lib.rs - standalone (line 20)"]
+            group.raw_catalog_sha256,
+            "4".repeat(64),
+            "catalog binding must survive the join"
         );
-        assert_eq!(
-            group.unmatched_unfinished_started,
-            ["src/lib.rs - compile_fail (line 30)"]
-        );
-        assert_eq!(group.unmatched_unstarted_tests, 1);
+        assert!(!group.has_ambiguous_outcomes());
     }
 
     #[test]
     fn joins_named_fail_fast_states_without_inventing_terminal_outcomes() {
         let mut unit = passing_outcome_unit();
+        unit.catalog.doctests.push(catalog_doctest(
+            "src/lib.rs - (line 10)",
+            10,
+            false,
+            true,
+            true,
+            false,
+            false,
+        ));
         unit.report = RustdocOutcomeReport {
             outcomes: vec![outcome(
                 "src/lib.rs - (line 3)",
@@ -2801,6 +3369,15 @@ mod tests {
         ));
 
         let mut unit = passing_outcome_unit();
+        unit.catalog.doctests.push(catalog_doctest(
+            "src/lib.rs - (line 10)",
+            10,
+            false,
+            true,
+            true,
+            false,
+            false,
+        ));
         unit.report = RustdocOutcomeReport {
             outcomes: vec![outcome(
                 "src/lib.rs - (line 3)",
@@ -2824,6 +3401,55 @@ mod tests {
     }
 
     #[test]
+    fn preserves_filter_and_fail_fast_identity_ambiguity_instead_of_guessing() {
+        let mut unit = passing_outcome_unit();
+        unit.catalog.doctests.extend([
+            catalog_doctest(
+                "src/lib.rs - filtered-or-unstarted-a (line 20)",
+                20,
+                false,
+                false,
+                false,
+                false,
+                true,
+            ),
+            catalog_doctest(
+                "src/lib.rs - filtered-or-unstarted-b (line 30)",
+                30,
+                false,
+                true,
+                false,
+                true,
+                false,
+            ),
+        ]);
+        unit.report = RustdocOutcomeReport {
+            outcomes: vec![outcome(
+                "src/lib.rs - (line 3)",
+                RustdocOutcomeStatus::Failed,
+            )],
+            suites: 1,
+            planned_tests: 2,
+            filtered_out: 1,
+            unfinished_started: Vec::new(),
+            unstarted_tests: 1,
+            total_seconds: None,
+            compilation_seconds: None,
+        };
+        let resolution =
+            join_rustdoc_outcomes(Vec::new(), vec![unit]).expect("lossless ambiguous outcome join");
+        assert!(resolution.is_fully_catalogued());
+        assert!(resolution.has_ambiguous_outcomes());
+        assert_eq!(resolution.groups[0].ambiguous_filtered_out, 1);
+        assert_eq!(resolution.groups[0].ambiguous_unstarted_tests, 1);
+        assert!(
+            resolution.groups[0].entries[1..]
+                .iter()
+                .all(|entry| { matches!(entry.state, RustdocJoinedOutcomeState::NotRunAmbiguous) })
+        );
+    }
+
+    #[test]
     fn outcome_join_rejects_ambiguous_groups_and_impossible_missing_entries() {
         let unit = passing_outcome_unit();
         assert!(
@@ -2837,14 +3463,15 @@ mod tests {
     }
 
     #[test]
-    fn outcome_join_retains_maps_and_units_without_a_counterpart() {
+    fn outcome_join_retains_maps_without_outcomes_and_catalogs_units_without_maps() {
         let maps_only = join_rustdoc_outcomes(vec![merged_unit()], Vec::new()).unwrap();
         assert_eq!(maps_only.unmatched_maps.len(), 1);
         assert!(!maps_only.is_fully_catalogued());
 
         let units_only = join_rustdoc_outcomes(Vec::new(), vec![passing_outcome_unit()]).unwrap();
-        assert_eq!(units_only.unmatched_units.len(), 1);
-        assert!(!units_only.is_fully_catalogued());
+        assert_eq!(units_only.groups.len(), 1);
+        assert!(units_only.groups[0].entries[0].merged_entry.is_none());
+        assert!(units_only.is_fully_catalogued());
     }
 
     #[test]

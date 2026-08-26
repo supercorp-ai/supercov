@@ -3112,7 +3112,16 @@ try {
   const outcomeUnit = JSON.parse(
     readFileSync(join(capturedDoctestDirectory, outcomeFiles[0]), 'utf8'),
   );
-  assert.equal(outcomeUnit.schema, 'supercov-rustdoc-outcome-unit-v1');
+  assert.equal(outcomeUnit.schema, 'supercov-rustdoc-outcome-unit-v2');
+  assert.equal(outcomeUnit.catalog.format_version, 2);
+  assert.equal(outcomeUnit.catalog.doctests.length, 6);
+  assert.equal(
+    outcomeUnit.rawCatalogSha256,
+    createHash('sha256')
+      .update(JSON.stringify(outcomeUnit.catalog))
+      .digest('hex'),
+    'rustdoc outcome unit was not bound to the exact extracted catalog',
+  );
   assert.equal(
     outcomeUnit.rawEventsSha256,
     createHash('sha256').update(capturedDoctest.stdout).digest('hex'),
@@ -3368,6 +3377,11 @@ try {
   const capturedOutcomeNames = new Set(
     outcomeUnit.report.outcomes.map(({displayName}) => displayName),
   );
+  assert.deepEqual(
+    capturedOutcomeNames,
+    new Set(outcomeUnit.catalog.doctests.map(({name}) => name)),
+    'the extracted rustdoc catalog and terminal names differ',
+  );
   assert(
     mergedMaps[0].entries.every(({displayName}) =>
       capturedOutcomeNames.has(displayName),
@@ -3380,8 +3394,20 @@ try {
         !mergedMaps[0].entries.some((entry) => entry.displayName === displayName),
     ).length,
     2,
-    'standalone/compile-fail rustdoc outcomes were not retained outside the merged map',
+    'fixture did not retain its standalone and compile-fail doctests',
   );
+  const standaloneCatalog = outcomeUnit.catalog.doctests.find(
+    ({name}) => name.includes('standalone_doctest_surface'),
+  );
+  const compileFailCatalog = outcomeUnit.catalog.doctests.find(
+    ({name}) => name.includes('stable_feature_gate_doctest_surface'),
+  );
+  assert.equal(
+    standaloneCatalog?.doctest_attributes.standalone_crate,
+    true,
+  );
+  assert.equal(compileFailCatalog?.doctest_attributes.compile_fail, true);
+  assert.equal(compileFailCatalog?.doctest_attributes.no_run, true);
   const mergedPendingManifest = crateManifest(
     wrappedDoctestDirectory,
     'doctest_bundle_2024',

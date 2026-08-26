@@ -7786,7 +7786,7 @@ fn launch_rustdoc(args: &[String]) -> ! {
     let rustdoc = env::var_os(REAL_RUSTDOC).expect("exact rustdoc path");
     let companion = env::var_os(COMPANION_PATH).expect("compiler companion path");
     let group = argument_value(args, "--crate-name").expect("rustdoc crate name");
-    let mut command = Command::new(rustdoc);
+    let mut command = Command::new(&rustdoc);
     command
         .args(args)
         .arg("-Zunstable-options")
@@ -7798,6 +7798,23 @@ fn launch_rustdoc(args: &[String]) -> ! {
     if env::var_os(RUSTDOC_CAPTURE_OUTCOMES).is_none() {
         let status = command.status().expect("launch exact rustdoc");
         std::process::exit(status.code().unwrap_or(1));
+    }
+
+    // Rustdoc's own versioned extraction format is the authority for every
+    // test identity and execution attribute. Capture it from the identical
+    // invocation before running libtest; compiler maps then augment only the
+    // merged subset with source/probe translations.
+    let catalog = Command::new(&rustdoc)
+        .args(args)
+        .arg("-Zunstable-options")
+        .arg("--output-format=doctest")
+        .env("RUSTC_BOOTSTRAP", "1")
+        .output()
+        .expect("capture exact rustdoc doctest catalog");
+    if !catalog.status.success() {
+        let _ = io::stdout().write_all(&catalog.stdout);
+        let _ = io::stderr().write_all(&catalog.stderr);
+        std::process::exit(catalog.status.code().unwrap_or(1));
     }
 
     command
@@ -7831,12 +7848,17 @@ fn launch_rustdoc(args: &[String]) -> ! {
         .stderr(Stdio::piped())
         .spawn()
         .expect("launch rustdoc outcome publisher");
-    publisher
-        .stdin
-        .take()
-        .expect("publisher stdin")
-        .write_all(&output.stdout)
-        .expect("write rustdoc outcome events");
+    let mut publisher_stdin = publisher.stdin.take().expect("publisher stdin");
+    publisher_stdin
+        .write_all(
+            &u64::try_from(catalog.stdout.len())
+                .expect("rustdoc catalog length exceeds u64")
+                .to_be_bytes(),
+        )
+        .and_then(|()| publisher_stdin.write_all(&catalog.stdout))
+        .and_then(|()| publisher_stdin.write_all(&output.stdout))
+        .expect("write rustdoc catalog and outcome events");
+    drop(publisher_stdin);
     let publication = publisher
         .wait_with_output()
         .expect("wait for rustdoc outcome publisher");

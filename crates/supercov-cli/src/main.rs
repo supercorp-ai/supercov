@@ -518,7 +518,7 @@ fn publish_rustdoc_outcome(arguments: Vec<String>) -> ExitCode {
         );
         return ExitCode::from(2);
     };
-    let input = match stdin() {
+    let input = match stdin_bytes() {
         Ok(input) => input,
         Err(error) => {
             eprintln!("[supercov] {error}");
@@ -526,11 +526,11 @@ fn publish_rustdoc_outcome(arguments: Vec<String>) -> ExitCode {
         }
     };
     let result = (|| {
-        let unit = supercov_engine::rust_doctest::rustdoc_outcome_unit_from_libtest(
+        let unit = supercov_engine::rust_doctest::rustdoc_outcome_unit_from_framed_input(
             invocation_id.clone(),
             group.clone(),
             companion_build_id.clone(),
-            input.as_bytes(),
+            &input,
         )?;
         let path = supercov_engine::rust_doctest::publish_rustdoc_outcome_unit(
             Path::new(directory),
@@ -2341,17 +2341,22 @@ fn benchmark_js_transform() -> ExitCode {
 }
 
 fn stdin() -> Result<String, String> {
+    let input = stdin_bytes()?;
+    String::from_utf8(input).map_err(|error| format!("Rust engine input is not UTF-8: {error}"))
+}
+
+fn stdin_bytes() -> Result<Vec<u8>, String> {
     if let Some(path) = std::env::var_os("SUPERCOV_INTERNAL_INPUT_FILE") {
-        return fs::read_to_string(&path).map_err(|error| {
+        return fs::read(&path).map_err(|error| {
             format!(
                 "failed to read Rust engine input {}: {error}",
                 Path::new(&path).display()
             )
         });
     }
-    let mut input = String::new();
+    let mut input = Vec::new();
     std::io::stdin()
-        .read_to_string(&mut input)
+        .read_to_end(&mut input)
         .map_err(|error| format!("failed to read Rust engine input: {error}"))?;
     Ok(input)
 }
