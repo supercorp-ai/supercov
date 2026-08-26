@@ -349,6 +349,14 @@ an unverified rustc commit.
    production archive/retry path, broaden derive/external/nested expansion
    coverage, and prove wrapper, failure, signal and full doctest corpus
    behavior. Any incomplete area blocks public Rust support.
+   The production compiler-output reader now consumes all candidate pairs and
+   runner maps as one strict generation, resolves pending bundles before normal
+   workspace normalization, and retains zero-obligation maps for outcome
+   attribution. A production transport translator rekeys string IDs, numeric
+   ordinals and nested assertion context chains without assuming descriptor
+   order; malformed parents and post-translation collisions fail closed.
+   Exact machine-readable terminal outcomes with ordinary-output equivalence
+   are the next archive integration boundary.
 4. Exact selection now independently probes rustc commit/host/driver digest,
    authenticates the companion's executable digest and rejects missing,
    duplicate or incomplete-public candidates. The private Cargo wrapper and

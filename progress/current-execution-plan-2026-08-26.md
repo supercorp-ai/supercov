@@ -644,6 +644,19 @@ derive/external/nested expansion coverage, outcome/retry archive joining,
 wrapper composition and the full failure/signal corpus remain explicit
 blockers, so this still does not enable the public rustdoc capability.
 
+The deferred join is now on the production compiler-output boundary rather
+than only behind a development command. One generation is parsed as a whole:
+ordinary candidates first establish exact immutable source snapshots, every
+pending bundle must match exactly one strict runner map, duplicate/unmatched
+groups fail, and map-only tests with no executable obligations remain available
+for outcome attribution. Only joined final candidates reach workspace
+normalization. A transport translator also rekeys string observations and
+numeric ordinals and recursively rebuilds nested assertion context IDs, whose
+derivation includes the translated decision identity; descriptor order is not
+assumed and collisions fail closed. Exact per-doctest terminal outcomes and
+preservation of the user's ordinary visible output are still required before
+these candidates can enter a published run.
+
 Correctness corpus:
 
 - original-versus-instrumented differential programs checking values, panics,

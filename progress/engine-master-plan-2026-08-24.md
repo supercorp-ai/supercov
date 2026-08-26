@@ -1523,6 +1523,14 @@ miss blocks flipping any default.
   and its runtime events retain the exact merged test root. Broader derive/
   external/nested expansion coverage plus archive/retry, wrapper and failure/
   signal corpora remain promotion blockers.
+- Production compiler-output ingestion now performs that deferred join before
+  workspace normalization. Pending bundles cannot leak through the normal
+  parser, unmatched or duplicate groups fail, and maps for zero-obligation
+  tests remain available for later outcome attribution. The corresponding
+  transport translator rekeys string IDs and numeric ordinals and recursively
+  reconstructs nested assertion contexts because their authenticated identity
+  incorporates the translated decision ID. Exact terminal-outcome capture and
+  visible-output equivalence remain open before public rustdoc execution.
 
 ## Non-goals and guardrails
 

@@ -18,11 +18,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     rust_compiler_ctfe::{RustCompilerCtfeUnit, read_rust_compiler_ctfe},
-    rust_compiler_manifest::{
-        NormalizedRustCompilerManifest, RustCompilerManifest, RustCompilerSourceSnapshots,
-        normalize_rust_compiler_candidates,
-    },
+    rust_compiler_manifest::{NormalizedRustCompilerManifest, normalize_rust_compiler_candidates},
     rust_compiler_selection::{SelectedRustCompilerCompanion, select_rust_compiler_companion},
+    rust_doctest::{RustdocMergedUnit, resolve_merged_doctest_candidates},
     rust_test_runner::cargo_invocation,
 };
 
@@ -70,6 +68,7 @@ pub struct RustCompilerBuild {
     pub target_directory: PathBuf,
     pub compiler_output_directory: PathBuf,
     pub ctfe_units: Vec<RustCompilerCtfeUnit>,
+    pub doctest_units: Vec<RustdocMergedUnit>,
     pub build_started_at_ms: i64,
     pub build_ended_at_ms: i64,
     pub build_ms: f64,
@@ -216,12 +215,12 @@ fn write_wrapper_config(
     file.sync_all().map_err(|error| io_error(path, error))
 }
 
-fn compiler_pairs(
+fn compiler_candidates(
     directory: &Path,
-) -> Result<Vec<(RustCompilerManifest, RustCompilerSourceSnapshots)>, RustCompilerOrchestrationError>
-{
+) -> Result<crate::rust_doctest::RustdocResolvedCandidates, RustCompilerOrchestrationError> {
     let mut manifests = BTreeMap::<String, PathBuf>::new();
     let mut snapshots = BTreeMap::<String, PathBuf>::new();
+    let mut merged_maps = Vec::new();
     let entries = fs::read_dir(directory)
         .map_err(|error| io_error(directory, error))?
         .collect::<Result<Vec<_>, _>>()
@@ -240,6 +239,10 @@ fn compiler_pairs(
                 "compiler output contains a non-UTF-8 name".into(),
             )
         })?;
+        if name.starts_with("doctest-map-") && name.ends_with(".json") {
+            merged_maps.push(fs::read(&path).map_err(|error| io_error(&path, error))?);
+            continue;
+        }
         let destination = if let Some(key) = name
             .strip_prefix("manifest-")
             .and_then(|name| name.strip_suffix(".json"))
@@ -265,20 +268,17 @@ fn compiler_pairs(
             snapshots.len()
         )));
     }
-    manifests
+    let pairs = manifests
         .into_iter()
         .map(|(key, manifest)| {
             let snapshot = &snapshots[&key];
             let manifest = fs::read(&manifest).map_err(|error| io_error(&manifest, error))?;
             let snapshot = fs::read(snapshot).map_err(|error| io_error(snapshot, error))?;
-            Ok((
-                RustCompilerManifest::parse(&manifest)
-                    .map_err(|error| RustCompilerOrchestrationError::Manifest(error.to_string()))?,
-                RustCompilerSourceSnapshots::parse(&snapshot)
-                    .map_err(|error| RustCompilerOrchestrationError::Manifest(error.to_string()))?,
-            ))
+            Ok((manifest, snapshot))
         })
-        .collect()
+        .collect::<Result<Vec<_>, RustCompilerOrchestrationError>>()?;
+    resolve_merged_doctest_candidates(pairs, merged_maps)
+        .map_err(|error| RustCompilerOrchestrationError::Manifest(error.to_string()))
 }
 
 fn selections(
@@ -482,8 +482,8 @@ pub fn build_with_rust_compiler_companion(
         &request.companion_candidates,
         request.require_public_capabilities,
     )?;
-    let pairs = compiler_pairs(&candidate_directory)?;
-    let normalized = normalize_rust_compiler_candidates(pairs)
+    let resolved = compiler_candidates(&candidate_directory)?;
+    let normalized = normalize_rust_compiler_candidates(resolved.candidates)
         .map_err(|error| RustCompilerOrchestrationError::Manifest(error.to_string()))?;
     let ctfe_units =
         read_rust_compiler_ctfe(&candidate_directory, &normalized, build_started_at_ms)
@@ -496,6 +496,7 @@ pub fn build_with_rust_compiler_companion(
         target_directory,
         compiler_output_directory,
         ctfe_units,
+        doctest_units: resolved.merged_units,
         build_started_at_ms,
         build_ended_at_ms,
         build_ms,

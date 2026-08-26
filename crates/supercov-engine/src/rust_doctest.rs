@@ -18,11 +18,18 @@ use sha2::{Digest, Sha256};
 use crate::rust_compiler_manifest::{
     RustCompilerManifest, RustCompilerSource, RustCompilerSourceSnapshots,
 };
+use crate::{
+    rust_probe_transport::{
+        RustPhaseContext, RustTransportRead, rust_assertion_context_id,
+        validate_rust_phase_contexts,
+    },
+    rust_runtime::RustProbeObservation,
+};
 
 const MAP_SCHEMA: &str = "supercov-rustdoc-merged-map-v1";
 const SOURCE_MODEL: &str = "rust-source-v1";
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustdocMergedMap {
     pub schema: String,
@@ -30,7 +37,7 @@ pub struct RustdocMergedMap {
     pub entries: Vec<RustdocMergedEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustdocMergedEntry {
     pub module: String,
@@ -62,6 +69,273 @@ pub struct RustdocMergedJoin {
     pub obligation_ids: BTreeMap<String, String>,
     /// Every temporary runtime ordinal translated to its final authored ordinal.
     pub probe_ordinals: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RustdocMergedUnit {
+    pub map: RustdocMergedMap,
+    /// A map can describe a doctest with no executable source obligations.
+    /// Such a test still participates in outcome attribution but needs no
+    /// identity or runtime translation.
+    pub join: Option<RustdocMergedJoin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustdocResolvedCandidates {
+    pub candidates: Vec<(RustCompilerManifest, RustCompilerSourceSnapshots)>,
+    pub merged_units: Vec<RustdocMergedUnit>,
+}
+
+impl RustdocMergedJoin {
+    /// Translate transport records emitted before rustdoc's merged runner made
+    /// final authored identities available. Assertion context IDs are derived
+    /// from decision IDs, so translating a decision also requires rebuilding
+    /// its complete nested phase chain and every record that refers to it.
+    pub fn translate_transport(
+        &self,
+        base_context_id: u64,
+        read: &RustTransportRead,
+    ) -> Result<RustTransportRead, RustdocJoinError> {
+        validate_rust_phase_contexts(base_context_id, read)
+            .map_err(|error| RustdocJoinError::Invalid(error.to_string()))?;
+
+        let definitions = read
+            .phases
+            .iter()
+            .map(|phase| (phase.child_context_id, phase))
+            .collect::<BTreeMap<_, _>>();
+        if definitions.len() != read.phases.len() {
+            return Err(RustdocJoinError::Invalid(
+                "merged doctest transport has duplicate assertion contexts".into(),
+            ));
+        }
+        let mut translated_contexts = BTreeMap::from([(base_context_id, base_context_id)]);
+        let mut visiting = BTreeSet::new();
+        fn translate_context(
+            context: u64,
+            base: u64,
+            definitions: &BTreeMap<u64, &RustPhaseContext>,
+            obligation_ids: &BTreeMap<String, String>,
+            translated: &mut BTreeMap<u64, u64>,
+            visiting: &mut BTreeSet<u64>,
+        ) -> Result<u64, RustdocJoinError> {
+            if context == 0 || context == base {
+                return Ok(context);
+            }
+            if let Some(translated) = translated.get(&context) {
+                return Ok(*translated);
+            }
+            if !visiting.insert(context) {
+                return Err(RustdocJoinError::Invalid(format!(
+                    "merged doctest assertion context cycle at {context:016x}"
+                )));
+            }
+            let phase = definitions.get(&context).ok_or_else(|| {
+                RustdocJoinError::Invalid(format!(
+                    "merged doctest context {context:016x} has no phase definition"
+                ))
+            })?;
+            let parent = translate_context(
+                phase.parent_context_id,
+                base,
+                definitions,
+                obligation_ids,
+                translated,
+                visiting,
+            )?;
+            let decision = obligation_ids
+                .get(&phase.decision_id)
+                .map_or(phase.decision_id.as_str(), String::as_str);
+            let final_context = rust_assertion_context_id(parent, decision, phase.invocation_nonce)
+                .map_err(|error| RustdocJoinError::Invalid(error.to_string()))?;
+            visiting.remove(&context);
+            translated.insert(context, final_context);
+            Ok(final_context)
+        }
+        for phase in &read.phases {
+            translate_context(
+                phase.child_context_id,
+                base_context_id,
+                &definitions,
+                &self.obligation_ids,
+                &mut translated_contexts,
+                &mut visiting,
+            )?;
+        }
+
+        let translate_record_context = |context: u64| {
+            if context == 0 {
+                Ok(0)
+            } else {
+                translated_contexts.get(&context).copied().ok_or_else(|| {
+                    RustdocJoinError::Invalid(format!(
+                        "merged doctest record context {context:016x} was not translated"
+                    ))
+                })
+            }
+        };
+        let mut translated = read.clone();
+        for observation in &mut translated.observations {
+            observation.context_id = translate_record_context(observation.context_id)?;
+            let id = match &mut observation.observation {
+                RustProbeObservation::Hit { id } | RustProbeObservation::Decision { id, .. } => id,
+            };
+            if let Some(final_id) = self.obligation_ids.get(id) {
+                *id = final_id.clone();
+            }
+        }
+        for hit in &mut translated.ordinal_hits {
+            hit.context_id = translate_record_context(hit.context_id)?;
+            let old = hit.ordinal.to_string();
+            if let Some(final_ordinal) = self.probe_ordinals.get(&old) {
+                hit.ordinal = final_ordinal.parse::<u64>().map_err(|_| {
+                    RustdocJoinError::Invalid(format!(
+                        "merged doctest final probe ordinal {final_ordinal} is invalid"
+                    ))
+                })?;
+            }
+        }
+        for phase in &mut translated.phases {
+            phase.child_context_id = translate_record_context(phase.child_context_id)?;
+            phase.parent_context_id = translate_record_context(phase.parent_context_id)?;
+            if let Some(final_id) = self.obligation_ids.get(&phase.decision_id) {
+                phase.decision_id = final_id.clone();
+            }
+        }
+        let unique_phases = translated
+            .phases
+            .iter()
+            .map(|phase| phase.child_context_id)
+            .collect::<BTreeSet<_>>();
+        if unique_phases.len() != translated.phases.len() {
+            return Err(RustdocJoinError::Invalid(
+                "merged doctest assertion contexts collided after identity translation".into(),
+            ));
+        }
+        validate_rust_phase_contexts(base_context_id, &translated)
+            .map_err(|error| RustdocJoinError::Invalid(error.to_string()))?;
+        Ok(translated)
+    }
+}
+
+/// Parse an entire compiler-output generation and resolve every deferred
+/// merged-doctest candidate before ordinary workspace normalization. Normal
+/// candidates provide immutable authored source snapshots; a pending bundle
+/// must match exactly one runner map, while a map without a pending bundle is
+/// retained because the represented test may have no source obligations.
+pub fn resolve_merged_doctest_candidates(
+    raw_pairs: Vec<(Vec<u8>, Vec<u8>)>,
+    raw_maps: Vec<Vec<u8>>,
+) -> Result<RustdocResolvedCandidates, RustdocJoinError> {
+    let mut maps = BTreeMap::<String, RustdocMergedMap>::new();
+    for raw in raw_maps {
+        let map = RustdocMergedMap::parse(&raw)?;
+        if maps.insert(map.group.clone(), map).is_some() {
+            return Err(RustdocJoinError::Invalid(
+                "compiler output contains duplicate merged-doctest groups".into(),
+            ));
+        }
+    }
+
+    struct Pending {
+        group: String,
+        manifest: Vec<u8>,
+        sources: Vec<u8>,
+    }
+    let mut candidates = Vec::new();
+    let mut pending = Vec::new();
+    let mut authored_sources = BTreeMap::<String, RustCompilerSource>::new();
+    for (manifest_bytes, source_bytes) in raw_pairs {
+        let ordinary_manifest = RustCompilerManifest::parse(&manifest_bytes);
+        let ordinary_sources = RustCompilerSourceSnapshots::parse(&source_bytes);
+        if let (Ok(manifest), Ok(sources)) = (ordinary_manifest, ordinary_sources) {
+            if manifest.crate_name != sources.crate_name {
+                return Err(RustdocJoinError::Manifest(format!(
+                    "compiler manifest/source identity differs for {}",
+                    manifest.crate_name
+                )));
+            }
+            for (key, source) in &sources.sources {
+                if authored_sources
+                    .insert(key.clone(), source.clone())
+                    .is_some_and(|existing| existing != *source)
+                {
+                    return Err(RustdocJoinError::Invalid(format!(
+                        "authored compiler source {key} changed across units"
+                    )));
+                }
+            }
+            candidates.push((manifest, sources));
+            continue;
+        }
+
+        let matching = maps
+            .keys()
+            .filter(|group| {
+                RustCompilerManifest::parse_pending_doctest(&manifest_bytes, group).is_ok()
+                    && RustCompilerSourceSnapshots::parse_pending_doctest(&source_bytes, group)
+                        .is_ok()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let [group] = matching.as_slice() else {
+            return Err(RustdocJoinError::Invalid(format!(
+                "compiler candidate matches {} merged-doctest maps instead of exactly one",
+                matching.len()
+            )));
+        };
+        if pending
+            .iter()
+            .any(|candidate: &Pending| candidate.group == *group)
+        {
+            return Err(RustdocJoinError::Invalid(format!(
+                "merged-doctest group {group} has more than one pending bundle"
+            )));
+        }
+        pending.push(Pending {
+            group: group.clone(),
+            manifest: manifest_bytes,
+            sources: source_bytes,
+        });
+    }
+
+    let mut joined_by_group = BTreeMap::new();
+    for pending in pending {
+        let map = maps
+            .get(&pending.group)
+            .expect("pending group was selected from parsed maps");
+        let encoded_map =
+            serde_json::to_vec(map).map_err(|error| RustdocJoinError::Json(error.to_string()))?;
+        let joined = join_merged_doctest(
+            &pending.manifest,
+            &pending.sources,
+            &encoded_map,
+            &authored_sources,
+        )?;
+        candidates.push((joined.manifest.clone(), joined.sources.clone()));
+        joined_by_group.insert(pending.group, joined);
+    }
+    candidates.sort_by(|left, right| {
+        left.0.crate_name.cmp(&right.0.crate_name).then_with(|| {
+            left.0
+                .points
+                .first()
+                .map(|point| &point.id)
+                .cmp(&right.0.points.first().map(|point| &point.id))
+        })
+    });
+    let merged_units = maps
+        .into_iter()
+        .map(|(group, map)| RustdocMergedUnit {
+            map,
+            join: joined_by_group.remove(&group),
+        })
+        .collect();
+    Ok(RustdocResolvedCandidates {
+        candidates,
+        merged_units,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1233,6 +1507,10 @@ mod tests {
         RustCompilerBranch, RustCompilerBranchAlternative, RustCompilerCondition,
         RustCompilerDecision, RustCompilerManifest, RustCompilerMatchArm, RustCompilerPoint,
         RustCompilerSelectionGroup, RustCompilerSourceSnapshots,
+        normalize_rust_compiler_candidates,
+    };
+    use crate::rust_probe_transport::{
+        RustOrdinalHit, RustTransportObservation, rust_assertion_context_id,
     };
 
     fn map() -> RustdocMergedMap {
@@ -2048,5 +2326,165 @@ mod tests {
         }
         assert_eq!(joined.obligation_ids.len(), 5);
         assert_eq!(joined.probe_ordinals.len(), 5);
+    }
+
+    #[test]
+    fn translates_deferred_runtime_ids_ordinals_and_nested_assertion_contexts() {
+        let (pending_manifest, sources, map, authored) = pending_assertion_candidate();
+        let pending = RustCompilerManifest::parse_pending_doctest(&pending_manifest, "fixture")
+            .expect("pending candidate");
+        let mut joined = join_merged_doctest(&pending_manifest, &sources, &map, &authored)
+            .expect("strict merged join");
+        let old_point = &pending.points[0];
+        let old_outer = &pending.decisions[0].id;
+        let final_outer = joined.obligation_ids[old_outer].clone();
+        let old_inner = "rs:decision:111111111111111111111111".to_owned();
+        let final_inner = "rs:decision:222222222222222222222222".to_owned();
+        joined
+            .obligation_ids
+            .insert(old_inner.clone(), final_inner.clone());
+
+        let base = 42;
+        let outer_nonce = 7;
+        let inner_nonce = 8;
+        let old_outer_context =
+            rust_assertion_context_id(base, old_outer, outer_nonce).expect("old outer context");
+        let old_inner_context =
+            rust_assertion_context_id(old_outer_context, &old_inner, inner_nonce)
+                .expect("old inner context");
+        let final_outer_context =
+            rust_assertion_context_id(base, &final_outer, outer_nonce).expect("final outer");
+        let final_inner_context =
+            rust_assertion_context_id(final_outer_context, &final_inner, inner_nonce)
+                .expect("final inner");
+        let dependency = "rs:function:333333333333333333333333";
+        let read = RustTransportRead {
+            observations: vec![
+                RustTransportObservation {
+                    process_id: 10,
+                    context_id: old_outer_context,
+                    observation: RustProbeObservation::Hit {
+                        id: old_point.id.clone(),
+                    },
+                },
+                RustTransportObservation {
+                    process_id: 10,
+                    context_id: old_inner_context,
+                    observation: RustProbeObservation::Decision {
+                        id: old_inner.clone(),
+                        values: vec![Some(true)],
+                        outcome: true,
+                    },
+                },
+                RustTransportObservation {
+                    process_id: 10,
+                    context_id: 0,
+                    observation: RustProbeObservation::Hit {
+                        id: dependency.into(),
+                    },
+                },
+            ],
+            ordinal_hits: vec![RustOrdinalHit {
+                process_id: 10,
+                context_id: old_outer_context,
+                ordinal: old_point.probe_ordinal.parse().unwrap(),
+            }],
+            // Deliberately child-first: transport descriptor order is not a
+            // topological guarantee and the rewriter must not depend on it.
+            phases: vec![
+                RustPhaseContext {
+                    process_id: 10,
+                    child_context_id: old_inner_context,
+                    parent_context_id: old_outer_context,
+                    invocation_nonce: inner_nonce,
+                    decision_id: old_inner,
+                },
+                RustPhaseContext {
+                    process_id: 10,
+                    child_context_id: old_outer_context,
+                    parent_context_id: base,
+                    invocation_nonce: outer_nonce,
+                    decision_id: old_outer.clone(),
+                },
+            ],
+            committed: 6,
+            incomplete: 1,
+            dropped: 0,
+            attachments: 2,
+        };
+
+        let translated = joined
+            .translate_transport(base, &read)
+            .expect("exact transport translation");
+        assert_eq!(translated.committed, read.committed);
+        assert_eq!(translated.incomplete, read.incomplete);
+        assert_eq!(translated.attachments, read.attachments);
+        assert_eq!(translated.observations[0].context_id, final_outer_context);
+        assert_eq!(translated.observations[1].context_id, final_inner_context);
+        assert_eq!(translated.observations[2], read.observations[2]);
+        assert!(matches!(
+            &translated.observations[0].observation,
+            RustProbeObservation::Hit { id }
+                if id == &joined.obligation_ids[&old_point.id]
+        ));
+        assert!(matches!(
+            &translated.observations[1].observation,
+            RustProbeObservation::Decision { id, .. } if id == &final_inner
+        ));
+        assert_eq!(translated.ordinal_hits[0].context_id, final_outer_context);
+        assert_eq!(
+            translated.ordinal_hits[0].ordinal.to_string(),
+            joined.probe_ordinals[&old_point.probe_ordinal]
+        );
+        assert_eq!(translated.phases[0].child_context_id, final_inner_context);
+        assert_eq!(translated.phases[0].parent_context_id, final_outer_context);
+        assert_eq!(translated.phases[0].decision_id, final_inner);
+        assert_eq!(translated.phases[1].child_context_id, final_outer_context);
+        assert_eq!(translated.phases[1].parent_context_id, base);
+        assert_eq!(translated.phases[1].decision_id, final_outer);
+    }
+
+    #[test]
+    fn resolves_a_complete_compiler_generation_before_normalization() {
+        let (pending_manifest, pending_sources, map, authored) = pending_assertion_candidate();
+        let direct =
+            join_merged_doctest(&pending_manifest, &pending_sources, &map, &authored).unwrap();
+        let ordinary_manifest = serde_json::to_vec(&direct.manifest).unwrap();
+        let ordinary_sources = serde_json::to_vec(&direct.sources).unwrap();
+
+        let resolved = resolve_merged_doctest_candidates(
+            vec![
+                (pending_manifest.clone(), pending_sources.clone()),
+                (ordinary_manifest.clone(), ordinary_sources.clone()),
+            ],
+            vec![map.clone()],
+        )
+        .expect("generation join");
+        assert_eq!(resolved.candidates.len(), 2);
+        assert_eq!(resolved.merged_units.len(), 1);
+        assert_eq!(resolved.merged_units[0].join.as_ref().unwrap(), &direct);
+        normalize_rust_compiler_candidates(resolved.candidates).unwrap();
+
+        let no_obligations = resolve_merged_doctest_candidates(
+            vec![(ordinary_manifest, ordinary_sources)],
+            vec![map.clone()],
+        )
+        .expect("map-only test remains attributable");
+        assert!(no_obligations.merged_units[0].join.is_none());
+
+        assert!(
+            resolve_merged_doctest_candidates(
+                vec![(pending_manifest.clone(), pending_sources.clone())],
+                Vec::new(),
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_merged_doctest_candidates(
+                vec![(pending_manifest, pending_sources)],
+                vec![map.clone(), map],
+            )
+            .is_err()
+        );
     }
 }
