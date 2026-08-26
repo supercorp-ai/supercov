@@ -206,8 +206,8 @@ invocation as the condition. The exploratory 0/1/2/3 function ordinals are
 gone: runtime MIR hits now carry the u64 prefix of the exact manifest point ID,
 and the compiler rejects both full-ID and probe-prefix collisions. The
 candidate still carries blocking denominator limitations. The authored match
-slice below has since narrowed that surface, but synthetic/unreachable match
-arms, let-else, `?`, assertion, CTFE and doctest obligation/probe mappings,
+slice below has since narrowed that surface, but nested synthetic match arms,
+synthetic match-guard decisions, let-else, `?`, assertion, CTFE and doctest obligation/probe mappings,
 plus full package and compiler fingerprints, remain R1 work. No measurement-
 complete claim is possible yet.
 
@@ -279,11 +279,17 @@ matches, identical and empty bodies, a local declarative-macro match and an
 irrefutable one-arm match that correctly creates no branch. A panicking guard
 leaves an incomplete selection frame and no fabricated alternative, while
 baseline/instrumented values and output remain identical. Synthetic
-proc-macro match tokens expose the next real blocker: their arm spans collapse
-to one invocation location. Those arms remain in the candidate denominator,
-emit no raw selection evidence and carry an explicit runtime-unresolved
-limitation. Pre-borrow-check semantic arm markers and rustc-backed unreachable-
-arm classification must close that gap before `match` is promotion-complete.
+proc-macro match tokens exposed a real boundary: their arm spans collapse to
+one invocation location. The companion now inserts semantics-neutral private
+arm markers in built MIR, maps them through rustc's real/imaginary match edges,
+requires each marker to survive borrow checking exactly once, removes them,
+and only then installs runtime hits. Unguarded and compound-guard proc-macro
+matches retain exact arm identities without pre-analysis runtime calls.
+Separately, built-MIR reachability excludes a statically unreachable authored
+arm while retaining and measuring both reachable siblings. Nested synthetic
+matches and synthetic match-guard MC/DC still require equivalent semantic
+markers; they remain explicit blockers and publish no fabricated decision
+vectors.
 
 The CTFE provider spike is now executable rather than hypothetical. The
 companion overrides `mir_for_ctfe`, inserts execution markers in original

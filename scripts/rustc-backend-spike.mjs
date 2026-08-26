@@ -357,8 +357,10 @@ try {
   assert.equal(identityManifestA.model, 'rust-source-v1');
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
-    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: synthetic and unreachable match-arm runtime mappings, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
-    'RUST_MATCH_RUNTIME_UNRESOLVED: generated_match_by_proc: synthetic match expansion requires semantic arm markers before span information collapses',
+    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: nested synthetic match-arm mappings, synthetic match-guard decisions, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
+    'RUST_MATCH_GUARD_RUNTIME_UNRESOLVED: generated_guarded_match_by_proc: synthetic guard conditions require semantic condition markers before span information collapses',
+    'RUST_MATCH_PROMOTION_INCOMPLETE: generated_guarded_match_by_proc: synthetic match arm markers require nested-expansion and marker-survival corpus completion',
+    'RUST_MATCH_PROMOTION_INCOMPLETE: generated_match_by_proc: synthetic match arm markers require nested-expansion and marker-survival corpus completion',
   ]);
   const allIds = [
     ...identityManifestA.points.map(({id}) => id),
@@ -567,8 +569,13 @@ try {
   assert.match(baselineBehavior.stdout, /match-identical=\[7, 7, 9\]/);
   assert.match(baselineBehavior.stdout, /match-empty=true/);
   assert.match(baselineBehavior.stdout, /match-irrefutable=5/);
+  assert.match(baselineBehavior.stdout, /match-unreachable=\[1, 2\]/);
   assert.match(baselineBehavior.stdout, /match-generated=\[23, 29\]/);
   assert.match(baselineBehavior.stdout, /match-generated-proc=\[31, 37\]/);
+  assert.match(
+    baselineBehavior.stdout,
+    /match-generated-guarded-proc=\[3, 2, 2, 0\]/,
+  );
   assert.match(baselineBehavior.stdout, /match-nested=\[3, 14, 0\]/);
   const runtimeManifest = crateManifest(
     instrumentedDirectory,
@@ -633,9 +640,17 @@ try {
   const matchIdenticalGroups = matchGroupsFor(runtimeManifest, 'match_identical');
   const matchEmptyGroups = matchGroupsFor(runtimeManifest, 'match_empty');
   const generatedMatchGroups = matchGroupsFor(runtimeManifest, 'generated_match');
+  const unreachableMatchGroups = matchGroupsFor(
+    runtimeManifest,
+    'match_unreachable',
+  );
   const generatedProcMatchGroups = matchGroupsFor(
     runtimeManifest,
     'generated_match_by_proc',
+  );
+  const generatedGuardedProcMatchGroups = matchGroupsFor(
+    runtimeManifest,
+    'generated_guarded_match_by_proc',
   );
   const nestedMatchGroups = matchGroupsFor(runtimeManifest, 'nested_match');
   const interruptedMatchGroups = matchGroupsFor(
@@ -646,7 +661,14 @@ try {
   assert.equal(matchIdenticalGroups.length, 1);
   assert.equal(matchEmptyGroups.length, 1);
   assert.equal(generatedMatchGroups.length, 1);
+  assert.equal(unreachableMatchGroups.length, 1);
+  assert.equal(
+    unreachableMatchGroups[0].arms.length,
+    2,
+    'a statically unreachable match arm remained in the branch denominator',
+  );
   assert.equal(generatedProcMatchGroups.length, 1);
+  assert.equal(generatedGuardedProcMatchGroups.length, 1);
   assert.equal(
     matchGroupsFor(runtimeManifest, 'match_irrefutable').length,
     0,
@@ -659,6 +681,9 @@ try {
     ...matchIdenticalGroups,
     ...matchEmptyGroups,
     ...generatedMatchGroups,
+    ...unreachableMatchGroups,
+    ...generatedProcMatchGroups,
+    ...generatedGuardedProcMatchGroups,
     ...nestedMatchGroups,
   ].flatMap((group) => group.arms.map(({selectedOrdinal}) => selectedOrdinal));
   const interruptedMatchOrdinals = interruptedMatchGroups[0].arms.flatMap(
@@ -768,18 +793,6 @@ try {
     ),
     'a panicking match guard committed a false selected/not-selected alternative',
   );
-  const generatedProcMatchOrdinals = generatedProcMatchGroups[0].arms.flatMap(
-    ({selectedOrdinal, notSelectedOrdinal}) => [
-      selectedOrdinal,
-      notSelectedOrdinal,
-    ],
-  );
-  assert(
-    !behaviorEvidence.ordinals.some(({ordinal}) =>
-      generatedProcMatchOrdinals.includes(ordinal),
-    ),
-    'an unresolved synthetic proc-macro match fabricated arm evidence',
-  );
   const allMatchGroups = runtimeManifest.selectionGroups.filter(
     ({kind}) => kind === 'match',
   );
@@ -819,6 +832,27 @@ try {
     ),
     [1, 1],
     'a declarative-macro match lost authored arm selection identity',
+  );
+  assert.deepEqual(
+    unreachableMatchGroups[0].arms.map(({selectedOrdinal}) =>
+      ordinalCount(selectedOrdinal),
+    ),
+    [1, 1],
+    'reachable arms changed when the compiler excluded an unreachable pattern',
+  );
+  assert.deepEqual(
+    generatedProcMatchGroups[0].arms.map(({selectedOrdinal}) =>
+      ordinalCount(selectedOrdinal),
+    ),
+    [1, 1],
+    'a proc-macro match lost semantic arm marker identity after borrow checking',
+  );
+  assert.deepEqual(
+    generatedGuardedProcMatchGroups[0].arms.map(({selectedOrdinal}) =>
+      ordinalCount(selectedOrdinal),
+    ),
+    [1, 2, 1],
+    'a guarded proc-macro match lost semantic arm marker identity after borrow checking',
   );
   assert.deepEqual(
     nestedMatchGroups.map((group) =>
@@ -913,6 +947,13 @@ try {
       ({id}) => id === decisionFor(runtimeManifest, 'interrupted_match')?.id,
     ),
     'a panicking match guard was incorrectly committed as a complete decision vector',
+  );
+  assert(
+    !behaviorEvidence.decisions.some(
+      ({id}) =>
+        id === decisionFor(runtimeManifest, 'generated_guarded_match_by_proc')?.id,
+    ),
+    'an unresolved synthetic match guard fabricated a complete decision vector',
   );
   assert.deepEqual(decisionVectors('generated_by_rules'), [
     JSON.stringify({values: [false], outcome: false}),

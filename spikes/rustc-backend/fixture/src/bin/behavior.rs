@@ -3,11 +3,12 @@ use std::{cell::RefCell, panic};
 use supercov_rustc_spike_fixture::{
     CONST_FALSE_VALUE, CONST_VALUE, authored, chained, compound, context_normal_scope,
     context_panic_scope, disjoined, drop_order, fallible, for_break, for_values,
-    generated_by_build_script, generated_by_proc, generated_by_rules, generated_match,
-    generated_match_by_proc, interrupted_decision,
+    generated_by_build_script, generated_by_proc, generated_by_rules, generated_guarded_match_by_proc,
+    generated_match, generated_match_by_proc, interrupted_decision,
     interrupted_for, interrupted_match, match_empty, match_identical, match_irrefutable,
-    match_value, mixed, nested, nested_expression, nested_for_values, nested_match, panic_path,
-    pattern, repeated_expansions, two_for_values, while_compound, while_let_chain,
+    match_unreachable, match_value, mixed, nested, nested_expression, nested_for_values,
+    nested_match, panic_path, pattern, repeated_expansions, two_for_values, while_compound,
+    while_let_chain,
 };
 
 fn main() {
@@ -140,10 +141,23 @@ fn main() {
     match_empty(false);
     println!("match-empty=true");
     println!("match-irrefutable={}", match_irrefutable(4));
+    println!(
+        "match-unreachable={:?}",
+        [match_unreachable(true), match_unreachable(false)]
+    );
     println!("match-generated={:?}", [generated_match(true), generated_match(false)]);
     println!(
         "match-generated-proc={:?}",
         [generated_match_by_proc(true), generated_match_by_proc(false)]
+    );
+    println!(
+        "match-generated-guarded-proc={:?}",
+        [
+            generated_guarded_match_by_proc(Some(3), true),
+            generated_guarded_match_by_proc(Some(0), true),
+            generated_guarded_match_by_proc(Some(3), false),
+            generated_guarded_match_by_proc(None, true),
+        ]
     );
     println!(
         "match-nested={:?}",

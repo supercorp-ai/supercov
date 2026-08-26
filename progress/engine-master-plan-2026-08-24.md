@@ -1313,8 +1313,8 @@ miss blocks flipping any default.
   directories emit byte-identical candidates without ephemeral paths. The
   selected function MIR probes now emit manifest-derived ordinals. The manifest
   remains deliberately incomplete until the same identity and real probes
-  cover synthetic/unreachable match arms, let-else, `?`, assertions, CTFE and
-  doctest obligations.
+  cover nested synthetic match arms, synthetic match-guard decisions, let-else,
+  `?`, assertions, CTFE and doctest obligations.
 - The next private slice translates rustc's authored branch regions into
   Supercov-owned MIR decision frames rather than importing a rustc/LLVM
   profile. Exact goldens now cover all exercised ternary shapes for `&&`, `||`,
@@ -1358,10 +1358,14 @@ miss blocks flipping any default.
   redundant raw events. Guard MC/DC vectors, rejection, nested, identical,
   empty and local declarative-macro bodies are exact; irrefutable one-arm
   matches create no false denominator, and a panicking guard leaves explicit
-  incomplete health without an arm hit. Proc-macro-generated arm spans can
-  collapse to one callsite, so those obligations stay visible but runtime-
-  unresolved and emit no fabricated evidence. A pre-borrow-check semantic arm
-  marker plus rustc unreachable-arm classification is the next R1 gate.
+  incomplete health without an arm hit. For proc-macro output whose arm spans
+  collapse to one callsite, semantics-neutral markers are inserted in built
+  MIR, follow rustc's real/imaginary match-edge structure, survive borrow
+  checking exactly once and are removed before runtime calls are added. Exact
+  unguarded and compound-guard proc arm selections are now proven. Built-MIR
+  semantic reachability also removes a statically unreachable authored arm
+  from the denominator. Nested synthetic groups and synthetic guard-condition
+  MC/DC markers remain the next R1 gate.
 
 ## Non-goals and guardrails
 

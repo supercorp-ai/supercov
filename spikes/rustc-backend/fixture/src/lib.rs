@@ -27,6 +27,7 @@ generated_function!();
 generated_match_function!();
 probe_macros::generated_function!();
 probe_macros::generated_match_function!();
+probe_macros::generated_guarded_match_function!();
 
 pub mod repeated_expansions {
     generated_function!();
@@ -188,6 +189,15 @@ pub fn match_empty(value: bool) {
 pub fn match_irrefutable(value: usize) -> usize {
     match value {
         value => value + 1,
+    }
+}
+
+#[allow(unreachable_patterns)]
+pub fn match_unreachable(value: bool) -> usize {
+    match value {
+        true => 1,
+        false => 2,
+        _ => 3,
     }
 }
 

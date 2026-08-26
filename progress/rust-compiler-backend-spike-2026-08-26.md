@@ -146,9 +146,9 @@ The spike proved:
     multiple iterations, two/one zero/entered compound-`while` invocations and
     three/one zero/entered `while let` invocations. Cross-thread completion and
     killed unfinished branch frames retain exact start context and explicit
-    incomplete health. Synthetic/unreachable match arms, let-else, `?`,
-    assertions, executable statements, CTFE and doctest integration remain
-    denominator gates.
+    incomplete health. Nested synthetic match arms, synthetic match-guard
+    decisions, let-else, `?`, assertions, executable statements, CTFE and
+    doctest integration remain denominator gates.
 19. Authored `for` loops now emit the frozen `loop-entry` zero/entered branch
     without a fictitious Boolean decision. The companion overrides rustc's
     documented post-borrow-check/pre-optimization MIR provider, recognizes the
@@ -170,12 +170,18 @@ The spike proved:
     identical and empty bodies, and a local declarative-macro-generated match.
     An irrefutable one-arm match creates no impossible branch. A guard panic
     leaves one incomplete selection frame and no false arm evidence. A
-    proc-macro-generated match exposed the remaining source-collapse boundary:
-    all generated arm tokens can carry the same invocation span. The candidate
-    retains those obligations with an explicit runtime-unresolved limitation
-    and publishes no fabricated hits. A semantics-neutral arm marker inserted
-    before span information collapses, then consumed after borrow checking, is
-    required before proc/derive match support can be promoted.
+    proc-macro-generated match exposed a source-collapse boundary: all
+    generated arm tokens can carry the same invocation span. The companion now
+    overrides built MIR only to add semantics-neutral private local markers at
+    rustc's real match-arm entries. It maps unguarded and compound-guard arm
+    selection through the compiler's real/imaginary match edges, requires every
+    marker to survive borrow checking exactly once, removes the assignments at
+    the post-borrow-check boundary, and only then inserts runtime calls. Exact
+    proc-macro arm selections now arrive without changing values/output or
+    fabricating the still-unresolved synthetic guard MC/DC vector. The same
+    built-MIR semantic reachability excludes a statically unreachable authored
+    arm while retaining both reachable siblings. Nested synthetic match groups
+    and semantic condition markers remain promotion blockers.
 
 The companion executable is about 600 KiB on arm64 macOS and dynamically uses
 the exact `librustc_driver` already shipped by the user's `rustc` component.
@@ -247,9 +253,8 @@ an unverified rustc commit.
 
 ## Next implementation gates
 
-1. Finish match with pre-borrow-check semantic arm markers for collapsed
-   proc/derive expansions and rustc-backed unreachable-arm classification.
-   Then extend the proven expanded-HIR control slice to let-else, `?`,
+1. Finish nested proc/derive match-group markers and synthetic match-guard
+   condition markers. Then extend the proven expanded-HIR control slice to let-else, `?`,
    assertions and remaining executable statement
    semantics; bind their real MIR/CTFE probes to the same manifest IDs. Add
    derive, nested/external expansion, generic/trait, include/module and
