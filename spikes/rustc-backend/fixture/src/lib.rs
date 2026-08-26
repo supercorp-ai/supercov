@@ -28,6 +28,9 @@ generated_match_function!();
 probe_macros::generated_function!();
 probe_macros::generated_match_function!();
 probe_macros::generated_guarded_match_function!();
+probe_macros::generated_nested_match_function!();
+probe_macros::generated_nested_scrutinee_match_function!();
+probe_macros::generated_nested_guard_match_function!();
 
 pub mod repeated_expansions {
     generated_function!();

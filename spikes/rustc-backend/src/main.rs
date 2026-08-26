@@ -87,6 +87,8 @@ static ORIGINAL_MIR_BUILT: OnceLock<MirBuiltProvider> = OnceLock::new();
 static ORIGINAL_MIR_DROPS: OnceLock<MirDropsProvider> = OnceLock::new();
 static CTFE_EVENTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 static MATCH_ARM_MARKERS: Mutex<BTreeMap<String, BTreeMap<u32, u64>>> = Mutex::new(BTreeMap::new());
+static MATCH_GUARD_MARKERS: Mutex<BTreeMap<String, Vec<MatchGuardConditionMarker>>> =
+    Mutex::new(BTreeMap::new());
 static UNREACHABLE_MATCH_ARMS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static DOCTEST_ROLE: OnceLock<&'static str> = OnceLock::new();
 
@@ -130,6 +132,7 @@ struct MatchArmSelectionObligation {
     branch_id: String,
     body_source: StableSourceRange,
     guarded: bool,
+    guard_decision_id: Option<String>,
     selected_ordinal: u64,
     not_selected_ordinal: u64,
 }
@@ -139,6 +142,9 @@ struct MatchSelectionObligation {
     identity: StableObligationIdentity,
     arms: Vec<MatchArmSelectionObligation>,
     definitions: Vec<String>,
+    parent_group_id: Option<String>,
+    parent_site: Option<&'static str>,
+    parent_arm_index: Option<usize>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -156,6 +162,13 @@ struct DecisionObligation {
     decision_kind: &'static str,
     conditions: Vec<DecisionCondition>,
     definitions: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MatchGuardConditionMarker {
+    local: u32,
+    decision_id: String,
+    condition_index: usize,
 }
 
 fn prune_unreachable_match_arms(
@@ -507,6 +520,7 @@ struct HirManifestCollector<'a, 'tcx> {
     match_groups: &'a mut BTreeMap<String, MatchSelectionObligation>,
     limitations: &'a mut BTreeSet<String>,
     control_overrides: BTreeMap<u32, &'static str>,
+    match_context: Option<(String, &'static str, Option<usize>)>,
 }
 
 impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
@@ -590,7 +604,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
         expression: &'tcx hir::Expr<'tcx>,
         condition: &'tcx hir::Expr<'tcx>,
         control_kind: &'static str,
-    ) {
+    ) -> Option<String> {
         let mut atomic = Vec::new();
         flatten_decision_expression(condition, Some(true), Some(false), &mut atomic);
         if atomic.iter().any(|condition| {
@@ -606,7 +620,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             // Hidden control flow emitted by an external macro (for example
             // assert! or println!) is implementation code of that macro, not
             // an authored decision in the caller's denominator.
-            return;
+            return None;
         }
         let has_let = atomic
             .iter()
@@ -633,14 +647,14 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                             "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: condition: unowned {} source {}",
                             self.definition, source.class, source.key
                         ));
-                        return;
+                        return None;
                     }
                     Err(error) => {
                         self.limitations.insert(format!(
                             "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: condition: {error}",
                             self.definition
                         ));
-                        return;
+                        return None;
                     }
                 };
             let branch_source = match stable_source_range(
@@ -657,14 +671,14 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                         "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: branch condition: unowned {} source {}",
                         self.definition, branch_source.class, branch_source.key
                     ));
-                    return;
+                    return None;
                 }
                 Err(error) => {
                     self.limitations.insert(format!(
                         "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: branch condition: {error}",
                         self.definition
                     ));
-                    return;
+                    return None;
                 }
             };
             conditions.push(DecisionCondition {
@@ -690,15 +704,8 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 false_outcome: condition.false_outcome,
             });
         }
-        let Some(decision) = self.identity("decision", condition.span, decision_kind) else {
-            return;
-        };
-        if control_kind == "match-guard" && decision.provenance == "synthetic-expansion" {
-            self.limitations.insert(format!(
-                "RUST_MATCH_GUARD_RUNTIME_UNRESOLVED: {}: synthetic guard conditions require semantic condition markers before span information collapses",
-                self.definition
-            ));
-        }
+        let decision = self.identity("decision", condition.span, decision_kind)?;
+        let decision_id = decision.id.clone();
         match self.decisions.get_mut(&decision.id) {
             Some(existing) if existing.identity.canonical != decision.canonical => {
                 self.tcx.dcx().fatal(format!(
@@ -743,6 +750,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             &format!("decision-outcome:{decision_kind}"),
             &[("true", "condition true"), ("false", "condition false")],
         );
+        Some(decision_id)
     }
 
     fn record_branch(
@@ -806,11 +814,15 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
         Some(branch_id)
     }
 
-    fn record_match(&mut self, expression: &'tcx hir::Expr<'tcx>, arms: &'tcx [hir::Arm<'tcx>]) {
+    fn record_match(
+        &mut self,
+        expression: &'tcx hir::Expr<'tcx>,
+        arms: &'tcx [hir::Arm<'tcx>],
+    ) -> Option<String> {
         if arms.len() < 2 {
             // An irrefutable single-arm match has no selectable alternative;
             // an empty match diverges while evaluating an uninhabited value.
-            return;
+            return None;
         }
         if expression.span.from_expansion()
             && !self.tcx.def_span(self.def_id).from_expansion()
@@ -821,28 +833,18 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 .macro_def_id
                 .is_some_and(|macro_def| macro_def.is_local())
         {
-            return;
+            return None;
         }
-        let Some(group) = self.identity("match-group", expression.span, "match") else {
-            return;
-        };
-        if group.provenance == "synthetic-expansion" {
-            self.limitations.insert(format!(
-                "RUST_MATCH_PROMOTION_INCOMPLETE: {}: synthetic match arm markers require nested-expansion and marker-survival corpus completion",
-                self.definition
-            ));
-        }
+        let group = self.identity("match-group", expression.span, "match")?;
         let mut selections = Vec::with_capacity(arms.len());
         for (index, arm) in arms.iter().enumerate() {
             let discriminator = format!("match-arm:{}:{index}", group.id);
-            let Some(branch_id) = self.record_branch(
+            let branch_id = self.record_branch(
                 arm.span,
                 "match-arm",
                 &discriminator,
                 &[("not-selected", "not selected"), ("selected", "selected")],
-            ) else {
-                return;
-            };
+            )?;
             let Some(branch) = self.branches.get(&branch_id) else {
                 self.tcx
                     .dcx()
@@ -855,14 +857,14 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                         "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: match arm body: unowned {} source {}",
                         self.definition, source.class, source.key
                     ));
-                    return;
+                    return None;
                 }
                 Err(error) => {
                     self.limitations.insert(format!(
                         "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: match arm body: {error}",
                         self.definition
                     ));
-                    return;
+                    return None;
                 }
             };
             let not_selected_ordinal = branch
@@ -886,10 +888,18 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 branch_id,
                 body_source,
                 guarded: arm.guard.is_some(),
+                guard_decision_id: None,
                 selected_ordinal,
                 not_selected_ordinal,
             });
         }
+        for (selection, arm) in selections.iter_mut().zip(arms) {
+            selection.guard_decision_id = arm
+                .guard
+                .and_then(|guard| self.record_control_decision(guard, guard, "match-guard"));
+        }
+        let group_id = group.id.clone();
+        let parent = self.match_context.clone();
         match self.match_groups.get_mut(&group.id) {
             Some(existing) if existing.identity.canonical != group.canonical => {
                 self.tcx.dcx().fatal(format!(
@@ -897,10 +907,17 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     group.id
                 ))
             }
-            Some(existing) if existing.arms != selections => self.tcx.dcx().fatal(format!(
-                "Supercov Rust match selection aggregation mismatch for {}",
-                group.id
-            )),
+            Some(existing)
+                if existing.arms != selections
+                    || existing.parent_group_id != parent.as_ref().map(|value| value.0.clone())
+                    || existing.parent_site != parent.as_ref().map(|value| value.1)
+                    || existing.parent_arm_index != parent.as_ref().and_then(|value| value.2) =>
+            {
+                self.tcx.dcx().fatal(format!(
+                    "Supercov Rust match selection aggregation mismatch for {}",
+                    group.id
+                ))
+            }
             Some(existing) => {
                 existing.definitions.push(self.definition.clone());
                 existing.definitions.sort();
@@ -913,10 +930,14 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                         identity: group,
                         arms: selections,
                         definitions: vec![self.definition.clone()],
+                        parent_group_id: parent.as_ref().map(|value| value.0.clone()),
+                        parent_site: parent.as_ref().map(|value| value.1),
+                        parent_arm_index: parent.as_ref().and_then(|value| value.2),
                     },
                 );
             }
         }
+        Some(group_id)
     }
 }
 
@@ -1010,22 +1031,32 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
                 hir::LoopSource::Loop => {}
             }
         }
-        if let hir::ExprKind::Match(_, arms, source) = expression.kind
+        if let hir::ExprKind::Match(scrutinee, arms, source) = expression.kind
             && matches!(source, hir::MatchSource::Normal | hir::MatchSource::Postfix)
+            && let Some(group_id) = self.record_match(expression, arms)
         {
-            self.record_match(expression, arms);
-            for arm in arms {
+            let previous = self
+                .match_context
+                .replace((group_id.clone(), "scrutinee", None));
+            self.visit_expr(scrutinee);
+            for (index, arm) in arms.iter().enumerate() {
+                self.visit_pat(arm.pat);
                 if let Some(guard) = arm.guard {
-                    self.record_control_decision(guard, guard, "match-guard");
+                    self.match_context = Some((group_id.clone(), "guard", Some(index)));
+                    self.visit_expr(guard);
                 }
+                self.match_context = Some((group_id.clone(), "body", Some(index)));
+                self.visit_expr(arm.body);
             }
+            self.match_context = previous;
+            return;
         }
         if let hir::ExprKind::If(condition, _, _) = expression.kind {
             let control_kind = self
                 .control_overrides
                 .remove(&expression.hir_id.local_id.as_u32())
                 .unwrap_or("if");
-            self.record_control_decision(expression, condition, control_kind);
+            let _ = self.record_control_decision(expression, condition, control_kind);
         }
         intravisit::walk_expr(self, expression);
     }
@@ -1132,12 +1163,13 @@ fn manifest_json(
                 .iter()
                 .map(|arm| {
                     format!(
-                        "{{\"branchId\":\"{}\",\"bodySourceKey\":\"{}\",\"bodyStart\":{},\"bodyEnd\":{},\"guarded\":{},\"selectedOrdinal\":\"{}\",\"notSelectedOrdinal\":\"{}\"}}",
+                        "{{\"branchId\":\"{}\",\"bodySourceKey\":\"{}\",\"bodyStart\":{},\"bodyEnd\":{},\"guarded\":{},\"guardDecisionId\":{},\"selectedOrdinal\":\"{}\",\"notSelectedOrdinal\":\"{}\"}}",
                         escape(&arm.branch_id),
                         escape(&arm.body_source.key),
                         arm.body_source.start,
                         arm.body_source.end,
                         arm.guarded,
+                        json_string(arm.guard_decision_id.as_deref()),
                         arm.selected_ordinal,
                         arm.not_selected_ordinal,
                     )
@@ -1145,7 +1177,7 @@ fn manifest_json(
                 .collect::<Vec<_>>()
                 .join(",");
             format!(
-                "{{\"id\":\"{}\",\"kind\":\"match\",\"sourceKey\":\"{}\",\"start\":{},\"end\":{},\"provenance\":\"{}\",\"probeOrdinal\":\"{}\",\"definitions\":{},\"arms\":[{}],\"canonical\":\"{}\"}}",
+                "{{\"id\":\"{}\",\"kind\":\"match\",\"sourceKey\":\"{}\",\"start\":{},\"end\":{},\"provenance\":\"{}\",\"probeOrdinal\":\"{}\",\"definitions\":{},\"parentGroupId\":{},\"parentSite\":{},\"parentArmIndex\":{},\"arms\":[{}],\"canonical\":\"{}\"}}",
                 escape(&group.identity.id),
                 escape(&group.identity.source.key),
                 group.identity.source.start,
@@ -1153,6 +1185,12 @@ fn manifest_json(
                 group.identity.provenance,
                 group.identity.probe_ordinal,
                 json_strings(&group.definitions),
+                json_string(group.parent_group_id.as_deref()),
+                json_string(group.parent_site),
+                group
+                    .parent_arm_index
+                    .map(|index| index.to_string())
+                    .unwrap_or_else(|| "null".into()),
                 arms,
                 escape(&group.identity.canonical),
             )
@@ -1281,7 +1319,7 @@ impl Callbacks for ProbeCallbacks {
         let mut decisions = BTreeMap::<String, DecisionObligation>::new();
         let mut match_groups = BTreeMap::<String, MatchSelectionObligation>::new();
         let mut manifest_limitations = BTreeSet::from([
-            "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: nested synthetic match-arm mappings, synthetic match-guard decisions, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
+            "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
         ]);
 
         for owner in tcx.hir_body_owners() {
@@ -1408,6 +1446,7 @@ impl Callbacks for ProbeCallbacks {
                     match_groups: &mut match_groups,
                     limitations: &mut manifest_limitations,
                     control_overrides: BTreeMap::new(),
+                    match_context: None,
                 };
                 collector.visit_body(body);
             }
@@ -1559,13 +1598,90 @@ fn guarded_match_arm_entry(
     Ok(*selected)
 }
 
-fn synthetic_match_entries(
-    body: &Body<'_>,
-    arms: &[MatchArmSelectionObligation],
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SyntheticMatchArmPath {
+    entry: BasicBlock,
+    guard_candidate: Option<BasicBlock>,
+    rejection: Option<BasicBlock>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SyntheticMatchGroupPath {
+    start: BasicBlock,
+    arms: Vec<SyntheticMatchArmPath>,
+}
+
+fn guard_condition_blocks<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    candidate: BasicBlock,
+    selected: BasicBlock,
+    rejection: BasicBlock,
+    expected: usize,
 ) -> Result<Vec<BasicBlock>, String> {
-    let arm_count = arms.len();
+    let mut pending = vec![candidate];
+    let mut visited = BTreeSet::new();
+    let mut switches = BTreeSet::new();
+    while let Some(block) = pending.pop() {
+        if block == selected || block == rejection || !visited.insert(block) {
+            continue;
+        }
+        let terminator = body.basic_blocks[block].terminator();
+        if let TerminatorKind::SwitchInt { discr, targets } = &terminator.kind
+            && discr.ty(&body.local_decls, tcx) == tcx.types.bool
+        {
+            let true_target = targets.target_for_value(1);
+            let false_target = targets.target_for_value(0);
+            let terminal_reachability = |target| {
+                (
+                    block_reaches(body, target, selected),
+                    block_reaches(body, target, rejection),
+                )
+            };
+            if terminal_reachability(true_target) != terminal_reachability(false_target) {
+                switches.insert(block);
+            }
+        }
+        pending.extend(semantic_successors(terminator));
+    }
+    if switches.len() != expected {
+        return Err(format!(
+            "synthetic guard has {} Boolean switches for {expected} conditions",
+            switches.len()
+        ));
+    }
+    let mut ranked = switches
+        .iter()
+        .copied()
+        .map(|block| {
+            let predecessors = switches
+                .iter()
+                .copied()
+                .filter(|other| *other != block && block_reaches(body, *other, block))
+                .count();
+            (predecessors, block)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort();
+    if ranked
+        .iter()
+        .enumerate()
+        .any(|(index, (rank, _))| index != *rank)
+    {
+        return Err("synthetic guard Boolean switches have no total evaluation order".into());
+    }
+    Ok(ranked.into_iter().map(|(_, block)| block).collect())
+}
+
+fn synthetic_match_candidates(
+    tcx: TyCtxt<'_>,
+    crate_name: &str,
+    body: &Body<'_>,
+    group: &MatchSelectionObligation,
+) -> Vec<SyntheticMatchGroupPath> {
+    let arm_count = group.arms.len();
     if arm_count < 2 {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let false_edges = body
         .basic_blocks
@@ -1584,10 +1700,20 @@ fn synthetic_match_entries(
         .collect::<BTreeMap<_, _>>();
     let mut candidates = Vec::new();
     for head in by_block.keys().copied() {
+        let head_source = body.basic_blocks[head]
+            .terminator()
+            .source_info
+            .span
+            .source_callsite();
+        if !stable_source_range(tcx, head_source, crate_name)
+            .is_ok_and(|source| source == group.identity.source)
+        {
+            continue;
+        }
         let mut current = head;
         let mut entries = Vec::with_capacity(arm_count);
         let mut valid = true;
-        for (index, arm) in arms[..arm_count - 1].iter().enumerate() {
+        for (index, arm) in group.arms[..arm_count - 1].iter().enumerate() {
             let Some((real, imaginary)) = by_block.get(&current).copied() else {
                 valid = false;
                 break;
@@ -1603,29 +1729,160 @@ fn synthetic_match_entries(
             } else {
                 real
             };
-            entries.push(entry);
+            entries.push(SyntheticMatchArmPath {
+                entry,
+                guard_candidate: arm.guarded.then_some(real),
+                rejection: arm.guarded.then_some(imaginary),
+            });
             if index + 1 == arm_count - 1 {
-                entries.push(imaginary);
+                entries.push(SyntheticMatchArmPath {
+                    entry: imaginary,
+                    guard_candidate: None,
+                    rejection: None,
+                });
             } else {
                 current = imaginary;
             }
         }
         if valid
             && entries.len() == arm_count
-            && entries.iter().copied().collect::<BTreeSet<_>>().len() == entries.len()
+            && entries
+                .iter()
+                .map(|entry| entry.entry)
+                .collect::<BTreeSet<_>>()
+                .len()
+                == entries.len()
         {
-            candidates.push(entries);
+            candidates.push(SyntheticMatchGroupPath {
+                start: head,
+                arms: entries,
+            });
         }
     }
     candidates.sort();
     candidates.dedup();
-    let [entries] = candidates.as_slice() else {
+    candidates
+}
+
+fn synthetic_match_parent_relation(
+    body: &Body<'_>,
+    child_group: &MatchSelectionObligation,
+    child: &SyntheticMatchGroupPath,
+    parent: &SyntheticMatchGroupPath,
+) -> bool {
+    match (child_group.parent_site, child_group.parent_arm_index) {
+        (Some("scrutinee"), None) => {
+            block_reaches(body, child.start, parent.start)
+                && !block_reaches(body, parent.start, child.start)
+        }
+        (Some("body"), Some(index)) => parent.arms.get(index).is_some_and(|arm| {
+            block_reaches(body, arm.entry, child.start)
+                && parent.arms.iter().enumerate().all(|(other, arm)| {
+                    other == index || !block_reaches(body, arm.entry, child.start)
+                })
+        }),
+        (Some("guard"), Some(index)) => parent.arms.get(index).is_some_and(|arm| {
+            arm.guard_candidate.is_some_and(|candidate| {
+                block_reaches(body, candidate, child.start)
+                    && block_reaches(body, child.start, arm.entry)
+                    && arm
+                        .rejection
+                        .is_some_and(|rejection| block_reaches(body, child.start, rejection))
+            })
+        }),
+        _ => false,
+    }
+}
+
+fn synthetic_match_assignments(
+    tcx: TyCtxt<'_>,
+    crate_name: &str,
+    body: &Body<'_>,
+    groups: &[&MatchSelectionObligation],
+) -> Result<BTreeMap<String, SyntheticMatchGroupPath>, String> {
+    let candidates = groups
+        .iter()
+        .map(|group| {
+            (
+                group.identity.id.clone(),
+                synthetic_match_candidates(tcx, crate_name, body, group),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if let Some((group_id, paths)) = candidates.iter().find(|(_, paths)| paths.is_empty()) {
         return Err(format!(
-            "collapsed match has {} structurally valid arm chains",
-            candidates.len()
+            "collapsed match group {group_id} has {} structurally valid arm chains",
+            paths.len()
+        ));
+    }
+    fn recurse(
+        body: &Body<'_>,
+        groups: &[&MatchSelectionObligation],
+        candidates: &BTreeMap<String, Vec<SyntheticMatchGroupPath>>,
+        index: usize,
+        used_starts: &mut BTreeSet<u32>,
+        current: &mut BTreeMap<String, SyntheticMatchGroupPath>,
+        solutions: &mut Vec<BTreeMap<String, SyntheticMatchGroupPath>>,
+    ) {
+        if solutions.len() > 1 {
+            return;
+        }
+        if index == groups.len() {
+            let valid = groups.iter().all(|group| {
+                let Some(parent_id) = &group.parent_group_id else {
+                    return true;
+                };
+                let (Some(child), Some(parent)) =
+                    (current.get(&group.identity.id), current.get(parent_id))
+                else {
+                    return false;
+                };
+                synthetic_match_parent_relation(body, group, child, parent)
+            });
+            if valid {
+                solutions.push(current.clone());
+            }
+            return;
+        }
+        let group = groups[index];
+        for candidate in &candidates[&group.identity.id] {
+            if !used_starts.insert(candidate.start.as_u32()) {
+                continue;
+            }
+            current.insert(group.identity.id.clone(), candidate.clone());
+            recurse(
+                body,
+                groups,
+                candidates,
+                index + 1,
+                used_starts,
+                current,
+                solutions,
+            );
+            current.remove(&group.identity.id);
+            used_starts.remove(&candidate.start.as_u32());
+        }
+    }
+    let mut ordered = groups.to_vec();
+    ordered.sort_by_key(|group| candidates[&group.identity.id].len());
+    let mut solutions = Vec::new();
+    recurse(
+        body,
+        &ordered,
+        &candidates,
+        0,
+        &mut BTreeSet::new(),
+        &mut BTreeMap::new(),
+        &mut solutions,
+    );
+    let [solution] = solutions.as_slice() else {
+        return Err(format!(
+            "{} collapsed match groups have {} parent-consistent CFG assignments; candidates={candidates:?}; solutions={solutions:?}",
+            groups.len(),
+            solutions.len()
         ));
     };
-    Ok(entries.clone())
+    Ok(solution.clone())
 }
 
 fn match_arm_marker_statement<'tcx>(
@@ -1709,27 +1966,92 @@ fn mir_built_with_match_markers<'tcx>(
     if synthetic_groups.is_empty() {
         return body;
     }
-    if synthetic_groups.len() != 1 {
-        return body;
-    }
-    let entries = {
+    let (assignments, guard_blocks) = {
         let borrowed = body.borrow();
-        match synthetic_match_entries(&borrowed, &synthetic_groups[0].arms) {
-            Ok(entries) => entries,
-            Err(_) => return body,
+        let assignments = match synthetic_match_assignments(
+            tcx,
+            &obligations.crate_name,
+            &borrowed,
+            &synthetic_groups,
+        ) {
+            Ok(assignments) => assignments,
+            Err(error) => tcx.dcx().fatal(format!(
+                "Supercov could not bind pre-borrow-check synthetic matches in {}: {error}",
+                obligations.definition
+            )),
+        };
+        let mut guard_blocks = Vec::new();
+        for group in &synthetic_groups {
+            let Some(path) = assignments.get(&group.identity.id) else {
+                return body;
+            };
+            for (arm, arm_path) in group.arms.iter().zip(&path.arms) {
+                let Some(decision_id) = &arm.guard_decision_id else {
+                    continue;
+                };
+                let Some(decision) = obligations.decisions.get(decision_id) else {
+                    return body;
+                };
+                let (Some(candidate), Some(rejection)) =
+                    (arm_path.guard_candidate, arm_path.rejection)
+                else {
+                    return body;
+                };
+                let blocks = match guard_condition_blocks(
+                    tcx,
+                    &borrowed,
+                    candidate,
+                    arm_path.entry,
+                    rejection,
+                    decision.conditions.len(),
+                ) {
+                    Ok(blocks) => blocks,
+                    Err(error) => tcx.dcx().fatal(format!(
+                        "Supercov could not bind pre-borrow-check synthetic guard {} in {}: {error}",
+                        decision_id, obligations.definition
+                    )),
+                };
+                guard_blocks.extend(
+                    blocks
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, block)| (decision_id.clone(), index, block)),
+                );
+            }
         }
+        (assignments, guard_blocks)
     };
     let mut instrumented = body.steal();
     let mut local_ordinals = BTreeMap::new();
-    for (arm, entry) in synthetic_groups[0].arms.iter().zip(entries) {
+    for group in &synthetic_groups {
+        let path = &assignments[&group.identity.id];
+        for (arm, arm_path) in group.arms.iter().zip(&path.arms) {
+            let marker_local = instrumented
+                .local_decls
+                .push(LocalDecl::new(tcx.types.u64, DUMMY_SP));
+            instrumented.basic_blocks_mut()[arm_path.entry]
+                .statements
+                .insert(
+                    0,
+                    match_arm_marker_statement(tcx, marker_local, arm.selected_ordinal),
+                );
+            local_ordinals.insert(marker_local.as_u32(), arm.selected_ordinal);
+        }
+    }
+    let mut guard_markers = Vec::new();
+    for (decision_id, condition_index, block) in guard_blocks {
         let marker_local = instrumented
             .local_decls
             .push(LocalDecl::new(tcx.types.u64, DUMMY_SP));
-        instrumented.basic_blocks_mut()[entry].statements.insert(
+        instrumented.basic_blocks_mut()[block].statements.insert(
             0,
-            match_arm_marker_statement(tcx, marker_local, arm.selected_ordinal),
+            match_arm_marker_statement(tcx, marker_local, condition_index as u64),
         );
-        local_ordinals.insert(marker_local.as_u32(), arm.selected_ordinal);
+        guard_markers.push(MatchGuardConditionMarker {
+            local: marker_local.as_u32(),
+            decision_id,
+            condition_index,
+        });
     }
     let mut markers = MATCH_ARM_MARKERS
         .lock()
@@ -1741,6 +2063,20 @@ fn mir_built_with_match_markers<'tcx>(
             "Supercov synthetic match marker collision for {}",
             obligations.definition
         ));
+    }
+    if !guard_markers.is_empty() {
+        let mut markers = MATCH_GUARD_MARKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) =
+            markers.insert(obligations.definition.clone(), guard_markers.clone())
+            && existing != guard_markers
+        {
+            tcx.dcx().fatal(format!(
+                "Supercov synthetic match guard marker collision for {}",
+                obligations.definition
+            ));
+        }
     }
     tcx.alloc_steal_mir(instrumented)
 }
@@ -1756,11 +2092,12 @@ fn mir_drops_with_structural_probes<'tcx>(
     if env::var_os(INSTRUMENT_MIR).is_none() || tcx.hir_body_const_context(def_id).is_some() {
         return body;
     }
-    let (match_plans, for_plans) = {
+    let (match_plans, for_plans, guard_plans) = {
         let borrowed = body.borrow();
         (
             runtime_match_plans(tcx, def_id, &borrowed),
             runtime_for_loop_plans(tcx, def_id, &borrowed),
+            runtime_marked_guard_decision_plans(tcx, def_id, &borrowed),
         )
     };
     let match_plans = match_plans.unwrap_or_else(|error| {
@@ -1775,21 +2112,41 @@ fn mir_drops_with_structural_probes<'tcx>(
             tcx.def_path_str(def_id)
         ))
     });
-    if match_plans.is_empty() && for_plans.is_empty() {
+    let guard_plans = guard_plans.unwrap_or_else(|error| {
+        tcx.dcx().fatal(format!(
+            "Supercov could not bind pre-optimization Rust synthetic guard probes in {}: {error}",
+            tcx.def_path_str(def_id)
+        ))
+    });
+    if match_plans.is_empty() && for_plans.is_empty() && guard_plans.is_empty() {
         return body;
     }
-    let Some(start) = find_runtime_function(tcx, START_BRANCH_FUNCTION) else {
+    let has_branch_plans = !match_plans.is_empty() || !for_plans.is_empty();
+    let start_branch = has_branch_plans
+        .then(|| find_runtime_function(tcx, START_BRANCH_FUNCTION))
+        .flatten();
+    let hit_branch = has_branch_plans
+        .then(|| find_runtime_function(tcx, HIT_BRANCH_FUNCTION))
+        .flatten();
+    let has_guard_plans = !guard_plans.is_empty();
+    let start_decision = has_guard_plans
+        .then(|| find_runtime_function(tcx, START_DECISION_FUNCTION))
+        .flatten();
+    let record_condition = has_guard_plans
+        .then(|| find_runtime_function(tcx, RECORD_CONDITION_FUNCTION))
+        .flatten();
+    let finish_decision = has_guard_plans
+        .then(|| find_runtime_function(tcx, FINISH_DECISION_FUNCTION))
+        .flatten();
+    if has_branch_plans != (start_branch.is_some() && hit_branch.is_some())
+        || has_guard_plans
+            != (start_decision.is_some() && record_condition.is_some() && finish_decision.is_some())
+    {
         tcx.dcx().fatal(format!(
-            "Supercov branch-start runtime is missing while instrumenting {}",
+            "Supercov structural runtimes are incomplete while instrumenting {}",
             tcx.def_path_str(def_id)
         ));
-    };
-    let Some(hit) = find_runtime_function(tcx, HIT_BRANCH_FUNCTION) else {
-        tcx.dcx().fatal(format!(
-            "Supercov branch-hit runtime is missing while instrumenting {}",
-            tcx.def_path_str(def_id)
-        ));
-    };
+    }
     let mut instrumented = body.steal();
     let span = tcx.def_span(def_id);
     let unit = instrumented
@@ -1802,17 +2159,55 @@ fn mir_drops_with_structural_probes<'tcx>(
         ));
     }
     let mut match_plans = match_plans;
-    if let Err(error) = instrument_runtime_matches(
-        tcx,
-        &mut instrumented,
-        &mut match_plans,
-        start,
-        hit,
-        unit,
-        span,
-    ) {
+    if let (Some(start), Some(hit)) = (start_branch, hit_branch)
+        && let Err(error) = instrument_runtime_matches(
+            tcx,
+            &mut instrumented,
+            &mut match_plans,
+            start,
+            hit,
+            unit,
+            span,
+        )
+    {
         tcx.dcx().fatal(format!(
             "Supercov could not inject pre-optimization Rust match probes in {}: {error}",
+            tcx.def_path_str(def_id)
+        ));
+    }
+    // Match instrumentation may replace the accepting edge of a guard. Bind
+    // exact Boolean targets after that edit while the semantic markers remain.
+    let guard_plans =
+        runtime_marked_guard_decision_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
+            tcx.dcx().fatal(format!(
+                "Supercov could not rebind pre-optimization Rust synthetic guard probes in {}: {error}",
+                tcx.def_path_str(def_id)
+            ))
+        });
+    if let Err(error) = strip_match_guard_markers(&mut instrumented, &tcx.def_path_str(def_id)) {
+        tcx.dcx().fatal(format!(
+            "Supercov could not consume pre-borrow-check Rust match guard markers in {}: {error}",
+            tcx.def_path_str(def_id)
+        ));
+    }
+    if let (Some(start), Some(condition), Some(finish)) =
+        (start_decision, record_condition, finish_decision)
+        && let Err(error) = instrument_runtime_decisions(
+            tcx,
+            &mut instrumented,
+            &guard_plans,
+            DecisionRuntime {
+                start,
+                condition,
+                finish,
+                branch_hit: None,
+                unit,
+            },
+            span,
+        )
+    {
+        tcx.dcx().fatal(format!(
+            "Supercov could not inject pre-optimization Rust synthetic guard probes in {}: {error}",
             tcx.def_path_str(def_id)
         ));
     }
@@ -1825,15 +2220,17 @@ fn mir_drops_with_structural_probes<'tcx>(
                 tcx.def_path_str(def_id)
             ))
         });
-    if let Err(error) = instrument_runtime_for_loops(
-        tcx,
-        &mut instrumented,
-        &mut for_plans,
-        start,
-        hit,
-        unit,
-        span,
-    ) {
+    if let (Some(start), Some(hit)) = (start_branch, hit_branch)
+        && let Err(error) = instrument_runtime_for_loops(
+            tcx,
+            &mut instrumented,
+            &mut for_plans,
+            start,
+            hit,
+            unit,
+            span,
+        )
+    {
         tcx.dcx().fatal(format!(
             "Supercov could not inject pre-optimization Rust for-loop probes in {}: {error}",
             tcx.def_path_str(def_id)
@@ -1999,6 +2396,7 @@ fn runtime_body_obligations(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Runti
         match_groups: &mut match_groups,
         limitations: &mut limitations,
         control_overrides: BTreeMap::new(),
+        match_context: None,
     }
     .visit_body(hir_body);
     prune_unreachable_match_arms(&mut branches, &mut match_groups);
@@ -2639,6 +3037,129 @@ fn runtime_match_plans<'tcx>(
     Ok(plans)
 }
 
+fn runtime_marked_guard_decision_plans<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: LocalDefId,
+    body: &Body<'tcx>,
+) -> Result<Vec<RuntimeDecisionPlan>, String> {
+    let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
+        return Ok(Vec::new());
+    };
+    let markers = MATCH_GUARD_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&obligations.definition)
+        .cloned()
+        .unwrap_or_default();
+    if markers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let markers_by_local = markers
+        .iter()
+        .map(|marker| (marker.local, marker))
+        .collect::<BTreeMap<_, _>>();
+    let mut blocks_by_local = BTreeMap::<u32, Vec<BasicBlock>>::new();
+    for (block, data) in body.basic_blocks.iter_enumerated() {
+        for statement in &data.statements {
+            let StatementKind::Assign(assignment) = &statement.kind else {
+                continue;
+            };
+            let (destination, _) = &**assignment;
+            let Some(local) = destination.as_local().map(|local| local.as_u32()) else {
+                continue;
+            };
+            if markers_by_local.contains_key(&local) {
+                blocks_by_local.entry(local).or_default().push(block);
+            }
+        }
+    }
+    let mut markers_by_decision = BTreeMap::<String, Vec<&MatchGuardConditionMarker>>::new();
+    for marker in &markers {
+        markers_by_decision
+            .entry(marker.decision_id.clone())
+            .or_default()
+            .push(marker);
+    }
+    let mut plans = Vec::new();
+    for (decision_id, mut decision_markers) in markers_by_decision {
+        let decision = obligations.decisions.get(&decision_id).ok_or_else(|| {
+            format!("synthetic guard marker references unknown decision {decision_id}")
+        })?;
+        decision_markers.sort_by_key(|marker| marker.condition_index);
+        if decision_markers.len() != decision.conditions.len()
+            || decision_markers
+                .iter()
+                .enumerate()
+                .any(|(index, marker)| index != marker.condition_index)
+        {
+            return Err(format!(
+                "synthetic guard {decision_id} has {}/{} ordered condition markers",
+                decision_markers.len(),
+                decision.conditions.len()
+            ));
+        }
+        let digest = decision_id
+            .strip_prefix("rs:decision:")
+            .ok_or_else(|| format!("invalid Rust decision ID {decision_id}"))?;
+        if digest.len() != 24 {
+            return Err(format!("invalid Rust decision digest {digest}"));
+        }
+        let id_high = u64::from_str_radix(&digest[..16], 16)
+            .map_err(|error| format!("invalid Rust decision ID {decision_id}: {error}"))?;
+        let id_low = u32::from_str_radix(&digest[16..], 16)
+            .map_err(|error| format!("invalid Rust decision ID {decision_id}: {error}"))?;
+        let mut conditions = Vec::new();
+        for marker in decision_markers {
+            let blocks = blocks_by_local
+                .get(&marker.local)
+                .cloned()
+                .unwrap_or_default();
+            let [entry_block] = blocks.as_slice() else {
+                return Err(format!(
+                    "synthetic guard {decision_id} condition {} marker survived in {} MIR blocks",
+                    marker.condition_index,
+                    blocks.len()
+                ));
+            };
+            let TerminatorKind::SwitchInt { discr, targets } =
+                &body.basic_blocks[*entry_block].terminator().kind
+            else {
+                return Err(format!(
+                    "synthetic guard {decision_id} condition {} marker does not precede a switch",
+                    marker.condition_index
+                ));
+            };
+            if discr.ty(&body.local_decls, tcx) != tcx.types.bool {
+                return Err(format!(
+                    "synthetic guard {decision_id} condition {} marker precedes a non-Boolean switch",
+                    marker.condition_index
+                ));
+            }
+            let condition = &decision.conditions[marker.condition_index];
+            conditions.push(RuntimeDecisionCondition {
+                index: marker.condition_index as u64,
+                entry_block: *entry_block,
+                true_sources: vec![*entry_block],
+                false_sources: vec![*entry_block],
+                true_target: targets.target_for_value(1),
+                false_target: targets.target_for_value(0),
+                true_outcome: condition.true_outcome,
+                false_outcome: condition.false_outcome,
+            });
+        }
+        plans.push(RuntimeDecisionPlan {
+            id: decision_id,
+            id_high,
+            id_low,
+            conditions,
+            loop_alternatives: None,
+            loop_source: None,
+            loop_token: None,
+        });
+    }
+    Ok(plans)
+}
+
 fn strip_match_arm_markers(body: &mut Body<'_>, definition: &str) -> Result<(), String> {
     let marker_locals = MATCH_ARM_MARKERS
         .lock()
@@ -2666,6 +3187,44 @@ fn strip_match_arm_markers(body: &mut Body<'_>, definition: &str) -> Result<(), 
     if removed != marker_locals.len() {
         return Err(format!(
             "synthetic match markers in {definition} survived borrow checking {removed}/{} times",
+            marker_locals.len()
+        ));
+    }
+    Ok(())
+}
+
+fn strip_match_guard_markers(body: &mut Body<'_>, definition: &str) -> Result<(), String> {
+    let marker_locals = MATCH_GUARD_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(definition)
+        .map(|markers| {
+            markers
+                .iter()
+                .map(|marker| marker.local)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    if marker_locals.is_empty() {
+        return Ok(());
+    }
+    let mut removed = 0;
+    for data in body.basic_blocks_mut() {
+        data.statements.retain(|statement| {
+            let StatementKind::Assign(assignment) = &statement.kind else {
+                return true;
+            };
+            let (destination, _) = &**assignment;
+            let is_marker = destination
+                .as_local()
+                .is_some_and(|local| marker_locals.contains(&local.as_u32()));
+            removed += usize::from(is_marker);
+            !is_marker
+        });
+    }
+    if removed != marker_locals.len() {
+        return Err(format!(
+            "synthetic match guard markers in {definition} survived borrow checking {removed}/{} times",
             marker_locals.len()
         ));
     }

@@ -1313,8 +1313,7 @@ miss blocks flipping any default.
   directories emit byte-identical candidates without ephemeral paths. The
   selected function MIR probes now emit manifest-derived ordinals. The manifest
   remains deliberately incomplete until the same identity and real probes
-  cover nested synthetic match arms, synthetic match-guard decisions, let-else,
-  `?`, assertions, CTFE and doctest obligations.
+  cover let-else, `?`, assertions, CTFE and doctest obligations.
 - The next private slice translates rustc's authored branch regions into
   Supercov-owned MIR decision frames rather than importing a rustc/LLVM
   profile. Exact goldens now cover all exercised ternary shapes for `&&`, `||`,
@@ -1364,8 +1363,13 @@ miss blocks flipping any default.
   checking exactly once and are removed before runtime calls are added. Exact
   unguarded and compound-guard proc arm selections are now proven. Built-MIR
   semantic reachability also removes a statically unreachable authored arm
-  from the denominator. Nested synthetic groups and synthetic guard-condition
-  MC/DC markers remain the next R1 gate.
+  from the denominator. Synthetic groups now preserve their expanded-HIR
+  parent/site/arm relation and require one parent-consistent CFG assignment;
+  body-, scrutinee- and guard-nested proc matches have exact independent arm
+  counts. Separate built-MIR condition markers exclude nested control switches
+  by accepting/rejecting reachability and emit exact synthetic guard MC/DC
+  vectors. Every marker is required to survive borrow checking exactly once and
+  is removed before runtime instrumentation.
 
 ## Non-goals and guardrails
 

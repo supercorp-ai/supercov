@@ -357,10 +357,7 @@ try {
   assert.equal(identityManifestA.model, 'rust-source-v1');
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
-    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: nested synthetic match-arm mappings, synthetic match-guard decisions, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
-    'RUST_MATCH_GUARD_RUNTIME_UNRESOLVED: generated_guarded_match_by_proc: synthetic guard conditions require semantic condition markers before span information collapses',
-    'RUST_MATCH_PROMOTION_INCOMPLETE: generated_guarded_match_by_proc: synthetic match arm markers require nested-expansion and marker-survival corpus completion',
-    'RUST_MATCH_PROMOTION_INCOMPLETE: generated_match_by_proc: synthetic match arm markers require nested-expansion and marker-survival corpus completion',
+    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
   ]);
   const allIds = [
     ...identityManifestA.points.map(({id}) => id),
@@ -569,6 +566,15 @@ try {
   assert.match(baselineBehavior.stdout, /match-identical=\[7, 7, 9\]/);
   assert.match(baselineBehavior.stdout, /match-empty=true/);
   assert.match(baselineBehavior.stdout, /match-irrefutable=5/);
+  assert.match(baselineBehavior.stdout, /match-generated-nested-proc=\[13, 24, 0\]/);
+  assert.match(
+    baselineBehavior.stdout,
+    /match-generated-nested-scrutinee-proc=\[1, 2, 0\]/,
+  );
+  assert.match(
+    baselineBehavior.stdout,
+    /match-generated-nested-guard-proc=\[3, 2, 2, 0\]/,
+  );
   assert.match(baselineBehavior.stdout, /match-unreachable=\[1, 2\]/);
   assert.match(baselineBehavior.stdout, /match-generated=\[23, 29\]/);
   assert.match(baselineBehavior.stdout, /match-generated-proc=\[31, 37\]/);
@@ -652,6 +658,18 @@ try {
     runtimeManifest,
     'generated_guarded_match_by_proc',
   );
+  const generatedNestedProcMatchGroups = matchGroupsFor(
+    runtimeManifest,
+    'generated_nested_match_by_proc',
+  );
+  const generatedNestedScrutineeProcMatchGroups = matchGroupsFor(
+    runtimeManifest,
+    'generated_nested_scrutinee_match_by_proc',
+  );
+  const generatedNestedGuardProcMatchGroups = matchGroupsFor(
+    runtimeManifest,
+    'generated_nested_guard_match_by_proc',
+  );
   const nestedMatchGroups = matchGroupsFor(runtimeManifest, 'nested_match');
   const interruptedMatchGroups = matchGroupsFor(
     runtimeManifest,
@@ -684,6 +702,9 @@ try {
     ...unreachableMatchGroups,
     ...generatedProcMatchGroups,
     ...generatedGuardedProcMatchGroups,
+    ...generatedNestedProcMatchGroups,
+    ...generatedNestedScrutineeProcMatchGroups,
+    ...generatedNestedGuardProcMatchGroups,
     ...nestedMatchGroups,
   ].flatMap((group) => group.arms.map(({selectedOrdinal}) => selectedOrdinal));
   const interruptedMatchOrdinals = interruptedMatchGroups[0].arms.flatMap(
@@ -854,6 +875,46 @@ try {
     [1, 2, 1],
     'a guarded proc-macro match lost semantic arm marker identity after borrow checking',
   );
+  assert.equal(generatedNestedProcMatchGroups.length, 2);
+  const generatedNestedProcRoot = generatedNestedProcMatchGroups.find(
+    ({parentGroupId}) => parentGroupId === null,
+  );
+  const generatedNestedProcChild = generatedNestedProcMatchGroups.find(
+    ({parentGroupId}) => parentGroupId === generatedNestedProcRoot?.id,
+  );
+  assert.deepEqual(
+    generatedNestedProcRoot?.arms.map(({selectedOrdinal}) =>
+      ordinalCount(selectedOrdinal),
+    ),
+    [2, 1],
+    'the outer proc-macro match lost nested parent/arm identity',
+  );
+  assert.deepEqual(
+    generatedNestedProcChild?.arms.map(({selectedOrdinal}) =>
+      ordinalCount(selectedOrdinal),
+    ),
+    [1, 1],
+    'the inner proc-macro match lost nested parent/arm identity',
+  );
+  const nestedSelectionCounts = (groups) => {
+    const root = groups.find(({parentGroupId}) => parentGroupId === null);
+    const child = groups.find(({parentGroupId}) => parentGroupId === root?.id);
+    return {
+      root: root?.arms.map(({selectedOrdinal}) => ordinalCount(selectedOrdinal)),
+      child: child?.arms.map(({selectedOrdinal}) => ordinalCount(selectedOrdinal)),
+      childSite: child?.parentSite,
+    };
+  };
+  assert.deepEqual(
+    nestedSelectionCounts(generatedNestedScrutineeProcMatchGroups),
+    {root: [1, 1], child: [2, 1], childSite: 'scrutinee'},
+    'a proc-macro match nested in a scrutinee lost semantic identity',
+  );
+  assert.deepEqual(
+    nestedSelectionCounts(generatedNestedGuardProcMatchGroups),
+    {root: [1, 2, 1], child: [2, 1], childSite: 'guard'},
+    'a proc-macro match nested in a guard lost semantic identity',
+  );
   assert.deepEqual(
     nestedMatchGroups.map((group) =>
       group.arms.map(({selectedOrdinal}) => ordinalCount(selectedOrdinal)),
@@ -942,18 +1003,32 @@ try {
       JSON.stringify({values: [true, true], outcome: true}),
     ].sort(),
   );
+  assert.deepEqual(
+    decisionVectors('generated_nested_guard_match_by_proc'),
+    [
+      JSON.stringify({values: [false], outcome: false}),
+      JSON.stringify({values: [false], outcome: false}),
+      JSON.stringify({values: [true], outcome: true}),
+    ].sort(),
+  );
   assert(
     !behaviorEvidence.decisions.some(
       ({id}) => id === decisionFor(runtimeManifest, 'interrupted_match')?.id,
     ),
     'a panicking match guard was incorrectly committed as a complete decision vector',
   );
-  assert(
-    !behaviorEvidence.decisions.some(
-      ({id}) =>
-        id === decisionFor(runtimeManifest, 'generated_guarded_match_by_proc')?.id,
+  assert.deepEqual(
+    vectorsForDecision(
+      decisionForConditions(runtimeManifest, 'generated_guarded_match_by_proc', [
+        'value > 0',
+        'enabled',
+      ]),
     ),
-    'an unresolved synthetic match guard fabricated a complete decision vector',
+    [
+      JSON.stringify({values: [false, null], outcome: false}),
+      JSON.stringify({values: [true, false], outcome: false}),
+      JSON.stringify({values: [true, true], outcome: true}),
+    ].sort(),
   );
   assert.deepEqual(decisionVectors('generated_by_rules'), [
     JSON.stringify({values: [false], outcome: false}),

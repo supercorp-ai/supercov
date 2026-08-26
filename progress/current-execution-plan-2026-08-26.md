@@ -206,8 +206,8 @@ invocation as the condition. The exploratory 0/1/2/3 function ordinals are
 gone: runtime MIR hits now carry the u64 prefix of the exact manifest point ID,
 and the compiler rejects both full-ID and probe-prefix collisions. The
 candidate still carries blocking denominator limitations. The authored match
-slice below has since narrowed that surface, but nested synthetic match arms,
-synthetic match-guard decisions, let-else, `?`, assertion, CTFE and doctest obligation/probe mappings,
+   slice below has since narrowed that surface, but let-else, `?`, assertion,
+   CTFE and doctest obligation/probe mappings,
 plus full package and compiler fingerprints, remain R1 work. No measurement-
 complete claim is possible yet.
 
@@ -283,13 +283,17 @@ proc-macro match tokens exposed a real boundary: their arm spans collapse to
 one invocation location. The companion now inserts semantics-neutral private
 arm markers in built MIR, maps them through rustc's real/imaginary match edges,
 requires each marker to survive borrow checking exactly once, removes them,
-and only then installs runtime hits. Unguarded and compound-guard proc-macro
-matches retain exact arm identities without pre-analysis runtime calls.
-Separately, built-MIR reachability excludes a statically unreachable authored
-arm while retaining and measuring both reachable siblings. Nested synthetic
-matches and synthetic match-guard MC/DC still require equivalent semantic
-markers; they remain explicit blockers and publish no fabricated decision
-vectors.
+   and only then installs runtime hits. Unguarded and compound-guard proc-macro
+   matches retain exact arm identities without pre-analysis runtime calls.
+   Separately, built-MIR reachability excludes a statically unreachable authored
+   arm while retaining and measuring both reachable siblings. The marker bridge
+   now also freezes each synthetic group's HIR parent, nesting site and arm,
+   solves one parent-consistent CFG assignment, and fails compilation when that
+   assignment is absent or ambiguous. Proc-macro matches nested in an arm body,
+   a scrutinee and a guard retain independent exact selections. Separate
+   condition markers select only Boolean switches that change the guard's
+   accepting/rejecting reachability, so nested control flow is excluded while
+   the synthetic two-condition guard emits the exact three ternary vectors.
 
 The CTFE provider spike is now executable rather than hypothetical. The
 companion overrides `mir_for_ctfe`, inserts execution markers in original

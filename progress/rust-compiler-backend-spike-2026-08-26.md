@@ -146,8 +146,7 @@ The spike proved:
     multiple iterations, two/one zero/entered compound-`while` invocations and
     three/one zero/entered `while let` invocations. Cross-thread completion and
     killed unfinished branch frames retain exact start context and explicit
-    incomplete health. Nested synthetic match arms, synthetic match-guard
-    decisions, let-else, `?`, assertions, executable statements, CTFE and
+    incomplete health. Let-else, `?`, assertions, executable statements, CTFE and
     doctest integration remain denominator gates.
 19. Authored `for` loops now emit the frozen `loop-entry` zero/entered branch
     without a fictitious Boolean decision. The companion overrides rustc's
@@ -177,11 +176,16 @@ The spike proved:
     selection through the compiler's real/imaginary match edges, requires every
     marker to survive borrow checking exactly once, removes the assignments at
     the post-borrow-check boundary, and only then inserts runtime calls. Exact
-    proc-macro arm selections now arrive without changing values/output or
-    fabricating the still-unresolved synthetic guard MC/DC vector. The same
+    proc-macro arm selections now arrive without changing values/output. The same
     built-MIR semantic reachability excludes a statically unreachable authored
-    arm while retaining both reachable siblings. Nested synthetic match groups
-    and semantic condition markers remain promotion blockers.
+    arm while retaining both reachable siblings. Synthetic groups now retain
+    their HIR parent, nesting site and arm, and a fail-closed solver requires one
+    parent-consistent CFG assignment. Exact fixtures cover nested body,
+    scrutinee and guard matches. Independent guard-condition markers preserve
+    only Boolean switches that change accepting/rejecting reachability, yielding
+    exact short-circuit vectors even when a nested match is evaluated inside the
+    guard. All arm and condition markers survive borrow checking exactly once
+    and are removed before runtime instrumentation.
 
 The companion executable is about 600 KiB on arm64 macOS and dynamically uses
 the exact `librustc_driver` already shipped by the user's `rustc` component.
@@ -253,11 +257,10 @@ an unverified rustc commit.
 
 ## Next implementation gates
 
-1. Finish nested proc/derive match-group markers and synthetic match-guard
-   condition markers. Then extend the proven expanded-HIR control slice to let-else, `?`,
+1. Extend the proven expanded-HIR control slice to let-else, `?`,
    assertions and remaining executable statement
    semantics; bind their real MIR/CTFE probes to the same manifest IDs. Add
-   derive, nested/external expansion, generic/trait, include/module and
+   derive, external expansion, generic/trait, include/module and
    package-fingerprint corpora before treating the candidate as a complete
    manifest.
 2. Extend the proven libtest entry/unwind carrier through child threads, async

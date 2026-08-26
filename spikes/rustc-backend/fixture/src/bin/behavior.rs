@@ -4,7 +4,8 @@ use supercov_rustc_spike_fixture::{
     CONST_FALSE_VALUE, CONST_VALUE, authored, chained, compound, context_normal_scope,
     context_panic_scope, disjoined, drop_order, fallible, for_break, for_values,
     generated_by_build_script, generated_by_proc, generated_by_rules, generated_guarded_match_by_proc,
-    generated_match, generated_match_by_proc, interrupted_decision,
+    generated_match, generated_match_by_proc, generated_nested_guard_match_by_proc,
+    generated_nested_match_by_proc, generated_nested_scrutinee_match_by_proc, interrupted_decision,
     interrupted_for, interrupted_match, match_empty, match_identical, match_irrefutable,
     match_unreachable, match_value, mixed, nested, nested_expression, nested_for_values,
     nested_match, panic_path, pattern, repeated_expansions, two_for_values, while_compound,
@@ -157,6 +158,31 @@ fn main() {
             generated_guarded_match_by_proc(Some(0), true),
             generated_guarded_match_by_proc(Some(3), false),
             generated_guarded_match_by_proc(None, true),
+        ]
+    );
+    println!(
+        "match-generated-nested-proc={:?}",
+        [
+            generated_nested_match_by_proc(Some(Ok(3))),
+            generated_nested_match_by_proc(Some(Err(4))),
+            generated_nested_match_by_proc(None),
+        ]
+    );
+    println!(
+        "match-generated-nested-scrutinee-proc={:?}",
+        [
+            generated_nested_scrutinee_match_by_proc(Some(true)),
+            generated_nested_scrutinee_match_by_proc(Some(false)),
+            generated_nested_scrutinee_match_by_proc(None),
+        ]
+    );
+    println!(
+        "match-generated-nested-guard-proc={:?}",
+        [
+            generated_nested_guard_match_by_proc(Some(3), true),
+            generated_nested_guard_match_by_proc(Some(0), true),
+            generated_nested_guard_match_by_proc(Some(3), false),
+            generated_nested_guard_match_by_proc(None, true),
         ]
     );
     println!(
