@@ -1,8 +1,16 @@
 //! Strict ingestion of the private rustc companion's manifest candidate.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use crate::{
+    coverage_analysis::PointKind,
+    coverage_report::{
+        BranchAlternativeMeta, BranchMeta, CoverageManifest, DecisionMeta, PointMeta,
+    },
+};
 
 const SCHEMA: &str = "supercov-rust-manifest-candidate-v1";
 const MODEL: &str = "rust-source-v1";
@@ -116,10 +124,49 @@ pub struct RustCompilerSelectionGroup {
     pub canonical: String,
 }
 
+/// Source bytes are supplied independently from the compiler manifest so the
+/// engine never resolves a compiler key by guessing at the user's filesystem.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCompilerSource {
+    pub file: String,
+    pub source: String,
+}
+
+/// Runtime ordinal semantics retained alongside the language-neutral
+/// manifest. A single selected match arm can cover its selected alternative
+/// and the not-selected alternatives of every sibling in the evaluated group.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NormalizedRustCompilerManifest {
+    pub manifest: CoverageManifest,
+    pub hit_obligations_by_ordinal: BTreeMap<u64, Vec<String>>,
+    pub internal_ordinals: BTreeSet<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCompilerNormalizationRequest {
+    pub manifest: RustCompilerManifest,
+    pub sources: BTreeMap<String, RustCompilerSource>,
+}
+
+impl RustCompilerNormalizationRequest {
+    pub fn parse_and_normalize(
+        bytes: &[u8],
+    ) -> Result<NormalizedRustCompilerManifest, RustCompilerManifestError> {
+        let request: Self = serde_json::from_slice(bytes)
+            .map_err(|error| RustCompilerManifestError::Json(error.to_string()))?;
+        request.manifest.normalize(&request.sources)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RustCompilerManifestError {
     Json(String),
     Invalid(String),
+    MissingSource(String),
+    InvalidSource(String),
 }
 
 impl std::fmt::Display for RustCompilerManifestError {
@@ -127,6 +174,15 @@ impl std::fmt::Display for RustCompilerManifestError {
         match self {
             Self::Json(error) => write!(formatter, "invalid Rust compiler manifest JSON: {error}"),
             Self::Invalid(error) => write!(formatter, "invalid Rust compiler manifest: {error}"),
+            Self::MissingSource(key) => {
+                write!(
+                    formatter,
+                    "Rust compiler manifest source {key} was not supplied"
+                )
+            }
+            Self::InvalidSource(error) => {
+                write!(formatter, "invalid Rust compiler manifest source: {error}")
+            }
         }
     }
 }
@@ -317,6 +373,7 @@ impl RustCompilerManifest {
         if selection_ids.len() != self.selection_groups.len() {
             return Err(invalid("duplicate match selection group ID"));
         }
+        let mut grouped_branch_ids = BTreeSet::new();
         for group in &self.selection_groups {
             if !valid_id(&group.id, &["match-group"])
                 || group.kind != "match"
@@ -360,6 +417,7 @@ impl RustCompilerManifest {
             for arm in &group.arms {
                 if !branch_ids.contains(arm.branch_id.as_str())
                     || !arm_branches.insert(arm.branch_id.as_str())
+                    || !grouped_branch_ids.insert(arm.branch_id.as_str())
                     || !source_range(&arm.body_source_key, arm.body_start, arm.body_end)
                     || arm.guarded != arm.guard_decision_id.is_some()
                     || arm
@@ -376,6 +434,17 @@ impl RustCompilerManifest {
                     .iter()
                     .find(|branch| branch.id == arm.branch_id)
                     .expect("validated branch reference");
+                if branch.kind != "match-arm"
+                    || branch.alternatives.len() != 2
+                    || branch
+                        .alternatives
+                        .iter()
+                        .map(|alternative| alternative.label.as_str())
+                        .collect::<BTreeSet<_>>()
+                        != BTreeSet::from(["not selected", "selected"])
+                {
+                    return Err(invalid("match group references a non-match branch"));
+                }
                 let alternatives = branch
                     .alternatives
                     .iter()
@@ -414,6 +483,218 @@ impl RustCompilerManifest {
         }
         Ok(())
     }
+
+    /// Convert the compiler-owned denominator into Supercov's shared manifest
+    /// and exact ordinal resolver. This is intentionally strict: source keys,
+    /// byte ranges and UTF-8 boundaries must all resolve before any evidence is
+    /// accepted for the crate.
+    pub fn normalize(
+        &self,
+        sources: &BTreeMap<String, RustCompilerSource>,
+    ) -> Result<NormalizedRustCompilerManifest, RustCompilerManifestError> {
+        self.validate()?;
+        let location = |key: &str, start: u32, end: u32| source_location(sources, key, start, end);
+
+        let mut hit_obligations_by_ordinal = BTreeMap::<u64, BTreeSet<String>>::new();
+        let mut internal_ordinals = BTreeSet::new();
+        let mut points = Vec::with_capacity(self.points.len());
+        for point in &self.points {
+            let (file, line, column, source) = location(&point.source_key, point.start, point.end)?;
+            let point_kind = match point.kind.as_str() {
+                "statement" => PointKind::Statement,
+                "function" => PointKind::Function,
+                _ => unreachable!("validated point kind"),
+            };
+            let probe_ordinal = ordinal(&point.probe_ordinal).expect("validated point ordinal");
+            hit_obligations_by_ordinal
+                .entry(probe_ordinal)
+                .or_default()
+                .insert(point.id.clone());
+            points.push(PointMeta {
+                id: point.id.clone(),
+                kind: point_kind,
+                file,
+                line,
+                column,
+                source,
+                label: (!point.discriminator.is_empty()).then(|| point.discriminator.clone()),
+            });
+        }
+
+        let mut branches = Vec::with_capacity(self.branches.len());
+        for branch in &self.branches {
+            let (file, line, column, source) =
+                location(&branch.source_key, branch.start, branch.end)?;
+            internal_ordinals
+                .insert(ordinal(&branch.probe_ordinal).expect("validated branch group ordinal"));
+            let alternatives = branch
+                .alternatives
+                .iter()
+                .map(|alternative| {
+                    let probe_ordinal = ordinal(&alternative.probe_ordinal)
+                        .expect("validated branch alternative ordinal");
+                    hit_obligations_by_ordinal
+                        .entry(probe_ordinal)
+                        .or_default()
+                        .insert(alternative.id.clone());
+                    BranchAlternativeMeta {
+                        id: alternative.id.clone(),
+                        label: alternative.label.clone(),
+                    }
+                })
+                .collect();
+            branches.push(BranchMeta {
+                id: branch.id.clone(),
+                kind: branch.kind.clone(),
+                file,
+                line,
+                column,
+                source,
+                alternatives,
+            });
+        }
+
+        let mut decisions = Vec::with_capacity(self.decisions.len());
+        for decision in &self.decisions {
+            let (file, line, column, source) =
+                location(&decision.source_key, decision.start, decision.end)?;
+            for condition in &decision.conditions {
+                // Resolve even when compiler-reconstructed display text differs
+                // from the authored span, as can happen for procedural output.
+                location(&condition.source_key, condition.start, condition.end)?;
+            }
+            internal_ordinals
+                .insert(ordinal(&decision.probe_ordinal).expect("validated decision ordinal"));
+            decisions.push(DecisionMeta {
+                id: decision.id.clone(),
+                file,
+                line,
+                column,
+                source,
+                conditions: decision
+                    .conditions
+                    .iter()
+                    .map(|condition| condition.source.clone())
+                    .collect(),
+                kind: decision.kind.clone(),
+            });
+        }
+
+        let branches_by_id = self
+            .branches
+            .iter()
+            .map(|branch| (branch.id.as_str(), branch))
+            .collect::<BTreeMap<_, _>>();
+        for group in &self.selection_groups {
+            internal_ordinals
+                .insert(ordinal(&group.probe_ordinal).expect("validated selection group ordinal"));
+            for selected in &group.arms {
+                let selected_ordinal =
+                    ordinal(&selected.selected_ordinal).expect("validated selected ordinal");
+                let implied = hit_obligations_by_ordinal
+                    .get_mut(&selected_ordinal)
+                    .expect("validated selected alternative ordinal");
+                for sibling in &group.arms {
+                    if sibling.branch_id == selected.branch_id {
+                        continue;
+                    }
+                    let sibling_branch = branches_by_id
+                        .get(sibling.branch_id.as_str())
+                        .expect("validated match branch");
+                    let not_selected = sibling_branch
+                        .alternatives
+                        .iter()
+                        .find(|alternative| {
+                            alternative.probe_ordinal == sibling.not_selected_ordinal
+                        })
+                        .expect("validated not-selected alternative");
+                    implied.insert(not_selected.id.clone());
+                }
+            }
+        }
+
+        let limitation_file = points
+            .first()
+            .map(|point| point.file.clone())
+            .unwrap_or_default();
+        let limitations = self
+            .limitations
+            .iter()
+            .enumerate()
+            .map(|(index, limitation)| {
+                json!({
+                    "id": format!("rust-compiler-candidate:{index}"),
+                    "kind": "rust-compiler-candidate",
+                    "file": limitation_file,
+                    "line": 1,
+                    "column": 0,
+                    "source": "",
+                    "reason": limitation,
+                })
+            })
+            .collect();
+
+        Ok(NormalizedRustCompilerManifest {
+            manifest: CoverageManifest {
+                decisions,
+                points,
+                branches,
+                limitations,
+                scope: Some(json!({
+                    "language": "rust",
+                    "model": self.model,
+                    "crate": self.crate_name,
+                    "measurementComplete": self.measurement_complete,
+                })),
+            },
+            hit_obligations_by_ordinal: hit_obligations_by_ordinal
+                .into_iter()
+                .map(|(ordinal, ids)| (ordinal, ids.into_iter().collect()))
+                .collect(),
+            internal_ordinals,
+        })
+    }
+}
+
+fn source_location(
+    sources: &BTreeMap<String, RustCompilerSource>,
+    key: &str,
+    start: u32,
+    end: u32,
+) -> Result<(String, usize, usize, String), RustCompilerManifestError> {
+    let source = sources
+        .get(key)
+        .ok_or_else(|| RustCompilerManifestError::MissingSource(key.into()))?;
+    if source.file.trim().is_empty() {
+        return Err(RustCompilerManifestError::InvalidSource(format!(
+            "{key} has an empty display path"
+        )));
+    }
+    let start = usize::try_from(start).expect("u32 always fits supported usize");
+    let end = usize::try_from(end).expect("u32 always fits supported usize");
+    if start >= end
+        || end > source.source.len()
+        || !source.source.is_char_boundary(start)
+        || !source.source.is_char_boundary(end)
+    {
+        return Err(RustCompilerManifestError::InvalidSource(format!(
+            "{key} range {start}..{end} is outside UTF-8 source bytes"
+        )));
+    }
+    let line_start = source.source[..start]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let line = source.source[..start]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1;
+    Ok((
+        source.file.clone(),
+        line,
+        start - line_start,
+        source.source[start..end].into(),
+    ))
 }
 
 #[cfg(test)]
@@ -498,6 +779,142 @@ mod tests {
         assert!(matches!(
             RustCompilerManifest::parse(&serde_json::to_vec(&complete).unwrap()),
             Err(RustCompilerManifestError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn normalizes_exact_source_locations_and_runtime_ordinals() {
+        let manifest =
+            RustCompilerManifest::parse(&serde_json::to_vec(&valid_manifest()).unwrap()).unwrap();
+        let sources = BTreeMap::from([(
+            "project:src/lib.rs".into(),
+            RustCompilerSource {
+                file: "src/lib.rs".into(),
+                source: "0123456789\nvalue && more text".into(),
+            },
+        )]);
+        let normalized = manifest.normalize(&sources).unwrap();
+        assert_eq!(normalized.manifest.points[0].source, "0123456789");
+        assert_eq!(normalized.manifest.branches[0].line, 2);
+        assert_eq!(normalized.manifest.branches[0].column, 0);
+        assert_eq!(normalized.manifest.branches[0].source, "value && ");
+        assert_eq!(
+            normalized.hit_obligations_by_ordinal[&1],
+            ["rs:function:000000000000000000000001"]
+        );
+        assert_eq!(
+            normalized.hit_obligations_by_ordinal[&3],
+            ["rs:branch-alternative:000000000000000000000003"]
+        );
+        assert_eq!(normalized.internal_ordinals, BTreeSet::from([2, 5]));
+        assert_eq!(normalized.manifest.limitations.len(), 1);
+    }
+
+    #[test]
+    fn match_selection_expands_to_sibling_not_selected_obligations() {
+        let mut candidate = valid_manifest();
+        candidate["branches"] = json!([
+            {
+                "id": "rs:branch:000000000000000000000006",
+                "kind": "match-arm",
+                "discriminator": "match-arm:0",
+                "sourceKey": "project:src/lib.rs",
+                "start": 11,
+                "end": 16,
+                "provenance": "authored-source",
+                "probeOrdinal": "6",
+                "definitions": ["fixture::function"],
+                "alternatives": [
+                    {"id": "rs:branch-alternative:000000000000000000000007", "label": "not selected", "probeOrdinal": "7"},
+                    {"id": "rs:branch-alternative:000000000000000000000008", "label": "selected", "probeOrdinal": "8"}
+                ],
+                "canonical": "first arm"
+            },
+            {
+                "id": "rs:branch:000000000000000000000009",
+                "kind": "match-arm",
+                "discriminator": "match-arm:1",
+                "sourceKey": "project:src/lib.rs",
+                "start": 17,
+                "end": 22,
+                "provenance": "authored-source",
+                "probeOrdinal": "9",
+                "definitions": ["fixture::function"],
+                "alternatives": [
+                    {"id": "rs:branch-alternative:00000000000000000000000a", "label": "not selected", "probeOrdinal": "10"},
+                    {"id": "rs:branch-alternative:00000000000000000000000b", "label": "selected", "probeOrdinal": "11"}
+                ],
+                "canonical": "second arm"
+            }
+        ]);
+        candidate["selectionGroups"] = json!([{
+            "id": "rs:match-group:00000000000000000000000c",
+            "kind": "match",
+            "sourceKey": "project:src/lib.rs",
+            "start": 11,
+            "end": 22,
+            "provenance": "authored-source",
+            "probeOrdinal": "12",
+            "definitions": ["fixture::function"],
+            "parentGroupId": null,
+            "parentSite": null,
+            "parentArmIndex": null,
+            "arms": [
+                {"branchId": "rs:branch:000000000000000000000006", "bodySourceKey": "project:src/lib.rs", "bodyStart": 11, "bodyEnd": 16, "guarded": false, "guardDecisionId": null, "selectedOrdinal": "8", "notSelectedOrdinal": "7"},
+                {"branchId": "rs:branch:000000000000000000000009", "bodySourceKey": "project:src/lib.rs", "bodyStart": 17, "bodyEnd": 22, "guarded": false, "guardDecisionId": null, "selectedOrdinal": "11", "notSelectedOrdinal": "10"}
+            ],
+            "canonical": "match"
+        }]);
+        let manifest =
+            RustCompilerManifest::parse(&serde_json::to_vec(&candidate).unwrap()).unwrap();
+        let sources = BTreeMap::from([(
+            "project:src/lib.rs".into(),
+            RustCompilerSource {
+                file: "src/lib.rs".into(),
+                source: "0123456789\nfirst second trailing".into(),
+            },
+        )]);
+        let normalized = manifest.normalize(&sources).unwrap();
+        assert_eq!(
+            normalized.hit_obligations_by_ordinal[&8],
+            [
+                "rs:branch-alternative:000000000000000000000008",
+                "rs:branch-alternative:00000000000000000000000a",
+            ]
+        );
+        assert_eq!(
+            normalized.hit_obligations_by_ordinal[&11],
+            [
+                "rs:branch-alternative:000000000000000000000007",
+                "rs:branch-alternative:00000000000000000000000b",
+            ]
+        );
+    }
+
+    #[test]
+    fn normalization_fails_closed_on_missing_or_non_utf8_boundary_sources() {
+        let manifest =
+            RustCompilerManifest::parse(&serde_json::to_vec(&valid_manifest()).unwrap()).unwrap();
+        assert!(matches!(
+            manifest.normalize(&BTreeMap::new()),
+            Err(RustCompilerManifestError::MissingSource(_))
+        ));
+
+        let mut candidate = valid_manifest();
+        candidate["points"][0]["start"] = json!(1);
+        candidate["points"][0]["end"] = json!(2);
+        let manifest =
+            RustCompilerManifest::parse(&serde_json::to_vec(&candidate).unwrap()).unwrap();
+        let sources = BTreeMap::from([(
+            "project:src/lib.rs".into(),
+            RustCompilerSource {
+                file: "src/lib.rs".into(),
+                source: "é0123456789\nvalue && more text".into(),
+            },
+        )]);
+        assert!(matches!(
+            manifest.normalize(&sources),
+            Err(RustCompilerManifestError::InvalidSource(_))
         ));
     }
 }

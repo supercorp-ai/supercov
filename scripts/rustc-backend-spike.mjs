@@ -138,6 +138,7 @@ function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: root,
     encoding: 'utf8',
+    input: options.input,
     env: {
       ...process.env,
       SUPERCOV_RUSTC_SPIKE_SOURCE_ROOT: fixtureRoot,
@@ -155,6 +156,49 @@ function run(command, args, options = {}) {
     throw new Error(`${command} exited ${result.status}`);
   }
   return result;
+}
+
+function compilerSources(manifestRecord, targetDirectory) {
+  const generatedFiles = readdirSync(targetDirectory, {recursive: true})
+    .map((path) => String(path).replaceAll('\\', '/'));
+  return Object.fromEntries(
+    [...new Set([
+      ...manifestRecord.points.map(({sourceKey}) => sourceKey),
+      ...manifestRecord.branches.map(({sourceKey}) => sourceKey),
+      ...manifestRecord.decisions.flatMap((decision) => [
+        decision.sourceKey,
+        ...decision.conditions.map(({sourceKey}) => sourceKey),
+      ]),
+      ...manifestRecord.selectionGroups.flatMap((group) => [
+        group.sourceKey,
+        ...group.arms.map(({bodySourceKey}) => bodySourceKey),
+      ]),
+    ])].map((sourceKey) => {
+      if (sourceKey.startsWith('source:')) {
+        const relative = sourceKey.slice('source:'.length);
+        return [
+          sourceKey,
+          {file: relative, source: readFileSync(join(fixtureRoot, relative), 'utf8')},
+        ];
+      }
+      const generated = /^generated:package:[^:]+:(.+)$/.exec(sourceKey);
+      assert(generated, `unresolved compiler source key ${sourceKey}`);
+      const suffix = `/out/${generated[1]}`;
+      const matches = generatedFiles.filter((path) => `/${path}`.endsWith(suffix));
+      assert.equal(
+        matches.length,
+        1,
+        `expected one generated source for ${sourceKey}, found ${matches.length}`,
+      );
+      return [
+        sourceKey,
+        {
+          file: sourceKey,
+          source: readFileSync(join(targetDirectory, matches[0]), 'utf8'),
+        },
+      ];
+    }),
+  );
 }
 
 function manifests(directory) {
@@ -455,6 +499,27 @@ try {
     {env: {SUPERCOV_INTERNAL_INPUT_FILE: identityManifestPath}},
   );
   assert.equal(productionValidation.stdout.trim(), 'supercov_rustc_spike_fixture');
+  const normalized = JSON.parse(
+    run(supercov, ['__normalize-rust-compiler-manifest'], {
+      input: JSON.stringify({
+        manifest: identityManifestA,
+        sources: compilerSources(
+          identityManifestA,
+          join(scratch, 'identity-target-a'),
+        ),
+      }),
+    }).stdout,
+  );
+  assert.equal(normalized.manifest.scope.language, 'rust');
+  assert.equal(normalized.manifest.scope.crate, 'supercov_rustc_spike_fixture');
+  assert.equal(normalized.manifest.points.length, identityManifestA.points.length);
+  assert.equal(normalized.manifest.branches.length, identityManifestA.branches.length);
+  assert.equal(normalized.manifest.decisions.length, identityManifestA.decisions.length);
+  assert(
+    Object.keys(normalized.hitObligationsByOrdinal).length >
+      identityManifestA.points.length,
+    'normalized ordinal resolver omitted branch alternatives',
+  );
   assert.deepEqual(
     identityManifestA,
     identityManifestB,

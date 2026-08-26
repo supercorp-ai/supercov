@@ -92,12 +92,41 @@ fn main() -> ExitCode {
         Some("__benchmark-js-transform") => benchmark_js_transform(),
         Some("__pack-evidence") => pack_evidence(),
         Some("__validate-rust-compiler-manifest") => validate_rust_compiler_manifest(),
+        Some("__normalize-rust-compiler-manifest") => normalize_rust_compiler_manifest(),
         Some("clean") => cleanup_command(arguments.collect()),
         Some("runs") => public_query_command("runs", arguments.collect()),
         Some("diff") => public_query_command("diff", arguments.collect()),
         Some("merge") => merge_command(arguments.collect()),
         Some(command) => {
             eprintln!("[supercov] Unknown command: {command}. Try supercov help.");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn normalize_rust_compiler_manifest() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    match supercov_engine::rust_compiler_manifest::RustCompilerNormalizationRequest::parse_and_normalize(
+        input.as_bytes(),
+    ) {
+        Ok(normalized) => match serde_json::to_string(&normalized) {
+            Ok(output) => {
+                println!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("[supercov] could not serialize normalized Rust manifest: {error}");
+                ExitCode::from(2)
+            }
+        },
+        Err(error) => {
+            eprintln!("[supercov] {error}");
             ExitCode::from(2)
         }
     }

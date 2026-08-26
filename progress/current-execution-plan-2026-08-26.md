@@ -237,6 +237,18 @@ fixture had missed: `authored-expansion` provenance, distinct
 `branch-alternative` IDs, and nested matches owned by a parent scrutinee without
 an arm index.
 
+The same real clean-build candidate is now normalized by the production Rust
+engine into the shared language-neutral `CoverageManifest`. The conversion
+requires an explicit source-key-to-byte-snapshot map, rejects missing sources,
+out-of-range offsets and non-UTF-8 boundaries, and derives line, column and
+source text without resolving compiler keys through filesystem guesses. It
+also produces a collision-checked ordinal resolver. Match-arm selection is
+expanded offline into the selected arm plus every evaluated sibling's
+`not selected` alternative, preserving the compiler frontend's group semantics
+without reconstructing interleaved event timing. The rustc spike exercises
+this normalization against authored, expanded and build-generated sources on
+every run.
+
 The first real-probe doctest attempt was deliberately rejected. It exposed and
 fixed an unstable-feature capability leak by adding rustc's empty
 `-Zallow-features=` restriction, but the instrumented run still regrouped one
