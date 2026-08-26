@@ -205,8 +205,33 @@ fn valid_id(id: &str, allowed: &[&str]) -> bool {
         && parts.next().is_none()
 }
 
+fn normalized_relative_path(value: &str, allow_package_root: bool) -> bool {
+    if allow_package_root && value == "." {
+        return true;
+    }
+    !value.is_empty()
+        && !value.starts_with('/')
+        && !value.contains('\\')
+        && value
+            .split('/')
+            .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
+}
+
+fn valid_source_key(key: &str) -> bool {
+    if let Some(path) = key.strip_prefix("source:") {
+        return normalized_relative_path(path, false);
+    }
+    let Some(generated) = key.strip_prefix("generated:package:") else {
+        return false;
+    };
+    let Some((package, output)) = generated.split_once(':') else {
+        return false;
+    };
+    normalized_relative_path(package, true) && normalized_relative_path(output, false)
+}
+
 fn source_range(key: &str, start: u32, end: u32) -> bool {
-    !key.trim().is_empty() && start < end
+    valid_source_key(key) && start < end
 }
 
 fn ordinal(value: &str) -> Option<u64> {
@@ -493,6 +518,44 @@ impl RustCompilerManifest {
         sources: &BTreeMap<String, RustCompilerSource>,
     ) -> Result<NormalizedRustCompilerManifest, RustCompilerManifestError> {
         self.validate()?;
+        let required_source_keys = self
+            .points
+            .iter()
+            .map(|point| point.source_key.as_str())
+            .chain(
+                self.branches
+                    .iter()
+                    .map(|branch| branch.source_key.as_str()),
+            )
+            .chain(self.decisions.iter().flat_map(|decision| {
+                std::iter::once(decision.source_key.as_str()).chain(
+                    decision
+                        .conditions
+                        .iter()
+                        .map(|condition| condition.source_key.as_str()),
+                )
+            }))
+            .chain(self.selection_groups.iter().flat_map(|group| {
+                std::iter::once(group.source_key.as_str())
+                    .chain(group.arms.iter().map(|arm| arm.body_source_key.as_str()))
+            }))
+            .collect::<BTreeSet<_>>();
+        let supplied_source_keys = sources.keys().map(String::as_str).collect::<BTreeSet<_>>();
+        if supplied_source_keys != required_source_keys {
+            let missing = required_source_keys
+                .difference(&supplied_source_keys)
+                .copied()
+                .collect::<Vec<_>>();
+            let extra = supplied_source_keys
+                .difference(&required_source_keys)
+                .copied()
+                .collect::<Vec<_>>();
+            return Err(RustCompilerManifestError::InvalidSource(format!(
+                "source snapshot keys differ from the denominator (missing: {}; extra: {})",
+                missing.join(", "),
+                extra.join(", ")
+            )));
+        }
         let location = |key: &str, start: u32, end: u32| source_location(sources, key, start, end);
 
         let mut hit_obligations_by_ordinal = BTreeMap::<u64, BTreeSet<String>>::new();
@@ -712,7 +775,7 @@ mod tests {
             "points": [{
                 "id": "rs:function:000000000000000000000001",
                 "kind": "function",
-                "sourceKey": "project:src/lib.rs",
+                "sourceKey": "source:src/lib.rs",
                 "start": 0,
                 "end": 10,
                 "provenance": "authored-source",
@@ -725,7 +788,7 @@ mod tests {
                 "id": "rs:branch:000000000000000000000002",
                 "kind": "decision-outcome",
                 "discriminator": "decision-outcome:if",
-                "sourceKey": "project:src/lib.rs",
+                "sourceKey": "source:src/lib.rs",
                 "start": 11,
                 "end": 20,
                 "provenance": "authored-source",
@@ -740,13 +803,13 @@ mod tests {
             "decisions": [{
                 "id": "rs:decision:000000000000000000000005",
                 "kind": "if",
-                "sourceKey": "project:src/lib.rs",
+                "sourceKey": "source:src/lib.rs",
                 "start": 11,
                 "end": 15,
                 "provenance": "authored-source",
                 "probeOrdinal": "5",
                 "definitions": ["fixture::function"],
-                "conditions": [{"sourceKey": "project:src/lib.rs", "start": 11, "end": 15, "source": "value"}],
+                "conditions": [{"sourceKey": "source:src/lib.rs", "start": 11, "end": 15, "source": "value"}],
                 "canonical": "decision"
             }],
             "selectionGroups": [],
@@ -780,6 +843,13 @@ mod tests {
             RustCompilerManifest::parse(&serde_json::to_vec(&complete).unwrap()),
             Err(RustCompilerManifestError::Invalid(_))
         ));
+
+        let mut traversal = valid_manifest();
+        traversal["points"][0]["sourceKey"] = json!("source:../outside.rs");
+        assert!(matches!(
+            RustCompilerManifest::parse(&serde_json::to_vec(&traversal).unwrap()),
+            Err(RustCompilerManifestError::Invalid(_))
+        ));
     }
 
     #[test]
@@ -787,7 +857,7 @@ mod tests {
         let manifest =
             RustCompilerManifest::parse(&serde_json::to_vec(&valid_manifest()).unwrap()).unwrap();
         let sources = BTreeMap::from([(
-            "project:src/lib.rs".into(),
+            "source:src/lib.rs".into(),
             RustCompilerSource {
                 file: "src/lib.rs".into(),
                 source: "0123456789\nvalue && more text".into(),
@@ -818,7 +888,7 @@ mod tests {
                 "id": "rs:branch:000000000000000000000006",
                 "kind": "match-arm",
                 "discriminator": "match-arm:0",
-                "sourceKey": "project:src/lib.rs",
+                "sourceKey": "source:src/lib.rs",
                 "start": 11,
                 "end": 16,
                 "provenance": "authored-source",
@@ -834,7 +904,7 @@ mod tests {
                 "id": "rs:branch:000000000000000000000009",
                 "kind": "match-arm",
                 "discriminator": "match-arm:1",
-                "sourceKey": "project:src/lib.rs",
+                "sourceKey": "source:src/lib.rs",
                 "start": 17,
                 "end": 22,
                 "provenance": "authored-source",
@@ -850,7 +920,7 @@ mod tests {
         candidate["selectionGroups"] = json!([{
             "id": "rs:match-group:00000000000000000000000c",
             "kind": "match",
-            "sourceKey": "project:src/lib.rs",
+            "sourceKey": "source:src/lib.rs",
             "start": 11,
             "end": 22,
             "provenance": "authored-source",
@@ -860,15 +930,15 @@ mod tests {
             "parentSite": null,
             "parentArmIndex": null,
             "arms": [
-                {"branchId": "rs:branch:000000000000000000000006", "bodySourceKey": "project:src/lib.rs", "bodyStart": 11, "bodyEnd": 16, "guarded": false, "guardDecisionId": null, "selectedOrdinal": "8", "notSelectedOrdinal": "7"},
-                {"branchId": "rs:branch:000000000000000000000009", "bodySourceKey": "project:src/lib.rs", "bodyStart": 17, "bodyEnd": 22, "guarded": false, "guardDecisionId": null, "selectedOrdinal": "11", "notSelectedOrdinal": "10"}
+                {"branchId": "rs:branch:000000000000000000000006", "bodySourceKey": "source:src/lib.rs", "bodyStart": 11, "bodyEnd": 16, "guarded": false, "guardDecisionId": null, "selectedOrdinal": "8", "notSelectedOrdinal": "7"},
+                {"branchId": "rs:branch:000000000000000000000009", "bodySourceKey": "source:src/lib.rs", "bodyStart": 17, "bodyEnd": 22, "guarded": false, "guardDecisionId": null, "selectedOrdinal": "11", "notSelectedOrdinal": "10"}
             ],
             "canonical": "match"
         }]);
         let manifest =
             RustCompilerManifest::parse(&serde_json::to_vec(&candidate).unwrap()).unwrap();
         let sources = BTreeMap::from([(
-            "project:src/lib.rs".into(),
+            "source:src/lib.rs".into(),
             RustCompilerSource {
                 file: "src/lib.rs".into(),
                 source: "0123456789\nfirst second trailing".into(),
@@ -897,7 +967,7 @@ mod tests {
             RustCompilerManifest::parse(&serde_json::to_vec(&valid_manifest()).unwrap()).unwrap();
         assert!(matches!(
             manifest.normalize(&BTreeMap::new()),
-            Err(RustCompilerManifestError::MissingSource(_))
+            Err(RustCompilerManifestError::InvalidSource(_))
         ));
 
         let mut candidate = valid_manifest();
@@ -906,7 +976,7 @@ mod tests {
         let manifest =
             RustCompilerManifest::parse(&serde_json::to_vec(&candidate).unwrap()).unwrap();
         let sources = BTreeMap::from([(
-            "project:src/lib.rs".into(),
+            "source:src/lib.rs".into(),
             RustCompilerSource {
                 file: "src/lib.rs".into(),
                 source: "é0123456789\nvalue && more text".into(),

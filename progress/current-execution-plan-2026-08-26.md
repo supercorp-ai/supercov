@@ -248,6 +248,11 @@ expanded offline into the selected arm plus every evaluated sibling's
 without reconstructing interleaved event timing. The rustc spike exercises
 this normalization against authored, expanded and build-generated sources on
 every run.
+The source namespace is now closed as well: only normalized project-relative
+`source:` keys and `generated:package:<package>:<out-relative>` keys are
+accepted. Absolute paths, backslashes, empty components and traversal are
+fatal, and the source snapshot map must equal the denominator's complete key
+set—missing and extra snapshots are both rejected.
 
 Authenticated `rust-probe-transport-v2` records now pass through a production
 Rust evidence projector. It validates every string probe, ordinal and decision
