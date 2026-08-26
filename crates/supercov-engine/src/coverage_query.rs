@@ -438,6 +438,8 @@ pub struct CoverageCoversLineData {
     pub run: String,
     pub filters: CoverageQueryFilters,
     pub location: CoverageLocation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     pub covered: bool,
     pub confidence: CoverageConfidence,
     pub total_tests: usize,
@@ -459,6 +461,8 @@ pub struct CoverageCoversAnchorsData {
     pub run: String,
     pub filters: CoverageQueryFilters,
     pub location: CoverageLocation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     pub line_obligation: bool,
     pub anchored: Vec<CoverageAnchor>,
     pub total_anchored: usize,
@@ -680,11 +684,12 @@ pub fn coverage_covers_query(
             limit: usize::MAX,
         },
     )?;
-    let all_remaining = file_detail
+    let gap_line = file_detail
         .gap_lines
         .into_iter()
-        .find(|gap| gap.line == options.line)
-        .map_or_else(Vec::new, |gap| gap.obligations);
+        .find(|gap| gap.line == options.line);
+    let source = gap_line.as_ref().and_then(|gap| gap.source.clone());
+    let all_remaining = gap_line.map_or_else(Vec::new, |gap| gap.obligations);
     let total_remaining = all_remaining.len();
     let remaining_page = all_remaining
         .iter()
@@ -711,6 +716,7 @@ pub fn coverage_covers_query(
                 run: options.run.into(),
                 filters,
                 location,
+                source,
                 line_obligation: false,
                 anchored,
                 total_anchored,
@@ -793,6 +799,7 @@ pub fn coverage_covers_query(
             run: options.run.into(),
             filters,
             location,
+            source,
             covered: line.tests.iter().any(|test| selected_includes(test)),
             confidence: line.confidence,
             total_tests: all_tests.len(),
@@ -2454,6 +2461,19 @@ fn gap_metric_value(gap: &IndexedFileGap, metric: MinimizeMetric) -> usize {
     }
 }
 
+fn has_gap_for_metric(gap: &IndexedFileGap, metric: MinimizeMetric) -> bool {
+    match metric {
+        MinimizeMetric::All => {
+            gap.uncovered_lines > 0
+                || gap.uncovered_statements > 0
+                || gap.uncovered_functions > 0
+                || gap.missing_branches > 0
+                || gap.missing_mcdc_conditions > 0
+        }
+        _ => gap_metric_value(gap, metric) > 0,
+    }
+}
+
 pub fn coverage_file_decisions_query(
     index: &CoverageIndex<'_>,
     options: CoverageFileDecisionsOptions<'_>,
@@ -2568,7 +2588,7 @@ pub fn coverage_file_query(
         });
     }
     if gaps_only {
-        files.retain(|gap| gap_metric_value(gap, metric) > 0 || gap.measurement_limitations > 0);
+        files.retain(|gap| has_gap_for_metric(gap, metric) || gap.measurement_limitations > 0);
     }
     files.sort_by(|left, right| {
         gap_metric_value(right, metric)
@@ -3047,6 +3067,40 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn all_metric_keeps_statement_only_files_in_the_gap_set() {
+        let gap = IndexedFileGap {
+            view: CoverageViewId::All,
+            file: "src/statement.js".into(),
+            uncovered_lines: 0,
+            uncovered_statements: 1,
+            uncovered_functions: 0,
+            missing_branches: 0,
+            missing_mcdc_conditions: 0,
+            measurement_limitations: 0,
+            limitation_kinds: Vec::new(),
+            covered_by_other_tests: crate::coverage_index::IndexedGapDimensions {
+                lines: 0,
+                statements: 0,
+                functions: 0,
+                branches: 0,
+                mcdc_conditions: 0,
+            },
+            uncovered_everywhere: crate::coverage_index::IndexedGapDimensions {
+                lines: 0,
+                statements: 1,
+                functions: 0,
+                branches: 0,
+                mcdc_conditions: 0,
+            },
+            score: 0,
+            waived_mcdc_conditions: None,
+        };
+        assert!(has_gap_for_metric(&gap, MinimizeMetric::All));
+        assert!(has_gap_for_metric(&gap, MinimizeMetric::Statements));
+        assert!(!has_gap_for_metric(&gap, MinimizeMetric::Lines));
+    }
 
     fn result(id: &str, vector: McdcVector) -> RawTestResult {
         RawTestResult {

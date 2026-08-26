@@ -1222,6 +1222,27 @@ fn function_point_span<State>(span: Span, context: &TraverseCtx<'_, State>) -> S
     }
 }
 
+fn type_only_import(statement: &Statement<'_>) -> bool {
+    let Statement::ImportDeclaration(declaration) = statement else {
+        return false;
+    };
+    if declaration.import_kind == ImportOrExportKind::Type {
+        return true;
+    }
+    let Some(specifiers) = declaration.specifiers.as_ref() else {
+        // A bare import (`import './side-effect.js'`) executes at runtime.
+        return false;
+    };
+    !specifiers.is_empty()
+        && specifiers.iter().all(|specifier| {
+            matches!(
+                specifier,
+                ImportDeclarationSpecifier::ImportSpecifier(specifier)
+                    if specifier.import_kind == ImportOrExportKind::Type
+            )
+        })
+}
+
 fn executable_statement(statement: &Statement<'_>) -> bool {
     !matches!(
         statement,
@@ -1231,6 +1252,7 @@ fn executable_statement(statement: &Statement<'_>) -> bool {
             | Statement::ExportNamedDeclaration(_)
             | Statement::ExportDefaultDeclaration(_)
     ) && !statement.is_typescript_syntax()
+        && !type_only_import(statement)
 }
 
 impl<'a> Traverse<'a, ()> for PointCollector<'_> {
@@ -6933,6 +6955,24 @@ mod tests {
         )
         .parse();
         assert!(reparsed.errors.is_empty(), "{:?}", reparsed.errors);
+    }
+
+    #[test]
+    fn explicit_type_only_imports_are_not_runtime_coverage_obligations() {
+        let source = concat!(
+            "import type { Session } from './types.ts';\n",
+            "import { type Row } from './rows.ts';\n",
+            "import './register.ts';\n",
+            "const value = 1;\n",
+        );
+        let output = instrument_candidate(source, "app/imports.ts").unwrap();
+        let statement_lines = output
+            .points
+            .iter()
+            .filter(|point| point.kind == "statement")
+            .map(|point| point.line)
+            .collect::<Vec<_>>();
+        assert_eq!(statement_lines, vec![3, 4]);
     }
 
     #[test]

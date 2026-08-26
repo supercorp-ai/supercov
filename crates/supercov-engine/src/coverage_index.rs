@@ -1026,12 +1026,12 @@ fn projection_record(
         usize_u64(
             gaps.iter()
                 .filter(|(_, gap)| {
-                    gap.uncovered_lines
-                        + gap.uncovered_functions * 2
-                        + gap.missing_branches * 2
-                        + gap.missing_mcdc_conditions * 3
-                        + gap.measurement_limitations * 3
-                        > 0
+                    gap.uncovered_lines > 0
+                        || gap.uncovered_statements > 0
+                        || gap.uncovered_functions > 0
+                        || gap.missing_branches > 0
+                        || gap.missing_mcdc_conditions > 0
+                        || gap.measurement_limitations > 0
                 })
                 .count(),
         )?,
