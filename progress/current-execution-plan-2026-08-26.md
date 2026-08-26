@@ -619,8 +619,24 @@ before argument evaluation, so optimized MIR cannot erase the statement and a
 panicking argument cannot misattribute it. The real rustdoc gate requires all
 five source ordinals under the exact standalone test root with zero dropped or
 incomplete records and unchanged output. Missing, ambiguous, reordered,
-carriage-return or synthetic mappings fail closed. Complete merged
-extracted-source obligations remain open, so this does not enable the public
+carriage-return or synthetic mappings fail closed.
+
+The merged extracted-source path now has a strict deferred join as well. The
+bundle compiler publishes one temporary `doctest-pending:<group>` source and
+cannot pass the ordinary manifest parser. The later generated runner publishes
+an atomically renamed, directory-synced map from each numeric `__doctest_N`
+module to rustdoc's exact original path, line and display name. Only then does
+the engine align the complete extracted `main` body against the runner-bounded
+documentation interval, translate exact subranges (including repeated atoms
+and repeated lines), rebuild every non-synthetic point, branch, alternative,
+decision and match-group identity, and return complete old-to-new ID and
+string-safe ordinal maps for already-emitted evidence. The resulting manifest
+passes the ordinary production validator and normalizer with no temporary
+identity. The real Cargo/rustdoc gate proves statement and assertion evidence
+under the exact merged test root without changing output or checkout bytes.
+Synthetic proc/derive expansion canonicals inside merged bundles,
+outcome/retry archive joining, wrapper composition and the full failure/signal
+corpus remain explicit blockers, so this still does not enable the public
 rustdoc capability.
 
 Correctness corpus:

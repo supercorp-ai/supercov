@@ -16,7 +16,7 @@ const SCHEMA: &str = "supercov-rust-manifest-candidate-v1";
 const MODEL: &str = "rust-source-v1";
 const SOURCE_SNAPSHOT_SCHEMA: &str = "supercov-rust-source-snapshots-v1";
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustCompilerManifest {
     pub schema: String,
@@ -31,7 +31,7 @@ pub struct RustCompilerManifest {
     pub limitations: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustCompilerPoint {
     pub id: String,
@@ -46,7 +46,7 @@ pub struct RustCompilerPoint {
     pub canonical: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustCompilerBranchAlternative {
     pub id: String,
@@ -54,7 +54,7 @@ pub struct RustCompilerBranchAlternative {
     pub probe_ordinal: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustCompilerBranch {
     pub id: String,
@@ -70,7 +70,7 @@ pub struct RustCompilerBranch {
     pub canonical: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustCompilerCondition {
     pub source_key: String,
@@ -79,7 +79,7 @@ pub struct RustCompilerCondition {
     pub source: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustCompilerDecision {
     pub id: String,
@@ -96,7 +96,7 @@ pub struct RustCompilerDecision {
     pub canonical: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustCompilerMatchArm {
     pub branch_id: String,
@@ -109,7 +109,7 @@ pub struct RustCompilerMatchArm {
     pub not_selected_ordinal: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustCompilerSelectionGroup {
     pub id: String,
@@ -129,14 +129,14 @@ pub struct RustCompilerSelectionGroup {
 
 /// Source bytes are supplied independently from the compiler manifest so the
 /// engine never resolves a compiler key by guessing at the user's filesystem.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustCompilerSource {
     pub file: String,
     pub source: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustCompilerSourceSnapshots {
     pub schema: String,
@@ -154,11 +154,28 @@ impl RustCompilerSourceSnapshots {
     }
 
     pub fn validate(&self) -> Result<(), RustCompilerManifestError> {
+        self.validate_with_pending_doctest(None)
+    }
+
+    pub(crate) fn parse_pending_doctest(
+        bytes: &[u8],
+        group: &str,
+    ) -> Result<Self, RustCompilerManifestError> {
+        let snapshots: Self = serde_json::from_slice(bytes)
+            .map_err(|error| RustCompilerManifestError::Json(error.to_string()))?;
+        snapshots.validate_with_pending_doctest(Some(group))?;
+        Ok(snapshots)
+    }
+
+    fn validate_with_pending_doctest(
+        &self,
+        pending_group: Option<&str>,
+    ) -> Result<(), RustCompilerManifestError> {
         if self.schema != SOURCE_SNAPSHOT_SCHEMA
             || self.crate_name.trim().is_empty()
             || self.sources.is_empty()
             || self.sources.iter().any(|(key, source)| {
-                !valid_source_key(key)
+                !valid_source_key_for(key, pending_group)
                     || source.file.trim().is_empty()
                     || source.file.chars().any(char::is_control)
             })
@@ -166,6 +183,20 @@ impl RustCompilerSourceSnapshots {
             return Err(RustCompilerManifestError::InvalidSource(
                 "malformed compiler source snapshot envelope".into(),
             ));
+        }
+        if let Some(group) = pending_group {
+            let key = format!("doctest-pending:{group}");
+            if !self.crate_name.starts_with("doctest_bundle_")
+                || self.sources.len() != 1
+                || self
+                    .sources
+                    .get(&key)
+                    .is_none_or(|source| source.file != key)
+            {
+                return Err(RustCompilerManifestError::InvalidSource(
+                    "malformed pending merged-doctest source envelope".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -430,15 +461,20 @@ fn valid_source_key(key: &str) -> bool {
     normalized_relative_path(package, true) && normalized_relative_path(output, false)
 }
 
-fn source_range(key: &str, start: u32, end: u32) -> bool {
-    valid_source_key(key) && start < end
+fn valid_source_key_for(key: &str, pending_group: Option<&str>) -> bool {
+    valid_source_key(key)
+        || pending_group.is_some_and(|group| key == format!("doctest-pending:{group}"))
+}
+
+fn source_range_for(key: &str, start: u32, end: u32, pending_group: Option<&str>) -> bool {
+    valid_source_key_for(key, pending_group) && start < end
 }
 
 fn ordinal(value: &str) -> Option<u64> {
     value.parse::<u64>().ok().filter(|ordinal| *ordinal != 0)
 }
 
-fn provenance(value: &str) -> bool {
+fn provenance_for(value: &str, pending_group: Option<&str>) -> bool {
     matches!(
         value,
         "authored-source"
@@ -446,7 +482,7 @@ fn provenance(value: &str) -> bool {
             | "synthetic-expansion"
             | "generated-source"
             | "doctest-source"
-    )
+    ) || pending_group.is_some() && value == "doctest-pending"
 }
 
 fn insert_identity(
@@ -482,6 +518,23 @@ impl RustCompilerManifest {
     }
 
     pub fn validate(&self) -> Result<(), RustCompilerManifestError> {
+        self.validate_with_pending_doctest(None)
+    }
+
+    pub(crate) fn parse_pending_doctest(
+        bytes: &[u8],
+        group: &str,
+    ) -> Result<Self, RustCompilerManifestError> {
+        let manifest: Self = serde_json::from_slice(bytes)
+            .map_err(|error| RustCompilerManifestError::Json(error.to_string()))?;
+        manifest.validate_with_pending_doctest(Some(group))?;
+        Ok(manifest)
+    }
+
+    fn validate_with_pending_doctest(
+        &self,
+        pending_group: Option<&str>,
+    ) -> Result<(), RustCompilerManifestError> {
         let invalid = |reason: &str| RustCompilerManifestError::Invalid(reason.into());
         if self.schema != SCHEMA || self.model != MODEL {
             return Err(invalid("unsupported schema or source model"));
@@ -490,6 +543,15 @@ impl RustCompilerManifest {
             return Err(invalid(
                 "a private candidate needs a crate identity and cannot claim completeness",
             ));
+        }
+        if let Some(group) = pending_group
+            && (!self.crate_name.starts_with("doctest_bundle_")
+                || group.is_empty()
+                || !group
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+        {
+            return Err(invalid("malformed pending merged-doctest identity"));
         }
         if self.points.is_empty() || !sorted_unique_nonempty(&self.limitations) {
             return Err(invalid(
@@ -509,14 +571,44 @@ impl RustCompilerManifest {
         {
             return Err(invalid("obligation arrays are not in canonical ID order"));
         }
+        if let Some(group) = pending_group {
+            let key = format!("doctest-pending:{group}");
+            let exact_pending = |source_key: &str, provenance: &str| {
+                source_key == key && provenance == "doctest-pending"
+            };
+            if self
+                .points
+                .iter()
+                .any(|point| !exact_pending(&point.source_key, &point.provenance))
+                || self
+                    .branches
+                    .iter()
+                    .any(|branch| !exact_pending(&branch.source_key, &branch.provenance))
+                || self.decisions.iter().any(|decision| {
+                    !exact_pending(&decision.source_key, &decision.provenance)
+                        || decision
+                            .conditions
+                            .iter()
+                            .any(|condition| condition.source_key != key)
+                })
+                || self.selection_groups.iter().any(|selection| {
+                    !exact_pending(&selection.source_key, &selection.provenance)
+                        || selection.arms.iter().any(|arm| arm.body_source_key != key)
+                })
+            {
+                return Err(invalid(
+                    "pending merged-doctest manifest mixes final and temporary source identities",
+                ));
+            }
+        }
 
         let mut ids = BTreeSet::new();
         let mut ordinals = BTreeSet::new();
         for point in &self.points {
             if !valid_id(&point.id, &["statement", "function"])
                 || !matches!(point.kind.as_str(), "statement" | "function")
-                || !source_range(&point.source_key, point.start, point.end)
-                || !provenance(&point.provenance)
+                || !source_range_for(&point.source_key, point.start, point.end, pending_group)
+                || !provenance_for(&point.provenance, pending_group)
                 || !sorted_unique_nonempty(&point.definitions)
                 || point.canonical.is_empty()
             {
@@ -536,8 +628,8 @@ impl RustCompilerManifest {
                         | "try-operator"
                         | "assertion-outcome"
                 )
-                || !source_range(&branch.source_key, branch.start, branch.end)
-                || !provenance(&branch.provenance)
+                || !source_range_for(&branch.source_key, branch.start, branch.end, pending_group)
+                || !provenance_for(&branch.provenance, pending_group)
                 || !sorted_unique_nonempty(&branch.definitions)
                 || branch.alternatives.len() < 2
                 || branch.canonical.is_empty()
@@ -574,14 +666,23 @@ impl RustCompilerManifest {
                         | "match-guard"
                         | "assertion"
                 )
-                || !source_range(&decision.source_key, decision.start, decision.end)
-                || !provenance(&decision.provenance)
+                || !source_range_for(
+                    &decision.source_key,
+                    decision.start,
+                    decision.end,
+                    pending_group,
+                )
+                || !provenance_for(&decision.provenance, pending_group)
                 || !sorted_unique_nonempty(&decision.definitions)
                 || decision.conditions.is_empty()
                 || decision.canonical.is_empty()
                 || decision.conditions.iter().any(|condition| {
-                    !source_range(&condition.source_key, condition.start, condition.end)
-                        || condition.source.trim().is_empty()
+                    !source_range_for(
+                        &condition.source_key,
+                        condition.start,
+                        condition.end,
+                        pending_group,
+                    ) || condition.source.trim().is_empty()
                 })
             {
                 return Err(invalid("malformed decision obligation"));
@@ -664,8 +765,8 @@ impl RustCompilerManifest {
         for group in &self.selection_groups {
             if !valid_id(&group.id, &["match-group"])
                 || group.kind != "match"
-                || !source_range(&group.source_key, group.start, group.end)
-                || !provenance(&group.provenance)
+                || !source_range_for(&group.source_key, group.start, group.end, pending_group)
+                || !provenance_for(&group.provenance, pending_group)
                 || !sorted_unique_nonempty(&group.definitions)
                 || group.arms.len() < 2
                 || group.canonical.is_empty()
@@ -689,8 +790,8 @@ impl RustCompilerManifest {
                     group.id,
                     valid_id(&group.id, &["match-group"]),
                     group.kind == "match",
-                    source_range(&group.source_key, group.start, group.end),
-                    provenance(&group.provenance),
+                    source_range_for(&group.source_key, group.start, group.end, pending_group,),
+                    provenance_for(&group.provenance, pending_group),
                     sorted_unique_nonempty(&group.definitions),
                     group.arms.len(),
                     !group.canonical.is_empty(),
@@ -705,7 +806,12 @@ impl RustCompilerManifest {
                 if !branch_ids.contains(arm.branch_id.as_str())
                     || !arm_branches.insert(arm.branch_id.as_str())
                     || !grouped_branch_ids.insert(arm.branch_id.as_str())
-                    || !source_range(&arm.body_source_key, arm.body_start, arm.body_end)
+                    || !source_range_for(
+                        &arm.body_source_key,
+                        arm.body_start,
+                        arm.body_end,
+                        pending_group,
+                    )
                     || arm.guarded != arm.guard_decision_id.is_some()
                     || arm
                         .guard_decision_id

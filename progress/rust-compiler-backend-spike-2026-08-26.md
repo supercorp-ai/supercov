@@ -334,16 +334,17 @@ an unverified rustc commit.
    no_std and supported-target behavior. Windows remains a separate explicit
    target gate.
 3. Generalize the proven CTFE marker path across every frozen compile-time
-   surface, map every marker into the frozen manifest, and make publication
-   crash-safe. Extend the proven rustdoc interception/mapping path with runtime
-   probes and exact per-doctest attribution. Either incomplete area blocks
-   public Rust support. A real-probe doctest experiment found two concrete
-   constraints. Private MIR flags must include rustc's empty
-   `-Zallow-features=` boundary so `RUSTC_BOOTSTRAP` cannot make a user's stable
-   `compile_fail` feature gate succeed. With that fixed, enabling the current
-   MIR path still changed rustdoc's visible grouping from one standalone plus
-   two merged tests into one three-test group. Results passed, but output parity
-   did not; the experiment was not promoted.
+   surface, map every marker into the frozen manifest, and retain crash-safe
+   publication. Rustdoc now has real runtime probes, exact standalone source
+   mappings and a strict merged-bundle deferred join. The bundle's temporary
+   IDs cannot pass normal ingestion; the later runner atomically publishes its
+   module/path/line map, after which the engine aligns the complete extracted
+   body, rebuilds all exercised non-synthetic identities and references, and
+   returns exact old-to-new event translations. The real gate preserves
+   rustdoc output and source bytes. Next rebase synthetic proc/derive canonical
+   expansion chains and their alternative ordinals, connect the join to the
+   production archive/retry path, and prove wrapper, failure, signal and full
+   doctest corpus behavior. Either incomplete area blocks public Rust support.
 4. Exact selection now independently probes rustc commit/host/driver digest,
    authenticates the companion's executable digest and rejects missing,
    duplicate or incomplete-public candidates. The private Cargo wrapper and

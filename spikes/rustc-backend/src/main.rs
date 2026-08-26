@@ -579,6 +579,47 @@ fn stable_source_range(
     }
     let start = file.original_relative_byte_pos(span.lo()).0;
     let end = file.original_relative_byte_pos(span.hi()).0;
+    let merged_bundle_path = (DOCTEST_ROLE.get().copied() == Some("merged-bundle"))
+        .then(|| match &file.name {
+            FileName::Real(name) => Some(PathBuf::from(
+                FileName::Real(name.clone())
+                    .prefer_local_unconditionally()
+                    .to_string_lossy()
+                    .into_owned(),
+            )),
+            _ => None,
+        })
+        .flatten()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().contains("doctest_bundle_"))
+        });
+    if let Some(path) = merged_bundle_path {
+        let group = env::var(RUSTDOC_GROUP_ID)
+            .map_err(|_| "merged doctest bundle has no rustdoc group identity".to_owned())?;
+        let source = fs::read_to_string(path)
+            .map_err(|error| format!("could not read merged doctest bundle: {error}"))?;
+        let key = format!("doctest-pending:{group}");
+        let snapshot = ExactSourceSnapshot {
+            file: key.clone(),
+            source,
+        };
+        let mut snapshots = SOURCE_SNAPSHOTS
+            .lock()
+            .map_err(|_| "source snapshot lock poisoned".to_owned())?;
+        if let Some(existing) = snapshots.insert(key.clone(), snapshot.clone())
+            && existing != snapshot
+        {
+            return Err(format!("source identity {key} resolved to different bytes"));
+        }
+        return Ok(StableSourceRange {
+            key,
+            start,
+            end,
+            class: "doctest-pending",
+            owned: true,
+        });
+    }
     let extracted_doctest_path = match &file.name {
         FileName::DocTest(path, _) => Some(path.clone()),
         FileName::Real(name) if DOCTEST_ROLE.get().copied() == Some("standalone") => {
@@ -824,6 +865,8 @@ fn obligation_identity(
     let synthetic_expansion = span.from_expansion() && source == callsite;
     let provenance = if source.class == "doctest" {
         "doctest-source"
+    } else if source.class == "doctest-pending" {
+        "doctest-pending"
     } else if synthetic_expansion {
         "synthetic-expansion"
     } else if span.from_expansion() {
@@ -1997,6 +2040,7 @@ impl Callbacks for ProbeCallbacks {
         let mut branches = BTreeMap::<String, BranchObligation>::new();
         let mut decisions = BTreeMap::<String, DecisionObligation>::new();
         let mut match_groups = BTreeMap::<String, MatchSelectionObligation>::new();
+        let mut merged_doctest_descriptors = BTreeMap::<String, MergedDoctestDescriptor>::new();
         let mut manifest_limitations = BTreeSet::from([
             "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: complete CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
         ]);
@@ -2067,11 +2111,36 @@ impl Callbacks for ProbeCallbacks {
                 .span_to_snippet(tcx.hir_body_owned_by(owner).value.span)
                 .ok();
             let definition = tcx.def_path_str(def_id);
+            match merged_doctest_descriptor(tcx, &definition) {
+                Ok(Some(descriptor)) => {
+                    if merged_doctest_descriptors
+                        .insert(descriptor.module.clone(), descriptor)
+                        .is_some()
+                    {
+                        tcx.dcx().fatal(format!(
+                            "Supercov observed duplicate merged doctest descriptor {definition}"
+                        ));
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => tcx.dcx().fatal(error),
+            }
             let test_name = test_identity_for(tcx, &definition);
             let test_context_id = test_name.as_deref().map(test_context_id);
             let doctest_display_name = merged_doctest_display_name(tcx, &definition);
             let owned_body = !definition.contains("__supercov_spike_runtime");
-            let function_identity = if is_function_body(kind) && owned_body {
+            let merged_bundle_module =
+                doctest_role.and_then(|role| merged_doctest_module(&definition, role));
+            let synthetic_merged_main = doctest_role == Some("merged-bundle")
+                && merged_bundle_module.is_some()
+                && definition.ends_with("::main");
+            let synthetic_merged_wrapper =
+                doctest_role == Some("merged-bundle") && definition.ends_with("::__main_fn");
+            let function_identity = if is_function_body(kind)
+                && owned_body
+                && !synthetic_merged_main
+                && !synthetic_merged_wrapper
+            {
                 match function_identity(tcx, def_id, span, &crate_name_string) {
                     Ok(identity) => {
                         match points.get_mut(&identity.id) {
@@ -2114,7 +2183,7 @@ impl Callbacks for ProbeCallbacks {
             } else {
                 None
             };
-            if owned_body {
+            if owned_body && !synthetic_merged_wrapper {
                 let body = tcx.hir_body_owned_by(owner);
                 let mut collector = HirManifestCollector {
                     tcx,
@@ -2185,6 +2254,9 @@ impl Callbacks for ProbeCallbacks {
         if output.flush().is_err() {
             tcx.dcx()
                 .fatal("Supercov could not flush the Rust compiler trace");
+        }
+        if let Err(error) = write_merged_doctest_map(&directory, &merged_doctest_descriptors) {
+            tcx.dcx().fatal(error);
         }
         if points.is_empty()
             && branches.is_empty()
@@ -7336,6 +7408,142 @@ impl<'tcx> Visitor<'tcx> for FirstStringLiteral {
         }
         intravisit::walk_expr(self, expression);
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MergedDoctestDescriptor {
+    module: String,
+    display_name: String,
+    path: String,
+    line: u64,
+}
+
+#[derive(Default)]
+struct MergedDoctestCallVisitor {
+    values: Vec<(String, String, u64)>,
+}
+
+impl<'tcx> Visitor<'tcx> for MergedDoctestCallVisitor {
+    fn visit_expr(&mut self, expression: &'tcx hir::Expr<'tcx>) {
+        if let hir::ExprKind::Call(_, arguments) = expression.kind
+            && arguments.len() >= 4
+            && let hir::ExprKind::Lit(display) = arguments[0].kind
+            && let rustc_ast::LitKind::Str(display, _) = display.node
+            && let hir::ExprKind::Lit(path) = arguments[2].kind
+            && let rustc_ast::LitKind::Str(path, _) = path.node
+            && let hir::ExprKind::Lit(line) = arguments[3].kind
+            && let rustc_ast::LitKind::Int(line, _) = line.node
+            && let Ok(line) = u64::try_from(line.get())
+        {
+            self.values
+                .push((display.as_str().to_owned(), path.as_str().to_owned(), line));
+        }
+        intravisit::walk_expr(self, expression);
+    }
+}
+
+fn merged_doctest_descriptor(
+    tcx: TyCtxt<'_>,
+    definition: &str,
+) -> Result<Option<MergedDoctestDescriptor>, String> {
+    if DOCTEST_ROLE.get().copied() != Some("merged-runner") {
+        return Ok(None);
+    }
+    let Some(module) = definition.strip_suffix("::TEST") else {
+        return Ok(None);
+    };
+    if !module.starts_with("__doctest_") {
+        return Ok(None);
+    }
+    let owner = tcx
+        .hir_body_owners()
+        .find(|owner| tcx.def_path_str(owner.to_def_id()) == definition)
+        .ok_or_else(|| format!("merged doctest descriptor {definition} has no HIR owner"))?;
+    let mut visitor = MergedDoctestCallVisitor::default();
+    visitor.visit_body(tcx.hir_body_owned_by(owner));
+    let [(display_name, path, line)] = visitor.values.as_slice() else {
+        return Err(format!(
+            "merged doctest descriptor {definition} contains {} candidate constructor calls",
+            visitor.values.len()
+        ));
+    };
+    Ok(Some(MergedDoctestDescriptor {
+        module: module.to_owned(),
+        display_name: display_name.clone(),
+        path: path.clone(),
+        line: *line,
+    }))
+}
+
+fn write_merged_doctest_map(
+    directory: &Path,
+    descriptors: &BTreeMap<String, MergedDoctestDescriptor>,
+) -> Result<(), String> {
+    if descriptors.is_empty() {
+        return Ok(());
+    }
+    let group = env::var(RUSTDOC_GROUP_ID)
+        .map_err(|_| "merged doctest runner has no rustdoc group identity".to_owned())?;
+    let entries = descriptors
+        .values()
+        .map(|descriptor| {
+            format!(
+                concat!(
+                    "{{",
+                    "\"module\":\"{}\",",
+                    "\"displayName\":\"{}\",",
+                    "\"path\":\"{}\",",
+                    "\"line\":{}",
+                    "}}"
+                ),
+                escape(&descriptor.module),
+                escape(&descriptor.display_name),
+                escape(&descriptor.path),
+                descriptor.line,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let payload = format!(
+        concat!(
+            "{{",
+            "\"schema\":\"supercov-rustdoc-merged-map-v1\",",
+            "\"group\":\"{}\",",
+            "\"entries\":[{}]",
+            "}}"
+        ),
+        escape(&group),
+        entries,
+    );
+    let identity = format!(
+        "doctest-map-{}-{}.json",
+        std::process::id(),
+        sanitize(&group)
+    );
+    let path = directory.join(&identity);
+    let partial = directory.join(format!(".{identity}.partial"));
+    let publication = (|| {
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&partial)
+            .map_err(|error| format!("could not create {}: {error}", partial.display()))?;
+        output
+            .write_all(payload.as_bytes())
+            .and_then(|()| output.sync_all())
+            .map_err(|error| format!("could not persist {}: {error}", partial.display()))?;
+        fs::rename(&partial, &path)
+            .map_err(|error| format!("could not publish {}: {error}", path.display()))?;
+        OpenOptions::new()
+            .read(true)
+            .open(directory)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("could not sync {}: {error}", directory.display()))
+    })();
+    if publication.is_err() {
+        let _ = fs::remove_file(&partial);
+    }
+    publication
 }
 
 fn merged_doctest_display_name(tcx: TyCtxt<'_>, definition: &str) -> Option<String> {

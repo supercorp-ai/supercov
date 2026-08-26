@@ -101,6 +101,7 @@ fn main() -> ExitCode {
         Some("__pack-evidence") => pack_evidence(),
         Some("__validate-rust-compiler-manifest") => validate_rust_compiler_manifest(),
         Some("__normalize-rust-compiler-manifest") => normalize_rust_compiler_manifest(),
+        Some("__join-rustdoc-merged-manifest") => join_rustdoc_merged_manifest(),
         Some("__project-rust-compiler-evidence") => project_rust_compiler_evidence(),
         Some("__select-rust-compiler-companion") => select_rust_compiler_companion(),
         Some("__build-rust-compiler") => build_rust_compiler(),
@@ -444,6 +445,62 @@ fn validate_rust_compiler_manifest() -> ExitCode {
     match supercov_engine::rust_compiler_manifest::RustCompilerManifest::parse(input.as_bytes()) {
         Ok(manifest) => {
             println!("{}", manifest.crate_name);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RustdocMergedJoinInput {
+    pending_manifest: serde_json::Value,
+    pending_sources: serde_json::Value,
+    map: serde_json::Value,
+    authored_sources: std::collections::BTreeMap<
+        String,
+        supercov_engine::rust_compiler_manifest::RustCompilerSource,
+    >,
+}
+
+fn join_rustdoc_merged_manifest() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let request: RustdocMergedJoinInput = match serde_json::from_str(&input) {
+        Ok(request) => request,
+        Err(error) => {
+            eprintln!("[supercov] invalid merged rustdoc join request: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let result = (|| {
+        let manifest = serde_json::to_vec(&request.pending_manifest)
+            .map_err(|error| format!("could not encode pending rustdoc manifest: {error}"))?;
+        let sources = serde_json::to_vec(&request.pending_sources)
+            .map_err(|error| format!("could not encode pending rustdoc sources: {error}"))?;
+        let map = serde_json::to_vec(&request.map)
+            .map_err(|error| format!("could not encode rustdoc source map: {error}"))?;
+        let joined = supercov_engine::rust_doctest::join_merged_doctest(
+            &manifest,
+            &sources,
+            &map,
+            &request.authored_sources,
+        )
+        .map_err(|error| error.to_string())?;
+        serde_json::to_string(&joined)
+            .map_err(|error| format!("could not serialize merged rustdoc join: {error}"))
+    })();
+    match result {
+        Ok(output) => {
+            println!("{output}");
             ExitCode::SUCCESS
         }
         Err(error) => {

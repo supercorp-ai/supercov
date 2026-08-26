@@ -37,6 +37,7 @@ pub mod rust_compiler_orchestration;
 pub mod rust_compiler_run;
 pub mod rust_compiler_selection;
 pub mod rust_compiler_test_runner;
+pub mod rust_doctest;
 pub mod rust_instrumenter;
 pub mod rust_phase_projection;
 pub mod rust_probe_transport;

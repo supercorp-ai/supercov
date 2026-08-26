@@ -1506,6 +1506,19 @@ miss blocks flipping any default.
   masking and separate nested decisions are exact as well. Remaining CTFE
   branch kinds, supported-target coverage and performance are active blockers;
   the candidate therefore reports incomplete CTFE mapping and stays private.
+- Merged rustdoc source mapping now uses a strict two-stage compiler contract.
+  The extracted bundle can publish only `doctest-pending:<group>` identities,
+  which the normal manifest parser rejects. The later runner atomically
+  publishes exact `__doctest_N` path/line descriptors; the Rust engine aligns
+  each complete extracted `main` body against original documentation, then
+  rebuilds all non-synthetic points, branches, alternatives, decisions,
+  selection groups, cross-references and runtime ordinals. Full-body alignment
+  disambiguates repeated atoms and repeated lines while missing, ambiguous,
+  reordered, tampered or partial inputs fail closed. The joined real-rustdoc
+  manifest passes the production validator/normalizer with no temporary key,
+  and its runtime events retain the exact merged test root. Synthetic
+  proc/derive expansion canonical rebasing plus archive/retry, wrapper and
+  failure/signal corpora remain promotion blockers.
 
 ## Non-goals and guardrails
 

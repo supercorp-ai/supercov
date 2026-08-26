@@ -3239,6 +3239,128 @@ try {
   assert.equal(mergedBundleContext?.testName, mergedRunnerContext?.testName);
   assert.equal(mergedBundleContext?.testContextId, mergedRunnerContext?.testContextId);
   assert.equal(mergedRunnerContext?.doctestDisplayName, 'src/lib.rs - (line 3)');
+  const mergedMaps = readdirSync(wrappedDoctestDirectory)
+    .filter((name) => name.startsWith('doctest-map-') && name.endsWith('.json'))
+    .map((name) =>
+      JSON.parse(readFileSync(join(wrappedDoctestDirectory, name), 'utf8')),
+    );
+  assert(
+    !readdirSync(wrappedDoctestDirectory).some((name) =>
+      name.includes('doctest-map-') && name.endsWith('.partial'),
+    ),
+    'merged doctest map publication retained a partial file',
+  );
+  assert.deepEqual(mergedMaps, [
+    {
+      schema: 'supercov-rustdoc-merged-map-v1',
+      group: 'supercov_rustc_spike_fixture',
+      entries: [
+        {
+          module: '__doctest_0',
+          displayName: 'src/lib.rs - (line 3)',
+          path: 'src/lib.rs',
+          line: 3,
+        },
+      ],
+    },
+  ]);
+  const mergedPendingManifest = crateManifest(
+    wrappedDoctestDirectory,
+    'doctest_bundle_2024',
+  );
+  const mergedPendingSources = compilerSources(
+    wrappedDoctestDirectory,
+    'doctest_bundle_2024',
+  );
+  assert.equal(mergedPendingManifest.points.length, 1);
+  assert.equal(mergedPendingManifest.branches.length, 1);
+  assert.equal(mergedPendingManifest.decisions.length, 1);
+  assert(
+    [
+      ...mergedPendingManifest.points,
+      ...mergedPendingManifest.branches,
+      ...mergedPendingManifest.decisions,
+    ].every(
+      ({sourceKey, provenance, definitions}) =>
+        sourceKey === 'doctest-pending:supercov_rustc_spike_fixture' &&
+        provenance === 'doctest-pending' &&
+        definitions.includes('__doctest_0::main'),
+    ),
+    'merged bundle obligations leaked temporary source identity',
+  );
+  assert.equal(
+    obligationSource(mergedPendingSources, mergedPendingManifest.points[0]),
+    'assert_eq!(supercov_rustc_spike_fixture::authored(true), 1)',
+  );
+  const mergedJoin = JSON.parse(
+    run(supercov, ['__join-rustdoc-merged-manifest'], {
+      input: JSON.stringify({
+        pendingManifest: mergedPendingManifest,
+        pendingSources: {
+          schema: 'supercov-rust-source-snapshots-v1',
+          crate: 'doctest_bundle_2024',
+          sources: mergedPendingSources,
+        },
+        map: mergedMaps[0],
+        authoredSources: {
+          'source:src/lib.rs': {
+            file: 'src/lib.rs',
+            source: readFileSync(fixtureSourcePath, 'utf8'),
+          },
+        },
+      }),
+    }).stdout,
+  );
+  assert.equal(mergedJoin.manifest.points.length, 1);
+  assert.equal(mergedJoin.manifest.branches.length, 1);
+  assert.equal(mergedJoin.manifest.decisions.length, 1);
+  assert(
+    [
+      ...mergedJoin.manifest.points,
+      ...mergedJoin.manifest.branches,
+      ...mergedJoin.manifest.decisions,
+    ].every(
+      ({sourceKey, provenance, canonical, definitions}) =>
+        sourceKey === 'source:src/lib.rs' &&
+        provenance === 'doctest-source' &&
+        !canonical.includes('doctest-pending:') &&
+        definitions.includes('doctest:src/lib.rs:3'),
+    ),
+    'the strict merged-doctest join retained a temporary identity',
+  );
+  assert.equal(
+    obligationSource(
+      mergedJoin.sources.sources,
+      mergedJoin.manifest.points[0],
+    ),
+    'assert_eq!(supercov_rustc_spike_fixture::authored(true), 1)',
+  );
+  assert.equal(
+    mergedJoin.obligationIds[mergedPendingManifest.points[0].id],
+    mergedJoin.manifest.points[0].id,
+  );
+  assert.equal(
+    mergedJoin.probeOrdinals[mergedPendingManifest.points[0].probeOrdinal],
+    mergedJoin.manifest.points[0].probeOrdinal,
+  );
+  const mergedRoot = mergedRunnerContext?.testContextId;
+  assert(mergedRoot, 'merged doctest test context identity is missing');
+  assert(
+    doctestRuntime.ordinals.some(
+      ({context, ordinal}) =>
+        doctestRootContext(context) === mergedRoot &&
+        ordinal === mergedPendingManifest.points[0].probeOrdinal,
+    ),
+    'merged pending statement probe was not attributed to its exact test root',
+  );
+  assert(
+    doctestRuntime.decisions.some(
+      ({context, id}) =>
+        doctestRootContext(context) === mergedRoot &&
+        id === mergedPendingManifest.decisions[0].id,
+    ),
+    'merged pending assertion decision was not attributed to its exact test root',
+  );
   assert.equal(
     createHash('sha256').update(readFileSync(fixtureSourcePath)).digest('hex'),
     fixtureSourceDigest,
