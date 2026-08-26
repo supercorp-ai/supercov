@@ -231,13 +231,14 @@ commit only at the final outcome. A compiler-level condition panic and a
 killed process now leave explicit incomplete health without publishing a false
 complete vector.
 
-This is not R1 completion. Retaining rustc branch regions currently links an
-ignored LLVM profile runtime. The spike redirects that unused profile output
-into its ephemeral directory and never imports it, so it leaves no checkout
-debris, but the native runtime link itself must be eliminated before this can
-be a product path. A broader nested/derive/external expansion corpus is also
-still required before the generated-owner mapping can be generalized. Rust
-remains private and measurement-incomplete.
+The native-profile blocker is now closed rather than hidden. The exact-version
+companion adds rustc's internal `no-profiler-runtime` switch, removes the native
+MIR coverage statements and maps before codegen, and gates both the absence of
+`.profraw` output and LLVM profile/coverage symbols in the linked executable.
+Rustc's branch correspondence is used only during compilation; every published
+observation remains Supercov-owned. A broader nested/derive/external expansion
+corpus and the rest of the R1 denominator are still required. Rust remains
+private and measurement-incomplete.
 
 The CTFE provider spike is now executable rather than hypothetical. The
 companion overrides `mir_for_ctfe`, inserts execution markers in original

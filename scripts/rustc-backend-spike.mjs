@@ -307,7 +307,6 @@ try {
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
     'RUST_MANIFEST_CANDIDATE_IF_SLICE_ONLY: loop, match, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
-    'RUST_NATIVE_PROFILE_LINK_ELIMINATION_UNPROVEN: rustc branch-region retention still enables an ignored LLVM profile runtime whose output must remain inside the ephemeral run directory',
   ]);
   const allIds = [
     ...identityManifestA.points.map(({id}) => id),
@@ -444,7 +443,7 @@ try {
     SUPERCOV_RUST_TRANSPORT_FILE: behaviorTransport.path,
     SUPERCOV_RUST_TRANSPORT_TOKEN: behaviorTransport.tokenHex,
     SUPERCOV_RUST_CONTEXT_ID: transportContext.toString(16).padStart(16, '0'),
-    LLVM_PROFILE_FILE: join(scratch, 'ignored-native-profile-%p.profraw'),
+    LLVM_PROFILE_FILE: join(scratch, 'must-not-exist-%p.profraw'),
   };
   const instrumentedBehavior = run(
     'cargo',
@@ -453,6 +452,19 @@ try {
   );
   assert.equal(instrumentedBehavior.stdout, baselineBehavior.stdout);
   assert.equal(instrumentedBehavior.stderr, baselineBehavior.stderr);
+  assert.deepEqual(
+    readdirSync(scratch).filter((name) => name.endsWith('.profraw')),
+    [],
+    'Supercov-owned instrumentation must not emit an LLVM profile',
+  );
+  const instrumentedBinary = readFileSync(
+    join(scratch, 'instrumented-target/debug/behavior'),
+  );
+  assert(
+    !instrumentedBinary.includes(Buffer.from('__llvm_profile')) &&
+      !instrumentedBinary.includes(Buffer.from('__llvm_cov')),
+    'the compiler companion linked native LLVM coverage machinery',
+  );
   assert.match(baselineBehavior.stdout, /drop-order=\["panic-drop", "second", "first"\]/);
   assert.match(baselineBehavior.stdout, /decision-panic=true/);
   assert.match(baselineBehavior.stdout, /expanded=\[5, 3, 19, 17, 9\]/);

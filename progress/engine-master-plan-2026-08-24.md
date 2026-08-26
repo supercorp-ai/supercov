@@ -1324,11 +1324,12 @@ miss blocks flipping any default.
   no longer pollutes an authored caller's denominator. Declarative, procedural
   and build-generated owners now bind only through a unique compiler-typed
   boolean branch at the exact expanded span, with their runtime vectors gated
-  in the spike. The broader nested/derive/external macro corpus remains open.
-  Promotion also remains blocked until branch-region retention no longer links
-  the currently ignored LLVM profile runtime. Its byproduct is redirected to
-  ephemeral spike storage and never consumed, but that is not the accepted end
-  state.
+  in the spike. The exact-version companion now prevents rustc from injecting
+  its profiler runtime and strips native MIR coverage before codegen; gates
+  prove no `.profraw` output or LLVM profile/coverage symbol remains in the
+  linked executable. Rustc branch correspondence is therefore a compiler
+  oracle inside Supercov's owned injection path, not a shipped measurement
+  dependency. The broader nested/derive/external macro corpus remains open.
 
 ## Non-goals and guardrails
 

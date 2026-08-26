@@ -126,12 +126,13 @@ The spike proved:
     decision ID, two distinct proc-macro invocations and build-generated source
     all emit their exact gated vectors; nested, derive and external expansion
     shapes remain a promotion corpus gate.
-17. Enabling rustc branch-region retention currently also links LLVM's profile
-    runtime even though the companion removes every native counter and never
-    reads a native profile. The spike redirects that ignored byproduct into its
-    ephemeral directory, proving no checkout debris, but public Rust support
-    must eliminate the native runtime link entirely. This is an explicit
-    product-path blocker, not accepted architecture.
+17. The exact-version companion combines branch-region retention with rustc's
+    internal `no-profiler-runtime` switch, then removes every native coverage
+    statement and mapping before codegen. The spike sets an LLVM profile path
+    as a tripwire and requires that no file be created; it also requires the
+    linked executable to contain no `__llvm_profile` or `__llvm_cov` symbol.
+    Rustc provides compile-time branch correspondence only. All runtime
+    observations and product evidence remain Supercov-owned.
 
 The companion executable is about 600 KiB on arm64 macOS and dynamically uses
 the exact `librustc_driver` already shipped by the user's `rustc` component.
@@ -203,28 +204,23 @@ an unverified rustc commit.
 
 ## Next implementation gates
 
-1. Eliminate the ignored LLVM profile-runtime link while retaining compiler
-   branch correspondence. Declarative, procedural and build-generated
-   decision regions now bind to exact compiler-typed boolean MIR branches and
-   emit gated vectors, but the broader nested/derive/external macro corpus is
-   still required. Until the link side effect and remaining corpus gates pass,
-   the decision evidence remains a private proof.
-2. Extend the proven expanded-HIR `if` slice to nested control decisions, loops, match, let-else, `?`,
-   assertions and remaining executable statement semantics; bind their real
-   MIR/CTFE probes to the same manifest IDs. Add derive, nested/external
-   expansion, generic/trait, include/module and package-fingerprint corpora
-   before treating the candidate as a complete manifest.
-3. Extend the proven libtest entry/unwind carrier through child threads, async
+1. Extend the proven expanded-HIR `if` slice to nested control decisions,
+   loops, match, let-else, `?`, assertions and remaining executable statement
+   semantics; bind their real MIR/CTFE probes to the same manifest IDs. Add
+   derive, nested/external expansion, generic/trait, include/module and
+   package-fingerprint corpora before treating the candidate as a complete
+   manifest.
+2. Extend the proven libtest entry/unwind carrier through child threads, async
    executors, subprocesses, retry, late work and phases, or activate the exact
    process-per-test fallback whenever context-zero work is observed. Prove
    no_std and supported-target behavior. Windows remains a separate explicit
    target gate.
-4. Generalize the proven CTFE marker path across every frozen compile-time
+3. Generalize the proven CTFE marker path across every frozen compile-time
    surface, map every marker into the frozen manifest, and make publication
    crash-safe. Extend the proven rustdoc interception/mapping path with runtime
    probes and exact per-doctest attribution. Either incomplete area blocks
    public Rust support.
-5. Add exact-version mismatch, missing-companion and custom-toolchain failure
+4. Add exact-version mismatch, missing-companion and custom-toolchain failure
    tests before connecting the companion to `npx supercov -- cargo test`.
 
 ## Primary references

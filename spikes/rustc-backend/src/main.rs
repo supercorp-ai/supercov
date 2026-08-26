@@ -1000,7 +1000,6 @@ impl Callbacks for ProbeCallbacks {
         let mut decisions = BTreeMap::<String, DecisionObligation>::new();
         let mut manifest_limitations = BTreeSet::from([
             "RUST_MANIFEST_CANDIDATE_IF_SLICE_ONLY: loop, match, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
-            "RUST_NATIVE_PROFILE_LINK_ELIMINATION_UNPROVEN: rustc branch-region retention still enables an ignored LLVM profile runtime whose output must remain inside the ephemeral run directory".to_owned(),
         ]);
 
         for owner in tcx.hir_body_owners() {
@@ -2013,12 +2012,14 @@ fn main() {
         // Ask the exact rustc companion to retain its THIR-to-MIR branch
         // regions. optimized_mir_with_probe translates those regions into
         // Supercov probes and removes every native coverage artifact before
-        // codegen. No LLVM profile is imported; eliminating the compiler's
-        // still-linked profile-runtime byproduct is a blocking next step.
+        // codegen. The exact-version no-profiler-runtime switch prevents rustc
+        // from injecting LLVM's profiler crate; the spike also gates absence
+        // of native profile output and symbols in the linked executable.
         // SAFETY: the compiler companion has not created any threads yet.
         unsafe { env::set_var("RUSTC_BOOTSTRAP", "1") };
         args.push("-Cinstrument-coverage".into());
         args.push("-Zcoverage-options=branch".into());
+        args.push("-Zno-profiler-runtime".into());
         args.push("--cfg=supercov_spike_instrumented".into());
         args.push("--check-cfg=cfg(supercov_spike_instrumented)".into());
     }
