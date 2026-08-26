@@ -20,6 +20,15 @@
     "ephemeralPathsForbidden": true,
     "collisionPolicy": "fatal"
   },
+  "testContextIdentity": {
+    "version": 1,
+    "algorithm": "fnv1a-64",
+    "domain": "supercov-rust-test-v1\u0000",
+    "input": "utf8-libtest-name",
+    "reservedValues": ["0000000000000000", "ffffffffffffffff"],
+    "reservedRemapXor": "a5a5a5a5a5a5a5a5",
+    "collisionPolicy": "fatal-before-launch"
+  },
   "pointKinds": ["statement", "function"],
   "controlDecisionKinds": [
     "if",

@@ -288,6 +288,7 @@ pub struct RustCoverageV1Contract {
     pub probe_model: String,
     pub generic_aggregation: String,
     pub source_identity: RustSourceIdentityContract,
+    pub test_context_identity: RustTestContextIdentityContract,
     pub point_kinds: Vec<String>,
     pub control_decision_kinds: Vec<String>,
     pub branch_kinds: Vec<String>,
@@ -295,6 +296,18 @@ pub struct RustCoverageV1Contract {
     pub required_identity_axes: Vec<String>,
     pub completeness_requires: Vec<String>,
     pub external_coverage_in_product: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustTestContextIdentityContract {
+    pub version: u32,
+    pub algorithm: String,
+    pub domain: String,
+    pub input: String,
+    pub reserved_values: Vec<String>,
+    pub reserved_remap_xor: String,
+    pub collision_policy: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1388,6 +1401,16 @@ mod tests {
         );
         assert!(contract.source_identity.ephemeral_paths_forbidden);
         assert_eq!(contract.source_identity.collision_policy, "fatal");
+        assert_eq!(contract.test_context_identity.version, 1);
+        assert_eq!(contract.test_context_identity.algorithm, "fnv1a-64");
+        assert_eq!(
+            contract.test_context_identity.domain,
+            "supercov-rust-test-v1\0"
+        );
+        assert_eq!(
+            contract.test_context_identity.collision_policy,
+            "fatal-before-launch"
+        );
         assert!(
             contract
                 .source_identity

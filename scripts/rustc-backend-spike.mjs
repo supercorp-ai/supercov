@@ -529,7 +529,7 @@ try {
   assert.equal(identityManifestA.model, 'rust-source-v1');
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
-    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: assertion phase metadata/evidence-v3 mapping, CTFE and doctest obligation/probe mappings are not emitted yet',
+    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: CTFE and doctest obligation/probe mappings and production compiler-supervisor orchestration are not emitted yet',
   ]);
   const allIds = [
     ...identityManifestA.points.map(({id}) => id),

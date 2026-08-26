@@ -1539,7 +1539,7 @@ impl Callbacks for ProbeCallbacks {
         let mut decisions = BTreeMap::<String, DecisionObligation>::new();
         let mut match_groups = BTreeMap::<String, MatchSelectionObligation>::new();
         let mut manifest_limitations = BTreeSet::from([
-            "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: assertion phase metadata/evidence-v3 mapping, CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
+            "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: CTFE and doctest obligation/probe mappings and production compiler-supervisor orchestration are not emitted yet".to_owned(),
         ]);
 
         for owner in tcx.hir_body_owners() {

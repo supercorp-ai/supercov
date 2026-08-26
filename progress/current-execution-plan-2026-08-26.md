@@ -264,6 +264,11 @@ visible transport health rather than being discarded. The real isolated
 libtest/compiler probe run now traverses the production transport reader,
 manifest normalizer and evidence-v3 projection and proves a passed assertion's
 causal phase and exact test context.
+The shared Rust engine now owns the frozen libtest-context derivation too. Its
+domain-separated FNV-1a input, reserved-value remap and fatal collision policy
+are part of `rust-source-v1`; supervisor preflight rejects duplicate names and
+any 64-bit collision before a process is launched. The compiler corpus's exact
+known context remains a cross-implementation golden.
 
 The first real-probe doctest attempt was deliberately rejected. It exposed and
 fixed an unstable-feature capability leak by adding rustc's empty
