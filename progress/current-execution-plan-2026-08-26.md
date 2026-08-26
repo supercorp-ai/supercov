@@ -519,8 +519,27 @@ commits only its first loop condition outcome for zero-versus-entered coverage:
 an entered loop's later terminating false condition remains an exact MC/DC
 vector but cannot fabricate a zero-iteration hit. The real corpus proves zero,
 disabled and two-iteration paths with unchanged behavior; strict ingestion
-rejects wrong loop alternatives. CTFE `?`, assertions, promoted/const-trait
-surfaces and the complete failure/platform/performance corpus remain open.
+rejects wrong loop alternatives. At this checkpoint CTFE `?`, assertions,
+promoted/const-trait surfaces and the complete failure/platform/performance
+corpus remained open; the following compatibility slice resolves the first two.
+
+The next CTFE compatibility slice resolves the first two items against the
+actual Rust 1.95 language boundary rather than assuming their runtime forms
+also exist during const evaluation. Stable Rust rejects `?` in `const fn`
+because `Try`/`FromResidual` are not const traits, and rejects
+`assert_eq!`/`assert_ne!` in `const fn` because `assert_failed` is non-const.
+Checked-in compile-fail programs require the exact baseline error count, codes,
+spans and text from the instrumented compiler and require that a rejected
+compiler invocation publishes no partial CTFE sidecars. Boolean `assert!` and
+`debug_assert!` are valid const surfaces: compound short-circuit and direct-
+const corpus cases now publish their exact successful vectors with unchanged
+values and output, while a failing `assert!` preserves rustc's E0080 diagnostic
+and publishes nothing. The companion now enables rustc's branch metadata
+through exact-version internal configuration rather than leaking
+`RUSTC_BOOTSTRAP` or unstable flags into user code. CTFE observation is active
+during compilation, but atomic sidecar publication is gated on successful
+analysis. Promoted/const-trait surfaces, the remaining failure/resource/
+concurrency matrix, `RUSTC_LOG` coexistence and performance remain open.
 
 The rustdoc launch boundary is now proven as well. Cargo's ordinary
 `RUSTC_WRAPPER` still does not see synthesized doctest crates, so Supercov uses

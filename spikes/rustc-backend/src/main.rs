@@ -20,7 +20,10 @@ use std::{
     io::Write,
     path::{Component, Path, PathBuf},
     process::Command,
-    sync::{LazyLock, Mutex, OnceLock},
+    sync::{
+        LazyLock, Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use rustc_data_structures::steal::Steal;
@@ -42,7 +45,10 @@ use rustc_middle::{
     ty::{self, TyCtxt},
     util::Providers,
 };
-use rustc_session::Session;
+use rustc_session::{
+    Session,
+    config::{CoverageLevel, InstrumentCoverage},
+};
 use rustc_span::{DUMMY_SP, DesugaringKind, FileName, def_id::LocalDefId, source_map::Spanned};
 
 use rustc_log::{
@@ -101,6 +107,7 @@ static ASSERTION_PHASE_MARKERS: LazyLock<Mutex<HashMap<LocalDefId, Vec<Assertion
 static UNREACHABLE_MATCH_ARMS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static SOURCE_SNAPSHOTS: Mutex<BTreeMap<String, ExactSourceSnapshot>> = Mutex::new(BTreeMap::new());
 static DOCTEST_ROLE: OnceLock<&'static str> = OnceLock::new();
+static COMPILATION_SUCCEEDED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ExactSourceSnapshot {
@@ -1608,6 +1615,15 @@ struct ProbeCallbacks;
 
 impl Callbacks for ProbeCallbacks {
     fn config(&mut self, config: &mut Config) {
+        if env::var_os(INSTRUMENT_MIR).is_some() {
+            // These are private compiler implementation settings, not user
+            // command-line options. Setting the exact-version config directly
+            // retains rustc's MIR branch map without exposing RUSTC_BOOTSTRAP
+            // or unstable feature permissions to the target crate.
+            config.opts.cg.instrument_coverage = InstrumentCoverage::Yes;
+            config.opts.unstable_opts.coverage_options.level = CoverageLevel::Branch;
+            config.opts.unstable_opts.no_profiler_runtime = true;
+        }
         config.override_queries = Some(install_query_overrides);
     }
 
@@ -1635,6 +1651,10 @@ impl Callbacks for ProbeCallbacks {
     }
 
     fn after_analysis<'tcx>(&mut self, _compiler: &Compiler, tcx: TyCtxt<'tcx>) -> Compilation {
+        if tcx.dcx().has_errors().is_some() {
+            return Compilation::Continue;
+        }
+        COMPILATION_SUCCEEDED.store(true, Ordering::Release);
         let Ok(directory) = env::var(OUTPUT_DIRECTORY) else {
             return Compilation::Continue;
         };
@@ -2881,7 +2901,7 @@ fn mir_built_with_match_markers<'tcx>(
         .get()
         .expect("original mir_built provider");
     let body = original(tcx, def_id);
-    if env::var_os(INSTRUMENT_MIR).is_none() {
+    if env::var_os(INSTRUMENT_MIR).is_none() || tcx.dcx().has_errors().is_some() {
         return body;
     }
     let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
@@ -2895,22 +2915,23 @@ fn mir_built_with_match_markers<'tcx>(
             | DefKind::AnonConst
             | DefKind::InlineConst
     );
-    if structural_ctfe_owner {
-        let decisions = obligations
-            .decisions
-            .values()
-            .filter(|decision| decision.definitions.contains(&obligations.definition))
-            .collect::<Vec<_>>();
-        if decisions.is_empty() {
-            return body;
-        }
+    let const_context = tcx.hir_body_const_context(def_id).is_some();
+    let structural_ctfe_decisions = obligations
+        .decisions
+        .values()
+        .filter(|decision| {
+            decision.definitions.contains(&obligations.definition)
+                && (structural_ctfe_owner || (const_context && decision.structural_marker))
+        })
+        .collect::<Vec<_>>();
+    if !structural_ctfe_decisions.is_empty() {
         let assignments = {
             let borrowed = body.borrow();
             structural_decision_condition_marker_assignments(
                 tcx,
                 &obligations.crate_name,
                 &borrowed,
-                &decisions,
+                &structural_ctfe_decisions,
                 true,
                 "CTFE",
             )
@@ -2938,7 +2959,7 @@ fn mir_built_with_match_markers<'tcx>(
             });
         }
         if markers.len()
-            != decisions
+            != structural_ctfe_decisions
                 .iter()
                 .map(|decision| decision.conditions.len())
                 .sum::<usize>()
@@ -2946,7 +2967,7 @@ fn mir_built_with_match_markers<'tcx>(
             tcx.dcx().fatal(format!(
                 "Supercov CTFE decision markers cover {}/{} conditions in {}",
                 markers.len(),
-                decisions
+                structural_ctfe_decisions
                     .iter()
                     .map(|decision| decision.conditions.len())
                     .sum::<usize>(),
@@ -2966,7 +2987,7 @@ fn mir_built_with_match_markers<'tcx>(
         }
         return tcx.alloc_steal_mir(instrumented);
     }
-    if tcx.hir_body_const_context(def_id).is_some() {
+    if const_context {
         return body;
     }
     {
@@ -3640,7 +3661,10 @@ fn mir_drops_with_structural_probes<'tcx>(
         .get()
         .expect("original mir_drops_elaborated_and_const_checked provider");
     let body = original(tcx, def_id);
-    if env::var_os(INSTRUMENT_MIR).is_none() || tcx.hir_body_const_context(def_id).is_some() {
+    if env::var_os(INSTRUMENT_MIR).is_none()
+        || tcx.dcx().has_errors().is_some()
+        || tcx.hir_body_const_context(def_id).is_some()
+    {
         return body;
     }
     let assertion_phase_markers = ASSERTION_PHASE_MARKERS
@@ -3927,7 +3951,7 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
         .get()
         .expect("original mir_for_ctfe provider");
     let body = original(tcx, def_id);
-    if env::var_os(INSTRUMENT_CTFE).is_none() {
+    if env::var_os(INSTRUMENT_CTFE).is_none() || tcx.dcx().has_errors().is_some() {
         return body;
     }
 
@@ -6508,7 +6532,7 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
         .get()
         .expect("original optimized_mir provider");
     let body = original(tcx, def_id);
-    if env::var_os(INSTRUMENT_MIR).is_none() {
+    if env::var_os(INSTRUMENT_MIR).is_none() || tcx.dcx().has_errors().is_some() {
         return body;
     }
     let definition = tcx.def_path_str(def_id);
@@ -7007,12 +7031,6 @@ fn main() {
         // codegen. The exact-version no-profiler-runtime switch prevents rustc
         // from injecting LLVM's profiler crate; the spike also gates absence
         // of native profile output and symbols in the linked executable.
-        // SAFETY: the compiler companion has not created any threads yet.
-        unsafe { env::set_var("RUSTC_BOOTSTRAP", "1") };
-        args.push("-Cinstrument-coverage".into());
-        args.push("-Zcoverage-options=branch".into());
-        args.push("-Zno-profiler-runtime".into());
-        args.push("-Zallow-features=".into());
         args.push("--cfg=supercov_spike_instrumented".into());
         args.push("--check-cfg=cfg(supercov_spike_instrumented)".into());
     }
@@ -7023,7 +7041,7 @@ fn main() {
     }
     let mut callbacks = ProbeCallbacks;
     rustc_driver::run_compiler(&args, &mut callbacks);
-    if env::var_os(INSTRUMENT_CTFE).is_some() {
+    if env::var_os(INSTRUMENT_CTFE).is_some() && COMPILATION_SUCCEEDED.load(Ordering::Acquire) {
         let events = CTFE_EVENTS.lock().expect("CTFE events lock");
         if let Err(error) = write_ctfe_outputs(&args, &events) {
             eprintln!("error: Supercov could not publish Rust CTFE evidence: {error}");

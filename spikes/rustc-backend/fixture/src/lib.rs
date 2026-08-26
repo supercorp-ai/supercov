@@ -121,6 +121,30 @@ pub const CONST_WHILE_ZERO: usize = const_while(0, true);
 pub const CONST_WHILE_ENTERED: usize = const_while(2, true);
 pub const CONST_WHILE_DISABLED: usize = const_while(2, false);
 
+pub const fn const_assertion(first: bool, second: bool) -> usize {
+    assert!(first || second);
+    137
+}
+
+pub const CONST_ASSERTION_FIRST: usize = const_assertion(true, false);
+pub const CONST_ASSERTION_SECOND: usize = const_assertion(false, true);
+pub const DIRECT_CONST_ASSERTION: usize = {
+    assert!(true);
+    139
+};
+
+pub const fn const_debug_assertion(first: bool, second: bool) -> usize {
+    debug_assert!(first || second, "const debug assertion failed");
+    149
+}
+
+pub const CONST_DEBUG_ASSERTION_FIRST: usize = const_debug_assertion(true, false);
+pub const CONST_DEBUG_ASSERTION_SECOND: usize = const_debug_assertion(false, true);
+pub const DIRECT_CONST_DEBUG_ASSERTION: usize = {
+    debug_assert!(true);
+    151
+};
+
 pub struct ConstGenericValue<const ENABLED: bool>;
 
 impl<const ENABLED: bool> ConstGenericValue<ENABLED> {

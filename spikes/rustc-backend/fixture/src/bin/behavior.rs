@@ -1,29 +1,29 @@
 use std::{cell::RefCell, panic};
 
 use supercov_rustc_spike_fixture::{
-    ARRAY_DECISION_LEN, ASSOCIATED_CONST_FALSE, ASSOCIATED_CONST_TRUE, CONST_FALSE_VALUE,
-    CONST_GENERIC_FALSE, CONST_GENERIC_TRUE, CONST_MIXED_FALSE_FALSE,
-    CONST_MIXED_FIRST_TRUE_FALSE, CONST_MIXED_FIRST_TRUE_TRUE, CONST_MIXED_SECOND_TRUE,
-    CONST_LET_ELSE_FALLBACK, CONST_LET_ELSE_MATCHED, CONST_MATCH_FALLBACK, CONST_MATCH_FIRST,
-    CONST_MATCH_SECOND, CONST_NESTED_INNER_FALSE, CONST_NESTED_INNER_TRUE,
+    ARRAY_DECISION_LEN, ASSOCIATED_CONST_FALSE, ASSOCIATED_CONST_TRUE, CONST_ASSERTION_FIRST,
+    CONST_ASSERTION_SECOND, CONST_DEBUG_ASSERTION_FIRST, CONST_DEBUG_ASSERTION_SECOND,
+    CONST_FALSE_VALUE, CONST_GENERIC_FALSE, CONST_GENERIC_TRUE, CONST_LET_ELSE_FALLBACK,
+    CONST_LET_ELSE_MATCHED, CONST_MATCH_FALLBACK, CONST_MATCH_FIRST, CONST_MATCH_SECOND,
+    CONST_MIXED_FALSE_FALSE, CONST_MIXED_FIRST_TRUE_FALSE, CONST_MIXED_FIRST_TRUE_TRUE,
+    CONST_MIXED_SECOND_TRUE, CONST_NESTED_INNER_FALSE, CONST_NESTED_INNER_TRUE,
     CONST_NESTED_OUTER_FALSE, CONST_VALUE, CONST_WHILE_DISABLED, CONST_WHILE_ENTERED,
-    CONST_WHILE_ZERO, DIRECT_CONST_FALSE, DIRECT_CONST_TRUE,
-    STATIC_CONST_FALSE, STATIC_CONST_TRUE, assert_compound, assert_equal,
+    CONST_WHILE_ZERO, DIRECT_CONST_ASSERTION, DIRECT_CONST_DEBUG_ASSERTION, DIRECT_CONST_FALSE,
+    DIRECT_CONST_TRUE, STATIC_CONST_FALSE, STATIC_CONST_TRUE, assert_compound, assert_equal,
     assert_equal_evaluation_order, assert_not_equal, assert_panicking_condition,
     assert_panicking_message_argument, authored, chained, compound, context_normal_scope,
     context_panic_scope, debug_assert_compound, debug_assert_equal, debug_assert_not_equal,
     disjoined, drop_order, fallible, for_break, for_values, generated_assertion_by_proc,
     generated_by_build_script, generated_by_proc, generated_by_rules,
     generated_guarded_match_by_proc, generated_let_else_by_proc, generated_match,
-    generated_match_by_proc, generated_nested_guard_match_by_proc,
-    generated_nested_match_by_proc, generated_nested_scrutinee_match_by_proc,
-    generated_nested_try_by_proc, generated_try_by_proc, generated_two_let_else_by_proc,
-    generated_two_try_by_proc, inline_const_values, interrupted_decision, interrupted_for,
-    interrupted_match, let_else_value, match_empty, match_identical, match_irrefutable,
-    match_unreachable, match_value, mixed, nested, nested_expression, nested_for_values,
-    nested_let_else, nested_match, nested_try_result, panic_before_try, panic_path, pattern,
-    repeated_expansions, try_option, try_result, two_for_values, two_let_else, two_try_results,
-    while_compound, while_let_chain,
+    generated_match_by_proc, generated_nested_guard_match_by_proc, generated_nested_match_by_proc,
+    generated_nested_scrutinee_match_by_proc, generated_nested_try_by_proc, generated_try_by_proc,
+    generated_two_let_else_by_proc, generated_two_try_by_proc, inline_const_values,
+    interrupted_decision, interrupted_for, interrupted_match, let_else_value, match_empty,
+    match_identical, match_irrefutable, match_unreachable, match_value, mixed, nested,
+    nested_expression, nested_for_values, nested_let_else, nested_match, nested_try_result,
+    panic_before_try, panic_path, pattern, repeated_expansions, try_option, try_result,
+    two_for_values, two_let_else, two_try_results, while_compound, while_let_chain,
 };
 
 fn main() {
@@ -113,6 +113,12 @@ fn main() {
             CONST_WHILE_ZERO,
             CONST_WHILE_ENTERED,
             CONST_WHILE_DISABLED,
+            CONST_ASSERTION_FIRST,
+            CONST_ASSERTION_SECOND,
+            DIRECT_CONST_ASSERTION,
+            CONST_DEBUG_ASSERTION_FIRST,
+            CONST_DEBUG_ASSERTION_SECOND,
+            DIRECT_CONST_DEBUG_ASSERTION,
         ]
     );
     println!(

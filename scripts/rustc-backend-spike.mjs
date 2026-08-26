@@ -28,6 +28,12 @@ const wrapper = join(
 );
 const supercov = join(root, 'target/debug/supercov');
 const scratch = mkdtempSync(join(tmpdir(), 'supercov-rustc-spike-'));
+const rustcTargetLibdirResult = spawnSync('rustc', ['--print', 'target-libdir'], {
+  encoding: 'utf8',
+});
+assert.equal(rustcTargetLibdirResult.status, 0, rustcTargetLibdirResult.stderr);
+const rustcTargetLibdir = rustcTargetLibdirResult.stdout.trim();
+assert(rustcTargetLibdir.length > 0, 'rustc returned an empty target libdir');
 const fixtureSourcePath = join(root, 'spikes/rustc-backend/fixture/src/lib.rs');
 const fixtureSourceBytes = readFileSync(fixtureSourcePath);
 const fixtureSourceDigest = createHash('sha256')
@@ -865,6 +871,89 @@ try {
   );
   assert.equal(instrumentedBehavior.stdout, baselineBehavior.stdout);
   assert.equal(instrumentedBehavior.stderr, baselineBehavior.stderr);
+  const compileFailCase = (name) => {
+    const source = join(fixtureRoot, `compile-fail/${name}.rs`);
+    const baselineOutput = join(scratch, `${name}-baseline.rmeta`);
+    const instrumentedOutput = join(scratch, `${name}-instrumented.rmeta`);
+    const compilerOutput = join(scratch, `${name}-output`);
+    const baseline = run(
+      'rustc',
+      [
+        '--edition=2024',
+        '--crate-type=lib',
+        '--emit=metadata',
+        '-o',
+        baselineOutput,
+        source,
+      ],
+      {expectFailure: true},
+    );
+    const instrumented = run(
+      wrapper,
+      [
+        'rustc',
+        '--edition=2024',
+        '--crate-type=lib',
+        '--emit=metadata',
+        '-o',
+        instrumentedOutput,
+        source,
+      ],
+      {
+        expectFailure: true,
+        env: {
+          SUPERCOV_RUST_COMPILER_OUTPUT: compilerOutput,
+          SUPERCOV_RUST_INSTRUMENT_MIR: '1',
+          SUPERCOV_RUST_INSTRUMENT_CTFE: '1',
+          DYLD_LIBRARY_PATH: [rustcTargetLibdir, process.env.DYLD_LIBRARY_PATH]
+            .filter(Boolean)
+            .join(':'),
+          LD_LIBRARY_PATH: [rustcTargetLibdir, process.env.LD_LIBRARY_PATH]
+            .filter(Boolean)
+            .join(':'),
+        },
+      },
+    );
+    const normalize = (value) =>
+      value
+        .replaceAll(source, `<${name}>`)
+        .replaceAll(baselineOutput, '<output>')
+        .replaceAll(instrumentedOutput, '<output>')
+        .replaceAll('std::result::Result', 'Result')
+        .replaceAll('std::ops::Try', 'Try')
+        .replaceAll('std::ops::FromResidual', 'FromResidual');
+    assert.equal(
+      normalize(instrumented.stderr),
+      normalize(baseline.stderr),
+      `Supercov changed the stable Rust 1.95 ${name} compile failure`,
+    );
+    assert(
+      !existsSync(compilerOutput) || readdirSync(compilerOutput).length === 0,
+      `a rejected ${name} compilation published partial coverage evidence`,
+    );
+    return {baseline, instrumented};
+  };
+  const {baseline: constTryBaseline, instrumented: constTryInstrumented} =
+    compileFailCase('const-try');
+  assert.match(
+    constTryInstrumented.stderr,
+    /std::result::Result/,
+    'the rustc-driver diagnostic-path rendering boundary unexpectedly changed',
+  );
+  assert.match(constTryBaseline.stderr, /E0658/);
+  assert.match(constTryBaseline.stderr, /Try.*not yet stable as a const trait/s);
+  const {baseline: constAssertFailure} = compileFailCase('const-assert');
+  assert.match(constAssertFailure.stderr, /E0080/);
+  assert.match(
+    constAssertFailure.stderr,
+    /evaluation panicked: assertion failed: value/,
+  );
+  for (const assertion of ['const-assert-eq', 'const-assert-ne']) {
+    const {baseline} = compileFailCase(assertion);
+    assert.match(baseline.stderr, /E0015/);
+    assert.match(baseline.stderr, /assert_failed/);
+    assert.match(baseline.stderr, /cannot call non-const function/);
+  }
   assert.deepEqual(
     readdirSync(scratch).filter((name) => name.endsWith('.profraw')),
     [],
@@ -942,7 +1031,7 @@ try {
   assert.match(baselineBehavior.stdout, /try-panic=true/);
   assert.match(
     baselineBehavior.stdout,
-    /ctfe-surfaces=\[17, 29, 31, 43, 47, 53, 59, 61, 2, 67, 79, 89, 83, 89, 83, 103, 101, 97, 107, 109, 113, 131, 127, 0, 2, 0\]/,
+    /ctfe-surfaces=\[17, 29, 31, 43, 47, 53, 59, 61, 2, 67, 79, 89, 83, 89, 83, 103, 101, 97, 107, 109, 113, 131, 127, 0, 2, 0, 137, 137, 139, 149, 149, 151\]/,
   );
   assert.match(baselineBehavior.stdout, /match-unreachable=\[1, 2\]/);
   assert.match(baselineBehavior.stdout, /match-generated=\[23, 29\]/);
@@ -2227,6 +2316,62 @@ try {
     enteredWhile,
     ['entered', 'entered', 'zero iterations'],
     'entered CTFE while corpus did not exercise its terminating false condition',
+  );
+  const constAssertionDecision = decisionForConditions(
+    runtimeManifest,
+    'const_assertion',
+    ['first', 'second'],
+  );
+  assert.equal(constAssertionDecision.kind, 'assertion');
+  assert.deepEqual(
+    ctfeVectorsForDecision('const_assertion', constAssertionDecision),
+    [
+      JSON.stringify({values: [false, true], outcome: true}),
+      JSON.stringify({values: [true, null], outcome: true}),
+    ].sort(),
+    'CTFE assertion did not preserve both successful short-circuit paths',
+  );
+  const directConstAssertion = decisionForConditions(
+    runtimeManifest,
+    'DIRECT_CONST_ASSERTION',
+    ['true'],
+  );
+  assert.equal(directConstAssertion.kind, 'assertion');
+  assert.deepEqual(
+    ctfeVectorsForDecision('DIRECT_CONST_ASSERTION', directConstAssertion),
+    oneVector(true),
+    'direct const assertion did not publish its successful decision',
+  );
+  const constDebugAssertionDecision = decisionForConditions(
+    runtimeManifest,
+    'const_debug_assertion',
+    ['first', 'second'],
+  );
+  assert.equal(constDebugAssertionDecision.kind, 'assertion');
+  assert.deepEqual(
+    ctfeVectorsForDecision(
+      'const_debug_assertion',
+      constDebugAssertionDecision,
+    ),
+    [
+      JSON.stringify({values: [false, true], outcome: true}),
+      JSON.stringify({values: [true, null], outcome: true}),
+    ].sort(),
+    'CTFE debug assertion did not preserve both successful short-circuit paths',
+  );
+  const directConstDebugAssertion = decisionForConditions(
+    runtimeManifest,
+    'DIRECT_CONST_DEBUG_ASSERTION',
+    ['true'],
+  );
+  assert.equal(directConstDebugAssertion.kind, 'assertion');
+  assert.deepEqual(
+    ctfeVectorsForDecision(
+      'DIRECT_CONST_DEBUG_ASSERTION',
+      directConstDebugAssertion,
+    ),
+    oneVector(true),
+    'direct const debug assertion did not publish its successful decision',
   );
   const ctfeDefinitions = new Set(
     ctfeRecordFiles.flatMap(({records: fileRecords}) =>
