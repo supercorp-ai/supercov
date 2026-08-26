@@ -412,8 +412,14 @@ Work:
 - fail closed for genuinely ambiguous mixed-language or unsupported runners.
 
 Prefer an owned in-process context carrier once it proves the same isolation as
-the process-per-test reference. Retain process-per-test as a correctness oracle
-or explicit fallback only if its semantics and UX are acceptable.
+the process-per-test reference. Architecture checkpoint: the compiler backend
+now proves the process-per-test path on a test that spawns a child thread. The
+thread's work inherits the supervisor-owned attempt context through the mmap
+transport environment, while the parent assertion verdict retains its distinct
+authenticated assertion phase; child work is not falsely upgraded to assertion
+confidence. Use this sound process boundary for the first public integration.
+Retain in-process concurrent libtest only as a later optimization after its
+thread/async/subprocess carriers prove equivalent attribution.
 
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.

@@ -1782,6 +1782,61 @@ try {
     ),
     'concurrent short-circuit vector lost its exact libtest context',
   );
+  const isolatedTransport = createTransport('isolated-child-thread');
+  const isolatedTestContext = testContextId('tests::child_context');
+  const isolatedTest = run(
+    'cargo',
+    [
+      'test',
+      '--quiet',
+      '--manifest-path',
+      fixture,
+      '--lib',
+      'tests::child_context',
+      '--',
+      '--ignored',
+      '--exact',
+      '--test-threads=1',
+    ],
+    {
+      env: {
+        ...instrumentedEnvironment,
+        SUPERCOV_RUST_TRANSPORT_FILE: isolatedTransport.path,
+        SUPERCOV_RUST_TRANSPORT_TOKEN: isolatedTransport.tokenHex,
+        SUPERCOV_RUST_CONTEXT_ID: BigInt(isolatedTestContext)
+          .toString(16)
+          .padStart(16, '0'),
+      },
+    },
+  );
+  assert.match(isolatedTest.stdout, /1 passed/);
+  const isolatedEvidence = readTransport(isolatedTransport);
+  validatePhaseContexts(isolatedEvidence, [isolatedTestContext]);
+  assert.equal(isolatedEvidence.attachments, 1);
+  assert.equal(isolatedEvidence.dropped, 0);
+  assert.equal(isolatedEvidence.incomplete, 0);
+  assert(
+    isolatedEvidence.ordinals.some(
+      ({context, ordinal}) =>
+        context === isolatedTestContext && ordinal === authoredProbe,
+    ),
+    'process-per-test fallback did not bind child-thread work to the exact test phase',
+  );
+  const isolatedAssertionId = assertionDecisionIdFor('tests::child_context');
+  const isolatedAssertionContext = assertionPhaseContext(
+    isolatedEvidence,
+    isolatedTestContext,
+    isolatedAssertionId,
+  );
+  assert(
+    isolatedEvidence.decisions.some(
+      ({context, id, outcome}) =>
+        context === isolatedAssertionContext &&
+        id === isolatedAssertionId &&
+        outcome === true,
+    ),
+    'process-per-test fallback lost the parent assertion verdict',
+  );
   const instrumentedRecords = records(instrumentedDirectory);
   assert(instrumentedRecords.some((record) => record.definition === 'authored'));
   const injectedProbe = instrumentedRecords.find((record) =>

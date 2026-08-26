@@ -294,7 +294,12 @@ an unverified rustc commit.
    manifest.
 2. Extend the proven libtest entry/unwind carrier through child threads, async
    executors, subprocesses, retry, late work and phases, or activate the exact
-   process-per-test fallback whenever context-zero work is observed. Prove
+   process-per-test fallback whenever context-zero work is observed. The first
+   fallback proof is now green: a one-test process binds child-thread work to
+   the exact test phase through the transport's supervisor context and keeps
+   the parent's assertion verdict in its dynamic assertion phase without
+   inventing assertion linkage for the child. Make this the initial integration
+   path; async/subprocess/retry/crash cases still need the same proof. Prove
    no_std and supported-target behavior. Windows remains a separate explicit
    target gate.
 3. Generalize the proven CTFE marker path across every frozen compile-time
