@@ -35,6 +35,7 @@ use crate::{
     evidence_archive::EvidenceArchiveEntry,
     rust_project::PreparedRustProject,
     rust_runtime::{RustProbeObservation, read_rust_probe_directory},
+    rust_test_context::preflight_rust_test_contexts,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,6 +91,7 @@ pub enum RustTestRunnerError {
     UnsafeArtifact(String),
     ListFailed(String),
     Probe(String),
+    Context(String),
     UnknownProbe(String),
     InvalidVector {
         id: String,
@@ -116,6 +118,7 @@ impl std::fmt::Display for RustTestRunnerError {
                 write!(formatter, "could not enumerate Rust tests: {reason}")
             }
             Self::Probe(reason) => write!(formatter, "invalid Rust probe evidence: {reason}"),
+            Self::Context(reason) => write!(formatter, "invalid Rust test context: {reason}"),
             Self::UnknownProbe(id) => write!(
                 formatter,
                 "Rust runtime emitted an unknown obligation: {id}"
@@ -179,6 +182,7 @@ struct ProcessTask {
     test_index: usize,
     artifact: TestArtifact,
     test: String,
+    context_id: u64,
     directory: PathBuf,
 }
 
@@ -488,7 +492,10 @@ pub fn run_prepared_rust_tests(
     let execution_started = Instant::now();
     let mut tasks = Vec::new();
     for (artifact_index, artifact) in artifacts.iter().enumerate() {
-        for (test_index, test) in list_tests(artifact)?.into_iter().enumerate() {
+        let tests = list_tests(artifact)?;
+        let contexts = preflight_rust_test_contexts(tests.clone())
+            .map_err(|error| RustTestRunnerError::Context(error.to_string()))?;
+        for (test_index, test) in tests.into_iter().enumerate() {
             let directory = evidence_root.join(format!("{artifact_index:04}-{test_index:08}"));
             fs::create_dir(&directory)
                 .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
@@ -497,6 +504,7 @@ pub fn run_prepared_rust_tests(
                 artifact_index,
                 test_index,
                 artifact: artifact.clone(),
+                context_id: contexts[&test],
                 test,
                 directory,
             });
@@ -520,6 +528,10 @@ pub fn run_prepared_rust_tests(
                         .args(["--exact", &task.test, "--nocapture"])
                         .current_dir(&project.workspace_root)
                         .env("SUPERCOV_RUST_EVIDENCE_DIR", &task.directory)
+                        .env(
+                            crate::rust_probe_transport::RUST_CONTEXT_ENV,
+                            format!("{:016x}", task.context_id),
+                        )
                         .output()
                         .map(|output| ProcessOutcome {
                             task: ProcessTask {
@@ -528,6 +540,7 @@ pub fn run_prepared_rust_tests(
                                 test_index: task.test_index,
                                 artifact: task.artifact.clone(),
                                 test: task.test.clone(),
+                                context_id: task.context_id,
                                 directory: task.directory.clone(),
                             },
                             output,

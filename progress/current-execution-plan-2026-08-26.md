@@ -268,7 +268,11 @@ The shared Rust engine now owns the frozen libtest-context derivation too. Its
 domain-separated FNV-1a input, reserved-value remap and fatal collision policy
 are part of `rust-source-v1`; supervisor preflight rejects duplicate names and
 any 64-bit collision before a process is launched. The compiler corpus's exact
-known context remains a cross-implementation golden.
+known context remains a cross-implementation golden. The existing exact
+process-per-libtest supervisor now performs this preflight per artifact and
+places the resulting context in the authenticated runtime environment before
+launch, which gives child threads the attempt identity without relying on
+thread timing or global mutable attribution.
 
 The first real-probe doctest attempt was deliberately rejected. It exposed and
 fixed an unstable-feature capability leak by adding rustc's empty
