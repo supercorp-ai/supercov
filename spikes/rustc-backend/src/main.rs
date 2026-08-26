@@ -89,6 +89,7 @@ static CTFE_EVENTS: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 static MATCH_ARM_MARKERS: Mutex<BTreeMap<String, BTreeMap<u32, u64>>> = Mutex::new(BTreeMap::new());
 static MATCH_GUARD_MARKERS: Mutex<BTreeMap<String, Vec<MatchGuardConditionMarker>>> =
     Mutex::new(BTreeMap::new());
+static LET_ELSE_MARKERS: Mutex<BTreeMap<String, Vec<LetElseMarker>>> = Mutex::new(BTreeMap::new());
 static UNREACHABLE_MATCH_ARMS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static DOCTEST_ROLE: OnceLock<&'static str> = OnceLock::new();
 
@@ -171,6 +172,13 @@ struct MatchGuardConditionMarker {
     condition_index: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LetElseMarker {
+    local: u32,
+    branch_id: String,
+    alternative_ordinal: u64,
+}
+
 fn prune_unreachable_match_arms(
     branches: &mut BTreeMap<String, BranchObligation>,
     match_groups: &mut BTreeMap<String, MatchSelectionObligation>,
@@ -204,6 +212,7 @@ struct StableObligationIdentity {
     source: StableSourceRange,
     provenance: &'static str,
     probe_ordinal: u64,
+    owner_local_ordinal: usize,
 }
 
 struct CtfeLayer;
@@ -489,6 +498,7 @@ fn obligation_identity(
         } else {
             probe_ordinal
         },
+        owner_local_ordinal,
     })
 }
 
@@ -981,7 +991,15 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
     fn visit_stmt(&mut self, statement: &'tcx hir::Stmt<'tcx>) {
         match statement.kind {
             hir::StmtKind::Let(local) if local.init.is_some() => {
-                self.point(statement.span, "statement", "let")
+                self.point(statement.span, "statement", "let");
+                if local.els.is_some() {
+                    let _ = self.record_branch(
+                        local.pat.span,
+                        "let-else",
+                        "let-else",
+                        &[("matched", "matched"), ("else", "else")],
+                    );
+                }
             }
             hir::StmtKind::Expr(_) | hir::StmtKind::Semi(_) => {
                 self.point(statement.span, "statement", "expression")
@@ -1319,7 +1337,7 @@ impl Callbacks for ProbeCallbacks {
         let mut decisions = BTreeMap::<String, DecisionObligation>::new();
         let mut match_groups = BTreeMap::<String, MatchSelectionObligation>::new();
         let mut manifest_limitations = BTreeSet::from([
-            "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
+            "RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet".to_owned(),
         ]);
 
         for owner in tcx.hir_body_owners() {
@@ -1885,6 +1903,118 @@ fn synthetic_match_assignments(
     Ok(solution.clone())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SyntheticLetElsePath {
+    start: BasicBlock,
+    matched: BasicBlock,
+    fallback: BasicBlock,
+}
+
+fn synthetic_let_else_assignments(
+    tcx: TyCtxt<'_>,
+    crate_name: &str,
+    body: &Body<'_>,
+    branches: &[&BranchObligation],
+) -> Result<BTreeMap<String, SyntheticLetElsePath>, String> {
+    let mut branches_by_source = BTreeMap::<(String, u32, u32), Vec<&BranchObligation>>::new();
+    for branch in branches {
+        branches_by_source
+            .entry((
+                branch.identity.source.key.clone(),
+                branch.identity.source.start,
+                branch.identity.source.end,
+            ))
+            .or_default()
+            .push(branch);
+    }
+    let false_edges = body
+        .basic_blocks
+        .iter_enumerated()
+        .filter_map(|(start, data)| match data.terminator().kind {
+            TerminatorKind::FalseEdge {
+                real_target,
+                imaginary_target,
+            } => stable_source_range(
+                tcx,
+                data.terminator().source_info.span.source_callsite(),
+                crate_name,
+            )
+            .ok()
+            .map(|source| {
+                (
+                    (source.key, source.start, source.end),
+                    SyntheticLetElsePath {
+                        start,
+                        matched: real_target,
+                        fallback: imaginary_target,
+                    },
+                )
+            }),
+            _ => None,
+        })
+        .fold(
+            BTreeMap::<(String, u32, u32), Vec<SyntheticLetElsePath>>::new(),
+            |mut grouped, (source, path)| {
+                grouped.entry(source).or_default().push(path);
+                grouped
+            },
+        );
+    let mut assignments = BTreeMap::new();
+    for (source, mut source_branches) in branches_by_source {
+        let mut candidates = false_edges.get(&source).cloned().unwrap_or_default();
+        source_branches.sort_by_key(|branch| branch.identity.owner_local_ordinal);
+        let rank_by_start = candidates
+            .iter()
+            .map(|candidate| {
+                let rank = candidates
+                    .iter()
+                    .filter(|other| {
+                        other.start != candidate.start
+                            && block_reaches(body, other.start, candidate.start)
+                    })
+                    .count();
+                (candidate.start.as_u32(), rank)
+            })
+            .collect::<BTreeMap<_, _>>();
+        candidates.sort_by_key(|candidate| rank_by_start[&candidate.start.as_u32()]);
+        if source_branches.len() != candidates.len() {
+            return Err(format!(
+                "{} synthetic let-else obligations at {}:{}-{} map to {} final pattern edges",
+                source_branches.len(),
+                source.0,
+                source.1,
+                source.2,
+                candidates.len()
+            ));
+        }
+        let ranks = candidates
+            .iter()
+            .map(|candidate| {
+                candidates
+                    .iter()
+                    .filter(|other| {
+                        other.start != candidate.start
+                            && block_reaches(body, other.start, candidate.start)
+                    })
+                    .count()
+            })
+            .collect::<Vec<_>>();
+        if ranks.iter().enumerate().any(|(index, rank)| index != *rank) {
+            return Err(format!(
+                "synthetic let-else edges at {}:{}-{} have no total semantic order",
+                source.0, source.1, source.2
+            ));
+        }
+        assignments.extend(
+            source_branches
+                .into_iter()
+                .zip(candidates)
+                .map(|(branch, candidate)| (branch.identity.id.clone(), candidate)),
+        );
+    }
+    Ok(assignments)
+}
+
 fn match_arm_marker_statement<'tcx>(
     tcx: TyCtxt<'tcx>,
     marker_local: rustc_middle::mir::Local,
@@ -1963,22 +2093,35 @@ fn mir_built_with_match_markers<'tcx>(
                 && group.identity.provenance == "synthetic-expansion"
         })
         .collect::<Vec<_>>();
-    if synthetic_groups.is_empty() {
+    let synthetic_let_else = obligations
+        .branches
+        .values()
+        .filter(|branch| {
+            branch.definitions.contains(&obligations.definition)
+                && branch.branch_kind == "let-else"
+                && branch.identity.provenance == "synthetic-expansion"
+        })
+        .collect::<Vec<_>>();
+    if synthetic_groups.is_empty() && synthetic_let_else.is_empty() {
         return body;
     }
-    let (assignments, guard_blocks) = {
+    let (assignments, guard_blocks, let_else_assignments) = {
         let borrowed = body.borrow();
-        let assignments = match synthetic_match_assignments(
-            tcx,
-            &obligations.crate_name,
-            &borrowed,
-            &synthetic_groups,
-        ) {
-            Ok(assignments) => assignments,
-            Err(error) => tcx.dcx().fatal(format!(
-                "Supercov could not bind pre-borrow-check synthetic matches in {}: {error}",
-                obligations.definition
-            )),
+        let assignments = if synthetic_groups.is_empty() {
+            BTreeMap::new()
+        } else {
+            match synthetic_match_assignments(
+                tcx,
+                &obligations.crate_name,
+                &borrowed,
+                &synthetic_groups,
+            ) {
+                Ok(assignments) => assignments,
+                Err(error) => tcx.dcx().fatal(format!(
+                    "Supercov could not bind pre-borrow-check synthetic matches in {}: {error}",
+                    obligations.definition
+                )),
+            }
         };
         let mut guard_blocks = Vec::new();
         for group in &synthetic_groups {
@@ -2019,7 +2162,19 @@ fn mir_built_with_match_markers<'tcx>(
                 );
             }
         }
-        (assignments, guard_blocks)
+        let let_else_assignments = synthetic_let_else_assignments(
+            tcx,
+            &obligations.crate_name,
+            &borrowed,
+            &synthetic_let_else,
+        )
+        .unwrap_or_else(|error| {
+            tcx.dcx().fatal(format!(
+                "Supercov could not bind pre-borrow-check synthetic let-else in {}: {error}",
+                obligations.definition
+            ))
+        });
+        (assignments, guard_blocks, let_else_assignments)
     };
     let mut instrumented = body.steal();
     let mut local_ordinals = BTreeMap::new();
@@ -2053,16 +2208,47 @@ fn mir_built_with_match_markers<'tcx>(
             condition_index,
         });
     }
-    let mut markers = MATCH_ARM_MARKERS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(existing) = markers.insert(obligations.definition.clone(), local_ordinals.clone())
-        && existing != local_ordinals
-    {
-        tcx.dcx().fatal(format!(
-            "Supercov synthetic match marker collision for {}",
-            obligations.definition
-        ));
+    let mut let_else_markers = Vec::new();
+    for branch in &synthetic_let_else {
+        let path = let_else_assignments[&branch.identity.id];
+        for (label, block) in [("matched", path.matched), ("else", path.fallback)] {
+            let alternative = branch
+                .alternatives
+                .iter()
+                .find(|alternative| alternative.label == label)
+                .unwrap_or_else(|| {
+                    tcx.dcx().fatal(format!(
+                        "Supercov synthetic let-else {} has no {label} alternative",
+                        branch.identity.id
+                    ))
+                });
+            let marker_local = instrumented
+                .local_decls
+                .push(LocalDecl::new(tcx.types.u64, DUMMY_SP));
+            instrumented.basic_blocks_mut()[block].statements.insert(
+                0,
+                match_arm_marker_statement(tcx, marker_local, alternative.identity.probe_ordinal),
+            );
+            let_else_markers.push(LetElseMarker {
+                local: marker_local.as_u32(),
+                branch_id: branch.identity.id.clone(),
+                alternative_ordinal: alternative.identity.probe_ordinal,
+            });
+        }
+    }
+    if !local_ordinals.is_empty() {
+        let mut markers = MATCH_ARM_MARKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) =
+            markers.insert(obligations.definition.clone(), local_ordinals.clone())
+            && existing != local_ordinals
+        {
+            tcx.dcx().fatal(format!(
+                "Supercov synthetic match marker collision for {}",
+                obligations.definition
+            ));
+        }
     }
     if !guard_markers.is_empty() {
         let mut markers = MATCH_GUARD_MARKERS
@@ -2074,6 +2260,20 @@ fn mir_built_with_match_markers<'tcx>(
         {
             tcx.dcx().fatal(format!(
                 "Supercov synthetic match guard marker collision for {}",
+                obligations.definition
+            ));
+        }
+    }
+    if !let_else_markers.is_empty() {
+        let mut markers = LET_ELSE_MARKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) =
+            markers.insert(obligations.definition.clone(), let_else_markers.clone())
+            && existing != let_else_markers
+        {
+            tcx.dcx().fatal(format!(
+                "Supercov synthetic let-else marker collision for {}",
                 obligations.definition
             ));
         }
@@ -2092,12 +2292,13 @@ fn mir_drops_with_structural_probes<'tcx>(
     if env::var_os(INSTRUMENT_MIR).is_none() || tcx.hir_body_const_context(def_id).is_some() {
         return body;
     }
-    let (match_plans, for_plans, guard_plans) = {
+    let (match_plans, for_plans, guard_plans, let_else_plans) = {
         let borrowed = body.borrow();
         (
             runtime_match_plans(tcx, def_id, &borrowed),
             runtime_for_loop_plans(tcx, def_id, &borrowed),
             runtime_marked_guard_decision_plans(tcx, def_id, &borrowed),
+            runtime_marked_let_else_plans(tcx, def_id, &borrowed),
         )
     };
     let match_plans = match_plans.unwrap_or_else(|error| {
@@ -2118,10 +2319,21 @@ fn mir_drops_with_structural_probes<'tcx>(
             tcx.def_path_str(def_id)
         ))
     });
-    if match_plans.is_empty() && for_plans.is_empty() && guard_plans.is_empty() {
+    let let_else_plans = let_else_plans.unwrap_or_else(|error| {
+        tcx.dcx().fatal(format!(
+            "Supercov could not bind pre-optimization Rust synthetic let-else probes in {}: {error}",
+            tcx.def_path_str(def_id)
+        ))
+    });
+    if match_plans.is_empty()
+        && for_plans.is_empty()
+        && guard_plans.is_empty()
+        && let_else_plans.is_empty()
+    {
         return body;
     }
-    let has_branch_plans = !match_plans.is_empty() || !for_plans.is_empty();
+    let has_branch_plans =
+        !match_plans.is_empty() || !for_plans.is_empty() || !let_else_plans.is_empty();
     let start_branch = has_branch_plans
         .then(|| find_runtime_function(tcx, START_BRANCH_FUNCTION))
         .flatten();
@@ -2208,6 +2420,37 @@ fn mir_drops_with_structural_probes<'tcx>(
     {
         tcx.dcx().fatal(format!(
             "Supercov could not inject pre-optimization Rust synthetic guard probes in {}: {error}",
+            tcx.def_path_str(def_id)
+        ));
+    }
+    // Match and guard instrumentation may split an endpoint edge. Rebind the
+    // semantic let-else markers only after those enclosing structures settle.
+    let mut let_else_plans =
+        runtime_marked_let_else_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
+            tcx.dcx().fatal(format!(
+                "Supercov could not rebind pre-optimization Rust synthetic let-else probes in {}: {error}",
+                tcx.def_path_str(def_id)
+            ))
+        });
+    if let Err(error) = strip_let_else_markers(&mut instrumented, &tcx.def_path_str(def_id)) {
+        tcx.dcx().fatal(format!(
+            "Supercov could not consume pre-borrow-check Rust let-else markers in {}: {error}",
+            tcx.def_path_str(def_id)
+        ));
+    }
+    if let (Some(start), Some(hit)) = (start_branch, hit_branch)
+        && let Err(error) = instrument_runtime_matches(
+            tcx,
+            &mut instrumented,
+            &mut let_else_plans,
+            start,
+            hit,
+            unit,
+            span,
+        )
+    {
+        tcx.dcx().fatal(format!(
+            "Supercov could not inject pre-optimization Rust synthetic let-else probes in {}: {error}",
             tcx.def_path_str(def_id)
         ));
     }
@@ -2835,6 +3078,164 @@ struct RuntimeMatchPlan {
     arms: Vec<RuntimeMatchArm>,
 }
 
+fn runtime_let_else_plans<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: LocalDefId,
+    body: &Body<'tcx>,
+) -> Result<Vec<RuntimeMatchPlan>, String> {
+    let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
+        return Ok(Vec::new());
+    };
+    let marked_branches = LET_ELSE_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&obligations.definition)
+        .map(|markers| {
+            markers
+                .iter()
+                .map(|marker| marker.branch_id.clone())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let branches = obligations
+        .branches
+        .values()
+        .filter(|branch| {
+            branch.branch_kind == "let-else"
+                && branch.definitions.contains(&obligations.definition)
+                && !marked_branches.contains(&branch.identity.id)
+        })
+        .collect::<Vec<_>>();
+    if branches.is_empty() {
+        return Ok(Vec::new());
+    }
+    let coverage = body.function_coverage_info.as_deref().ok_or_else(|| {
+        format!(
+            "rustc did not retain branch mappings for let-else function {}",
+            obligations.definition
+        )
+    })?;
+    let mut bcb_blocks = BTreeMap::<u32, Vec<BasicBlock>>::new();
+    for (block, data) in body.basic_blocks.iter_enumerated() {
+        for statement in &data.statements {
+            if let StatementKind::Coverage(CoverageKind::VirtualCounter { bcb }) = statement.kind {
+                bcb_blocks.entry(bcb.as_u32()).or_default().push(block);
+            }
+        }
+    }
+    let mut mappings = coverage
+        .mappings
+        .iter()
+        .filter_map(|mapping| match mapping.kind {
+            MappingKind::Branch {
+                true_bcb,
+                false_bcb,
+            } => Some((mapping.span, true_bcb.as_u32(), false_bcb.as_u32())),
+            MappingKind::Code { .. } => None,
+        })
+        .map(|(span, true_bcb, false_bcb)| {
+            stable_source_range(tcx, span, &obligations.crate_name)
+                .map(|source| (source, true_bcb, false_bcb))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let dominators = body.basic_blocks.dominators().clone();
+    let mut plans = Vec::new();
+    for branch in branches {
+        let candidates = mappings
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (source, _, _))| {
+                (source == &branch.identity.source).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let [mapping_index] = candidates.as_slice() else {
+            return Err(format!(
+                "let-else branch {} maps to {} rustc branch regions",
+                branch.identity.id,
+                candidates.len()
+            ));
+        };
+        let (_, matched_bcb, else_bcb) = mappings.remove(*mapping_index);
+        let unique_block = |bcb: u32| -> Result<BasicBlock, String> {
+            let blocks = bcb_blocks.get(&bcb).cloned().unwrap_or_default();
+            match blocks.as_slice() {
+                [block] => Ok(*block),
+                _ => Err(format!(
+                    "coverage block {bcb} for {} maps to {} MIR blocks",
+                    branch.identity.id,
+                    blocks.len()
+                )),
+            }
+        };
+        let matched_target = unique_block(matched_bcb)?;
+        let else_target = unique_block(else_bcb)?;
+        let start_block = nearest_common_dominator(&dominators, matched_target, else_target)
+            .ok_or_else(|| {
+                format!(
+                    "let-else branch {} has no common dominator",
+                    branch.identity.id
+                )
+            })?;
+        let incoming = |target: BasicBlock| {
+            body.basic_blocks.predecessors()[target]
+                .iter()
+                .copied()
+                .filter(|source| dominators.dominates(start_block, *source))
+                .collect::<Vec<_>>()
+        };
+        let matched_sources = incoming(matched_target);
+        let else_sources = incoming(else_target);
+        if matched_sources.is_empty() || else_sources.is_empty() {
+            return Err(format!(
+                "let-else branch {} has incomplete terminal edges ({}/{})",
+                branch.identity.id,
+                matched_sources.len(),
+                else_sources.len()
+            ));
+        }
+        let alternative = |label: &str| {
+            branch
+                .alternatives
+                .iter()
+                .find(|alternative| alternative.label == label)
+                .map(|alternative| {
+                    (
+                        alternative.identity.id.clone(),
+                        alternative.identity.probe_ordinal,
+                    )
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "let-else branch {} has no {label} alternative",
+                        branch.identity.id
+                    )
+                })
+        };
+        let (matched_id, matched_ordinal) = alternative("matched")?;
+        let (else_id, else_ordinal) = alternative("else")?;
+        plans.push(RuntimeMatchPlan {
+            id: branch.identity.id.clone(),
+            start_block,
+            token: None,
+            arms: vec![
+                RuntimeMatchArm {
+                    branch_id: matched_id,
+                    entry_block: matched_target,
+                    entry_sources: matched_sources,
+                    selected_ordinal: matched_ordinal,
+                },
+                RuntimeMatchArm {
+                    branch_id: else_id,
+                    entry_block: else_target,
+                    entry_sources: else_sources,
+                    selected_ordinal: else_ordinal,
+                },
+            ],
+        });
+    }
+    Ok(plans)
+}
+
 fn executable_block_sources(
     tcx: TyCtxt<'_>,
     crate_name: &str,
@@ -3160,6 +3561,119 @@ fn runtime_marked_guard_decision_plans<'tcx>(
     Ok(plans)
 }
 
+fn runtime_marked_let_else_plans<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: LocalDefId,
+    body: &Body<'tcx>,
+) -> Result<Vec<RuntimeMatchPlan>, String> {
+    let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
+        return Ok(Vec::new());
+    };
+    let markers = LET_ELSE_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&obligations.definition)
+        .cloned()
+        .unwrap_or_default();
+    if markers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let marker_locals = markers
+        .iter()
+        .map(|marker| marker.local)
+        .collect::<BTreeSet<_>>();
+    let mut blocks_by_local = BTreeMap::<u32, Vec<BasicBlock>>::new();
+    for (block, data) in body.basic_blocks.iter_enumerated() {
+        for statement in &data.statements {
+            let StatementKind::Assign(assignment) = &statement.kind else {
+                continue;
+            };
+            let (destination, _) = &**assignment;
+            let Some(local) = destination.as_local().map(|local| local.as_u32()) else {
+                continue;
+            };
+            if marker_locals.contains(&local) {
+                blocks_by_local.entry(local).or_default().push(block);
+            }
+        }
+    }
+    let mut markers_by_branch = BTreeMap::<String, Vec<&LetElseMarker>>::new();
+    for marker in &markers {
+        markers_by_branch
+            .entry(marker.branch_id.clone())
+            .or_default()
+            .push(marker);
+    }
+    let dominators = body.basic_blocks.dominators().clone();
+    let mut plans = Vec::new();
+    for (branch_id, branch_markers) in markers_by_branch {
+        let branch = obligations.branches.get(&branch_id).ok_or_else(|| {
+            format!("synthetic let-else marker references unknown branch {branch_id}")
+        })?;
+        if branch_markers.len() != 2 {
+            return Err(format!(
+                "synthetic let-else {branch_id} has {} endpoint markers",
+                branch_markers.len()
+            ));
+        }
+        let mut endpoints = Vec::new();
+        for marker in branch_markers {
+            let blocks = blocks_by_local
+                .get(&marker.local)
+                .cloned()
+                .unwrap_or_default();
+            let [entry_block] = blocks.as_slice() else {
+                return Err(format!(
+                    "synthetic let-else {branch_id} endpoint marker survived in {} MIR blocks",
+                    blocks.len()
+                ));
+            };
+            let alternative = branch
+                .alternatives
+                .iter()
+                .find(|alternative| {
+                    alternative.identity.probe_ordinal == marker.alternative_ordinal
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "synthetic let-else {branch_id} marker has unknown ordinal {}",
+                        marker.alternative_ordinal
+                    )
+                })?;
+            endpoints.push((alternative, *entry_block));
+        }
+        let start_block = nearest_common_dominator(&dominators, endpoints[0].1, endpoints[1].1)
+            .ok_or_else(|| format!("synthetic let-else {branch_id} has no common dominator"))?;
+        let mut arms = Vec::new();
+        for (alternative, entry_block) in endpoints {
+            let entry_sources = body.basic_blocks.predecessors()[entry_block]
+                .iter()
+                .copied()
+                .filter(|source| dominators.dominates(start_block, *source))
+                .collect::<Vec<_>>();
+            if entry_sources.is_empty() {
+                return Err(format!(
+                    "synthetic let-else {branch_id} endpoint {} has no incoming selection edge",
+                    alternative.identity.id
+                ));
+            }
+            arms.push(RuntimeMatchArm {
+                branch_id: alternative.identity.id.clone(),
+                entry_block,
+                entry_sources,
+                selected_ordinal: alternative.identity.probe_ordinal,
+            });
+        }
+        plans.push(RuntimeMatchPlan {
+            id: branch_id,
+            start_block,
+            token: None,
+            arms,
+        });
+    }
+    Ok(plans)
+}
+
 fn strip_match_arm_markers(body: &mut Body<'_>, definition: &str) -> Result<(), String> {
     let marker_locals = MATCH_ARM_MARKERS
         .lock()
@@ -3225,6 +3739,44 @@ fn strip_match_guard_markers(body: &mut Body<'_>, definition: &str) -> Result<()
     if removed != marker_locals.len() {
         return Err(format!(
             "synthetic match guard markers in {definition} survived borrow checking {removed}/{} times",
+            marker_locals.len()
+        ));
+    }
+    Ok(())
+}
+
+fn strip_let_else_markers(body: &mut Body<'_>, definition: &str) -> Result<(), String> {
+    let marker_locals = LET_ELSE_MARKERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(definition)
+        .map(|markers| {
+            markers
+                .iter()
+                .map(|marker| marker.local)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    if marker_locals.is_empty() {
+        return Ok(());
+    }
+    let mut removed = 0;
+    for data in body.basic_blocks_mut() {
+        data.statements.retain(|statement| {
+            let StatementKind::Assign(assignment) = &statement.kind else {
+                return true;
+            };
+            let (destination, _) = &**assignment;
+            let is_marker = destination
+                .as_local()
+                .is_some_and(|local| marker_locals.contains(&local.as_u32()));
+            removed += usize::from(is_marker);
+            !is_marker
+        });
+    }
+    if removed != marker_locals.len() {
+        return Err(format!(
+            "synthetic let-else markers in {definition} survived borrow checking {removed}/{} times",
             marker_locals.len()
         ));
     }
@@ -3795,6 +4347,11 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
             "Supercov could not bind Rust decision probes in {definition}: {error}"
         ))
     });
+    let mut let_else_plans = runtime_let_else_plans(tcx, def_id, body).unwrap_or_else(|error| {
+        tcx.dcx().fatal(format!(
+            "Supercov could not bind Rust let-else probes in {definition}: {error}"
+        ))
+    });
     let probe_id = probe_id_for(tcx, def_id, &definition);
     let context_id = context_id_for(tcx, def_id, &definition);
     let probe_function = probe_id.and_then(|_| find_runtime_function(tcx, PROBE_FUNCTION));
@@ -3812,10 +4369,11 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
     let has_loop_plans = decision_plans
         .iter()
         .any(|plan| plan.loop_alternatives.is_some());
-    let start_branch = has_loop_plans
+    let has_branch_plans = has_loop_plans || !let_else_plans.is_empty();
+    let start_branch = has_branch_plans
         .then(|| find_runtime_function(tcx, START_BRANCH_FUNCTION))
         .flatten();
-    let hit_branch = has_loop_plans
+    let hit_branch = has_branch_plans
         .then(|| find_runtime_function(tcx, HIT_BRANCH_FUNCTION))
         .flatten();
     if probe_id.is_some() != probe_function.is_some()
@@ -3824,7 +4382,7 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
             && (start_decision.is_none()
                 || record_condition.is_none()
                 || finish_decision.is_none()))
-        || has_loop_plans != (start_branch.is_some() && hit_branch.is_some())
+        || has_branch_plans != (start_branch.is_some() && hit_branch.is_some())
     {
         tcx.dcx().fatal(format!(
             "Supercov injected runtime functions are incomplete while instrumenting {definition}"
@@ -3834,12 +4392,31 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
     let mut instrumented = body.clone();
     strip_native_coverage(&mut instrumented);
     let span = tcx.def_span(def_id);
-    if probe_id.is_none() && context_id.is_none() && decision_plans.is_empty() {
+    if probe_id.is_none()
+        && context_id.is_none()
+        && decision_plans.is_empty()
+        && let_else_plans.is_empty()
+    {
         return tcx.arena.alloc(instrumented);
     }
     let unit = instrumented
         .local_decls
         .push(LocalDecl::new(tcx.types.unit, span));
+    if let (Some(start), Some(hit)) = (start_branch, hit_branch)
+        && let Err(error) = instrument_runtime_matches(
+            tcx,
+            &mut instrumented,
+            &mut let_else_plans,
+            start,
+            hit,
+            unit,
+            span,
+        )
+    {
+        tcx.dcx().fatal(format!(
+            "Supercov could not inject Rust let-else probes in {definition}: {error}"
+        ));
+    }
     if let Some(start_branch) = start_branch
         && let Err(error) = instrument_runtime_loop_frames(
             tcx,

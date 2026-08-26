@@ -4,12 +4,14 @@ use supercov_rustc_spike_fixture::{
     CONST_FALSE_VALUE, CONST_VALUE, authored, chained, compound, context_normal_scope,
     context_panic_scope, disjoined, drop_order, fallible, for_break, for_values,
     generated_by_build_script, generated_by_proc, generated_by_rules, generated_guarded_match_by_proc,
-    generated_match, generated_match_by_proc, generated_nested_guard_match_by_proc,
-    generated_nested_match_by_proc, generated_nested_scrutinee_match_by_proc, interrupted_decision,
+    generated_let_else_by_proc, generated_match, generated_match_by_proc, generated_nested_guard_match_by_proc,
+    generated_nested_match_by_proc, generated_nested_scrutinee_match_by_proc,
+    generated_two_let_else_by_proc, interrupted_decision,
     interrupted_for, interrupted_match, match_empty, match_identical, match_irrefutable,
-    match_unreachable, match_value, mixed, nested, nested_expression, nested_for_values,
+    let_else_value, match_unreachable, match_value, mixed, nested, nested_expression, nested_for_values,
+    nested_let_else,
     nested_match, panic_path, pattern, repeated_expansions, two_for_values, while_compound,
-    while_let_chain,
+    two_let_else, while_let_chain,
 };
 
 fn main() {
@@ -183,6 +185,35 @@ fn main() {
             generated_nested_guard_match_by_proc(Some(0), true),
             generated_nested_guard_match_by_proc(Some(3), false),
             generated_nested_guard_match_by_proc(None, true),
+        ]
+    );
+    println!("let-else={:?}", [let_else_value(Some(7)), let_else_value(None)]);
+    println!(
+        "let-else-nested={:?}",
+        [
+            nested_let_else(Some(Ok(7))),
+            nested_let_else(Some(Err(7))),
+            nested_let_else(None),
+        ]
+    );
+    println!(
+        "let-else-two={:?}",
+        [
+            two_let_else(Some(2), Some(3)),
+            two_let_else(None, Some(3)),
+            two_let_else(Some(2), None),
+        ]
+    );
+    println!(
+        "let-else-generated-proc={:?}",
+        [generated_let_else_by_proc(Some(7)), generated_let_else_by_proc(None)]
+    );
+    println!(
+        "let-else-generated-two-proc={:?}",
+        [
+            generated_two_let_else_by_proc(Some(Ok(2)), Some(3)),
+            generated_two_let_else_by_proc(None, Some(3)),
+            generated_two_let_else_by_proc(Some(Ok(2)), None),
         ]
     );
     println!(

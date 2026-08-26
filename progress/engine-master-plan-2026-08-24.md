@@ -1313,7 +1313,7 @@ miss blocks flipping any default.
   directories emit byte-identical candidates without ephemeral paths. The
   selected function MIR probes now emit manifest-derived ordinals. The manifest
   remains deliberately incomplete until the same identity and real probes
-  cover let-else, `?`, assertions, CTFE and doctest obligations.
+  cover `?`, assertions, CTFE and doctest obligations.
 - The next private slice translates rustc's authored branch regions into
   Supercov-owned MIR decision frames rather than importing a rustc/LLVM
   profile. Exact goldens now cover all exercised ternary shapes for `&&`, `||`,
@@ -1338,7 +1338,7 @@ miss blocks flipping any default.
   starts once at the natural loop entry and is bypassed by backedges, preserving
   the start context across migration and leaving killed writers explicitly
   incomplete. Exact fixtures prove multi-iteration behavior without duplicate
-  or relabeled invocation evidence. Match, let-else, `?`, assertions,
+  or relabeled invocation evidence. Match, `?`, assertions,
   CTFE and doctest completeness remain private release blockers.
 - Authored `for` loops now close the same frozen `loop-entry` zero/entered
   obligation without inventing an MC/DC decision. A documented post-borrow-
@@ -1370,6 +1370,12 @@ miss blocks flipping any default.
   by accepting/rejecting reachability and emit exact synthetic guard MC/DC
   vectors. Every marker is required to survive borrow checking exactly once and
   is removed before runtime instrumentation.
+- `let else` now has its frozen `matched`/`else` denominator and exact owned
+  first-commit observations. Authored patterns bind to rustc's retained branch
+  region; collapsed proc-macro output uses built-MIR real/imaginary endpoint
+  markers that must survive borrow checking exactly once and are removed before
+  runtime calls. Simple/nested patterns and multiple sequential authored and
+  synthetic statements preserve behavior and exact invocation counts.
 
 ## Non-goals and guardrails
 

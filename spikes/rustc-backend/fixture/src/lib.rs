@@ -31,6 +31,8 @@ probe_macros::generated_guarded_match_function!();
 probe_macros::generated_nested_match_function!();
 probe_macros::generated_nested_scrutinee_match_function!();
 probe_macros::generated_nested_guard_match_function!();
+probe_macros::generated_let_else_function!();
+probe_macros::generated_two_let_else_function!();
 
 pub mod repeated_expansions {
     generated_function!();
@@ -45,6 +47,30 @@ pub const fn const_decision(value: bool) -> usize {
 
 pub const CONST_VALUE: usize = const_decision(true);
 pub const CONST_FALSE_VALUE: usize = const_decision(false);
+
+pub fn let_else_value(value: Option<usize>) -> usize {
+    let Some(value) = value else {
+        return 0;
+    };
+    value
+}
+
+pub fn nested_let_else(value: Option<Result<usize, usize>>) -> usize {
+    let Some(Ok(value)) = value else {
+        return 0;
+    };
+    value
+}
+
+pub fn two_let_else(first: Option<usize>, second: Option<usize>) -> usize {
+    let Some(first) = first else {
+        return 0;
+    };
+    let Some(second) = second else {
+        return first;
+    };
+    first + second
+}
 
 /// A non-mergeable doctest with a hidden setup line.
 ///

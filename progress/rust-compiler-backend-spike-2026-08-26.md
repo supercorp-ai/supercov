@@ -146,7 +146,7 @@ The spike proved:
     multiple iterations, two/one zero/entered compound-`while` invocations and
     three/one zero/entered `while let` invocations. Cross-thread completion and
     killed unfinished branch frames retain exact start context and explicit
-    incomplete health. Let-else, `?`, assertions, executable statements, CTFE and
+    incomplete health. `?`, assertions, executable statements, CTFE and
     doctest integration remain denominator gates.
 19. Authored `for` loops now emit the frozen `loop-entry` zero/entered branch
     without a fictitious Boolean decision. The companion overrides rustc's
@@ -186,6 +186,15 @@ The spike proved:
     exact short-circuit vectors even when a nested match is evaluated inside the
     guard. All arm and condition markers survive borrow checking exactly once
     and are removed before runtime instrumentation.
+21. `let else` now emits the frozen `matched`/`else` branch alternatives with
+    one crash-visible first-commit frame. Authored patterns bind through rustc's
+    exact retained branch region. Synthetic proc-macro output instead receives
+    semantics-neutral markers at built MIR's final real/imaginary pattern edge;
+    each marker must survive borrow checking exactly once and is removed before
+    runtime calls. The corpus proves simple and nested patterns, sequential
+    authored statements, and sequential synthetic statements sharing one
+    collapsed callsite, with byte-identical baseline behavior and exact
+    alternative counts.
 
 The companion executable is about 600 KiB on arm64 macOS and dynamically uses
 the exact `librustc_driver` already shipped by the user's `rustc` component.
@@ -257,7 +266,7 @@ an unverified rustc commit.
 
 ## Next implementation gates
 
-1. Extend the proven expanded-HIR control slice to let-else, `?`,
+1. Extend the proven expanded-HIR control slice to `?`,
    assertions and remaining executable statement
    semantics; bind their real MIR/CTFE probes to the same manifest IDs. Add
    derive, external expansion, generic/trait, include/module and

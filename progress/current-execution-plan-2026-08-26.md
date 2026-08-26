@@ -206,7 +206,7 @@ invocation as the condition. The exploratory 0/1/2/3 function ordinals are
 gone: runtime MIR hits now carry the u64 prefix of the exact manifest point ID,
 and the compiler rejects both full-ID and probe-prefix collisions. The
 candidate still carries blocking denominator limitations. The authored match
-   slice below has since narrowed that surface, but let-else, `?`, assertion,
+   slice below has since narrowed that surface, but `?`, assertion,
    CTFE and doctest obligation/probe mappings,
 plus full package and compiler fingerprints, remain R1 work. No measurement-
 complete claim is possible yet.
@@ -294,6 +294,17 @@ requires each marker to survive borrow checking exactly once, removes them,
    condition markers select only Boolean switches that change the guard's
    accepting/rejecting reachability, so nested control flow is excluded while
    the synthetic two-condition guard emits the exact three ternary vectors.
+
+`let else` is now exact as a branch rather than being mislabeled as an MC/DC
+decision. Expanded HIR freezes one `matched` and one `else` alternative at the
+refutable pattern. For authored source, rustc's exact branch region binds those
+alternatives to the optimized MIR targets before native coverage metadata is
+removed. Collapsed proc-macro source has no such retained region, so the built-
+MIR bridge marks the final real/imaginary pattern edge, requires both markers
+to survive borrow checking exactly once, removes them, and installs the same
+first-commit runtime frame. Simple and nested patterns, two sequential authored
+statements, and two sequential synthetic statements sharing one collapsed
+callsite all preserve baseline behavior and exact per-invocation counts.
 
 The CTFE provider spike is now executable rather than hypothetical. The
 companion overrides `mir_for_ctfe`, inserts execution markers in original

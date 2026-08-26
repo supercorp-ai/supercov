@@ -357,7 +357,7 @@ try {
   assert.equal(identityManifestA.model, 'rust-source-v1');
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
-    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
+    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
   ]);
   const allIds = [
     ...identityManifestA.points.map(({id}) => id),
@@ -379,7 +379,7 @@ try {
   );
   assert(
     identityManifestA.branches.every(({kind}) =>
-      ['decision-outcome', 'loop-entry', 'match-arm'].includes(kind),
+      ['decision-outcome', 'loop-entry', 'match-arm', 'let-else'].includes(kind),
     ),
     'compiler manifest emitted a branch kind outside the frozen Rust contract',
   );
@@ -575,6 +575,11 @@ try {
     baselineBehavior.stdout,
     /match-generated-nested-guard-proc=\[3, 2, 2, 0\]/,
   );
+  assert.match(baselineBehavior.stdout, /let-else=\[7, 0\]/);
+  assert.match(baselineBehavior.stdout, /let-else-nested=\[7, 0, 0\]/);
+  assert.match(baselineBehavior.stdout, /let-else-two=\[5, 0, 2\]/);
+  assert.match(baselineBehavior.stdout, /let-else-generated-proc=\[8, 0\]/);
+  assert.match(baselineBehavior.stdout, /let-else-generated-two-proc=\[5, 0, 2\]/);
   assert.match(baselineBehavior.stdout, /match-unreachable=\[1, 2\]/);
   assert.match(baselineBehavior.stdout, /match-generated=\[23, 29\]/);
   assert.match(baselineBehavior.stdout, /match-generated-proc=\[31, 37\]/);
@@ -642,6 +647,45 @@ try {
   const interruptedForOrdinals = loopAlternativeOrdinals(
     branchFor(runtimeManifest, 'interrupted_for', 'loop-entry'),
   );
+  const letElseBranch = branchFor(runtimeManifest, 'let_else_value', 'let-else');
+  const letElseMatched = letElseBranch.alternatives.find(
+    ({label}) => label === 'matched',
+  )?.probeOrdinal;
+  const letElseFallback = letElseBranch.alternatives.find(
+    ({label}) => label === 'else',
+  )?.probeOrdinal;
+  const letElseOrdinals = (branch) => ({
+    matched: branch.alternatives.find(({label}) => label === 'matched')?.probeOrdinal,
+    fallback: branch.alternatives.find(({label}) => label === 'else')?.probeOrdinal,
+  });
+  const nestedLetElse = letElseOrdinals(
+    branchFor(runtimeManifest, 'nested_let_else', 'let-else'),
+  );
+  const twoLetElse = branchesFor(runtimeManifest, 'two_let_else', 'let-else')
+    .sort((left, right) => left.start - right.start)
+    .map(letElseOrdinals);
+  assert.equal(twoLetElse.length, 2, 'expected two sequential let-else branches');
+  const generatedLetElse = letElseOrdinals(
+    branchFor(runtimeManifest, 'generated_let_else_by_proc', 'let-else'),
+  );
+  const generatedTwoLetElse = branchesFor(
+    runtimeManifest,
+    'generated_two_let_else_by_proc',
+    'let-else',
+  ).map(letElseOrdinals);
+  assert.equal(
+    generatedTwoLetElse.length,
+    2,
+    'expected two sequential synthetic let-else branches',
+  );
+  const additionalLetElseOrdinals = [
+    nestedLetElse.matched,
+    nestedLetElse.fallback,
+    ...twoLetElse.flatMap(({matched, fallback}) => [matched, fallback]),
+    generatedLetElse.matched,
+    generatedLetElse.fallback,
+    ...generatedTwoLetElse.flatMap(({matched, fallback}) => [matched, fallback]),
+  ];
   const matchValueGroups = matchGroupsFor(runtimeManifest, 'match_value');
   const matchIdenticalGroups = matchGroupsFor(runtimeManifest, 'match_identical');
   const matchEmptyGroups = matchGroupsFor(runtimeManifest, 'match_empty');
@@ -732,6 +776,9 @@ try {
       whileLetZero,
       whileLetEntered,
       ...committedForOrdinals,
+      letElseMatched,
+      letElseFallback,
+      ...additionalLetElseOrdinals,
       ...matchSelectedOrdinals,
     ].every(Boolean),
     'runtime probe is not bound to its manifest obligation',
@@ -756,8 +803,55 @@ try {
       whileLetZero,
       whileLetEntered,
       ...committedForOrdinals,
+      letElseMatched,
+      letElseFallback,
+      ...additionalLetElseOrdinals,
       ...matchSelectedOrdinals,
     ]),
+  );
+  assert.equal(
+    behaviorEvidence.ordinals.filter(({ordinal}) => ordinal === letElseMatched).length,
+    1,
+    'the matched let-else alternative must commit exactly once',
+  );
+  assert.equal(
+    behaviorEvidence.ordinals.filter(({ordinal}) => ordinal === letElseFallback).length,
+    1,
+    'the else let-else alternative must commit exactly once',
+  );
+  for (const [ordinal, count] of [
+    [nestedLetElse.matched, 1],
+    [nestedLetElse.fallback, 2],
+    [twoLetElse[0].matched, 2],
+    [twoLetElse[0].fallback, 1],
+    [twoLetElse[1].matched, 1],
+    [twoLetElse[1].fallback, 1],
+    [generatedLetElse.matched, 1],
+    [generatedLetElse.fallback, 1],
+  ]) {
+    assert.equal(
+      behaviorEvidence.ordinals.filter((hit) => hit.ordinal === ordinal).length,
+      count,
+      `let-else alternative ${ordinal} did not retain exact invocation count`,
+    );
+  }
+  assert.deepEqual(
+    generatedTwoLetElse
+      .map(({matched}) =>
+        behaviorEvidence.ordinals.filter((hit) => hit.ordinal === matched).length,
+      )
+      .sort(),
+    [1, 2],
+    'sequential synthetic let-else matched alternatives lost semantic order/counts',
+  );
+  assert.deepEqual(
+    generatedTwoLetElse
+      .map(({fallback}) =>
+        behaviorEvidence.ordinals.filter((hit) => hit.ordinal === fallback).length,
+      )
+      .sort(),
+    [1, 1],
+    'sequential synthetic let-else fallback alternatives lost semantic order/counts',
   );
   assert.equal(
     behaviorEvidence.ordinals.filter(({ordinal}) => ordinal === whileZero).length,

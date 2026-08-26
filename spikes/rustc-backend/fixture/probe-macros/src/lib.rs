@@ -42,6 +42,20 @@ pub fn generated_nested_guard_match_function(_input: TokenStream) -> TokenStream
         .expect("valid generated nested-guard Rust match")
 }
 
+#[proc_macro]
+pub fn generated_let_else_function(_input: TokenStream) -> TokenStream {
+    "pub fn generated_let_else_by_proc(value: Option<usize>) -> usize { let Some(value) = value else { return 0; }; value + 1 }"
+        .parse()
+        .expect("valid generated Rust let-else")
+}
+
+#[proc_macro]
+pub fn generated_two_let_else_function(_input: TokenStream) -> TokenStream {
+    "pub fn generated_two_let_else_by_proc(first: Option<Result<usize, usize>>, second: Option<usize>) -> usize { let Some(Ok(first)) = first else { return 0; }; let Some(second) = second else { return first; }; first + second }"
+        .parse()
+        .expect("valid generated sequential Rust let-else")
+}
+
 #[proc_macro_attribute]
 pub fn generated_test(_attribute: TokenStream, item: TokenStream) -> TokenStream {
     let mut output: TokenStream = "#[test]".parse().expect("valid test attribute");
