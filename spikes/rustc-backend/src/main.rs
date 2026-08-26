@@ -5972,8 +5972,50 @@ fn json_usizes(values: &[usize]) -> String {
     format!("[{values}]")
 }
 
+fn print_companion_handshake() {
+    let executable = env::current_exe().expect("resolve compiler companion executable");
+    let build_id = format!(
+        "{:x}",
+        Sha256::digest(fs::read(executable).expect("read compiler companion executable"))
+    );
+    println!(
+        concat!(
+            "{{",
+            "\"protocolVersion\":1,",
+            "\"frontendId\":\"rust\",",
+            "\"coverageModelVariant\":\"rust-source-v1\",",
+            "\"evidenceSchemaVersion\":3,",
+            "\"companionBuildId\":\"{}\",",
+            "\"compiler\":{{",
+            "\"rustcCommitHash\":\"{}\",",
+            "\"rustcRelease\":\"{}\",",
+            "\"hostTriple\":\"{}\",",
+            "\"rustcDriverSha256\":\"{}\"",
+            "}},",
+            "\"capabilities\":{{",
+            "\"expandedHirProvenance\":true,",
+            "\"runtimeMirProbeInsertion\":true,",
+            "\"generatedSourceProvenance\":true,",
+            "\"ctfePathTracing\":false,",
+            "\"rustdocDoctestTracing\":false,",
+            "\"exactTestHarnessAttribution\":true",
+            "}}",
+            "}}"
+        ),
+        build_id,
+        env!("SUPERCOV_COMPANION_RUSTC_COMMIT"),
+        env!("SUPERCOV_COMPANION_RUSTC_RELEASE"),
+        env!("SUPERCOV_COMPANION_HOST"),
+        env!("SUPERCOV_COMPANION_DRIVER_SHA256"),
+    );
+}
+
 fn main() {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
+    if args.as_slice() == ["--supercov-handshake"] {
+        print_companion_handshake();
+        return;
+    }
     if env::args()
         .next()
         .and_then(|argument| {

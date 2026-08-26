@@ -1268,6 +1268,12 @@ miss blocks flipping any default.
   probes, generated-source provenance, CTFE tracing, rustdoc/doctest tracing
   and exact test-harness attribution together; a private partial companion
   cannot claim measurement completeness.
+- The engine now enforces that envelope against real binaries. It independently
+  hashes the selected rustc driver and candidate executable, supplies the exact
+  toolchain library directory only to the child loader, and accepts exactly one
+  commit/host/driver/build match. The private companion's honest false CTFE and
+  doctest capabilities are rejected by public selection, while private spike
+  selection succeeds; missing and duplicate candidates are executable failures.
 
 ## Checkpoint — 2026-08-26 Rust probe transport v1
 

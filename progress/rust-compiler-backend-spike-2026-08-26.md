@@ -313,8 +313,11 @@ an unverified rustc commit.
    MIR path still changed rustdoc's visible grouping from one standalone plus
    two merged tests into one three-test group. Results passed, but output parity
    did not; the experiment was not promoted.
-4. Add exact-version mismatch, missing-companion and custom-toolchain failure
-   tests before connecting the companion to `npx supercov -- cargo test`.
+4. Exact selection now independently probes rustc commit/host/driver digest,
+   authenticates the companion's executable digest and rejects missing,
+   duplicate or incomplete-public candidates. Add the remaining packaged
+   custom-toolchain/platform matrix before connecting the companion to
+   `npx supercov -- cargo test`.
 
 ## Primary references
 

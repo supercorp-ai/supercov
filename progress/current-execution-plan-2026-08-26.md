@@ -274,6 +274,19 @@ places the resulting context in the authenticated runtime environment before
 launch, which gives child threads the attempt identity without relying on
 thread timing or global mutable attribution.
 
+Exact compiler selection is now executable outside the spike as well. At
+build time the companion records the rustc commit, release, host and SHA-256
+of the exact `librustc_driver` it linked against. At selection time the engine
+independently resolves the requested rustc, hashes its driver, hashes the
+candidate executable, runs the candidate's strict handshake under that
+toolchain's dynamic-library environment, and accepts exactly one
+commit/host/driver/build match. Missing, duplicate, malformed, self-hash-
+mismatched and merely nearby companions fail closed. The current private
+candidate deliberately advertises CTFE and rustdoc/doctest publication as
+false, so the same selector rejects it when public capabilities are required.
+This closes identity negotiation only; production Cargo orchestration and the
+remaining capability gates still block cutover.
+
 The first real-probe doctest attempt was deliberately rejected. It exposed and
 fixed an unstable-feature capability leak by adding rustc's empty
 `-Zallow-features=` restriction, but the instrumented run still regrouped one

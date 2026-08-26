@@ -94,12 +94,58 @@ fn main() -> ExitCode {
         Some("__validate-rust-compiler-manifest") => validate_rust_compiler_manifest(),
         Some("__normalize-rust-compiler-manifest") => normalize_rust_compiler_manifest(),
         Some("__project-rust-compiler-evidence") => project_rust_compiler_evidence(),
+        Some("__select-rust-compiler-companion") => select_rust_compiler_companion(),
         Some("clean") => cleanup_command(arguments.collect()),
         Some("runs") => public_query_command("runs", arguments.collect()),
         Some("diff") => public_query_command("diff", arguments.collect()),
         Some("merge") => merge_command(arguments.collect()),
         Some(command) => {
             eprintln!("[supercov] Unknown command: {command}. Try supercov help.");
+            ExitCode::from(2)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RustCompilerSelectionInput {
+    rustc_path: PathBuf,
+    candidates: Vec<PathBuf>,
+    require_public_capabilities: bool,
+}
+
+fn select_rust_compiler_companion() -> ExitCode {
+    let input = match stdin() {
+        Ok(input) => input,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            return ExitCode::from(2);
+        }
+    };
+    let request: RustCompilerSelectionInput = match serde_json::from_str(&input) {
+        Ok(request) => request,
+        Err(error) => {
+            eprintln!("[supercov] invalid Rust compiler selection request: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    match supercov_engine::rust_compiler_selection::select_rust_compiler_companion(
+        &request.rustc_path,
+        &request.candidates,
+        request.require_public_capabilities,
+    ) {
+        Ok(selection) => match serde_json::to_string(&selection) {
+            Ok(output) => {
+                println!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("[supercov] could not serialize Rust compiler selection: {error}");
+                ExitCode::from(2)
+            }
+        },
+        Err(error) => {
+            eprintln!("[supercov] {error}");
             ExitCode::from(2)
         }
     }

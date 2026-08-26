@@ -416,6 +416,81 @@ try {
   });
   run('cargo', ['build', '-p', 'supercov']);
 
+  const rustc = run('rustup', ['which', 'rustc']).stdout.trim();
+  const selectionRequest = {
+    rustcPath: rustc,
+    candidates: [wrapper],
+    requirePublicCapabilities: false,
+  };
+  const selectedCompanion = JSON.parse(
+    run(supercov, ['__select-rust-compiler-companion'], {
+      input: JSON.stringify(selectionRequest),
+    }).stdout,
+  );
+  assert.equal(selectedCompanion.rustcPath, rustc);
+  assert.equal(selectedCompanion.companionPath, wrapper);
+  assert.equal(selectedCompanion.handshake.protocolVersion, 1);
+  assert.equal(selectedCompanion.handshake.frontendId, 'rust');
+  assert.equal(
+    selectedCompanion.handshake.coverageModelVariant,
+    'rust-source-v1',
+  );
+  assert.equal(selectedCompanion.handshake.evidenceSchemaVersion, 3);
+  assert.equal(
+    selectedCompanion.handshake.companionBuildId,
+    createHash('sha256').update(readFileSync(wrapper)).digest('hex'),
+    'selector accepted a companion build ID that did not match its executable bytes',
+  );
+  assert.deepEqual(
+    selectedCompanion.handshake.compiler,
+    selectedCompanion.compiler,
+    'selector accepted a companion built for a different compiler identity',
+  );
+  assert.equal(selectedCompanion.handshake.capabilities.ctfePathTracing, false);
+  assert.equal(
+    selectedCompanion.handshake.capabilities.rustdocDoctestTracing,
+    false,
+  );
+  const publicSelection = run(
+    supercov,
+    ['__select-rust-compiler-companion'],
+    {
+      input: JSON.stringify({
+        ...selectionRequest,
+        requirePublicCapabilities: true,
+      }),
+      expectFailure: true,
+    },
+  );
+  assert.match(
+    publicSelection.stderr,
+    /Rust companion lacks public coverage capabilities/,
+  );
+  const missingSelection = run(
+    supercov,
+    ['__select-rust-compiler-companion'],
+    {
+      input: JSON.stringify({...selectionRequest, candidates: []}),
+      expectFailure: true,
+    },
+  );
+  assert.match(
+    missingSelection.stderr,
+    /no exact compiler companion matches the selected rustc/,
+  );
+  const duplicateSelection = run(
+    supercov,
+    ['__select-rust-compiler-companion'],
+    {
+      input: JSON.stringify({...selectionRequest, candidates: [wrapper, wrapper]}),
+      expectFailure: true,
+    },
+  );
+  assert.match(
+    duplicateSelection.stderr,
+    /multiple exact compiler companions match the selected rustc/,
+  );
+
   const observedDirectory = join(scratch, 'observed');
   const observedTarget = join(scratch, 'observed-target');
   run('cargo', ['test', '--manifest-path', fixture, '--no-run'], {
