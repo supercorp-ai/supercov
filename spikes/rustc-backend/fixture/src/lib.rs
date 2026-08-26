@@ -50,6 +50,29 @@ pub fn authored(value: bool) -> usize {
     if value { 1 } else { 2 }
 }
 
+pub fn compound(left: bool, right: bool) -> usize {
+    if left && right { 29 } else { 31 }
+}
+
+pub fn pattern(value: Option<bool>) -> usize {
+    if let Some(value) = value {
+        usize::from(value)
+    } else {
+        37
+    }
+}
+
+pub fn chained(value: Option<bool>, enabled: bool) -> usize {
+    if let Some(value) = value
+        && value
+        && enabled
+    {
+        41
+    } else {
+        43
+    }
+}
+
 pub fn fallible(value: usize) -> Result<usize, &'static str> {
     if value == 0 {
         Err("zero")
@@ -111,6 +134,12 @@ mod tests {
         assert_eq!(generated_by_build_script(false), 9);
         assert_eq!(CONST_VALUE, 11);
         assert_eq!(CONST_FALSE_VALUE, 13);
+        assert_eq!(compound(true, true), 29);
+        assert_eq!(compound(true, false), 31);
+        assert_eq!(pattern(Some(true)), 1);
+        assert_eq!(pattern(None), 37);
+        assert_eq!(chained(Some(true), true), 41);
+        assert_eq!(chained(Some(false), true), 43);
     }
 
     #[cfg(supercov_spike_instrumented)]

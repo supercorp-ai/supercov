@@ -193,10 +193,22 @@ owner path, so repeated invocations remain distinct. Owned `OUT_DIR` source is
 keyed by project-relative package root and out-relative path. Two entirely
 clean Cargo target directories produced byte-identical candidates, with no
 target hash or absolute scratch path. IDs are SHA-256-derived and any in-run
-digest collision is fatal. The candidate deliberately carries a blocking
-functions-only limitation: statements, branches, decisions, derives, nested
-expansion shapes and full package/compiler fingerprints remain R1 work and no
-measurement-complete claim is possible yet.
+digest collision is fatal.
+
+The next structural increment now walks expanded HIR rather than concrete
+source. It adds executable statement points; `if`, `if let` and let-chain
+decisions; source-ordered `&&`/`||` atomic conditions; and true/false branch
+alternatives. Those identities aggregate repeated declarative expansion
+tokens, distinguish repeated proc-macro invocations with an owner-local
+ordinal, and stay byte-identical across clean targets. Synthetic condition
+display comes from rustc's expanded HIR instead of falsely printing the macro
+invocation as the condition. The exploratory 0/1/2/3 function ordinals are
+gone: runtime MIR hits now carry the u64 prefix of the exact manifest point ID,
+and the compiler rejects both full-ID and probe-prefix collisions. The
+candidate still carries a blocking if-slice limitation: loop, match, let-else,
+`?`, assertion, CTFE and doctest obligation/probe mappings, plus full package
+and compiler fingerprints, remain R1 work. No measurement-complete claim is
+possible yet.
 
 The CTFE provider spike is now executable rather than hypothetical. The
 companion overrides `mir_for_ctfe`, inserts execution markers in original

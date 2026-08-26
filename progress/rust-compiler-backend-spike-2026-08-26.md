@@ -97,6 +97,15 @@ The spike proved:
     Two clean builds with unrelated target directories emit byte-identical
     candidates. The candidate is explicitly measurement-incomplete until all
     remaining point, branch and decision obligations use the same identity.
+15. The first expanded-HIR denominator slice now emits function and executable
+    statement points, `if`/`if let`/let-chain decisions, source-ordered logical
+    atomic conditions and true/false alternatives. Repeated declarative macro
+    expansions aggregate all four shapes; repeated procedural invocations stay
+    distinct through an owner-local ordinal; proc-generated condition display
+    is reconstructed from HIR rather than mislabeled with its invocation text.
+    Selected MIR function probes no longer use toy 0/1/2/3 ordinals: each emits
+    the u64 prefix of its exact manifest ID, with a second collision gate for
+    the shortened transport key.
 
 The companion executable is about 600 KiB on arm64 macOS and dynamically uses
 the exact `librustc_driver` already shipped by the user's `rustc` component.
@@ -128,11 +137,13 @@ an unverified rustc commit.
 2. The companion derives the denominator from expanded compiler structures and
    emits frozen source/expansion/generated provenance. It inserts Supercov
    runtime probes into runtime MIR only after semantic analysis. Source
-   identity v1 is now executable for function entries: authored and
+   identity v1 is now executable for function and statement points plus the
+   first `if` decision/branch shapes: authored and
    declarative-expansion ranges aggregate by stable source tuple, synthetic
    proc/derive output adds expansion-chain and owner identity, and generated
-   output uses package/out-relative provenance. Unknown or colliding identity
-   fails manifest publication.
+   output uses package/out-relative provenance. Unknown, aggregation-mismatched
+   or colliding identity fails manifest publication. Runtime function hits use
+   the manifest-derived probe ordinal rather than a parallel ID namespace.
 3. A separate CTFE provider path records compile-time execution. Runtime calls
    in const MIR are invalid. The first exact-version experiment now injects
    block and split-edge markers into `mir_for_ctfe` and captures their
@@ -162,10 +173,11 @@ an unverified rustc commit.
 
 ## Next implementation gates
 
-1. Extend the now-proven stable function-entry identities to every statement,
-   branch, decision and condition from expanded HIR plus MIR source info. Add
-   derive, nested/external expansion, generic/trait, include/module and package-
-   fingerprint corpora before treating the candidate as a complete manifest.
+1. Extend the proven expanded-HIR `if` slice to loops, match, let-else, `?`,
+   assertions and remaining executable statement semantics; bind their real
+   MIR/CTFE probes to the same manifest IDs. Add derive, nested/external
+   expansion, generic/trait, include/module and package-fingerprint corpora
+   before treating the candidate as a complete manifest.
 2. Extend the proven libtest entry/unwind carrier through child threads, async
    executors, subprocesses, retry, late work and phases, or activate the exact
    process-per-test fallback whenever context-zero work is observed. Prove

@@ -1376,6 +1376,20 @@ mod tests {
         );
         assert!(contract.source_identity.ephemeral_paths_forbidden);
         assert_eq!(contract.source_identity.collision_policy, "fatal");
+        assert!(
+            contract
+                .source_identity
+                .authored_canonical_fields
+                .iter()
+                .any(|field| field == "semantic-discriminator")
+        );
+        assert!(
+            contract
+                .source_identity
+                .synthetic_expansion_canonical_fields
+                .iter()
+                .any(|field| field == "owner-local-ordinal")
+        );
         assert_eq!(
             contract.required_identity_axes,
             ["run", "worker", "test", "retry", "phase"]

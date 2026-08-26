@@ -26,11 +26,13 @@ Source identity v1 hashes a NUL-delimited canonical tuple with SHA-256 and uses
 the first 12 digest bytes in the typed obligation ID. Authored source,
 `include!` source and declarative expansion tokens use model, obligation kind,
 project-relative source key and original UTF-8 byte range. This deliberately
-aggregates repeated expansions of the same authored macro tokens. Synthetic
+aggregates repeated expansions of the same authored macro tokens. An explicit
+semantic discriminator separates alternatives that share a range. Synthetic
 procedural/derive output whose spans collapse to an invocation additionally
-uses the complete stable expansion chain and rustc's textual owner path; two
-distinct invocations therefore cannot merge merely because they emit the same
-name or bytes. Generated `OUT_DIR` sources use the project-relative owning
+uses the complete stable expansion chain, rustc's textual owner path and an
+owner-local structural ordinal; two distinct invocations or generated nodes
+therefore cannot merge merely because they emit the same name or bytes.
+Generated `OUT_DIR` sources use the project-relative owning
 package root plus path relative to `OUT_DIR`, never target-directory hashes or
 absolute paths. Any unknown provenance, ephemeral-path dependency or digest
 collision is fatal for manifest publication. Run fingerprints separately bind

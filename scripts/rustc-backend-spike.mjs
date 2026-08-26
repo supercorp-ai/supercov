@@ -87,7 +87,7 @@ function readTransport(transport) {
     assert(payloadOffset + payloadLength <= payloadCapacity);
     ordinals.push({
       context,
-      ordinal: Number(bytes.readBigUInt64LE(payloadBase + payloadOffset)),
+      ordinal: bytes.readBigUInt64LE(payloadBase + payloadOffset).toString(),
     });
   }
   return {
@@ -148,8 +148,16 @@ function crateManifest(directory, crate) {
 }
 
 function obligationFor(manifestRecord, definition) {
-  return manifestRecord.obligations.find((obligation) =>
-    obligation.definitions.includes(definition),
+  return manifestRecord.points.find(
+    (obligation) =>
+      obligation.kind === 'function' &&
+      obligation.definitions.includes(definition),
+  );
+}
+
+function decisionFor(manifestRecord, definition) {
+  return manifestRecord.decisions.find((decision) =>
+    decision.definitions.includes(definition),
   );
 }
 
@@ -284,12 +292,40 @@ try {
   assert.equal(identityManifestA.model, 'rust-source-v1');
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
-    'RUST_MANIFEST_CANDIDATE_FUNCTIONS_ONLY: statement, branch and decision obligations are not emitted yet',
+    'RUST_MANIFEST_CANDIDATE_IF_SLICE_ONLY: loop, match, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
   ]);
+  const allIds = [
+    ...identityManifestA.points.map(({id}) => id),
+    ...identityManifestA.branches.flatMap((branch) => [
+      branch.id,
+      ...branch.alternatives.map(({id}) => id),
+    ]),
+    ...identityManifestA.decisions.map(({id}) => id),
+  ];
   assert.equal(
-    new Set(identityManifestA.obligations.map(({id}) => id)).size,
-    identityManifestA.obligations.length,
+    new Set(allIds).size,
+    allIds.length,
     'manifest candidate contains colliding obligation IDs',
+  );
+  assert(
+    identityManifestA.points.some(({kind}) => kind === 'statement'),
+    'compiler manifest did not emit statement points',
+  );
+  const compoundDecision = decisionFor(identityManifestA, 'compound');
+  assert.equal(compoundDecision?.kind, 'if');
+  assert.equal(compoundDecision?.conditions.length, 2);
+  assert.deepEqual(
+    compoundDecision?.conditions.map(({source}) => source),
+    ['left', 'right'],
+  );
+  const patternDecision = decisionFor(identityManifestA, 'pattern');
+  assert.equal(patternDecision?.kind, 'if-let');
+  assert.equal(patternDecision?.conditions.length, 1);
+  const chainedDecision = decisionFor(identityManifestA, 'chained');
+  assert.equal(chainedDecision?.kind, 'let-chain');
+  assert.deepEqual(
+    chainedDecision?.conditions.map(({source}) => source),
+    ['let Some(value) = value', 'value', 'enabled'],
   );
   const declarativeRoot = obligationFor(
     identityManifestA,
@@ -302,6 +338,14 @@ try {
   assert.equal(declarativeRoot?.id, declarativeRepeated?.id);
   assert.equal(declarativeRoot?.provenance, 'authored-expansion');
   assert.equal(declarativeRoot?.definitions.length, 2);
+  const declarativeDecision = decisionFor(
+    identityManifestA,
+    'generated_by_rules',
+  );
+  assert.deepEqual(declarativeDecision?.definitions, [
+    'generated_by_rules',
+    'repeated_expansions::generated_by_rules',
+  ]);
   const proceduralRoot = obligationFor(identityManifestA, 'generated_by_proc');
   const proceduralRepeated = obligationFor(
     identityManifestA,
@@ -310,6 +354,16 @@ try {
   assert.equal(proceduralRoot?.provenance, 'synthetic-expansion');
   assert.equal(proceduralRepeated?.provenance, 'synthetic-expansion');
   assert.notEqual(proceduralRoot?.id, proceduralRepeated?.id);
+  assert.notEqual(
+    decisionFor(identityManifestA, 'generated_by_proc')?.id,
+    decisionFor(identityManifestA, 'repeated_expansions::generated_by_proc')?.id,
+  );
+  assert.deepEqual(
+    decisionFor(identityManifestA, 'generated_by_proc')?.conditions.map(
+      ({source}) => source,
+    ),
+    ['value'],
+  );
   const generatedObligation = obligationFor(
     identityManifestA,
     'generated_by_build_script',
@@ -337,6 +391,20 @@ try {
     },
   );
   assert.match(collision.stderr, /Supercov Rust obligation ID collision/);
+  const probeCollision = run(
+    'cargo',
+    ['build', '--quiet', '--manifest-path', fixture, '--lib'],
+    {
+      expectFailure: true,
+      env: {
+        CARGO_TARGET_DIR: join(scratch, 'probe-collision-target'),
+        RUSTC_WRAPPER: wrapper,
+        SUPERCOV_RUSTC_SPIKE_OUTPUT: join(scratch, 'probe-collision-output'),
+        SUPERCOV_RUSTC_SPIKE_FORCE_PROBE_COLLISION: '1',
+      },
+    },
+  );
+  assert.match(probeCollision.stderr, /Supercov Rust probe ordinal collision/);
 
   const baselineBehavior = run(
     'cargo',
@@ -362,21 +430,43 @@ try {
   assert.equal(instrumentedBehavior.stdout, baselineBehavior.stdout);
   assert.equal(instrumentedBehavior.stderr, baselineBehavior.stderr);
   assert.match(baselineBehavior.stdout, /drop-order=\["panic-drop", "second", "first"\]/);
+  assert.match(baselineBehavior.stdout, /expanded=\[5, 3, 19, 17, 9\]/);
+  assert.match(baselineBehavior.stdout, /conditions=\[29, 31, 37, 41, 43\]/);
+  const runtimeManifest = crateManifest(
+    instrumentedDirectory,
+    'supercov_rustc_spike_fixture',
+  );
+  const runtimeProbe = (definition) =>
+    obligationFor(runtimeManifest, definition)?.probeOrdinal;
+  const authoredProbe = runtimeProbe('authored');
+  const fallibleProbe = runtimeProbe('fallible');
+  const dropOrderProbe = runtimeProbe('drop_order');
+  const panicProbe = runtimeProbe('panic_path');
+  assert(
+    [authoredProbe, fallibleProbe, dropOrderProbe, panicProbe].every(Boolean),
+    'runtime probe is not bound to a function manifest obligation',
+  );
   const behaviorEvidence = readTransport(behaviorTransport);
   assert.equal(behaviorEvidence.attachments, 1);
   assert.equal(behaviorEvidence.dropped, 0);
   assert.equal(behaviorEvidence.incomplete, 0);
   assert.deepEqual(
     new Set(behaviorEvidence.ordinals.map(({ordinal}) => ordinal)),
-    new Set([0, 1, 2, 3]),
+    new Set([authoredProbe, fallibleProbe, dropOrderProbe, panicProbe]),
   );
   const behaviorPairs = new Set(
     behaviorEvidence.ordinals.map(({context, ordinal}) => `${context}:${ordinal}`),
   );
-  assert(behaviorPairs.has('303:0'), 'normal scope did not activate context 303');
-  assert(behaviorPairs.has('404:3'), 'panic scope did not activate context 404');
   assert(
-    behaviorPairs.has(`${transportContext}:0`),
+    behaviorPairs.has(`303:${authoredProbe}`),
+    'normal scope did not activate context 303',
+  );
+  assert(
+    behaviorPairs.has(`404:${panicProbe}`),
+    'panic scope did not activate context 404',
+  );
+  assert(
+    behaviorPairs.has(`${transportContext}:${authoredProbe}`),
     `context was not restored after scope exit: ${JSON.stringify([...behaviorPairs])}`,
   );
 
@@ -443,7 +533,7 @@ try {
   assert.equal(testEvidence.incomplete, 0);
   assert.deepEqual(
     new Set(testEvidence.ordinals.map(({ordinal}) => ordinal)),
-    new Set([0, 1, 2, 3]),
+    new Set([authoredProbe, fallibleProbe, dropOrderProbe, panicProbe]),
   );
 
   const concurrentTransport = createTransport('concurrent-tests');
@@ -489,11 +579,11 @@ try {
       ),
     ),
     new Set([
-      `${contextIds[0]}:0`,
-      `${contextIds[1]}:1`,
-      `${contextIds[2]}:0`,
-      `${contextIds[3]}:3`,
-      '0:0',
+      `${contextIds[0]}:${authoredProbe}`,
+      `${contextIds[1]}:${fallibleProbe}`,
+      `${contextIds[2]}:${authoredProbe}`,
+      `${contextIds[3]}:${panicProbe}`,
+      `0:${authoredProbe}`,
     ]),
   );
   const instrumentedRecords = records(instrumentedDirectory);
@@ -595,7 +685,7 @@ try {
   );
 
   console.log(
-    '[rustc-backend-spike] deterministic authored, repeated-expansion, proc-macro and generated-source identities survive clean target directories; mmap MIR/CTFE probes and scoped rustdoc interception preserve behavior and source',
+    '[rustc-backend-spike] compiler points, if/if-let/let-chain decisions and branches keep deterministic authored/macro/generated identities across clean targets; mmap function probes bind to manifest ordinals while MIR/CTFE/rustdoc interception preserves behavior and source',
   );
 } finally {
   rmSync(scratch, {recursive: true, force: true});
