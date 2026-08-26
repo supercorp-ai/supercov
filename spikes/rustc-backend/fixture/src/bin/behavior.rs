@@ -4,7 +4,7 @@ use supercov_rustc_spike_fixture::{
     CONST_FALSE_VALUE, CONST_VALUE, authored, chained, compound, context_normal_scope,
     context_panic_scope, disjoined, drop_order, fallible, generated_by_build_script,
     generated_by_proc, generated_by_rules, interrupted_decision, mixed, nested,
-    nested_expression, panic_path, pattern, repeated_expansions,
+    nested_expression, panic_path, pattern, repeated_expansions, while_compound, while_let_chain,
 };
 
 fn main() {
@@ -81,6 +81,23 @@ fn main() {
             nested_expression(true, true, false, true),
             nested_expression(true, false, false, true),
             nested_expression(true, false, false, false),
+        ]
+    );
+    println!(
+        "while={:?}",
+        [
+            while_compound(0, true),
+            while_compound(2, true),
+            while_compound(2, false),
+        ]
+    );
+    println!(
+        "while-let={:?}",
+        [
+            while_let_chain(Vec::new(), true),
+            while_let_chain(vec![Some(2), Some(3)], true),
+            while_let_chain(vec![Some(2)], false),
+            while_let_chain(vec![Some(0)], true),
         ]
     );
 }

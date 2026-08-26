@@ -135,6 +135,19 @@ The spike proved:
     linked executable to contain no `__llvm_profile` or `__llvm_cov` symbol.
     Rustc provides compile-time branch correspondence only. All runtime
     observations and product evidence remain Supercov-owned.
+18. `while` and `while let` now have exact runtime semantics for both their
+    condition decisions and their separate zero-iterations/entered branches.
+    A nested pattern such as `Some(Some(value))` lowers to a MIR subgraph, so
+    the companion finds its nearest common dominator and instruments every
+    dominated edge into the terminal true/false blocks instead of requiring a
+    fictitious single switch. It then finds the authored natural-loop header,
+    starts one first-commit branch frame on the external entry, and redirects
+    backedges past that start. Exact fixtures prove short-circuit vectors,
+    multiple iterations, two/one zero/entered compound-`while` invocations and
+    three/one zero/entered `while let` invocations. Cross-thread completion and
+    killed unfinished branch frames retain exact start context and explicit
+    incomplete health. The next denominator gate is `for`, match, let-else,
+    `?`, assertions, executable statements, CTFE and doctest integration.
 
 The companion executable is about 600 KiB on arm64 macOS and dynamically uses
 the exact `librustc_driver` already shipped by the user's `rustc` component.

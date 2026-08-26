@@ -205,7 +205,7 @@ display comes from rustc's expanded HIR instead of falsely printing the macro
 invocation as the condition. The exploratory 0/1/2/3 function ordinals are
 gone: runtime MIR hits now carry the u64 prefix of the exact manifest point ID,
 and the compiler rejects both full-ID and probe-prefix collisions. The
-candidate still carries a blocking if-slice limitation: loop, match, let-else,
+candidate still carries a blocking denominator limitation: `for`, match, let-else,
 `?`, assertion, CTFE and doctest obligation/probe mappings, plus full package
 and compiler fingerprints, remain R1 work. No measurement-complete claim is
 possible yet.
@@ -241,6 +241,17 @@ Rustc's branch correspondence is used only during compilation; every published
 observation remains Supercov-owned. A broader nested/derive/external expansion
 corpus and the rest of the R1 denominator are still required. Rust remains
 private and measurement-incomplete.
+
+Compound `while` and nested-pattern `while let` conditions now use the same
+exact ternary decision model. Pattern conditions are not assumed to be one MIR
+switch: the companion finds the condition subgraph's common dominator and
+instruments every dominated edge into its terminal true/false blocks. For the
+separate zero-iterations/entered obligation, it climbs to the actual natural
+loop header, starts one first-commit frame only on the external entry, and
+redirects backedges past that start. The executable fixture proves two zero
+and one entered compound-`while` invocation, three zero and one entered
+`while let` invocation, exact short-circuit vectors, multiple iterations and
+no per-iteration relabeling or duplicate loop observation.
 
 The CTFE provider spike is now executable rather than hypothetical. The
 companion overrides `mir_for_ctfe`, inserts execution markers in original

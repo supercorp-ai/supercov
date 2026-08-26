@@ -78,6 +78,26 @@ pub fn nested_expression(first: bool, second: bool, third: bool, fourth: bool) -
     }
 }
 
+pub fn while_compound(mut remaining: usize, enabled: bool) -> usize {
+    let mut entered = 0;
+    while remaining > 0 && enabled {
+        entered += 1;
+        remaining -= 1;
+    }
+    entered
+}
+
+pub fn while_let_chain(mut values: Vec<Option<usize>>, enabled: bool) -> usize {
+    let mut total = 0;
+    while let Some(Some(value)) = values.pop()
+        && value > 0
+        && enabled
+    {
+        total += value;
+    }
+    total
+}
+
 #[inline(never)]
 fn panic_condition() -> bool {
     panic!("decision-condition-panic")
@@ -180,6 +200,13 @@ mod tests {
         assert_eq!(nested_expression(true, true, true, false), 83);
         assert_eq!(nested_expression(true, true, false, true), 89);
         assert_eq!(nested_expression(true, false, false, true), 83);
+        assert_eq!(while_compound(0, true), 0);
+        assert_eq!(while_compound(2, true), 2);
+        assert_eq!(while_compound(2, false), 0);
+        assert_eq!(while_let_chain(Vec::new(), true), 0);
+        assert_eq!(while_let_chain(vec![Some(2), Some(3)], true), 5);
+        assert_eq!(while_let_chain(vec![Some(2)], false), 0);
+        assert_eq!(while_let_chain(vec![Some(0)], true), 0);
         assert_eq!(pattern(Some(true)), 1);
         assert_eq!(pattern(None), 37);
         assert_eq!(chained(Some(true), true), 41);

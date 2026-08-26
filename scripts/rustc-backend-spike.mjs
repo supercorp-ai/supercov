@@ -194,6 +194,14 @@ function decisionForConditions(manifestRecord, definition, sources) {
   return matches[0];
 }
 
+function branchFor(manifestRecord, definition, kind) {
+  const matches = manifestRecord.branches.filter(
+    (branch) => branch.kind === kind && branch.definitions.includes(definition),
+  );
+  assert.equal(matches.length, 1, `expected one ${definition} ${kind} branch`);
+  return matches[0];
+}
+
 function records(directory) {
   return readdirSync(directory)
     .filter((name) => name.endsWith('.jsonl'))
@@ -325,7 +333,7 @@ try {
   assert.equal(identityManifestA.model, 'rust-source-v1');
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
-    'RUST_MANIFEST_CANDIDATE_IF_SLICE_ONLY: loop, match, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
+    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: for-loop, match, let-else, try, assertion, CTFE and doctest obligation/probe mappings are not emitted yet',
   ]);
   const allIds = [
     ...identityManifestA.points.map(({id}) => id),
@@ -491,6 +499,8 @@ try {
   assert.match(baselineBehavior.stdout, /or-mixed=\[47, 47, 49, 53, 59, 53, 59\]/);
   assert.match(baselineBehavior.stdout, /nested=\[79, 71, 73, 73\]/);
   assert.match(baselineBehavior.stdout, /nested-expression=\[89, 83, 89, 83, 89\]/);
+  assert.match(baselineBehavior.stdout, /while=\[0, 2, 0\]/);
+  assert.match(baselineBehavior.stdout, /while-let=\[0, 5, 0, 0\]/);
   const runtimeManifest = crateManifest(
     instrumentedDirectory,
     'supercov_rustc_spike_fixture',
@@ -508,9 +518,40 @@ try {
   const fallibleProbe = runtimeProbe('fallible');
   const dropOrderProbe = runtimeProbe('drop_order');
   const panicProbe = runtimeProbe('panic_path');
+  const whileInvocation = branchFor(
+    runtimeManifest,
+    'while_compound',
+    'while-invocation',
+  );
+  const whileZero = whileInvocation.alternatives.find(
+    ({label}) => label === 'zero iterations',
+  )?.probeOrdinal;
+  const whileEntered = whileInvocation.alternatives.find(
+    ({label}) => label === 'entered',
+  )?.probeOrdinal;
+  const whileLetInvocation = branchFor(
+    runtimeManifest,
+    'while_let_chain',
+    'while-invocation',
+  );
+  const whileLetZero = whileLetInvocation.alternatives.find(
+    ({label}) => label === 'zero iterations',
+  )?.probeOrdinal;
+  const whileLetEntered = whileLetInvocation.alternatives.find(
+    ({label}) => label === 'entered',
+  )?.probeOrdinal;
   assert(
-    [authoredProbe, fallibleProbe, dropOrderProbe, panicProbe].every(Boolean),
-    'runtime probe is not bound to a function manifest obligation',
+    [
+      authoredProbe,
+      fallibleProbe,
+      dropOrderProbe,
+      panicProbe,
+      whileZero,
+      whileEntered,
+      whileLetZero,
+      whileLetEntered,
+    ].every(Boolean),
+    'runtime probe is not bound to its manifest obligation',
   );
   const behaviorEvidence = readTransport(behaviorTransport);
   assert.equal(behaviorEvidence.attachments, 1);
@@ -522,7 +563,42 @@ try {
   );
   assert.deepEqual(
     new Set(behaviorEvidence.ordinals.map(({ordinal}) => ordinal)),
-    new Set([authoredProbe, fallibleProbe, dropOrderProbe, panicProbe]),
+    new Set([
+      authoredProbe,
+      fallibleProbe,
+      dropOrderProbe,
+      panicProbe,
+      whileZero,
+      whileEntered,
+      whileLetZero,
+      whileLetEntered,
+    ]),
+  );
+  assert.equal(
+    behaviorEvidence.ordinals.filter(({ordinal}) => ordinal === whileZero).length,
+    2,
+    'two zero-iteration while invocations must remain distinct observations',
+  );
+  assert.equal(
+    behaviorEvidence.ordinals.filter(({ordinal}) => ordinal === whileEntered).length,
+    1,
+    'the entered while invocation must commit exactly once across all iterations',
+  );
+  assert.equal(
+    behaviorEvidence.ordinals.filter(({ordinal}) => ordinal === whileLetZero)
+      .length,
+    3,
+    `three zero-iteration while-let invocations must remain distinct observations: ${JSON.stringify(
+      behaviorEvidence.ordinals.filter(({ordinal}) =>
+        [whileLetZero, whileLetEntered].includes(ordinal),
+      ),
+    )}`,
+  );
+  assert.equal(
+    behaviorEvidence.ordinals.filter(({ordinal}) => ordinal === whileLetEntered)
+      .length,
+    1,
+    'the entered while-let invocation must commit exactly once across iterations',
   );
   const vectorsForDecision = (decision) => {
     const id = decision?.id;
@@ -621,6 +697,38 @@ try {
       JSON.stringify({values: [false], outcome: false}),
       JSON.stringify({values: [true], outcome: true}),
       JSON.stringify({values: [true], outcome: true}),
+    ].sort(),
+  );
+  assert.deepEqual(
+    vectorsForDecision(
+      decisionForConditions(runtimeManifest, 'while_compound', [
+        'remaining > 0',
+        'enabled',
+      ]),
+    ),
+    [
+      JSON.stringify({values: [false, null], outcome: false}),
+      JSON.stringify({values: [false, null], outcome: false}),
+      JSON.stringify({values: [true, false], outcome: false}),
+      JSON.stringify({values: [true, true], outcome: true}),
+      JSON.stringify({values: [true, true], outcome: true}),
+    ].sort(),
+  );
+  assert.deepEqual(
+    vectorsForDecision(
+      decisionForConditions(runtimeManifest, 'while_let_chain', [
+        'let Some(Some(value)) = values.pop()',
+        'value > 0',
+        'enabled',
+      ]),
+    ),
+    [
+      JSON.stringify({values: [false, null, null], outcome: false}),
+      JSON.stringify({values: [false, null, null], outcome: false}),
+      JSON.stringify({values: [true, false, null], outcome: false}),
+      JSON.stringify({values: [true, true, false], outcome: false}),
+      JSON.stringify({values: [true, true, true], outcome: true}),
+      JSON.stringify({values: [true, true, true], outcome: true}),
     ].sort(),
   );
   const behaviorPairs = new Set(
@@ -878,7 +986,7 @@ try {
   );
 
   console.log(
-    '[rustc-backend-spike] expanded-HIR obligations keep deterministic identities; compiler branch regions become exact Supercov nested/short-circuit/pattern ternary vectors with libtest contexts, while MIR/CTFE/rustdoc interception preserves behavior and source',
+    '[rustc-backend-spike] expanded-HIR obligations keep deterministic identities; compiler branch regions become exact Supercov nested/short-circuit/pattern/while ternary vectors and per-invocation loop branches with libtest contexts, while MIR/CTFE/rustdoc interception preserves behavior and source',
   );
 } finally {
   rmSync(scratch, {recursive: true, force: true});

@@ -519,6 +519,14 @@ fn main() {{
         __supercov_runtime_v1::exit_context(before_outer);
         __supercov_runtime_v1::mir_decision_finish(outer, true);
         migrated.join().unwrap();
+        let before_branch = __supercov_runtime_v1::enter_context(903);
+        let branch = __supercov_runtime_v1::mir_branch_start();
+        __supercov_runtime_v1::exit_context(before_branch);
+        let migrated_branch = std::thread::spawn(move || {{
+            __supercov_runtime_v1::mir_branch_hit(branch, 777);
+            __supercov_runtime_v1::mir_branch_hit(branch, 888);
+        }});
+        migrated_branch.join().unwrap();
     }} else if mode == "kill" {{
         __supercov_runtime_v1::hit("rs:function:fedcba9876543210fedcba98");
         let interrupted = __supercov_runtime_v1::mir_decision_start(
@@ -527,6 +535,7 @@ fn main() {{
             2,
         );
         __supercov_runtime_v1::mir_decision_condition(interrupted, 0, true);
+        let _interrupted_branch = __supercov_runtime_v1::mir_branch_start();
         println!("ready");
         use std::io::Write as _;
         std::io::stdout().flush().unwrap();
@@ -635,7 +644,7 @@ fn main() {{
             .unwrap();
         assert!(output.status.success());
         let read = read_rust_transport(&mir_decisions, &TOKEN).unwrap();
-        assert_eq!(read.committed, 2);
+        assert_eq!(read.committed, 3);
         assert_eq!(read.dropped, 0);
         assert_eq!(read.incomplete, 0);
         assert!(read.observations.iter().any(|observation| matches!(
@@ -648,6 +657,12 @@ fn main() {{
                 if id == "rs:decision:0123456789abcdef01234567"
                     && values == &[Some(true), Some(true)]
         )));
+        assert!(
+            read.ordinal_hits
+                .iter()
+                .any(|hit| hit.context_id == 903 && hit.ordinal == 777)
+        );
+        assert!(!read.ordinal_hits.iter().any(|hit| hit.ordinal == 888));
         assert!(read.observations.iter().any(|observation| matches!(
             observation,
             RustTransportObservation {
@@ -780,7 +795,7 @@ fn main() {{
         child.wait().unwrap();
         let read = read_rust_transport(&killed, &TOKEN).unwrap();
         assert_eq!(read.committed, 1);
-        assert_eq!(read.incomplete, 1);
+        assert_eq!(read.incomplete, 2);
         assert_eq!(read.dropped, 0);
         assert_eq!(
             read.observations,

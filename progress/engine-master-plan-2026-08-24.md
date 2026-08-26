@@ -1331,6 +1331,15 @@ miss blocks flipping any default.
   linked executable. Rustc branch correspondence is therefore a compiler
   oracle inside Supercov's owned injection path, not a shipped measurement
   dependency. The broader nested/derive/external macro corpus remains open.
+- The next compiler slice closes `while`/`while let` decisions and their
+  separate zero-iterations/entered branches. Nested patterns are handled as
+  arbitrary optimized-MIR condition subgraphs with complete terminal-edge
+  instrumentation, not guessed single switches. A first-commit branch frame
+  starts once at the natural loop entry and is bypassed by backedges, preserving
+  the start context across migration and leaving killed writers explicitly
+  incomplete. Exact fixtures prove multi-iteration behavior without duplicate
+  or relabeled invocation evidence. `for`, match, let-else, `?`, assertions,
+  CTFE and doctest completeness remain private release blockers.
 
 ## Non-goals and guardrails
 

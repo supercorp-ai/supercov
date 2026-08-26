@@ -430,6 +430,97 @@ mod __SUPERCOV_MODULE__ {
                 (&*pointer.cast::<AtomicU8>()).store(1, Ordering::Release);
             }
         }
+
+        fn reserve_ordinal(&self) -> u64 {
+            let descriptor = self
+                .atomic_u64(NEXT_DESCRIPTOR_OFFSET)
+                .fetch_add(1, Ordering::Relaxed);
+            if descriptor >= u64::from(self.descriptor_capacity) {
+                self.dropped();
+                return 0;
+            }
+            let payload = self
+                .atomic_u64(NEXT_PAYLOAD_OFFSET)
+                .fetch_add(8, Ordering::Relaxed);
+            if payload.saturating_add(8) > u64::from(self.payload_capacity) {
+                self.dropped();
+                return 0;
+            }
+            let descriptor_offset = HEADER_SIZE + descriptor as usize * DESCRIPTOR_SIZE;
+            // SAFETY: reservations are in-bounds and private to this frame.
+            // The first terminal branch observation writes the ordinal and
+            // commits the descriptor; interruption remains explicit health.
+            unsafe {
+                let pointer = self.pointer.add(descriptor_offset);
+                pointer.add(1).write(KIND_ORDINAL_HIT);
+                pointer.add(2).write(0);
+                pointer.add(3).write(0);
+                write_u32(pointer, 4, std::process::id());
+                write_u64(pointer, 8, self.active_context());
+                write_u32(pointer, 16, payload as u32);
+                write_u32(pointer, 20, 8);
+                write_u32(pointer, 24, 0);
+                write_u32(pointer, 28, 8);
+                write_u64(pointer, 32, 0);
+            }
+            descriptor + 1
+        }
+
+        fn finish_ordinal(&self, token: u64, ordinal: u64) {
+            let Some(descriptor) = token.checked_sub(1) else {
+                return;
+            };
+            if descriptor >= u64::from(self.descriptor_capacity) {
+                return;
+            }
+            let descriptor_offset = HEADER_SIZE + descriptor as usize * DESCRIPTOR_SIZE;
+            // SAFETY: the descriptor and its eight-byte payload were reserved
+            // together. The release commit publishes exactly one alternative.
+            unsafe {
+                let pointer = self.pointer.add(descriptor_offset);
+                if (&*pointer.cast::<AtomicU8>()).load(Ordering::Acquire) != 0 {
+                    return;
+                }
+                let bytes = std::slice::from_raw_parts(pointer, DESCRIPTOR_SIZE);
+                if bytes[1] != KIND_ORDINAL_HIT
+                    || read_u32(bytes, 4) != Some(std::process::id())
+                    || read_u32(bytes, 20) != Some(8)
+                    || read_u32(bytes, 24) != Some(0)
+                    || read_u32(bytes, 28) != Some(8)
+                {
+                    return;
+                }
+                let Some(context_id) = read_u64(bytes, 8) else {
+                    return;
+                };
+                let Some(payload) = read_u32(bytes, 16) else {
+                    return;
+                };
+                if u64::from(payload).saturating_add(8) > u64::from(self.payload_capacity) {
+                    return;
+                }
+                let payload_pointer = self.pointer.add(self.payload_base + payload as usize);
+                write_u64(payload_pointer, 0, ordinal);
+                let values = std::slice::from_raw_parts(payload_pointer, 8);
+                write_u64(
+                    pointer,
+                    32,
+                    checksum(
+                        KIND_ORDINAL_HIT,
+                        0,
+                        std::process::id(),
+                        context_id,
+                        payload,
+                        8,
+                        0,
+                        8,
+                        &[],
+                        values,
+                    ),
+                );
+                (&*pointer.cast::<AtomicU8>()).store(1, Ordering::Release);
+            }
+        }
     }
 
     #[cfg(not(any(
@@ -476,6 +567,12 @@ mod __SUPERCOV_MODULE__ {
         fn decision_condition(&self, _token: u64, _index: usize, _value: bool) {}
 
         fn finish_decision(&self, _token: u64, _outcome: bool) {}
+
+        fn reserve_ordinal(&self) -> u64 {
+            0
+        }
+
+        fn finish_ordinal(&self, _token: u64, _ordinal: u64) {}
     }
 
     impl Drop for Transport {
@@ -674,6 +771,21 @@ mod __SUPERCOV_MODULE__ {
     pub fn mir_decision_finish(token: u64, outcome: bool) {
         if let Some(transport) = transport() {
             transport.finish_decision(token, outcome);
+        }
+    }
+
+    /// Reserves one crash-visible branch-selection frame. The first selected
+    /// alternative commits it; later loop checks cannot relabel the same
+    /// invocation from entered to zero-iteration.
+    #[inline(never)]
+    pub fn mir_branch_start() -> u64 {
+        transport().map_or(0, Transport::reserve_ordinal)
+    }
+
+    #[inline(never)]
+    pub fn mir_branch_hit(token: u64, ordinal: u64) {
+        if let Some(transport) = transport() {
+            transport.finish_ordinal(token, ordinal);
         }
     }
 
