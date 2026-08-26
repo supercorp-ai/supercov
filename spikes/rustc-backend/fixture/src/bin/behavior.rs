@@ -3,8 +3,8 @@ use std::{cell::RefCell, panic};
 use supercov_rustc_spike_fixture::{
     CONST_FALSE_VALUE, CONST_VALUE, authored, chained, compound, context_normal_scope,
     context_panic_scope, disjoined, drop_order, fallible, generated_by_build_script,
-    generated_by_proc, generated_by_rules, interrupted_decision, mixed, panic_path, pattern,
-    repeated_expansions,
+    generated_by_proc, generated_by_rules, interrupted_decision, mixed, nested,
+    nested_expression, panic_path, pattern, repeated_expansions,
 };
 
 fn main() {
@@ -62,6 +62,25 @@ fn main() {
             mixed(true, false, false),
             mixed(false, true, true),
             mixed(false, false, true),
+        ]
+    );
+    println!(
+        "nested={:?}",
+        [
+            nested(false, true, true),
+            nested(true, true, true),
+            nested(true, true, false),
+            nested(true, false, true),
+        ]
+    );
+    println!(
+        "nested-expression={:?}",
+        [
+            nested_expression(false, true, true, true),
+            nested_expression(true, true, true, false),
+            nested_expression(true, true, false, true),
+            nested_expression(true, false, false, true),
+            nested_expression(true, false, false, false),
         ]
     );
 }

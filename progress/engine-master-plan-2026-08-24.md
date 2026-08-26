@@ -1317,14 +1317,15 @@ miss blocks flipping any default.
 - The next private slice translates rustc's authored branch regions into
   Supercov-owned MIR decision frames rather than importing a rustc/LLVM
   profile. Exact goldens now cover all exercised ternary shapes for `&&`, `||`,
-  mixed `(a || b) && c`, `if let` and a let chain, nested/thread-migrated runtime
-  frames and parallel libtest contexts. An mmap descriptor reserved at decision
-  start and committed only at its outcome makes condition panic and process
-  kill explicit incomplete health. External macro implementation control flow
-  no longer pollutes an authored caller's denominator. Declarative, procedural
-  and build-generated owners now bind only through a unique compiler-typed
-  boolean branch at the exact expanded span, with their runtime vectors gated
-  in the spike. The exact-version companion now prevents rustc from injecting
+  mixed `(a || b) && c`, nested bodies, value-producing nested decisions,
+  `if let` and a let chain, nested/thread-migrated runtime frames and parallel
+  libtest contexts. An mmap descriptor reserved at decision start and committed
+  only at its outcome makes condition panic and process kill explicit
+  incomplete health. External macro implementation control flow no longer
+  pollutes an authored caller's denominator. Declarative, procedural and
+  build-generated owners now bind only through a unique compiler-typed boolean
+  branch at the exact expanded span, with their runtime vectors gated in the
+  spike. The exact-version companion now prevents rustc from injecting
   its profiler runtime and strips native MIR coverage before codegen; gates
   prove no `.profraw` output or LLVM profile/coverage symbol remains in the
   linked executable. Rustc branch correspondence is therefore a compiler

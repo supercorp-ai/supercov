@@ -215,9 +215,11 @@ uses rustc's exact source-to-optimized-MIR branch regions to locate each
 authored condition edge, translates those edges into Supercov-owned
 token-bearing frames, and emits frozen string decision IDs plus ternary values
 through `rust-probe-transport-v1`. Exact goldens cover `&&`, `||`, mixed
-`(a || b) && c`, `if let` and a three-atom let chain, including every exercised
-short-circuit vector and parallel libtest attribution. Baseline and
-instrumented behavior remain exact.
+`(a || b) && c`, nested `if` bodies, an outer `&&` whose second condition is a
+value-producing inner `if`, `if let` and a three-atom let chain, including every
+exercised short-circuit vector and parallel libtest attribution. The outer
+frame remains open while the inner decision completes without the vectors
+merging. Baseline and instrumented behavior remain exact.
 The work also removed hidden control flow from external macro implementations
 such as `assert!` and `println!` from the caller's authored denominator.
 Generated owners use a fail-closed expanded-span fallback that accepts only

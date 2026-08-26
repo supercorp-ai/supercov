@@ -62,6 +62,22 @@ pub fn mixed(first: bool, second: bool, third: bool) -> usize {
     if (first || second) && third { 53 } else { 59 }
 }
 
+pub fn nested(first: bool, second: bool, third: bool) -> usize {
+    if first {
+        if second && third { 71 } else { 73 }
+    } else {
+        79
+    }
+}
+
+pub fn nested_expression(first: bool, second: bool, third: bool, fourth: bool) -> usize {
+    if first && (if second { third } else { fourth }) {
+        83
+    } else {
+        89
+    }
+}
+
 #[inline(never)]
 fn panic_condition() -> bool {
     panic!("decision-condition-panic")
@@ -157,6 +173,13 @@ mod tests {
         assert_eq!(disjoined(false, false), 49);
         assert_eq!(mixed(false, true, true), 53);
         assert_eq!(mixed(false, false, true), 59);
+        assert_eq!(nested(false, true, true), 79);
+        assert_eq!(nested(true, true, true), 71);
+        assert_eq!(nested(true, true, false), 73);
+        assert_eq!(nested_expression(false, true, true, true), 89);
+        assert_eq!(nested_expression(true, true, true, false), 83);
+        assert_eq!(nested_expression(true, true, false, true), 89);
+        assert_eq!(nested_expression(true, false, false, true), 83);
         assert_eq!(pattern(Some(true)), 1);
         assert_eq!(pattern(None), 37);
         assert_eq!(chained(Some(true), true), 41);

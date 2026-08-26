@@ -175,6 +175,25 @@ function decisionFor(manifestRecord, definition) {
   );
 }
 
+function decisionForConditions(manifestRecord, definition, sources) {
+  const matches = manifestRecord.decisions.filter(
+    (decision) =>
+      decision.definitions.includes(definition) &&
+      JSON.stringify(decision.conditions.map(({source}) => source)) ===
+        JSON.stringify(sources),
+  );
+  assert.equal(
+    matches.length,
+    1,
+    `expected one ${definition} decision with conditions ${JSON.stringify(sources)}; found ${JSON.stringify(
+      manifestRecord.decisions
+        .filter((decision) => decision.definitions.includes(definition))
+        .map((decision) => decision.conditions.map(({source}) => source)),
+    )}`,
+  );
+  return matches[0];
+}
+
 function records(directory) {
   return readdirSync(directory)
     .filter((name) => name.endsWith('.jsonl'))
@@ -470,6 +489,8 @@ try {
   assert.match(baselineBehavior.stdout, /expanded=\[5, 3, 19, 17, 9\]/);
   assert.match(baselineBehavior.stdout, /conditions=\[29, 31, 31, 1, 37, 41, 43, 43\]/);
   assert.match(baselineBehavior.stdout, /or-mixed=\[47, 47, 49, 53, 59, 53, 59\]/);
+  assert.match(baselineBehavior.stdout, /nested=\[79, 71, 73, 73\]/);
+  assert.match(baselineBehavior.stdout, /nested-expression=\[89, 83, 89, 83, 89\]/);
   const runtimeManifest = crateManifest(
     instrumentedDirectory,
     'supercov_rustc_spike_fixture',
@@ -503,14 +524,16 @@ try {
     new Set(behaviorEvidence.ordinals.map(({ordinal}) => ordinal)),
     new Set([authoredProbe, fallibleProbe, dropOrderProbe, panicProbe]),
   );
-  const decisionVectors = (definition) => {
-    const id = decisionFor(runtimeManifest, definition)?.id;
-    assert(id, `missing runtime decision for ${definition}`);
+  const vectorsForDecision = (decision) => {
+    const id = decision?.id;
+    assert(id, 'missing runtime decision');
     return behaviorEvidence.decisions
       .filter((decision) => decision.id === id)
       .map(({values, outcome}) => JSON.stringify({values, outcome}))
       .sort();
   };
+  const decisionVectors = (definition) =>
+    vectorsForDecision(decisionFor(runtimeManifest, definition));
   assert(
     !behaviorEvidence.decisions.some(
       ({id}) => id === decisionFor(runtimeManifest, 'interrupted_decision')?.id,
@@ -555,6 +578,51 @@ try {
   assert.deepEqual(decisionVectors('generated_by_build_script'), [
     JSON.stringify({values: [false], outcome: false}),
   ]);
+  assert.deepEqual(
+    vectorsForDecision(decisionForConditions(runtimeManifest, 'nested', ['first'])),
+    [
+      JSON.stringify({values: [false], outcome: false}),
+      JSON.stringify({values: [true], outcome: true}),
+      JSON.stringify({values: [true], outcome: true}),
+      JSON.stringify({values: [true], outcome: true}),
+    ].sort(),
+  );
+  assert.deepEqual(
+    vectorsForDecision(
+      decisionForConditions(runtimeManifest, 'nested', ['second', 'third']),
+    ),
+    [
+      JSON.stringify({values: [false, null], outcome: false}),
+      JSON.stringify({values: [true, false], outcome: false}),
+      JSON.stringify({values: [true, true], outcome: true}),
+    ].sort(),
+  );
+  assert.deepEqual(
+    vectorsForDecision(
+      decisionForConditions(runtimeManifest, 'nested_expression', [
+        'first',
+        '(if second { third } else { fourth })',
+      ]),
+    ),
+    [
+      JSON.stringify({values: [false, null], outcome: false}),
+      JSON.stringify({values: [true, false], outcome: false}),
+      JSON.stringify({values: [true, false], outcome: false}),
+      JSON.stringify({values: [true, true], outcome: true}),
+      JSON.stringify({values: [true, true], outcome: true}),
+    ].sort(),
+  );
+  assert.deepEqual(
+    vectorsForDecision(
+      decisionForConditions(runtimeManifest, 'nested_expression', ['second']),
+    ),
+    [
+      JSON.stringify({values: [false], outcome: false}),
+      JSON.stringify({values: [false], outcome: false}),
+      JSON.stringify({values: [true], outcome: true}),
+      JSON.stringify({values: [true], outcome: true}),
+    ].sort(),
+  );
   const behaviorPairs = new Set(
     behaviorEvidence.ordinals.map(({context, ordinal}) => `${context}:${ordinal}`),
   );
@@ -810,7 +878,7 @@ try {
   );
 
   console.log(
-    '[rustc-backend-spike] expanded-HIR points and if/if-let/let-chain obligations keep deterministic identities; compiler branch regions become exact Supercov &&/||/mixed/pattern ternary vectors with libtest contexts, while MIR/CTFE/rustdoc interception preserves behavior and source',
+    '[rustc-backend-spike] expanded-HIR obligations keep deterministic identities; compiler branch regions become exact Supercov nested/short-circuit/pattern ternary vectors with libtest contexts, while MIR/CTFE/rustdoc interception preserves behavior and source',
   );
 } finally {
   rmSync(scratch, {recursive: true, force: true});

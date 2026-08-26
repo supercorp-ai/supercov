@@ -112,9 +112,11 @@ The spike proved:
     token-bearing per-evaluation frame records ternary source-order values and
     publishes the frozen string decision ID through `rust-probe-transport-v1`.
     Goldens observe every short-circuit shape for `&&`, `||`, mixed
-    `(a || b) && c`, both `if let` results, and a three-atom let chain. Parallel
-    libtests keep their exact contexts, while production runtime tests cover
-    nested frames and a frame finished on another thread. Frames now reserve
+    `(a || b) && c`, nested bodies, a value-producing inner `if` evaluated
+    while its outer `&&` frame remains open, both `if let` results, and a
+    three-atom let chain. Parallel libtests keep their exact contexts, while
+    production runtime tests cover nested frames and a frame finished on
+    another thread. Frames now reserve
     their bounded mmap descriptor at evaluation start and commit only at the
     final outcome; compiler-level condition panic and killed-process tests
     leave one explicit incomplete descriptor without committing a false
@@ -204,8 +206,8 @@ an unverified rustc commit.
 
 ## Next implementation gates
 
-1. Extend the proven expanded-HIR `if` slice to nested control decisions,
-   loops, match, let-else, `?`, assertions and remaining executable statement
+1. Extend the proven expanded-HIR `if` slice to loops, match, let-else, `?`,
+   assertions and remaining executable statement
    semantics; bind their real MIR/CTFE probes to the same manifest IDs. Add
    derive, nested/external expansion, generic/trait, include/module and
    package-fingerprint corpora before treating the candidate as a complete
