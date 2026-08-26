@@ -86,6 +86,7 @@ static ORIGINAL_MIR_BUILT: OnceLock<MirBuiltProvider> = OnceLock::new();
 static ORIGINAL_MIR_DROPS: OnceLock<MirDropsProvider> = OnceLock::new();
 static CTFE_EVENTS: Mutex<Vec<CtfeObservation>> = Mutex::new(Vec::new());
 static CTFE_MARKERS: Mutex<BTreeMap<u64, CtfeMarkerIdentity>> = Mutex::new(BTreeMap::new());
+static CTFE_MAPPINGS: Mutex<BTreeMap<u64, CtfeMarkerMapping>> = Mutex::new(BTreeMap::new());
 static MATCH_ARM_MARKERS: LazyLock<Mutex<HashMap<LocalDefId, BTreeMap<u32, u64>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static STRUCTURAL_DECISION_MARKERS: LazyLock<
@@ -119,6 +120,12 @@ struct CtfeMarkerIdentity {
 struct CtfeObservation {
     marker: u64,
     thread: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CtfeMarkerMapping {
+    identity: CtfeMarkerIdentity,
+    hit_ordinals: BTreeSet<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3792,6 +3799,25 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
     let span = tcx.def_span(def_id);
     let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE).to_string();
     let definition = tcx.def_path_str(def_id);
+    let mut hit_ordinals_by_block = BTreeMap::<BasicBlock, BTreeSet<u64>>::new();
+    for plan in runtime_statement_plans(tcx, def_id, body).unwrap_or_else(|error| {
+        tcx.dcx().fatal(format!(
+            "Supercov could not bind Rust CTFE statement probes in {definition}: {error}"
+        ))
+    }) {
+        hit_ordinals_by_block
+            .entry(plan.block)
+            .or_default()
+            .insert(plan.ordinal);
+    }
+    if is_function_body(tcx.def_kind(def_id))
+        && let Ok(identity) = function_identity(tcx, def_id.to_def_id(), span, &crate_name)
+    {
+        hit_ordinals_by_block
+            .entry(rustc_middle::mir::START_BLOCK)
+            .or_default()
+            .insert(identity.probe_ordinal);
+    }
     let marker_local = instrumented
         .local_decls
         .push(LocalDecl::new(tcx.types.u64, span));
@@ -3807,6 +3833,15 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
             &definition,
             observation_kind,
             block.as_u32(),
+        );
+        register_ctfe_hits(
+            tcx,
+            marker,
+            hit_ordinals_by_block
+                .get(&block)
+                .into_iter()
+                .flatten()
+                .copied(),
         );
         block_data
             .statements
@@ -3910,7 +3945,40 @@ fn ctfe_marker_identity(
             "Supercov CTFE marker collision {marker} between {existing:?} and {identity:?}"
         ));
     }
+    drop(markers);
+    let mut mappings = CTFE_MAPPINGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match mappings.get(&marker) {
+        Some(existing) if existing.identity != identity => tcx.dcx().fatal(format!(
+            "Supercov CTFE mapping collision {marker} between {existing:?} and {identity:?}"
+        )),
+        Some(_) => {}
+        None => {
+            mappings.insert(
+                marker,
+                CtfeMarkerMapping {
+                    identity,
+                    hit_ordinals: BTreeSet::new(),
+                },
+            );
+        }
+    }
     marker
+}
+
+fn register_ctfe_hits(
+    tcx: TyCtxt<'_>,
+    marker: u64,
+    hits: impl Iterator<Item = u64>,
+) {
+    let mut mappings = CTFE_MAPPINGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mapping = mappings
+        .get_mut(&marker)
+        .unwrap_or_else(|| tcx.dcx().fatal(format!("Supercov CTFE marker {marker} has no mapping")));
+    mapping.hit_ordinals.extend(hits);
 }
 
 fn ctfe_marker_statement<'tcx>(
@@ -6442,7 +6510,10 @@ fn main() {
     rustc_driver::run_compiler(&args, &mut callbacks);
     if env::var_os(INSTRUMENT_CTFE).is_some() {
         let events = CTFE_EVENTS.lock().expect("CTFE events lock");
-        write_ctfe_events(&args, &events);
+        if let Err(error) = write_ctfe_outputs(&args, &events) {
+            eprintln!("error: Supercov could not publish Rust CTFE evidence: {error}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -6509,38 +6580,70 @@ fn strip_injected_rustdoc_unstable_option(args: &mut [String]) {
     }
 }
 
-fn write_ctfe_events(args: &[String], events: &[CtfeObservation]) {
-    if events.is_empty() {
-        return;
-    }
-    let Ok(directory) = env::var(OUTPUT_DIRECTORY) else {
-        return;
-    };
+fn write_new_synced(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let mut output = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    output
+        .write_all(contents)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    output
+        .sync_all()
+        .map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn write_ctfe_outputs(args: &[String], events: &[CtfeObservation]) -> Result<(), String> {
+    let directory = env::var(OUTPUT_DIRECTORY)
+        .map_err(|_| format!("{OUTPUT_DIRECTORY} is not set"))?;
     let directory = PathBuf::from(directory);
-    if fs::create_dir_all(&directory).is_err() {
-        return;
-    }
+    fs::create_dir_all(&directory).map_err(|error| format!("{}: {error}", directory.display()))?;
     let crate_name = args
         .windows(2)
         .find_map(|pair| (pair[0] == "--crate-name").then_some(pair[1].as_str()))
         .unwrap_or("unknown");
-    let output = directory.join(format!(
-        "{}-{}-ctfe.jsonl",
+    let identity = format!(
+        "{}-{}",
         std::process::id(),
         sanitize(crate_name)
-    ));
-    let Ok(mut output) = OpenOptions::new().create_new(true).write(true).open(output) else {
-        return;
-    };
+    );
     let markers = CTFE_MARKERS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mappings = CTFE_MAPPINGS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if mappings.is_empty() && events.is_empty() {
+        return Ok(());
+    }
+    if markers.len() != mappings.len()
+        || markers.iter().any(|(marker, marker_identity)| {
+            mappings
+                .get(marker)
+                .is_none_or(|mapping| mapping.identity != *marker_identity)
+        })
+    {
+        return Err("CTFE marker registry and obligation mapping differ".into());
+    }
+    if mappings
+        .values()
+        .any(|mapping| mapping.identity.crate_name != crate_name)
+    {
+        return Err(format!(
+            "CTFE mappings crossed compiler crate identity {crate_name}"
+        ));
+    }
+    let mut event_bytes = Vec::new();
     for observation in events {
         let Some(identity) = markers.get(&observation.marker) else {
-            continue;
+            return Err(format!(
+                "observed unregistered CTFE marker {}",
+                observation.marker
+            ));
         };
         let record = format!(
-            "{{\"crate\":\"{}\",\"kind\":\"ctfe-marker\",\"marker\":{},\"definition\":\"{}\",\"observationKind\":\"{}\",\"ordinal\":{},\"thread\":\"{}\"}}\n",
+            "{{\"crate\":\"{}\",\"kind\":\"ctfe-marker\",\"marker\":\"{}\",\"definition\":\"{}\",\"observationKind\":\"{}\",\"ordinal\":{},\"thread\":\"{}\"}}\n",
             escape(&identity.crate_name),
             observation.marker,
             escape(&identity.definition),
@@ -6548,7 +6651,49 @@ fn write_ctfe_events(args: &[String], events: &[CtfeObservation]) {
             identity.local_ordinal,
             escape(&observation.thread),
         );
-        let _ = output.write_all(record.as_bytes());
+        event_bytes.extend_from_slice(record.as_bytes());
     }
-    let _ = output.flush();
+    let mapping_records = mappings
+        .iter()
+        .map(|(marker, mapping)| {
+            let hit_ordinals = mapping
+                .hit_ordinals
+                .iter()
+                .map(u64::to_string)
+                .map(|ordinal| format!("\"{ordinal}\""))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{{\"marker\":\"{marker}\",\"definition\":\"{}\",\"observationKind\":\"{}\",\"ordinal\":{},\"hitOrdinals\":[{hit_ordinals}]}}",
+                escape(&mapping.identity.definition),
+                mapping.identity.observation_kind,
+                mapping.identity.local_ordinal,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let mapping_bytes = format!(
+        "{{\"schema\":\"supercov-rust-ctfe-map-v1\",\"crate\":\"{}\",\"mappings\":[{mapping_records}]}}\n",
+        escape(crate_name),
+    );
+    let events_final = directory.join(format!("ctfe-events-{identity}.jsonl"));
+    let mappings_final = directory.join(format!("ctfe-map-{identity}.json"));
+    let events_partial = directory.join(format!(".ctfe-events-{identity}.partial"));
+    let mappings_partial = directory.join(format!(".ctfe-map-{identity}.partial"));
+    write_new_synced(&events_partial, &event_bytes)?;
+    if let Err(error) = write_new_synced(&mappings_partial, mapping_bytes.as_bytes()) {
+        let _ = fs::remove_file(&events_partial);
+        return Err(error);
+    }
+    fs::rename(&mappings_partial, &mappings_final)
+        .map_err(|error| format!("{}: {error}", mappings_final.display()))?;
+    fs::rename(&events_partial, &events_final)
+        .map_err(|error| format!("{}: {error}", events_final.display()))?;
+    let directory_file = OpenOptions::new()
+        .read(true)
+        .open(&directory)
+        .map_err(|error| format!("{}: {error}", directory.display()))?;
+    directory_file
+        .sync_all()
+        .map_err(|error| format!("{}: {error}", directory.display()))
 }

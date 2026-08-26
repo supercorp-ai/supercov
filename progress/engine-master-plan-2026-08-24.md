@@ -1485,7 +1485,13 @@ miss blocks flipping any default.
   true/false const behavior remains byte-identical and the corpus proves more
   than one CTFE definition is observed. This is framing groundwork only: marker-to-
   frozen-obligation mapping and crash-safe evidence-v3 build-phase publication
-  remain the active blocker.
+  were subsequently completed for function and statement points. Compiler-finalized
+  sidecars are atomically renamed, use lossless textual identities, and are
+  rejected unless every event, frame and hit ordinal resolves exactly. A real
+  compiler run now archives and re-queries those observations as `rustc` setup
+  evidence. Exact CTFE branch/decision vectors and the broader const corpus
+  remain the active blocker; the candidate therefore still reports the CTFE
+  limitation and stays private.
 
 ## Non-goals and guardrails
 

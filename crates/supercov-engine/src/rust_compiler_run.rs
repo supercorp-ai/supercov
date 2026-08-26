@@ -36,6 +36,7 @@ pub struct DirectRustCompilerRunResult {
     pub run_directory: PathBuf,
     pub exit_code: i32,
     pub tests: usize,
+    pub setup_results: usize,
     pub background_results: usize,
     pub artifacts: usize,
     pub selection: crate::rust_compiler_selection::SelectedRustCompilerCompanion,
@@ -167,6 +168,12 @@ pub fn run_direct_rust_compiler(
             .iter()
             .filter(|result| result.role == "background")
             .count();
+        let setup_results = run
+            .request
+            .raw_results
+            .iter()
+            .filter(|result| result.role == "setup")
+            .count();
         let denominator = RustCompilerDenominatorCounts {
             points: run.request.manifest.points.len(),
             branches: run.request.manifest.branches.len(),
@@ -186,6 +193,7 @@ pub fn run_direct_rust_compiler(
             run_directory,
             exit_code: run.exit_code,
             tests,
+            setup_results,
             background_results,
             artifacts: run.artifacts,
             selection: run.selection,

@@ -470,6 +470,17 @@ the proof covers one controlled const function and does not yet supply the
 complete marker-to-obligation mapping for const/static/inline-const/const-generic code, crash-safe event
 publication, `RUSTC_LOG` coexistence or acceptable performance corpus.
 
+The first mapped CTFE evidence slice is now carried through the real run
+boundary. Compiler-finalized event and mapping sidecars are published with
+same-filesystem staging/rename and directory sync; marker and hit ordinals are
+lossless decimal strings rather than unsafe JSON numbers. Strict Rust ingestion
+requires one map/event pair per compiler unit, exact crate/definition/kind/site
+identity, balanced per-thread invocation frames, and resolution of every hit
+ordinal to the frozen denominator. Function and statement hits are archived as
+exact `rustc` setup-phase evidence and survive evidence-v3 analysis plus normal
+run querying. CTFE decision/branch reconstruction is still deliberately absent
+and the manifest limitation remains, so this is not yet a completeness claim.
+
 The rustdoc launch boundary is now proven as well. Cargo's ordinary
 `RUSTC_WRAPPER` still does not see synthesized doctest crates, so Supercov uses
 a scoped launcher for the exact ordinary rustdoc and adds its compiler

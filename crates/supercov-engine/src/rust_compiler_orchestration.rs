@@ -11,12 +11,13 @@ use std::{
     io::Write,
     path::{Component, Path, PathBuf},
     process::Command,
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    rust_compiler_ctfe::{RustCompilerCtfeUnit, read_rust_compiler_ctfe},
     rust_compiler_manifest::{
         NormalizedRustCompilerManifest, RustCompilerManifest, RustCompilerSourceSnapshots,
         normalize_rust_compiler_candidates,
@@ -30,6 +31,7 @@ pub const RUST_COMPILER_OUTPUT_ENV: &str = "SUPERCOV_RUST_COMPILER_OUTPUT";
 pub const RUST_SOURCE_ROOT_ENV: &str = "SUPERCOV_RUST_SOURCE_ROOT";
 pub const RUST_TARGET_ROOT_ENV: &str = "SUPERCOV_RUST_TARGET_ROOT";
 pub const RUST_INSTRUMENT_MIR_ENV: &str = "SUPERCOV_RUST_INSTRUMENT_MIR";
+pub const RUST_INSTRUMENT_CTFE_ENV: &str = "SUPERCOV_RUST_INSTRUMENT_CTFE";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -67,6 +69,9 @@ pub struct RustCompilerBuild {
     pub artifacts: Vec<RustCompilerTestArtifact>,
     pub target_directory: PathBuf,
     pub compiler_output_directory: PathBuf,
+    pub ctfe_units: Vec<RustCompilerCtfeUnit>,
+    pub build_started_at_ms: i64,
+    pub build_ended_at_ms: i64,
     pub build_ms: f64,
 }
 
@@ -135,6 +140,14 @@ fn io_error(path: &Path, error: impl std::fmt::Display) -> RustCompilerOrchestra
         path: path.to_path_buf(),
         reason: error.to_string(),
     }
+}
+
+fn epoch_ms() -> Result<i64, RustCompilerOrchestrationError> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| RustCompilerOrchestrationError::Cargo(error.to_string()))?
+        .as_millis();
+    i64::try_from(millis).map_err(|error| RustCompilerOrchestrationError::Cargo(error.to_string()))
 }
 
 fn valid_run_id(value: &str) -> bool {
@@ -443,6 +456,7 @@ pub fn build_with_rust_compiler_companion(
     invocation
         .arguments
         .extend(["--no-run".into(), "--message-format=json".into()]);
+    let build_started_at_ms = epoch_ms()?;
     let started = Instant::now();
     let output = Command::new(&invocation.program)
         .args(&invocation.arguments)
@@ -454,9 +468,11 @@ pub fn build_with_rust_compiler_companion(
         .env(RUST_SOURCE_ROOT_ENV, &project_root)
         .env(RUST_TARGET_ROOT_ENV, &target_directory)
         .env(RUST_INSTRUMENT_MIR_ENV, "1")
+        .env(RUST_INSTRUMENT_CTFE_ENV, "1")
         .output()
         .map_err(|error| RustCompilerOrchestrationError::Cargo(error.to_string()))?;
     let build_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let build_ended_at_ms = epoch_ms()?;
     if !output.status.success() {
         let rendered = rendered_cargo_diagnostics(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -472,6 +488,9 @@ pub fn build_with_rust_compiler_companion(
     let pairs = compiler_pairs(&candidate_directory)?;
     let normalized = normalize_rust_compiler_candidates(pairs)
         .map_err(|error| RustCompilerOrchestrationError::Manifest(error.to_string()))?;
+    let ctfe_units =
+        read_rust_compiler_ctfe(&candidate_directory, &normalized, build_started_at_ms)
+            .map_err(|error| RustCompilerOrchestrationError::CompilerOutput(error.to_string()))?;
     let artifacts = cargo_artifacts(&output.stdout, &target_directory)?;
     Ok(RustCompilerBuild {
         selection,
@@ -479,6 +498,9 @@ pub fn build_with_rust_compiler_companion(
         artifacts,
         target_directory,
         compiler_output_directory,
+        ctfe_units,
+        build_started_at_ms,
+        build_ended_at_ms,
         build_ms,
     })
 }

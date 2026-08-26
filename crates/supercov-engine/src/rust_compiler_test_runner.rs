@@ -32,6 +32,7 @@ use crate::{
         ExitCodeInput, PersistedCoverageModel, RawTestResult, RuntimeSnapshot, TestProvenance,
     },
     evidence_archive::EvidenceArchiveEntry,
+    rust_compiler_ctfe::RustCompilerCtfeUnit,
     rust_compiler_evidence::{
         RustCompilerEvidenceProjection, RustCompilerTransportHealth, project_rust_compiler_evidence,
     },
@@ -387,6 +388,100 @@ fn runner_declaration() -> FrontendRunnerDeclaration {
     }
 }
 
+fn compiler_runner_declaration() -> FrontendRunnerDeclaration {
+    FrontendRunnerDeclaration {
+        runner: "rustc".into(),
+        execution_model: ExecutionModel::ProcessPerTest,
+        attribution: FrontendAttribution {
+            run: AttributionPrecision::Exact,
+            worker: AttributionPrecision::Exact,
+            test: AttributionPrecision::Exact,
+            retry: AttributionPrecision::Exact,
+            phase: AttributionPrecision::Exact,
+            action: AttributionPrecision::Unavailable,
+            assertion: AttributionPrecision::Unavailable,
+        },
+        limitations: vec![
+            FrontendLimitation {
+                id: "rust-ctfe-action-linkage-unavailable".into(),
+                scopes: vec![FrontendLimitationScope::Action],
+                reason: "Compile-time evaluation is build execution, not an application action"
+                    .into(),
+            },
+            FrontendLimitation {
+                id: "rust-ctfe-assertion-linkage-unavailable".into(),
+                scopes: vec![FrontendLimitationScope::Assertion],
+                reason: "Compile-time execution has no user-test assertion lifecycle".into(),
+            },
+        ],
+    }
+}
+
+fn ctfe_raw_results(
+    run_id: &str,
+    units: Vec<RustCompilerCtfeUnit>,
+    started_at_ms: i64,
+    ended_at_ms: i64,
+) -> Vec<RawTestResult> {
+    units
+        .into_iter()
+        .enumerate()
+        .map(|(index, unit)| {
+            let worker_id = format!("rustc-{index:04}");
+            let test_id = format!("rust:build:ctfe:{}:{index:04}", unit.crate_name);
+            let attempt_id = format!("{run_id}:ctfe:{index:04}");
+            let phase_id = phase_id(run_id, &attempt_id);
+            let mut snapshot = unit.snapshot;
+            for event in &mut snapshot.events {
+                event.phase_id = Some(phase_id.clone());
+            }
+            RawTestResult {
+                test_id: Some(test_id.clone()),
+                scope: Some(ExecutionScope {
+                    version: 1,
+                    run_id: run_id.into(),
+                    worker_id,
+                    test_id: test_id.clone(),
+                    test_key: test_id.clone(),
+                    retry: 0,
+                    attempt_id,
+                }),
+                test: test_id.clone(),
+                test_file: None,
+                title: Some(format!(
+                    "Compile-time evaluation for {} ({})",
+                    unit.crate_name, unit.identity
+                )),
+                retry: Some(0),
+                status: Some("passed".into()),
+                expected_status: Some("passed".into()),
+                flaky: false,
+                provenance: TestProvenance {
+                    runner: "rustc".into(),
+                    kind: "build".into(),
+                    project: Some(unit.crate_name),
+                    source: "supercov-rustc-ctfe".into(),
+                },
+                role: "setup".into(),
+                phases: vec![CoveragePhase {
+                    id: phase_id,
+                    kind: "setup".into(),
+                    operation: "Rust constant evaluation".into(),
+                    source: None,
+                    caused_by_phase_id: None,
+                    started_at_ms,
+                    ended_at_ms: Some(ended_at_ms),
+                    status: Some("passed".into()),
+                    error: None,
+                }],
+                runtime: vec![snapshot],
+                browser: Vec::new(),
+                server: Vec::new(),
+            }
+        })
+        .collect()
+}
+
 fn status(output: &Output) -> (&'static str, i32) {
     let exit = output.status.code().unwrap_or(1);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -573,7 +668,12 @@ fn execute_compiler_build(
         })?;
     outcomes.sort_by_key(|outcome| outcome.task.ordinal);
 
-    let mut raw_results = Vec::new();
+    let mut raw_results = ctfe_raw_results(
+        &request.run_id,
+        build.ctfe_units.clone(),
+        build.build_started_at_ms,
+        build.build_ended_at_ms,
+    );
     let mut attempt_health = Vec::new();
     let mut overall_exit = 0;
     for outcome in outcomes {
@@ -664,7 +764,7 @@ fn execute_compiler_build(
         frontend_version: "rust-compiler-v1".into(),
         language: "rust".into(),
         structural_source: StructuralSource::OwnedProbes,
-        runners: vec![runner_declaration()],
+        runners: vec![compiler_runner_declaration(), runner_declaration()],
         structural_limitations,
     };
     Ok(RustCompilerFrontendRun {
@@ -710,5 +810,11 @@ mod tests {
         assert_eq!(runner.attribution.assertion, AttributionPrecision::Exact);
         assert_eq!(runner.attribution.action, AttributionPrecision::Unavailable);
         assert_eq!(runner.limitations.len(), 1);
+        let compiler = compiler_runner_declaration();
+        assert_eq!(compiler.attribution.phase, AttributionPrecision::Exact);
+        assert_eq!(
+            compiler.attribution.assertion,
+            AttributionPrecision::Unavailable
+        );
     }
 }

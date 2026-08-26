@@ -516,6 +516,10 @@ try {
   assert(productionRun.denominator.decisions > 0);
   assert(productionRun.artifacts > 0);
   assert(productionRun.tests > 0);
+  assert(
+    productionRun.setupResults > 0,
+    'production compiler run did not publish CTFE build-phase evidence',
+  );
   assert.equal(productionRun.attemptHealth.length, productionRun.tests);
   assert(
     productionRun.attemptHealth.every(
@@ -1825,7 +1829,45 @@ try {
   assert.equal(ctfeBehavior.stderr, baselineBehavior.stderr);
   assert.match(ctfeBehavior.stdout, /const-values=11,13/);
   const ctfeRecordFiles = recordFiles(ctfeDirectory).filter(({name}) =>
-    name.endsWith('-ctfe.jsonl'),
+    name.startsWith('ctfe-events-'),
+  );
+  const ctfeMaps = readdirSync(ctfeDirectory)
+    .filter((name) => name.startsWith('ctfe-map-') && name.endsWith('.json'))
+    .map((name) => ({
+      name,
+      value: JSON.parse(readFileSync(join(ctfeDirectory, name), 'utf8')),
+    }));
+  assert(ctfeMaps.length > 0, 'compiler emitted no CTFE obligation maps');
+  const manifestedCtfeHits = allManifestedHitOrdinals(ctfeDirectory);
+  const mappingsByMarker = new Map();
+  for (const {name, value} of ctfeMaps) {
+    assert.equal(value.schema, 'supercov-rust-ctfe-map-v1', `${name}: schema`);
+    assert.equal(typeof value.crate, 'string', `${name}: crate`);
+    for (const mapping of value.mappings) {
+      assert.match(mapping.marker, /^\d+$/, `${name}: marker must be lossless text`);
+      const mappingKey = `${value.crate}:${mapping.marker}`;
+      const existing = mappingsByMarker.get(mappingKey);
+      if (existing) {
+        assert.deepEqual(
+          mapping,
+          existing,
+          `${name}: CTFE mapping ${mapping.marker} changed across compiler units`,
+        );
+      } else {
+        mappingsByMarker.set(mappingKey, mapping);
+      }
+      for (const ordinal of mapping.hitOrdinals) {
+        assert.match(ordinal, /^\d+$/, `${name}: hit ordinal must be lossless text`);
+        assert(
+          manifestedCtfeHits.has(ordinal),
+          `${name}: CTFE hit ordinal ${ordinal} is absent from the frozen denominator`,
+        );
+      }
+    }
+  }
+  assert(
+    [...mappingsByMarker.values()].some(({hitOrdinals}) => hitOrdinals.length > 0),
+    'CTFE maps contain no function or statement obligations',
   );
   const ctfeSequences = ctfeRecordFiles.map(({records: fileRecords}) =>
     fileRecords
@@ -1851,8 +1893,18 @@ try {
     const threadStacks = new Map();
     for (const record of fileRecords) {
       assert.equal(record.kind, 'ctfe-marker', `${name}: invalid CTFE record kind`);
+      assert.match(record.marker, /^\d+$/, `${name}: marker must be lossless text`);
       assert.equal(typeof record.thread, 'string', `${name}: CTFE thread missing`);
       assert(record.thread.length > 0, `${name}: CTFE thread empty`);
+      const mapping = mappingsByMarker.get(`${record.crate}:${record.marker}`);
+      assert(mapping, `${name}: observed CTFE marker has no obligation mapping`);
+      assert.equal(mapping.definition, record.definition, `${name}: definition drift`);
+      assert.equal(
+        mapping.observationKind,
+        record.observationKind,
+        `${name}: observation kind drift`,
+      );
+      assert.equal(mapping.ordinal, record.ordinal, `${name}: ordinal drift`);
       const stack = threadStacks.get(record.thread) ?? [];
       threadStacks.set(record.thread, stack);
       if (record.observationKind === 'entry') {
