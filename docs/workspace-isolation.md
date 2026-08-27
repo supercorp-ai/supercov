@@ -17,10 +17,10 @@ is below the project's `.supercov/` directory:
 | `work/<run>/run-publication/` | Incomplete run staging; atomically renamed or removed on recovery. |
 | `evidence/<run>/` | Loose in-flight evidence; packed and removed after publication. |
 | `runs/<run>/` | Immutable `evidence.raw.gz` (manifest plus raw execution evidence) and `run.json`; retained until explicit `clean`. Derived query views are cached only after their first query. |
-| `cache/instrumented-workspace/<project>/` | Stable physical fallback and provider snapshot cache. |
-| `cache/instrumented-workspace/.<project>.staging-*` | Unpublished cache transaction; removed on error or recovery. |
-| `cache/instrumented-workspace/.<project>.previous-*` | Last complete cache generation during publication; restored or removed on recovery. |
-| `cache/instrumented-workspace/<project>/.supercov/server-evidence/<run>/` | Server/background transport shared with local or mounted guest processes; archived and removed after publication, interruption, refresh, or cleanup. |
+| `supercov/workspace/<project>/` | Stable physical fallback and provider snapshot cache. The non-dotted ancestor keeps Express/`send` and similar static-file stacks semantically unchanged. |
+| `supercov/workspace/.<project>.staging-*` | Unpublished cache transaction; removed on error or recovery. |
+| `supercov/workspace/.<project>.previous-*` | Last complete cache generation during publication; restored or removed on recovery. |
+| `supercov/workspace/<project>/.supercov/server-evidence/<run>/` | Server/background transport shared with local or mounted guest processes; archived and removed after publication, interruption, refresh, or cleanup. |
 
 The lower-level runtime retains `/tmp/supercov-server-evidence` only as a
 fallback when it is embedded without the Supercov CLI and no owned transport
@@ -30,7 +30,10 @@ translation maps that same root into the guest mount.
 ## Current physical fallback
 
 Builds and opaque VM/container mounts currently use a stable physical namespace
-at `.supercov/cache/instrumented-workspace/<project>`. Refresh has four states:
+at `supercov/workspace/<project>`. The `supercov/` container is owned only when
+its exact marker is present; if a project already owns that name, Supercov uses
+a deterministic non-dotted fallback and copies the user's directory as ordinary
+source rather than adopting or excluding it. Refresh has four states:
 
 1. The last complete source generation remains live while a sibling `staging`
    tree is prepared.

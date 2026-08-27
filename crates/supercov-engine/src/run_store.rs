@@ -671,6 +671,9 @@ impl std::fmt::Display for RunIndexError {
             Self::RunStore(error) => write!(formatter, "{error}"),
             Self::QueryIndex(error) => write!(formatter, "{error}"),
             Self::CoverageIndex(error) => write!(formatter, "{error}"),
+            Self::Report(ReportError::NoEvidence(_)) => {
+                write!(formatter, "no coverage evidence was published")
+            }
             Self::Report(error) => write!(formatter, "coverage analysis failed: {error:?}"),
             Self::Metadata(error) => write!(formatter, "run integrity is invalid: {error}"),
             Self::EvidenceChanged => write!(formatter, "evidence changed while indexing"),

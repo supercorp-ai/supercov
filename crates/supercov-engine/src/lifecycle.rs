@@ -19,7 +19,6 @@ use sha2::{Digest, Sha256};
 use crate::run_store::{RunMetadata, valid_run_id};
 
 const TRASH: &str = ".supercov/.trash";
-const WORKSPACE_MARKER: &str = ".supercov-workspace-store";
 const INCOMPLETE_LOCK_GRACE: Duration = Duration::from_secs(30);
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
@@ -145,15 +144,9 @@ fn reject_linked_ancestors(
     Ok(())
 }
 
-fn workspace_container(root: &Path) -> PathBuf {
-    root.join("supercov")
-}
-
 fn owned_workspace_container(root: &Path) -> bool {
-    let container = workspace_container(root);
-    fs::symlink_metadata(&container).is_ok_and(|metadata| metadata.file_type().is_dir())
-        && fs::symlink_metadata(container.join(WORKSPACE_MARKER))
-            .is_ok_and(|metadata| metadata.file_type().is_file())
+    let container = crate::workspace::workspace_container(root);
+    crate::workspace::owned_workspace_path(&container)
 }
 
 fn unique_name() -> String {
@@ -250,7 +243,7 @@ pub fn remove_stored_tree_deferred(
     let store = root.join(".supercov");
     let trash = root.join(TRASH);
     let in_store = lexical_descendant(&store, &target) && !lexical_descendant(&trash, &target);
-    let container = workspace_container(&root);
+    let container = crate::workspace::workspace_container(&root);
     let in_workspace = owned_workspace_container(&root)
         && (target == container || lexical_descendant(&container, &target));
     if !in_store && !in_workspace {
@@ -822,7 +815,7 @@ pub fn cleanup_storage_locked(
             }
         }
     }
-    let container = workspace_container(root);
+    let container = crate::workspace::workspace_container(root);
     let legacy = [root.join(".supercov/.cache"), root.join(".supercov/cache")];
     let mut caches = Vec::new();
     let mut removed_cargo_cache = false;
@@ -1093,7 +1086,11 @@ mod tests {
         let root = project();
         let container = root.join("supercov");
         fs::create_dir_all(container.join("workspace/project")).unwrap();
-        fs::write(container.join(WORKSPACE_MARKER), "owned").unwrap();
+        fs::write(
+            container.join(".supercov-workspace-store"),
+            b"Supercov instrumented workspace. Safe to delete.\n",
+        )
+        .unwrap();
         fs::create_dir_all(root.join(".supercov/cache/legacy")).unwrap();
         let mut preparation = ProjectLock::acquire(&root, "prepare", "start").unwrap();
         crate::workspace::prepare_cargo_cached_workspace(&root, &preparation).unwrap();

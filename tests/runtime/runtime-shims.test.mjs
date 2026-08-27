@@ -1,4 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 import {
@@ -82,11 +87,17 @@ test("remote launch mapping is provider-neutral and scopes reusable snapshots", 
 test("capability proxies preserve frozen constructor and export properties", () => {
   class PrismaSessionStorage {}
   const wrappedConstructor = wrapImportedCapability(PrismaSessionStorage);
+  assert.equal(wrappedConstructor, PrismaSessionStorage);
   assert.equal(wrappedConstructor.prototype, PrismaSessionStorage.prototype);
   assert.ok(new wrappedConstructor() instanceof PrismaSessionStorage);
 
+  const registered = new Map([["session", wrappedConstructor]]);
+  const instance = new PrismaSessionStorage();
+  assert.equal(instance.constructor, registered.get("session"));
+
   class RestResource {}
   const exports = wrapImportedCapability({ RestResource });
+  assert.equal(exports.RestResource, RestResource);
   assert.equal(exports.RestResource, exports.RestResource);
   class Product extends exports.RestResource {}
   assert.ok(new Product() instanceof RestResource);
@@ -104,4 +115,186 @@ test("capability proxies preserve frozen constructor and export properties", () 
     guestRoot: "/guest/workspace",
   });
   assert.equal(wrappedCapability.fixed, fixed);
+});
+
+test("background evidence is durable before an uncatchable process death", {
+  skip: process.platform === "win32",
+}, () => {
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-background-kill-"));
+  try {
+    const runtime = pathToFileURL(
+      resolve("runtime/javascript/runtime.js"),
+    ).href;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `const runtime = await import(${JSON.stringify(runtime)}); runtime.coverageHit("kill-safe-hit"); process.kill(process.pid, "SIGKILL");`,
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          SUPERCOV_RUN_ID: "run-kill-safe",
+          SUPERCOV_SERVER_EVIDENCE_ROOT: root,
+        },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(child.signal, "SIGKILL");
+    const directory = resolve(root, "run-kill-safe", "background");
+    const files = readdirSync(directory);
+    assert.equal(files.length, 1);
+    const records = readFileSync(resolve(directory, files[0]), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.equal(records.length, 1);
+    assert.equal(records[0].id, "kill-safe-hit");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a loopback request that loses its carrier is retained as background evidence", () => {
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-loopback-background-"));
+  try {
+    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.js")).href;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `
+          import http from "node:http";
+          const runtime = await import(${JSON.stringify(runtime)});
+          const scope = {
+            version: 1,
+            runId: "run-loopback",
+            workerId: "worker-1",
+            testId: "test-loopback",
+            testKey: "test-loopback",
+            retry: 0,
+            attemptId: "attempt-loopback",
+          };
+          let origin;
+          const handler = runtime.withRequestPhase(async (request, response) => {
+            if (request.url === "/outer") {
+              await runtime.withCoverageCarrier({ version: 1, scope }, async () => {
+                runtime.coverageHit("outer-scoped-hit");
+                await new Promise((resolve, reject) => {
+                  // Deliberately bypass fetch propagation. The nested inbound
+                  // request has headers but no Supercov carrier, matching an
+                  // interceptor or SDK that performs a raw loopback dispatch.
+                  const nested = http.request(origin + "/inner", { method: "POST" }, (result) => {
+                    result.resume();
+                    result.on("end", resolve);
+                  });
+                  nested.on("error", reject);
+                  nested.end();
+                });
+              });
+              response.end("outer");
+              return;
+            }
+            runtime.coverageHit("inner-background-hit");
+            response.end("inner");
+          });
+          const server = http.createServer(handler);
+          await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+          origin = "http://127.0.0.1:" + server.address().port;
+          await fetch(origin + "/outer");
+          await new Promise((resolve) => server.close(resolve));
+        `,
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          SUPERCOV_RUN_ID: "run-loopback",
+          SUPERCOV_SERVER_EVIDENCE_ROOT: root,
+        },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(child.status, 0, child.stderr);
+    const runDirectory = resolve(root, "run-loopback");
+    const backgroundDirectory = resolve(runDirectory, "background");
+    const background = readdirSync(backgroundDirectory).flatMap((file) =>
+      readFileSync(resolve(backgroundDirectory, file), "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line)),
+    );
+    assert.ok(background.some((record) => record.id === "inner-background-hit"));
+    const attemptsDirectory = resolve(runDirectory, "attempts");
+    const scoped = readdirSync(attemptsDirectory)
+      .filter((file) => file.endsWith(".jsonl"))
+      .flatMap((file) =>
+        readFileSync(
+          resolve(attemptsDirectory, file),
+          "utf8",
+        )
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line)),
+      );
+    assert.ok(scoped.some((record) => record.id === "outer-scoped-hit"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("instrumentation stack cleanup keeps the user's first frame", async () => {
+  const runtime = await import("../../runtime/javascript/runtime.js");
+  const error = new Error("assertion failed");
+  error.stack = [
+    "Error: assertion failed",
+    "    at Proxy.toBe (/workspace/.supercov/playwright.js:660:44)",
+    "    at Object.apply (/workspace/.supercov/nodeAssertAdapter.js:23:10)",
+    "    at load (file:///workspace/.supercov/resolve-loader.mjs:42:7)",
+    "    at withProbeV2Context (/workspace/.supercov/runtime.js:248:12)",
+    "    at tests/offline/article.spec.ts:155:9",
+    "    at userHelper (/workspace/tests/helper.ts:8:3)",
+  ].join("\n");
+  assert.equal(runtime.cleanInstrumentationStack(error), error);
+  assert.equal(
+    error.stack,
+    [
+      "Error: assertion failed",
+      "    at tests/offline/article.spec.ts:155:9",
+      "    at userHelper (/workspace/tests/helper.ts:8:3)",
+    ].join("\n"),
+  );
+});
+
+test("server evidence transport failure is explicit and fail-closed", () => {
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-transport-failure-"));
+  try {
+    const blocked = resolve(root, "not-a-directory");
+    writeFileSync(blocked, "file blocks evidence directory creation");
+    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.js")).href;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `const runtime = await import(${JSON.stringify(runtime)}); runtime.coverageHit("must-not-disappear");`,
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          SUPERCOV_RUN_ID: "run-transport-failure",
+          SUPERCOV_SERVER_EVIDENCE_ROOT: blocked,
+        },
+        encoding: "utf8",
+      },
+    );
+    assert.notEqual(child.status, 0);
+    assert.match(child.stderr, /SUPERCOV_EVIDENCE_TRANSPORT_FAILED|could not persist coverage evidence/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

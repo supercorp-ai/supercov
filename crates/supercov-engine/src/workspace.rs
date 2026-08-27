@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::lifecycle::{LifecycleError, ProjectLock, atomic_rename, remove_stored_tree_deferred};
 
 const WORKSPACE_MARKER: &str = ".supercov-workspace-store";
+const WORKSPACE_MARKER_CONTENTS: &[u8] = b"Supercov instrumented workspace. Safe to delete.\n";
 const CARGO_WORKSPACE_VERSION: u32 = 1;
 const ROOT_EXCLUSIONS: &[&str] = &[
     ".cache",
@@ -115,7 +116,23 @@ fn project_name(root: &Path) -> Result<&std::ffi::OsStr, WorkspaceError> {
 }
 
 pub fn workspace_container(root: &Path) -> PathBuf {
-    root.join(".supercov/cache")
+    let preferred = root.join("supercov");
+    if fs::symlink_metadata(&preferred).is_err() || owned_workspace_path(&preferred) {
+        return preferred;
+    }
+    let digest = format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()));
+    for sequence in 0..1_024usize {
+        let name = if sequence == 0 {
+            format!("supercov-workspace-{}", &digest[..16])
+        } else {
+            format!("supercov-workspace-{}-{sequence}", &digest[..16])
+        };
+        let candidate = root.join(name);
+        if fs::symlink_metadata(&candidate).is_err() || owned_workspace_path(&candidate) {
+            return candidate;
+        }
+    }
+    root.join(format!("supercov-workspace-{}-overflow", &digest[..16]))
 }
 
 pub fn cached_workspace_path(root: &Path) -> Result<PathBuf, WorkspaceError> {
@@ -240,52 +257,69 @@ pub fn isolated_workspace_path(root: &Path, run_id: &str) -> Result<PathBuf, Wor
         return Err(WorkspaceError::UnsafePath(PathBuf::from(run_id)));
     }
     Ok(root
-        .join(".supercov/work")
+        .join("supercov/work")
         .join(run_id)
         .join(project_name(root)?))
 }
 
-fn marker_owned(path: &Path) -> bool {
+pub(crate) fn owned_workspace_path(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
         && fs::symlink_metadata(path.join(WORKSPACE_MARKER))
             .is_ok_and(|metadata| metadata.file_type().is_file())
+        && fs::read(path.join(WORKSPACE_MARKER))
+            .is_ok_and(|contents| contents == WORKSPACE_MARKER_CONTENTS)
 }
 
 fn ensure_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
     let container = workspace_container(root);
+    let mut created = false;
     match fs::symlink_metadata(&container) {
         Ok(metadata) if !metadata.file_type().is_dir() => {
             return Err(WorkspaceError::UnsafePath(container));
         }
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir_all(&container).map_err(|source| io_error(&container, source))?;
+            fs::create_dir(&container).map_err(|source| io_error(&container, source))?;
+            created = true;
         }
         Err(source) => return Err(io_error(&container, source)),
     }
-    for (name, contents) in [
-        (".gitignore", "*\n"),
-        (
-            WORKSPACE_MARKER,
-            "Supercov instrumented workspace. Safe to delete.\n",
-        ),
-    ] {
-        let path = container.join(name);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => file
-                .write_all(contents.as_bytes())
-                .and_then(|_| file.sync_all())
-                .map_err(|source| io_error(&path, source))?,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                if !fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_file())
-                {
-                    return Err(WorkspaceError::UnsafePath(path));
-                }
-            }
-            Err(source) => return Err(io_error(&path, source)),
+    let result = (|| {
+        if !created && !owned_workspace_path(&container) {
+            return Err(WorkspaceError::UnsafePath(container.clone()));
         }
+        for (name, contents) in [
+            (".gitignore", b"*\n".as_slice()),
+            (WORKSPACE_MARKER, WORKSPACE_MARKER_CONTENTS),
+        ] {
+            let path = container.join(name);
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => file
+                    .write_all(contents)
+                    .and_then(|_| file.sync_all())
+                    .map_err(|source| io_error(&path, source))?,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    if !fs::symlink_metadata(&path)
+                        .is_ok_and(|metadata| metadata.file_type().is_file())
+                    {
+                        return Err(WorkspaceError::UnsafePath(path));
+                    }
+                    if name == WORKSPACE_MARKER
+                        && !fs::read(&path)
+                            .is_ok_and(|contents| contents == WORKSPACE_MARKER_CONTENTS)
+                    {
+                        return Err(WorkspaceError::UnsafePath(path));
+                    }
+                }
+                Err(source) => return Err(io_error(&path, source)),
+            }
+        }
+        Ok(container.clone())
+    })();
+    if result.is_err() && created {
+        let _ = fs::remove_dir_all(&container);
     }
-    Ok(container)
+    result
 }
 
 fn lexical_normalize(path: &Path) -> Option<PathBuf> {
@@ -420,7 +454,7 @@ fn copy_tree<Operations: WorkspaceOperations>(
         }
         let from = entry.path();
         let metadata = fs::symlink_metadata(&from).map_err(|error| io_error(&from, error))?;
-        if metadata.file_type().is_dir() && marker_owned(&from) {
+        if metadata.file_type().is_dir() && owned_workspace_path(&from) {
             continue;
         }
         let to = destination.join(&name);
@@ -564,6 +598,7 @@ pub fn prepare_isolated_workspace(
     lock: &ProjectLock,
 ) -> Result<PathBuf, WorkspaceError> {
     require_lock(root, lock)?;
+    ensure_container(root)?;
     let mut operations = SystemWorkspaceOperations;
     let workspace = isolated_workspace_path(root, run_id)?;
     remove_stored_tree_deferred(root, &workspace)?;
@@ -1141,6 +1176,27 @@ mod tests {
             prepare_isolated_workspace(&root, "other", &lock),
             Err(WorkspaceError::MissingLock)
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn user_supercov_directory_is_copied_and_never_adopted() {
+        let root = project();
+        fs::create_dir(root.join("supercov")).unwrap();
+        fs::write(root.join("supercov/user-module.js"), "export default 1;\n").unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+        assert_ne!(workspace_container(&root), root.join("supercov"));
+        assert_eq!(
+            fs::read_to_string(workspace.join("supercov/user-module.js")).unwrap(),
+            "export default 1;\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("supercov/user-module.js")).unwrap(),
+            "export default 1;\n"
+        );
+        assert!(!root.join("supercov").join(WORKSPACE_MARKER).exists());
+        lock.release().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

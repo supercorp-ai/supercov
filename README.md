@@ -7,6 +7,17 @@ suites.
 npx supercov -- npm test
 ```
 
+For coding agents, put the same rule in the repository instructions they read
+before running commands (for example `AGENTS.md` or `CLAUDE.md`):
+
+```md
+Measure coverage with `npx supercov -- npm test`. Prefix the project's full
+test command; do not substitute a single unit, integration, or E2E script.
+```
+
+`npx supercov --help` explains the full-command rule, and
+`npx supercov docs agent-loop` prints the bounded query workflow as Markdown.
+
 For local development before publication, a Supercov contributor can expose
 the checkout globally. Consumer repositories still remain untouched:
 
@@ -141,8 +152,9 @@ Use `--filter passed` for verified coverage from successful attempts of
 ultimately passing tests, or `--filter failed` to inspect only execution from
 failed attempts (including failed retries of flaky tests). Evidence records
 attempt status and classify each test as passed, failed, flaky, skipped, timed
-out, interrupted, or unknown. Passed and failed views are derived from the
-same immutable archive rather than duplicated into presentation files.
+out, interrupted, unknown, or selected but unstarted after fail-fast. Passed
+and failed views are derived from the same immutable archive rather than
+duplicated into presentation files.
 
 The run ID is positional because all coverage queries operate on one immutable
 run. `latest` is a convenience selector for interactive use. Every query
@@ -191,12 +203,13 @@ configuration, instrumenter, schema, and denominator fingerprints. It rewrites
 the run scope inside every evidence record, namespaces shard paths, publishes a
 new immutable run atomically, and leaves all input runs untouched. This is the
 distributed/multi-host primitive; incompatible shards fail clearly instead of
-producing a plausible but invalid aggregate.
+producing a plausible but invalid aggregate. A rejection names each exact
+domain that differs instead of presenting a generic list of possibilities.
 
 For a JavaScript or TypeScript project, the CLI:
 
 1. refreshes a stable isolated source namespace under
-   `.supercov/cache/workspace/<project>/`, links the existing
+   `supercov/workspace/<project>/`, links the existing
    dependency tree, and creates generated runner configuration and build output
    only there; file data uses copy-on-write reflinks where the filesystem
    supports them, and falls back to copying where it does not; the stable path
@@ -229,9 +242,10 @@ For a JavaScript or TypeScript project, the CLI:
    rebuilt afterward.
 
 Only the Supercov-owned `.supercov/` run store and marker-protected
-`.supercov/cache/workspace/` cache are modified in the user's checkout. A user-created
-`supercov/` directory without Supercov's ownership marker is never treated as
-storage. A per-project lock rejects overlapping runs before either can build. Run state is durably written
+`supercov/workspace/` cache are modified in the user's checkout. A user-created
+`supercov/` directory without Supercov's ownership marker remains ordinary
+project source; Supercov selects a deterministic non-dotted fallback container
+instead. A per-project lock rejects overlapping runs before either can build. Run state is durably written
 through preparing/building/testing/publishing phases; SIGINT, SIGTERM,
 and SIGHUP are forwarded to the entire child process group. If the process is
 killed without a cleanup opportunity, the next invocation marks the dead PID's

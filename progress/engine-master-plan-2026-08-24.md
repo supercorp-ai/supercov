@@ -1851,6 +1851,41 @@ miss blocks flipping any default.
   independent oracles and every remaining R1-R4 promotion gate are still
   blockers.
 
+## Checkpoint — 2026-08-27 public JavaScript field hardening
+
+- Essential SEO agent dogfood produced a consolidated B1–B9/D1–D7 field
+  report. `progress/javascript-field-hardening-2026-08-27.md` now binds every
+  in-scope finding to an implementation and executable proof; separately
+  labelled Shopify harness and application bugs remain outside Supercov.
+- The public frontend preserves class/callback identity while retaining
+  provider-neutral opaque launch interception, excludes invariant control and
+  ambient TypeScript from executable denominators, persists carrierless
+  loopback work as background evidence and fails closed on transport loss.
+- Expected failures and every outcome/kind/runner projection are exact.
+  Reviewed exceptions now support every measured obligation kind as a loud,
+  separately labelled policy layer. Branch-parent line queries reconstruct
+  status, source, tests and missing alternatives from alternative evidence.
+- Agent contact surfaces now explain full-command isolated execution, ship the
+  guides, retain filters in drill-down commands, expose per-kind and E2E gap
+  context and name the retained output workspace. The owned JavaScript
+  workspace is non-dotted and adopted only through one exact marker predicate.
+- Warnings-denied formatting/Clippy plus 19 CLI, 19 contract and 277 engine
+  tests are green locally, followed by the runtime, public runner/build,
+  opaque-launcher, four-browser syntax and macOS crash/isolation matrices.
+  Test262 preserved all 65,051 baseline-passing scenarios across 41,593 files
+  with zero semantic differences. Combined Essential SEO dogfood passed 436
+  unit and 80 E2E tests with complete measurement. The release transformer
+  measured 25.66ms median for 500 files. Hosted CI was not used.
+- B9 is closed as well: strict merge rejection now names the exact incompatible
+  fingerprint domains instead of listing every possibility.
+- This closes the field-correctness checkpoint. The independent R3 1.10x
+  promotion gate remains open: the first fair warm/warm end-to-end comparison
+  measured 110.45s plain versus 124.06s instrumented (1.123x), including about
+  0.76s of Supercov setup/publication outside the test command.
+- This is a public-frontend correctness checkpoint, not a change to the
+  current Rust-language R0–R4 critical path. Future language frontends inherit
+  these shared attribution, lifecycle and agent-query invariants.
+
 ## Non-goals and guardrails
 
 - No accidental behavior change during ports; every future language frontend

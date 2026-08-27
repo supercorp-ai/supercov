@@ -80,12 +80,34 @@ fn merged_path(path: &str, shard: usize) -> String {
     format!("shards/{shard}/{path}")
 }
 
-fn compatible(first: &StoredRun, candidate: &StoredRun) -> bool {
+fn incompatible_dimensions(first: &StoredRun, candidate: &StoredRun) -> Vec<&'static str> {
     let first = &first.metadata.integrity;
     let candidate = &candidate.metadata.integrity;
-    candidate.fingerprint.combined == first.fingerprint.combined
-        && candidate.schema_version == first.schema_version
-        && candidate.instrumenter_version == first.instrumenter_version
+    let mut dimensions = Vec::new();
+    if candidate.schema_version != first.schema_version {
+        dimensions.push("coverage schema");
+    }
+    if candidate.instrumenter_version != first.instrumenter_version
+        || candidate.fingerprint.instrumenter != first.fingerprint.instrumenter
+    {
+        dimensions.push("instrumenter");
+    }
+    if candidate.fingerprint.source != first.fingerprint.source {
+        dimensions.push("source");
+    }
+    if candidate.fingerprint.tests != first.fingerprint.tests {
+        dimensions.push("tests");
+    }
+    if candidate.fingerprint.dependencies != first.fingerprint.dependencies {
+        dimensions.push("dependencies");
+    }
+    if candidate.fingerprint.configuration != first.fingerprint.configuration {
+        dimensions.push("configuration");
+    }
+    if dimensions.is_empty() && candidate.fingerprint.combined != first.fingerprint.combined {
+        dimensions.push("integrity fingerprint");
+    }
+    dimensions
 }
 
 /// Merge two or more complete, compatible stored runs into one immutable run.
@@ -115,10 +137,12 @@ pub fn merge_coverage_runs(
         .collect::<Result<Vec<_>, _>>()?;
     let first = inputs[0];
     for input in inputs.iter().skip(1) {
-        if !compatible(first, input) {
+        let dimensions = incompatible_dimensions(first, input);
+        if !dimensions.is_empty() {
             return Err(format!(
-                "Cannot merge incompatible run {}: source, tests, dependencies, configuration, or instrumenter differ",
-                input.id
+                "Cannot merge incompatible run {}: differing domains: {}",
+                input.id,
+                dimensions.join(", ")
             ));
         }
     }
@@ -346,6 +370,34 @@ mod tests {
             ),
             Err(error) if error == "Each merged run must be unique"
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn names_every_incompatible_integrity_dimension() {
+        let root = temporary();
+        create_analyzable_test_run(&root, "run-a");
+        create_analyzable_test_run(&root, "run-b");
+        let metadata_path = root.join(".supercov/runs/run-b/run.json");
+        let mut metadata: RunMetadata =
+            serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        metadata.integrity.fingerprint.source = "1".repeat(64);
+        metadata.integrity.fingerprint.tests = "2".repeat(64);
+        metadata.integrity.fingerprint.configuration = "3".repeat(64);
+        metadata.integrity.fingerprint.combined = "4".repeat(64);
+        fs::write(&metadata_path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+
+        let error = merge_coverage_runs(
+            &root,
+            &["run-a".into(), "run-b".into()],
+            "merged",
+            "2026-01-01T00:00:00.000Z",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "Cannot merge incompatible run run-b: differing domains: source, tests, configuration"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

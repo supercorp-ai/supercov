@@ -19,6 +19,17 @@ const importedCapabilityProxies = new WeakMap();
 const importedMemberProxies = new WeakMap();
 let installed = false;
 let remoteLaunchSequence = 0;
+
+function isClassConstructor(value) {
+    if (typeof value !== "function")
+        return false;
+    try {
+        return /^class(?:\s|\{)/u.test(Function.prototype.toString.call(value));
+    }
+    catch {
+        return false;
+    }
+}
 function executionLogPath(path) {
     const shard = (process.env["SUPERCOV_EXECUTION_LOG_SHARD"] ?? "host").replace(/[^A-Za-z0-9_.-]/g, "_");
     const suffix = `.${shard}.${process.pid}.jsonl`;
@@ -275,6 +286,13 @@ function wrapImportedMember(member, receiver, invoke) {
  */
 export function wrapCapabilityCallbacks(value, mapping, depth = 0, seen = new WeakMap()) {
     if (typeof value === "function") {
+        // A class is a nominal value as well as a callable capability. Replacing
+        // it with a Proxy changes strict constructor identity in registries such
+        // as Lexical, ORMs and dependency-injection containers. Static builder
+        // methods are supervised at the export boundary; classes passed through
+        // ordinary configuration must remain the exact original value.
+        if (isClassConstructor(value))
+            return value;
         const cached = seen.get(value);
         if (cached)
             return cached;
@@ -320,6 +338,10 @@ export function wrapCapabilityCallbacks(value, mapping, depth = 0, seen = new We
 export function wrapCapabilityObject(value, mapping) {
     if ((!value || typeof value !== "object") && typeof value !== "function")
         return value;
+    if (isClassConstructor(value)) {
+        patchBuilder(value);
+        return value;
+    }
     const object = value;
     const cached = capabilityProxies.get(object);
     if (cached)
@@ -379,6 +401,10 @@ export function wrapCapabilityObject(value, mapping) {
 export function wrapImportedCapability(value) {
     if ((!value || typeof value !== "object") && typeof value !== "function")
         return value;
+    if (isClassConstructor(value)) {
+        patchBuilder(value);
+        return value;
+    }
     const object = value;
     const cached = importedCapabilityProxies.get(object);
     if (cached)
@@ -408,6 +434,10 @@ export function wrapImportedCapability(value) {
             if (fixed.fixed)
                 return fixed.value;
             const member = Reflect.get(target, property, target);
+            if (isClassConstructor(member)) {
+                patchBuilder(member);
+                return member;
+            }
             if (typeof member !== "function")
                 return wrapImportedCapability(member);
             return wrapImportedMember(member, target, invoke);

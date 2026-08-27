@@ -2,7 +2,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     io::Read,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{Command, ExitCode, Stdio},
     time::{Duration, Instant},
 };
@@ -25,7 +25,7 @@ use supercov_engine::{
         coverage_test_query, minimum_test_set_for_request,
     },
     coverage_report::{
-        ArchiveReportRequest, CoverageReportRequest, analyze_coverage_archive,
+        ArchiveReportRequest, CoverageReportRequest, ReportError, analyze_coverage_archive,
         analyze_coverage_results,
     },
     evidence_archive::{
@@ -39,8 +39,8 @@ use supercov_engine::{
     query_index::{QueryIndex, QueryIndexIdentity, write_query_index},
     run_query::{RunListData, run_list_query},
     run_store::{
-        RunInventory, RunStoreError, StoredRun, compare_run_integrity, discover_runs,
-        open_or_rebuild_query_index, select_run,
+        RunIndexError, RunInventory, RunStoreError, StoredRun, compare_run_integrity,
+        discover_runs, open_or_rebuild_query_index, select_run,
     },
 };
 use time::{OffsetDateTime, macros::format_description};
@@ -50,14 +50,86 @@ mod public_query;
 use human_query::render_human;
 use public_query::{PublicQueryInvocation, help_for, parse_public_query};
 
-const HELP: &str = "Supercov coverage engine.\n\
-\n\
-Usage:\n\
-  supercov -- <test command>\n\
-  supercov runs <run-id> [resource] [--json]\n\
-  supercov diff <older-run> <newer-run> [--json]\n\
-  supercov merge <run-id> <run-id> [...]\n\
-  supercov clean [--keep N] [--dry-run]\n";
+const HELP: &str = r#"Supercov coverage engine.
+
+Measure your FULL test command, not one suite. Supercov copies the project
+into an isolated instrumented workspace, so sandboxed and VM-gated suites run
+unchanged and every detected runner lands in one run.
+
+  npx supercov -- npm test
+  supercov -- <test command>            measure the complete command
+
+Inspect a run with small, paginated answers:
+  supercov runs latest                 newest run summary
+  supercov runs latest gaps            files with unresolved obligations
+  supercov runs latest gaps --kind e2e E2E gaps by origin
+  supercov runs latest file <path>     gap lines in one file
+  supercov runs <id> --help            every run query
+  supercov runs <run-id> [resource]    query one immutable run
+
+Compare, combine, and maintain:
+  supercov diff <older> <newer>        compare two runs
+  supercov merge <id> <id> [...]       combine compatible runs
+  supercov clean [--keep N]            remove stored runs (all by default)
+
+Guides:
+  supercov docs                        list bundled guides
+  supercov docs <topic>                print Markdown to stdout
+"#;
+
+const DOC_TOPICS: &[&str] = &[
+    "getting-started",
+    "agent-loop",
+    "cli",
+    "coverage-model",
+    "evidence",
+    "supported-suites",
+    "verification",
+    "performance",
+    "workspace-isolation",
+];
+
+fn hydrate_line_source_from_working_tree(
+    root: &Path,
+    stale: bool,
+    data: &mut supercov_engine::coverage_query::CoverageCoversData,
+) {
+    let (location, source, origin) = match data {
+        supercov_engine::coverage_query::CoverageCoversData::Line(data) => {
+            (&data.location, &mut data.source, &mut data.source_origin)
+        }
+        supercov_engine::coverage_query::CoverageCoversData::Anchors(data) => {
+            (&data.location, &mut data.source, &mut data.source_origin)
+        }
+    };
+    if source.is_some() {
+        return;
+    }
+    let relative = Path::new(&location.file);
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return;
+    }
+    let Ok(contents) = fs::read_to_string(root.join(relative)) else {
+        return;
+    };
+    let Some(line) = contents.lines().nth(location.line.saturating_sub(1)) else {
+        return;
+    };
+    *source = Some(line.into());
+    *origin = Some(
+        if stale {
+            "working-tree-stale"
+        } else {
+            "working-tree-current"
+        }
+        .into(),
+    );
+}
 
 fn is_executable_wrapper_program(argument: &OsStr) -> bool {
     if argument
@@ -189,6 +261,7 @@ fn main() -> ExitCode {
         Some("__build-rust-compiler") => build_rust_compiler(),
         Some("__run-rust-compiler") => run_rust_compiler(),
         Some("clean") => cleanup_command(arguments.collect()),
+        Some("docs") => docs_command(arguments.collect()),
         Some("runs") => public_query_command("runs", arguments.collect()),
         Some("diff") => public_query_command("diff", arguments.collect()),
         Some("merge") => merge_command(arguments.collect()),
@@ -197,6 +270,62 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn docs_command(arguments: Vec<String>) -> ExitCode {
+    if arguments
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
+    {
+        println!(
+            "Usage: supercov docs [topic]\n\nWithout a topic, lists bundled Markdown guides. With a topic, prints that guide to stdout."
+        );
+        return ExitCode::SUCCESS;
+    }
+    if arguments.len() > 1 {
+        eprintln!("[supercov] docs accepts at most one topic");
+        return ExitCode::from(2);
+    }
+    let Some(topic) = arguments.first() else {
+        println!("Bundled guides");
+        for topic in DOC_TOPICS {
+            println!("  {topic}");
+        }
+        return ExitCode::SUCCESS;
+    };
+    if !DOC_TOPICS.contains(&topic.as_str()) {
+        eprintln!("[supercov] unknown guide {topic:?}; run `supercov docs` to list topics");
+        return ExitCode::from(2);
+    }
+    let mut roots = Vec::new();
+    if let Some(root) = std::env::var_os("SUPERCOV_PACKAGE_ROOT") {
+        roots.push(PathBuf::from(root));
+    }
+    if let Ok(root) = std::env::current_dir() {
+        roots.push(root);
+    }
+    roots.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    for root in roots {
+        let path = root.join("docs").join(format!("{topic}.md"));
+        match fs::read_to_string(&path) {
+            Ok(markdown) => {
+                print!("{markdown}");
+                if !markdown.ends_with('\n') {
+                    println!();
+                }
+                return ExitCode::SUCCESS;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                eprintln!("[supercov] could not read {}: {error}", path.display());
+                return ExitCode::from(1);
+            }
+        }
+    }
+    eprintln!(
+        "[supercov] guide {topic:?} is not present in this installation; reinstall Supercov or use the repository documentation"
+    );
+    ExitCode::from(1)
 }
 
 fn rust_cargo_test_runner(arguments: Vec<OsString>) -> ExitCode {
@@ -1235,6 +1364,10 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                 "[coverage] evidence: {}",
                 result.run_directory.join("evidence.raw.gz").display()
             );
+            eprintln!(
+                "[supercov] outputs created by the wrapped command remain under {}",
+                result.workspace.display()
+            );
             if let Some(timings) = &result.metadata.timings {
                 eprintln!(
                     "[supercov] timings {}",
@@ -1411,6 +1544,66 @@ fn javascript_run(run: &StoredRun) -> bool {
         .starts_with("supercov-rust-")
 }
 
+fn selected_package_script(command: &[String]) -> Option<&str> {
+    let program = command
+        .first()
+        .and_then(|value| Path::new(value).file_stem())
+        .and_then(OsStr::to_str)?;
+    if !matches!(program, "npm" | "pnpm" | "yarn") {
+        return None;
+    }
+    match command.get(1).map(String::as_str) {
+        Some("test") => Some("test"),
+        Some("run") => command.get(2).map(String::as_str),
+        Some(value) if program != "npm" && !value.starts_with('-') => Some(value),
+        _ => None,
+    }
+}
+
+fn full_suite_hints(root: &Path, command: &[String], observed_kinds: &[String]) -> Vec<String> {
+    if observed_kinds.len() != 1 {
+        return Vec::new();
+    }
+    let Ok(raw) = fs::read_to_string(root.join("package.json")) else {
+        return Vec::new();
+    };
+    let Ok(package) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Vec::new();
+    };
+    let Some(scripts) = package
+        .get("scripts")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Vec::new();
+    };
+    if !scripts.contains_key("test") {
+        return Vec::new();
+    }
+    let selected = selected_package_script(command);
+    if selected == Some("test") {
+        return Vec::new();
+    }
+    let alternatives = scripts
+        .keys()
+        .filter(|name| name.starts_with("test:") && Some(name.as_str()) != selected)
+        .take(4)
+        .cloned()
+        .collect::<Vec<_>>();
+    if selected.is_none() && alternatives.is_empty() {
+        return Vec::new();
+    }
+    let suites = if alternatives.is_empty() {
+        String::new()
+    } else {
+        format!(" Other test scripts include {}.", alternatives.join(", "))
+    };
+    vec![format!(
+        "This run observed only the `{}` test kind and wrapped `{}`.{suites} For whole-project coverage, measure the package's full test command: `npx supercov -- npm test`.",
+        observed_kinds[0],
+        command.join(" ")
+    )]
+}
+
 enum PublicQueryOutput {
     Runs {
         data: RunListData,
@@ -1497,6 +1690,7 @@ fn execute_public_query(
             request
                 .valid
                 .get_or_insert(run.metadata.test_exit_code == Some(0));
+            request.test_exit_code = run.metadata.test_exit_code;
             let current = current_integrity_for_run(root, run);
             let mut warnings = Vec::new();
             if let Some(current) = current.as_ref() {
@@ -1515,7 +1709,20 @@ fn execute_public_query(
             }
             let result = (|| -> Result<IndexedQueryOutput, agent_json::AgentError> {
                 let container = open_or_rebuild_query_index(run).map_err(|error| {
-                    internal_agent_error(format!("Failed to open coverage index: {error}"))
+                    let message = if matches!(
+                        error,
+                        RunIndexError::Report(ReportError::NoEvidence(_))
+                    ) {
+                        match run.metadata.test_exit_code {
+                            Some(code) => format!(
+                                "The wrapped command exited {code} before publishing queryable coverage evidence. Inspect that command's original output and rerun after it passes."
+                            ),
+                            None => "The wrapped command ended without an exit status or queryable coverage evidence. Inspect that command's original output and rerun.".into(),
+                        }
+                    } else {
+                        format!("Failed to open coverage index: {error}")
+                    };
+                    internal_agent_error(message)
                 })?;
                 let index = CoverageIndex::new(&container).map_err(|error| {
                     internal_agent_error(format!("Failed to read coverage index: {error}"))
@@ -1532,20 +1739,18 @@ fn execute_public_query(
                     None
                 };
                 let waiver_evaluation = if let Some(source) = waiver_source.as_ref() {
-                    let decisions = supercov_engine::coverage_query::filtered_decisions(
-                        &index,
-                        request.view().map_err(|error| error.agent_error())?,
-                        request.kind.as_deref(),
-                        request.runner.as_deref(),
-                    )
-                    .map_err(|error| {
-                        supercov_engine::indexed_query::IndexedQueryError::Query(error)
-                            .agent_error()
-                    })?;
                     Some(
-                        supercov_engine::coverage_waivers::evaluate_coverage_waivers(
-                            &decisions, source,
-                        ),
+                        supercov_engine::coverage_query::evaluate_indexed_coverage_waivers(
+                            &index,
+                            request.view().map_err(|error| error.agent_error())?,
+                            request.kind.as_deref(),
+                            request.runner.as_deref(),
+                            source,
+                        )
+                        .map_err(|error| {
+                            supercov_engine::indexed_query::IndexedQueryError::Query(error)
+                                .agent_error()
+                        })?,
                     )
                 } else {
                     None
@@ -1606,9 +1811,35 @@ fn execute_public_query(
                 .map_err(|error| error.agent_error())
             })();
             result
-                .map(|output| PublicQueryOutput::Coverage {
-                    output,
-                    warnings: warnings.clone(),
+                .map(|mut output| {
+                    if let supercov_engine::indexed_query::IndexedQueryData::Line(data) =
+                        &mut output.data
+                    {
+                        hydrate_line_source_from_working_tree(
+                            root,
+                            request.stale.unwrap_or(false),
+                            data,
+                        );
+                    }
+                    if let supercov_engine::indexed_query::IndexedQueryData::Summary(data) =
+                        &mut output.data
+                    {
+                        data.command.clone_from(&run.metadata.command);
+                        let observed_kinds = data
+                            .coverage_by_kind
+                            .iter()
+                            .filter_map(|entry| entry.kind.clone())
+                            .collect::<Vec<_>>();
+                        data.hints = full_suite_hints(root, &run.metadata.command, &observed_kinds);
+                        data.workspace = supercov_engine::workspace::cached_workspace_path(root)
+                            .ok()
+                            .filter(|path| path.is_dir())
+                            .map(|path| path.display().to_string());
+                    }
+                    PublicQueryOutput::Coverage {
+                        output,
+                        warnings: warnings.clone(),
+                    }
                 })
                 .map_err(|error| PublicQueryExecutionError {
                     error: Box::new(error),
@@ -2062,14 +2293,16 @@ fn query_stored_run() -> ExitCode {
         let waiver_source = supercov_engine::coverage_waivers::read_coverage_waivers(&request.root)
             .map_err(|error| error.to_string())?;
         let waiver_evaluation = if let Some(source) = waiver_source.as_ref() {
-            let decisions = supercov_engine::coverage_query::filtered_decisions(
-                &index,
-                request.query.view().map_err(|error| error.to_string())?,
-                request.query.kind.as_deref(),
-                request.query.runner.as_deref(),
+            Some(
+                supercov_engine::coverage_query::evaluate_indexed_coverage_waivers(
+                    &index,
+                    request.query.view().map_err(|error| error.to_string())?,
+                    request.query.kind.as_deref(),
+                    request.query.runner.as_deref(),
+                    source,
+                )
+                .map_err(|error| format!("{error:?}"))?,
             )
-            .map_err(|error| format!("{error:?}"))?;
-            Some(supercov_engine::coverage_waivers::evaluate_coverage_waivers(&decisions, source))
         } else {
             None
         };
@@ -2391,6 +2624,7 @@ fn query_index_files() -> ExitCode {
                     kind: request.kind.as_deref(),
                     runner: request.runner.as_deref(),
                     valid: request.valid.unwrap_or(false),
+                    test_exit_code: None,
                     stale: request.stale.unwrap_or(false),
                     stale_reasons: request.stale_reasons.clone().unwrap_or_default(),
                 },
@@ -3004,6 +3238,34 @@ mod tests {
     #[test]
     fn shell_reports_the_public_engine() {
         assert!(HELP.contains("Supercov coverage engine"));
+        assert!(HELP.contains("FULL test command"));
+        assert!(HELP.contains("npx supercov -- npm test"));
+        assert!(HELP.contains("supercov docs"));
+    }
+
+    #[test]
+    fn suite_slice_hint_points_to_the_existing_full_package_command() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-suite-hint-{}-{}",
+            std::process::id(),
+            OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{"scripts":{"test":"npm run test:unit && npm run test:e2e","test:unit":"vitest run","test:e2e":"playwright test"}}"#,
+        )
+        .unwrap();
+        let hints = full_suite_hints(
+            &root,
+            &["npm".into(), "run".into(), "test:unit".into()],
+            &["unit".into()],
+        );
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(hints.len(), 1);
+        assert!(hints[0].contains("only the `unit` test kind"));
+        assert!(hints[0].contains("test:e2e"));
+        assert!(hints[0].contains("npx supercov -- npm test"));
     }
 
     #[test]

@@ -13,9 +13,9 @@ use crate::{
     coverage_analysis::{CoverageSummary, is_independence_pair},
     coverage_index::{
         CoverageDimension, CoverageIndex, CoverageIndexError, CoverageViewId, IndexedCoverageModel,
-        IndexedDecisionGap, IndexedDimensionCoverage, IndexedFileGap, IndexedHitMetadata,
-        IndexedMeasurement, IndexedOutcomeCounts, IndexedScopeEntry, IndexedSourceScope,
-        IndexedSummaryConfidence, IndexedTestSummary,
+        IndexedDecisionGap, IndexedDimensionCoverage, IndexedFileGap, IndexedGapDimensions,
+        IndexedHitMetadata, IndexedMeasurement, IndexedOutcomeCounts, IndexedScopeEntry,
+        IndexedSourceScope, IndexedSummaryConfidence, IndexedTestSummary,
     },
     coverage_report::{
         CoverageConfidence, CoverageReportRequest, CoverageView, DecisionMeta, ReportError,
@@ -316,10 +316,18 @@ pub struct CoverageDiagnostic {
 #[serde(rename_all = "camelCase")]
 pub struct CoverageSummaryData {
     pub run: String,
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
     pub filters: CoverageQueryFilters,
     pub model: IndexedCoverageModel,
     pub generated_at: String,
     pub valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_exit_code: Option<i32>,
     pub stale: bool,
     pub stale_reasons: Vec<String>,
     pub structurally_complete: bool,
@@ -329,6 +337,8 @@ pub struct CoverageSummaryData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waivers: Option<crate::coverage_waivers::CoverageWaiverSummary>,
     pub coverage_by_kind: Vec<IndexedDimensionCoverage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub e2e_gap_context: Option<CoverageKindGapContext>,
     pub coverage_by_runner: Vec<IndexedDimensionCoverage>,
     pub attribution: crate::coverage_index::IndexedAttribution,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -346,6 +356,15 @@ pub struct CoverageSummaryData {
     pub source_scope: Option<IndexedSourceScope>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoverageKindGapContext {
+    pub kind: String,
+    pub other_kinds: Vec<String>,
+    pub covered_elsewhere: IndexedGapDimensions,
+    pub uncovered_everywhere: IndexedGapDimensions,
+}
+
 #[derive(Debug, Clone)]
 pub struct CoverageSummaryQueryOptions<'a> {
     pub run: &'a str,
@@ -353,6 +372,7 @@ pub struct CoverageSummaryQueryOptions<'a> {
     pub kind: Option<&'a str>,
     pub runner: Option<&'a str>,
     pub valid: bool,
+    pub test_exit_code: Option<i32>,
     pub stale: bool,
     pub stale_reasons: Vec<String>,
 }
@@ -448,6 +468,8 @@ pub struct CoverageCoversLineData {
     pub location: CoverageLocation,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_origin: Option<String>,
     pub covered: bool,
     pub confidence: CoverageConfidence,
     pub total_tests: usize,
@@ -471,6 +493,8 @@ pub struct CoverageCoversAnchorsData {
     pub location: CoverageLocation,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_origin: Option<String>,
     pub line_obligation: bool,
     pub anchored: Vec<CoverageAnchor>,
     pub total_anchored: usize,
@@ -574,12 +598,24 @@ pub fn coverage_covers_query(
         .iter()
         .map(|test| (test.id.clone(), test.clone()))
         .collect::<HashMap<_, _>>();
-    let all_anchor_tests = anchors
+    let mut anchor_test_ids = anchors
         .iter()
         .flat_map(|anchor| anchor.tests.iter())
         .filter(|id| selected_includes(id))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for anchor in anchors.iter().filter(|anchor| anchor.kind == "branch") {
+        anchor_test_ids.extend(
+            metadata
+                .values()
+                .filter(|detail| detail.parent_id.as_deref() == Some(anchor.id.as_str()))
+                .flat_map(|detail| detail.tests.iter())
+                .filter(|id| selected_includes(id))
+                .cloned(),
+        );
+    }
+    let all_anchor_tests = anchor_test_ids
+        .iter()
         .map(|id| {
             let test = tests_by_id.get(id);
             CoverageCoveringTest {
@@ -598,11 +634,32 @@ pub fn coverage_covers_query(
         .cloned()
         .collect::<Vec<_>>();
     let render_anchor = |anchor: crate::coverage_index::IndexedAnchor| {
-        let covering_tests = anchor
-            .tests
+        let branch_alternatives = if anchor.kind == "branch" {
+            metadata
+                .values()
+                .filter(|detail| {
+                    detail.obligation == "branch"
+                        && detail.parent_id.as_deref() == Some(anchor.id.as_str())
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let branch_tests = branch_alternatives
             .iter()
+            .flat_map(|detail| detail.tests.iter())
             .filter(|test| selected_includes(test))
-            .count();
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let covering_tests = if anchor.kind == "branch" {
+            branch_tests.len()
+        } else {
+            anchor
+                .tests
+                .iter()
+                .filter(|test| selected_includes(test))
+                .count()
+        };
         let detail = metadata.get(&anchor.id);
         let decision = decisions
             .get(&anchor.id)
@@ -622,11 +679,22 @@ pub fn coverage_covers_query(
                         .count(),
                 )
             });
-        let covered = if anchor.kind == "decision" {
-            conditions == covered_conditions
-        } else {
-            covering_tests > 0
+        let covered = match anchor.kind.as_str() {
+            "decision" => conditions == covered_conditions,
+            "branch" if !branch_alternatives.is_empty() => branch_alternatives
+                .iter()
+                .all(|detail| detail.tests.iter().any(|test| selected_includes(test))),
+            "branch" => anchor.covered,
+            _ => covering_tests > 0,
         };
+        let branch_source = branch_alternatives
+            .first()
+            .map(|detail| detail.source.clone());
+        let missing_branch_alternatives = branch_alternatives
+            .iter()
+            .filter(|detail| !detail.tests.iter().any(|test| selected_includes(test)))
+            .filter_map(|detail| detail.alternative.clone())
+            .collect::<Vec<_>>();
         CoverageAnchor {
             kind: anchor.kind,
             id: anchor.id,
@@ -635,6 +703,7 @@ pub fn coverage_covers_query(
             source: decision
                 .as_ref()
                 .map(|decision| decision.meta.source.clone())
+                .or(branch_source)
                 .or_else(|| {
                     detail.map(|detail| {
                         detail
@@ -644,7 +713,11 @@ pub fn coverage_covers_query(
                     })
                 })
                 .and_then(|source| compact_source(&source)),
-            missing: detail.and_then(|detail| detail.alternative.clone()),
+            missing: if missing_branch_alternatives.is_empty() {
+                detail.and_then(|detail| detail.alternative.clone())
+            } else {
+                Some(missing_branch_alternatives.join("; "))
+            },
             covering_tests,
             covered_conditions,
             conditions,
@@ -696,7 +769,20 @@ pub fn coverage_covers_query(
         .gap_lines
         .into_iter()
         .find(|gap| gap.line == options.line);
-    let source = gap_line.as_ref().and_then(|gap| gap.source.clone());
+    // Covered lines are absent from the gap projection, but their anchored
+    // statement/branch/decision metadata still carries the source snippet.
+    // Prefer the exact gap-line text when present and otherwise retain that
+    // anchored source so a successful line query never contradicts itself by
+    // claiming the source is unavailable while printing it below.
+    let source = gap_line
+        .as_ref()
+        .and_then(|gap| gap.source.clone())
+        .or_else(|| {
+            rendered_anchors
+                .iter()
+                .filter_map(|anchor| anchor.source.clone())
+                .min_by_key(|source| source.len())
+        });
     let all_remaining = gap_line.map_or_else(Vec::new, |gap| gap.obligations);
     let total_remaining = all_remaining.len();
     let remaining_page = all_remaining
@@ -725,6 +811,7 @@ pub fn coverage_covers_query(
                 filters,
                 location,
                 source,
+                source_origin: None,
                 line_obligation: false,
                 anchored,
                 total_anchored,
@@ -808,6 +895,7 @@ pub fn coverage_covers_query(
             filters,
             location,
             source,
+            source_origin: None,
             covered: line.tests.iter().any(|test| selected_includes(test)),
             confidence: line.confidence,
             total_tests: all_tests.len(),
@@ -1305,6 +1393,59 @@ pub fn filtered_decisions(
         .collect()
 }
 
+/// Evaluate project policy against the exact query projection. This keeps the
+/// immutable measured index authoritative while allowing a separately named,
+/// reviewed-policy view for obligations proven unreachable by the project.
+pub fn evaluate_indexed_coverage_waivers(
+    index: &CoverageIndex<'_>,
+    view: CoverageViewId,
+    kind: Option<&str>,
+    runner: Option<&str>,
+    source: &crate::coverage_waivers::CoverageWaiverSource,
+) -> Result<crate::coverage_waivers::CoverageWaiverEvaluation, QueryError> {
+    let tests = index.test_summaries(view)?;
+    let selected = selected_test_ids(&tests, kind, runner)?;
+    let selected_includes = |tests: &[String]| {
+        selected.as_ref().map_or(!tests.is_empty(), |selected| {
+            tests.iter().any(|test| selected.contains(test))
+        })
+    };
+    let decisions = index
+        .decision_details(view)?
+        .into_iter()
+        .map(|decision| selected_decision(decision, selected.as_ref()))
+        .collect::<Vec<_>>();
+    let mut evaluation = crate::coverage_waivers::evaluate_coverage_waivers(&decisions, source);
+    let mut obligations = index
+        .lines(view)?
+        .into_iter()
+        .map(|line| crate::coverage_waivers::CoverageWaiverObligation {
+            id: format!("line:{}:{}", line.file, line.line),
+            kind: "line".into(),
+            file: line.file,
+            line: line.line,
+            column: 0,
+            source: String::new(),
+            alternative: None,
+            covered: selected_includes(&line.tests),
+        })
+        .collect::<Vec<_>>();
+    obligations.extend(index.hit_metadata(view)?.into_iter().map(|hit| {
+        crate::coverage_waivers::CoverageWaiverObligation {
+            id: hit.id,
+            kind: hit.obligation,
+            file: hit.file,
+            line: hit.line,
+            column: hit.column,
+            source: hit.label.unwrap_or(hit.source),
+            alternative: hit.alternative,
+            covered: selected_includes(&hit.tests),
+        }
+    }));
+    crate::coverage_waivers::evaluate_obligation_waivers(&mut evaluation, &obligations);
+    Ok(evaluation)
+}
+
 pub fn coverage_decision_query(
     index: &CoverageIndex<'_>,
     options: CoverageDecisionQueryOptions<'_>,
@@ -1449,7 +1590,12 @@ pub struct CoverageOtherCoverage {
 #[serde(rename_all = "camelCase")]
 pub struct CoverageLineObligation {
     pub kind: String,
+    pub id: String,
     pub line: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waived: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiver_reason: Option<String>,
     pub other_coverage: CoverageOtherCoverage,
 }
 
@@ -1457,9 +1603,14 @@ pub struct CoverageLineObligation {
 #[serde(rename_all = "camelCase")]
 pub struct CoveragePointObligation {
     pub kind: String,
+    pub id: String,
     pub line: usize,
     pub column: usize,
     pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waived: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiver_reason: Option<String>,
     pub other_coverage: CoverageOtherCoverage,
 }
 
@@ -1467,10 +1618,15 @@ pub struct CoveragePointObligation {
 #[serde(rename_all = "camelCase")]
 pub struct CoverageBranchObligation {
     pub kind: String,
+    pub id: String,
     pub line: usize,
     pub column: usize,
     pub source: String,
     pub missing: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waived: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiver_reason: Option<String>,
     pub other_coverage: CoverageOtherCoverage,
 }
 
@@ -1551,6 +1707,7 @@ pub struct CoverageFileCounts {
     pub missing_branches: usize,
     pub missing_mcdc_conditions: usize,
     pub waived_mcdc_conditions: usize,
+    pub waived_obligations: usize,
     pub measurement_limitations: usize,
 }
 
@@ -1734,7 +1891,10 @@ pub fn coverage_file_detail_query(
         .map(|line| {
             CoverageFileObligation::Line(CoverageLineObligation {
                 kind: "line".into(),
+                id: format!("line:{}:{}", line.file, line.line),
                 line: line.line,
+                waived: None,
+                waiver_reason: None,
                 other_coverage: other_coverage(&line.tests, selected.as_ref(), &tests_by_id),
             })
         })
@@ -1750,9 +1910,12 @@ pub fn coverage_file_detail_query(
         .map(|point| {
             CoverageFileObligation::Point(CoveragePointObligation {
                 kind: "statement".into(),
+                id: point.id.clone(),
                 line: point.line,
                 column: point.column,
                 source: point.label.clone().unwrap_or_else(|| point.source.clone()),
+                waived: None,
+                waiver_reason: None,
                 other_coverage: other_coverage(&point.tests, selected.as_ref(), &tests_by_id),
             })
         })
@@ -1765,9 +1928,12 @@ pub fn coverage_file_detail_query(
         .map(|point| {
             CoverageFileObligation::Point(CoveragePointObligation {
                 kind: "function".into(),
+                id: point.id.clone(),
                 line: point.line,
                 column: point.column,
                 source: point.label.clone().unwrap_or_else(|| point.source.clone()),
+                waived: None,
+                waiver_reason: None,
                 other_coverage: other_coverage(&point.tests, selected.as_ref(), &tests_by_id),
             })
         })
@@ -1782,10 +1948,13 @@ pub fn coverage_file_detail_query(
         .map(|branch| {
             CoverageFileObligation::Branch(CoverageBranchObligation {
                 kind: "branch".into(),
+                id: branch.id.clone(),
                 line: branch.line,
                 column: branch.column,
                 source: branch.source.clone(),
                 missing: branch.alternative.clone().unwrap_or_default(),
+                waived: None,
+                waiver_reason: None,
                 other_coverage: other_coverage(&branch.tests, selected.as_ref(), &tests_by_id),
             })
         })
@@ -1937,6 +2106,7 @@ pub fn coverage_file_detail_query(
                 missing_branches: branches.len(),
                 missing_mcdc_conditions: mcdc.len(),
                 waived_mcdc_conditions: 0,
+                waived_obligations: 0,
                 measurement_limitations: total_limitations,
             },
             total_tests,
@@ -2260,6 +2430,7 @@ pub fn coverage_summary_query(
 ) -> Result<CoverageSummaryData, QueryError> {
     let projection = index.projection(options.view, options.kind, options.runner)?;
     let mut diagnostics = Vec::new();
+    let mut transport_blockers = 0usize;
     if projection.empty_evidence_tests > 0 {
         diagnostics.push(CoverageDiagnostic {
             code: "TEST_EVIDENCE_MISSING".into(),
@@ -2273,6 +2444,7 @@ pub fn coverage_summary_query(
     }
     if let Some(transport) = &projection.transport {
         if transport.corrupt_records > 0 {
+            transport_blockers += 1;
             diagnostics.push(CoverageDiagnostic {
                 code: "CORRUPT_EVIDENCE_RECORDS".into(),
                 severity: "error".into(),
@@ -2284,18 +2456,63 @@ pub fn coverage_summary_query(
         }
         if transport.remote_launches > 0
             && transport.scoped_server_records == 0
+            && transport.background_server_records == 0
             && projection.attribution.server_explicit == 0
             && projection.attribution.server_fallback == 0
         {
+            transport_blockers += 1;
             diagnostics.push(CoverageDiagnostic {
                 code: "REMOTE_SERVER_EVIDENCE_MISSING".into(),
-                severity: "warning".into(),
-                message: "Remote launches were supervised, but no server evidence returned. Coverage may describe only browser/test processes; inspect how the application server is launched.".into(),
+                severity: "error".into(),
+                message: "Remote launches were supervised, but neither scoped nor background server evidence returned. Supercov refuses to describe this measurement as complete.".into(),
             });
         }
     }
     let coverage_by_kind = index.dimensions(options.view, CoverageDimension::Kind)?;
     let coverage_by_runner = index.dimensions(options.view, CoverageDimension::Runner)?;
+    let other_e2e_kinds = coverage_by_kind
+        .iter()
+        .filter(|dimension| dimension.tests > 0)
+        .filter_map(|dimension| dimension.kind.clone())
+        .filter(|kind| kind != "e2e")
+        .collect::<Vec<_>>();
+    let e2e_observed = coverage_by_kind
+        .iter()
+        .any(|dimension| dimension.tests > 0 && dimension.kind.as_deref() == Some("e2e"));
+    let e2e_gap_context = if options.kind.is_none()
+        && options.runner.is_none()
+        && e2e_observed
+        && !other_e2e_kinds.is_empty()
+    {
+        let mut covered_elsewhere = IndexedGapDimensions {
+            lines: 0,
+            statements: 0,
+            functions: 0,
+            branches: 0,
+            mcdc_conditions: 0,
+        };
+        let mut uncovered_everywhere = covered_elsewhere.clone();
+        for gap in index.file_gaps(options.view, Some("e2e"), None)? {
+            covered_elsewhere.lines += gap.covered_by_other_tests.lines;
+            covered_elsewhere.statements += gap.covered_by_other_tests.statements;
+            covered_elsewhere.functions += gap.covered_by_other_tests.functions;
+            covered_elsewhere.branches += gap.covered_by_other_tests.branches;
+            covered_elsewhere.mcdc_conditions += gap.covered_by_other_tests.mcdc_conditions;
+            uncovered_everywhere.lines += gap.uncovered_everywhere.lines;
+            uncovered_everywhere.statements += gap.uncovered_everywhere.statements;
+            uncovered_everywhere.functions += gap.uncovered_everywhere.functions;
+            uncovered_everywhere.branches += gap.uncovered_everywhere.branches;
+            uncovered_everywhere.mcdc_conditions += gap.uncovered_everywhere.mcdc_conditions;
+        }
+        Some(CoverageKindGapContext {
+            kind: "e2e".into(),
+            other_kinds: other_e2e_kinds,
+            covered_elsewhere,
+            uncovered_everywhere,
+        })
+    } else {
+        None
+    };
     let filters = CoverageQueryFilters {
         outcome: match options.view {
             CoverageViewId::All => "all",
@@ -2306,26 +2523,36 @@ pub fn coverage_summary_query(
         kind: options.kind.map(str::to_owned),
         runner: options.runner.map(str::to_owned),
     };
-    let structurally_complete =
-        projection.summary.coverage_complete && projection.measurement.complete;
+    let mut measurement = projection.measurement.clone();
+    if transport_blockers > 0 {
+        measurement.complete = false;
+        measurement.limitations = measurement.limitations.saturating_add(transport_blockers);
+        measurement.blocking = measurement.blocking.saturating_add(transport_blockers);
+    }
+    let structurally_complete = projection.summary.coverage_complete && measurement.complete;
     let complete = options.view == CoverageViewId::Passed
         && options.valid
         && !options.stale
         && structurally_complete;
     Ok(CoverageSummaryData {
         run: options.run.into(),
+        command: Vec::new(),
+        hints: Vec::new(),
+        workspace: None,
         filters,
         model: index.model()?,
         generated_at: projection.generated_at,
         valid: options.valid,
+        test_exit_code: options.test_exit_code,
         stale: options.stale,
         stale_reasons: options.stale_reasons,
         structurally_complete,
         complete,
         coverage: projection.summary,
-        measurement: projection.measurement.clone(),
+        measurement,
         waivers: None,
         coverage_by_kind,
+        e2e_gap_context,
         coverage_by_runner,
         attribution: projection.attribution,
         transport: projection.transport,
@@ -3109,6 +3336,7 @@ mod tests {
             },
             score: 0,
             waived_mcdc_conditions: None,
+            waived_obligations: None,
         };
         assert!(has_gap_for_metric(&gap, MinimizeMetric::All));
         assert!(has_gap_for_metric(&gap, MinimizeMetric::Statements));

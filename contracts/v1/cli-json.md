@@ -17,11 +17,16 @@ supercov runs <run-id> test <id|name> [selectors]
 supercov runs <run-id> minimize [selectors]
 supercov diff <older-run> <newer-run> [--json]
 supercov merge <run-id> <run-id> [...]
-supercov prune|clean [--keep N] [--dry-run]
+supercov clean [--keep N] [--dry-run]
 ```
 
 `latest` resolves to the newest published run. Paginated resources default to
 20 items and accept non-negative `--offset` plus positive `--limit`.
+
+Outcome summaries contain `passed`, `failed`, `flaky`, `skipped`, `timedOut`,
+`interrupted`, `unknown`, and `unstarted`. The last category is a selected test
+that never began because fail-fast stopped the runner; it has no invented
+attempt or coverage evidence.
 
 `--json` writes exactly one newline-terminated JSON object to stdout and no
 prose. Success is:

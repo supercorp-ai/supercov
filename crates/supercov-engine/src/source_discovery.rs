@@ -211,8 +211,7 @@ fn generated_directory(name: &str) -> bool {
 }
 
 fn owned_workspace_store(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| name == "supercov")
-        && path.join(".supercov-workspace-store").is_file()
+    crate::workspace::owned_workspace_path(path)
 }
 
 fn source_file(name: &str) -> bool {
@@ -837,7 +836,11 @@ mod tests {
             entry(&before, "supercov/user.ts").status,
             SourceScopeStatus::Ambiguous
         );
-        fs::write(root.join("supercov/.supercov-workspace-store"), "owned").unwrap();
+        fs::write(
+            root.join("supercov/.supercov-workspace-store"),
+            b"Supercov instrumented workspace. Safe to delete.\n",
+        )
+        .unwrap();
         let after = discover_source_scope(&root, None).unwrap();
         assert!(
             after

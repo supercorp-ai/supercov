@@ -107,9 +107,15 @@ try {
   const before = snapshot(root);
   const workspace = resolve(
     root,
-    ".supercov/cache/workspace",
+    "supercov/workspace",
     basename(root),
   );
+  mkdirSync(resolve(root, "supercov"));
+  writeFileSync(
+    resolve(root, "supercov/.supercov-workspace-store"),
+    "Supercov instrumented workspace. Safe to delete.\n",
+  );
+  writeFileSync(resolve(root, "supercov/.gitignore"), "*\n");
   const cacheParent = resolve(workspace, "..");
   const stagingPrefix = `.${basename(root)}.staging-`;
   mkdirSync(workspace, { recursive: true });

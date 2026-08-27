@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { resolveNativeBinary } from "./native.js";
 
 let rustBinary;
@@ -15,9 +17,16 @@ const child = spawn(
   process.argv.slice(2),
   {
     stdio: "inherit",
-    env: process.env,
+    env: {
+      ...process.env,
+      SUPERCOV_PACKAGE_ROOT: resolvePackageRoot(),
+    },
   },
 );
+
+function resolvePackageRoot() {
+  return dirname(dirname(fileURLToPath(import.meta.url)));
+}
 
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.once(signal, () => {

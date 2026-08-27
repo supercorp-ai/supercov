@@ -666,7 +666,7 @@ function wrapMatchers(matchers, path = "expect") {
                         }, (error) => {
                             if (phase && controller)
                                 controller.finish(phase, error);
-                            throw error;
+                            throw coverageRuntime.cleanInstrumentationStack(error);
                         });
                     }
                     if (phase && controller)
@@ -676,7 +676,7 @@ function wrapMatchers(matchers, path = "expect") {
                 catch (error) {
                     if (phase && controller)
                         controller.finish(phase, error);
-                    throw error;
+                    throw coverageRuntime.cleanInstrumentationStack(error);
                 }
             };
         },

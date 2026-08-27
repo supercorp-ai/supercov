@@ -236,8 +236,7 @@ fn skipped_directory(name: &str) -> bool {
 }
 
 fn owned_workspace_store(path: &Path) -> bool {
-    path.file_name().is_some_and(|name| name == "supercov")
-        && path.join(".supercov-workspace-store").is_file()
+    crate::workspace::owned_workspace_path(path)
 }
 
 fn walk_files(
@@ -635,7 +634,11 @@ mod tests {
         write(&root, "tests/index.test.ts", "test('ready', () => {})");
         write(&root, "vite.config.ts", "export default {}");
         write(&root, ".cache/test262/fake.test.js", "ignored");
-        write(&root, "supercov/.supercov-workspace-store", "owned");
+        write(
+            &root,
+            "supercov/.supercov-workspace-store",
+            "Supercov instrumented workspace. Safe to delete.\n",
+        );
         write(
             &root,
             "supercov/workspace/copy/tests/copied.test.ts",

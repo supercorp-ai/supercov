@@ -111,9 +111,15 @@ async function verifyUncatchableCacheRecovery() {
     const projectBefore = snapshot(crashRoot);
     const expectedCache = resolve(
       crashRoot,
-      ".supercov/cache/workspace",
+      "supercov/workspace",
       basename(crashRoot),
     );
+    mkdirSync(resolve(crashRoot, "supercov"));
+    writeFileSync(
+      resolve(crashRoot, "supercov/.supercov-workspace-store"),
+      "Supercov instrumented workspace. Safe to delete.\n",
+    );
+    writeFileSync(resolve(crashRoot, "supercov/.gitignore"), "*\n");
     const cacheParent = resolve(expectedCache, "..");
     const stagingPrefix = `.${basename(crashRoot)}.staging-`;
     mkdirSync(expectedCache, { recursive: true });
@@ -299,7 +305,7 @@ const workRoot = resolve(root, ".supercov/work");
 const runsBefore = new Set(existsSync(workRoot) ? readdirSync(workRoot) : []);
 const expectedCache = resolve(
   root,
-  ".supercov/cache/workspace/generic-playwright",
+  "supercov/workspace/generic-playwright",
 );
 
 const child = spawn(

@@ -48,10 +48,36 @@ try {
   cpSync(resolve(fixture, 'tests'), resolve(project, 'tests'), { recursive: true });
   mkdirSync(resolve(project, 'node_modules'));
   symlinkSync(resolve(repository, 'node_modules/expect'), resolve(project, 'node_modules/expect'));
+  const permissionSource = resolve(project, 'src/permission.mjs');
+  const authoredPermissionSource = `${readFileSync(permissionSource, 'utf8')}\nexport function choose(value = 'fallback') {\n  return value;\n}\n\nif (false) {\n  throw new Error('syntactically unreachable fixture');\n}\n`;
+  writeFileSync(permissionSource, authoredPermissionSource);
+  const permissionTest = resolve(project, 'tests/permission.test.mjs');
+  writeFileSync(
+    permissionTest,
+    readFileSync(permissionTest, 'utf8')
+      .replace('{ permission }', '{ permission, choose }')
+      .replace(
+        'assert.equal(permission(true, false), "allowed");',
+        'assert.equal(permission(true, false), "allowed");\n  assert.equal(choose(), "fallback");\n  assert.equal(choose("explicit"), "explicit");',
+      ),
+  );
+  const chooseLine = authoredPermissionSource
+    .slice(0, authoredPermissionSource.indexOf('export function choose'))
+    .split('\n').length;
+  const unreachableLine = authoredPermissionSource
+    .slice(0, authoredPermissionSource.indexOf("throw new Error('syntactically unreachable fixture')"))
+    .split('\n').length;
 
   const missing = run(['--']);
   assert.equal(missing.status, 2);
   assert.equal(missing.stderr, 'Usage: supercov -- <test command>\n');
+  const help = run(['--help']);
+  assert.equal(help.status, 0, help.stderr);
+  assert.match(help.stdout, /Measure your FULL test command/u);
+  assert.match(help.stdout, /npx supercov -- npm test/u);
+  const agentGuide = run(['docs', 'agent-loop']);
+  assert.equal(agentGuide.status, 0, agentGuide.stderr);
+  assert.match(agentGuide.stdout, /# Agent loop/u);
 
   const successful = run(['--', process.execPath, '--test', '--test-concurrency=2']);
   assert.equal(successful.status, 0, successful.stderr || successful.stdout);
@@ -65,6 +91,10 @@ try {
   assert.match(successful.stderr, /\[supercov\] running in isolated workspace: .* --test/);
   assert.match(
     successful.stderr,
+    /\[supercov\] outputs created by the wrapped command remain under .*\/supercov\/workspace\/project/,
+  );
+  assert.match(
+    successful.stderr,
     /\[supercov\] timings initialization=\d+(?:\.\d)?ms workspace=\d+(?:\.\d)?ms setup=\d+(?:\.\d)?ms build=\d+(?:\.\d)?ms tests=\d+(?:\.\d)?ms evidence=\d+(?:\.\d)?ms total=\d+(?:\.\d)?ms/,
   );
   const [successfulId] = publishedRuns();
@@ -74,6 +104,45 @@ try {
   );
   assert.equal(successfulMetadata.id, successfulId);
   assert.equal(successfulMetadata.testExitCode, 0);
+  const successfulSummary = run(['runs', successfulId]);
+  assert.equal(successfulSummary.status, 0, successfulSummary.stderr);
+  assert.match(successfulSummary.stdout, /command: .* --test --test-concurrency=2/u);
+  assert.match(successfulSummary.stdout, /By test kind\n  unit/u);
+  assert.match(
+    successfulSummary.stdout,
+    /Complete for the measured command and coverage model/u,
+  );
+  assert.match(successfulSummary.stdout, /does not prove every project test suite was run/u);
+  writeFileSync(
+    resolve(project, 'supercov.waivers.json'),
+    JSON.stringify({
+      version: 1,
+      waivers: [{
+        kind: 'line',
+        file: 'src/permission.mjs',
+        line: unreachableLine,
+        reason: 'the enclosing condition is the literal false',
+      }],
+    }),
+  );
+  const reviewedSummary = run(['runs', successfulId]);
+  assert.match(reviewedSummary.stdout, /Reviewed exceptions  1 applied, 0 contradicted, 0 unmatched/u);
+  assert.match(reviewedSummary.stdout, /Policy-adjusted/u);
+  const reviewedFile = run(['runs', successfulId, 'file', 'src/permission.mjs']);
+  assert.match(reviewedFile.stdout, /Reviewed exception: the enclosing condition is the literal false/u);
+  const filesView = run(['runs', successfulId, 'files']);
+  const gapsView = run(['runs', successfulId, 'gaps']);
+  assert.match(filesView.stdout, /Coverage files — every included source file/u);
+  assert.match(gapsView.stdout, /Coverage gaps — only files with unresolved obligations/u);
+  const coveredBranchLine = run([
+    'runs',
+    successfulId,
+    'line',
+    `src/permission.mjs:${chooseLine}`,
+  ]);
+  assert.match(coveredBranchLine.stdout, /Status\n  COVERED/u);
+  assert.match(coveredBranchLine.stdout, /Branch at column \d+ — covered/u);
+  assert.doesNotMatch(coveredBranchLine.stdout, /Covering tests\n  None/u);
 
   writeFileSync(
     resolve(project, 'tests/failure.test.mjs'),
@@ -96,9 +165,21 @@ try {
     readFileSync(resolve(project, '.supercov/runs', failedId, 'run.json'), 'utf8'),
   );
   assert.equal(failedMetadata.testExitCode, 1);
+  const failedSummary = run(['runs', failedId]);
+  assert.equal(failedSummary.status, 0, failedSummary.stderr);
+  assert.match(failedSummary.stdout, /\[INVALID: wrapped command exited 1\]/u);
+  assert.match(
+    failedSummary.stdout,
+    /Coverage \(diagnostic only — the wrapped command did not pass\)/u,
+  );
+  const failedProjection = run(['runs', failedId, '--filter', 'failed']);
+  assert.match(
+    failedProjection.stdout,
+    new RegExp(`npx supercov runs '${failedId}' files --filter failed`, 'u'),
+  );
   assert.equal(
     readFileSync(resolve(project, 'src/permission.mjs'), 'utf8'),
-    readFileSync(resolve(fixture, 'src/permission.mjs'), 'utf8'),
+    authoredPermissionSource,
   );
   assert.deepEqual(readdirSync(resolve(project, '.supercov/work')), []);
 
@@ -176,7 +257,7 @@ try {
   assert.equal(interruptedState.signal, 'SIGINT');
   assert.equal(
     readFileSync(resolve(project, 'src/permission.mjs'), 'utf8'),
-    readFileSync(resolve(fixture, 'src/permission.mjs'), 'utf8'),
+    authoredPermissionSource,
   );
 
   console.log(

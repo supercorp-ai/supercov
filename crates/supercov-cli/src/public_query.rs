@@ -37,7 +37,7 @@ pub fn help_for(command: &str, arguments: &[String]) -> Option<String> {
         .map(String::as_str);
     let Some(child) = child else {
         return Some(
-            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 coverage and remaining obligations by source file\n  gaps                  source files with unresolved obligations\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 included, excluded and ambiguous source files\n  minimize              smallest test set for a coverage target\n\nCommon options:\n  --filter <all|passed|failed>\n  --kind <kind>\n  --runner <runner>\n  --offset <n>\n  --limit <n>\n  --json\n\nRun any query with --help for its exact usage.\n"
+            "Usage: supercov runs <run-id> [query] [options]\n\nWithout a query, prints the run's coverage summary.\n\nQueries:\n  files                 every included file, including fully covered files\n  gaps                  only files with unresolved coverage or measurement gaps\n  file <path>           gap lines with consolidated obligations\n  line <file:line>      line state, obligations, tests and phases\n  decision <location>   MC/DC vectors and witness pairs for one decision\n  test <id|name>        coverage attributed to one test\n  kinds                 coverage grouped by unit/component/integration/e2e\n  runners               coverage grouped by test runner\n  scope                 included, excluded and ambiguous source files\n  minimize              smallest test set for a coverage target\n\nCommon options:\n  --filter <all|passed|failed>   recalculate coverage from those attempts only\n  --kind <kind>\n  --runner <runner>\n  --offset <n>\n  --limit <n>\n  --json\n\nProvably unreachable line, statement, function, branch, or MC/DC obligations can\nbe recorded as reviewed exceptions in supercov.waivers.json. Raw coverage is\nnever changed; the separately labelled policy-adjusted result is also shown.\nRun any query with --help for its exact usage.\n"
                 .into(),
         );
     };
@@ -404,6 +404,7 @@ fn coverage_invocation(
         selector: None,
         sort: None,
         valid: None,
+        test_exit_code: None,
         stale: None,
         stale_reasons: None,
         offset: options.offset,
@@ -517,6 +518,7 @@ pub fn parse_public_query(
                 selector: None,
                 sort: None,
                 valid: None,
+                test_exit_code: None,
                 stale: None,
                 stale_reasons: None,
                 offset: options.offset,

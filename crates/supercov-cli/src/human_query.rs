@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use supercov_contracts::AgentPagination;
 use supercov_engine::{
     coverage_analysis::{CoverageSummary, McdcVector},
@@ -208,18 +210,18 @@ fn render_files(
                 + gap.missing_branches
                 + gap.missing_mcdc_conditions;
             let status = if missing == 0 {
-                "coverage complete".into()
+                "covered in this projection".into()
             } else {
                 format!(
-                    "missing: lines {}  stmts {}  funcs {}  branches {}  MC/DC {}{}",
+                    "uncovered: lines {}  statements {}  functions {}  branch outcomes {}  MC/DC conditions {}{}",
                     gap.uncovered_lines,
                     gap.uncovered_statements,
                     gap.uncovered_functions,
                     gap.missing_branches,
                     gap.missing_mcdc_conditions,
-                    gap.waived_mcdc_conditions
+                    gap.waived_obligations
                         .filter(|count| *count > 0)
-                        .map_or_else(String::new, |count| format!(" ({count} waived)")),
+                        .map_or_else(String::new, |count| format!(" ({count} reviewed exceptions)")),
                 )
             };
             let limitations = if gap.measurement_limitations == 0 {
@@ -240,11 +242,24 @@ fn render_files(
             } else {
                 String::new()
             };
-            format!("{}  {status}{limitations}{provenance}", gap.file)
+            format!("{}\n  {status}{limitations}{provenance}", gap.file)
         })
         .collect::<Vec<_>>()
-        .join("\n");
-    let mut output = format!("{body}\n{}", page_label(page));
+        .join("\n\n");
+    let title = if child == "gaps" {
+        "Coverage gaps — only files with unresolved obligations"
+    } else {
+        "Coverage files — every included source file"
+    };
+    let label = filter_label(request);
+    let projection = if label.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nProjection: {label}. Uncovered counts are recalculated using only that evidence."
+        )
+    };
+    let mut output = format!("{title}{projection}\n\n{body}\n\n{}", page_label(page));
     if let Some(inspect) =
         inspect_file_command(run, request, rows.first().map(|row| row.file.as_str()))
     {
@@ -311,44 +326,63 @@ fn vector_text(vector: &McdcVector) -> String {
 
 fn branch_need(value: &str) -> String {
     match value {
-        "default evaluated" => "use the default value".into(),
-        "value provided" => "provide an explicit value".into(),
-        "no matching case" => "run with no matching switch case".into(),
-        "try completed without catch" => "complete the try block without entering catch".into(),
-        "catch entered" => "enter the catch block".into(),
-        "zero iterations" => "run with zero loop iterations".into(),
-        "one or more iterations" => "run with one or more loop iterations".into(),
-        "nullish / short-circuited" => "use a nullish value and short-circuit".into(),
-        "non-nullish / continued" => "use a non-nullish value and continue".into(),
-        "assignment skipped" => "skip the assignment".into(),
-        "right evaluated / assigned" => "evaluate and assign the right-hand side".into(),
-        "short-circuit / left selected" => "short-circuit and select the left-hand side".into(),
-        "right evaluated / selected" => "evaluate and select the right-hand side".into(),
-        other => other.into(),
+        "default evaluated" => "default-value branch not observed".into(),
+        "value provided" => "explicit-value branch not observed".into(),
+        "no matching case" => "switch no-match outcome not observed".into(),
+        "try completed without catch" => "try-success outcome not observed".into(),
+        "catch entered" => "catch outcome not observed".into(),
+        "zero iterations" => "zero-iteration outcome not observed".into(),
+        "one or more iterations" => "entered-loop outcome not observed".into(),
+        "nullish / short-circuited" => "nullish short-circuit outcome not observed".into(),
+        "non-nullish / continued" => "non-nullish continuation outcome not observed".into(),
+        "assignment skipped" => "assignment-skipped outcome not observed".into(),
+        "right evaluated / assigned" => "right-evaluated assignment outcome not observed".into(),
+        "short-circuit / left selected" => {
+            "left-selected short-circuit outcome not observed".into()
+        }
+        "right evaluated / selected" => "right-selected outcome not observed".into(),
+        other => format!("branch outcome not observed: {other}"),
     }
 }
 
 fn render_needed_obligation(obligation: &CoverageFileObligation) -> String {
-    match obligation {
-        CoverageFileObligation::Line(_) => "execute this line".into(),
+    let (mut text, waiver) = match obligation {
+        CoverageFileObligation::Line(item) => {
+            ("line not executed".into(), item.waiver_reason.as_ref())
+        }
         CoverageFileObligation::Point(item) if item.kind == "statement" => {
-            "execute this statement".into()
+            ("statement not executed".into(), item.waiver_reason.as_ref())
         }
         CoverageFileObligation::Point(item) if item.kind == "function" => {
-            "call this function".into()
+            ("function not called".into(), item.waiver_reason.as_ref())
         }
-        CoverageFileObligation::Point(item) => format!("cover this {}", item.kind),
-        CoverageFileObligation::Branch(item) => branch_need(&item.missing),
-        CoverageFileObligation::Mcdc(item) => {
-            let mut value = format!(
-                "show that `{}` independently changes the decision result",
+        CoverageFileObligation::Point(item) => (
+            format!("{} not covered", item.kind),
+            item.waiver_reason.as_ref(),
+        ),
+        CoverageFileObligation::Branch(item) => {
+            (branch_need(&item.missing), item.waiver_reason.as_ref())
+        }
+        CoverageFileObligation::Mcdc(item) => (
+            format!(
+                "no witness pair shows `{}` independently changing the decision result",
                 item.missing_condition
-            );
-            if item.waived == Some(true) {
-                value.push_str(" (waived)");
-            }
-            value
-        }
+            ),
+            item.waiver_reason.as_ref(),
+        ),
+    };
+    if let Some(reason) = waiver {
+        text.push_str(&format!(" [reviewed exception: {reason}]"));
+    }
+    text
+}
+
+fn obligation_waiver_reason(obligation: &CoverageFileObligation) -> Option<&str> {
+    match obligation {
+        CoverageFileObligation::Line(item) => item.waiver_reason.as_deref(),
+        CoverageFileObligation::Point(item) => item.waiver_reason.as_deref(),
+        CoverageFileObligation::Branch(item) => item.waiver_reason.as_deref(),
+        CoverageFileObligation::Mcdc(item) => item.waiver_reason.as_deref(),
     }
 }
 
@@ -422,6 +456,11 @@ fn render_anchor(anchor: &supercov_engine::coverage_query::CoverageAnchor) -> Ve
     if let Some(source) = &anchor.source {
         lines.push(format!("    `{source}`"));
     }
+    if !anchor.covered
+        && let Some(missing) = &anchor.missing
+    {
+        lines.push(format!("    Unobserved: {missing}"));
+    }
     lines
 }
 
@@ -449,23 +488,42 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 first.push_str(&format!(" ({label})"));
             }
             if !data.valid {
-                first.push_str(" [INVALID: test exit unknown]");
+                if let Some(code) = data.test_exit_code {
+                    first.push_str(&format!(" [INVALID: wrapped command exited {code}]"));
+                } else {
+                    first.push_str(" [INVALID: wrapped command exit status unavailable]");
+                }
             }
             if data.stale {
                 first.push_str(&format!(" [STALE: {}]", data.stale_reasons.join(", ")));
             }
             let measurement = if data.measurement.complete {
-                "Complete — no blocking measurement limitations".into()
+                "Complete for the measured command and coverage model".into()
             } else {
-                format!(
-                    "Incomplete — {} blocking limitation(s) in {} file(s)",
-                    data.measurement.blocking, data.measurement.files
-                )
+                if data.measurement.files > 0 {
+                    format!(
+                        "Incomplete — {} blocking limitation(s) in {} file(s)",
+                        data.measurement.blocking, data.measurement.files
+                    )
+                } else {
+                    format!(
+                        "Incomplete — {} blocking transport or run limitation(s)",
+                        data.measurement.blocking
+                    )
+                }
             };
-            let mut lines = vec![
-                first,
+            let coverage_heading = if data.valid {
+                "Coverage"
+            } else {
+                "Coverage (diagnostic only — the wrapped command did not pass)"
+            };
+            let mut lines = vec![first];
+            if !data.command.is_empty() {
+                lines.push(format!("command: {}", data.command.join(" ")));
+            }
+            lines.extend([
                 String::new(),
-                "Coverage".into(),
+                coverage_heading.into(),
                 format!(
                     "  Lines      {} ({}/{})",
                     percentage(data.coverage.lines.percentage),
@@ -484,34 +542,104 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     data.coverage.covered_conditions,
                     data.coverage.conditions
                 ),
+            ]);
+            if data.coverage_by_kind.iter().any(|kind| kind.tests > 0) {
+                lines.extend([String::new(), "By test kind".into()]);
+                for kind in data.coverage_by_kind.iter().filter(|kind| kind.tests > 0) {
+                    lines.push(format!(
+                        "  {:<12} {:>4} test(s)  lines {:>7}  branches {:>7}  MC/DC {:>7}",
+                        kind.kind.as_deref().unwrap_or("unknown"),
+                        kind.tests,
+                        percentage(kind.summary.lines.percentage),
+                        percentage(kind.summary.branches.percentage),
+                        percentage(kind.summary.condition_coverage_pct),
+                    ));
+                }
+            }
+            if let Some(context) = &data.e2e_gap_context {
+                let share = if data.coverage.lines.covered == 0 {
+                    0.0
+                } else {
+                    context.covered_elsewhere.lines as f64 * 100.0
+                        / data.coverage.lines.covered as f64
+                };
+                lines.extend([
+                    String::new(),
+                    "E2E gap context".into(),
+                    format!(
+                        "  Other test kinds only  {} lines ({} of all covered lines)",
+                        count(context.covered_elsewhere.lines),
+                        percentage(share),
+                    ),
+                    format!(
+                        "  Uncovered everywhere   {} lines",
+                        count(context.uncovered_everywhere.lines),
+                    ),
+                    format!(
+                        "  Other kinds            {}",
+                        context.other_kinds.join(", ")
+                    ),
+                    format!(
+                        "  Inspect                {}",
+                        coverage_command(&data.run, request, "gaps --kind e2e")
+                    ),
+                ]);
+            }
+            lines.extend([
                 String::new(),
                 "Measurement".into(),
-                format!("  Status      {measurement}"),
-            ];
+                format!("  Instrumentation  {measurement}"),
+                "  Scope            Only code reached by the wrapped command is observed; this status does not prove every project test suite was run.".into(),
+            ]);
+            if let Some(workspace) = &data.workspace {
+                lines.push(format!("  Command outputs  {workspace}"));
+            }
             if let Some(waivers) = &data.waivers {
                 lines.push(format!(
-                    "Waivers      {} applied, {} contradicted, {} unmatched; MC/DC excluding waived {} ({}/{})",
+                    "Reviewed exceptions  {} applied, {} contradicted, {} unmatched",
                     waivers.applied,
                     waivers.contradicted.len(),
                     waivers.unmatched.len(),
-                    percentage(waivers.mcdc_excluding_waived.percentage),
-                    waivers.mcdc_excluding_waived.covered,
-                    waivers.mcdc_excluding_waived.total,
+                ));
+                let adjusted = &waivers.coverage_excluding_waived;
+                lines.push(format!(
+                    "  Policy status    {}",
+                    if waivers.complete {
+                        "complete"
+                    } else {
+                        "incomplete"
+                    }
+                ));
+                lines.push(format!(
+                    "  Policy-adjusted  lines {}  statements {}  functions {}  branches {}  MC/DC {}",
+                    percentage(adjusted.lines.percentage),
+                    percentage(adjusted.statements.percentage),
+                    percentage(adjusted.functions.percentage),
+                    percentage(adjusted.branches.percentage),
+                    percentage(adjusted.mcdc.percentage),
                 ));
                 for contradiction in &waivers.contradicted {
                     lines.push(format!(
-                        "  contradicted (condition is covered): {}:{} {}",
-                        contradiction.file, contradiction.line, contradiction.condition
+                        "  contradicted (obligation is covered): {} {}:{} {}",
+                        contradiction.kind,
+                        contradiction.file,
+                        contradiction.line,
+                        contradiction.obligation
                     ));
                 }
                 for waiver in &waivers.unmatched {
                     lines.push(format!(
-                        "  unmatched (no such condition): {}{} {}",
+                        "  unmatched (no such obligation): {} {}{}{}",
+                        waiver.kind,
                         waiver.file,
                         waiver
                             .line
                             .map_or_else(String::new, |line| format!(":{line}")),
-                        waiver.condition
+                        if waiver.condition.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {}", waiver.condition)
+                        }
                     ));
                 }
             }
@@ -533,6 +661,11 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     count(data.files_with_measurement_limitations)
                 ),
             ]);
+            if !data.coverage.coverage_complete {
+                lines.push(
+                    "  Provably unreachable obligations can be recorded as reviewed exceptions in supercov.waivers.json; `supercov docs coverage-model` explains the policy.".into(),
+                );
+            }
             if let Some(confidence) = &data.confidence {
                 lines.extend([
                     String::new(),
@@ -562,14 +695,18 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     lines.extend(diagnostic_lines(diagnostic));
                 }
             }
+            if !data.hints.is_empty() {
+                lines.extend([String::new(), "Hints".into()]);
+                lines.extend(data.hints.iter().map(|hint| format!("  {hint}")));
+            }
             lines.extend([
                 String::new(),
                 "Commands".into(),
-                format!("  npx supercov runs {} files", data.run),
-                format!("  npx supercov runs {} gaps", data.run),
-                format!("  npx supercov runs {} kinds", data.run),
-                format!("  npx supercov runs {} runners", data.run),
-                format!("  npx supercov runs {} scope", data.run),
+                format!("  {}", coverage_command(&data.run, request, "files")),
+                format!("  {}", coverage_command(&data.run, request, "gaps")),
+                format!("  {}", coverage_command(&data.run, request, "kinds")),
+                format!("  {}", coverage_command(&data.run, request, "runners")),
+                format!("  {}", coverage_command(&data.run, request, "scope")),
                 format!("  npx supercov runs {} --help", data.run),
             ]);
             lines.join("\n")
@@ -751,6 +888,10 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     count(data.counts.missing_mcdc_conditions)
                 ),
                 format!(
+                    "  Reviewed exceptions             {}",
+                    count(data.counts.waived_obligations)
+                ),
+                format!(
                     "  Measurement limitations         {}",
                     count(data.counts.measurement_limitations)
                 ),
@@ -773,7 +914,15 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 ));
                 let needs = file_gap_needs(&gap.state, &gap.obligations);
                 for need in needs {
-                    lines.push(format!("       Needed: {need}"));
+                    lines.push(format!("       Unobserved: {need}"));
+                }
+                let reviewed = gap
+                    .obligations
+                    .iter()
+                    .filter_map(obligation_waiver_reason)
+                    .collect::<BTreeSet<_>>();
+                for reason in reviewed {
+                    lines.push(format!("       Reviewed exception: {reason}"));
                 }
                 for limitation in &gap.limitations {
                     lines.push(format!("       Cannot measure: {}", limitation.reason));
@@ -940,8 +1089,19 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         "Status".into(),
                         format!("  {state}"),
                     ];
+                    if let Some(origin) = &data.source_origin {
+                        lines.insert(
+                            4,
+                            if origin == "working-tree-stale" {
+                                "  (read from the working tree, which changed since this run)"
+                                    .into()
+                            } else {
+                                "  (read from the current working tree)".into()
+                            },
+                        );
+                    }
                     if !data.remaining.is_empty() {
-                        lines.extend([String::new(), "Needed".into()]);
+                        lines.extend([String::new(), "Unobserved coverage".into()]);
                         lines.extend(data.remaining.iter().map(|obligation| {
                             format!("  - {}", render_needed_obligation(obligation))
                         }));
@@ -1019,8 +1179,19 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                             }
                         ),
                     ];
+                    if let Some(origin) = &data.source_origin {
+                        lines.insert(
+                            4,
+                            if origin == "working-tree-stale" {
+                                "  (read from the working tree, which changed since this run)"
+                                    .into()
+                            } else {
+                                "  (read from the current working tree)".into()
+                            },
+                        );
+                    }
                     if !data.remaining.is_empty() {
-                        lines.extend([String::new(), "Needed".into()]);
+                        lines.extend([String::new(), "Unobserved coverage".into()]);
                         lines.extend(data.remaining.iter().map(|obligation| {
                             format!("  - {}", render_needed_obligation(obligation))
                         }));
@@ -1278,6 +1449,20 @@ pub fn render_human(invocation: &PublicQueryInvocation, output: &PublicQueryOutp
                 "ID", "LINES", "BRANCH", "MC/DC", "STARTED"
             )];
             lines.extend(data.runs.iter().map(|run| {
+                let mut status = Vec::new();
+                if let Some(code) = run.test_exit_code {
+                    if code != 0 {
+                        status.push(format!("FAILED (exit {code})"));
+                    }
+                } else {
+                    status.push("INVALID (exit status unavailable)".into());
+                }
+                if run.coverage_error.is_some() {
+                    status.push("INVALID COVERAGE".into());
+                }
+                if run.stale == Some(true) {
+                    status.push(format!("STALE ({})", run.reasons.join(", ")));
+                }
                 format!(
                     "{:<id_width$}  {:>8}  {:>8}  {:>8}  {}{}",
                     run.id,
@@ -1285,12 +1470,10 @@ pub fn render_human(invocation: &PublicQueryInvocation, output: &PublicQueryOutp
                     optional_percentage(run.branches),
                     optional_percentage(run.mcdc),
                     readable_timestamp(&run.generated_at),
-                    if run.coverage_error.is_some() {
-                        "  INVALID COVERAGE".into()
-                    } else if run.stale == Some(true) {
-                        format!("  STALE ({})", run.reasons.join(", "))
-                    } else {
+                    if status.is_empty() {
                         String::new()
+                    } else {
+                        format!("  {}", status.join("; "))
                     }
                 )
             }));
@@ -1329,6 +1512,7 @@ mod tests {
             selector: None,
             sort: None,
             valid: None,
+            test_exit_code: None,
             stale: None,
             stale_reasons: None,
             offset: 0,
@@ -1367,6 +1551,18 @@ mod tests {
     }
 
     #[test]
+    fn follow_up_commands_preserve_the_active_projection() {
+        let mut request = request();
+        request.filter = "failed".into();
+        request.kind = Some("integration".into());
+        request.runner = Some("playwright".into());
+        assert_eq!(
+            coverage_command("run_00b780f05c9ae324", &request, "files"),
+            "npx supercov runs 'run_00b780f05c9ae324' files --filter failed --kind 'integration' --runner 'playwright'"
+        );
+    }
+
+    #[test]
     fn missing_test_evidence_is_explained_without_internal_codes() {
         let lines = diagnostic_lines(&CoverageDiagnostic {
             code: "TEST_EVIDENCE_MISSING".into(),
@@ -1389,12 +1585,18 @@ mod tests {
     }
 
     #[test]
-    fn branch_obligations_are_described_as_test_behaviors() {
-        assert_eq!(branch_need("default evaluated"), "use the default value");
-        assert_eq!(branch_need("value provided"), "provide an explicit value");
+    fn branch_obligations_are_described_as_observed_facts() {
+        assert_eq!(
+            branch_need("default evaluated"),
+            "default-value branch not observed"
+        );
+        assert_eq!(
+            branch_need("value provided"),
+            "explicit-value branch not observed"
+        );
         assert_eq!(
             branch_need("zero iterations"),
-            "run with zero loop iterations"
+            "zero-iteration outcome not observed"
         );
     }
 }

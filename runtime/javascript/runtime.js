@@ -149,6 +149,7 @@ function createState() {
     serverBuffers: /* @__PURE__ */ new Map(),
     persistedServerRecords: /* @__PURE__ */ new Set(),
     backgroundBuffers: /* @__PURE__ */ new Map(),
+    backgroundWriters: /* @__PURE__ */ new Map(),
     backgroundSequence: 0,
     runtimeSnapshots: false,
     assertionPhases: /* @__PURE__ */ new Map(),
@@ -371,28 +372,12 @@ function flushAllBufferedServerEvidence() {
     flushBufferedBackgroundEvidence(runId);
 }
 function flushBufferedBackgroundEvidence(runId) {
-  var _a8;
   if (isBrowser)
     return void 0;
   const records = state.backgroundBuffers.get(runId);
   if (!records || records.size === 0)
     return void 0;
-  const fs = getFs();
-  if (!fs)
-    return void 0;
-  const directory = backgroundEvidenceDirectory(runId);
-  const shard = (_a8 = process.env["SUPERCOV_EXECUTION_LOG_SHARD"]) != null ? _a8 : "process";
-  const writer = `${shard}-${process.pid}`;
-  const payload = [...records.values()].map((record) => JSON.stringify(record)).join("\n") + "\n";
-  try {
-    fs.mkdirSync(directory, { recursive: true });
-    const nextSequence = writeExclusiveBackgroundRecord(fs, runId, writer, state.backgroundSequence, payload);
-    state.backgroundSequence = nextSequence;
-    state.backgroundBuffers.delete(runId);
-    return backgroundEvidencePath(runId, `${writer}-${nextSequence - 1}`);
-  } catch (e) {
-    return void 0;
-  }
+  return state.backgroundWriters.get(runId);
 }
 function writeExclusiveBackgroundRecord(fs, runId, writer, initialSequence, payload) {
   let sequence = initialSequence;
@@ -408,6 +393,30 @@ function writeExclusiveBackgroundRecord(fs, runId, writer, initialSequence, payl
     }
   }
   throw Object.assign(new Error("Could not allocate a collision-free Supercov background evidence record"), { code: "SUPERCOV_BACKGROUND_COLLISION_LIMIT" });
+}
+function appendDurableBackgroundRecord(fs, runId, record) {
+  var _a8;
+  const records = state.backgroundBuffers.get(runId) != null ? state.backgroundBuffers.get(runId) : /* @__PURE__ */ new Map();
+  const key = serverRecordKey(record);
+  if (records.has(key))
+    return state.backgroundWriters.get(runId);
+  const directory = backgroundEvidenceDirectory(runId);
+  const payload = JSON.stringify(record) + "\n";
+  fs.mkdirSync(directory, { recursive: true });
+  let path = state.backgroundWriters.get(runId);
+  if (!path) {
+    const shard = (_a8 = process.env["SUPERCOV_EXECUTION_LOG_SHARD"]) != null ? _a8 : "process";
+    const writer = `${shard}-${process.pid}`;
+    const nextSequence = writeExclusiveBackgroundRecord(fs, runId, writer, state.backgroundSequence, payload);
+    state.backgroundSequence = nextSequence;
+    path = backgroundEvidencePath(runId, `${writer}-${nextSequence - 1}`);
+    state.backgroundWriters.set(runId, path);
+  } else {
+    fs.appendFileSync(path, payload);
+  }
+  records.set(key, record);
+  state.backgroundBuffers.set(runId, records);
+  return path;
 }
 var _a7;
 if (!isBrowser) {
@@ -475,18 +484,19 @@ function appendServer(record) {
     if (deduplicationKey && state.persistedServerRecords.has(deduplicationKey))
       return;
     if (!path) {
-      const buffered = (_d = state.backgroundBuffers.get(runId)) != null ? _d : /* @__PURE__ */ new Map();
-      buffered.set(serverRecordKey(serialized), serialized);
-      state.backgroundBuffers.set(runId, buffered);
-      if (buffered.size >= 4096)
-        flushBufferedBackgroundEvidence(runId);
+      appendDurableBackgroundRecord(fs, runId, serialized);
       return;
     }
     fs.mkdirSync(directory, { recursive: true });
     fs.appendFileSync(path, JSON.stringify(serialized) + "\n");
     if (deduplicationKey)
       state.persistedServerRecords.add(deduplicationKey);
-  } catch (e) {
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    const failure = new Error(`Supercov could not persist coverage evidence for run ${runId}: ${detail}`);
+    failure.code = "SUPERCOV_EVIDENCE_TRANSPORT_FAILED";
+    failure.cause = cause;
+    throw failure;
   }
 }
 function environmentRequestContext() {
@@ -542,6 +552,20 @@ function finishAssertionPhase(phase, error) {
   if (error !== void 0)
     phase.error = error instanceof Error ? error.message : String(error);
 }
+
+function cleanInstrumentationStack(error) {
+  if (!error || typeof error !== "object" || typeof error.stack !== "string")
+    return error;
+  const lines = error.stack.split("\n");
+  const visible = lines.filter((line, index) => index === 0 || !/[\\/]\.supercov[\\/](?:playwright|nodeTest|vitest|runtime|launchSupervisor|nodeAssert|nodeAssertStrict|nodeAssertAdapter|register|resolve-loader)\.(?:js|mjs)(?::|\))/u.test(line));
+  if (visible.length !== lines.length) {
+    try {
+      error.stack = visible.join("\n");
+    } catch (e) {
+    }
+  }
+  return error;
+}
 function withNodeAssertionPhase(operation, source, callback) {
   var _a8;
   const context = currentRequestContext();
@@ -571,13 +595,13 @@ function withNodeAssertionPhase(operation, source, callback) {
         return value;
       }, (error) => {
         finishAssertionPhase(phase, error);
-        throw error;
+        throw cleanInstrumentationStack(error);
       });
     finishAssertionPhase(phase);
     return result;
   } catch (error) {
     finishAssertionPhase(phase, error);
-    throw error;
+    throw cleanInstrumentationStack(error);
   }
 }
 function takeNodeAssertionPhases(scope) {
@@ -1021,6 +1045,7 @@ const directRuntimeApi = {
   coverageCarrier,
   coverageContextEnvironment,
   coverageContextHeaders,
+  cleanInstrumentationStack,
   coverageHit,
   coverageHitV2,
   coverageSnapshot,
@@ -1067,6 +1092,7 @@ export {
   coverageCarrier,
   coverageContextEnvironment,
   coverageContextHeaders,
+  cleanInstrumentationStack,
   coverageHit,
   coverageHitV2,
   coverageSnapshot,

@@ -65,6 +65,7 @@ try {
       "test('owner', () => expect(permission(false, true)).toBe('allowed'));",
       "test('both', () => expect(permission(true, true)).toBe('allowed'));",
       "test('neither', () => expect(permission(false, false)).toBe('denied'));",
+      "test.fails('known failure', () => expect(permission(true, false)).toBe('denied'));",
       '',
     ].join('\n'),
   );
@@ -76,7 +77,7 @@ try {
     startedAt: '2026-08-25T00:00:02.000Z',
   });
   assert.equal(run.exitCode, 0);
-  assert.equal(run.assertionCalls, 4);
+  assert.equal(run.assertionCalls, 5);
   assert.equal(readFileSync(resolve(project, 'src/permission.js'), 'utf8'), application);
   const summary = rust('__query-stored-run', {
     root: project,
@@ -98,6 +99,65 @@ try {
     summary.data.coverageByRunner.map(entry => entry.runner),
     ['vitest'],
   );
+  const all = rust('__query-stored-run', {
+    root: project,
+    query: {
+      runId: run.runId,
+      filter: 'all',
+      command: 'summary',
+    },
+  });
+  assert.equal(all.data.tests, 5);
+  assert.equal(all.data.testOutcomes.passed, 5);
+  assert.equal(all.data.testOutcomes.failed, 0);
+  const failed = rust('__query-stored-run', {
+    root: project,
+    query: {
+      runId: run.runId,
+      filter: 'failed',
+      command: 'summary',
+    },
+  });
+  assert.equal(failed.data.coverage.lines.covered, 0);
+  assert.equal(failed.data.coverage.branches.covered, 0);
+  const failedFiles = rust('__query-stored-run', {
+    root: project,
+    query: {
+      runId: run.runId,
+      filter: 'failed',
+      command: 'files',
+      offset: 0,
+      limit: 20,
+    },
+  });
+  const allFiles = rust('__query-stored-run', {
+    root: project,
+    query: {
+      runId: run.runId,
+      filter: 'all',
+      command: 'files',
+      offset: 0,
+      limit: 20,
+    },
+  });
+  assert.equal(failedFiles.data.files[0].file, 'src/permission.js');
+  assert.ok(
+    failedFiles.data.files[0].uncoveredLines > allFiles.data.files[0].uncoveredLines,
+    '--filter failed must recalculate file coverage from failed attempts only',
+  );
+  const coveredLine = rust('__query-stored-run', {
+    root: project,
+    query: {
+      runId: run.runId,
+      filter: 'all',
+      command: 'line',
+      file: 'src/permission.js',
+      line: 2,
+      offset: 0,
+      limit: 20,
+    },
+  });
+  assert.match(coveredLine.data.source, /admin \|\| owner/u);
   const test = rust('__query-stored-run', {
     root: project,
     query: {

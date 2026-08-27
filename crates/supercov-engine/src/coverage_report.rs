@@ -802,6 +802,18 @@ fn record_attempt(test: &mut MutableTest, raw: &RawTestResult) {
     );
 }
 
+fn effective_attempt_status(attempt: &TestAttempt) -> &str {
+    if attempt.expected_status.as_deref() == Some("failed") {
+        match attempt.status.as_str() {
+            "failed" => "passed",
+            "passed" => "failed",
+            status => status,
+        }
+    } else {
+        attempt.status.as_str()
+    }
+}
+
 fn test_outcome(test: &MutableTest) -> String {
     let Some(terminal) = test.attempts.values().next_back() else {
         return if test.unstarted {
@@ -810,17 +822,18 @@ fn test_outcome(test: &MutableTest) -> String {
             "unknown".into()
         };
     };
-    if terminal.status == "passed"
+    let terminal_status = effective_attempt_status(terminal);
+    if terminal_status == "passed"
         && (test.runner_reported_flaky
             || test
                 .attempts
                 .values()
                 .take(test.attempts.len().saturating_sub(1))
-                .any(|attempt| attempt.status != "passed"))
+                .any(|attempt| effective_attempt_status(attempt) != "passed"))
     {
         "flaky".into()
     } else {
-        terminal.status.clone()
+        terminal_status.into()
     }
 }
 
@@ -867,14 +880,43 @@ pub fn passing_coverage_results(raw_results: &[RawTestResult]) -> Vec<RawTestRes
 }
 
 pub fn failed_coverage_results(raw_results: &[RawTestResult]) -> Vec<RawTestResult> {
-    let failed = raw_results
-        .iter()
-        .filter_map(|raw| {
-            if raw.status.as_deref() == Some("failed") {
-                raw.retry.map(|retry| (raw_test_id(raw).to_owned(), retry))
+    let mut attempts = BTreeMap::<(String, usize), Vec<&RawTestResult>>::new();
+    for raw in raw_results {
+        if let Some(retry) = raw.retry {
+            attempts
+                .entry((raw_test_id(raw).to_owned(), retry))
+                .or_default()
+                .push(raw);
+        }
+    }
+    let failed = attempts
+        .into_iter()
+        .filter_map(|(identity, records)| {
+            // Runner reporters carry expected-status semantics while hook
+            // evidence records often do not. Treat reporter records as the
+            // authority for the attempt outcome, then retain every companion
+            // evidence record only after the attempt is classified.
+            let authoritative = records
+                .iter()
+                .copied()
+                .filter(|raw| raw.expected_status.is_some())
+                .collect::<Vec<_>>();
+            let authoritative = if authoritative.is_empty() {
+                records
             } else {
-                None
-            }
+                authoritative
+            };
+            authoritative
+                .iter()
+                .any(
+                    |raw| match (raw.status.as_deref(), raw.expected_status.as_deref()) {
+                        (Some("failed"), Some("failed")) => false,
+                        (Some("passed"), Some("failed")) => true,
+                        (Some("failed"), _) => true,
+                        _ => false,
+                    },
+                )
+                .then_some(identity)
         })
         .collect::<BTreeSet<_>>();
     raw_results
@@ -2339,7 +2381,43 @@ mod tests {
         assert!(report.filters.passed.points[1].covered);
         assert!(!report.filters.passed.points[2].covered);
         assert!(report.filters.failed.points[0].covered);
+        assert_eq!(
+            report
+                .view
+                .tests
+                .iter()
+                .find(|test| test.name == "expected-failure")
+                .unwrap()
+                .outcome,
+            "failed"
+        );
         assert_eq!(report.view.tests[1].outcome, "flaky");
+    }
+
+    #[test]
+    fn expected_failure_is_a_green_outcome_but_not_verified_or_failed_coverage() {
+        let mut expected = raw("expected-failure", 0, "failed", &["expected"]);
+        expected.expected_status = Some("failed".into());
+        let companion = raw("expected-failure", 0, "failed", &["expected"]);
+        let request = CoverageReportRequest {
+            run_id: "run".into(),
+            manifest: CoverageManifest {
+                decisions: vec![],
+                points: vec![point("expected", 1)],
+                branches: vec![],
+                limitations: vec![],
+                scope: None,
+            },
+            raw_results: vec![companion, expected],
+            generated_at: "time".into(),
+            coverage_model: None,
+            integrity: None,
+            test_exit_code: ExitCodeInput::Missing,
+        };
+        let report = analyze_coverage_results(&request).unwrap();
+        assert_eq!(report.view.tests[0].outcome, "passed");
+        assert!(!report.filters.passed.points[0].covered);
+        assert!(!report.filters.failed.points[0].covered);
     }
 
     #[test]

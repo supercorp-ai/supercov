@@ -1084,6 +1084,50 @@ ran. This closes the isolated assertion-denominator blocker, not R1 or R2.
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.
 
+### Public JavaScript field-hardening checkpoint — 2026-08-27
+
+Real agent work in Essential SEO found public-frontend defects that would also
+invalidate later language frontends if left in the shared engine. They are now
+release-blocking regression invariants, traced in
+`progress/javascript-field-hardening-2026-08-27.md`.
+
+- Ahead-of-run capability selection is AST- and mapping-shape-driven. It wraps
+  only the imported root actually called with a host/guest mapping, preserves
+  raw class/callback identity and still detects computed guest paths used by
+  opaque ESM/CommonJS launchers.
+- Syntactically invariant JavaScript control decisions and TypeScript ambient
+  declarations no longer manufacture impossible obligations. Reviewed
+  exceptions now cover line, statement, function, branch and MC/DC obligations
+  without altering raw measured coverage.
+- Expected failures, outcome/kind/runner projections, background loopback
+  evidence, transport health, invalid command exits and branch-parent query
+  reconstruction are exact and fail closed.
+- The public CLI now teaches the full-command/isolated-workspace model, ships
+  queryable guides, shows per-kind and E2E gap context, preserves filters in
+  every generated command and distinguishes all files from unresolved gaps.
+- JavaScript workspaces use an exactly marker-owned non-dotted container so
+  framework path semantics are unchanged; cleanup and crash recovery share the
+  same ownership predicate.
+
+The checkpoint is closed by local evidence, without hosted workflow use:
+
+- warnings-denied formatting/Clippy and 19 CLI, 19 contract and 277 engine
+  tests pass, followed by every public runtime/build/runner integration;
+- the full fixture matrix, opaque ESM/CommonJS launchers, four-browser syntax
+  matrix and macOS crash/isolation gates pass;
+- Test262 selected 41,593 files and preserved all 65,051 baseline-passing
+  scenarios with zero transform and zero semantic-equivalence failures;
+- the real combined Essential SEO command passed 436 unit and 80 E2E tests in
+  one run, reported complete measurement, and attributed 99.96% lines, 99.62%
+  branches and 98.86% MC/DC;
+- the release transformer measured a 25.66ms median for 500 files (2.566s
+  extrapolated to 50,000 files).
+
+The separate R3 end-to-end performance promotion gate remains open: one fair
+warm comparison measured 110.45s plain versus 124.06s instrumented (1.123x),
+with 0.76s of Supercov setup/publication outside the wrapped tests. This is a
+measured optimization backlog, not an unresolved correctness field defect.
+
 ### R3 — Make lifecycle and performance release-grade
 
 Optimize the proven architecture, not a partial one.

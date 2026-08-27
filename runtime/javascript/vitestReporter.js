@@ -9,8 +9,22 @@ function sourcePath(moduleId) {
         : moduleId;
     return relative(process.cwd(), absolute).split(sep).join("/");
 }
+function rawAttemptStatus(state, expectedFailure) {
+    if (!expectedFailure)
+        return state;
+    // Vitest reports an already-inverted final state for `it.fails`: pass
+    // means the body failed as expected, while fail means it unexpectedly
+    // passed. Supercov's cross-runner contract stores actual + expected, so
+    // undo Vitest's inversion at the adapter boundary.
+    if (state === "passed")
+        return "failed";
+    if (state === "failed")
+        return "passed";
+    return state;
+}
 /** Records final runner outcomes, including tests that never execute hooks. */
 export default class SupercovVitestReporter {
+    reportedAttempts = new Set();
     onTestCaseResult(testCase) {
         const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
         if (!evidenceDirectory)
@@ -27,7 +41,7 @@ export default class SupercovVitestReporter {
             testFile,
             title: testCase.name,
             retry,
-            status: result.state,
+            status: rawAttemptStatus(result.state, testCase.options.fails),
             expectedStatus: testCase.options.fails ? "failed" : "passed",
             flaky: diagnostic?.flaky ?? false,
             provenance: inferTestProvenance({
@@ -41,6 +55,7 @@ export default class SupercovVitestReporter {
             server: [],
         };
         const safeId = testCase.id.replace(/[^a-zA-Z0-9_-]/g, "_");
+        this.reportedAttempts.add(`${testCase.id}:${retry}`);
         const directory = resolve(process.cwd(), evidenceDirectory, `vitest-${safeId}-${retry}-status`);
         mkdirSync(directory, { recursive: true });
         atomicWriteFileSync(resolve(directory, "mcdc.json"), `${JSON.stringify(payload)}\n`);
@@ -55,23 +70,28 @@ export default class SupercovVitestReporter {
             if (task.type === "test" && task.result?.state) {
                 const testFile = sourcePath(file.filepath ?? task.filepath ?? "unknown");
                 const retry = task.result.retryCount ?? 0;
+                if (this.reportedAttempts.has(`${task.id}:${retry}`)) {
+                    return;
+                }
                 const names = [task.name ?? task.id ?? "test"];
                 let suite = task.suite;
                 while (suite?.name) {
                     names.unshift(suite.name);
                     suite = suite.suite;
                 }
+                const expectedFailure = Boolean(task.fails ?? task.options?.fails);
                 const payload = {
                     testId: `vitest:${task.id ?? names.join(" > ")}`,
                     test: names.join(" > "),
                     testFile,
                     title: task.name ?? names.at(-1) ?? "test",
                     retry,
-                    status: task.result.state === "pass"
+                    status: rawAttemptStatus(task.result.state === "pass"
                         ? "passed"
                         : task.result.state === "fail"
                             ? "failed"
-                            : "skipped",
+                            : "skipped", expectedFailure),
+                    expectedStatus: expectedFailure ? "failed" : "passed",
                     provenance: inferTestProvenance({
                         runner: "vitest",
                         file: testFile,

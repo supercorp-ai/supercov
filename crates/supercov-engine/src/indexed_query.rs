@@ -43,6 +43,7 @@ pub struct IndexedQueryRequest {
     pub selector: Option<String>,
     pub sort: Option<DecisionSort>,
     pub valid: Option<bool>,
+    pub test_exit_code: Option<i32>,
     pub stale: Option<bool>,
     pub stale_reasons: Option<Vec<String>>,
     #[serde(default)]
@@ -461,13 +462,13 @@ pub fn query_indexed_with_waivers(
                 kind: request.kind.as_deref(),
                 runner: request.runner.as_deref(),
                 valid: request.valid.unwrap_or(false),
+                test_exit_code: request.test_exit_code,
                 stale: request.stale.unwrap_or(false),
                 stale_reasons: request.stale_reasons.clone().unwrap_or_default(),
             },
         )?;
         if let Some(waivers) = waivers {
-            data.waivers =
-                Some(waivers.summary(data.coverage.covered_conditions, data.coverage.conditions));
+            data.waivers = Some(waivers.summary(&data.coverage));
         }
         return Ok(IndexedQueryOutput {
             command: "coverage.summary",
@@ -522,15 +523,7 @@ pub fn query_indexed_with_waivers(
                 CoverageCoversData::Anchors(data) => &mut data.remaining,
             };
             for obligation in remaining {
-                if let crate::coverage_query::CoverageFileObligation::Mcdc(obligation) = obligation
-                    && let Some(waiver) = waivers
-                        .waived_by_decision
-                        .get(&obligation.id)
-                        .and_then(|conditions| conditions.get(&obligation.condition_index))
-                {
-                    obligation.waived = Some(true);
-                    obligation.waiver_reason = Some(waiver.reason.clone());
-                }
+                annotate_obligation_waiver(obligation, waivers);
             }
         }
         return Ok(IndexedQueryOutput {
@@ -626,18 +619,14 @@ pub fn query_indexed_with_waivers(
                 .get(&data.file)
                 .copied()
                 .unwrap_or(0);
+            data.counts.waived_obligations = waivers
+                .applied_by_file
+                .get(&data.file)
+                .copied()
+                .unwrap_or(0);
             for line in &mut data.gap_lines {
                 for obligation in &mut line.obligations {
-                    if let crate::coverage_query::CoverageFileObligation::Mcdc(obligation) =
-                        obligation
-                        && let Some(waiver) = waivers
-                            .waived_by_decision
-                            .get(&obligation.id)
-                            .and_then(|conditions| conditions.get(&obligation.condition_index))
-                    {
-                        obligation.waived = Some(true);
-                        obligation.waiver_reason = Some(waiver.reason.clone());
-                    }
+                    annotate_obligation_waiver(obligation, waivers);
                 }
             }
         }
@@ -734,7 +723,14 @@ pub fn query_indexed_with_waivers(
             CoverageFileQueryData::Gaps(data) => &mut data.gaps,
         };
         for row in rows {
-            row.waived_mcdc_conditions =
+            row.waived_mcdc_conditions = Some(
+                waivers
+                    .applied
+                    .iter()
+                    .filter(|matched| matched.file == row.file)
+                    .count(),
+            );
+            row.waived_obligations =
                 Some(waivers.applied_by_file.get(&row.file).copied().unwrap_or(0));
         }
     }
@@ -755,6 +751,41 @@ pub fn query_indexed_with_waivers(
             pagination: Some(query.pagination),
         },
     })
+}
+
+fn annotate_obligation_waiver(
+    obligation: &mut crate::coverage_query::CoverageFileObligation,
+    waivers: &CoverageWaiverEvaluation,
+) {
+    use crate::coverage_query::CoverageFileObligation;
+    let waiver = match obligation {
+        CoverageFileObligation::Line(obligation) => waivers.waived_lines.get(&obligation.id),
+        CoverageFileObligation::Point(obligation) => waivers.waived_hits.get(&obligation.id),
+        CoverageFileObligation::Branch(obligation) => waivers.waived_hits.get(&obligation.id),
+        CoverageFileObligation::Mcdc(obligation) => waivers
+            .waived_by_decision
+            .get(&obligation.id)
+            .and_then(|conditions| conditions.get(&obligation.condition_index)),
+    };
+    let Some(waiver) = waiver else { return };
+    match obligation {
+        CoverageFileObligation::Line(value) => {
+            value.waived = Some(true);
+            value.waiver_reason = Some(waiver.reason.clone());
+        }
+        CoverageFileObligation::Point(value) => {
+            value.waived = Some(true);
+            value.waiver_reason = Some(waiver.reason.clone());
+        }
+        CoverageFileObligation::Branch(value) => {
+            value.waived = Some(true);
+            value.waiver_reason = Some(waiver.reason.clone());
+        }
+        CoverageFileObligation::Mcdc(value) => {
+            value.waived = Some(true);
+            value.waiver_reason = Some(waiver.reason.clone());
+        }
+    }
 }
 
 #[cfg(test)]

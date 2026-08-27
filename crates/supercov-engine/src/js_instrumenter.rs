@@ -25,8 +25,9 @@ use oxc_ast::{
         FormalParameters, Function, FunctionBody, IfStatement, ImportDeclarationSpecifier,
         ImportOrExportKind, LogicalExpression, NewExpression, ObjectPropertyKind,
         PrivateFieldExpression, Program, PropertyKey, PropertyKind, Statement,
-        StaticMemberExpression, SwitchStatement, TryStatement, VariableDeclaration,
-        VariableDeclarationKind, VariableDeclarator, WhileStatement, WithStatement,
+        StaticMemberExpression, SwitchStatement, TSGlobalDeclaration, TSModuleDeclaration,
+        TryStatement, VariableDeclaration, VariableDeclarationKind, VariableDeclarator,
+        WhileStatement, WithStatement,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -458,10 +459,16 @@ fn capability_source_candidate(source: &str) -> bool {
     // `machine`, `acquire` and `spawn` are common in tests and application
     // code; treating any of them as sufficient wrapped unrelated framework
     // registration functions and changed their captured callsite.
-    ["hostPath", "guestPath", "hostRoot", "guestRoot", "mounts"]
-        .iter()
-        .any(|shape| source.contains(shape))
-        || (source.contains("source") && source.contains("target") && source.contains("/workspace"))
+    let direct_mapping = (source.contains("hostPath") && source.contains("guestPath"))
+        || (source.contains("hostRoot") && source.contains("guestRoot"));
+    // The guest path is commonly computed (for example
+    // `resolve(tmpdir(), "workspace")`), so requiring the literal
+    // `/workspace` loses genuine opaque launchers. The nested mount shape is
+    // already specific, and the AST pass below still restricts wrapping to
+    // the imported root actually called with that argument.
+    let mount_mapping =
+        source.contains("mounts") && source.contains("source") && source.contains("target");
+    direct_mapping || mount_mapping
 }
 
 fn excluded_capability_import(source: &str, wrapper: &str) -> bool {
@@ -470,6 +477,84 @@ fn excluded_capability_import(source: &str, wrapper: &str) -> bool {
         || source.starts_with("virtual:supercov-")
         || source.contains(".supercov/")
         || CAPABILITY_IMPORT_EXCLUSIONS.contains(&source)
+}
+
+fn capability_callee_root(expression: &Expression<'_>) -> Option<String> {
+    match expression {
+        Expression::Identifier(identifier) => Some(identifier.name.to_string()),
+        Expression::StaticMemberExpression(member) => capability_callee_root(&member.object),
+        Expression::ComputedMemberExpression(member) => capability_callee_root(&member.object),
+        Expression::CallExpression(call) => capability_callee_root(&call.callee),
+        Expression::ParenthesizedExpression(parenthesized) => {
+            capability_callee_root(&parenthesized.expression)
+        }
+        Expression::TSAsExpression(expression) => capability_callee_root(&expression.expression),
+        Expression::TSSatisfiesExpression(expression) => {
+            capability_callee_root(&expression.expression)
+        }
+        Expression::TSNonNullExpression(expression) => {
+            capability_callee_root(&expression.expression)
+        }
+        Expression::TSTypeAssertion(expression) => capability_callee_root(&expression.expression),
+        _ => None,
+    }
+}
+
+struct CapabilityCallCollector<'s> {
+    source: &'s str,
+    mapping_variables: HashSet<String>,
+    roots: HashSet<String>,
+}
+
+impl CapabilityCallCollector<'_> {
+    fn argument_has_mapping(&self, argument: &Argument<'_>) -> bool {
+        if let Argument::Identifier(identifier) = argument
+            && self.mapping_variables.contains(identifier.name.as_str())
+        {
+            return true;
+        }
+        capability_source_candidate(source_slice(self.source, argument.span()))
+    }
+}
+
+impl<'a> Visit<'a> for CapabilityCallCollector<'_> {
+    fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'a>) {
+        if let (BindingPattern::BindingIdentifier(identifier), Some(initializer)) =
+            (&declarator.id, &declarator.init)
+            && capability_source_candidate(source_slice(self.source, initializer.span()))
+        {
+            self.mapping_variables.insert(identifier.name.to_string());
+        }
+        walk::walk_variable_declarator(self, declarator);
+    }
+
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if call
+            .arguments
+            .iter()
+            .any(|argument| self.argument_has_mapping(argument))
+            && let Some(root) = capability_callee_root(&call.callee)
+        {
+            self.roots.insert(root);
+        }
+        walk::walk_call_expression(self, call);
+    }
+}
+
+fn capability_import_roots(program: &Program<'_>, source: &str) -> HashSet<String> {
+    let mut collector = CapabilityCallCollector {
+        source,
+        mapping_variables: HashSet::new(),
+        roots: HashSet::new(),
+    };
+    // Mapping variables must be known before calls are inspected because a
+    // declaration may appear after a function that closes over it.
+    collector.visit_program(program);
+    let mapping_variables = collector.mapping_variables.clone();
+    collector.roots.clear();
+    collector.mapping_variables = mapping_variables;
+    collector.visit_program(program);
+    collector.roots
 }
 
 /// Wrap value imports that can hide a remote execution capability. This is an
@@ -482,6 +567,10 @@ fn transform_capability_imports<'a>(
     wrapper: &str,
 ) -> usize {
     if !capability_source_candidate(source) || !program.source_type.is_module() {
+        return 0;
+    }
+    let capability_roots = capability_import_roots(program, source);
+    if capability_roots.is_empty() {
         return 0;
     }
     let ast = AstBuilder::new(allocator);
@@ -518,6 +607,9 @@ fn transform_capability_imports<'a>(
                 }
             };
             let original = local.name.to_string();
+            if !capability_roots.contains(&original) {
+                continue;
+            }
             let raw = names.allocate(&format!("__supercovRaw{original}"));
             local.name = ast.ident(&raw);
             let wrapped_value = ast.expression_call(
@@ -1144,6 +1236,7 @@ struct PointCollector<'s> {
     source_sensitive_functions: &'s HashSet<SpanKey>,
     unsafe_function_depth: usize,
     with_depth: usize,
+    ambient_depth: usize,
 }
 
 #[derive(Default)]
@@ -1173,7 +1266,7 @@ impl PointCollector<'_> {
     }
 
     fn unsafe_context(&self) -> bool {
-        self.unsafe_function_depth > 0 || self.with_depth > 0
+        self.unsafe_function_depth > 0 || self.with_depth > 0 || self.ambient_depth > 0
     }
 
     fn exit_function(&mut self, span: Span) {
@@ -1397,6 +1490,42 @@ impl<'a> Traverse<'a, ()> for PointCollector<'_> {
     ) {
         self.with_depth -= 1;
     }
+
+    fn enter_ts_global_declaration(
+        &mut self,
+        _node: &mut TSGlobalDeclaration<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.ambient_depth += 1;
+    }
+
+    fn exit_ts_global_declaration(
+        &mut self,
+        _node: &mut TSGlobalDeclaration<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        self.ambient_depth -= 1;
+    }
+
+    fn enter_ts_module_declaration(
+        &mut self,
+        node: &mut TSModuleDeclaration<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        if node.declare {
+            self.ambient_depth += 1;
+        }
+    }
+
+    fn exit_ts_module_declaration(
+        &mut self,
+        node: &mut TSModuleDeclaration<'a>,
+        _context: &mut TraverseCtx<'a, ()>,
+    ) {
+        if node.declare {
+            self.ambient_depth -= 1;
+        }
+    }
 }
 
 fn collect_points<'a>(
@@ -1418,6 +1547,7 @@ fn collect_points<'a>(
             source_sensitive_functions,
             unsafe_function_depth: 0,
             with_depth: 0,
+            ambient_depth: 0,
         };
         traverse_mut(&mut collector, allocator, program, Default::default(), ());
         analysis.points.extend(collector.points);
@@ -4965,9 +5095,12 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
     }
 
     fn visit_if_statement(&mut self, statement: &mut IfStatement<'a>) {
-        let plan = self.reserve_decision(&statement.test);
+        let plan = decision_outcome_is_variable(&statement.test)
+            .then(|| self.reserve_decision(&statement.test));
         self.visit_expression(&mut statement.test);
-        self.apply_decision(&mut statement.test, plan);
+        if let Some(plan) = plan {
+            self.apply_decision(&mut statement.test, plan);
+        }
         self.visit_statement(&mut statement.consequent);
         if let Some(alternate) = &mut statement.alternate {
             self.visit_statement(alternate);
@@ -4975,31 +5108,41 @@ impl<'a> VisitMut<'a> for ControlProbeV2Transformer<'a, '_> {
     }
 
     fn visit_conditional_expression(&mut self, expression: &mut ConditionalExpression<'a>) {
-        let plan = self.reserve_decision(&expression.test);
+        let plan = decision_outcome_is_variable(&expression.test)
+            .then(|| self.reserve_decision(&expression.test));
         self.visit_expression(&mut expression.test);
-        self.apply_decision(&mut expression.test, plan);
+        if let Some(plan) = plan {
+            self.apply_decision(&mut expression.test, plan);
+        }
         self.visit_expression(&mut expression.consequent);
         self.visit_expression(&mut expression.alternate);
     }
 
     fn visit_while_statement(&mut self, statement: &mut WhileStatement<'a>) {
-        let plan = self.reserve_decision(&statement.test);
+        let plan = decision_outcome_is_variable(&statement.test)
+            .then(|| self.reserve_decision(&statement.test));
         self.visit_expression(&mut statement.test);
-        self.apply_decision(&mut statement.test, plan);
+        if let Some(plan) = plan {
+            self.apply_decision(&mut statement.test, plan);
+        }
         self.visit_statement(&mut statement.body);
     }
 
     fn visit_do_while_statement(&mut self, statement: &mut DoWhileStatement<'a>) {
-        let plan = self.reserve_decision(&statement.test);
+        let plan = decision_outcome_is_variable(&statement.test)
+            .then(|| self.reserve_decision(&statement.test));
         self.visit_statement(&mut statement.body);
         self.visit_expression(&mut statement.test);
-        self.apply_decision(&mut statement.test, plan);
+        if let Some(plan) = plan {
+            self.apply_decision(&mut statement.test, plan);
+        }
     }
 
     fn visit_for_statement(&mut self, statement: &mut ForStatement<'a>) {
         let plan = statement
             .test
             .as_ref()
+            .filter(|test| decision_outcome_is_variable(test))
             .map(|test| self.reserve_decision(test));
         if let Some(init) = &mut statement.init {
             self.visit_for_statement_init(init);
@@ -5054,6 +5197,42 @@ impl DecisionCollector<'_> {
                 0
             },
         );
+    }
+}
+
+/// MC/DC applies only when a decision can produce both Boolean outcomes.
+/// This deliberately recognizes only semantics that are provable from syntax;
+/// it never evaluates user code or assumes values for identifiers/calls.
+fn decision_outcome_is_variable(expression: &Expression<'_>) -> bool {
+    syntactic_boolean_outcome(expression).is_none()
+}
+
+fn syntactic_boolean_outcome(expression: &Expression<'_>) -> Option<bool> {
+    match transparent_expression(expression) {
+        Expression::BooleanLiteral(literal) => Some(literal.value),
+        Expression::UnaryExpression(unary) if unary.operator.is_not() => {
+            syntactic_boolean_outcome(&unary.argument).map(|value| !value)
+        }
+        Expression::LogicalExpression(logical)
+            if matches!(logical.operator, LogicalOperator::And | LogicalOperator::Or) =>
+        {
+            let left = syntactic_boolean_outcome(&logical.left);
+            let right = syntactic_boolean_outcome(&logical.right);
+            match logical.operator {
+                LogicalOperator::And => match (left, right) {
+                    (Some(false), _) | (_, Some(false)) => Some(false),
+                    (Some(true), value) | (value, Some(true)) => value,
+                    _ => None,
+                },
+                LogicalOperator::Or => match (left, right) {
+                    (Some(true), _) | (_, Some(true)) => Some(true),
+                    (Some(false), value) | (value, Some(false)) => value,
+                    _ => None,
+                },
+                LogicalOperator::Coalesce => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -6496,7 +6675,9 @@ impl<'a> Visit<'a> for DecisionCollector<'_> {
     }
 
     fn visit_if_statement(&mut self, statement: &IfStatement<'a>) {
-        self.record_decision(&statement.test, "if");
+        if decision_outcome_is_variable(&statement.test) {
+            self.record_decision(&statement.test, "if");
+        }
         self.visit_expression(&statement.test);
         self.visit_statement(&statement.consequent);
         if let Some(alternate) = &statement.alternate {
@@ -6505,26 +6686,34 @@ impl<'a> Visit<'a> for DecisionCollector<'_> {
     }
 
     fn visit_conditional_expression(&mut self, expression: &ConditionalExpression<'a>) {
-        self.record_decision(&expression.test, "ternary");
+        if decision_outcome_is_variable(&expression.test) {
+            self.record_decision(&expression.test, "ternary");
+        }
         self.visit_expression(&expression.test);
         self.visit_expression(&expression.consequent);
         self.visit_expression(&expression.alternate);
     }
 
     fn visit_while_statement(&mut self, statement: &WhileStatement<'a>) {
-        self.record_decision(&statement.test, "while");
+        if decision_outcome_is_variable(&statement.test) {
+            self.record_decision(&statement.test, "while");
+        }
         self.visit_expression(&statement.test);
         self.visit_statement(&statement.body);
     }
 
     fn visit_do_while_statement(&mut self, statement: &DoWhileStatement<'a>) {
-        self.record_decision(&statement.test, "do-while");
+        if decision_outcome_is_variable(&statement.test) {
+            self.record_decision(&statement.test, "do-while");
+        }
         self.visit_statement(&statement.body);
         self.visit_expression(&statement.test);
     }
 
     fn visit_for_statement(&mut self, statement: &ForStatement<'a>) {
-        if let Some(test) = &statement.test {
+        if let Some(test) = &statement.test
+            && decision_outcome_is_variable(test)
+        {
             self.record_decision(test, "for");
         }
         if let Some(init) = &statement.init {
@@ -6679,8 +6868,9 @@ mod tests {
     #[test]
     fn capability_imports_are_rewritten_ahead_of_run_by_rust() {
         let source = concat!(
-            "import { ImageBuilder } from './sdk.mjs';\n",
+            "import { ImageBuilder, ordinaryHelper } from './sdk.mjs';\n",
             "await ImageBuilder.build({ mounts: [{ source: process.cwd(), target: '/workspace' }], snapshotKey: 'base' });\n",
+            "ordinaryHelper();\n",
         );
         let output = instrument_node_assertion_phases_with_runtime_hooks(
             source,
@@ -6694,7 +6884,48 @@ mod tests {
         assert!(output.code.contains("wrapImportedCapability"));
         assert!(output.code.contains("__supercovRawImageBuilder"));
         assert!(output.code.contains("const ImageBuilder"));
+        assert!(!output.code.contains("__supercovRawordinaryHelper"));
         assert!(output.code.contains("../.supercov/launchSupervisor.js"));
+    }
+
+    #[test]
+    fn capability_imports_accept_a_computed_guest_mount_path() {
+        let source = concat!(
+            "import { OpaqueImageBuilder, ordinaryHelper } from './sdk.mjs';\n",
+            "const guestRoot = resolve(tmpdir(), 'workspace');\n",
+            "await OpaqueImageBuilder.build({ mounts: [{ source: process.cwd(), target: guestRoot }], snapshotTag: 'base' });\n",
+            "ordinaryHelper();\n",
+        );
+        let output = instrument_node_assertion_phases_with_runtime_hooks(
+            source,
+            "tests/runner.mjs",
+            &[],
+            Some("../.supercov/launchSupervisor.js"),
+        )
+        .unwrap();
+        assert_eq!(output.capability_imports, 1);
+        assert!(output.code.contains("__supercovRawOpaqueImageBuilder"));
+        assert!(!output.code.contains("__supercovRawordinaryHelper"));
+    }
+
+    #[test]
+    fn capability_import_selection_follows_a_mapping_variable() {
+        let source = concat!(
+            "import { launch, unrelated } from './sdk.mjs';\n",
+            "run();\n",
+            "const options = { hostPath: process.cwd(), guestPath: '/workspace' };\n",
+            "function run() { launch(options); unrelated(); }\n",
+        );
+        let output = instrument_node_assertion_phases_with_runtime_hooks(
+            source,
+            "tests/runner.mjs",
+            &[],
+            Some("../.supercov/launchSupervisor.js"),
+        )
+        .unwrap();
+        assert_eq!(output.capability_imports, 1);
+        assert!(output.code.contains("__supercovRawlaunch"));
+        assert!(!output.code.contains("__supercovRawunrelated"));
     }
 
     #[test]
@@ -6709,6 +6940,23 @@ mod tests {
         .unwrap();
         assert_eq!(output.code, source);
         assert_eq!(output.capability_imports, 0);
+    }
+
+    #[test]
+    fn ordinary_mount_language_does_not_enable_capability_proxies() {
+        let source = concat!(
+            "import { render } from '@testing-library/react';\n",
+            "it('mounts into a host element', () => render(<main />));\n",
+        );
+        let output = instrument_node_assertion_phases_with_runtime_hooks(
+            source,
+            "tests/component.test.tsx",
+            &[],
+            Some("../.supercov/launchSupervisor.js"),
+        )
+        .unwrap();
+        assert_eq!(output.capability_imports, 0);
+        assert!(!output.code.contains("wrapImportedCapability"));
     }
 
     #[test]
@@ -6930,6 +7178,51 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["ternary", "while", "do-while", "for", "if"]
         );
+    }
+
+    #[test]
+    fn excludes_syntactically_invariant_control_decisions_from_mcdc() {
+        let source = concat!(
+            "export function run(value) {\n",
+            "  while (true) { break; }\n",
+            "  do { value += 1; } while (false);\n",
+            "  if (false) value += 2;\n",
+            "  if (value || true) value += 3;\n",
+            "  if (value && false) value += 4;\n",
+            "  if (value) value += 5;\n",
+            "  return value;\n",
+            "}\n",
+        );
+        let output = analyze_candidate(source, "src/constants.js").unwrap();
+        assert_eq!(output.decisions.len(), 1);
+        assert_eq!(output.decisions[0].source, "value");
+
+        let instrumented = instrument_direct_candidate(source, "src/constants.js").unwrap();
+        assert_eq!(instrumented.decisions.len(), 1);
+        assert_eq!(instrumented.decisions[0].source, "value");
+    }
+
+    #[test]
+    fn excludes_typescript_ambient_declarations_from_the_executable_denominator() {
+        let source = concat!(
+            "declare global {\n",
+            "  var Beacon: undefined | ((action: string) => void);\n",
+            "}\n",
+            "declare module 'virtual:feature' {\n",
+            "  export const enabled: boolean;\n",
+            "}\n",
+            "declare const buildOnly: string;\n",
+            "export const live = 1;\n",
+        );
+        let output = instrument_direct_candidate(source, "src/ambient.ts").unwrap();
+        let statements = output
+            .points
+            .iter()
+            .filter(|point| point.kind == "statement")
+            .map(|point| point.source.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(statements, ["const live = 1;"]);
+        assert!(output.code.contains("const live = 1"));
     }
 
     #[test]
