@@ -7,7 +7,7 @@
 //! Unsupported configuration surfaces fail before user code executes.
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap},
     ffi::OsString,
     fs,
     path::{Component, Path, PathBuf},
@@ -15,7 +15,7 @@ use std::{
     str::FromStr,
 };
 
-use cargo_config2::{Config, ResolveOptions, Walk, cargo_home_with_cwd};
+use cargo_config2::cargo_home_with_cwd;
 use cargo_platform::{Cfg, CfgExpr};
 use serde::{Deserialize, Serialize};
 
@@ -96,13 +96,41 @@ pub struct RustCargoResolvedTargetRunner {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustCargoRunnerPlan {
+    pub compiler: RustCargoCompilerCommandPlan,
     pub targets: Vec<RustCargoTargetRunnerPlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCargoCompilerCommandPlan {
+    pub rustc: RustCargoRunnerProgram,
+    pub rustc_wrapper: Option<RustCargoRunnerProgram>,
+    pub rustc_workspace_wrapper: Option<RustCargoRunnerProgram>,
+}
+
+impl RustCargoCompilerCommandPlan {
+    fn resolved_programs(&self, workspace: &Path) -> Vec<PathBuf> {
+        self.rustc_wrapper
+            .iter()
+            .chain(self.rustc_workspace_wrapper.iter())
+            .chain(std::iter::once(&self.rustc))
+            .map(|program| program.resolve(workspace))
+            .collect()
+    }
+
+    fn command(&self, workspace: &Path) -> Command {
+        let programs = self.resolved_programs(workspace);
+        let mut command = Command::new(&programs[0]);
+        command.args(&programs[1..]);
+        command
+    }
 }
 
 #[derive(Debug, Clone)]
 struct CargoModelInputs {
     cargo_home: Option<PathBuf>,
     environment: HashMap<String, OsString>,
+    host_override: Option<String>,
 }
 
 impl CargoModelInputs {
@@ -112,6 +140,7 @@ impl CargoModelInputs {
             environment: std::env::vars_os()
                 .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
                 .collect(),
+            host_override: None,
         }
     }
 
@@ -363,24 +392,6 @@ fn selected_cargo_program(
     Ok(selected.into_os_string())
 }
 
-fn discovered_configuration(
-    root: &Path,
-) -> Result<(HashSet<PathBuf>, bool), RustCargoConfigurationError> {
-    let mut paths = HashSet::new();
-    let mut includes = false;
-    for path in Walk::new(root) {
-        let contents = fs::read_to_string(&path).map_err(|error| io_error(&path, error))?;
-        let value: toml::Value = toml::from_str(&contents).map_err(|error| {
-            RustCargoConfigurationError::Invalid(format!("{}: {error}", path.display()))
-        })?;
-        includes |= value
-            .as_table()
-            .is_some_and(|table| table.contains_key("include"));
-        paths.insert(path);
-    }
-    Ok((paths, includes))
-}
-
 fn model_target_config<'a>(
     model: &'a CargoConfigValue,
     target: &str,
@@ -526,6 +537,162 @@ fn environment_runner(
     }))
 }
 
+fn environment_tool(
+    root: &Path,
+    key: &str,
+    inputs: &CargoModelInputs,
+    empty_disables: bool,
+    non_utf8_is_absent: bool,
+) -> Result<Option<Option<RustCargoRunnerProgram>>, RustCargoConfigurationError> {
+    let Some(value) = inputs.environment(key) else {
+        return Ok(None);
+    };
+    let value = match value.clone().into_string() {
+        Ok(value) => value,
+        Err(_) if non_utf8_is_absent => return Ok(None),
+        Err(_) => {
+            return Err(RustCargoConfigurationError::Invalid(format!(
+                "{key} is not UTF-8"
+            )));
+        }
+    };
+    if empty_disables && value.is_empty() {
+        return Ok(Some(None));
+    }
+    let path = if value.contains('/') || value.contains('\\') {
+        root.join(value)
+    } else {
+        PathBuf::from(value)
+    };
+    Ok(Some(Some(runner_program(root, path)?)))
+}
+
+fn model_tool(
+    root: &Path,
+    value: &CargoConfigValue,
+    empty_disables: bool,
+) -> Result<Option<RustCargoRunnerProgram>, RustCargoConfigurationError> {
+    let path = value
+        .program_path(root)
+        .map_err(|error| RustCargoConfigurationError::Invalid(error.to_string()))?;
+    if empty_disables && path.as_os_str().is_empty() {
+        return Ok(None);
+    }
+    runner_program(root, path).map(Some)
+}
+
+fn selected_compiler_tool(
+    root: &Path,
+    model: &CargoConfigValue,
+    inputs: &CargoModelInputs,
+    model_key: &str,
+    direct_environment: &str,
+    cargo_environment: &str,
+    empty_disables: bool,
+) -> Result<Option<RustCargoRunnerProgram>, RustCargoConfigurationError> {
+    let configured = model.at(&["build", model_key]);
+    if let Some(selected) =
+        environment_tool(root, direct_environment, inputs, empty_disables, true)?
+    {
+        return Ok(selected);
+    }
+    if configured.is_some_and(|value| {
+        matches!(
+            value.definition,
+            CargoConfigDefinition::CliFile(_) | CargoConfigDefinition::CliValue
+        )
+    }) {
+        return model_tool(root, configured.expect("checked above"), empty_disables);
+    }
+    if let Some(selected) =
+        environment_tool(root, cargo_environment, inputs, empty_disables, false)?
+    {
+        return Ok(selected);
+    }
+    configured
+        .map(|value| model_tool(root, value, empty_disables))
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn compiler_command_plan(
+    root: &Path,
+    model: &CargoConfigValue,
+    default_rustc: RustCargoRunnerProgram,
+    inputs: &CargoModelInputs,
+) -> Result<RustCargoCompilerCommandPlan, RustCargoConfigurationError> {
+    let rustc = selected_compiler_tool(
+        root,
+        model,
+        inputs,
+        "rustc",
+        "RUSTC",
+        "CARGO_BUILD_RUSTC",
+        false,
+    )?
+    .unwrap_or(default_rustc);
+    let rustc_wrapper = selected_compiler_tool(
+        root,
+        model,
+        inputs,
+        "rustc-wrapper",
+        "RUSTC_WRAPPER",
+        "CARGO_BUILD_RUSTC_WRAPPER",
+        true,
+    )?;
+    let rustc_workspace_wrapper = selected_compiler_tool(
+        root,
+        model,
+        inputs,
+        "rustc-workspace-wrapper",
+        "RUSTC_WORKSPACE_WRAPPER",
+        "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+        true,
+    )?;
+    Ok(RustCargoCompilerCommandPlan {
+        rustc,
+        rustc_wrapper,
+        rustc_workspace_wrapper,
+    })
+}
+
+fn compiler_host(
+    root: &Path,
+    compiler: &RustCargoCompilerCommandPlan,
+) -> Result<String, RustCargoConfigurationError> {
+    let output = compiler
+        .command(root)
+        .arg("-vV")
+        .output()
+        .map_err(|error| io_error(&compiler.rustc.resolve(root), error))?;
+    if !output.status.success() {
+        return Err(RustCargoConfigurationError::Invalid(format!(
+            "Cargo's configured compiler command failed while resolving its host with status {}: {}",
+            output
+                .status
+                .code()
+                .map_or_else(|| "signal".into(), |value| value.to_string()),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let stdout = String::from_utf8(output.stdout).map_err(|_| {
+        RustCargoConfigurationError::Invalid(
+            "Cargo's configured compiler command produced non-UTF-8 verbose version output".into(),
+        )
+    })?;
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .filter(|host| !host.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            RustCargoConfigurationError::Invalid(
+                "Cargo's configured compiler command did not report a host in rustc -vV output"
+                    .into(),
+            )
+        })
+}
+
 fn parsed_model_runner(
     root: &Path,
     runner: &CargoConfigValue,
@@ -540,19 +707,30 @@ fn parsed_model_runner(
 }
 
 fn target_cfg(
-    config: &Config,
+    configuration_root: &Path,
+    execution_root: &Path,
+    compiler: &RustCargoCompilerCommandPlan,
     target: &ModelTarget,
 ) -> Result<Vec<Cfg>, RustCargoConfigurationError> {
-    let rustc = config.rustc();
-    let output = Command::new(&rustc.path)
-        .args(&rustc.args)
-        .args(["--print", "cfg", "--target", &target.cargo_argument])
+    let target_argument = match target.kind {
+        ModelTargetKind::Tuple => PathBuf::from(&target.cargo_argument),
+        ModelTargetKind::Json => {
+            let source = Path::new(&target.cargo_argument);
+            source.strip_prefix(configuration_root).map_or_else(
+                |_| source.to_owned(),
+                |relative| execution_root.join(relative),
+            )
+        }
+    };
+    let output = compiler
+        .command(execution_root)
+        .args(["--print", "cfg", "--target"])
+        .arg(&target_argument)
         .output()
-        .map_err(|error| io_error(&rustc.path, error))?;
+        .map_err(|error| io_error(&compiler.rustc.resolve(execution_root), error))?;
     if !output.status.success() {
         return Err(RustCargoConfigurationError::Invalid(format!(
-            "{} failed while resolving cfg values for target {} with status {}: {}",
-            rustc.path.display(),
+            "Cargo's configured compiler command failed while resolving cfg values for target {} with status {}: {}",
             target.cargo_argument,
             output
                 .status
@@ -563,8 +741,7 @@ fn target_cfg(
     }
     let stdout = String::from_utf8(output.stdout).map_err(|_| {
         RustCargoConfigurationError::Invalid(format!(
-            "{} produced non-UTF-8 cfg output for target {}",
-            rustc.path.display(),
+            "Cargo's configured compiler command produced non-UTF-8 cfg output for target {}",
             target.cargo_argument
         ))
     })?;
@@ -617,11 +794,11 @@ fn cfg_runner<'a>(
 }
 
 fn model_runner(
-    root: &Path,
+    configuration_root: &Path,
+    execution_root: &Path,
     model: &CargoConfigValue,
-    config: &Config,
+    compiler: &RustCargoCompilerCommandPlan,
     target: &ModelTarget,
-    directly_loaded: &HashSet<PathBuf>,
     inputs: &CargoModelInputs,
 ) -> Result<Option<RustCargoUnderlyingRunner>, RustCargoConfigurationError> {
     let exact = model_exact_runner(model, &target.name);
@@ -638,33 +815,12 @@ fn model_runner(
         _ => environment.as_ref().or(exact),
     };
     if let Some(runner) = selected {
-        return parsed_model_runner(root, runner).map(Some);
+        return parsed_model_runner(configuration_root, runner).map(Some);
     }
-    for key in ["rustc", "rustc-wrapper", "rustc-workspace-wrapper"] {
-        if model
-            .at(&["build", key])
-            .is_some_and(|value| definition_is_owned_layer(&value.definition, directly_loaded))
-        {
-            return Err(RustCargoConfigurationError::Unsupported(format!(
-                "Cargo include/--config changed build.{key}; exact cfg runner selection through that compiler command is not yet implemented"
-            )));
-        }
-    }
-    let cfg = target_cfg(config, target)?;
+    let cfg = target_cfg(configuration_root, execution_root, compiler, target)?;
     cfg_runner(model, &cfg)?
-        .map(|runner| parsed_model_runner(root, runner))
+        .map(|runner| parsed_model_runner(configuration_root, runner))
         .transpose()
-}
-
-fn definition_is_owned_layer(
-    definition: &CargoConfigDefinition,
-    directly_loaded: &HashSet<PathBuf>,
-) -> bool {
-    match definition {
-        CargoConfigDefinition::File(path) => !directly_loaded.contains(path),
-        CargoConfigDefinition::CliFile(_) | CargoConfigDefinition::CliValue => true,
-        CargoConfigDefinition::BuiltIn | CargoConfigDefinition::Environment(_) => false,
-    }
 }
 
 fn runner_program(
@@ -701,37 +857,44 @@ fn runner_program(
     )))
 }
 
-fn resolve_with_options(
+fn resolve_with_inputs(
     root: &Path,
+    execution_root: &Path,
     invocation: &CargoTestInvocation,
-    options: ResolveOptions,
     model_inputs: CargoModelInputs,
 ) -> Result<RustCargoRunnerPlan, RustCargoConfigurationError> {
     let root = fs::canonicalize(root).map_err(|error| io_error(root, error))?;
-    let (directly_loaded, _) = discovered_configuration(&root)?;
+    let execution_root =
+        fs::canonicalize(execution_root).map_err(|error| io_error(execution_root, error))?;
     let command_targets = command_targets(invocation)?;
     let command_config = command_config_arguments(invocation)?;
     let selected_cargo = selected_cargo_program(invocation)?;
-    let config = Config::load_with_options(&root, options.cargo(selected_cargo))
-        .map_err(|error| RustCargoConfigurationError::Invalid(error.to_string()))?;
     let model = load_cargo_configuration(&root, model_inputs.cargo_home.clone(), &command_config)
         .map_err(|error| RustCargoConfigurationError::Invalid(error.to_string()))?;
-    if model
-        .at(&["build", "rustc"])
-        .is_some_and(|value| definition_is_owned_layer(&value.definition, &directly_loaded))
-        && command_targets.is_empty()
-        && model_inputs.environment("CARGO_BUILD_TARGET").is_none()
-        && model.at(&["build", "target"]).is_none()
-    {
+    let selected_cargo_path = PathBuf::from(&selected_cargo);
+    let default_rustc = selected_cargo_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(|parent| parent.join(format!("rustc{}", std::env::consts::EXE_SUFFIX)))
+        .filter(|candidate| candidate.is_file())
+        .map(|candidate| runner_program(&root, candidate))
+        .transpose()?
+        .unwrap_or_else(|| RustCargoRunnerProgram::SearchPath {
+            value: format!("rustc{}", std::env::consts::EXE_SUFFIX),
+        });
+    let compiler = compiler_command_plan(&root, &model, default_rustc, &model_inputs)?;
+    if compiler.rustc_wrapper.is_some() || compiler.rustc_workspace_wrapper.is_some() {
         return Err(RustCargoConfigurationError::Unsupported(
-            "Cargo include/--config changed build.rustc while target selection depends on that compiler's host; exact host resolution is not yet implemented"
+            "Cargo compiler wrappers are detected exactly but cannot yet be composed without changing wrapper-visible compiler semantics"
                 .into(),
         ));
     }
-    let host = config
-        .host_triple()
-        .map_err(|error| RustCargoConfigurationError::Invalid(error.to_string()))?;
-    let targets = model_targets(&root, &model, command_targets, host, &model_inputs)?;
+    let host = model_inputs
+        .host_override
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(|| compiler_host(&execution_root, &compiler))?;
+    let targets = model_targets(&root, &model, command_targets, &host, &model_inputs)?;
     let targets = targets
         .iter()
         .map(|target| {
@@ -739,26 +902,27 @@ fn resolve_with_options(
                 target: target.name.clone(),
                 underlying_runner: model_runner(
                     &root,
+                    &execution_root,
                     &model,
-                    &config,
+                    &compiler,
                     target,
-                    &directly_loaded,
                     &model_inputs,
                 )?,
             })
         })
         .collect::<Result<Vec<_>, RustCargoConfigurationError>>()?;
-    Ok(RustCargoRunnerPlan { targets })
+    Ok(RustCargoRunnerPlan { compiler, targets })
 }
 
 pub(crate) fn resolve_cargo_runner_plan(
     root: &Path,
+    execution_root: &Path,
     invocation: &CargoTestInvocation,
 ) -> Result<RustCargoRunnerPlan, RustCargoConfigurationError> {
-    resolve_with_options(
+    resolve_with_inputs(
         root,
+        execution_root,
         invocation,
-        ResolveOptions::default(),
         CargoModelInputs::ambient(root),
     )
 }
@@ -796,10 +960,6 @@ mod tests {
         }
     }
 
-    fn options(root: &Path) -> ResolveOptions {
-        options_with(root, [])
-    }
-
     fn model_inputs() -> CargoModelInputs {
         model_inputs_with([])
     }
@@ -813,22 +973,205 @@ mod tests {
                 .into_iter()
                 .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
                 .collect(),
+            host_override: Some("aarch64-apple-darwin".into()),
         }
     }
 
-    fn options_with<const N: usize>(
-        root: &Path,
-        additional: [(OsString, OsString); N],
-    ) -> ResolveOptions {
-        let mut environment = vec![(
-            OsString::from("CARGO_HOME"),
-            root.join("empty-home").into_os_string(),
-        )];
-        environment.extend(additional);
-        ResolveOptions::default()
-            .cargo_home(None)
-            .host_triple("aarch64-apple-darwin")
-            .env(environment)
+    #[test]
+    fn compiler_tools_follow_cargo_cli_and_environment_precedence() {
+        let root = fixture();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            concat!(
+                "[build]\n",
+                "rustc=\"./file-rustc\"\n",
+                "rustc-wrapper=\"./file-wrapper\"\n",
+                "rustc-workspace-wrapper=\"./file-workspace-wrapper\"\n",
+            ),
+        )
+        .unwrap();
+        let cli = [
+            "build.rustc=\"./cli-rustc\"".into(),
+            "build.rustc-wrapper=\"./cli-wrapper\"".into(),
+            "build.rustc-workspace-wrapper=\"./cli-workspace-wrapper\"".into(),
+        ];
+        let model = load_cargo_configuration(&root, None, &cli).unwrap();
+        let plan = compiler_command_plan(
+            &root,
+            &model,
+            RustCargoRunnerProgram::SearchPath {
+                value: "rustc".into(),
+            },
+            &model_inputs_with([
+                (OsString::from("RUSTC"), OsString::from("./direct-rustc")),
+                (
+                    OsString::from("CARGO_BUILD_RUSTC_WRAPPER"),
+                    OsString::from("./cargo-wrapper"),
+                ),
+                (OsString::from("RUSTC_WORKSPACE_WRAPPER"), OsString::new()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.rustc,
+            RustCargoRunnerProgram::WorkspaceRelative {
+                value: "direct-rustc".into()
+            }
+        );
+        assert_eq!(
+            plan.rustc_wrapper,
+            Some(RustCargoRunnerProgram::WorkspaceRelative {
+                value: "cli-wrapper".into()
+            })
+        );
+        assert_eq!(plan.rustc_workspace_wrapper, None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_non_utf8_tool_environment_falls_back_but_config_environment_is_invalid() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = fixture();
+        fs::write(root.join(".cargo/config.toml"), "").unwrap();
+        let model =
+            load_cargo_configuration(&root, None, &["build.rustc=\"./cli-rustc\"".into()]).unwrap();
+        let plan = compiler_command_plan(
+            &root,
+            &model,
+            RustCargoRunnerProgram::SearchPath {
+                value: "rustc".into(),
+            },
+            &model_inputs_with([(OsString::from("RUSTC"), OsString::from_vec(vec![0xff]))]),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.rustc,
+            RustCargoRunnerProgram::WorkspaceRelative {
+                value: "cli-rustc".into()
+            }
+        );
+
+        let empty_model = load_cargo_configuration(&root, None, &[]).unwrap();
+        let error = compiler_command_plan(
+            &root,
+            &empty_model,
+            RustCargoRunnerProgram::SearchPath {
+                value: "rustc".into(),
+            },
+            &model_inputs_with([(
+                OsString::from("CARGO_BUILD_RUSTC"),
+                OsString::from_vec(vec![0xff]),
+            )]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("CARGO_BUILD_RUSTC is not UTF-8"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn every_compiler_wrapper_layer_fails_before_compiler_execution() {
+        let root = fixture();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[build]\nrustc-wrapper=\"missing-wrapper-that-must-not-run\"\n",
+        )
+        .unwrap();
+        let error = resolve_with_inputs(&root, &root, &invocation(&["test"]), model_inputs())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot yet be composed"), "{error}");
+
+        fs::write(root.join(".cargo/config.toml"), "").unwrap();
+        let error = resolve_with_inputs(
+            &root,
+            &root,
+            &invocation(&[
+                "test",
+                "--config",
+                "build.rustc-workspace-wrapper=\"missing-cli-wrapper\"",
+            ]),
+            model_inputs(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("cannot yet be composed"), "{error}");
+
+        let error = resolve_with_inputs(
+            &root,
+            &root,
+            &invocation(&["test"]),
+            model_inputs_with([(
+                OsString::from("RUSTC_WRAPPER"),
+                OsString::from("missing-env-wrapper"),
+            )]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("cannot yet be composed"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn included_build_rustc_drives_host_and_cfg_runner_selection() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = fixture();
+        let rustc = which::which("rustc").unwrap();
+        let proxy = root.join("compiler-proxy");
+        let log = root.join("compiler.log");
+        fs::write(
+            &proxy,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"{}\"\nexec \"{}\" \"$@\"\n",
+                log.display(),
+                rustc.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&proxy, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(
+            root.join(".cargo/compiler.toml"),
+            concat!(
+                "[build]\nrustc=\"./compiler-proxy\"\n",
+                "[target.'cfg(unix)']\nrunner=[\"cfg-runner\",\"--cfg\"]\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "include=[\"compiler.toml\"]\n",
+        )
+        .unwrap();
+        let mut inputs = model_inputs();
+        inputs.host_override = None;
+        let plan = resolve_with_inputs(&root, &root, &invocation(&["test"]), inputs).unwrap();
+        assert_eq!(
+            plan.compiler.rustc,
+            RustCargoRunnerProgram::WorkspaceRelative {
+                value: "compiler-proxy".into()
+            }
+        );
+        assert_eq!(
+            plan.targets[0].underlying_runner,
+            Some(RustCargoUnderlyingRunner {
+                program: RustCargoRunnerProgram::SearchPath {
+                    value: "cfg-runner".into()
+                },
+                arguments: vec!["--cfg".into()]
+            })
+        );
+        let invocations = fs::read_to_string(&log).unwrap();
+        assert!(invocations.lines().any(|line| line == "-vV"));
+        assert!(
+            invocations
+                .lines()
+                .any(|line| line.contains("--print cfg --target"))
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -844,13 +1187,8 @@ mod tests {
             ),
         )
         .unwrap();
-        let plan = resolve_with_options(
-            &root,
-            &invocation(&["test"]),
-            options(&root),
-            model_inputs(),
-        )
-        .unwrap();
+        let plan =
+            resolve_with_inputs(&root, &root, &invocation(&["test"]), model_inputs()).unwrap();
         assert_eq!(
             plan.targets[0].underlying_runner,
             Some(RustCargoUnderlyingRunner {
@@ -860,16 +1198,10 @@ mod tests {
                 arguments: vec!["--exact".into()],
             })
         );
-        let plan = resolve_with_options(
+        let plan = resolve_with_inputs(
+            &root,
             &root,
             &invocation(&["test"]),
-            options_with(
-                &root,
-                [(
-                    OsString::from("CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER"),
-                    OsString::from("environment-runner --environment"),
-                )],
-            ),
             model_inputs_with([(
                 OsString::from("CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER"),
                 OsString::from("environment-runner --environment"),
@@ -896,13 +1228,8 @@ mod tests {
             "[target.aarch64-apple-darwin]\nrunner=[\"bin with spaces/runner\",\"--fixed\"]\n",
         )
         .unwrap();
-        let plan = resolve_with_options(
-            &root,
-            &invocation(&["test"]),
-            options(&root),
-            model_inputs(),
-        )
-        .unwrap();
+        let plan =
+            resolve_with_inputs(&root, &root, &invocation(&["test"]), model_inputs()).unwrap();
         assert_eq!(plan.targets[0].target, "aarch64-apple-darwin");
         assert_eq!(
             plan.targets[0].underlying_runner,
@@ -924,13 +1251,8 @@ mod tests {
             "[target.aarch64-apple-darwin]\nrunner=\"runner\\t--one\\n--two\"\n",
         )
         .unwrap();
-        let plan = resolve_with_options(
-            &root,
-            &invocation(&["test"]),
-            options(&root),
-            model_inputs(),
-        )
-        .unwrap();
+        let plan =
+            resolve_with_inputs(&root, &root, &invocation(&["test"]), model_inputs()).unwrap();
         assert_eq!(
             plan.targets[0].underlying_runner,
             Some(RustCargoUnderlyingRunner {
@@ -948,14 +1270,9 @@ mod tests {
             ),
         )
         .unwrap();
-        let error = resolve_with_options(
-            &root,
-            &invocation(&["test"]),
-            options(&root),
-            model_inputs(),
-        )
-        .unwrap_err()
-        .to_string();
+        let error = resolve_with_inputs(&root, &root, &invocation(&["test"]), model_inputs())
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("several matching instances"), "{error}");
         fs::remove_dir_all(root).unwrap();
     }
@@ -968,7 +1285,8 @@ mod tests {
             "[target.aarch64-apple-darwin]\nrunner=\"runner\"\n",
         )
         .unwrap();
-        let plan = resolve_with_options(
+        let plan = resolve_with_inputs(
+            &root,
             &root,
             &invocation(&[
                 "test",
@@ -976,7 +1294,6 @@ mod tests {
                 "--target=aarch64-apple-darwin",
                 "--target=aarch64-apple-darwin",
             ]),
-            options(&root),
             model_inputs(),
         )
         .unwrap();
@@ -1056,13 +1373,10 @@ mod tests {
             format!("[target.{host}]\nrunner=[\"selected-runner\",\"--selected\"]\n"),
         )
         .unwrap();
-        let plan = resolve_with_options(
+        let plan = resolve_with_inputs(
+            &root,
             &root,
             &invocation(&["+1.95.0", "test"]),
-            ResolveOptions::default().cargo_home(None).env([(
-                OsString::from("CARGO_HOME"),
-                root.join("empty-home").into_os_string(),
-            )]),
             model_inputs(),
         )
         .unwrap();
@@ -1093,14 +1407,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            resolve_with_options(
-                &root,
-                &invocation(&["test"]),
-                options(&root),
-                model_inputs(),
-            )
-            .unwrap()
-            .targets[0]
+            resolve_with_inputs(&root, &root, &invocation(&["test"]), model_inputs(),)
+                .unwrap()
+                .targets[0]
                 .underlying_runner,
             Some(RustCargoUnderlyingRunner {
                 program: RustCargoRunnerProgram::SearchPath {
@@ -1110,20 +1419,14 @@ mod tests {
             })
         );
         assert_eq!(
-            resolve_with_options(
+            resolve_with_inputs(
+                &root,
                 &root,
                 &invocation(&[
                     "test",
                     "--config",
                     "target.aarch64-apple-darwin.runner=[\"cli\",\"--cli\"]",
                 ]),
-                options_with(
-                    &root,
-                    [(
-                        OsString::from("CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER"),
-                        OsString::from("environment"),
-                    )],
-                ),
                 model_inputs_with([(
                     OsString::from("CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER"),
                     OsString::from("environment"),
@@ -1149,10 +1452,10 @@ mod tests {
                 OsString::from("runner-b"),
             ),
         ];
-        let plan = resolve_with_options(
+        let plan = resolve_with_inputs(
+            &root,
             &root,
             &invocation(&["test", "--target=a", "--target=b"]),
-            options_with(&root, multi_target_environment.clone()),
             model_inputs_with(multi_target_environment),
         );
         let plan = plan.unwrap();
@@ -1188,14 +1491,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            resolve_with_options(
-                &root,
-                &invocation(&["test"]),
-                options(&root),
-                model_inputs(),
-            )
-            .unwrap()
-            .targets[0]
+            resolve_with_inputs(&root, &root, &invocation(&["test"]), model_inputs(),)
+                .unwrap()
+                .targets[0]
                 .underlying_runner,
             Some(RustCargoUnderlyingRunner {
                 program: RustCargoRunnerProgram::SearchPath {
@@ -1212,14 +1510,9 @@ mod tests {
             ),
         )
         .unwrap();
-        let error = resolve_with_options(
-            &root,
-            &invocation(&["test"]),
-            options(&root),
-            model_inputs(),
-        )
-        .unwrap_err()
-        .to_string();
+        let error = resolve_with_inputs(&root, &root, &invocation(&["test"]), model_inputs())
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("several matching instances"), "{error}");
         assert!(
             command_targets(&invocation(&["--quiet", "+nightly", "test"]))
@@ -1228,10 +1521,10 @@ mod tests {
                 .contains("must be the first")
         );
         assert!(
-            resolve_with_options(
+            resolve_with_inputs(
+                &root,
                 &root,
                 &invocation(&["-Ztarget-applies-to-host", "test"]),
-                options(&root),
                 model_inputs(),
             )
             .unwrap_err()

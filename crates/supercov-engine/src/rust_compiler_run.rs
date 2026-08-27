@@ -110,8 +110,6 @@ pub fn run_direct_rust_compiler(
         .map_err(|error| format!("{}: {error}", request.root.display()))?;
     let cargo_invocation =
         cargo_invocation(&root, &request.command).map_err(|error| error.to_string())?;
-    let cargo_runner_plan =
-        resolve_cargo_runner_plan(&root, &cargo_invocation).map_err(|error| error.to_string())?;
     let mut lock = ProjectLock::acquire(&root, &request.run_id, &request.started_at)
         .map_err(|error| error.to_string())?;
     let initialization_ms = elapsed_ms(initialization_started);
@@ -131,6 +129,8 @@ pub fn run_direct_rust_compiler(
         let workspace_started = Instant::now();
         let workspace =
             prepare_cargo_cached_workspace(&root, &lock).map_err(|error| error.to_string())?;
+        let cargo_runner_plan = resolve_cargo_runner_plan(&root, &workspace, &cargo_invocation)
+            .map_err(|error| error.to_string())?;
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
 

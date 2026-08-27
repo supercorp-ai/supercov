@@ -171,12 +171,28 @@ impl CargoConfigValue {
                 "Cargo executable path and arguments cannot be empty".into(),
             ));
         };
-        let program = if program.contains('/') || (cfg!(windows) && program.contains('\\')) {
+        let program = if program.contains('/') || program.contains('\\') {
             self.definition.value_root(cwd).join(program)
         } else {
             PathBuf::from(program)
         };
         Ok((program, arguments.to_vec()))
+    }
+
+    pub(crate) fn program_path(&self, cwd: &Path) -> Result<PathBuf, CargoConfigModelError> {
+        let value = self.string().ok_or_else(|| {
+            CargoConfigModelError::Invalid(
+                "Cargo compiler and wrapper paths must be strings".into(),
+            )
+        })?;
+        if value.is_empty() {
+            return Ok(PathBuf::new());
+        }
+        if value.contains('/') || value.contains('\\') {
+            Ok(self.definition.value_root(cwd).join(value))
+        } else {
+            Ok(PathBuf::from(value))
+        }
     }
 
     fn description(&self) -> &'static str {

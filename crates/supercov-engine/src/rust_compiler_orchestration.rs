@@ -184,7 +184,7 @@ pub struct RustCompilerBuild {
 pub enum RustCompilerOrchestrationError {
     InvalidRequest(String),
     Io { path: PathBuf, reason: String },
-    ExistingWorkspaceWrapper,
+    ExistingCompilerWrapper,
     Cargo(String),
     CargoOutput(String),
     CompilerOutput(String),
@@ -198,8 +198,8 @@ impl std::fmt::Display for RustCompilerOrchestrationError {
         match self {
             Self::InvalidRequest(reason) => write!(formatter, "invalid Rust compiler build: {reason}"),
             Self::Io { path, reason } => write!(formatter, "{}: {reason}", path.display()),
-            Self::ExistingWorkspaceWrapper => formatter.write_str(
-                "an existing RUSTC_WORKSPACE_WRAPPER cannot yet be composed without changing compiler semantics",
+            Self::ExistingCompilerWrapper => formatter.write_str(
+                "a configured Cargo compiler wrapper cannot yet be composed without changing wrapper-visible compiler semantics",
             ),
             Self::Cargo(reason) => write!(formatter, "Cargo compiler build failed: {reason}"),
             Self::CargoOutput(reason) => write!(formatter, "invalid Cargo compiler output: {reason}"),
@@ -811,8 +811,14 @@ pub fn build_with_rust_compiler_companion_supervised(
             "command, safe run ID and companion candidates are required".into(),
         ));
     }
-    if std::env::var_os("RUSTC_WORKSPACE_WRAPPER").is_some() {
-        return Err(RustCompilerOrchestrationError::ExistingWorkspaceWrapper);
+    if request.cargo_runner_plan.compiler.rustc_wrapper.is_some()
+        || request
+            .cargo_runner_plan
+            .compiler
+            .rustc_workspace_wrapper
+            .is_some()
+    {
+        return Err(RustCompilerOrchestrationError::ExistingCompilerWrapper);
     }
     if std::env::var_os("RUSTDOC").is_some() {
         return Err(RustCompilerOrchestrationError::InvalidRequest(
@@ -1244,9 +1250,18 @@ mod tests {
 
     #[test]
     fn cargo_runner_configuration_is_target_indexed_and_rejects_aliases() {
-        use crate::rust_cargo_configuration::RustCargoTargetRunnerPlan;
+        use crate::rust_cargo_configuration::{
+            RustCargoCompilerCommandPlan, RustCargoRunnerProgram, RustCargoTargetRunnerPlan,
+        };
 
         let plan = RustCargoRunnerPlan {
+            compiler: RustCargoCompilerCommandPlan {
+                rustc: RustCargoRunnerProgram::SearchPath {
+                    value: "rustc".into(),
+                },
+                rustc_wrapper: None,
+                rustc_workspace_wrapper: None,
+            },
             targets: vec![
                 RustCargoTargetRunnerPlan {
                     target: "aarch64-apple-darwin".into(),
@@ -1268,6 +1283,7 @@ mod tests {
             ]
         );
         let duplicate = RustCargoRunnerPlan {
+            compiler: plan.compiler.clone(),
             targets: vec![plan.targets[0].clone(), plan.targets[0].clone()],
         };
         assert!(

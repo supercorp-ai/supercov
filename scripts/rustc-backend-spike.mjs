@@ -863,6 +863,140 @@ try {
     'included-cfg-runner compiler run left terminal work state behind',
   );
 
+  const configuredCompiler = join(productionFixture, 'compiler-proxy.mjs');
+  const configuredCompilerLog = join(scratch, 'configured-compiler.jsonl');
+  const includedCompilerConfig = join(
+    productionFixture,
+    '.cargo',
+    'included-compiler.toml',
+  );
+  writeFileSync(
+    configuredCompiler,
+    [
+      '#!/usr/bin/env node',
+      "import {appendFileSync} from 'node:fs';",
+      "import {spawnSync} from 'node:child_process';",
+      "import {fileURLToPath} from 'node:url';",
+      'const args = process.argv.slice(2);',
+      'appendFileSync(process.env.SUPERCOV_CONFIGURED_COMPILER_LOG, JSON.stringify({program: fileURLToPath(import.meta.url), args}) + "\\n");',
+      'const result = spawnSync(process.env.SUPERCOV_REAL_RUSTC, args, {stdio: "inherit", env: process.env});',
+      'if (result.error) throw result.error;',
+      'if (result.signal) process.kill(process.pid, result.signal);',
+      'process.exit(result.status ?? 98);',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(configuredCompiler, 0o755);
+  writeFileSync(
+    includedCompilerConfig,
+    '[build]\nrustc="./compiler-proxy.mjs"\n',
+  );
+  writeFileSync(
+    join(productionFixture, '.cargo/config.toml'),
+    'include=["included-runner.toml","included-compiler.toml"]\n' +
+      '[build]\n' +
+      'rustflags=["--cfg","supercov_config_once"]\n',
+  );
+  const configuredCompilerRun = JSON.parse(
+    run(supercov, ['__run-rust-compiler'], {
+      env: {
+        SUPERCOV_PRODUCTION_RUNNER_LOG: join(
+          scratch,
+          'configured-compiler-runner.jsonl',
+        ),
+        SUPERCOV_CONFIGURED_COMPILER_LOG: configuredCompilerLog,
+        SUPERCOV_REAL_RUSTC: rustc,
+      },
+      input: JSON.stringify({
+        root: productionFixture,
+        command: [cargo, 'test', 'records_real_runtime_probes'],
+        runId: 'run_b123456789abcdef',
+        startedAt: '2026-08-26T00:00:13.000Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+    }).stdout,
+  );
+  assert.equal(configuredCompilerRun.exitCode, 0);
+  assert(configuredCompilerRun.tests > 0);
+  const configuredCompilerInvocations = readFileSync(
+    configuredCompilerLog,
+    'utf8',
+  )
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  assert(
+    configuredCompilerInvocations.some(({args}) => args.includes('-vV')),
+    'included build.rustc did not drive exact host/compiler selection',
+  );
+  assert(
+    configuredCompilerInvocations.some(
+      ({args}) => args.includes('--print') && args.includes('cfg'),
+    ),
+    'included build.rustc did not drive target cfg runner selection',
+  );
+  assert(
+    configuredCompilerInvocations.every(({program}) =>
+      program.startsWith(cargoWorkspace(productionFixture)),
+    ),
+    'workspace-relative build.rustc was not relocated into the isolated workspace',
+  );
+  assert(
+    !existsSync(join(productionFixture, '.supercov/work/run_b123456789abcdef')),
+    'configured-compiler run left terminal work state behind',
+  );
+  const forbiddenWrapper = join(productionFixture, 'forbidden-wrapper.mjs');
+  const forbiddenWrapperMarker = join(scratch, 'forbidden-wrapper-ran');
+  writeFileSync(
+    forbiddenWrapper,
+    [
+      '#!/usr/bin/env node',
+      "import {writeFileSync} from 'node:fs';",
+      `writeFileSync(${JSON.stringify(forbiddenWrapperMarker)}, 'ran');`,
+      'process.exit(99);',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(forbiddenWrapper, 0o755);
+  writeFileSync(
+    includedCompilerConfig,
+    '[build]\nrustc-wrapper="./forbidden-wrapper.mjs"\n',
+  );
+  const configuredWrapperFailure = run(
+    supercov,
+    ['__run-rust-compiler'],
+    {
+      expectFailure: true,
+      input: JSON.stringify({
+        root: productionFixture,
+        command: [cargo, 'test', 'records_real_runtime_probes'],
+        runId: 'run_c123456789abcdef',
+        startedAt: '2026-08-26T00:00:13.500Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+    },
+  );
+  assert.match(configuredWrapperFailure.stderr, /cannot yet be composed/u);
+  assert(
+    !existsSync(forbiddenWrapperMarker),
+    'unsupported configured compiler wrapper executed during preflight',
+  );
+  assert(
+    !existsSync(join(productionFixture, '.supercov/work/run_c123456789abcdef')),
+    'configured-wrapper rejection created terminal work state',
+  );
+  writeFileSync(
+    join(productionFixture, '.cargo/config.toml'),
+    'include=["included-runner.toml"]\n' +
+      '[build]\n' +
+      'rustflags=["--cfg","supercov_config_once"]\n',
+  );
+
   const duplicateCfgKeys =
     process.platform === 'darwin'
       ? ['cfg(target_vendor = "apple")', 'cfg(target_os = "macos")']

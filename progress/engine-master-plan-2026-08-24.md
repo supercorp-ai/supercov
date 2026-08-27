@@ -1720,6 +1720,32 @@ miss blocks flipping any default.
   read-only/cross-volume fallback, semantic corpora and performance also remain
   blocking.
 
+## Checkpoint — 2026-08-27 owned Cargo compiler-command selection
+
+- One target-independent compiler plan now resolves Cargo's `build.rustc`,
+  `rustc-wrapper` and `rustc-workspace-wrapper` surfaces across ordinary files,
+  recursive includes, CLI config, `CARGO_BUILD_*` and direct `RUSTC*`
+  environment variables. It preserves Cargo's special direct-environment
+  precedence and empty-wrapper reset behavior plus definition-relative paths.
+- The exact configured compiler now supplies both host identity and selected
+  target cfg facts. Workspace-relative compiler programs execute only from the
+  authenticated copied workspace; the configuration preflight no longer runs
+  project-owned compiler code from the source checkout.
+- The real rustc/rustdoc corpus supplies an included compiler proxy, requires
+  every observed proxy invocation to live under the isolated workspace and
+  reaches exact companion/evidence/query completion. General or workspace
+  compiler wrappers are detected but fail before execution until transparent
+  composition can preserve their compiler-visible semantics; a marker oracle
+  proves a rejected wrapper never executes or creates run debris.
+- The authoritative rustc/rustdoc corpus, 249 engine tests, 19 contract tests,
+  17 CLI tests, warnings-denied clippy, the standalone Cargo runner gate and
+  the complete public JavaScript/TypeScript matrix are green locally. No hosted
+  workflow ran.
+- This closes configured compiler selection and silent wrapper replacement,
+  not wrapper composition. Retries, nextest/custom harnesses, presentation
+  modes, read-only/cross-volume fallback, real distinct targets, remaining
+  semantic corpora and performance remain release blockers.
+
 ## Non-goals and guardrails
 
 - No accidental behavior change during ports; every future language frontend
