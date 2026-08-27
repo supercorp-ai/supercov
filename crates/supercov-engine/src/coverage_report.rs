@@ -2078,11 +2078,17 @@ pub fn analyze_coverage_archive(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, time::SystemTime};
+    use std::{
+        fs,
+        sync::atomic::{AtomicU64, Ordering},
+        time::SystemTime,
+    };
 
     use crate::evidence_archive::{EvidenceArchiveEntry, write_archive};
 
     use super::*;
+
+    static ARCHIVE_ID: AtomicU64 = AtomicU64::new(0);
 
     fn point(id: &str, line: usize) -> PointMeta {
         PointMeta {
@@ -2321,8 +2327,9 @@ mod tests {
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "supercov-rust-report-{}-{nonce}",
-            std::process::id()
+            "supercov-rust-report-{}-{nonce}-{}",
+            std::process::id(),
+            ARCHIVE_ID.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("evidence.raw.gz");
