@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  chmodSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -17,6 +18,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const supercov = join(root, 'target/debug/supercov');
 const scratch = mkdtempSync(join(tmpdir(), 'supercov-cargo-runner-'));
 const workspace = join(scratch, 'workspace');
+const configuredRunner = join(workspace, 'bin with spaces', 'runner.mjs');
+const runnerLog = join(workspace, 'runner-invocations.jsonl');
 
 function packageSource(name, fail) {
   return [
@@ -39,6 +42,24 @@ function writeWorkspace() {
     join(workspace, 'Cargo.toml'),
     '[workspace]\nmembers=["a", "b", "c"]\nresolver="2"\n',
   );
+  mkdirSync(dirname(configuredRunner), {recursive: true});
+  writeFileSync(
+    configuredRunner,
+    [
+      '#!/usr/bin/env node',
+      "import {appendFileSync} from 'node:fs';",
+      "import {spawnSync} from 'node:child_process';",
+      'const [fixed, spaced, artifact, ...args] = process.argv.slice(2);',
+      "if (fixed !== '--fixed' || spaced !== 'two words' || !artifact) process.exit(97);",
+      'appendFileSync(process.env.SUPERCOV_RUNNER_LOG, JSON.stringify({fixed, spaced, artifact, args, build: process.env.SUPERCOV_BUILD_VALUE}) + "\\n");',
+      "const result = spawnSync(artifact, args, {stdio: 'inherit', env: process.env});",
+      'if (result.error) throw result.error;',
+      'if (result.signal) process.kill(process.pid, result.signal);',
+      'process.exit(result.status ?? 98);',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(configuredRunner, 0o755);
   for (const name of ['a', 'b', 'c']) {
     const packageRoot = join(workspace, name);
     mkdirSync(join(packageRoot, 'src'), {recursive: true});
@@ -75,7 +96,16 @@ function runCase(runId, noFailFast) {
   const configPath = join(runRoot, 'cargo-runner.json');
   writeFileSync(
     configPath,
-    JSON.stringify({version: 1, runId, targetDirectory: target, outputDirectory: output}),
+    JSON.stringify({
+      version: 1,
+      runId,
+      targetDirectory: target,
+      outputDirectory: output,
+      underlyingRunner: {
+        program: configuredRunner,
+        arguments: ['--fixed', 'two words'],
+      },
+    }),
     {flag: 'wx', mode: 0o600},
   );
   const runner = `target.'cfg(all())'.runner=[${JSON.stringify(supercov)},"__cargo-test-runner"]`;
@@ -92,6 +122,7 @@ function runCase(runId, noFailFast) {
       CARGO_TARGET_DIR: target,
       SUPERCOV_RUST_CARGO_RUNNER_CONFIG: configPath,
       SUPERCOV_MARKER_ROOT: markers,
+      SUPERCOV_RUNNER_LOG: runnerLog,
     },
   });
   if (result.error) throw result.error;
@@ -100,7 +131,13 @@ function runCase(runId, noFailFast) {
     .filter((name) => name.startsWith('libtest-') && name.endsWith('.json'))
     .sort()
     .map((name) => JSON.parse(readFileSync(join(output, name), 'utf8')));
-  return {markers, result, units};
+  const runnerInvocations = readFileSync(runnerLog, 'utf8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  writeFileSync(runnerLog, '');
+  return {markers, result, units, runnerInvocations};
 }
 
 try {
@@ -110,6 +147,13 @@ try {
   assert(existsSync(join(failFast.markers, 'b')));
   assert(!existsSync(join(failFast.markers, 'c')));
   assert.equal(failFast.units.length, 2);
+  assert.equal(failFast.runnerInvocations.length, 4);
+  assert(
+    failFast.runnerInvocations.every(
+      ({fixed, spaced, build}) =>
+        fixed === '--fixed' && spaced === 'two words' && ['a', 'b'].includes(build),
+    ),
+  );
   assert.deepEqual(
     failFast.units.map(({invocationOrdinal}) => invocationOrdinal).sort(),
     [0, 1],
@@ -128,6 +172,13 @@ try {
   assert(existsSync(join(noFailFast.markers, 'b')));
   assert(existsSync(join(noFailFast.markers, 'c')));
   assert.equal(noFailFast.units.length, 3);
+  assert.equal(noFailFast.runnerInvocations.length, 6);
+  assert(
+    noFailFast.runnerInvocations.every(
+      ({fixed, spaced, build}) =>
+        fixed === '--fixed' && spaced === 'two words' && ['a', 'b', 'c'].includes(build),
+    ),
+  );
   assert.deepEqual(
     noFailFast.units.map(({invocationOrdinal}) => invocationOrdinal).sort(),
     [0, 1, 2],
@@ -137,7 +188,7 @@ try {
     [0, 0, 101],
   );
   console.log(
-    '[rust-cargo-runner] Cargo-owned package/build-script environment, artifact order, default fail-fast, and --no-fail-fast are preserved',
+    '[rust-cargo-runner] Cargo-owned environment/order/fail-fast and exact configured-runner argv composition are preserved',
   );
 } finally {
   rmSync(scratch, {recursive: true, force: true});

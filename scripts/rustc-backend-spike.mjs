@@ -3,6 +3,7 @@ import {spawn, spawnSync} from 'node:child_process';
 import {createHash, randomBytes} from 'node:crypto';
 import {
   closeSync,
+  chmodSync,
   cpSync,
   existsSync,
   ftruncateSync,
@@ -585,9 +586,40 @@ try {
       !path.startsWith(join(fixtureRoot, 'target')) &&
       !path.startsWith(join(fixtureRoot, '.supercov')),
   });
+  const productionRunner = join(
+    productionFixture,
+    'bin with spaces',
+    'configured-runner.mjs',
+  );
+  const productionRunnerLog = join(scratch, 'configured-runner.jsonl');
+  mkdirSync(dirname(productionRunner), {recursive: true});
+  mkdirSync(join(productionFixture, '.cargo'), {recursive: true});
+  writeFileSync(
+    join(productionFixture, '.cargo/config.toml'),
+    '[target.' + JSON.stringify(process.platform === 'darwin' ? 'cfg(target_vendor = "apple")' : 'cfg(unix)') + ']\n' +
+      'runner=["bin with spaces/configured-runner.mjs","--fixed","two words"]\n',
+  );
+  writeFileSync(
+    productionRunner,
+    [
+      '#!/usr/bin/env node',
+      "import {appendFileSync} from 'node:fs';",
+      "import {spawnSync} from 'node:child_process';",
+      "import {fileURLToPath} from 'node:url';",
+      'const [fixed, spaced, artifact, ...args] = process.argv.slice(2);',
+      "if (fixed !== '--fixed' || spaced !== 'two words' || !artifact) process.exit(97);",
+      'if (process.env.SUPERCOV_PRODUCTION_RUNNER_LOG) appendFileSync(process.env.SUPERCOV_PRODUCTION_RUNNER_LOG, JSON.stringify({program: fileURLToPath(import.meta.url), artifact, args}) + "\\n");',
+      "const result = spawnSync(artifact, args, {stdio: 'inherit', env: process.env});",
+      'if (result.error) throw result.error;',
+      'if (result.signal) process.kill(process.pid, result.signal);',
+      'process.exit(result.status ?? 98);',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(productionRunner, 0o755);
   const productionRun = JSON.parse(
     run(supercov, ['__run-rust-compiler'], {
-      env: {RUSTC: rustc},
+      env: {RUSTC: rustc, SUPERCOV_PRODUCTION_RUNNER_LOG: productionRunnerLog},
       input: JSON.stringify({
         root: productionFixture,
         command: [cargo, 'test'],
@@ -612,6 +644,31 @@ try {
   );
   assert.equal(productionRun.tests, productionRun.libtests + productionRun.doctests);
   assert.equal(productionRun.doctests, 6);
+  const productionRunnerInvocations = readFileSync(productionRunnerLog, 'utf8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  assert(
+    productionRunnerInvocations.some(({args}) => args.includes('--list')),
+    'configured runner did not wrap libtest discovery',
+  );
+  assert(
+    productionRunnerInvocations.some(({args}) => args.includes('--exact')),
+    'configured runner did not wrap exact libtest execution',
+  );
+  assert(
+    productionRunnerInvocations.some(
+      ({args}) => !args.includes('--list') && !args.includes('--exact'),
+    ),
+    'configured runner did not wrap rustdoc test execution',
+  );
+  assert(
+    productionRunnerInvocations.every(({program}) =>
+      program.includes('/.supercov/cache/workspace/'),
+    ),
+    'workspace-relative configured runner was not relocated into the isolated workspace',
+  );
   const productionAttemptHealth = productionRun.transportHealth.filter(
     ({scopeKind}) => scopeKind === 'test-attempt',
   );
@@ -786,6 +843,13 @@ try {
     ),
     'filtered production compiler run left terminal work state behind',
   );
+
+  // The configured runner fixture has now covered a normal mixed
+  // libtest/rustdoc run, a killed rustdoc run and an exact filtered libtest
+  // run. Remove it before the later dylib-heavy proc-macro workspace: a Node
+  // shebang runner is not a valid baseline launcher for macOS DYLD paths.
+  rmSync(join(productionFixture, '.cargo'), {recursive: true});
+  rmSync(dirname(productionRunner), {recursive: true});
 
   const productionManifest = join(productionFixture, 'Cargo.toml');
   writeFileSync(

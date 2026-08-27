@@ -222,6 +222,7 @@ fn rust_cargo_test_runner(arguments: Vec<OsString>) -> ExitCode {
 fn strip_injected_rustdoc_runner(
     arguments: Vec<String>,
     runner: &Path,
+    underlying_runner: Option<&supercov_engine::rust_cargo_configuration::RustCargoResolvedRunner>,
 ) -> Result<Vec<String>, String> {
     let runner = runner
         .to_str()
@@ -281,6 +282,16 @@ fn strip_injected_rustdoc_runner(
     if !removed_runner {
         return Err("rustdoc did not receive Supercov's injected Cargo runner".into());
     }
+    if let Some(underlying_runner) = underlying_runner {
+        let program = underlying_runner
+            .program
+            .to_str()
+            .ok_or_else(|| "the configured Cargo runner path is not UTF-8".to_owned())?;
+        stripped.extend(["--test-runtool".into(), program.into()]);
+        for argument in &underlying_runner.arguments {
+            stripped.extend(["--test-runtool-arg".into(), argument.clone()]);
+        }
+    }
     Ok(stripped)
 }
 
@@ -311,7 +322,8 @@ fn rustdoc_wrapper(arguments: Vec<String>) -> ExitCode {
         // catalog/outcome/transport supervisor below. Remove only Supercov's
         // injected pair so the same executable is not misclassified twice.
         // Any configured or malformed alternative fails closed.
-        let arguments = strip_injected_rustdoc_runner(arguments, &engine)?;
+        let arguments =
+            strip_injected_rustdoc_runner(arguments, &engine, config.underlying_runner.as_ref())?;
         let started = Instant::now();
         let selection = loop {
             match supercov_engine::rust_compiler_orchestration::verified_compiler_selection(
@@ -2869,6 +2881,7 @@ mod tests {
                     "src/lib.rs".into(),
                 ],
                 runner,
+                None,
             )
             .unwrap(),
             ["--crate-name", "fixture", "src/lib.rs"]
@@ -2880,16 +2893,42 @@ mod tests {
                     "--test-runtool-arg=__cargo-test-runner".into(),
                 ],
                 runner,
+                None,
             )
             .unwrap(),
             Vec::<String>::new()
+        );
+        let underlying = supercov_engine::rust_cargo_configuration::RustCargoResolvedRunner {
+            program: PathBuf::from("/opt/runner with spaces"),
+            arguments: vec!["--fixed".into(), "two words".into()],
+        };
+        assert_eq!(
+            strip_injected_rustdoc_runner(
+                vec![
+                    "--test-runtool=/opt/supercov".into(),
+                    "--test-runtool-arg=__cargo-test-runner".into(),
+                    "src/lib.rs".into(),
+                ],
+                runner,
+                Some(&underlying),
+            )
+            .unwrap(),
+            [
+                "src/lib.rs",
+                "--test-runtool",
+                "/opt/runner with spaces",
+                "--test-runtool-arg",
+                "--fixed",
+                "--test-runtool-arg",
+                "two words",
+            ]
         );
     }
 
     #[test]
     fn rustdoc_rejects_missing_or_foreign_runner_composition() {
         let runner = Path::new("/opt/supercov");
-        assert!(strip_injected_rustdoc_runner(vec!["--test".into()], runner).is_err());
+        assert!(strip_injected_rustdoc_runner(vec!["--test".into()], runner, None).is_err());
         assert!(
             strip_injected_rustdoc_runner(
                 vec![
@@ -2899,6 +2938,7 @@ mod tests {
                     "__cargo-test-runner".into(),
                 ],
                 runner,
+                None,
             )
             .is_err()
         );
@@ -2906,6 +2946,7 @@ mod tests {
             strip_injected_rustdoc_runner(
                 vec!["--test-runtool".into(), "/opt/supercov".into()],
                 runner,
+                None,
             )
             .is_err()
         );

@@ -862,9 +862,35 @@ hosted workflow ran.
 
 This closes reconstructed Cargo launch state, standard Cargo ordering/default
 fail-fast, package/build-script environment and the libtest/rustdoc ownership
-split. Existing user-runner composition, retry identity, nextest/custom
-harnesses, complete presentation/output modes and their crash matrix remain
-open and keep Rust private.
+split.
+
+The next configured-runner slice resolves Cargo's normal hierarchical target
+configuration and `CARGO_TARGET_<TRIPLE>_RUNNER` environment through Cargo's
+documented precedence before the checkout is copied. Exact target entries beat
+matching `cfg(...)` entries and the environment beats both. Search-path,
+absolute and workspace-relative programs remain distinct; workspace-relative
+programs are relocated into the isolated copy. Scalar and array forms, fixed
+arguments and paths/arguments containing spaces are composed as structured
+argv inside both libtest discovery/exact attempts and rustdoc's
+`--test-runtool` chain. Cargo's original artifact argument is preserved for
+the user runner while its canonical path remains the security/evidence
+identity. A real mixed libtest/rustdoc compiler run, killed rustdoc run and
+filtered libtest run pass through the configured runner; the standalone
+three-package Cargo-authority corpus also remains green.
+
+This deliberately does not claim complete Cargo configuration support. Cargo
+1.95 config `include`, user command-line `--config`, multiple selected targets
+and an explicit rustup `+toolchain` selector stop before user execution until
+their exact merge/selection semantics are owned. The current nested cached
+workspace also lets Cargo discover both the copied project config and the
+original checkout's ancestor config; mergeable non-runner values could
+therefore be applied twice. Move the Cargo workspace outside the original
+configuration ancestry, with recoverable ownership and deterministic cleanup,
+before public promotion. Retry identity, nextest/custom harnesses, complete
+presentation/output modes and their crash matrix likewise remain open and keep
+Rust private. The full rustc/rustdoc corpus, public JavaScript/TypeScript
+matrix, clippy, 231 engine tests, 19 contract tests and 16 CLI tests are green
+locally; no hosted workflow ran.
 
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.

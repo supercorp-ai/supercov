@@ -12,8 +12,10 @@ use crate::{
         recover_abandoned_runs, remove_stored_tree_deferred, update_run_state, write_run_state,
     },
     run_store::{RawEvidenceMetadata, RunMetadata, RunTimings},
+    rust_cargo_configuration::resolve_cargo_runner_plan,
     rust_compiler_test_runner::{RustCompilerRunRequest, run_rust_compiler_frontend},
     rust_run::current_rust_integrity,
+    rust_test_runner::cargo_invocation,
     workspace::{cached_workspace_path, prepare_cached_workspace, recover_cached_workspace},
 };
 
@@ -106,6 +108,10 @@ pub fn run_direct_rust_compiler(
     let initialization_started = Instant::now();
     let root = fs::canonicalize(&request.root)
         .map_err(|error| format!("{}: {error}", request.root.display()))?;
+    let cargo_invocation =
+        cargo_invocation(&root, &request.command).map_err(|error| error.to_string())?;
+    let cargo_runner_plan =
+        resolve_cargo_runner_plan(&root, &cargo_invocation).map_err(|error| error.to_string())?;
     let mut lock = ProjectLock::acquire(&root, &request.run_id, &request.started_at)
         .map_err(|error| error.to_string())?;
     let initialization_ms = elapsed_ms(initialization_started);
@@ -162,6 +168,7 @@ pub fn run_direct_rust_compiler(
                 wrapper_path: request.wrapper_path.clone(),
                 companion_candidates: request.companion_candidates.clone(),
                 require_public_capabilities: request.require_public_capabilities,
+                cargo_runner_plan,
                 watchdog_program: request.watchdog_program.clone(),
             },
             diagnostics,

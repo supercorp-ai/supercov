@@ -1633,10 +1633,15 @@ miss blocks flipping any default.
   contract tests, 16 CLI tests, runtime assets and Rust-only package preflight
   are also green locally. No hosted workflow ran.
 - This is an R2 checkpoint, not public Rust promotion. Composition with an
-  existing configured runner, retry identity, nextest/custom harnesses,
-  complete presentation modes, their crash/concurrency matrices, remaining R1
-  semantic corpora, supported-platform gates and the 1.10x performance gate
-  remain blocking.
+  existing configured runner is now proven for normal hierarchy/environment
+  precedence, structured scalar/array argv, isolated workspace relocation and
+  rustdoc composition. Cargo config `include`, command-line `--config`,
+  multi-target selection and rustup `+toolchain` selection remain fail-closed.
+  Cargo's cached workspace must also move outside the original checkout's
+  configuration ancestry so copied and ancestor config cannot merge twice.
+  Retry identity, nextest/custom harnesses, complete presentation modes, their
+  crash/concurrency matrices, remaining R1 semantic corpora,
+  supported-platform gates and the 1.10x performance gate remain blocking.
 
 ## Non-goals and guardrails
 

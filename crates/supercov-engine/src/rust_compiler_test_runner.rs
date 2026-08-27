@@ -35,6 +35,7 @@ use crate::{
     process_supervision::{
         CommandSpec, ProcessSupervisor, SupervisedOutput, SupervisedResult, SupervisionOptions,
     },
+    rust_cargo_configuration::{RustCargoResolvedRunner, RustCargoRunnerPlan},
     rust_compiler_ctfe::RustCompilerCtfeUnit,
     rust_compiler_evidence::{
         RustCompilerEvidenceProjection, RustCompilerTransportHealth, project_rust_compiler_evidence,
@@ -64,6 +65,7 @@ pub struct RustCargoRunnerConfig {
     pub run_id: String,
     pub target_directory: PathBuf,
     pub output_directory: PathBuf,
+    pub underlying_runner: Option<RustCargoResolvedRunner>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -116,6 +118,7 @@ pub struct RustCompilerRunRequest {
     pub wrapper_path: PathBuf,
     pub companion_candidates: Vec<PathBuf>,
     pub require_public_capabilities: bool,
+    pub cargo_runner_plan: RustCargoRunnerPlan,
     pub watchdog_program: Option<PathBuf>,
 }
 
@@ -128,6 +131,7 @@ impl RustCompilerRunRequest {
             wrapper_path: self.wrapper_path.clone(),
             companion_candidates: self.companion_candidates.clone(),
             require_public_capabilities: self.require_public_capabilities,
+            cargo_runner_plan: self.cargo_runner_plan.clone(),
         }
     }
 }
@@ -259,6 +263,7 @@ fn io_error(path: &Path, error: impl std::fmt::Display) -> RustCompilerTestError
 #[derive(Debug, Clone)]
 struct TestArtifact {
     executable: PathBuf,
+    runner_argument: Option<OsString>,
     package: String,
     target_key: String,
     kind: String,
@@ -276,6 +281,7 @@ struct ProcessTask {
     context_id: u64,
     transport: PathBuf,
     run_arguments: Vec<String>,
+    underlying_runner: Option<RustCargoResolvedRunner>,
 }
 
 #[derive(Debug)]
@@ -334,6 +340,7 @@ fn normalize_artifacts(
             target_kinds.dedup();
             Ok(TestArtifact {
                 executable,
+                runner_argument: None,
                 package: artifact.package.clone(),
                 target_key: format!("{}:{}", target_kinds.join("+"), artifact.target_name),
                 kind: if artifact.target_kinds.iter().any(|kind| kind == "test") {
@@ -358,18 +365,20 @@ fn list_tests(
     project_root: &Path,
     artifact: &TestArtifact,
     selection_arguments: &[String],
+    underlying_runner: Option<&RustCargoResolvedRunner>,
     supervisor: &ProcessSupervisor,
     options: SupervisionOptions,
 ) -> Result<Vec<String>, RustCompilerTestError> {
-    let mut arguments = selection_arguments
+    let mut test_arguments = selection_arguments
         .iter()
         .map(OsString::from)
         .collect::<Vec<_>>();
-    arguments.extend(["--list".into(), "--format".into(), "terse".into()]);
+    test_arguments.extend(["--list".into(), "--format".into(), "terse".into()]);
+    let (program, arguments) = artifact_command(artifact, underlying_runner, test_arguments);
     let output = supervisor
         .supervise_captured(
             &CommandSpec {
-                program: artifact.executable.clone().into_os_string(),
+                program,
                 arguments,
                 cwd: project_root.to_owned(),
                 environment: Some(inherited_environment([])),
@@ -402,6 +411,31 @@ fn list_tests(
     tests.sort();
     tests.dedup();
     Ok(tests)
+}
+
+fn artifact_command(
+    artifact: &TestArtifact,
+    underlying_runner: Option<&RustCargoResolvedRunner>,
+    test_arguments: Vec<OsString>,
+) -> (OsString, Vec<OsString>) {
+    match underlying_runner {
+        Some(runner) => {
+            let mut arguments = runner
+                .arguments
+                .iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            arguments.push(
+                artifact
+                    .runner_argument
+                    .clone()
+                    .unwrap_or_else(|| artifact.executable.clone().into_os_string()),
+            );
+            arguments.extend(test_arguments);
+            (runner.program.clone().into_os_string(), arguments)
+        }
+        None => (artifact.executable.clone().into_os_string(), test_arguments),
+    }
 }
 
 fn token_hex(token: &[u8; TOKEN_BYTES]) -> String {
@@ -446,12 +480,17 @@ fn run_process(
     )
     .map_err(|error| error.to_string())?;
     let started_at_ms = epoch_ms().map_err(|error| error.to_string())?;
-    let mut arguments = task
+    let mut test_arguments = task
         .run_arguments
         .iter()
         .map(OsString::from)
         .collect::<Vec<_>>();
-    arguments.extend([OsString::from("--exact"), OsString::from(&task.test)]);
+    test_arguments.extend([OsString::from("--exact"), OsString::from(&task.test)]);
+    let (program, arguments) = artifact_command(
+        &task.artifact,
+        task.underlying_runner.as_ref(),
+        test_arguments,
+    );
     let environment = vec![
         (
             OsString::from(RUST_TRANSPORT_ENV),
@@ -469,7 +508,7 @@ fn run_process(
     let output = supervisor
         .supervise_captured(
             &CommandSpec {
-                program: task.artifact.executable.clone().into_os_string(),
+                program,
                 arguments,
                 cwd: project_root.to_owned(),
                 environment: Some(inherited_environment(environment)),
@@ -703,9 +742,10 @@ pub fn run_cargo_libtest_runner(
     let failure_artifact = arguments.first().map(PathBuf::from);
     let result = (|| {
         let mut arguments = arguments.into_iter();
-        let artifact = arguments.next().map(PathBuf::from).ok_or_else(|| {
+        let artifact_argument = arguments.next().ok_or_else(|| {
             RustCompilerTestError::Context("Cargo runner received no artifact".into())
         })?;
+        let artifact = PathBuf::from(&artifact_argument);
         let artifact = fs::canonicalize(&artifact).map_err(|error| io_error(&artifact, error))?;
         if !artifact.starts_with(&target_directory)
             || !fs::symlink_metadata(&artifact).is_ok_and(|metadata| metadata.file_type().is_file())
@@ -745,11 +785,13 @@ pub fn run_cargo_libtest_runner(
         let transport_directory = regular_directory(&transport_directory)?;
         let test_artifact = TestArtifact {
             executable: artifact.clone(),
+            runner_argument: Some(artifact_argument),
             package: "cargo-pending".into(),
             target_key: "cargo-pending".into(),
             kind: "cargo-pending".into(),
             source: "cargo-pending".into(),
         };
+        let underlying_runner = config.underlying_runner.clone();
         let supervisor = watchdog_program
             .as_deref()
             .map_or_else(ProcessSupervisor::new, ProcessSupervisor::new_crash_safe)
@@ -767,6 +809,7 @@ pub fn run_cargo_libtest_runner(
             &current_directory,
             &test_artifact,
             &selection.list_arguments,
+            underlying_runner.as_ref(),
             &supervisor,
             options,
         )?;
@@ -785,6 +828,7 @@ pub fn run_cargo_libtest_runner(
                 context_id: contexts[test],
                 transport: transport_directory.join(format!("{index:08}.mmap")),
                 run_arguments: selection.run_arguments.clone(),
+                underlying_runner: underlying_runner.clone(),
             })
             .collect::<Vec<_>>();
         let outcomes = execute_process_tasks(&current_directory, &tasks, &supervisor, options)?;
@@ -1601,6 +1645,7 @@ fn execute_compiler_build(
                     unit.invocation_ordinal
                 )),
                 run_arguments: Vec::new(),
+                underlying_runner: None,
             };
             outcomes.push(ProcessOutcome {
                 task,
@@ -1827,6 +1872,7 @@ mod tests {
     fn libtest_identity_includes_package_target_and_workspace_source() {
         let artifact = |package: &str, target_key: &str| TestArtifact {
             executable: PathBuf::from("test-artifact"),
+            runner_argument: None,
             package: package.into(),
             target_key: target_key.into(),
             kind: "unit".into(),

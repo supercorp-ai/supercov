@@ -22,6 +22,7 @@ use crate::{
     process_supervision::{
         CommandSpec, ForwardedSignal, ProcessSupervisor, SupervisedOutput, SupervisionOptions,
     },
+    rust_cargo_configuration::{RustCargoResolvedRunner, RustCargoRunnerPlan},
     rust_compiler_ctfe::{RustCompilerCtfeUnit, read_rust_compiler_ctfe},
     rust_compiler_manifest::{NormalizedRustCompilerManifest, normalize_rust_compiler_candidates},
     rust_compiler_selection::{SelectedRustCompilerCompanion, select_rust_compiler_companion},
@@ -97,6 +98,7 @@ pub struct RustCompilerWrapperConfig {
     pub require_public_capabilities: bool,
     pub selection_directory: PathBuf,
     pub shared_runtime_directory: PathBuf,
+    pub underlying_runner: Option<RustCargoResolvedRunner>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -108,6 +110,7 @@ pub struct RustCompilerBuildRequest {
     pub wrapper_path: PathBuf,
     pub companion_candidates: Vec<PathBuf>,
     pub require_public_capabilities: bool,
+    pub cargo_runner_plan: RustCargoRunnerPlan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -808,6 +811,11 @@ pub fn build_with_rust_compiler_companion_supervised(
     fs::create_dir(&cargo_runner_directory)
         .map_err(|error| io_error(&cargo_runner_directory, error))?;
     write_shared_runtime_source(&shared_runtime_directory)?;
+    let underlying_runner = request
+        .cargo_runner_plan
+        .underlying_runner
+        .as_ref()
+        .map(|runner| runner.resolve(&project_root));
     let config_path = compiler_output_directory.join("wrapper.json");
     write_json_config(
         &config_path,
@@ -816,6 +824,7 @@ pub fn build_with_rust_compiler_companion_supervised(
             require_public_capabilities: request.require_public_capabilities,
             selection_directory: selection_directory.clone(),
             shared_runtime_directory: shared_runtime_directory.clone(),
+            underlying_runner: underlying_runner.clone(),
         },
     )?;
     let cargo_runner_config_path = compiler_output_directory.join("cargo-runner.json");
@@ -826,6 +835,7 @@ pub fn build_with_rust_compiler_companion_supervised(
             run_id: request.run_id.clone(),
             target_directory: target_directory.clone(),
             output_directory: cargo_runner_directory.clone(),
+            underlying_runner,
         },
     )?;
 
@@ -908,8 +918,10 @@ pub fn build_with_rust_compiler_companion_supervised(
     })?;
     let wrapper_string = serde_json::to_string(wrapper_string)
         .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
+    let target = serde_json::to_string(&request.cargo_runner_plan.target)
+        .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
     let runner_config =
-        format!("target.'cfg(all())'.runner=[{wrapper_string},\"__cargo-test-runner\"]");
+        format!("target.{target}.runner=[{wrapper_string},\"__cargo-test-runner\"]");
     let mut full_arguments = execution_arguments;
     full_arguments.extend(["--config".into(), runner_config]);
     if !invocation.runner_arguments.is_empty() {
