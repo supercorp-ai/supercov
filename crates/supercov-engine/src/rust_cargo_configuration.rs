@@ -10,6 +10,7 @@ use std::{
     ffi::OsString,
     fs,
     path::{Component, Path, PathBuf},
+    process::Command,
 };
 
 use cargo_config2::{Config, ResolveOptions, Walk};
@@ -101,14 +102,7 @@ fn command_targets(
         .ok_or_else(|| {
             RustCargoConfigurationError::Invalid("Cargo test subcommand is missing".into())
         })?;
-    if let Some(selector) = invocation.arguments[..test_position]
-        .iter()
-        .find(|argument| argument.starts_with('+'))
-    {
-        return Err(RustCargoConfigurationError::Unsupported(format!(
-            "Cargo runner composition does not yet resolve the {selector} rustup toolchain selector exactly; refusing to use the default toolchain's target configuration"
-        )));
-    }
+    toolchain_selector(invocation, test_position)?;
     if invocation.arguments[..test_position]
         .iter()
         .any(|argument| argument == "-Z" || argument.starts_with("-Z"))
@@ -147,6 +141,132 @@ fn command_targets(
         index += 1;
     }
     Ok(targets)
+}
+
+fn toolchain_selector(
+    invocation: &CargoTestInvocation,
+    test_position: usize,
+) -> Result<Option<&str>, RustCargoConfigurationError> {
+    let prefix = &invocation.arguments[..test_position];
+    let selectors = prefix
+        .iter()
+        .enumerate()
+        .filter(|(_, argument)| argument.starts_with('+'))
+        .collect::<Vec<_>>();
+    match selectors.as_slice() {
+        [] => Ok(None),
+        [(0, selector)] if selector.len() > 1 => Ok(Some(&selector[1..])),
+        [(0, _)] => Err(RustCargoConfigurationError::Invalid(
+            "the rustup toolchain selector is empty".into(),
+        )),
+        _ => Err(RustCargoConfigurationError::Invalid(
+            "the rustup +toolchain selector must be the first and only selector before the Cargo subcommand"
+                .into(),
+        )),
+    }
+}
+
+fn command_stdout(
+    program: &Path,
+    arguments: &[&str],
+    operation: &str,
+) -> Result<String, RustCargoConfigurationError> {
+    let output = Command::new(program)
+        .args(arguments)
+        .output()
+        .map_err(|error| io_error(program, error))?;
+    if !output.status.success() {
+        return Err(RustCargoConfigurationError::Invalid(format!(
+            "{} failed while {operation} with status {}: {}",
+            program.display(),
+            output
+                .status
+                .code()
+                .map_or_else(|| "signal".into(), |value| value.to_string()),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    if !output.stderr.is_empty() {
+        return Err(RustCargoConfigurationError::Invalid(format!(
+            "{} wrote unexpected stderr while {operation}: {}",
+            program.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    String::from_utf8(output.stdout).map_err(|_| {
+        RustCargoConfigurationError::Invalid(format!(
+            "{} produced non-UTF-8 output while {operation}",
+            program.display()
+        ))
+    })
+}
+
+fn rustup_program(cargo: &Path) -> PathBuf {
+    cargo
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(
+            || PathBuf::from(format!("rustup{}", std::env::consts::EXE_SUFFIX)),
+            |parent| parent.join(format!("rustup{}", std::env::consts::EXE_SUFFIX)),
+        )
+}
+
+fn selected_cargo_program(
+    invocation: &CargoTestInvocation,
+) -> Result<OsString, RustCargoConfigurationError> {
+    let test_position = invocation
+        .arguments
+        .iter()
+        .position(|argument| argument == "test")
+        .ok_or_else(|| {
+            RustCargoConfigurationError::Invalid("Cargo test subcommand is missing".into())
+        })?;
+    let Some(selector) = toolchain_selector(invocation, test_position)? else {
+        return Ok(invocation.program.clone().into());
+    };
+    let cargo_proxy = which::which(&invocation.program).map_err(|error| {
+        RustCargoConfigurationError::Invalid(format!(
+            "could not resolve the Cargo proxy {}: {error}",
+            invocation.program
+        ))
+    })?;
+    let rustup = rustup_program(&cargo_proxy);
+    let selected = command_stdout(
+        &rustup,
+        &["which", "--toolchain", selector, "cargo"],
+        "resolving the explicit rustup toolchain's Cargo",
+    )?;
+    let selected = PathBuf::from(selected.trim());
+    if !selected.is_absolute() {
+        return Err(RustCargoConfigurationError::Invalid(format!(
+            "rustup returned a non-absolute Cargo path for +{selector}: {}",
+            selected.display()
+        )));
+    }
+    let selected = fs::canonicalize(&selected).map_err(|error| io_error(&selected, error))?;
+    let metadata = fs::symlink_metadata(&selected).map_err(|error| io_error(&selected, error))?;
+    if !metadata.file_type().is_file() {
+        return Err(RustCargoConfigurationError::Invalid(format!(
+            "rustup returned a non-regular Cargo path for +{selector}: {}",
+            selected.display()
+        )));
+    }
+    let proxy_version = command_stdout(
+        &cargo_proxy,
+        &[&format!("+{selector}"), "-Vv"],
+        "verifying the explicit rustup Cargo selection",
+    )?;
+    let selected_version = command_stdout(
+        &selected,
+        &["-Vv"],
+        "verifying the resolved Cargo executable",
+    )?;
+    if proxy_version != selected_version {
+        return Err(RustCargoConfigurationError::Invalid(format!(
+            "the +{selector} Cargo proxy and rustup's selected Cargo executable disagree"
+        )));
+    }
+    Ok(selected.into_os_string())
 }
 
 fn reject_unresolved_includes(root: &Path) -> Result<(), RustCargoConfigurationError> {
@@ -210,7 +330,8 @@ fn resolve_with_options(
     let root = fs::canonicalize(root).map_err(|error| io_error(root, error))?;
     reject_unresolved_includes(&root)?;
     let targets = command_targets(invocation)?;
-    let config = Config::load_with_options(&root, options.cargo(invocation.program.clone()))
+    let selected_cargo = selected_cargo_program(invocation)?;
+    let config = Config::load_with_options(&root, options.cargo(selected_cargo))
         .map_err(|error| RustCargoConfigurationError::Invalid(error.to_string()))?;
     let targets = config
         .build_target_for_config(targets.iter())
@@ -377,6 +498,50 @@ mod tests {
     }
 
     #[test]
+    fn resolves_an_explicit_installed_rustup_toolchain_before_target_configuration() {
+        let root = fixture();
+        let rustc = Command::new("rustc")
+            .args(["+1.95.0", "-vV"])
+            .output()
+            .unwrap();
+        assert!(
+            rustc.status.success(),
+            "{}",
+            String::from_utf8_lossy(&rustc.stderr)
+        );
+        let rustc = String::from_utf8(rustc.stdout).unwrap();
+        let host = rustc
+            .lines()
+            .find_map(|line| line.strip_prefix("host: "))
+            .unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            format!("[target.{host}]\nrunner=[\"selected-runner\",\"--selected\"]\n"),
+        )
+        .unwrap();
+        let plan = resolve_with_options(
+            &root,
+            &invocation(&["+1.95.0", "test"]),
+            ResolveOptions::default().cargo_home(None).env([(
+                OsString::from("CARGO_HOME"),
+                root.join("empty-home").into_os_string(),
+            )]),
+        )
+        .unwrap();
+        assert_eq!(plan.target, host);
+        assert_eq!(
+            plan.underlying_runner,
+            Some(RustCargoUnderlyingRunner {
+                program: RustCargoRunnerProgram::SearchPath {
+                    value: "selected-runner".into(),
+                },
+                arguments: vec!["--selected".into()],
+            })
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn rejects_include_cli_override_and_multiple_targets_before_execution() {
         let root = fixture();
         fs::write(root.join(".cargo/extra.toml"), "[build]\njobs=1\n").unwrap();
@@ -413,10 +578,10 @@ mod tests {
             .contains("2 targets")
         );
         assert!(
-            resolve_with_options(&root, &invocation(&["+nightly", "test"]), options(&root),)
+            command_targets(&invocation(&["--quiet", "+nightly", "test"]))
                 .unwrap_err()
                 .to_string()
-                .contains("rustup toolchain selector")
+                .contains("must be the first")
         );
         assert!(
             resolve_with_options(

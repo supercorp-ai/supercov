@@ -880,8 +880,8 @@ three-package Cargo-authority corpus also remains green.
 
 This deliberately does not claim complete Cargo configuration support. Cargo
 1.95 config `include`, user command-line `--config`, multiple selected targets
-and an explicit rustup `+toolchain` selector stop before user execution until
-their exact merge/selection semantics are owned.
+stop before user execution until their exact merge/selection semantics are
+owned.
 
 Checkpoint (2026-08-27): Cargo execution now uses an authenticated
 same-filesystem sibling workspace rather than a descendant of the source
@@ -899,9 +899,20 @@ generation and leave no transaction debris. Recovery removes incomplete
 staging, restores the newest prior generation when necessary, terminal run
 cleanup removes only the exact run subtree, and `supercov clean` removes the
 owned sibling only while holding the ordinary project lock. The authoritative
-rustc/rustdoc corpus, public JavaScript/TypeScript matrix, clippy, 234 engine
+rustc/rustdoc corpus, public JavaScript/TypeScript matrix, clippy, 235 engine
 tests, 19 contract tests and 16 CLI tests are green locally; no hosted workflow
 ran.
+
+Explicit installed rustup `+toolchain` selection is now exact as well. Before
+configuration resolution, Supercov asks the same rustup installation for that
+toolchain's real Cargo executable, requires the original proxy and selected
+binary to return byte-identical verbose identities, and gives the selected
+Cargo path to the configuration resolver so its sibling rustc and target cfg
+set match execution. The original proxy command remains unchanged for the
+actual run. A real `cargo +1.95.0 test ...` compiler run, with no `RUSTC`
+override, selects the exact rustc companion, preserves the relocated configured
+runner and selected tests, publishes evidence and leaves no terminal work.
+Empty, misplaced and multiple selectors fail before execution.
 
 This closes copied/ancestor configuration duplication for the current
 same-filesystem writable-parent topology. A checkout whose parent cannot host

@@ -42,6 +42,7 @@ sha2.workspace = true
 supercov-contracts.workspace = true
 sysinfo.workspace = true
 toml.workspace = true
+which.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 junction.workspace = true

@@ -45,6 +45,7 @@ sysinfo = { version = "0.38.4", default-features = false, features = ["system"] 
 time = { version = "0.3", features = ["formatting", "macros"] }
 toml = "1.1.4"
 windows-sys = "0.61.2"
+which = "8.0.6"
 
 [profile.release]
 codegen-units = 1

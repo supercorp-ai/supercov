@@ -769,6 +769,64 @@ try {
     'production libtest identity omitted its relocatable package and exact target',
   );
 
+  const selectedToolchainRunnerLog = join(
+    scratch,
+    'selected-toolchain-runner.jsonl',
+  );
+  const selectedToolchainRun = JSON.parse(
+    run(supercov, ['__run-rust-compiler'], {
+      env: {
+        SUPERCOV_PRODUCTION_RUNNER_LOG: selectedToolchainRunnerLog,
+      },
+      input: JSON.stringify({
+        root: productionFixture,
+        command: [
+          'cargo',
+          '+1.95.0',
+          'test',
+          'records_real_runtime_probes',
+        ],
+        runId: 'run_3123456789abcdef',
+        startedAt: '2026-08-26T00:00:20.000Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+    }).stdout,
+  );
+  assert.equal(selectedToolchainRun.exitCode, 0);
+  assert.equal(selectedToolchainRun.selection.companionPath, wrapper);
+  assert.equal(
+    selectedToolchainRun.selection.rustcPath,
+    rustc,
+    'explicit +toolchain did not select the matching rustc without RUSTC',
+  );
+  assert(
+    selectedToolchainRun.tests > 0,
+    'explicit +toolchain run selected no exact tests',
+  );
+  const selectedToolchainRunnerInvocations = readFileSync(
+    selectedToolchainRunnerLog,
+    'utf8',
+  )
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  assert(
+    selectedToolchainRunnerInvocations.length > 0 &&
+      selectedToolchainRunnerInvocations.every(({program}) =>
+        program.startsWith(cargoWorkspace(productionFixture)),
+      ),
+    'explicit +toolchain did not preserve the relocated configured runner',
+  );
+  assert(
+    !existsSync(
+      join(productionFixture, '.supercov/work/run_3123456789abcdef'),
+    ),
+    'explicit +toolchain run left terminal work state behind',
+  );
+
   const killedRunId = 'run_4123456789abcdef';
   const killedProduction = spawnCommand(supercov, ['__run-rust-compiler'], {
     env: {RUSTC: rustc},

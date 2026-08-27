@@ -1636,7 +1636,12 @@ miss blocks flipping any default.
   existing configured runner is now proven for normal hierarchy/environment
   precedence, structured scalar/array argv, isolated workspace relocation and
   rustdoc composition. Cargo config `include`, command-line `--config`,
-  multi-target selection and rustup `+toolchain` selection remain fail-closed.
+  and multi-target selection remain fail-closed. Explicit installed rustup
+  `+toolchain` selection now resolves the real Cargo executable through the
+  same rustup installation, verifies proxy/selected verbose identity, and lets
+  that Cargo select the matching rustc configuration. A real run without a
+  `RUSTC` override proves exact companion selection, configured-runner
+  composition, test selection, evidence and cleanup.
   Cargo's cached workspace now lives in an authenticated same-filesystem
   sibling, preserves the project basename beneath neutral generated ancestors,
   and proves through a real build script that copied and parent configuration
