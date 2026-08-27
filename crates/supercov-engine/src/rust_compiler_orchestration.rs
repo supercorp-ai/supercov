@@ -22,7 +22,7 @@ use crate::{
     process_supervision::{
         CommandSpec, ForwardedSignal, ProcessSupervisor, SupervisedOutput, SupervisionOptions,
     },
-    rust_cargo_configuration::{RustCargoResolvedRunner, RustCargoRunnerPlan},
+    rust_cargo_configuration::{RustCargoResolvedTargetRunner, RustCargoRunnerPlan},
     rust_compiler_ctfe::{RustCompilerCtfeUnit, read_rust_compiler_ctfe},
     rust_compiler_manifest::{NormalizedRustCompilerManifest, normalize_rust_compiler_candidates},
     rust_compiler_selection::{SelectedRustCompilerCompanion, select_rust_compiler_companion},
@@ -66,6 +66,41 @@ fn interrupted_error(output: &SupervisedOutput) -> Option<RustCompilerOrchestrat
     })
 }
 
+fn cargo_runner_configuration_arguments(
+    wrapper: &Path,
+    plan: &RustCargoRunnerPlan,
+) -> Result<Vec<String>, RustCompilerOrchestrationError> {
+    let wrapper = wrapper.to_str().ok_or_else(|| {
+        RustCompilerOrchestrationError::InvalidRequest(
+            "the Cargo runner executable path is not UTF-8".into(),
+        )
+    })?;
+    let wrapper = serde_json::to_string(wrapper)
+        .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
+    let mut seen = BTreeMap::new();
+    let mut arguments = Vec::with_capacity(plan.targets.len() * 2);
+    for target in &plan.targets {
+        if seen.insert(target.target.as_str(), ()).is_some() {
+            return Err(RustCompilerOrchestrationError::InvalidRequest(format!(
+                "Cargo runner plan contains duplicate target identity: {}",
+                target.target
+            )));
+        }
+        let target = serde_json::to_string(&target.target)
+            .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
+        arguments.extend([
+            "--config".into(),
+            format!("target.{target}.runner=[{wrapper},\"__cargo-test-runner\",{target}]"),
+        ]);
+    }
+    if arguments.is_empty() {
+        return Err(RustCompilerOrchestrationError::InvalidRequest(
+            "Cargo runner plan has no selected targets".into(),
+        ));
+    }
+    Ok(arguments)
+}
+
 pub const RUST_COMPILER_WRAPPER_CONFIG_ENV: &str = "SUPERCOV_RUST_COMPILER_WRAPPER_CONFIG";
 pub const RUST_COMPILER_OUTPUT_ENV: &str = "SUPERCOV_RUST_COMPILER_OUTPUT";
 pub const RUST_SOURCE_ROOT_ENV: &str = "SUPERCOV_RUST_SOURCE_ROOT";
@@ -98,7 +133,7 @@ pub struct RustCompilerWrapperConfig {
     pub require_public_capabilities: bool,
     pub selection_directory: PathBuf,
     pub shared_runtime_directory: PathBuf,
-    pub underlying_runner: Option<RustCargoResolvedRunner>,
+    pub target_runners: Vec<RustCargoResolvedTargetRunner>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -811,11 +846,12 @@ pub fn build_with_rust_compiler_companion_supervised(
     fs::create_dir(&cargo_runner_directory)
         .map_err(|error| io_error(&cargo_runner_directory, error))?;
     write_shared_runtime_source(&shared_runtime_directory)?;
-    let underlying_runner = request
+    let target_runners = request
         .cargo_runner_plan
-        .underlying_runner
-        .as_ref()
-        .map(|runner| runner.resolve(&project_root));
+        .targets
+        .iter()
+        .map(|target| target.resolve(&project_root))
+        .collect::<Vec<_>>();
     let config_path = compiler_output_directory.join("wrapper.json");
     write_json_config(
         &config_path,
@@ -824,7 +860,7 @@ pub fn build_with_rust_compiler_companion_supervised(
             require_public_capabilities: request.require_public_capabilities,
             selection_directory: selection_directory.clone(),
             shared_runtime_directory: shared_runtime_directory.clone(),
-            underlying_runner: underlying_runner.clone(),
+            target_runners: target_runners.clone(),
         },
     )?;
     let cargo_runner_config_path = compiler_output_directory.join("cargo-runner.json");
@@ -835,7 +871,7 @@ pub fn build_with_rust_compiler_companion_supervised(
             run_id: request.run_id.clone(),
             target_directory: target_directory.clone(),
             output_directory: cargo_runner_directory.clone(),
-            underlying_runner,
+            target_runners,
         },
     )?;
 
@@ -911,19 +947,11 @@ pub fn build_with_rust_compiler_companion_supervised(
     } else {
         None
     };
-    let wrapper_string = wrapper.to_str().ok_or_else(|| {
-        RustCompilerOrchestrationError::InvalidRequest(
-            "the Cargo runner executable path is not UTF-8".into(),
-        )
-    })?;
-    let wrapper_string = serde_json::to_string(wrapper_string)
-        .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
-    let target = serde_json::to_string(&request.cargo_runner_plan.target)
-        .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
-    let runner_config =
-        format!("target.{target}.runner=[{wrapper_string},\"__cargo-test-runner\"]");
     let mut full_arguments = execution_arguments;
-    full_arguments.extend(["--config".into(), runner_config]);
+    full_arguments.extend(cargo_runner_configuration_arguments(
+        &wrapper,
+        &request.cargo_runner_plan,
+    )?);
     if !invocation.runner_arguments.is_empty() {
         full_arguments.push("--".into());
         full_arguments.extend(invocation.runner_arguments.iter().cloned());
@@ -1025,13 +1053,20 @@ pub fn build_with_rust_compiler_companion_supervised(
         .map(|output| cargo_artifacts(&output.stdout, &target_directory, &project_root))
         .transpose()?
         .unwrap_or_default();
-    let cargo_runner_units = read_cargo_runner_units(&cargo_runner_directory, &request.run_id)
-        .map_err(|error| {
-            let stderr = String::from_utf8_lossy(&execution_output.stderr);
-            RustCompilerOrchestrationError::CompilerOutput(
-                format!("{error}\n{stderr}").trim().to_owned(),
-            )
-        })?;
+    let expected_targets = request
+        .cargo_runner_plan
+        .targets
+        .iter()
+        .map(|target| target.target.clone())
+        .collect::<Vec<_>>();
+    let cargo_runner_units =
+        read_cargo_runner_units(&cargo_runner_directory, &request.run_id, &expected_targets)
+            .map_err(|error| {
+                let stderr = String::from_utf8_lossy(&execution_output.stderr);
+                RustCompilerOrchestrationError::CompilerOutput(
+                    format!("{error}\n{stderr}").trim().to_owned(),
+                )
+            })?;
     let execution_exit_code = execution_output.result.exit_code();
     Ok(RustCompilerBuild {
         selection,
@@ -1204,6 +1239,42 @@ mod tests {
                 .map(|artifact| &artifact.package)
                 .collect::<Vec<_>>(),
             "package identities changed when the workspace moved"
+        );
+    }
+
+    #[test]
+    fn cargo_runner_configuration_is_target_indexed_and_rejects_aliases() {
+        use crate::rust_cargo_configuration::RustCargoTargetRunnerPlan;
+
+        let plan = RustCargoRunnerPlan {
+            targets: vec![
+                RustCargoTargetRunnerPlan {
+                    target: "aarch64-apple-darwin".into(),
+                    underlying_runner: None,
+                },
+                RustCargoTargetRunnerPlan {
+                    target: "x86_64-unknown-linux-gnu".into(),
+                    underlying_runner: None,
+                },
+            ],
+        };
+        assert_eq!(
+            cargo_runner_configuration_arguments(Path::new("/opt/super cov"), &plan).unwrap(),
+            [
+                "--config",
+                "target.\"aarch64-apple-darwin\".runner=[\"/opt/super cov\",\"__cargo-test-runner\",\"aarch64-apple-darwin\"]",
+                "--config",
+                "target.\"x86_64-unknown-linux-gnu\".runner=[\"/opt/super cov\",\"__cargo-test-runner\",\"x86_64-unknown-linux-gnu\"]",
+            ]
+        );
+        let duplicate = RustCargoRunnerPlan {
+            targets: vec![plan.targets[0].clone(), plan.targets[0].clone()],
+        };
+        assert!(
+            cargo_runner_configuration_arguments(Path::new("/opt/supercov"), &duplicate)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate target identity")
         );
     }
 }

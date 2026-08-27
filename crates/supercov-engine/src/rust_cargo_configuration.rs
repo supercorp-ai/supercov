@@ -7,7 +7,7 @@
 //! Unsupported configuration surfaces fail before user code executes.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     ffi::OsString,
     fs,
     path::{Component, Path, PathBuf},
@@ -69,9 +69,34 @@ pub struct RustCargoResolvedRunner {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RustCargoRunnerPlan {
+pub struct RustCargoTargetRunnerPlan {
     pub target: String,
     pub underlying_runner: Option<RustCargoUnderlyingRunner>,
+}
+
+impl RustCargoTargetRunnerPlan {
+    pub fn resolve(&self, workspace: &Path) -> RustCargoResolvedTargetRunner {
+        RustCargoResolvedTargetRunner {
+            target: self.target.clone(),
+            underlying_runner: self
+                .underlying_runner
+                .as_ref()
+                .map(|runner| runner.resolve(workspace)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCargoResolvedTargetRunner {
+    pub target: String,
+    pub underlying_runner: Option<RustCargoResolvedRunner>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCargoRunnerPlan {
+    pub targets: Vec<RustCargoTargetRunnerPlan>,
 }
 
 #[derive(Debug, Clone)]
@@ -356,26 +381,6 @@ fn discovered_configuration(
     Ok((paths, includes))
 }
 
-fn target_name(value: &str) -> Result<String, RustCargoConfigurationError> {
-    if Path::new(value)
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
-        || value.contains(['/', '\\'])
-    {
-        return Path::new(value)
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .filter(|stem| !stem.is_empty())
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                RustCargoConfigurationError::Invalid(format!(
-                    "Cargo target specification has no UTF-8 file stem: {value}"
-                ))
-            });
-    }
-    Ok(value.to_owned())
-}
-
 fn model_target_config<'a>(
     model: &'a CargoConfigValue,
     target: &str,
@@ -398,45 +403,107 @@ fn model_exact_runner<'a>(
     model_target_config(model, target)?.at(&["runner"])
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum ModelTargetKind {
+    Tuple,
+    Json,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ModelTarget {
+    kind: ModelTargetKind,
     name: String,
     cargo_argument: String,
 }
 
 fn model_targets(
+    root: &Path,
     model: &CargoConfigValue,
     command_targets: Vec<String>,
     host: &str,
     inputs: &CargoModelInputs,
 ) -> Result<Vec<ModelTarget>, RustCargoConfigurationError> {
     let convert = |target: &str| {
+        let target = target.trim();
+        if target.is_empty() {
+            return Err(RustCargoConfigurationError::Invalid(
+                "Cargo target was empty".into(),
+            ));
+        }
+        let target = if target == "host-tuple" { host } else { target };
+        if target.ends_with(".json") {
+            let requested = Path::new(target);
+            let requested = if requested.is_absolute() {
+                requested.to_owned()
+            } else {
+                root.join(requested)
+            };
+            let path = fs::canonicalize(&requested).map_err(|error| io_error(&requested, error))?;
+            let name = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| !stem.is_empty())
+                .ok_or_else(|| {
+                    RustCargoConfigurationError::Invalid(format!(
+                        "Cargo target specification has no UTF-8 file stem: {}",
+                        path.display()
+                    ))
+                })?;
+            let cargo_argument = path.to_str().ok_or_else(|| {
+                RustCargoConfigurationError::Invalid(format!(
+                    "Cargo target specification path is not UTF-8: {}",
+                    path.display()
+                ))
+            })?;
+            return Ok(ModelTarget {
+                kind: ModelTargetKind::Json,
+                name: name.to_owned(),
+                cargo_argument: cargo_argument.to_owned(),
+            });
+        }
         Ok(ModelTarget {
-            name: target_name(target)?,
+            kind: ModelTargetKind::Tuple,
+            name: target.to_owned(),
             cargo_argument: target.to_owned(),
         })
     };
-    if !command_targets.is_empty() {
-        return command_targets
-            .iter()
-            .map(|target| convert(target))
-            .collect();
-    }
-    if let Some(target) = inputs.environment("CARGO_BUILD_TARGET") {
+    let targets = if !command_targets.is_empty() {
+        command_targets
+    } else if let Some(target) = inputs.environment("CARGO_BUILD_TARGET") {
         let target = target.clone().into_string().map_err(|_| {
             RustCargoConfigurationError::Invalid("CARGO_BUILD_TARGET is not UTF-8".into())
         })?;
-        return Ok(vec![convert(&target)?]);
+        vec![target]
+    } else if let Some(targets) = model.at(&["build", "target"]) {
+        targets
+            .string_list()
+            .ok_or_else(|| {
+                RustCargoConfigurationError::Invalid(
+                    "build.target must be a string or string array".into(),
+                )
+            })?
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    } else {
+        vec![host.to_owned()]
+    };
+    let targets = targets
+        .iter()
+        .map(|target| convert(target))
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map(BTreeSet::into_iter)
+        .map(Iterator::collect::<Vec<_>>)?;
+    let mut names = HashMap::new();
+    for target in &targets {
+        if let Some(first) = names.insert(&target.name, &target.cargo_argument) {
+            return Err(RustCargoConfigurationError::Invalid(format!(
+                "Cargo targets {first} and {} have the same configuration identity {:?}",
+                target.cargo_argument, target.name
+            )));
+        }
     }
-    if let Some(targets) = model.at(&["build", "target"]) {
-        let values = targets.string_list().ok_or_else(|| {
-            RustCargoConfigurationError::Invalid(
-                "build.target must be a string or string array".into(),
-            )
-        })?;
-        return values.into_iter().map(convert).collect();
-    }
-    Ok(vec![convert(host)?])
+    Ok(targets)
 }
 
 fn environment_runner(
@@ -664,25 +731,24 @@ fn resolve_with_options(
     let host = config
         .host_triple()
         .map_err(|error| RustCargoConfigurationError::Invalid(error.to_string()))?;
-    let targets = model_targets(&model, command_targets, host, &model_inputs)?;
-    let [target] = targets.as_slice() else {
-        return Err(RustCargoConfigurationError::Unsupported(format!(
-            "Cargo selected {} targets; exact multi-target runner composition is not yet implemented",
-            targets.len()
-        )));
-    };
-    let runner = model_runner(
-        &root,
-        &model,
-        &config,
-        target,
-        &directly_loaded,
-        &model_inputs,
-    )?;
-    Ok(RustCargoRunnerPlan {
-        target: target.name.clone(),
-        underlying_runner: runner,
-    })
+    let targets = model_targets(&root, &model, command_targets, host, &model_inputs)?;
+    let targets = targets
+        .iter()
+        .map(|target| {
+            Ok(RustCargoTargetRunnerPlan {
+                target: target.name.clone(),
+                underlying_runner: model_runner(
+                    &root,
+                    &model,
+                    &config,
+                    target,
+                    &directly_loaded,
+                    &model_inputs,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, RustCargoConfigurationError>>()?;
+    Ok(RustCargoRunnerPlan { targets })
 }
 
 pub(crate) fn resolve_cargo_runner_plan(
@@ -786,7 +852,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            plan.underlying_runner,
+            plan.targets[0].underlying_runner,
             Some(RustCargoUnderlyingRunner {
                 program: RustCargoRunnerProgram::SearchPath {
                     value: "exact-runner".into(),
@@ -811,7 +877,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            plan.underlying_runner,
+            plan.targets[0].underlying_runner,
             Some(RustCargoUnderlyingRunner {
                 program: RustCargoRunnerProgram::SearchPath {
                     value: "environment-runner".into(),
@@ -837,9 +903,9 @@ mod tests {
             model_inputs(),
         )
         .unwrap();
-        assert_eq!(plan.target, "aarch64-apple-darwin");
+        assert_eq!(plan.targets[0].target, "aarch64-apple-darwin");
         assert_eq!(
-            plan.underlying_runner,
+            plan.targets[0].underlying_runner,
             Some(RustCargoUnderlyingRunner {
                 program: RustCargoRunnerProgram::WorkspaceRelative {
                     value: PathBuf::from("bin with spaces/runner")
@@ -866,7 +932,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            plan.underlying_runner,
+            plan.targets[0].underlying_runner,
             Some(RustCargoUnderlyingRunner {
                 program: RustCargoRunnerProgram::SearchPath {
                     value: "runner".into()
@@ -891,6 +957,80 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("several matching instances"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cargo_duplicate_and_host_tuple_targets_collapse_before_runner_selection() {
+        let root = fixture();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[target.aarch64-apple-darwin]\nrunner=\"runner\"\n",
+        )
+        .unwrap();
+        let plan = resolve_with_options(
+            &root,
+            &invocation(&[
+                "test",
+                "--target=host-tuple",
+                "--target=aarch64-apple-darwin",
+                "--target=aarch64-apple-darwin",
+            ]),
+            options(&root),
+            model_inputs(),
+        )
+        .unwrap();
+        assert_eq!(plan.targets[0].target, "aarch64-apple-darwin");
+        assert_eq!(
+            plan.targets[0].underlying_runner,
+            Some(RustCargoUnderlyingRunner {
+                program: RustCargoRunnerProgram::SearchPath {
+                    value: "runner".into()
+                },
+                arguments: Vec::new()
+            })
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn custom_target_paths_are_project_relative_and_name_collisions_fail_closed() {
+        let root = fixture();
+        fs::create_dir_all(root.join("targets/first")).unwrap();
+        fs::create_dir_all(root.join("targets/second")).unwrap();
+        fs::write(root.join("targets/first/custom.json"), "{}").unwrap();
+        fs::write(root.join("targets/second/custom.json"), "{}").unwrap();
+        let model = CargoConfigValue {
+            kind: CargoConfigKind::Table(std::collections::BTreeMap::new()),
+            definition: CargoConfigDefinition::BuiltIn,
+        };
+        let inputs = model_inputs();
+        let target = model_targets(
+            &root,
+            &model,
+            vec!["targets/first/custom.json".into()],
+            "aarch64-apple-darwin",
+            &inputs,
+        )
+        .unwrap();
+        assert_eq!(target[0].name, "custom");
+        assert_eq!(
+            Path::new(&target[0].cargo_argument),
+            fs::canonicalize(root.join("targets/first/custom.json")).unwrap()
+        );
+        let error = model_targets(
+            &root,
+            &model,
+            vec![
+                "targets/first/custom.json".into(),
+                "targets/second/custom.json".into(),
+            ],
+            "aarch64-apple-darwin",
+            &inputs,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("same configuration identity"), "{error}");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -926,9 +1066,9 @@ mod tests {
             model_inputs(),
         )
         .unwrap();
-        assert_eq!(plan.target, host);
+        assert_eq!(plan.targets[0].target, host);
         assert_eq!(
-            plan.underlying_runner,
+            plan.targets[0].underlying_runner,
             Some(RustCargoUnderlyingRunner {
                 program: RustCargoRunnerProgram::SearchPath {
                     value: "selected-runner".into(),
@@ -940,7 +1080,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_include_cli_and_cfg_runners_but_rejects_open_configuration_surfaces() {
+    fn resolves_include_cli_cfg_and_multiple_target_runners_but_rejects_open_surfaces() {
         let root = fixture();
         fs::write(
             root.join(".cargo/extra.toml"),
@@ -960,7 +1100,8 @@ mod tests {
                 model_inputs(),
             )
             .unwrap()
-            .underlying_runner,
+            .targets[0]
+                .underlying_runner,
             Some(RustCargoUnderlyingRunner {
                 program: RustCargoRunnerProgram::SearchPath {
                     value: "included".into()
@@ -989,7 +1130,8 @@ mod tests {
                 )]),
             )
             .unwrap()
-            .underlying_runner,
+            .targets[0]
+                .underlying_runner,
             Some(RustCargoUnderlyingRunner {
                 program: RustCargoRunnerProgram::SearchPath {
                     value: "cli".into()
@@ -997,16 +1139,48 @@ mod tests {
                 arguments: vec!["--cli".into()]
             })
         );
-        assert!(
-            resolve_with_options(
-                &root,
-                &invocation(&["test", "--target=a", "--target=b"]),
-                options(&root),
-                model_inputs(),
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("2 targets")
+        let multi_target_environment = [
+            (
+                OsString::from("CARGO_TARGET_A_RUNNER"),
+                OsString::from("runner-a"),
+            ),
+            (
+                OsString::from("CARGO_TARGET_B_RUNNER"),
+                OsString::from("runner-b"),
+            ),
+        ];
+        let plan = resolve_with_options(
+            &root,
+            &invocation(&["test", "--target=a", "--target=b"]),
+            options_with(&root, multi_target_environment.clone()),
+            model_inputs_with(multi_target_environment),
+        );
+        let plan = plan.unwrap();
+        assert_eq!(
+            plan.targets
+                .iter()
+                .map(|target| target.target.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        assert_eq!(
+            plan.targets
+                .iter()
+                .map(|target| {
+                    target
+                        .underlying_runner
+                        .as_ref()
+                        .map(|runner| &runner.program)
+                })
+                .collect::<Vec<_>>(),
+            [
+                Some(&RustCargoRunnerProgram::SearchPath {
+                    value: "runner-a".into()
+                }),
+                Some(&RustCargoRunnerProgram::SearchPath {
+                    value: "runner-b".into()
+                })
+            ]
         );
         fs::write(
             root.join(".cargo/extra.toml"),
@@ -1021,7 +1195,8 @@ mod tests {
                 model_inputs(),
             )
             .unwrap()
-            .underlying_runner,
+            .targets[0]
+                .underlying_runner,
             Some(RustCargoUnderlyingRunner {
                 program: RustCargoRunnerProgram::SearchPath {
                     value: "included-cfg".into()

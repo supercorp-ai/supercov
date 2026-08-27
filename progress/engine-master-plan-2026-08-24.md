@@ -1689,6 +1689,37 @@ miss blocks flipping any default.
   fallback, remaining semantic corpora, target matrices and the 1.10x gate
   remain blocking.
 
+## Checkpoint — 2026-08-27 target-indexed Cargo runner composition
+
+- Multiple selected targets no longer share one implicit configured runner.
+  Resolution produces an ordered, deduplicated target plan; every exact target
+  gets a structured Cargo runner override containing Supercov's internal marker
+  and the selected target identity. `host-tuple` normalizes to the exact Cargo
+  host before deduplication. Relative custom JSON targets resolve from the
+  tested project root, use Cargo's canonical path/short-name split and fail
+  closed when distinct paths would alias one configuration name.
+- Both internal consumer paths are target-bound. Libtest selects only the
+  matching original runner and publishes version-2 atomic units keyed by target
+  plus artifact. The reader accepts only the run's selected target set.
+  Rustdoc removes the exact injected marker/target pair and restores only that
+  target's original runner. Missing, unknown, duplicated or foreign target
+  composition is fatal.
+- A real Cargo 1.95 gate passes the explicit installed host and `host-tuple`
+  together and proves Cargo deduplicates them before one exact runner
+  invocation while preserving environment, order, fail-fast and cleanup.
+  Synthetic two-target gates prove distinct runner selection, rustdoc
+  restoration, structured config generation and collision-free publication.
+- The authoritative rustc/rustdoc corpus, 245 engine tests, 19 contract tests,
+  17 CLI tests, warnings-denied clippy and the complete public JavaScript/
+  TypeScript matrix are green locally. No hosted workflow ran.
+- This closes the single-target engine assumption, not the target platform
+  matrix. Only `aarch64-apple-darwin` is installed on the proving host;
+  execution on two genuinely different targets, supported Linux targets and
+  Windows remain explicit release gates. Runner-affecting `build.rustc`/
+  wrapper configuration, retries, nextest/custom harnesses, presentation modes,
+  read-only/cross-volume fallback, semantic corpora and performance also remain
+  blocking.
+
 ## Non-goals and guardrails
 
 - No accidental behavior change during ports; every future language frontend

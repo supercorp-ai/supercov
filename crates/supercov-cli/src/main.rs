@@ -222,7 +222,7 @@ fn rust_cargo_test_runner(arguments: Vec<OsString>) -> ExitCode {
 fn strip_injected_rustdoc_runner(
     arguments: Vec<String>,
     runner: &Path,
-    underlying_runner: Option<&supercov_engine::rust_cargo_configuration::RustCargoResolvedRunner>,
+    target_runners: &[supercov_engine::rust_cargo_configuration::RustCargoResolvedTargetRunner],
 ) -> Result<Vec<String>, String> {
     let runner = runner
         .to_str()
@@ -230,7 +230,7 @@ fn strip_injected_rustdoc_runner(
     let mut stripped = Vec::with_capacity(arguments.len());
     let mut arguments = arguments.into_iter();
     let mut removed_runner = false;
-    let mut removed_marker = false;
+    let mut runner_arguments = Vec::new();
     while let Some(argument) = arguments.next() {
         if argument == "--test-runtool" {
             let value = arguments
@@ -257,32 +257,41 @@ fn strip_injected_rustdoc_runner(
             let value = arguments
                 .next()
                 .ok_or_else(|| "rustdoc --test-runtool-arg has no value".to_owned())?;
-            if value != "__cargo-test-runner" || removed_marker {
-                return Err(format!(
-                    "rustdoc received an unexpected test-runner argument: {value}"
-                ));
-            }
-            removed_marker = true;
+            runner_arguments.push(value);
             continue;
         }
         if let Some(value) = argument.strip_prefix("--test-runtool-arg=") {
-            if value != "__cargo-test-runner" || removed_marker {
-                return Err(format!(
-                    "rustdoc received an unexpected test-runner argument: {value}"
-                ));
-            }
-            removed_marker = true;
+            runner_arguments.push(value.to_owned());
             continue;
         }
         stripped.push(argument);
     }
-    if removed_runner != removed_marker {
-        return Err("rustdoc received an incomplete injected Cargo runner".into());
-    }
     if !removed_runner {
         return Err("rustdoc did not receive Supercov's injected Cargo runner".into());
     }
-    if let Some(underlying_runner) = underlying_runner {
+    let [marker, target] = runner_arguments.as_slice() else {
+        return Err(format!(
+            "rustdoc received {} injected Cargo runner arguments; expected the marker and target identity",
+            runner_arguments.len()
+        ));
+    };
+    if marker != "__cargo-test-runner" {
+        return Err(format!(
+            "rustdoc received an unexpected test-runner marker: {marker}"
+        ));
+    }
+    let mut matching_targets = target_runners
+        .iter()
+        .filter(|candidate| candidate.target == *target);
+    let target_runner = matching_targets.next().ok_or_else(|| {
+        format!("rustdoc received an unconfigured Cargo target identity: {target}")
+    })?;
+    if matching_targets.next().is_some() {
+        return Err(format!(
+            "Rust compiler wrapper configuration duplicates Cargo target identity: {target}"
+        ));
+    }
+    if let Some(underlying_runner) = &target_runner.underlying_runner {
         let program = underlying_runner
             .program
             .to_str()
@@ -322,8 +331,7 @@ fn rustdoc_wrapper(arguments: Vec<String>) -> ExitCode {
         // catalog/outcome/transport supervisor below. Remove only Supercov's
         // injected pair so the same executable is not misclassified twice.
         // Any configured or malformed alternative fails closed.
-        let arguments =
-            strip_injected_rustdoc_runner(arguments, &engine, config.underlying_runner.as_ref())?;
+        let arguments = strip_injected_rustdoc_runner(arguments, &engine, &config.target_runners)?;
         let started = Instant::now();
         let selection = loop {
             match supercov_engine::rust_compiler_orchestration::verified_compiler_selection(
@@ -2869,6 +2877,11 @@ mod tests {
     #[test]
     fn rustdoc_removes_only_the_exact_injected_cargo_runner() {
         let runner = Path::new("/opt/supercov");
+        let plain_target =
+            supercov_engine::rust_cargo_configuration::RustCargoResolvedTargetRunner {
+                target: "aarch64-apple-darwin".into(),
+                underlying_runner: None,
+            };
         assert_eq!(
             strip_injected_rustdoc_runner(
                 vec![
@@ -2878,10 +2891,12 @@ mod tests {
                     "/opt/supercov".into(),
                     "--test-runtool-arg".into(),
                     "__cargo-test-runner".into(),
+                    "--test-runtool-arg".into(),
+                    "aarch64-apple-darwin".into(),
                     "src/lib.rs".into(),
                 ],
                 runner,
-                None,
+                std::slice::from_ref(&plain_target),
             )
             .unwrap(),
             ["--crate-name", "fixture", "src/lib.rs"]
@@ -2891,9 +2906,10 @@ mod tests {
                 vec![
                     "--test-runtool=/opt/supercov".into(),
                     "--test-runtool-arg=__cargo-test-runner".into(),
+                    "--test-runtool-arg=aarch64-apple-darwin".into(),
                 ],
                 runner,
-                None,
+                std::slice::from_ref(&plain_target),
             )
             .unwrap(),
             Vec::<String>::new()
@@ -2902,15 +2918,21 @@ mod tests {
             program: PathBuf::from("/opt/runner with spaces"),
             arguments: vec!["--fixed".into(), "two words".into()],
         };
+        let configured_target =
+            supercov_engine::rust_cargo_configuration::RustCargoResolvedTargetRunner {
+                target: "aarch64-apple-darwin".into(),
+                underlying_runner: Some(underlying),
+            };
         assert_eq!(
             strip_injected_rustdoc_runner(
                 vec![
                     "--test-runtool=/opt/supercov".into(),
                     "--test-runtool-arg=__cargo-test-runner".into(),
+                    "--test-runtool-arg=aarch64-apple-darwin".into(),
                     "src/lib.rs".into(),
                 ],
                 runner,
-                Some(&underlying),
+                std::slice::from_ref(&configured_target),
             )
             .unwrap(),
             [
@@ -2928,7 +2950,11 @@ mod tests {
     #[test]
     fn rustdoc_rejects_missing_or_foreign_runner_composition() {
         let runner = Path::new("/opt/supercov");
-        assert!(strip_injected_rustdoc_runner(vec!["--test".into()], runner, None).is_err());
+        let target = supercov_engine::rust_cargo_configuration::RustCargoResolvedTargetRunner {
+            target: "aarch64-apple-darwin".into(),
+            underlying_runner: None,
+        };
+        assert!(strip_injected_rustdoc_runner(vec!["--test".into()], runner, &[]).is_err());
         assert!(
             strip_injected_rustdoc_runner(
                 vec![
@@ -2936,9 +2962,11 @@ mod tests {
                     "/opt/foreign".into(),
                     "--test-runtool-arg".into(),
                     "__cargo-test-runner".into(),
+                    "--test-runtool-arg".into(),
+                    "aarch64-apple-darwin".into(),
                 ],
                 runner,
-                None,
+                std::slice::from_ref(&target),
             )
             .is_err()
         );
@@ -2946,9 +2974,77 @@ mod tests {
             strip_injected_rustdoc_runner(
                 vec!["--test-runtool".into(), "/opt/supercov".into()],
                 runner,
-                None,
+                std::slice::from_ref(&target),
             )
             .is_err()
+        );
+        let injected = vec![
+            "--test-runtool=/opt/supercov".into(),
+            "--test-runtool-arg=__cargo-test-runner".into(),
+            "--test-runtool-arg=x86_64-unknown-linux-gnu".into(),
+        ];
+        assert!(
+            strip_injected_rustdoc_runner(injected.clone(), runner, std::slice::from_ref(&target))
+                .unwrap_err()
+                .contains("unconfigured Cargo target")
+        );
+    }
+
+    #[test]
+    fn rustdoc_restores_only_the_selected_targets_runner() {
+        let runner = Path::new("/opt/supercov");
+        let targets = [
+            supercov_engine::rust_cargo_configuration::RustCargoResolvedTargetRunner {
+                target: "aarch64-apple-darwin".into(),
+                underlying_runner: Some(
+                    supercov_engine::rust_cargo_configuration::RustCargoResolvedRunner {
+                        program: "/opt/darwin-runner".into(),
+                        arguments: vec!["--darwin".into()],
+                    },
+                ),
+            },
+            supercov_engine::rust_cargo_configuration::RustCargoResolvedTargetRunner {
+                target: "x86_64-unknown-linux-gnu".into(),
+                underlying_runner: Some(
+                    supercov_engine::rust_cargo_configuration::RustCargoResolvedRunner {
+                        program: "/opt/linux-runner".into(),
+                        arguments: vec!["--linux".into()],
+                    },
+                ),
+            },
+        ];
+        assert_eq!(
+            strip_injected_rustdoc_runner(
+                vec![
+                    "--test-runtool=/opt/supercov".into(),
+                    "--test-runtool-arg=__cargo-test-runner".into(),
+                    "--test-runtool-arg=x86_64-unknown-linux-gnu".into(),
+                    "src/lib.rs".into(),
+                ],
+                runner,
+                &targets,
+            )
+            .unwrap(),
+            [
+                "src/lib.rs",
+                "--test-runtool",
+                "/opt/linux-runner",
+                "--test-runtool-arg",
+                "--linux",
+            ]
+        );
+        assert!(
+            strip_injected_rustdoc_runner(
+                vec![
+                    "--test-runtool=/opt/supercov".into(),
+                    "--test-runtool-arg=__cargo-test-runner".into(),
+                    "--test-runtool-arg=aarch64-apple-darwin".into(),
+                ],
+                runner,
+                &[targets[0].clone(), targets[0].clone()],
+            )
+            .unwrap_err()
+            .contains("duplicates Cargo target identity")
         );
     }
 

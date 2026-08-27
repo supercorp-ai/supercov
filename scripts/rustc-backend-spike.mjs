@@ -774,9 +774,9 @@ try {
   );
   assert.equal(productionTestQuery.ok, true);
   assert.equal(productionTestQuery.data.tests.length, 1);
-  assert.match(
+  assert.equal(
     productionTestQuery.data.tests[0].id,
-    /^rust:libtest:package:\.:lib:supercov_rustc_spike_fixture:src\/lib\.rs::tests::records_real_runtime_probes$/u,
+    `rust:libtest:${rustcHost}:package:.:lib:supercov_rustc_spike_fixture:src/lib.rs::tests::records_real_runtime_probes`,
     'production libtest identity omitted its relocatable package and exact target',
   );
 
@@ -1186,8 +1186,8 @@ try {
   assert.deepEqual(
     new Set(multiPackageQuery.data.tests.map(({id}) => id)),
     new Set([
-      'rust:libtest:package:sibling-a:lib:shared_target:sibling-a/src/lib.rs::same_name',
-      'rust:libtest:package:sibling-b:lib:shared_target:sibling-b/src/lib.rs::same_name',
+      `rust:libtest:${rustcHost}:package:sibling-a:lib:shared_target:sibling-a/src/lib.rs::same_name`,
+      `rust:libtest:${rustcHost}:package:sibling-b:lib:shared_target:sibling-b/src/lib.rs::same_name`,
     ]),
     'colliding libtest names did not retain exact relocatable package identity',
   );

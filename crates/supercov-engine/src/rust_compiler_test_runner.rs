@@ -35,7 +35,9 @@ use crate::{
     process_supervision::{
         CommandSpec, ProcessSupervisor, SupervisedOutput, SupervisedResult, SupervisionOptions,
     },
-    rust_cargo_configuration::{RustCargoResolvedRunner, RustCargoRunnerPlan},
+    rust_cargo_configuration::{
+        RustCargoResolvedRunner, RustCargoResolvedTargetRunner, RustCargoRunnerPlan,
+    },
     rust_compiler_ctfe::RustCompilerCtfeUnit,
     rust_compiler_evidence::{
         RustCompilerEvidenceProjection, RustCompilerTransportHealth, project_rust_compiler_evidence,
@@ -56,7 +58,7 @@ use crate::{
 
 const TOKEN_BYTES: usize = supercov_contracts::RUST_PROBE_TRANSPORT_TOKEN_SIZE;
 pub const RUST_CARGO_RUNNER_CONFIG_ENV: &str = "SUPERCOV_RUST_CARGO_RUNNER_CONFIG";
-pub const RUST_CARGO_RUNNER_VERSION: u32 = 1;
+pub const RUST_CARGO_RUNNER_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -65,7 +67,7 @@ pub struct RustCargoRunnerConfig {
     pub run_id: String,
     pub target_directory: PathBuf,
     pub output_directory: PathBuf,
-    pub underlying_runner: Option<RustCargoResolvedRunner>,
+    pub target_runners: Vec<RustCargoResolvedTargetRunner>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -87,6 +89,7 @@ pub struct RustCargoRunnerUnit {
     pub version: u32,
     pub run_id: String,
     pub invocation_ordinal: u64,
+    pub target: String,
     pub artifact: PathBuf,
     pub arguments: Vec<String>,
     pub attempts: Vec<RustCargoRunnerAttempt>,
@@ -98,6 +101,7 @@ struct RustCargoRunnerFailure {
     version: u32,
     run_id: String,
     invocation_ordinal: u64,
+    target: Option<String>,
     artifact: Option<PathBuf>,
     error: String,
 }
@@ -354,10 +358,10 @@ fn normalize_artifacts(
         .collect()
 }
 
-fn libtest_id(artifact: &TestArtifact, test: &str) -> String {
+fn libtest_id(compilation_target: &str, artifact: &TestArtifact, test: &str) -> String {
     format!(
-        "rust:libtest:{}:{}:{}::{test}",
-        artifact.package, artifact.target_key, artifact.source
+        "rust:libtest:{compilation_target}:{}:{}:{}::{test}",
+        artifact.package, artifact.target_key, artifact.source,
     )
 }
 
@@ -600,7 +604,12 @@ fn write_cargo_runner_unit(
     let artifact = unit.artifact.to_str().ok_or_else(|| {
         RustCompilerTestError::Context("Cargo test artifact path is not UTF-8".into())
     })?;
-    let digest = format!("{:x}", Sha256::digest(artifact.as_bytes()));
+    let mut identity = Sha256::new();
+    identity.update((unit.target.len() as u64).to_be_bytes());
+    identity.update(unit.target.as_bytes());
+    identity.update((artifact.len() as u64).to_be_bytes());
+    identity.update(artifact.as_bytes());
+    let digest = format!("{:x}", identity.finalize());
     let destination = output_directory.join(format!("libtest-{}.json", &digest[..24]));
     let partial = output_directory.join(format!(
         ".libtest-{}-{}.partial",
@@ -737,11 +746,45 @@ pub fn run_cargo_libtest_runner(
             output_directory.display().to_string(),
         ));
     }
+    let mut configured_targets = BTreeSet::new();
+    if config.target_runners.is_empty()
+        || config
+            .target_runners
+            .iter()
+            .any(|target| target.target.is_empty() || !configured_targets.insert(&target.target))
+    {
+        return Err(RustCompilerTestError::Context(
+            "Cargo runner config has empty or duplicate target identities".into(),
+        ));
+    }
     let invocation_ordinal = reserve_cargo_runner_ordinal(&output_directory)?;
     let run_id = config.run_id.clone();
-    let failure_artifact = arguments.first().map(PathBuf::from);
+    let failure_target = arguments
+        .first()
+        .and_then(|target| target.clone().into_string().ok());
+    let failure_artifact = arguments.get(1).map(PathBuf::from);
     let result = (|| {
         let mut arguments = arguments.into_iter();
+        let target = arguments
+            .next()
+            .ok_or_else(|| {
+                RustCompilerTestError::Context("Cargo runner received no target identity".into())
+            })?
+            .into_string()
+            .map_err(|_| {
+                RustCompilerTestError::Context(
+                    "Cargo runner received a non-UTF-8 target identity".into(),
+                )
+            })?;
+        let target_runner = config
+            .target_runners
+            .iter()
+            .find(|candidate| candidate.target == target)
+            .ok_or_else(|| {
+                RustCompilerTestError::Context(format!(
+                    "Cargo runner received an unconfigured target identity: {target}"
+                ))
+            })?;
         let artifact_argument = arguments.next().ok_or_else(|| {
             RustCompilerTestError::Context("Cargo runner received no artifact".into())
         })?;
@@ -791,7 +834,7 @@ pub fn run_cargo_libtest_runner(
             kind: "cargo-pending".into(),
             source: "cargo-pending".into(),
         };
-        let underlying_runner = config.underlying_runner.clone();
+        let underlying_runner = target_runner.underlying_runner.clone();
         let supervisor = watchdog_program
             .as_deref()
             .map_or_else(ProcessSupervisor::new, ProcessSupervisor::new_crash_safe)
@@ -858,6 +901,7 @@ pub fn run_cargo_libtest_runner(
             version: RUST_CARGO_RUNNER_VERSION,
             run_id: run_id.clone(),
             invocation_ordinal,
+            target,
             artifact,
             arguments,
             attempts,
@@ -875,6 +919,7 @@ pub fn run_cargo_libtest_runner(
             version: RUST_CARGO_RUNNER_VERSION,
             run_id,
             invocation_ordinal,
+            target: failure_target,
             artifact: failure_artifact,
             error: error.to_string(),
         };
@@ -890,8 +935,16 @@ pub fn run_cargo_libtest_runner(
 pub fn read_cargo_runner_units(
     output_directory: &Path,
     run_id: &str,
+    expected_targets: &[String],
 ) -> Result<Vec<RustCargoRunnerUnit>, RustCompilerTestError> {
     let output_directory = regular_directory(output_directory)?;
+    let expected_target_count = expected_targets.len();
+    let expected_targets = expected_targets.iter().collect::<BTreeSet<_>>();
+    if expected_targets.is_empty() || expected_targets.len() != expected_target_count {
+        return Err(RustCompilerTestError::Context(
+            "Cargo runner expected-target set is empty or duplicated".into(),
+        ));
+    }
     let mut reservations = BTreeSet::new();
     let mut units = Vec::new();
     let mut failures = Vec::new();
@@ -977,6 +1030,12 @@ pub fn read_cargo_runner_units(
                 "Cargo runner unit has incompatible identity".into(),
             ));
         }
+        if !expected_targets.contains(&unit.target) {
+            return Err(RustCompilerTestError::Context(format!(
+                "Cargo runner unit has an unselected target identity: {}",
+                unit.target
+            )));
+        }
         units.push(unit);
     }
     units.sort_by_key(|unit| unit.invocation_ordinal);
@@ -1022,10 +1081,10 @@ pub fn read_cargo_runner_units(
     let mut artifacts = BTreeSet::new();
     if units
         .iter()
-        .any(|unit| !artifacts.insert(unit.artifact.clone()))
+        .any(|unit| !artifacts.insert((unit.target.clone(), unit.artifact.clone())))
     {
         return Err(RustCompilerTestError::Context(
-            "Cargo runner published one artifact more than once".into(),
+            "Cargo runner published one target artifact more than once".into(),
         ));
     }
     Ok(units)
@@ -1628,7 +1687,7 @@ fn execute_compiler_build(
                     attempt.test
                 )));
             }
-            let test_id = libtest_id(artifact, &attempt.test);
+            let test_id = libtest_id(&unit.target, artifact, &attempt.test);
             if !identities.insert(test_id.clone()) {
                 return Err(RustCompilerTestError::DuplicateTest(test_id));
             }
@@ -1882,16 +1941,20 @@ mod tests {
         let sibling = artifact("package:crates/sibling", "lib:same");
         let integration = artifact("package:.", "test:same");
         assert_eq!(
-            libtest_id(&root, "tests::same_name"),
-            "rust:libtest:package:.:lib:same:shared/src/lib.rs::tests::same_name"
+            libtest_id("aarch64-apple-darwin", &root, "tests::same_name"),
+            "rust:libtest:aarch64-apple-darwin:package:.:lib:same:shared/src/lib.rs::tests::same_name"
         );
         assert_ne!(
-            libtest_id(&root, "tests::same_name"),
-            libtest_id(&sibling, "tests::same_name")
+            libtest_id("aarch64-apple-darwin", &root, "tests::same_name"),
+            libtest_id("aarch64-apple-darwin", &sibling, "tests::same_name")
         );
         assert_ne!(
-            libtest_id(&root, "tests::same_name"),
-            libtest_id(&integration, "tests::same_name")
+            libtest_id("aarch64-apple-darwin", &root, "tests::same_name"),
+            libtest_id("aarch64-apple-darwin", &integration, "tests::same_name")
+        );
+        assert_ne!(
+            libtest_id("aarch64-apple-darwin", &root, "tests::same_name"),
+            libtest_id("x86_64-apple-darwin", &root, "tests::same_name")
         );
     }
 
@@ -1912,6 +1975,7 @@ mod tests {
             version: RUST_CARGO_RUNNER_VERSION,
             run_id: "run_0123456789abcdef".into(),
             invocation_ordinal: ordinal,
+            target: Some("aarch64-apple-darwin".into()),
             artifact: Some(PathBuf::from("target/test-artifact")),
             error: "deliberate runner failure".into(),
         };
@@ -1927,7 +1991,12 @@ mod tests {
                 .to_string_lossy()
                 .ends_with(".partial")
         }));
-        let error = read_cargo_runner_units(&root, "run_0123456789abcdef").unwrap_err();
+        let error = read_cargo_runner_units(
+            &root,
+            "run_0123456789abcdef",
+            &["aarch64-apple-darwin".into()],
+        )
+        .unwrap_err();
         let error = error.to_string();
         assert!(error.contains("invocation 0 failed"), "{error}");
         assert!(error.contains("deliberate runner failure"), "{error}");
@@ -1946,10 +2015,77 @@ mod tests {
         ));
         fs::create_dir(&root).unwrap();
         reserve_cargo_runner_ordinal(&root).unwrap();
-        let error = read_cargo_runner_units(&root, "run_0123456789abcdef")
-            .unwrap_err()
-            .to_string();
+        let error = read_cargo_runner_units(
+            &root,
+            "run_0123456789abcdef",
+            &["aarch64-apple-darwin".into()],
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("without publishing its unit"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cargo_runner_units_are_bound_to_the_selected_target_set() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-cargo-runner-target-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let ordinal = reserve_cargo_runner_ordinal(&root).unwrap();
+        write_cargo_runner_unit(
+            &root,
+            &RustCargoRunnerUnit {
+                version: RUST_CARGO_RUNNER_VERSION,
+                run_id: "run_0123456789abcdef".into(),
+                invocation_ordinal: ordinal,
+                target: "aarch64-apple-darwin".into(),
+                artifact: PathBuf::from("target/test-artifact"),
+                arguments: Vec::new(),
+                attempts: Vec::new(),
+            },
+        )
+        .unwrap();
+        let second_ordinal = reserve_cargo_runner_ordinal(&root).unwrap();
+        write_cargo_runner_unit(
+            &root,
+            &RustCargoRunnerUnit {
+                version: RUST_CARGO_RUNNER_VERSION,
+                run_id: "run_0123456789abcdef".into(),
+                invocation_ordinal: second_ordinal,
+                target: "x86_64-unknown-linux-gnu".into(),
+                artifact: PathBuf::from("target/test-artifact"),
+                arguments: Vec::new(),
+                attempts: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_cargo_runner_units(
+                &root,
+                "run_0123456789abcdef",
+                &[
+                    "aarch64-apple-darwin".into(),
+                    "x86_64-unknown-linux-gnu".into(),
+                ],
+            )
+            .unwrap()
+            .len(),
+            2
+        );
+        let error = read_cargo_runner_units(
+            &root,
+            "run_0123456789abcdef",
+            &["x86_64-unknown-linux-gnu".into()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unselected target identity"), "{error}");
         fs::remove_dir_all(root).unwrap();
     }
 

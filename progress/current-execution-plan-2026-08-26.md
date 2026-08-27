@@ -937,6 +937,29 @@ for 241 engine tests, 19 contract tests, 16 CLI tests, warnings-denied clippy,
 the complete public JavaScript/TypeScript matrix and the authoritative
 rustc/rustdoc corpus. No hosted workflow ran.
 
+Cargo runner composition is now target-indexed end to end. Every selected
+target receives a separate structured `--config` runner override carrying its
+exact target identity; the internal libtest runner selects only that target's
+resolved user runner, persists the target in its atomic unit and binds the
+unit filename to target plus artifact. The reader rejects empty, duplicated or
+unselected target identities. Rustdoc receives the same fixed target argument,
+removes only Supercov's exact runner pair and restores only that target's
+original scalar/array runner. Unknown, duplicated, missing and foreign
+composition fails closed. Repeated targets and `host-tuple` normalize through
+Cargo's ordered-set semantics before runner selection. Custom JSON target paths
+are project-relative and canonical; two paths with the same Cargo short name
+are rejected rather than aliasing.
+
+The standalone real-Cargo gate supplies both the explicit installed host and
+`host-tuple` and proves Cargo invokes the target runner once with exact argv,
+ordering, fail-fast and cleanup. Synthetic two-target tests prove independent
+runner selection, rustdoc restoration and collision-free publication. This
+machine has only `aarch64-apple-darwin` installed, so execution across two
+genuinely distinct targets is not claimed and remains part of the supported-
+target matrix. The authoritative rustc/rustdoc corpus, 245 engine tests, 19
+contract tests, 17 CLI tests, warnings-denied clippy and the complete public
+JavaScript/TypeScript matrix are green locally. No hosted workflow ran.
+
 This closes copied/ancestor configuration duplication for the current
 same-filesystem writable-parent topology. A checkout whose parent cannot host
 the authenticated sibling still fails closed; an exact read-only-parent,
@@ -945,7 +968,8 @@ promotion. Retry identity, nextest/custom harnesses, complete
 presentation/output modes and their crash matrix likewise remain open. Cargo
 configuration that changes `build.rustc`/compiler wrappers through an included
 or CLI layer while host/cfg selection depends on that command still fails
-closed, as does multiple selected targets. These gaps keep Rust private.
+closed. Execution across multiple genuinely distinct installed targets remains
+unproven. These gaps keep Rust private.
 
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.

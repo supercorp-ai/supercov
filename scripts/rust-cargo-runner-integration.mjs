@@ -94,22 +94,40 @@ function runCase(runId, noFailFast) {
   mkdirSync(output, {recursive: true});
   mkdirSync(markers, {recursive: true});
   const configPath = join(runRoot, 'cargo-runner.json');
+  const rustcVersion = spawnSync('rustc', ['-vV'], {encoding: 'utf8'});
+  if (rustcVersion.status !== 0) throw new Error(rustcVersion.stderr || 'rustc -vV failed');
+  const targetIdentity = rustcVersion.stdout.match(/^host: (.+)$/m)?.[1];
+  if (!targetIdentity) throw new Error('rustc -vV did not report a host target');
   writeFileSync(
     configPath,
     JSON.stringify({
-      version: 1,
+      version: 2,
       runId,
       targetDirectory: target,
       outputDirectory: output,
-      underlyingRunner: {
-        program: configuredRunner,
-        arguments: ['--fixed', 'two words'],
-      },
+      targetRunners: [{
+        target: targetIdentity,
+        underlyingRunner: {
+          program: configuredRunner,
+          arguments: ['--fixed', 'two words'],
+        },
+      }],
     }),
     {flag: 'wx', mode: 0o600},
   );
-  const runner = `target.'cfg(all())'.runner=[${JSON.stringify(supercov)},"__cargo-test-runner"]`;
-  const args = ['test', '--workspace', '--lib'];
+  const runner = `target.'cfg(all())'.runner=[${JSON.stringify(supercov)},"__cargo-test-runner",${JSON.stringify(targetIdentity)}]`;
+  // Cargo 1.95 normalizes `host-tuple` and deduplicates it with the explicit
+  // host target before invoking the configured runner. Keeping both selectors
+  // here makes that real behavior part of the target-indexed runner gate.
+  const args = [
+    'test',
+    '--workspace',
+    '--lib',
+    '--target',
+    targetIdentity,
+    '--target',
+    'host-tuple',
+  ];
   if (noFailFast) args.push('--no-fail-fast');
   args.push('--config', runner);
   const result = spawnSync('cargo', args, {
