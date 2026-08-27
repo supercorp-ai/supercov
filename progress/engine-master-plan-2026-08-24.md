@@ -1603,6 +1603,41 @@ miss blocks flipping any default.
   ENOSPC recovery, remaining semantic corpora, platform matrices and the
   1.10x performance gate remain blocking.
 
+## Checkpoint — 2026-08-27 Cargo-authoritative libtest execution
+
+- Production no longer reconstructs Cargo's test-artifact launch environment.
+  The original Cargo test command remains the authority and invokes one
+  internal Supercov target runner with Cargo's exact package/build-script
+  variables, profile state, loader paths, artifact order and fail-fast policy.
+  The runner retains the proven process-per-test transport and assertion
+  contexts inside that Cargo-owned boundary.
+- A real three-package workspace gives every package the same target and test
+  names, sets a distinct runtime value from each build script and deliberately
+  fails the middle package. Default Cargo execution runs the first two packages
+  and stops; `--no-fail-fast` runs all three. Ordinal-bound units preserve the
+  observed order and exact exit statuses.
+- Cargo passes the target runner to rustdoc as `--test-runtool`. The exact
+  rustdoc wrapper strips only Supercov's injected runner pair and then uses the
+  existing catalog/outcome/transport supervisor. Missing, duplicated or
+  foreign runner composition is rejected. Generated doctest binaries therefore
+  cannot create libtest units or be counted twice.
+- Each runner invocation reserves a durable create-new ordinal. A normal
+  internal failure atomically publishes a strict diagnostic failure unit; an
+  uncatchable death leaves an unmatched reservation and is reported as a
+  distinct incomplete transaction. Partial files, duplicate publications,
+  retained transports and incompatible identities fail closed.
+- The reconstructed dynamic-loader implementation and macOS fallback defaults
+  were removed. The full real compiler corpus—including the dynamically linked
+  proc-macro harness—passes using only Cargo's inherited environment. The
+  complete public JavaScript/TypeScript matrix, clippy, 228 engine tests, 19
+  contract tests, 16 CLI tests, runtime assets and Rust-only package preflight
+  are also green locally. No hosted workflow ran.
+- This is an R2 checkpoint, not public Rust promotion. Composition with an
+  existing configured runner, retry identity, nextest/custom harnesses,
+  complete presentation modes, their crash/concurrency matrices, remaining R1
+  semantic corpora, supported-platform gates and the 1.10x performance gate
+  remain blocking.
+
 ## Non-goals and guardrails
 
 - No accidental behavior change during ports; every future language frontend

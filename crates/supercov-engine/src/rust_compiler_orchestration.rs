@@ -25,6 +25,10 @@ use crate::{
     rust_compiler_ctfe::{RustCompilerCtfeUnit, read_rust_compiler_ctfe},
     rust_compiler_manifest::{NormalizedRustCompilerManifest, normalize_rust_compiler_candidates},
     rust_compiler_selection::{SelectedRustCompilerCompanion, select_rust_compiler_companion},
+    rust_compiler_test_runner::{
+        RUST_CARGO_RUNNER_CONFIG_ENV, RUST_CARGO_RUNNER_VERSION, RustCargoRunnerConfig,
+        RustCargoRunnerUnit, read_cargo_runner_units,
+    },
     rust_doctest::{
         RustdocOutcomeResolution, join_rustdoc_outcomes, read_rustdoc_outcome_units,
         resolve_merged_doctest_candidates,
@@ -126,15 +130,16 @@ pub struct RustCompilerBuild {
     pub compiler_output_directory: PathBuf,
     pub ctfe_units: Vec<RustCompilerCtfeUnit>,
     pub doctest_outcomes: RustdocOutcomeResolution,
+    pub cargo_runner_units: Vec<RustCargoRunnerUnit>,
     pub run_libtests: bool,
     pub run_doctests: bool,
-    pub doctest_arguments: Vec<String>,
-    pub doctest_exit_code: Option<i32>,
-    pub doctest_stdout: Vec<u8>,
-    pub doctest_stderr: Vec<u8>,
+    pub execution_exit_code: i32,
+    pub execution_stdout: Vec<u8>,
+    pub execution_stderr: Vec<u8>,
     pub build_started_at_ms: i64,
     pub build_ended_at_ms: i64,
     pub build_ms: f64,
+    pub execution_ms: f64,
 }
 
 #[derive(Debug)]
@@ -265,9 +270,9 @@ fn regular_executable(path: &Path) -> Result<PathBuf, RustCompilerOrchestrationE
     Ok(path)
 }
 
-fn write_wrapper_config(
+fn write_json_config<T: Serialize>(
     path: &Path,
-    config: &RustCompilerWrapperConfig,
+    config: &T,
 ) -> Result<(), RustCompilerOrchestrationError> {
     let bytes = serde_json::to_vec(config)
         .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
@@ -799,9 +804,12 @@ pub fn build_with_rust_compiler_companion_supervised(
     let shared_runtime_directory = compiler_output_directory.join("shared-runtime");
     fs::create_dir(&shared_runtime_directory)
         .map_err(|error| io_error(&shared_runtime_directory, error))?;
+    let cargo_runner_directory = compiler_output_directory.join("cargo-runner");
+    fs::create_dir(&cargo_runner_directory)
+        .map_err(|error| io_error(&cargo_runner_directory, error))?;
     write_shared_runtime_source(&shared_runtime_directory)?;
     let config_path = compiler_output_directory.join("wrapper.json");
-    write_wrapper_config(
+    write_json_config(
         &config_path,
         &RustCompilerWrapperConfig {
             candidates: request.companion_candidates.clone(),
@@ -810,11 +818,22 @@ pub fn build_with_rust_compiler_companion_supervised(
             shared_runtime_directory: shared_runtime_directory.clone(),
         },
     )?;
+    let cargo_runner_config_path = compiler_output_directory.join("cargo-runner.json");
+    write_json_config(
+        &cargo_runner_config_path,
+        &RustCargoRunnerConfig {
+            version: RUST_CARGO_RUNNER_VERSION,
+            run_id: request.run_id.clone(),
+            target_directory: target_directory.clone(),
+            output_directory: cargo_runner_directory.clone(),
+        },
+    )?;
 
     let mut invocation = cargo_invocation(&project_root, &request.command)
         .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
     let execution = rust_cargo_execution_selection(&invocation)
         .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
+    let execution_arguments = invocation.arguments.clone();
     let build_started_at_ms = epoch_ms()?;
     let started = Instant::now();
     let output = if execution.run_libtests {
@@ -882,71 +901,82 @@ pub fn build_with_rust_compiler_companion_supervised(
     } else {
         None
     };
-    let doctest_output = if execution.run_doctests {
-        Some(
-            supervisor
-                .supervise_captured(
-                    &CommandSpec {
-                        program: invocation.program.clone().into(),
-                        arguments: execution
-                            .doctest_arguments
-                            .iter()
-                            .map(OsString::from)
-                            .collect(),
-                        cwd: project_root.clone(),
-                        environment: Some(inherited_environment([
-                            (
-                                OsString::from("CARGO_TARGET_DIR"),
-                                target_directory.clone().into_os_string(),
-                            ),
-                            (
-                                OsString::from("RUSTC_WORKSPACE_WRAPPER"),
-                                wrapper.clone().into_os_string(),
-                            ),
-                            (
-                                OsString::from(RUST_COMPILER_WRAPPER_CONFIG_ENV),
-                                config_path.clone().into_os_string(),
-                            ),
-                            (
-                                OsString::from(RUST_COMPILER_OUTPUT_ENV),
-                                candidate_directory.clone().into_os_string(),
-                            ),
-                            (
-                                OsString::from(RUST_SOURCE_ROOT_ENV),
-                                project_root.clone().into_os_string(),
-                            ),
-                            (
-                                OsString::from(RUST_TARGET_ROOT_ENV),
-                                target_directory.clone().into_os_string(),
-                            ),
-                            (OsString::from(RUST_INSTRUMENT_MIR_ENV), OsString::from("1")),
-                            (
-                                OsString::from(RUST_INSTRUMENT_CTFE_ENV),
-                                OsString::from("1"),
-                            ),
-                            (
-                                OsString::from(RUST_STATIC_RUNTIME_DIRECTORY_ENV),
-                                shared_runtime_directory.clone().into_os_string(),
-                            ),
-                            (OsString::from("RUSTDOC"), wrapper.clone().into_os_string()),
-                            (
-                                OsString::from(RUSTDOC_WRAPPER_MODE_ENV),
-                                OsString::from("1"),
-                            ),
-                        ])),
-                        captured_output: None,
-                    },
-                    options,
-                    diagnostics,
-                )
-                .map_err(|error| RustCompilerOrchestrationError::Cargo(error.to_string()))?,
+    let wrapper_string = wrapper.to_str().ok_or_else(|| {
+        RustCompilerOrchestrationError::InvalidRequest(
+            "the Cargo runner executable path is not UTF-8".into(),
         )
-    } else {
-        None
-    };
-    if let Some(error) = doctest_output.as_ref().and_then(interrupted_error) {
+    })?;
+    let wrapper_string = serde_json::to_string(wrapper_string)
+        .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
+    let runner_config =
+        format!("target.'cfg(all())'.runner=[{wrapper_string},\"__cargo-test-runner\"]");
+    let mut full_arguments = execution_arguments;
+    full_arguments.extend(["--config".into(), runner_config]);
+    if !invocation.runner_arguments.is_empty() {
+        full_arguments.push("--".into());
+        full_arguments.extend(invocation.runner_arguments.iter().cloned());
+    }
+    let execution_started = Instant::now();
+    let execution_output = supervisor
+        .supervise_captured(
+            &CommandSpec {
+                program: invocation.program.clone().into(),
+                arguments: full_arguments.into_iter().map(OsString::from).collect(),
+                cwd: project_root.clone(),
+                environment: Some(inherited_environment([
+                    (
+                        OsString::from("CARGO_TARGET_DIR"),
+                        target_directory.clone().into_os_string(),
+                    ),
+                    (
+                        OsString::from("RUSTC_WORKSPACE_WRAPPER"),
+                        wrapper.clone().into_os_string(),
+                    ),
+                    (
+                        OsString::from(RUST_COMPILER_WRAPPER_CONFIG_ENV),
+                        config_path.clone().into_os_string(),
+                    ),
+                    (
+                        OsString::from(RUST_COMPILER_OUTPUT_ENV),
+                        candidate_directory.clone().into_os_string(),
+                    ),
+                    (
+                        OsString::from(RUST_SOURCE_ROOT_ENV),
+                        project_root.clone().into_os_string(),
+                    ),
+                    (
+                        OsString::from(RUST_TARGET_ROOT_ENV),
+                        target_directory.clone().into_os_string(),
+                    ),
+                    (OsString::from(RUST_INSTRUMENT_MIR_ENV), OsString::from("1")),
+                    (
+                        OsString::from(RUST_INSTRUMENT_CTFE_ENV),
+                        OsString::from("1"),
+                    ),
+                    (
+                        OsString::from(RUST_STATIC_RUNTIME_DIRECTORY_ENV),
+                        shared_runtime_directory.clone().into_os_string(),
+                    ),
+                    (OsString::from("RUSTDOC"), wrapper.clone().into_os_string()),
+                    (
+                        OsString::from(RUSTDOC_WRAPPER_MODE_ENV),
+                        OsString::from("1"),
+                    ),
+                    (
+                        OsString::from(RUST_CARGO_RUNNER_CONFIG_ENV),
+                        cargo_runner_config_path.clone().into_os_string(),
+                    ),
+                ])),
+                captured_output: None,
+            },
+            options,
+            diagnostics,
+        )
+        .map_err(|error| RustCompilerOrchestrationError::Cargo(error.to_string()))?;
+    if let Some(error) = interrupted_error(&execution_output) {
         return Err(error);
     }
+    let execution_ms = execution_started.elapsed().as_secs_f64() * 1000.0;
     let build_ms = started.elapsed().as_secs_f64() * 1000.0;
     let build_ended_at_ms = epoch_ms()?;
     let selection = verified_compiler_selection(
@@ -983,10 +1013,14 @@ pub fn build_with_rust_compiler_companion_supervised(
         .map(|output| cargo_artifacts(&output.stdout, &target_directory, &project_root))
         .transpose()?
         .unwrap_or_default();
-    let (doctest_exit_code, doctest_stdout, doctest_stderr) = doctest_output.map_or_else(
-        || (None, Vec::new(), Vec::new()),
-        |output| (output.result.status, output.stdout, output.stderr),
-    );
+    let cargo_runner_units = read_cargo_runner_units(&cargo_runner_directory, &request.run_id)
+        .map_err(|error| {
+            let stderr = String::from_utf8_lossy(&execution_output.stderr);
+            RustCompilerOrchestrationError::CompilerOutput(
+                format!("{error}\n{stderr}").trim().to_owned(),
+            )
+        })?;
+    let execution_exit_code = execution_output.result.exit_code();
     Ok(RustCompilerBuild {
         selection,
         normalized,
@@ -995,15 +1029,16 @@ pub fn build_with_rust_compiler_companion_supervised(
         compiler_output_directory,
         ctfe_units,
         doctest_outcomes,
+        cargo_runner_units,
         run_libtests: execution.run_libtests,
         run_doctests: execution.run_doctests,
-        doctest_arguments: execution.doctest_arguments,
-        doctest_exit_code,
-        doctest_stdout,
-        doctest_stderr,
+        execution_exit_code,
+        execution_stdout: execution_output.stdout,
+        execution_stderr: execution_output.stderr,
         build_started_at_ms,
         build_ended_at_ms,
         build_ms,
+        execution_ms,
     })
 }
 

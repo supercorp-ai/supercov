@@ -8,14 +8,14 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    fs,
+    fs::{self, OpenOptions},
     io::{self, Write},
     path::{Component, Path, PathBuf},
     sync::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
     },
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -32,7 +32,9 @@ use crate::{
         ExitCodeInput, PersistedCoverageModel, RawTestResult, RuntimeSnapshot, TestProvenance,
     },
     evidence_archive::EvidenceArchiveEntry,
-    process_supervision::{CommandSpec, ProcessSupervisor, SupervisedOutput, SupervisionOptions},
+    process_supervision::{
+        CommandSpec, ProcessSupervisor, SupervisedOutput, SupervisedResult, SupervisionOptions,
+    },
     rust_compiler_ctfe::RustCompilerCtfeUnit,
     rust_compiler_evidence::{
         RustCompilerEvidenceProjection, RustCompilerTransportHealth, project_rust_compiler_evidence,
@@ -48,10 +50,61 @@ use crate::{
         read_rust_transport,
     },
     rust_test_context::preflight_rust_test_contexts,
-    rust_test_runner::{cargo_invocation, rust_libtest_selection},
+    rust_test_runner::rust_libtest_selection,
 };
 
 const TOKEN_BYTES: usize = supercov_contracts::RUST_PROBE_TRANSPORT_TOKEN_SIZE;
+pub const RUST_CARGO_RUNNER_CONFIG_ENV: &str = "SUPERCOV_RUST_CARGO_RUNNER_CONFIG";
+pub const RUST_CARGO_RUNNER_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCargoRunnerConfig {
+    pub version: u32,
+    pub run_id: String,
+    pub target_directory: PathBuf,
+    pub output_directory: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCargoRunnerAttempt {
+    pub test: String,
+    pub context_id: u64,
+    pub result: SupervisedResult,
+    pub transport: RustTransportRead,
+    pub started_at_ms: i64,
+    pub ended_at_ms: i64,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCargoRunnerUnit {
+    pub version: u32,
+    pub run_id: String,
+    pub invocation_ordinal: u64,
+    pub artifact: PathBuf,
+    pub arguments: Vec<String>,
+    pub attempts: Vec<RustCargoRunnerAttempt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RustCargoRunnerFailure {
+    version: u32,
+    run_id: String,
+    invocation_ordinal: u64,
+    artifact: Option<PathBuf>,
+    error: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustCargoRunnerExecution {
+    pub exit_code: i32,
+    pub unit_path: PathBuf,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -210,7 +263,6 @@ struct TestArtifact {
     target_key: String,
     kind: String,
     source: String,
-    loader_environment: (OsString, OsString),
 }
 
 #[derive(Debug, Clone)]
@@ -263,17 +315,25 @@ fn relative_source(root: &Path, source: &Path) -> Result<String, RustCompilerTes
 fn normalize_artifacts(
     project_root: &Path,
     target_directory: &Path,
-    compiler_library_directory: &Path,
     artifacts: &[RustCompilerTestArtifact],
 ) -> Result<Vec<TestArtifact>, RustCompilerTestError> {
+    let target_directory =
+        fs::canonicalize(target_directory).map_err(|error| io_error(target_directory, error))?;
     artifacts
         .iter()
         .map(|artifact| {
+            let executable = fs::canonicalize(&artifact.executable)
+                .map_err(|error| io_error(&artifact.executable, error))?;
+            if !executable.starts_with(&target_directory) {
+                return Err(RustCompilerTestError::UnsafeArtifact(
+                    executable.display().to_string(),
+                ));
+            }
             let mut target_kinds = artifact.target_kinds.clone();
             target_kinds.sort();
             target_kinds.dedup();
             Ok(TestArtifact {
-                executable: artifact.executable.clone(),
+                executable,
                 package: artifact.package.clone(),
                 target_key: format!("{}:{}", target_kinds.join("+"), artifact.target_name),
                 kind: if artifact.target_kinds.iter().any(|kind| kind == "test") {
@@ -282,108 +342,9 @@ fn normalize_artifacts(
                     "unit".into()
                 },
                 source: relative_source(project_root, &artifact.source_path)?,
-                loader_environment: cargo_loader_environment(
-                    &artifact.executable,
-                    target_directory,
-                    compiler_library_directory,
-                )?,
             })
         })
         .collect()
-}
-
-fn cargo_loader_variable() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "DYLD_FALLBACK_LIBRARY_PATH"
-    } else if cfg!(windows) {
-        "PATH"
-    } else {
-        "LD_LIBRARY_PATH"
-    }
-}
-
-fn cargo_loader_paths(
-    executable: &Path,
-    target_directory: &Path,
-    compiler_library_directory: &Path,
-    inherited: Option<&std::ffi::OsStr>,
-    home: Option<&std::ffi::OsStr>,
-    macos_defaults: bool,
-) -> Result<Vec<PathBuf>, RustCompilerTestError> {
-    let target_directory =
-        fs::canonicalize(target_directory).map_err(|error| io_error(target_directory, error))?;
-    let executable = fs::canonicalize(executable).map_err(|error| io_error(executable, error))?;
-    let compiler_library_directory = fs::canonicalize(compiler_library_directory)
-        .map_err(|error| io_error(compiler_library_directory, error))?;
-    if !executable.starts_with(&target_directory) {
-        return Err(RustCompilerTestError::UnsafeArtifact(
-            executable.display().to_string(),
-        ));
-    }
-    let profile_directory = executable
-        .parent()
-        .and_then(Path::parent)
-        .filter(|profile| profile.starts_with(&target_directory))
-        .ok_or_else(|| RustCompilerTestError::UnsafeArtifact(executable.display().to_string()))?;
-    let sysroot_library_directory = compiler_library_directory
-        .ancestors()
-        .nth(3)
-        .filter(|directory| directory.file_name().is_some_and(|name| name == "lib"))
-        .ok_or_else(|| {
-            RustCompilerTestError::Context(format!(
-                "invalid compiler target library directory: {}",
-                compiler_library_directory.display()
-            ))
-        })?;
-    let mut paths = vec![
-        profile_directory.to_path_buf(),
-        profile_directory.join("deps"),
-        compiler_library_directory.clone(),
-        sysroot_library_directory.to_path_buf(),
-    ];
-    let inherited_paths = inherited
-        .map(std::env::split_paths)
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    if inherited_paths.starts_with(&paths) {
-        paths = inherited_paths;
-    } else {
-        paths.extend(inherited_paths);
-    }
-    if macos_defaults && inherited.is_none_or(|value| value.is_empty()) {
-        if let Some(home) = home.filter(|value| !value.is_empty()) {
-            paths.push(PathBuf::from(home).join("lib"));
-        }
-        paths.extend([PathBuf::from("/usr/local/lib"), PathBuf::from("/usr/lib")]);
-    }
-    let mut seen = BTreeSet::new();
-    paths.retain(|path| seen.insert(path.clone()));
-    Ok(paths)
-}
-
-fn cargo_loader_environment(
-    executable: &Path,
-    target_directory: &Path,
-    compiler_library_directory: &Path,
-) -> Result<(OsString, OsString), RustCompilerTestError> {
-    let variable = cargo_loader_variable();
-    let inherited = std::env::var_os(variable);
-    let home = std::env::var_os("HOME");
-    let paths = cargo_loader_paths(
-        executable,
-        target_directory,
-        compiler_library_directory,
-        inherited.as_deref(),
-        home.as_deref(),
-        cfg!(target_os = "macos"),
-    )?;
-    let value = std::env::join_paths(paths).map_err(|error| {
-        RustCompilerTestError::Context(format!(
-            "could not construct Cargo-compatible {variable}: {error}"
-        ))
-    })?;
-    Ok((OsString::from(variable), value))
 }
 
 fn libtest_id(artifact: &TestArtifact, test: &str) -> String {
@@ -411,7 +372,7 @@ fn list_tests(
                 program: artifact.executable.clone().into_os_string(),
                 arguments,
                 cwd: project_root.to_owned(),
-                environment: Some(inherited_environment([artifact.loader_environment.clone()])),
+                environment: Some(inherited_environment([])),
                 captured_output: None,
             },
             options,
@@ -491,27 +452,27 @@ fn run_process(
         .map(OsString::from)
         .collect::<Vec<_>>();
     arguments.extend([OsString::from("--exact"), OsString::from(&task.test)]);
+    let environment = vec![
+        (
+            OsString::from(RUST_TRANSPORT_ENV),
+            task.transport.clone().into_os_string(),
+        ),
+        (
+            OsString::from(RUST_TRANSPORT_TOKEN_ENV),
+            OsString::from(token_hex(&token)),
+        ),
+        (
+            OsString::from(RUST_CONTEXT_ENV),
+            OsString::from(format!("{:016x}", task.context_id)),
+        ),
+    ];
     let output = supervisor
         .supervise_captured(
             &CommandSpec {
                 program: task.artifact.executable.clone().into_os_string(),
                 arguments,
                 cwd: project_root.to_owned(),
-                environment: Some(inherited_environment([
-                    task.artifact.loader_environment.clone(),
-                    (
-                        OsString::from(RUST_TRANSPORT_ENV),
-                        task.transport.clone().into_os_string(),
-                    ),
-                    (
-                        OsString::from(RUST_TRANSPORT_TOKEN_ENV),
-                        OsString::from(token_hex(&token)),
-                    ),
-                    (
-                        OsString::from(RUST_CONTEXT_ENV),
-                        OsString::from(format!("{:016x}", task.context_id)),
-                    ),
-                ])),
+                environment: Some(inherited_environment(environment)),
                 captured_output: None,
             },
             options,
@@ -528,6 +489,502 @@ fn run_process(
         started_at_ms,
         ended_at_ms,
     })
+}
+
+fn execute_process_tasks(
+    project_root: &Path,
+    tasks: &[ProcessTask],
+    supervisor: &ProcessSupervisor,
+    options: SupervisionOptions,
+) -> Result<Vec<ProcessOutcome>, RustCompilerTestError> {
+    let workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(tasks.len());
+    let next = AtomicUsize::new(0);
+    let outcomes = Mutex::new(Vec::<Result<ProcessOutcome, String>>::with_capacity(
+        tasks.len(),
+    ));
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(task) = tasks.get(index) else { break };
+                    outcomes
+                        .lock()
+                        .expect("Rust compiler result lock poisoned")
+                        .push(run_process(project_root, task, supervisor, options));
+                }
+            });
+        }
+    });
+    let mut outcomes = outcomes
+        .into_inner()
+        .map_err(|_| RustCompilerTestError::Context("Rust compiler result lock poisoned".into()))?
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|reason| RustCompilerTestError::Launch {
+            test: "unknown attempt".into(),
+            reason,
+        })?;
+    outcomes.sort_by_key(|outcome| outcome.task.ordinal);
+    Ok(outcomes)
+}
+
+fn regular_directory(path: &Path) -> Result<PathBuf, RustCompilerTestError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| io_error(path, error))?;
+    if !metadata.file_type().is_dir() {
+        return Err(RustCompilerTestError::UnsafeArtifact(
+            path.display().to_string(),
+        ));
+    }
+    fs::canonicalize(path).map_err(|error| io_error(path, error))
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<(), RustCompilerTestError> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| io_error(path, error))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<(), RustCompilerTestError> {
+    Ok(())
+}
+
+fn write_cargo_runner_unit(
+    output_directory: &Path,
+    unit: &RustCargoRunnerUnit,
+) -> Result<PathBuf, RustCompilerTestError> {
+    let artifact = unit.artifact.to_str().ok_or_else(|| {
+        RustCompilerTestError::Context("Cargo test artifact path is not UTF-8".into())
+    })?;
+    let digest = format!("{:x}", Sha256::digest(artifact.as_bytes()));
+    let destination = output_directory.join(format!("libtest-{}.json", &digest[..24]));
+    let partial = output_directory.join(format!(
+        ".libtest-{}-{}.partial",
+        &digest[..24],
+        std::process::id()
+    ));
+    let bytes = serde_json::to_vec(unit)
+        .map_err(|error| RustCompilerTestError::Context(error.to_string()))?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&partial)
+        .map_err(|error| io_error(&partial, error))?;
+    let write_result = (|| {
+        file.write_all(&bytes)
+            .map_err(|error| io_error(&partial, error))?;
+        file.sync_all().map_err(|error| io_error(&partial, error))?;
+        drop(file);
+        fs::rename(&partial, &destination).map_err(|error| io_error(&destination, error))?;
+        sync_directory(output_directory)
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&partial);
+    }
+    write_result.map(|()| destination)
+}
+
+fn write_cargo_runner_failure(
+    output_directory: &Path,
+    failure: &RustCargoRunnerFailure,
+) -> Result<PathBuf, RustCompilerTestError> {
+    let destination =
+        output_directory.join(format!("failure-{:016}.json", failure.invocation_ordinal));
+    let partial = output_directory.join(format!(
+        ".failure-{:016}-{}.partial",
+        failure.invocation_ordinal,
+        std::process::id()
+    ));
+    let bytes = serde_json::to_vec(failure)
+        .map_err(|error| RustCompilerTestError::Context(error.to_string()))?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&partial)
+        .map_err(|error| io_error(&partial, error))?;
+    let write_result = (|| {
+        file.write_all(&bytes)
+            .map_err(|error| io_error(&partial, error))?;
+        file.sync_all().map_err(|error| io_error(&partial, error))?;
+        drop(file);
+        fs::rename(&partial, &destination).map_err(|error| io_error(&destination, error))?;
+        sync_directory(output_directory)
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&partial);
+    }
+    write_result.map(|()| destination)
+}
+
+fn reserve_cargo_runner_ordinal(output_directory: &Path) -> Result<u64, RustCompilerTestError> {
+    for ordinal in 0..1_000_000_u64 {
+        let reservation = output_directory.join(format!(".sequence-{ordinal:016}.reserved"));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(&reservation) {
+            Ok(file) => {
+                file.sync_all()
+                    .map_err(|error| io_error(&reservation, error))?;
+                sync_directory(output_directory)?;
+                return Ok(ordinal);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(io_error(&reservation, error)),
+        }
+    }
+    Err(RustCompilerTestError::Context(
+        "Cargo runner invocation ordinal space is exhausted".into(),
+    ))
+}
+
+pub fn run_cargo_libtest_runner(
+    config_path: &Path,
+    arguments: Vec<OsString>,
+    watchdog_program: Option<PathBuf>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<RustCargoRunnerExecution, RustCompilerTestError> {
+    let config_metadata =
+        fs::symlink_metadata(config_path).map_err(|error| io_error(config_path, error))?;
+    if !config_metadata.file_type().is_file() {
+        return Err(RustCompilerTestError::UnsafeArtifact(
+            config_path.display().to_string(),
+        ));
+    }
+    let config: RustCargoRunnerConfig = serde_json::from_slice(
+        &fs::read(config_path).map_err(|error| io_error(config_path, error))?,
+    )
+    .map_err(|error| {
+        RustCompilerTestError::Context(format!("invalid Cargo runner config: {error}"))
+    })?;
+    if config.version != RUST_CARGO_RUNNER_VERSION
+        || !config.run_id.starts_with("run_")
+        || config.run_id.len() != 20
+        || !config.run_id[4..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(RustCompilerTestError::Context(
+            "Cargo runner config has an unsupported version or invalid run ID".into(),
+        ));
+    }
+    let target_directory = regular_directory(&config.target_directory)?;
+    let output_directory = regular_directory(&config.output_directory)?;
+    let run_root = target_directory
+        .parent()
+        .ok_or_else(|| RustCompilerTestError::Context("Cargo target has no run root".into()))?;
+    if !output_directory.starts_with(run_root) || output_directory == target_directory {
+        return Err(RustCompilerTestError::UnsafeArtifact(
+            output_directory.display().to_string(),
+        ));
+    }
+    let invocation_ordinal = reserve_cargo_runner_ordinal(&output_directory)?;
+    let run_id = config.run_id.clone();
+    let failure_artifact = arguments.first().map(PathBuf::from);
+    let result = (|| {
+        let mut arguments = arguments.into_iter();
+        let artifact = arguments.next().map(PathBuf::from).ok_or_else(|| {
+            RustCompilerTestError::Context("Cargo runner received no artifact".into())
+        })?;
+        let artifact = fs::canonicalize(&artifact).map_err(|error| io_error(&artifact, error))?;
+        if !artifact.starts_with(&target_directory)
+            || !fs::symlink_metadata(&artifact).is_ok_and(|metadata| metadata.file_type().is_file())
+        {
+            return Err(RustCompilerTestError::UnsafeArtifact(
+                artifact.display().to_string(),
+            ));
+        }
+        let arguments = arguments
+            .map(|argument| {
+                argument.into_string().map_err(|_| {
+                    RustCompilerTestError::Context(
+                        "Cargo runner received a non-UTF-8 libtest argument".into(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let invocation = crate::rust_test_runner::CargoTestInvocation {
+            program: "cargo".into(),
+            arguments: vec!["test".into()],
+            runner_arguments: arguments.clone(),
+        };
+        let selection = rust_libtest_selection(&invocation)
+            .map_err(|error| RustCompilerTestError::UnsupportedCommand(error.to_string()))?;
+        let current_directory = std::env::current_dir()
+            .and_then(fs::canonicalize)
+            .map_err(|error| io_error(Path::new("."), error))?;
+        let artifact_digest = format!(
+            "{:x}",
+            Sha256::digest(artifact.as_os_str().as_encoded_bytes())
+        );
+        let transport_directory = output_directory
+            .join("attempts")
+            .join(&artifact_digest[..24]);
+        fs::create_dir_all(&transport_directory)
+            .map_err(|error| io_error(&transport_directory, error))?;
+        let transport_directory = regular_directory(&transport_directory)?;
+        let test_artifact = TestArtifact {
+            executable: artifact.clone(),
+            package: "cargo-pending".into(),
+            target_key: "cargo-pending".into(),
+            kind: "cargo-pending".into(),
+            source: "cargo-pending".into(),
+        };
+        let supervisor = watchdog_program
+            .as_deref()
+            .map_or_else(ProcessSupervisor::new, ProcessSupervisor::new_crash_safe)
+            .map_err(|error| RustCompilerTestError::Launch {
+                test: "Cargo runner".into(),
+                reason: error.to_string(),
+            })?;
+        let options = SupervisionOptions::from_environment().map_err(|error| {
+            RustCompilerTestError::Launch {
+                test: "Cargo runner".into(),
+                reason: error.to_string(),
+            }
+        })?;
+        let tests = list_tests(
+            &current_directory,
+            &test_artifact,
+            &selection.list_arguments,
+            &supervisor,
+            options,
+        )?;
+        let contexts = preflight_rust_test_contexts(tests.clone())
+            .map_err(|error| RustCompilerTestError::Context(error.to_string()))?;
+        let tasks = tests
+            .iter()
+            .enumerate()
+            .map(|(index, test)| ProcessTask {
+                ordinal: index,
+                artifact_index: 0,
+                test_index: index,
+                artifact: test_artifact.clone(),
+                test: test.clone(),
+                test_id: format!("rust:cargo-runner:{}::{test}", &artifact_digest[..24]),
+                context_id: contexts[test],
+                transport: transport_directory.join(format!("{index:08}.mmap")),
+                run_arguments: selection.run_arguments.clone(),
+            })
+            .collect::<Vec<_>>();
+        let outcomes = execute_process_tasks(&current_directory, &tasks, &supervisor, options)?;
+        let mut exit_code = 0;
+        let attempts = outcomes
+            .into_iter()
+            .map(|outcome| {
+                let result_code = outcome.output.result.exit_code();
+                if exit_code == 0 && result_code != 0 {
+                    exit_code = result_code;
+                }
+                let _ = stdout.write_all(&outcome.output.stdout);
+                let _ = stderr.write_all(&outcome.output.stderr);
+                RustCargoRunnerAttempt {
+                    test: outcome.task.test,
+                    context_id: outcome.task.context_id,
+                    result: outcome.output.result,
+                    transport: outcome.read,
+                    started_at_ms: outcome.started_at_ms,
+                    ended_at_ms: outcome.ended_at_ms,
+                    stdout: outcome.output.stdout,
+                    stderr: outcome.output.stderr,
+                }
+            })
+            .collect();
+        let unit = RustCargoRunnerUnit {
+            version: RUST_CARGO_RUNNER_VERSION,
+            run_id: run_id.clone(),
+            invocation_ordinal,
+            artifact,
+            arguments,
+            attempts,
+        };
+        let unit_path = write_cargo_runner_unit(&output_directory, &unit)?;
+        fs::remove_dir(&transport_directory)
+            .map_err(|error| io_error(&transport_directory, error))?;
+        Ok(RustCargoRunnerExecution {
+            exit_code,
+            unit_path,
+        })
+    })();
+    if let Err(error) = &result {
+        let failure = RustCargoRunnerFailure {
+            version: RUST_CARGO_RUNNER_VERSION,
+            run_id,
+            invocation_ordinal,
+            artifact: failure_artifact,
+            error: error.to_string(),
+        };
+        if let Err(publication_error) = write_cargo_runner_failure(&output_directory, &failure) {
+            return Err(RustCompilerTestError::Context(format!(
+                "{error}; Cargo runner also could not publish its failure: {publication_error}"
+            )));
+        }
+    }
+    result
+}
+
+pub fn read_cargo_runner_units(
+    output_directory: &Path,
+    run_id: &str,
+) -> Result<Vec<RustCargoRunnerUnit>, RustCompilerTestError> {
+    let output_directory = regular_directory(output_directory)?;
+    let mut reservations = BTreeSet::new();
+    let mut units = Vec::new();
+    let mut failures = Vec::new();
+    let mut retained_attempt_state = false;
+    for entry in
+        fs::read_dir(&output_directory).map_err(|error| io_error(&output_directory, error))?
+    {
+        let entry = entry.map_err(|error| io_error(&output_directory, error))?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
+        let name = entry.file_name();
+        let name = name.to_str().ok_or_else(|| {
+            RustCompilerTestError::Context("Cargo runner output name is not UTF-8".into())
+        })?;
+        if name == "attempts" && metadata.file_type().is_dir() {
+            retained_attempt_state = fs::read_dir(&path)
+                .map_err(|error| io_error(&path, error))?
+                .next()
+                .transpose()
+                .map_err(|error| io_error(&path, error))?
+                .is_some();
+            continue;
+        }
+        if name.starts_with(".sequence-") && name.ends_with(".reserved") {
+            if !metadata.file_type().is_file() || metadata.len() != 0 {
+                return Err(RustCompilerTestError::UnsafeArtifact(
+                    path.display().to_string(),
+                ));
+            }
+            let ordinal = name
+                .strip_prefix(".sequence-")
+                .and_then(|name| name.strip_suffix(".reserved"))
+                .filter(|value| {
+                    value.len() == 16 && value.bytes().all(|byte| byte.is_ascii_digit())
+                })
+                .and_then(|value| value.parse::<u64>().ok())
+                .ok_or_else(|| {
+                    RustCompilerTestError::Context("malformed Cargo runner reservation".into())
+                })?;
+            if !reservations.insert(ordinal) {
+                return Err(RustCompilerTestError::Context(
+                    "duplicate Cargo runner reservation".into(),
+                ));
+            }
+            continue;
+        }
+        if name.starts_with("failure-") && name.ends_with(".json") {
+            if !metadata.file_type().is_file() {
+                return Err(RustCompilerTestError::UnsafeArtifact(
+                    path.display().to_string(),
+                ));
+            }
+            let failure: RustCargoRunnerFailure =
+                serde_json::from_slice(&fs::read(&path).map_err(|error| io_error(&path, error))?)
+                    .map_err(|error| {
+                    RustCompilerTestError::Context(format!(
+                        "invalid Cargo runner failure unit: {error}"
+                    ))
+                })?;
+            if failure.version != RUST_CARGO_RUNNER_VERSION || failure.run_id != run_id {
+                return Err(RustCompilerTestError::Context(
+                    "Cargo runner failure unit has incompatible identity".into(),
+                ));
+            }
+            failures.push(failure);
+            continue;
+        }
+        if !name.starts_with("libtest-")
+            || !name.ends_with(".json")
+            || !metadata.file_type().is_file()
+        {
+            return Err(RustCompilerTestError::UnsafeArtifact(
+                path.display().to_string(),
+            ));
+        }
+        let unit: RustCargoRunnerUnit =
+            serde_json::from_slice(&fs::read(&path).map_err(|error| io_error(&path, error))?)
+                .map_err(|error| {
+                    RustCompilerTestError::Context(format!("invalid Cargo runner unit: {error}"))
+                })?;
+        if unit.version != RUST_CARGO_RUNNER_VERSION || unit.run_id != run_id {
+            return Err(RustCompilerTestError::Context(
+                "Cargo runner unit has incompatible identity".into(),
+            ));
+        }
+        units.push(unit);
+    }
+    units.sort_by_key(|unit| unit.invocation_ordinal);
+    failures.sort_by_key(|failure| failure.invocation_ordinal);
+    let mut publications = BTreeSet::new();
+    for ordinal in units
+        .iter()
+        .map(|unit| unit.invocation_ordinal)
+        .chain(failures.iter().map(|failure| failure.invocation_ordinal))
+    {
+        if !reservations.contains(&ordinal) || !publications.insert(ordinal) {
+            return Err(RustCompilerTestError::Context(
+                "Cargo runner invocation publications are malformed or duplicated".into(),
+            ));
+        }
+    }
+    if reservations.len() != publications.len()
+        || reservations
+            .iter()
+            .enumerate()
+            .any(|(expected, ordinal)| *ordinal != expected as u64)
+    {
+        return Err(RustCompilerTestError::Context(
+            "Cargo runner reserved an invocation without publishing its unit".into(),
+        ));
+    }
+    if let Some(failure) = failures.first() {
+        return Err(RustCompilerTestError::Context(format!(
+            "Cargo runner invocation {} failed for {}: {}",
+            failure.invocation_ordinal,
+            failure.artifact.as_ref().map_or_else(
+                || "an unknown artifact".into(),
+                |path| path.display().to_string()
+            ),
+            failure.error
+        )));
+    }
+    if retained_attempt_state {
+        return Err(RustCompilerTestError::Context(
+            "Cargo runner retained attempt transport state".into(),
+        ));
+    }
+    let mut artifacts = BTreeSet::new();
+    if units
+        .iter()
+        .any(|unit| !artifacts.insert(unit.artifact.clone()))
+    {
+        return Err(RustCompilerTestError::Context(
+            "Cargo runner published one artifact more than once".into(),
+        ));
+    }
+    Ok(units)
 }
 
 fn rust_compiler_coverage_model() -> CoverageModelDeclaration {
@@ -1088,101 +1545,86 @@ pub fn run_rust_compiler_frontend(
         } => RustCompilerTestError::Interrupted { code, signal },
         error => RustCompilerTestError::Build(error.to_string()),
     })?;
-    execute_compiler_build(request, build, &supervisor, options, diagnostics)
+    execute_compiler_build(request, build, diagnostics)
 }
 
 fn execute_compiler_build(
     request: &RustCompilerRunRequest,
     build: RustCompilerBuild,
-    supervisor: &ProcessSupervisor,
-    options: SupervisionOptions,
     diagnostics: &mut dyn Write,
 ) -> Result<RustCompilerFrontendRun, RustCompilerTestError> {
     let project_root = fs::canonicalize(&request.project_root)
         .map_err(|error| io_error(&request.project_root, error))?;
-    let invocation = cargo_invocation(&project_root, &request.command)
-        .map_err(|error| RustCompilerTestError::UnsupportedCommand(error.to_string()))?;
-    let selection = build
-        .run_libtests
-        .then(|| rust_libtest_selection(&invocation))
-        .transpose()
-        .map_err(|error| RustCompilerTestError::UnsupportedCommand(error.to_string()))?;
-    let artifacts = normalize_artifacts(
-        &project_root,
-        &build.target_directory,
-        &build.selection.compiler_library_directory,
-        &build.artifacts,
-    )?;
-    let evidence_root = build.compiler_output_directory.join("attempts");
-    fs::create_dir(&evidence_root).map_err(|error| io_error(&evidence_root, error))?;
-    let mut tasks = Vec::new();
+    let artifacts = normalize_artifacts(&project_root, &build.target_directory, &build.artifacts)?;
+    let artifact_by_path = artifacts
+        .iter()
+        .enumerate()
+        .map(|(index, artifact)| (artifact.executable.clone(), (index, artifact.clone())))
+        .collect::<BTreeMap<_, _>>();
+    let mut outcomes = Vec::new();
     let mut identities = BTreeSet::new();
-    for (artifact_index, artifact) in artifacts.iter().enumerate() {
-        let selection = selection.as_ref().ok_or_else(|| {
-            RustCompilerTestError::UnsupportedCommand(
-                "doc-only execution unexpectedly produced a libtest artifact".into(),
-            )
+    for unit in &build.cargo_runner_units {
+        let (artifact_index, artifact) = artifact_by_path.get(&unit.artifact).ok_or_else(|| {
+            RustCompilerTestError::Context(format!(
+                "Cargo runner executed an unknown artifact: {}",
+                unit.artifact.display()
+            ))
         })?;
-        let tests = list_tests(
-            &project_root,
-            artifact,
-            &selection.list_arguments,
-            supervisor,
-            options,
-        )?;
-        let contexts = preflight_rust_test_contexts(tests.clone())
+        let tests = unit
+            .attempts
+            .iter()
+            .map(|attempt| attempt.test.clone())
+            .collect::<Vec<_>>();
+        let contexts = preflight_rust_test_contexts(tests)
             .map_err(|error| RustCompilerTestError::Context(error.to_string()))?;
-        for (test_index, test) in tests.into_iter().enumerate() {
-            let test_id = libtest_id(artifact, &test);
+        for (test_index, attempt) in unit.attempts.iter().enumerate() {
+            if contexts[&attempt.test] != attempt.context_id {
+                return Err(RustCompilerTestError::Context(format!(
+                    "Cargo runner context changed for {}",
+                    attempt.test
+                )));
+            }
+            let test_id = libtest_id(artifact, &attempt.test);
             if !identities.insert(test_id.clone()) {
                 return Err(RustCompilerTestError::DuplicateTest(test_id));
             }
-            tasks.push(ProcessTask {
-                ordinal: tasks.len(),
-                artifact_index,
+            let task = ProcessTask {
+                ordinal: outcomes.len(),
+                artifact_index: *artifact_index,
                 test_index,
                 artifact: artifact.clone(),
-                test: test.clone(),
+                test: attempt.test.clone(),
                 test_id,
-                context_id: contexts[&test],
-                transport: evidence_root.join(format!("{artifact_index:04}-{test_index:08}.mmap")),
-                run_arguments: selection.run_arguments.clone(),
+                context_id: attempt.context_id,
+                transport: build.compiler_output_directory.join(format!(
+                    "cargo-runner/libtest-{:04}-{test_index:08}.json",
+                    unit.invocation_ordinal
+                )),
+                run_arguments: Vec::new(),
+            };
+            outcomes.push(ProcessOutcome {
+                task,
+                output: SupervisedOutput {
+                    result: attempt.result.clone(),
+                    stdout: attempt.stdout.clone(),
+                    stderr: attempt.stderr.clone(),
+                },
+                read: attempt.transport.clone(),
+                started_at_ms: attempt.started_at_ms,
+                ended_at_ms: attempt.ended_at_ms,
             });
         }
     }
-    let execution_started = Instant::now();
-    let workers = std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
-        .min(tasks.len());
-    let next = AtomicUsize::new(0);
-    let outcomes = Mutex::new(Vec::<Result<ProcessOutcome, String>>::with_capacity(
-        tasks.len(),
-    ));
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| {
-                loop {
-                    let index = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(task) = tasks.get(index) else { break };
-                    outcomes
-                        .lock()
-                        .expect("Rust compiler result lock poisoned")
-                        .push(run_process(&project_root, task, supervisor, options));
-                }
-            });
-        }
-    });
-    let mut outcomes = outcomes
-        .into_inner()
-        .map_err(|_| RustCompilerTestError::Context("Rust compiler result lock poisoned".into()))?
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|reason| RustCompilerTestError::Launch {
-            test: "unknown attempt".into(),
-            reason,
-        })?;
-    outcomes.sort_by_key(|outcome| outcome.task.ordinal);
+    if build.execution_exit_code == 0
+        && build.run_libtests
+        && build.cargo_runner_units.len() != artifacts.len()
+    {
+        return Err(RustCompilerTestError::Context(format!(
+            "Cargo completed successfully but published {} runner unit(s) for {} artifact(s)",
+            build.cargo_runner_units.len(),
+            artifacts.len()
+        )));
+    }
 
     let mut raw_results = ctfe_raw_results(
         &request.run_id,
@@ -1198,29 +1640,28 @@ fn execute_compiler_build(
         &build.normalized,
     )?;
     raw_results.extend(doctest_results);
-    let mut overall_exit = if build.run_doctests {
-        build.doctest_exit_code.unwrap_or(1)
-    } else {
-        0
-    };
-    if build.run_doctests && overall_exit != 0 {
+    let overall_exit = build.execution_exit_code;
+    if overall_exit != 0 {
         diagnostics
-            .write_all(&build.doctest_stdout)
-            .and_then(|_| diagnostics.write_all(&build.doctest_stderr))
+            .write_all(&build.execution_stdout)
+            .and_then(|_| diagnostics.write_all(&build.execution_stderr))
             .map_err(|error| RustCompilerTestError::Io {
                 path: build.compiler_output_directory.clone(),
                 reason: error.to_string(),
             })?;
     }
-    if (overall_exit == 0) == doctest_command_failed(&build.doctest_outcomes) {
+    let authenticated_failure = doctest_command_failed(&build.doctest_outcomes)
+        || outcomes
+            .iter()
+            .any(|outcome| outcome.output.result.exit_code() != 0);
+    if (overall_exit != 0) != authenticated_failure {
         return Err(RustCompilerTestError::Context(
-            "Cargo rustdoc exit status disagrees with authenticated doctest outcomes".into(),
+            "Cargo exit status disagrees with authenticated libtest/doctest outcomes".into(),
         ));
     }
     for outcome in outcomes {
         let (test_status, exit) = status(&outcome.output);
         if exit != 0 {
-            overall_exit = exit;
             writeln!(
                 diagnostics,
                 "[supercov] Rust test failed: {}",
@@ -1360,7 +1801,7 @@ fn execute_compiler_build(
             .collect(),
         transport_health,
         build_ms: build.build_ms,
-        execution_ms: execution_started.elapsed().as_secs_f64() * 1000.0,
+        execution_ms: build.execution_ms,
     })
 }
 
@@ -1390,7 +1831,6 @@ mod tests {
             target_key: target_key.into(),
             kind: "unit".into(),
             source: "shared/src/lib.rs".into(),
-            loader_environment: (OsString::from("PATH"), OsString::new()),
         };
         let root = artifact("package:.", "lib:same");
         let sibling = artifact("package:crates/sibling", "lib:same");
@@ -1410,75 +1850,60 @@ mod tests {
     }
 
     #[test]
-    fn cargo_loader_paths_match_cargo_order_and_preserve_inherited_paths() {
-        let unique = format!(
-            "supercov-cargo-loader-{}-{}",
+    fn cargo_runner_failure_units_are_atomic_and_diagnostic() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-cargo-runner-failure-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        );
-        let root = std::env::temp_dir().join(unique);
-        let target = root.join("target");
-        let profile = target.join("debug");
-        let deps = profile.join("deps");
-        let executable = deps.join("artifact");
-        let compiler = root.join("toolchain/lib/rustlib/test-host/lib");
-        fs::create_dir_all(&deps).unwrap();
-        fs::create_dir_all(&compiler).unwrap();
-        fs::write(&executable, b"artifact").unwrap();
-        let inherited_paths = [root.join("existing-a"), root.join("existing-b")];
-        let inherited = std::env::join_paths(&inherited_paths).unwrap();
-        let paths = cargo_loader_paths(
-            &executable,
-            &target,
-            &compiler,
-            Some(&inherited),
-            None,
-            false,
-        )
-        .unwrap();
-        let canonical_root = fs::canonicalize(&root).unwrap();
+        ));
+        fs::create_dir(&root).unwrap();
+        let ordinal = reserve_cargo_runner_ordinal(&root).unwrap();
+        assert_eq!(ordinal, 0);
+        let failure = RustCargoRunnerFailure {
+            version: RUST_CARGO_RUNNER_VERSION,
+            run_id: "run_0123456789abcdef".into(),
+            invocation_ordinal: ordinal,
+            artifact: Some(PathBuf::from("target/test-artifact")),
+            error: "deliberate runner failure".into(),
+        };
+        let published = write_cargo_runner_failure(&root, &failure).unwrap();
         assert_eq!(
-            paths,
-            vec![
-                canonical_root.join("target/debug"),
-                canonical_root.join("target/debug/deps"),
-                canonical_root.join("toolchain/lib/rustlib/test-host/lib"),
-                canonical_root.join("toolchain/lib"),
-                inherited_paths[0].clone(),
-                inherited_paths[1].clone(),
-            ]
+            published.file_name().unwrap(),
+            "failure-0000000000000000.json"
         );
+        assert!(fs::read_dir(&root).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".partial")
+        }));
+        let error = read_cargo_runner_units(&root, "run_0123456789abcdef").unwrap_err();
+        let error = error.to_string();
+        assert!(error.contains("invocation 0 failed"), "{error}");
+        assert!(error.contains("deliberate runner failure"), "{error}");
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn cargo_loader_paths_restore_macos_fallback_defaults_once() {
-        let unique = format!(
-            "supercov-cargo-loader-defaults-{}-{}",
+    fn cargo_runner_process_death_is_distinct_from_an_internal_failure() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-cargo-runner-death-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
-        );
-        let root = std::env::temp_dir().join(unique);
-        let target = root.join("target");
-        let deps = target.join("debug/deps");
-        let executable = deps.join("artifact");
-        let compiler = root.join("toolchain/lib/rustlib/test-host/lib");
-        fs::create_dir_all(&deps).unwrap();
-        fs::create_dir_all(&compiler).unwrap();
-        fs::write(&executable, b"artifact").unwrap();
-        let home = root.join("home").into_os_string();
-        let paths =
-            cargo_loader_paths(&executable, &target, &compiler, None, Some(&home), true).unwrap();
-        assert_eq!(paths[4], root.join("home/lib"));
-        assert_eq!(paths[5], PathBuf::from("/usr/local/lib"));
-        assert_eq!(paths[6], PathBuf::from("/usr/lib"));
-        assert_eq!(paths.iter().collect::<BTreeSet<_>>().len(), paths.len());
+        ));
+        fs::create_dir(&root).unwrap();
+        reserve_cargo_runner_ordinal(&root).unwrap();
+        let error = read_cargo_runner_units(&root, "run_0123456789abcdef")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("without publishing its unit"), "{error}");
         fs::remove_dir_all(root).unwrap();
     }
 

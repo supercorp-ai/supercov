@@ -837,14 +837,34 @@ dependency directory, exact target libdir, sysroot libdir, inherited paths and
 the macOS fallback defaults. This closes the dynamically linked proc-macro
 harness failure exposed by the multi-package gate.
 
-That loader repair is not treated as complete Cargo launch equivalence. Direct
-artifact execution still cannot authoritatively reconstruct every package and
-build-script runtime variable, native dynamic-library directory or configured
-target runner. Before public promotion, Cargo must remain the launch authority
-through an injected/composed runner boundary that receives its exact environment
-and ordering. The same boundary is the architecture for cross-artifact
-fail-fast and visible-output preservation; duplicating more of Cargo's launch
-logic inside Supercov is explicitly rejected.
+Checkpoint (2026-08-27): Cargo is now the production launch authority. The
+full original Cargo test command runs once with an injected internal target
+runner; Cargo supplies every package/build-script variable, native loader path,
+profile setting, artifact order and cross-artifact fail-fast decision. The
+runner enumerates each Cargo-selected libtest artifact, executes every exact
+test through the existing authenticated process-per-test transport and
+atomically publishes an ordinal-bound unit. A real three-package workspace
+proves build-script runtime variables, identical target/test names, default
+fail-fast and `--no-fail-fast` behavior. The former reconstructed dynamic-loader
+environment and its macOS-specific fallback logic have been deleted; the real
+proc-macro harness remains green using Cargo's inherited environment.
+
+Cargo also forwards target runners to rustdoc. The exact rustdoc wrapper now
+removes only Supercov's injected `--test-runtool` pair before entering the
+already-authenticated rustdoc catalog/outcome supervisor; missing, duplicated
+or foreign composition fails closed. This prevents generated doctest binaries
+from being misclassified as ordinary libtest artifacts. Every normal internal
+runner error atomically publishes a strict failure unit, while a killed runner
+remains distinguishable as an unmatched durable reservation. The complete
+rustc/rustdoc corpus, the public JavaScript/TypeScript engine matrix, clippy,
+228 engine tests, 19 contract tests and 16 CLI tests are green locally. No
+hosted workflow ran.
+
+This closes reconstructed Cargo launch state, standard Cargo ordering/default
+fail-fast, package/build-script environment and the libtest/rustdoc ownership
+split. Existing user-runner composition, retry identity, nextest/custom
+harnesses, complete presentation/output modes and their crash matrix remain
+open and keep Rust private.
 
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.

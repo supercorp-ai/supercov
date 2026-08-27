@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -94,6 +95,13 @@ fn is_executable_wrapper_program(argument: &str) -> bool {
 }
 
 fn main() -> ExitCode {
+    let os_arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if os_arguments
+        .first()
+        .is_some_and(|argument| argument == "__cargo-test-runner")
+    {
+        return rust_cargo_test_runner(os_arguments.into_iter().skip(1).collect());
+    }
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     // The parent-death watchdog inherits arbitrary wrapper environments. It
     // must dispatch before Cargo/rustdoc wrapper detection and must never emit
@@ -183,6 +191,99 @@ fn main() -> ExitCode {
     }
 }
 
+fn rust_cargo_test_runner(arguments: Vec<OsString>) -> ExitCode {
+    let Some(config_path) =
+        std::env::var_os(supercov_engine::rust_compiler_test_runner::RUST_CARGO_RUNNER_CONFIG_ENV)
+            .map(PathBuf::from)
+    else {
+        eprintln!("[supercov] Cargo test runner configuration is missing");
+        return ExitCode::from(2);
+    };
+    let watchdog = std::env::current_exe()
+        .ok()
+        .and_then(|path| fs::canonicalize(path).ok());
+    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
+    match supercov_engine::rust_compiler_test_runner::run_cargo_libtest_runner(
+        &config_path,
+        arguments,
+        watchdog,
+        &mut stdout,
+        &mut stderr,
+    ) {
+        Ok(execution) => ExitCode::from(execution.exit_code.clamp(0, 255) as u8),
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn strip_injected_rustdoc_runner(
+    arguments: Vec<String>,
+    runner: &Path,
+) -> Result<Vec<String>, String> {
+    let runner = runner
+        .to_str()
+        .ok_or_else(|| "the injected Cargo runner path is not UTF-8".to_owned())?;
+    let mut stripped = Vec::with_capacity(arguments.len());
+    let mut arguments = arguments.into_iter();
+    let mut removed_runner = false;
+    let mut removed_marker = false;
+    while let Some(argument) = arguments.next() {
+        if argument == "--test-runtool" {
+            let value = arguments
+                .next()
+                .ok_or_else(|| "rustdoc --test-runtool has no value".to_owned())?;
+            if value != runner || removed_runner {
+                return Err(format!(
+                    "rustdoc received an unexpected test runner: {value}"
+                ));
+            }
+            removed_runner = true;
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--test-runtool=") {
+            if value != runner || removed_runner {
+                return Err(format!(
+                    "rustdoc received an unexpected test runner: {value}"
+                ));
+            }
+            removed_runner = true;
+            continue;
+        }
+        if argument == "--test-runtool-arg" {
+            let value = arguments
+                .next()
+                .ok_or_else(|| "rustdoc --test-runtool-arg has no value".to_owned())?;
+            if value != "__cargo-test-runner" || removed_marker {
+                return Err(format!(
+                    "rustdoc received an unexpected test-runner argument: {value}"
+                ));
+            }
+            removed_marker = true;
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--test-runtool-arg=") {
+            if value != "__cargo-test-runner" || removed_marker {
+                return Err(format!(
+                    "rustdoc received an unexpected test-runner argument: {value}"
+                ));
+            }
+            removed_marker = true;
+            continue;
+        }
+        stripped.push(argument);
+    }
+    if removed_runner != removed_marker {
+        return Err("rustdoc received an incomplete injected Cargo runner".into());
+    }
+    if !removed_runner {
+        return Err("rustdoc did not receive Supercov's injected Cargo runner".into());
+    }
+    Ok(stripped)
+}
+
 fn rustdoc_wrapper(arguments: Vec<String>) -> ExitCode {
     let Some(config_path) = std::env::var_os(
         supercov_engine::rust_compiler_orchestration::RUST_COMPILER_WRAPPER_CONFIG_ENV,
@@ -202,6 +303,15 @@ fn rustdoc_wrapper(arguments: Vec<String>) -> ExitCode {
         let config: supercov_engine::rust_compiler_orchestration::RustCompilerWrapperConfig =
             serde_json::from_slice(&fs::read(&config_path).map_err(|error| error.to_string())?)
                 .map_err(|error| format!("invalid Rust compiler wrapper configuration: {error}"))?;
+        let engine = fs::canonicalize(std::env::current_exe().map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+        // Cargo forwards the configured target runner to rustdoc as
+        // --test-runtool. Ordinary libtest artifacts must pass through the
+        // Cargo-authoritative runner, while rustdoc already has its own exact
+        // catalog/outcome/transport supervisor below. Remove only Supercov's
+        // injected pair so the same executable is not misclassified twice.
+        // Any configured or malformed alternative fails closed.
+        let arguments = strip_injected_rustdoc_runner(arguments, &engine)?;
         let started = Instant::now();
         let selection = loop {
             match supercov_engine::rust_compiler_orchestration::verified_compiler_selection(
@@ -227,8 +337,6 @@ fn rustdoc_wrapper(arguments: Vec<String>) -> ExitCode {
         let rustdoc =
             supercov_engine::rust_compiler_selection::resolve_matching_rustdoc(&selection)
                 .map_err(|error| error.to_string())?;
-        let engine = fs::canonicalize(std::env::current_exe().map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
         let mut command = Command::new(&selection.companion_path);
         command
             .args(&arguments)
@@ -2744,6 +2852,63 @@ mod tests {
         assert!(!is_executable_wrapper_program("--edition=2024"));
         assert!(!is_executable_wrapper_program("@rustdoc-arguments"));
         assert!(!is_executable_wrapper_program("Cargo.toml"));
+    }
+
+    #[test]
+    fn rustdoc_removes_only_the_exact_injected_cargo_runner() {
+        let runner = Path::new("/opt/supercov");
+        assert_eq!(
+            strip_injected_rustdoc_runner(
+                vec![
+                    "--crate-name".into(),
+                    "fixture".into(),
+                    "--test-runtool".into(),
+                    "/opt/supercov".into(),
+                    "--test-runtool-arg".into(),
+                    "__cargo-test-runner".into(),
+                    "src/lib.rs".into(),
+                ],
+                runner,
+            )
+            .unwrap(),
+            ["--crate-name", "fixture", "src/lib.rs"]
+        );
+        assert_eq!(
+            strip_injected_rustdoc_runner(
+                vec![
+                    "--test-runtool=/opt/supercov".into(),
+                    "--test-runtool-arg=__cargo-test-runner".into(),
+                ],
+                runner,
+            )
+            .unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn rustdoc_rejects_missing_or_foreign_runner_composition() {
+        let runner = Path::new("/opt/supercov");
+        assert!(strip_injected_rustdoc_runner(vec!["--test".into()], runner).is_err());
+        assert!(
+            strip_injected_rustdoc_runner(
+                vec![
+                    "--test-runtool".into(),
+                    "/opt/foreign".into(),
+                    "--test-runtool-arg".into(),
+                    "__cargo-test-runner".into(),
+                ],
+                runner,
+            )
+            .is_err()
+        );
+        assert!(
+            strip_injected_rustdoc_runner(
+                vec!["--test-runtool".into(), "/opt/supercov".into()],
+                runner,
+            )
+            .is_err()
+        );
     }
 
     #[test]
