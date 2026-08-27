@@ -1796,8 +1796,32 @@ miss blocks flipping any default.
 - This closes the pinned ordinary nextest retry/concurrency/crash slice, not
   custom harnesses, remaining presentation modes, late work/subprocesses,
   cache-bypass wrappers, cross-volume isolation or platform matrices. A newly
-  isolated constant-literal assertion denominator gap also remains an R1
-  blocker.
+  isolated constant-literal assertion denominator gap remains an R1 blocker at
+  this checkpoint.
+
+## Checkpoint — 2026-08-27 authored constant assertion decisions
+
+- The constant-assertion gap from the nextest checkpoint is closed without a
+  Supercov constant evaluator. Expanded HIR marks authored assertion atoms;
+  built MIR may bind either their dynamic or rustc-folded typed Boolean switch.
+  Synthetic equality-macro conditions continue to reject unrelated constant
+  switches.
+- Exact goldens cover literal true/false, `debug_assert!`, folded and named
+  constants, and mixed literal/dynamic `&&` and `||`. `assert!(false)` remains
+  a real decision with only the failed vector observed, so its passing
+  alternative remains uncovered instead of disappearing or being invented.
+- Baseline/instrumented behavior, assertion-phase evidence v3 and the full
+  rustc/rustdoc/Cargo/nextest corpus are green. The public node:test, Vitest,
+  Playwright, Vite, esbuild, tsc, webpack and SWC matrices remain green as
+  well: 267 engine tests, 19 contract tests and 17 CLI tests pass with clippy
+  warnings denied.
+- The corpus runner now rejects killed or timed-out commands with no exit
+  status even when failure was expected. A slow deliberately failing doctest
+  receives its own bounded timeout rather than converting infrastructure death
+  into a valid test failure.
+- This closes one traced R1 branch-denominator blocker only. The remaining R1,
+  R2, lifecycle, platform, oracle, performance and dogfood promotion gates are
+  unchanged. No hosted workflow ran.
 
 ## Non-goals and guardrails
 

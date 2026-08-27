@@ -1031,8 +1031,29 @@ presentation/output modes, late work and subprocess attribution, non-forwarding
 compiler caches, read-only-parent/cross-volume fallback, genuinely distinct
 installed targets and the supported Linux/Windows matrices remain release
 blockers. The compiler corpus also exposed a separate R1 denominator gap:
-constant-literal assertion decisions such as `assert!(false)` must be modeled
-without depending on a generated switch or silently disappearing.
+constant-literal assertion decisions such as `assert!(false)` had to be
+modeled without depending on a generated switch or silently disappearing.
+
+Checkpoint (2026-08-27): that constant-assertion gap is closed without a
+Supercov constant evaluator. The companion distinguishes HIR-backed authored
+assertion atoms from synthetic `assert_eq!`/`assert_ne!` macro control flow,
+then permits either dynamic or rustc-folded typed Boolean switches only for the
+authored atoms. Exact goldens cover literal true/false, debug variants, a
+folded expression, a named constant and mixed literal/dynamic `&&` and `||`;
+the existing equality and debug-equality vectors prove unrelated macro-
+internal constant switches remain excluded. `assert!(false)` retains both
+frozen outcome obligations, publishes only the observed failed vector and
+therefore leaves the passing alternative honestly uncovered. Baseline and
+instrumented values, panics, output, drops and ordering remain identical, and
+every new decision reaches authenticated assertion-phase evidence v3.
+
+The command harness now also rejects a signal or timeout with no exit status
+even when a nonzero test result was expected. The deliberately failing doctest
+has a separate bounded allowance rather than weakening this rule. The
+authoritative rustc/rustdoc/Cargo/nextest corpus, 267 engine tests, 19 contract
+tests, 17 CLI tests, warnings-denied clippy and the complete public
+JavaScript/TypeScript integration matrix are green locally. No hosted workflow
+ran. This closes the isolated assertion-denominator blocker, not R1 or R2.
 
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.

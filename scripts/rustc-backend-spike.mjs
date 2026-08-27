@@ -196,6 +196,17 @@ function run(command, args, options = {}) {
       {cause: result.error},
     );
   }
+  if (result.status === null) {
+    const output = [result.stdout, result.stderr]
+      .filter((value) => typeof value === 'string' && value.length > 0)
+      .join('\n')
+      .slice(-8_000);
+    throw new Error(
+      `${command} terminated without an exit status${result.signal ? ` (${result.signal})` : ''}${
+        output.length > 0 ? `\n${output}` : ''
+      }`,
+    );
+  }
   if (options.expectFailure) {
     assert.notEqual(result.status, 0, `${command} unexpectedly succeeded`);
   } else if (result.status !== 0) {
@@ -2008,6 +2019,7 @@ try {
     run(supercov, ['__run-rust-compiler'], {
       env: {RUSTC: rustc},
       expectFailure: true,
+      timeout: 300_000,
       input: JSON.stringify({
         root: failingDoctestFixture,
         command: [cargo, 'test', '--doc'],
@@ -2638,7 +2650,7 @@ try {
   assert.match(baselineBehavior.stdout, /match-panic=true/);
   assert.match(
     baselineBehavior.stdout,
-    /assertion-panics=\[true, true, false, false, true, false, true, true, true, false, false, true, false, true, true, true, false\]/,
+    /assertion-panics=\[true, true, false, false, true, false, true, true, true, false, false, true, false, true, true, true, false, false, true, false, true, true, false, true, false, false, true\]/,
   );
   assert.match(baselineBehavior.stdout, /assertion-edge-panics=\[true, true\]/);
   assert.match(baselineBehavior.stdout, /assertion-order=\["left", "right"\]/);
@@ -3412,6 +3424,50 @@ try {
     ].sort(),
   };
   assert.deepEqual(decisionVectors('assert_compound'), assertionVectors.compound);
+  const literalTrueAssertion = decisionForConditions(
+    runtimeManifest,
+    'assert_literal_true',
+    ['true'],
+  );
+  const literalFalseAssertion = decisionForConditions(
+    runtimeManifest,
+    'assert_literal_false',
+    ['false'],
+  );
+  assert.deepEqual(vectorsForDecision(literalTrueAssertion), [
+    JSON.stringify({values: [true], outcome: true}),
+  ]);
+  assert.deepEqual(vectorsForDecision(literalFalseAssertion), [
+    JSON.stringify({values: [false], outcome: false}),
+  ]);
+  assert.deepEqual(decisionVectors('debug_assert_literal_true'), [
+    JSON.stringify({values: [true], outcome: true}),
+  ]);
+  assert.deepEqual(decisionVectors('debug_assert_literal_false'), [
+    JSON.stringify({values: [false], outcome: false}),
+  ]);
+  const literalFirstVectors = [
+    JSON.stringify({values: [true, false], outcome: false}),
+    JSON.stringify({values: [true, true], outcome: true}),
+  ].sort();
+  assert.deepEqual(
+    decisionVectors('assert_literal_conjunction'),
+    literalFirstVectors,
+  );
+  const falseLiteralFirstVectors = [
+    JSON.stringify({values: [false, false], outcome: false}),
+    JSON.stringify({values: [false, true], outcome: true}),
+  ].sort();
+  assert.deepEqual(
+    decisionVectors('assert_literal_disjunction'),
+    falseLiteralFirstVectors,
+  );
+  assert.deepEqual(decisionVectors('assert_constant_expression_true'), [
+    JSON.stringify({values: [true], outcome: true}),
+  ]);
+  assert.deepEqual(decisionVectors('assert_named_constant_false'), [
+    JSON.stringify({values: [false], outcome: false}),
+  ]);
   assert.deepEqual(decisionVectors('assert_equal'), assertionVectors.equality);
   assert.deepEqual(decisionVectors('assert_not_equal'), assertionVectors.equality);
   assert.deepEqual(
@@ -3441,6 +3497,14 @@ try {
   );
   for (const definition of [
     'assert_compound',
+    'assert_literal_true',
+    'assert_literal_false',
+    'debug_assert_literal_true',
+    'debug_assert_literal_false',
+    'assert_literal_conjunction',
+    'assert_literal_disjunction',
+    'assert_constant_expression_true',
+    'assert_named_constant_false',
     'assert_equal',
     'assert_not_equal',
     'debug_assert_compound',
@@ -4779,9 +4843,9 @@ try {
         {
           module: '__doctest_1',
           displayName:
-            'src/lib.rs - doctest_execution_modes (line 304)',
+            'src/lib.rs - doctest_execution_modes (line 337)',
           path: 'src/lib.rs',
-          line: 304,
+          line: 337,
           ignored: true,
           noRun: false,
           shouldPanic: false,
@@ -4789,9 +4853,9 @@ try {
         {
           module: '__doctest_2',
           displayName:
-            'src/lib.rs - doctest_execution_modes (line 308)',
+            'src/lib.rs - doctest_execution_modes (line 341)',
           path: 'src/lib.rs',
-          line: 308,
+          line: 341,
           ignored: false,
           noRun: true,
           shouldPanic: false,
@@ -4799,9 +4863,9 @@ try {
         {
           module: '__doctest_3',
           displayName:
-            'src/lib.rs - doctest_execution_modes (line 312)',
+            'src/lib.rs - doctest_execution_modes (line 345)',
           path: 'src/lib.rs',
-          line: 312,
+          line: 345,
           ignored: false,
           noRun: false,
           shouldPanic: true,

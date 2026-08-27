@@ -230,6 +230,39 @@ pub fn assert_compound(left: bool, right: bool) {
     assert!(left && right, "compound assertion failed: {left}/{right}");
 }
 
+pub fn assert_literal_true() {
+    assert!(true, "literal true assertion failed");
+}
+
+pub fn assert_literal_false() {
+    assert!(false, "literal false assertion failed");
+}
+
+pub fn debug_assert_literal_true() {
+    debug_assert!(true, "literal true debug assertion failed");
+}
+
+pub fn debug_assert_literal_false() {
+    debug_assert!(false, "literal false debug assertion failed");
+}
+
+pub fn assert_literal_conjunction(right: bool) {
+    assert!(true && right, "literal-first conjunction failed");
+}
+
+pub fn assert_literal_disjunction(right: bool) {
+    assert!(false || right, "literal-first disjunction failed");
+}
+
+pub fn assert_constant_expression_true() {
+    assert!(1 + 1 == 2, "constant expression assertion failed");
+}
+
+pub fn assert_named_constant_false() {
+    const CONDITION: bool = false;
+    assert!(CONDITION, "named constant assertion failed");
+}
+
 pub fn assert_equal(left: usize, right: usize) {
     assert_eq!(left, right, "values differ");
 }

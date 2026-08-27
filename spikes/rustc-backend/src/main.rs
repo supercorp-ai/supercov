@@ -253,6 +253,7 @@ struct DecisionCondition {
     true_outcome: Option<bool>,
     false_outcome: Option<bool>,
     invert_value: bool,
+    authored_expression: bool,
 }
 
 #[derive(Debug)]
@@ -1160,6 +1161,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 true_outcome: condition.true_outcome,
                 false_outcome: condition.false_outcome,
                 invert_value: false,
+                authored_expression: true,
             });
         }
         let decision = self.identity("decision", condition.span, decision_kind)?;
@@ -1299,6 +1301,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             true_outcome: Some(true),
             false_outcome: Some(false),
             invert_value,
+            authored_expression: false,
         };
         let outcome_branch_id = self.record_branch(
             span,
@@ -2952,9 +2955,6 @@ fn structural_decision_condition_marker_assignments<'tcx>(
             }),
             Operand::RuntimeChecks(_) => false,
         };
-        if discriminant_is_constant && !allow_constant_discriminants {
-            continue;
-        }
         let source = stable_source_range(tcx, terminator.source_info.span, crate_name)?;
         let callsite = stable_source_range(
             tcx,
@@ -2988,6 +2988,14 @@ fn structural_decision_condition_marker_assignments<'tcx>(
                 callsite.key, callsite.start, callsite.end
             ));
         };
+        if discriminant_is_constant && !allow_constant_discriminants {
+            let is_authored_condition = conditions_by_source[owner]
+                .iter()
+                .all(|(decision, index)| decision.conditions[*index].authored_expression);
+            if !is_authored_condition {
+                continue;
+            }
+        }
         blocks_by_source
             .entry(owner.clone())
             .or_default()
