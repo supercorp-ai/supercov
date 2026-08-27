@@ -824,6 +824,28 @@ delayed work, and requires the following run to report and remove the abandoned
 transaction. The complete node:test, Vitest, Playwright and build-adapter matrix
 remains green under this supervisor.
 
+Multi-package libtest identity is now exact for the first collision corpus.
+Every Cargo compiler artifact must carry a regular `Cargo.toml` manifest within
+the project; the engine derives a relocation-stable `package:.` or
+`package:<workspace-relative-root>` identity and combines it with sorted target
+kinds, target name, workspace-relative source and libtest name. A real copied
+workspace adds two packages with the same lib target and test name, executes
+both through the production compiler frontend and proves the two distinct IDs
+survive stored-run querying. Artifact enumeration and execution also reproduce
+Cargo 0.96's ordered dynamic-library search path, including profile root,
+dependency directory, exact target libdir, sysroot libdir, inherited paths and
+the macOS fallback defaults. This closes the dynamically linked proc-macro
+harness failure exposed by the multi-package gate.
+
+That loader repair is not treated as complete Cargo launch equivalence. Direct
+artifact execution still cannot authoritatively reconstruct every package and
+build-script runtime variable, native dynamic-library directory or configured
+target runner. Before public promotion, Cargo must remain the launch authority
+through an injected/composed runner boundary that receives its exact environment
+and ordering. The same boundary is the architecture for cross-artifact
+fail-fast and visible-output preservation; duplicating more of Cargo's launch
+logic inside Supercov is explicitly rejected.
+
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.
 

@@ -663,6 +663,26 @@ try {
     {cwd: productionFixture},
   );
   assert.match(productionQuery.stdout, /run_0123456789abcdef/);
+  const productionTestQuery = JSON.parse(
+    run(supercov, ['__query-stored-run'], {
+      input: JSON.stringify({
+        root: productionFixture,
+        query: {
+          runId: productionRun.runId,
+          filter: 'all',
+          command: 'test',
+          selector: 'records_real_runtime_probes',
+        },
+      }),
+    }).stdout,
+  );
+  assert.equal(productionTestQuery.ok, true);
+  assert.equal(productionTestQuery.data.tests.length, 1);
+  assert.match(
+    productionTestQuery.data.tests[0].id,
+    /^rust:libtest:package:\.:lib:supercov_rustc_spike_fixture:src\/lib\.rs::tests::records_real_runtime_probes$/u,
+    'production libtest identity omitted its relocatable package and exact target',
+  );
 
   const killedRunId = 'run_4123456789abcdef';
   const killedProduction = spawnCommand(supercov, ['__run-rust-compiler'], {
@@ -765,6 +785,85 @@ try {
       ),
     ),
     'filtered production compiler run left terminal work state behind',
+  );
+
+  const productionManifest = join(productionFixture, 'Cargo.toml');
+  writeFileSync(
+    productionManifest,
+    readFileSync(productionManifest, 'utf8').replace(
+      'members = ["probe-macros"]',
+      'members = ["probe-macros", "sibling-a", "sibling-b"]',
+    ),
+  );
+  for (const sibling of ['sibling-a', 'sibling-b']) {
+    const siblingRoot = join(productionFixture, sibling);
+    mkdirSync(join(siblingRoot, 'src'), {recursive: true});
+    writeFileSync(
+      join(siblingRoot, 'Cargo.toml'),
+      [
+        '[package]',
+        `name = "${sibling}"`,
+        'version = "0.0.0"',
+        'edition = "2024"',
+        '',
+        '[lib]',
+        'name = "shared_target"',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(siblingRoot, 'src/lib.rs'),
+      [
+        'pub fn selected(value: bool) -> usize {',
+        '    if value { 1 } else { 0 }',
+        '}',
+        '',
+        '#[test]',
+        'fn same_name() {',
+        '    assert_eq!(selected(true), 1);',
+        '}',
+        '',
+      ].join('\n'),
+    );
+  }
+  const multiPackageRun = JSON.parse(
+    run(supercov, ['__run-rust-compiler'], {
+      env: {RUSTC: rustc},
+      input: JSON.stringify({
+        root: productionFixture,
+        command: [cargo, 'test', '--workspace', '--lib', 'same_name'],
+        runId: 'run_6123456789abcdef',
+        startedAt: '2026-08-26T00:01:15.000Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+    }).stdout,
+  );
+  assert.equal(multiPackageRun.exitCode, 0);
+  assert.equal(multiPackageRun.libtests, 2);
+  assert.equal(multiPackageRun.doctests, 0);
+  const multiPackageQuery = JSON.parse(
+    run(supercov, ['__query-stored-run'], {
+      input: JSON.stringify({
+        root: productionFixture,
+        query: {
+          runId: multiPackageRun.runId,
+          filter: 'passed',
+          command: 'test',
+          selector: 'same_name',
+        },
+      }),
+    }).stdout,
+  );
+  assert.equal(multiPackageQuery.ok, true);
+  assert.deepEqual(
+    new Set(multiPackageQuery.data.tests.map(({id}) => id)),
+    new Set([
+      'rust:libtest:package:sibling-a:lib:shared_target:sibling-a/src/lib.rs::same_name',
+      'rust:libtest:package:sibling-b:lib:shared_target:sibling-b/src/lib.rs::same_name',
+    ]),
+    'colliding libtest names did not retain exact relocatable package identity',
   );
 
   const interruptedRunId = 'run_5123456789abcdef';

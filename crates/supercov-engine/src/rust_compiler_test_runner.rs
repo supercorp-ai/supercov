@@ -206,9 +206,11 @@ fn io_error(path: &Path, error: impl std::fmt::Display) -> RustCompilerTestError
 #[derive(Debug, Clone)]
 struct TestArtifact {
     executable: PathBuf,
-    target_name: String,
+    package: String,
+    target_key: String,
     kind: String,
     source: String,
+    loader_environment: (OsString, OsString),
 }
 
 #[derive(Debug, Clone)]
@@ -260,23 +262,135 @@ fn relative_source(root: &Path, source: &Path) -> Result<String, RustCompilerTes
 
 fn normalize_artifacts(
     project_root: &Path,
+    target_directory: &Path,
+    compiler_library_directory: &Path,
     artifacts: &[RustCompilerTestArtifact],
 ) -> Result<Vec<TestArtifact>, RustCompilerTestError> {
     artifacts
         .iter()
         .map(|artifact| {
+            let mut target_kinds = artifact.target_kinds.clone();
+            target_kinds.sort();
+            target_kinds.dedup();
             Ok(TestArtifact {
                 executable: artifact.executable.clone(),
-                target_name: artifact.target_name.clone(),
+                package: artifact.package.clone(),
+                target_key: format!("{}:{}", target_kinds.join("+"), artifact.target_name),
                 kind: if artifact.target_kinds.iter().any(|kind| kind == "test") {
                     "integration".into()
                 } else {
                     "unit".into()
                 },
                 source: relative_source(project_root, &artifact.source_path)?,
+                loader_environment: cargo_loader_environment(
+                    &artifact.executable,
+                    target_directory,
+                    compiler_library_directory,
+                )?,
             })
         })
         .collect()
+}
+
+fn cargo_loader_variable() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "DYLD_FALLBACK_LIBRARY_PATH"
+    } else if cfg!(windows) {
+        "PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    }
+}
+
+fn cargo_loader_paths(
+    executable: &Path,
+    target_directory: &Path,
+    compiler_library_directory: &Path,
+    inherited: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+    macos_defaults: bool,
+) -> Result<Vec<PathBuf>, RustCompilerTestError> {
+    let target_directory =
+        fs::canonicalize(target_directory).map_err(|error| io_error(target_directory, error))?;
+    let executable = fs::canonicalize(executable).map_err(|error| io_error(executable, error))?;
+    let compiler_library_directory = fs::canonicalize(compiler_library_directory)
+        .map_err(|error| io_error(compiler_library_directory, error))?;
+    if !executable.starts_with(&target_directory) {
+        return Err(RustCompilerTestError::UnsafeArtifact(
+            executable.display().to_string(),
+        ));
+    }
+    let profile_directory = executable
+        .parent()
+        .and_then(Path::parent)
+        .filter(|profile| profile.starts_with(&target_directory))
+        .ok_or_else(|| RustCompilerTestError::UnsafeArtifact(executable.display().to_string()))?;
+    let sysroot_library_directory = compiler_library_directory
+        .ancestors()
+        .nth(3)
+        .filter(|directory| directory.file_name().is_some_and(|name| name == "lib"))
+        .ok_or_else(|| {
+            RustCompilerTestError::Context(format!(
+                "invalid compiler target library directory: {}",
+                compiler_library_directory.display()
+            ))
+        })?;
+    let mut paths = vec![
+        profile_directory.to_path_buf(),
+        profile_directory.join("deps"),
+        compiler_library_directory.clone(),
+        sysroot_library_directory.to_path_buf(),
+    ];
+    let inherited_paths = inherited
+        .map(std::env::split_paths)
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if inherited_paths.starts_with(&paths) {
+        paths = inherited_paths;
+    } else {
+        paths.extend(inherited_paths);
+    }
+    if macos_defaults && inherited.is_none_or(|value| value.is_empty()) {
+        if let Some(home) = home.filter(|value| !value.is_empty()) {
+            paths.push(PathBuf::from(home).join("lib"));
+        }
+        paths.extend([PathBuf::from("/usr/local/lib"), PathBuf::from("/usr/lib")]);
+    }
+    let mut seen = BTreeSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
+    Ok(paths)
+}
+
+fn cargo_loader_environment(
+    executable: &Path,
+    target_directory: &Path,
+    compiler_library_directory: &Path,
+) -> Result<(OsString, OsString), RustCompilerTestError> {
+    let variable = cargo_loader_variable();
+    let inherited = std::env::var_os(variable);
+    let home = std::env::var_os("HOME");
+    let paths = cargo_loader_paths(
+        executable,
+        target_directory,
+        compiler_library_directory,
+        inherited.as_deref(),
+        home.as_deref(),
+        cfg!(target_os = "macos"),
+    )?;
+    let value = std::env::join_paths(paths).map_err(|error| {
+        RustCompilerTestError::Context(format!(
+            "could not construct Cargo-compatible {variable}: {error}"
+        ))
+    })?;
+    Ok((OsString::from(variable), value))
+}
+
+fn libtest_id(artifact: &TestArtifact, test: &str) -> String {
+    format!(
+        "rust:libtest:{}:{}:{}::{test}",
+        artifact.package, artifact.target_key, artifact.source
+    )
 }
 
 fn list_tests(
@@ -297,7 +411,7 @@ fn list_tests(
                 program: artifact.executable.clone().into_os_string(),
                 arguments,
                 cwd: project_root.to_owned(),
-                environment: None,
+                environment: Some(inherited_environment([artifact.loader_environment.clone()])),
                 captured_output: None,
             },
             options,
@@ -384,6 +498,7 @@ fn run_process(
                 arguments,
                 cwd: project_root.to_owned(),
                 environment: Some(inherited_environment([
+                    task.artifact.loader_environment.clone(),
                     (
                         OsString::from(RUST_TRANSPORT_ENV),
                         task.transport.clone().into_os_string(),
@@ -898,7 +1013,7 @@ fn raw_result(
         provenance: TestProvenance {
             runner: "rust-libtest".into(),
             kind: task.artifact.kind.clone(),
-            project: Some(task.artifact.target_name.clone()),
+            project: Some(task.artifact.package.clone()),
             source: "supercov-rustc-process-per-test".into(),
         },
         role: "test".into(),
@@ -930,7 +1045,7 @@ fn raw_result(
             provenance: TestProvenance {
                 runner: "rust-libtest".into(),
                 kind: task.artifact.kind.clone(),
-                project: Some(task.artifact.target_name.clone()),
+                project: Some(task.artifact.package.clone()),
                 source: "supercov-rustc-context-zero".into(),
             },
             role: "background".into(),
@@ -992,7 +1107,12 @@ fn execute_compiler_build(
         .then(|| rust_libtest_selection(&invocation))
         .transpose()
         .map_err(|error| RustCompilerTestError::UnsupportedCommand(error.to_string()))?;
-    let artifacts = normalize_artifacts(&project_root, &build.artifacts)?;
+    let artifacts = normalize_artifacts(
+        &project_root,
+        &build.target_directory,
+        &build.selection.compiler_library_directory,
+        &build.artifacts,
+    )?;
     let evidence_root = build.compiler_output_directory.join("attempts");
     fs::create_dir(&evidence_root).map_err(|error| io_error(&evidence_root, error))?;
     let mut tasks = Vec::new();
@@ -1013,7 +1133,7 @@ fn execute_compiler_build(
         let contexts = preflight_rust_test_contexts(tests.clone())
             .map_err(|error| RustCompilerTestError::Context(error.to_string()))?;
         for (test_index, test) in tests.into_iter().enumerate() {
-            let test_id = format!("{}::{test}", artifact.source);
+            let test_id = libtest_id(artifact, &test);
             if !identities.insert(test_id.clone()) {
                 return Err(RustCompilerTestError::DuplicateTest(test_id));
             }
@@ -1260,6 +1380,106 @@ mod tests {
         assert_eq!(first.len(), "rust-test:".len() + 40);
         assert_ne!(first, phase_id("run-b", "attempt"));
         assert_ne!(first, phase_id("run-a", "attempt-b"));
+    }
+
+    #[test]
+    fn libtest_identity_includes_package_target_and_workspace_source() {
+        let artifact = |package: &str, target_key: &str| TestArtifact {
+            executable: PathBuf::from("test-artifact"),
+            package: package.into(),
+            target_key: target_key.into(),
+            kind: "unit".into(),
+            source: "shared/src/lib.rs".into(),
+            loader_environment: (OsString::from("PATH"), OsString::new()),
+        };
+        let root = artifact("package:.", "lib:same");
+        let sibling = artifact("package:crates/sibling", "lib:same");
+        let integration = artifact("package:.", "test:same");
+        assert_eq!(
+            libtest_id(&root, "tests::same_name"),
+            "rust:libtest:package:.:lib:same:shared/src/lib.rs::tests::same_name"
+        );
+        assert_ne!(
+            libtest_id(&root, "tests::same_name"),
+            libtest_id(&sibling, "tests::same_name")
+        );
+        assert_ne!(
+            libtest_id(&root, "tests::same_name"),
+            libtest_id(&integration, "tests::same_name")
+        );
+    }
+
+    #[test]
+    fn cargo_loader_paths_match_cargo_order_and_preserve_inherited_paths() {
+        let unique = format!(
+            "supercov-cargo-loader-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let target = root.join("target");
+        let profile = target.join("debug");
+        let deps = profile.join("deps");
+        let executable = deps.join("artifact");
+        let compiler = root.join("toolchain/lib/rustlib/test-host/lib");
+        fs::create_dir_all(&deps).unwrap();
+        fs::create_dir_all(&compiler).unwrap();
+        fs::write(&executable, b"artifact").unwrap();
+        let inherited_paths = [root.join("existing-a"), root.join("existing-b")];
+        let inherited = std::env::join_paths(&inherited_paths).unwrap();
+        let paths = cargo_loader_paths(
+            &executable,
+            &target,
+            &compiler,
+            Some(&inherited),
+            None,
+            false,
+        )
+        .unwrap();
+        let canonical_root = fs::canonicalize(&root).unwrap();
+        assert_eq!(
+            paths,
+            vec![
+                canonical_root.join("target/debug"),
+                canonical_root.join("target/debug/deps"),
+                canonical_root.join("toolchain/lib/rustlib/test-host/lib"),
+                canonical_root.join("toolchain/lib"),
+                inherited_paths[0].clone(),
+                inherited_paths[1].clone(),
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cargo_loader_paths_restore_macos_fallback_defaults_once() {
+        let unique = format!(
+            "supercov-cargo-loader-defaults-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let target = root.join("target");
+        let deps = target.join("debug/deps");
+        let executable = deps.join("artifact");
+        let compiler = root.join("toolchain/lib/rustlib/test-host/lib");
+        fs::create_dir_all(&deps).unwrap();
+        fs::create_dir_all(&compiler).unwrap();
+        fs::write(&executable, b"artifact").unwrap();
+        let home = root.join("home").into_os_string();
+        let paths =
+            cargo_loader_paths(&executable, &target, &compiler, None, Some(&home), true).unwrap();
+        assert_eq!(paths[4], root.join("home/lib"));
+        assert_eq!(paths[5], PathBuf::from("/usr/local/lib"));
+        assert_eq!(paths[6], PathBuf::from("/usr/lib"));
+        assert_eq!(paths.iter().collect::<BTreeSet<_>>().len(), paths.len());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

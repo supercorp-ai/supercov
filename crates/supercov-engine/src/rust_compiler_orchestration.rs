@@ -110,6 +110,7 @@ pub struct RustCompilerBuildRequest {
 #[serde(rename_all = "camelCase")]
 pub struct RustCompilerTestArtifact {
     pub executable: PathBuf,
+    pub package: String,
     pub target_name: String,
     pub target_kinds: Vec<String>,
     pub source_path: PathBuf,
@@ -174,6 +175,8 @@ impl std::error::Error for RustCompilerOrchestrationError {}
 #[derive(Debug, Deserialize)]
 struct CargoMessage {
     reason: String,
+    #[serde(default)]
+    manifest_path: Option<PathBuf>,
     #[serde(default)]
     target: Option<CargoTarget>,
     #[serde(default)]
@@ -645,9 +648,12 @@ pub fn verified_compiler_selection(
 fn cargo_artifacts(
     stdout: &[u8],
     target_directory: &Path,
+    project_root: &Path,
 ) -> Result<Vec<RustCompilerTestArtifact>, RustCompilerOrchestrationError> {
     let canonical_target =
         fs::canonicalize(target_directory).map_err(|error| io_error(target_directory, error))?;
+    let canonical_project =
+        fs::canonicalize(project_root).map_err(|error| io_error(project_root, error))?;
     let mut artifacts = Vec::new();
     for line in stdout
         .split(|byte| *byte == b'\n')
@@ -660,7 +666,9 @@ fn cargo_artifacts(
         {
             continue;
         }
-        let (Some(executable), Some(target)) = (message.executable, message.target) else {
+        let (Some(executable), Some(manifest_path), Some(target)) =
+            (message.executable, message.manifest_path, message.target)
+        else {
             continue;
         };
         let executable =
@@ -673,8 +681,44 @@ fn cargo_artifacts(
                 executable.display()
             )));
         }
+        let manifest_metadata = fs::symlink_metadata(&manifest_path)
+            .map_err(|error| io_error(&manifest_path, error))?;
+        let manifest =
+            fs::canonicalize(&manifest_path).map_err(|error| io_error(&manifest_path, error))?;
+        let package_root = manifest
+            .parent()
+            .and_then(|path| path.strip_prefix(&canonical_project).ok())
+            .filter(|_| {
+                manifest_metadata.file_type().is_file()
+                    && manifest
+                        .file_name()
+                        .is_some_and(|name| name == "Cargo.toml")
+            })
+            .ok_or_else(|| {
+                RustCompilerOrchestrationError::CargoOutput(format!(
+                    "test artifact manifest escaped the owned project: {}",
+                    manifest.display()
+                ))
+            })?;
+        let package = if package_root.as_os_str().is_empty() {
+            "package:.".to_owned()
+        } else if package_root
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        {
+            format!(
+                "package:{}",
+                package_root.to_string_lossy().replace('\\', "/")
+            )
+        } else {
+            return Err(RustCompilerOrchestrationError::CargoOutput(format!(
+                "test artifact has a noncanonical package root: {}",
+                package_root.display()
+            )));
+        };
         artifacts.push(RustCompilerTestArtifact {
             executable,
+            package,
             target_name: target.name,
             target_kinds: target.kind,
             source_path: target.src_path,
@@ -936,7 +980,7 @@ pub fn build_with_rust_compiler_companion_supervised(
         .map_err(|error| RustCompilerOrchestrationError::CompilerOutput(error.to_string()))?;
     let artifacts = output
         .as_ref()
-        .map(|output| cargo_artifacts(&output.stdout, &target_directory))
+        .map(|output| cargo_artifacts(&output.stdout, &target_directory, &project_root))
         .transpose()?
         .unwrap_or_default();
     let (doctest_exit_code, doctest_stdout, doctest_stderr) = doctest_output.map_or_else(
@@ -1046,5 +1090,73 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect::<BTreeSet<_>>();
         assert_eq!(names, BTreeSet::from(["runtime.rs".into()]));
+    }
+
+    #[test]
+    fn cargo_artifacts_bind_relocatable_workspace_package_identity() {
+        fn fixture(root: &Path) -> (PathBuf, Vec<u8>) {
+            let target = root.join("target");
+            fs::create_dir(&target).unwrap();
+            let mut messages = Vec::new();
+            for (index, package_root) in [Path::new("."), Path::new("crates/sibling")]
+                .into_iter()
+                .enumerate()
+            {
+                let package = root.join(package_root);
+                let source = package.join("src/lib.rs");
+                fs::create_dir_all(source.parent().unwrap()).unwrap();
+                fs::write(
+                    package.join("Cargo.toml"),
+                    "[package]\nname='fixture'\nversion='0.0.0'\n",
+                )
+                .unwrap();
+                fs::write(&source, "#[test] fn same_name() {}\n").unwrap();
+                let executable = target.join(format!("same-target-{index}"));
+                fs::write(&executable, b"artifact").unwrap();
+                messages.extend(
+                    serde_json::to_vec(&serde_json::json!({
+                        "reason": "compiler-artifact",
+                        "package_id": format!("opaque-{index}"),
+                        "manifest_path": package.join("Cargo.toml"),
+                        "target": {
+                            "name": "same_target",
+                            "kind": ["lib"],
+                            "src_path": source,
+                        },
+                        "profile": { "test": true },
+                        "executable": executable,
+                    }))
+                    .unwrap(),
+                );
+                messages.push(b'\n');
+            }
+            (target, messages)
+        }
+
+        let first = TemporaryDirectory::new();
+        let second = TemporaryDirectory::new();
+        let (first_target, first_messages) = fixture(&first.0);
+        let (second_target, second_messages) = fixture(&second.0);
+        let first_artifacts = cargo_artifacts(&first_messages, &first_target, &first.0).unwrap();
+        let second_artifacts =
+            cargo_artifacts(&second_messages, &second_target, &second.0).unwrap();
+        assert_eq!(
+            first_artifacts
+                .iter()
+                .map(|artifact| artifact.package.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["package:.", "package:crates/sibling"])
+        );
+        assert_eq!(
+            first_artifacts
+                .iter()
+                .map(|artifact| &artifact.package)
+                .collect::<Vec<_>>(),
+            second_artifacts
+                .iter()
+                .map(|artifact| &artifact.package)
+                .collect::<Vec<_>>(),
+            "package identities changed when the workspace moved"
+        );
     }
 }
