@@ -383,6 +383,7 @@ pub struct IndexedOutcomeCounts {
     pub timed_out: usize,
     pub interrupted: usize,
     pub unknown: usize,
+    pub unstarted: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1179,6 +1180,16 @@ fn projection_record(
             )?,
         );
     }
+    put_u64(
+        &mut record,
+        520,
+        usize_u64(
+            selected_tests
+                .iter()
+                .filter(|test| test.role == "test" && test.outcome == "unstarted")
+                .count(),
+        )?,
+    );
 
     if let Some(transport) = &view.transport {
         record[1] = 1;
@@ -1433,6 +1444,7 @@ fn test_summary_record(
         "timedOut" => 4,
         "interrupted" => 5,
         "unknown" => 6,
+        "unstarted" => 7,
         _ => return Err(CoverageIndexError::InvalidRecord("test outcome")),
     };
     put_u32(&mut record, 4, strings.intern(&test.id)?);
@@ -2622,7 +2634,7 @@ impl<'a> CoverageIndex<'a> {
                 continue;
             }
             if record[38..40].iter().any(|byte| *byte != 0)
-                || record[518..].iter().any(|byte| *byte != 0)
+                || record[518..520].iter().any(|byte| *byte != 0)
             {
                 return Err(CoverageIndexError::InvalidRecord(
                     "projection reserved bytes",
@@ -2799,6 +2811,7 @@ impl<'a> CoverageIndex<'a> {
                     timed_out: number(384)?,
                     interrupted: number(392)?,
                     unknown: number(400)?,
+                    unstarted: number(520)?,
                 },
                 source_scope,
             });
@@ -3099,6 +3112,7 @@ impl<'a> CoverageIndex<'a> {
                     4 => "timedOut",
                     5 => "interrupted",
                     6 => "unknown",
+                    7 => "unstarted",
                     _ => return Err(CoverageIndexError::InvalidRecord("test outcome")),
                 }
                 .into(),
@@ -3908,6 +3922,67 @@ mod tests {
         assert_eq!(limitations.len(), 1);
         assert_eq!(limitations[0].kind, "dynamic-code");
         assert_eq!(limitations[0].line, 3);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn index_preserves_catalogued_unstarted_tests_without_attempts() {
+        let report = analyze_coverage_results(&CoverageReportRequest {
+            run_id: "run".into(),
+            manifest: CoverageManifest {
+                decisions: Vec::new(),
+                points: Vec::new(),
+                branches: Vec::new(),
+                limitations: Vec::new(),
+                scope: None,
+            },
+            raw_results: vec![RawTestResult {
+                test_id: Some("unstarted".into()),
+                scope: None,
+                test: "unstarted".into(),
+                test_file: Some("tests/a.rs".into()),
+                title: None,
+                retry: None,
+                status: Some("unstarted".into()),
+                expected_status: Some("passed".into()),
+                flaky: false,
+                provenance: TestProvenance {
+                    runner: "rust-nextest".into(),
+                    kind: "unit".into(),
+                    project: None,
+                    source: "selected-but-not-started".into(),
+                },
+                role: "test".into(),
+                phases: Vec::new(),
+                runtime: Vec::new(),
+                browser: Vec::new(),
+                server: Vec::new(),
+            }],
+            generated_at: "time".into(),
+            coverage_model: None,
+            integrity: None,
+            test_exit_code: ExitCodeInput::Present(Some(100)),
+        })
+        .unwrap();
+        let root = root();
+        let path = root.join("query-index.v1.bin");
+        write_query_index(
+            &coverage_index_sections(&report).unwrap(),
+            &identity(),
+            &path,
+        )
+        .unwrap();
+        let container = QueryIndex::open(&path, &identity()).unwrap();
+        let index = CoverageIndex::new(&container).unwrap();
+        let summaries = index.test_summaries(CoverageViewId::All).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].outcome, "unstarted");
+        let details = index.test_details(CoverageViewId::All).unwrap();
+        assert!(details[0].retries.is_empty());
+        assert!(details[0].attempts.is_empty());
+        let projection = index.projection(CoverageViewId::All, None, None).unwrap();
+        assert_eq!(projection.tests, 1);
+        assert_eq!(projection.test_outcomes.unstarted, 1);
         fs::remove_dir_all(root).unwrap();
     }
 

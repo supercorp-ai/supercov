@@ -18,6 +18,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use nextest_metadata::{BuildPlatform, FilterMatch, NextestExitCode, RustTestSuiteStatusSummary};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use supercov_contracts::{
@@ -52,13 +53,23 @@ use crate::{
         RUST_TRANSPORT_ENV, RUST_TRANSPORT_TOKEN_ENV, RustTransportRead, create_rust_transport,
         read_rust_transport,
     },
+    rust_runner_attempt::{
+        NextestAttemptIdentity, RustRunnerInvocationIdentity, classify_rust_runner_environment,
+    },
     rust_test_context::preflight_rust_test_contexts,
     rust_test_runner::rust_libtest_selection,
 };
 
 const TOKEN_BYTES: usize = supercov_contracts::RUST_PROBE_TRANSPORT_TOKEN_SIZE;
 pub const RUST_CARGO_RUNNER_CONFIG_ENV: &str = "SUPERCOV_RUST_CARGO_RUNNER_CONFIG";
-pub const RUST_CARGO_RUNNER_VERSION: u32 = 2;
+pub const RUST_CARGO_RUNNER_VERSION: u32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RustCargoRunnerKind {
+    CargoTest,
+    Nextest,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -75,6 +86,9 @@ pub struct RustCargoRunnerConfig {
 pub struct RustCargoRunnerAttempt {
     pub test: String,
     pub context_id: u64,
+    pub retry: usize,
+    pub total_attempts: usize,
+    pub runner_attempt_id: String,
     pub result: SupervisedResult,
     pub transport: RustTransportRead,
     pub started_at_ms: i64,
@@ -89,6 +103,13 @@ pub struct RustCargoRunnerUnit {
     pub version: u32,
     pub run_id: String,
     pub invocation_ordinal: u64,
+    pub runner: RustCargoRunnerKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner_binary_id: Option<String>,
     pub target: String,
     pub artifact: PathBuf,
     pub arguments: Vec<String>,
@@ -109,7 +130,7 @@ struct RustCargoRunnerFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustCargoRunnerExecution {
     pub exit_code: i32,
-    pub unit_path: PathBuf,
+    pub unit_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -213,6 +234,7 @@ pub enum RustCompilerTestError {
     DroppedEvidence { test: String, dropped: u64 },
     Projection { test: String, reason: String },
     UnsupportedCommand(String),
+    UnverifiedExecution { code: i32, reason: String },
     Interrupted { code: i32, signal: String },
 }
 
@@ -248,6 +270,10 @@ impl std::fmt::Display for RustCompilerTestError {
                 write!(formatter, "invalid Rust evidence for {test}: {reason}")
             }
             Self::UnsupportedCommand(reason) => formatter.write_str(reason),
+            Self::UnverifiedExecution { code, reason } => write!(
+                formatter,
+                "Rust test command exited {code}, but Supercov could not authenticate complete coverage evidence: {reason}"
+            ),
             Self::Interrupted { signal, .. } => {
                 write!(formatter, "Rust test run was interrupted by {signal}")
             }
@@ -278,13 +304,16 @@ struct TestArtifact {
 struct ProcessTask {
     ordinal: usize,
     artifact_index: usize,
-    test_index: usize,
     artifact: TestArtifact,
     test: String,
     test_id: String,
     context_id: u64,
+    retry: usize,
+    total_attempts: usize,
+    runner_attempt_id: String,
+    runner: RustCargoRunnerKind,
     transport: PathBuf,
-    run_arguments: Vec<String>,
+    test_arguments: Vec<OsString>,
     underlying_runner: Option<RustCargoResolvedRunner>,
 }
 
@@ -484,16 +513,10 @@ fn run_process(
     )
     .map_err(|error| error.to_string())?;
     let started_at_ms = epoch_ms().map_err(|error| error.to_string())?;
-    let mut test_arguments = task
-        .run_arguments
-        .iter()
-        .map(OsString::from)
-        .collect::<Vec<_>>();
-    test_arguments.extend([OsString::from("--exact"), OsString::from(&task.test)]);
     let (program, arguments) = artifact_command(
         &task.artifact,
         task.underlying_runner.as_ref(),
-        test_arguments,
+        task.test_arguments.clone(),
     );
     let environment = vec![
         (
@@ -610,9 +633,14 @@ fn write_cargo_runner_unit(
     identity.update((artifact.len() as u64).to_be_bytes());
     identity.update(artifact.as_bytes());
     let digest = format!("{:x}", identity.finalize());
-    let destination = output_directory.join(format!("libtest-{}.json", &digest[..24]));
+    let destination = output_directory.join(format!(
+        "libtest-{:016}-{}.json",
+        unit.invocation_ordinal,
+        &digest[..24]
+    ));
     let partial = output_directory.join(format!(
-        ".libtest-{}-{}.partial",
+        ".libtest-{:016}-{}-{}.partial",
+        unit.invocation_ordinal,
         &digest[..24],
         std::process::id()
     ));
@@ -705,6 +733,55 @@ fn reserve_cargo_runner_ordinal(output_directory: &Path) -> Result<u64, RustComp
     ))
 }
 
+fn run_nextest_list_passthrough(
+    current_directory: &Path,
+    artifact: &TestArtifact,
+    underlying_runner: Option<&RustCargoResolvedRunner>,
+    arguments: Vec<OsString>,
+    watchdog_program: Option<&Path>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<RustCargoRunnerExecution, RustCompilerTestError> {
+    let supervisor = watchdog_program
+        .map_or_else(ProcessSupervisor::new, ProcessSupervisor::new_crash_safe)
+        .map_err(|error| RustCompilerTestError::Launch {
+            test: "nextest list".into(),
+            reason: error.to_string(),
+        })?;
+    let options =
+        SupervisionOptions::from_environment().map_err(|error| RustCompilerTestError::Launch {
+            test: "nextest list".into(),
+            reason: error.to_string(),
+        })?;
+    let (program, arguments) = artifact_command(artifact, underlying_runner, arguments);
+    let output = supervisor
+        .supervise_captured(
+            &CommandSpec {
+                program,
+                arguments,
+                cwd: current_directory.to_owned(),
+                environment: Some(inherited_environment([])),
+                captured_output: None,
+            },
+            options,
+            &mut io::sink(),
+        )
+        .map_err(|error| RustCompilerTestError::Launch {
+            test: "nextest list".into(),
+            reason: error.to_string(),
+        })?;
+    stdout
+        .write_all(&output.stdout)
+        .map_err(|error| io_error(current_directory, error))?;
+    stderr
+        .write_all(&output.stderr)
+        .map_err(|error| io_error(current_directory, error))?;
+    Ok(RustCargoRunnerExecution {
+        exit_code: output.result.exit_code(),
+        unit_path: None,
+    })
+}
+
 pub fn run_cargo_libtest_runner(
     config_path: &Path,
     arguments: Vec<OsString>,
@@ -757,47 +834,80 @@ pub fn run_cargo_libtest_runner(
             "Cargo runner config has empty or duplicate target identities".into(),
         ));
     }
-    let invocation_ordinal = reserve_cargo_runner_ordinal(&output_directory)?;
+    let runner_identity = classify_rust_runner_environment()
+        .map_err(|error| RustCompilerTestError::Context(error.to_string()))?;
     let run_id = config.run_id.clone();
     let failure_target = arguments
         .first()
         .and_then(|target| target.clone().into_string().ok());
     let failure_artifact = arguments.get(1).map(PathBuf::from);
-    let result = (|| {
-        let mut arguments = arguments.into_iter();
-        let target = arguments
-            .next()
-            .ok_or_else(|| {
-                RustCompilerTestError::Context("Cargo runner received no target identity".into())
-            })?
-            .into_string()
-            .map_err(|_| {
-                RustCompilerTestError::Context(
-                    "Cargo runner received a non-UTF-8 target identity".into(),
-                )
-            })?;
-        let target_runner = config
-            .target_runners
-            .iter()
-            .find(|candidate| candidate.target == target)
-            .ok_or_else(|| {
-                RustCompilerTestError::Context(format!(
-                    "Cargo runner received an unconfigured target identity: {target}"
-                ))
-            })?;
-        let artifact_argument = arguments.next().ok_or_else(|| {
-            RustCompilerTestError::Context("Cargo runner received no artifact".into())
+    let mut runner_arguments = arguments.into_iter();
+    let target = runner_arguments
+        .next()
+        .ok_or_else(|| {
+            RustCompilerTestError::Context("Cargo runner received no target identity".into())
+        })?
+        .into_string()
+        .map_err(|_| {
+            RustCompilerTestError::Context(
+                "Cargo runner received a non-UTF-8 target identity".into(),
+            )
         })?;
-        let artifact = PathBuf::from(&artifact_argument);
-        let artifact = fs::canonicalize(&artifact).map_err(|error| io_error(&artifact, error))?;
-        if !artifact.starts_with(&target_directory)
-            || !fs::symlink_metadata(&artifact).is_ok_and(|metadata| metadata.file_type().is_file())
-        {
-            return Err(RustCompilerTestError::UnsafeArtifact(
-                artifact.display().to_string(),
-            ));
-        }
-        let arguments = arguments
+    let target_runner = config
+        .target_runners
+        .iter()
+        .find(|candidate| candidate.target == target)
+        .ok_or_else(|| {
+            RustCompilerTestError::Context(format!(
+                "Cargo runner received an unconfigured target identity: {target}"
+            ))
+        })?;
+    let artifact_argument = runner_arguments.next().ok_or_else(|| {
+        RustCompilerTestError::Context("Cargo runner received no artifact".into())
+    })?;
+    let artifact_path = PathBuf::from(&artifact_argument);
+    let artifact =
+        fs::canonicalize(&artifact_path).map_err(|error| io_error(&artifact_path, error))?;
+    if !artifact.starts_with(&target_directory)
+        || !fs::symlink_metadata(&artifact).is_ok_and(|metadata| metadata.file_type().is_file())
+    {
+        return Err(RustCompilerTestError::UnsafeArtifact(
+            artifact.display().to_string(),
+        ));
+    }
+    let arguments = runner_arguments.collect::<Vec<_>>();
+    let current_directory = std::env::current_dir()
+        .and_then(fs::canonicalize)
+        .map_err(|error| io_error(Path::new("."), error))?;
+    let test_artifact = TestArtifact {
+        executable: artifact.clone(),
+        runner_argument: Some(artifact_argument),
+        package: "cargo-pending".into(),
+        target_key: "cargo-pending".into(),
+        kind: "cargo-pending".into(),
+        source: "cargo-pending".into(),
+    };
+    let underlying_runner = target_runner.underlying_runner.clone();
+    if matches!(
+        runner_identity,
+        RustRunnerInvocationIdentity::NextestList(_)
+    ) {
+        return run_nextest_list_passthrough(
+            &current_directory,
+            &test_artifact,
+            underlying_runner.as_ref(),
+            arguments,
+            watchdog_program.as_deref(),
+            stdout,
+            stderr,
+        );
+    }
+
+    let invocation_ordinal = reserve_cargo_runner_ordinal(&output_directory)?;
+    let result = (|| {
+        let utf8_arguments = arguments
+            .iter()
+            .cloned()
             .map(|argument| {
                 argument.into_string().map_err(|_| {
                     RustCompilerTestError::Context(
@@ -808,33 +918,21 @@ pub fn run_cargo_libtest_runner(
             .collect::<Result<Vec<_>, _>>()?;
         let invocation = crate::rust_test_runner::CargoTestInvocation {
             program: "cargo".into(),
+            kind: crate::rust_test_runner::RustCargoCommandKind::CargoTest,
             arguments: vec!["test".into()],
-            runner_arguments: arguments.clone(),
+            runner_arguments: utf8_arguments.clone(),
         };
-        let selection = rust_libtest_selection(&invocation)
-            .map_err(|error| RustCompilerTestError::UnsupportedCommand(error.to_string()))?;
-        let current_directory = std::env::current_dir()
-            .and_then(fs::canonicalize)
-            .map_err(|error| io_error(Path::new("."), error))?;
         let artifact_digest = format!(
             "{:x}",
             Sha256::digest(artifact.as_os_str().as_encoded_bytes())
         );
-        let transport_directory = output_directory
-            .join("attempts")
-            .join(&artifact_digest[..24]);
+        let transport_directory = output_directory.join("attempts").join(format!(
+            "{invocation_ordinal:016}-{}",
+            &artifact_digest[..24]
+        ));
         fs::create_dir_all(&transport_directory)
             .map_err(|error| io_error(&transport_directory, error))?;
         let transport_directory = regular_directory(&transport_directory)?;
-        let test_artifact = TestArtifact {
-            executable: artifact.clone(),
-            runner_argument: Some(artifact_argument),
-            package: "cargo-pending".into(),
-            target_key: "cargo-pending".into(),
-            kind: "cargo-pending".into(),
-            source: "cargo-pending".into(),
-        };
-        let underlying_runner = target_runner.underlying_runner.clone();
         let supervisor = watchdog_program
             .as_deref()
             .map_or_else(ProcessSupervisor::new, ProcessSupervisor::new_crash_safe)
@@ -848,31 +946,105 @@ pub fn run_cargo_libtest_runner(
                 reason: error.to_string(),
             }
         })?;
-        let tests = list_tests(
-            &current_directory,
-            &test_artifact,
-            &selection.list_arguments,
-            underlying_runner.as_ref(),
-            &supervisor,
-            options,
-        )?;
+        let (runner, runner_run_id, runner_version, runner_binary_id, attempts) =
+            match &runner_identity {
+                RustRunnerInvocationIdentity::CargoSingleAttempt => {
+                    let selection = rust_libtest_selection(&invocation).map_err(|error| {
+                        RustCompilerTestError::UnsupportedCommand(error.to_string())
+                    })?;
+                    let tests = list_tests(
+                        &current_directory,
+                        &test_artifact,
+                        &selection.list_arguments,
+                        underlying_runner.as_ref(),
+                        &supervisor,
+                        options,
+                    )?;
+                    let attempts = tests
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, test)| {
+                            let mut test_arguments = selection
+                                .run_arguments
+                                .iter()
+                                .map(OsString::from)
+                                .collect::<Vec<_>>();
+                            test_arguments
+                                .extend([OsString::from("--exact"), OsString::from(&test)]);
+                            (
+                                test,
+                                0,
+                                1,
+                                format!(
+                                    "{}:cargo:{invocation_ordinal:016}:{index:08}",
+                                    config.run_id
+                                ),
+                                test_arguments,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    (RustCargoRunnerKind::CargoTest, None, None, None, attempts)
+                }
+                RustRunnerInvocationIdentity::NextestAttempt(NextestAttemptIdentity {
+                    invocation,
+                    test_name,
+                    retry,
+                    total_attempts,
+                    runner_attempt_id,
+                }) => {
+                    if !utf8_arguments
+                        .windows(2)
+                        .any(|pair| pair == ["--exact", test_name])
+                    {
+                        return Err(RustCompilerTestError::Context(
+                            "nextest target-runner arguments do not select NEXTEST_TEST_NAME exactly"
+                                .into(),
+                        ));
+                    }
+                    (
+                        RustCargoRunnerKind::Nextest,
+                        Some(invocation.run_id.clone()),
+                        Some(invocation.version.clone()),
+                        Some(invocation.binary_id.clone()),
+                        vec![(
+                            test_name.clone(),
+                            *retry,
+                            *total_attempts,
+                            runner_attempt_id.clone(),
+                            arguments.clone(),
+                        )],
+                    )
+                }
+                RustRunnerInvocationIdentity::NextestList(_) => unreachable!("handled above"),
+            };
+        let tests = attempts
+            .iter()
+            .map(|(test, _, _, _, _)| test.clone())
+            .collect::<Vec<_>>();
         let contexts = preflight_rust_test_contexts(tests.clone())
             .map_err(|error| RustCompilerTestError::Context(error.to_string()))?;
-        let tasks = tests
-            .iter()
+        let tasks = attempts
+            .into_iter()
             .enumerate()
-            .map(|(index, test)| ProcessTask {
-                ordinal: index,
-                artifact_index: 0,
-                test_index: index,
-                artifact: test_artifact.clone(),
-                test: test.clone(),
-                test_id: format!("rust:cargo-runner:{}::{test}", &artifact_digest[..24]),
-                context_id: contexts[test],
-                transport: transport_directory.join(format!("{index:08}.mmap")),
-                run_arguments: selection.run_arguments.clone(),
-                underlying_runner: underlying_runner.clone(),
-            })
+            .map(
+                |(index, (test, retry, total_attempts, runner_attempt_id, test_arguments))| {
+                    ProcessTask {
+                        ordinal: index,
+                        artifact_index: 0,
+                        artifact: test_artifact.clone(),
+                        test: test.clone(),
+                        test_id: format!("rust:cargo-runner:{}::{test}", &artifact_digest[..24]),
+                        context_id: contexts[&test],
+                        retry,
+                        total_attempts,
+                        runner_attempt_id,
+                        runner,
+                        transport: transport_directory.join(format!("{index:08}.mmap")),
+                        test_arguments,
+                        underlying_runner: underlying_runner.clone(),
+                    }
+                },
+            )
             .collect::<Vec<_>>();
         let outcomes = execute_process_tasks(&current_directory, &tasks, &supervisor, options)?;
         let mut exit_code = 0;
@@ -888,6 +1060,9 @@ pub fn run_cargo_libtest_runner(
                 RustCargoRunnerAttempt {
                     test: outcome.task.test,
                     context_id: outcome.task.context_id,
+                    retry: outcome.task.retry,
+                    total_attempts: outcome.task.total_attempts,
+                    runner_attempt_id: outcome.task.runner_attempt_id,
                     result: outcome.output.result,
                     transport: outcome.read,
                     started_at_ms: outcome.started_at_ms,
@@ -901,9 +1076,13 @@ pub fn run_cargo_libtest_runner(
             version: RUST_CARGO_RUNNER_VERSION,
             run_id: run_id.clone(),
             invocation_ordinal,
+            runner,
+            runner_run_id,
+            runner_version,
+            runner_binary_id,
             target,
             artifact,
-            arguments,
+            arguments: utf8_arguments,
             attempts,
         };
         let unit_path = write_cargo_runner_unit(&output_directory, &unit)?;
@@ -911,7 +1090,7 @@ pub fn run_cargo_libtest_runner(
             .map_err(|error| io_error(&transport_directory, error))?;
         Ok(RustCargoRunnerExecution {
             exit_code,
-            unit_path,
+            unit_path: Some(unit_path),
         })
     })();
     if let Err(error) = &result {
@@ -1078,14 +1257,95 @@ pub fn read_cargo_runner_units(
             "Cargo runner retained attempt transport state".into(),
         ));
     }
-    let mut artifacts = BTreeSet::new();
-    if units
+    let runner_kinds = units
         .iter()
-        .any(|unit| !artifacts.insert((unit.target.clone(), unit.artifact.clone())))
-    {
+        .map(|unit| unit.runner)
+        .collect::<BTreeSet<_>>();
+    if runner_kinds.len() > 1 {
         return Err(RustCompilerTestError::Context(
-            "Cargo runner published one target artifact more than once".into(),
+            "Cargo runner mixed standard Cargo and nextest units".into(),
         ));
+    }
+    let mut attempt_ids = BTreeSet::new();
+    if units.iter().flat_map(|unit| &unit.attempts).any(|attempt| {
+        attempt.runner_attempt_id.is_empty()
+            || !attempt_ids.insert(attempt.runner_attempt_id.clone())
+    }) {
+        return Err(RustCompilerTestError::Context(
+            "Cargo runner attempt identity is empty or duplicated".into(),
+        ));
+    }
+    match runner_kinds.first() {
+        Some(RustCargoRunnerKind::CargoTest) => {
+            let mut artifacts = BTreeSet::new();
+            if units.iter().any(|unit| {
+                unit.runner_run_id.is_some()
+                    || unit.runner_version.is_some()
+                    || unit.runner_binary_id.is_some()
+                    || !artifacts.insert((unit.target.clone(), unit.artifact.clone()))
+                    || unit
+                        .attempts
+                        .iter()
+                        .any(|attempt| attempt.retry != 0 || attempt.total_attempts != 1)
+            }) {
+                return Err(RustCompilerTestError::Context(
+                    "standard Cargo runner units violate the single-attempt identity contract"
+                        .into(),
+                ));
+            }
+        }
+        Some(RustCargoRunnerKind::Nextest) => {
+            let mut nextest_identity = None;
+            let mut logical_attempts =
+                BTreeMap::<(String, PathBuf, String), Vec<&RustCargoRunnerAttempt>>::new();
+            for unit in &units {
+                let identity = (unit.runner_run_id.as_ref(), unit.runner_version.as_ref());
+                if identity.0.is_none()
+                    || identity.1.is_none()
+                    || unit.runner_binary_id.is_none()
+                    || unit.attempts.len() != 1
+                {
+                    return Err(RustCompilerTestError::Context(
+                        "nextest runner unit lacks exact invocation or attempt identity".into(),
+                    ));
+                }
+                match &nextest_identity {
+                    Some(expected) if *expected != identity => {
+                        return Err(RustCompilerTestError::Context(
+                            "nextest runner units belong to different runs or versions".into(),
+                        ));
+                    }
+                    None => nextest_identity = Some(identity),
+                    _ => {}
+                }
+                let attempt = &unit.attempts[0];
+                logical_attempts
+                    .entry((
+                        unit.target.clone(),
+                        unit.artifact.clone(),
+                        attempt.test.clone(),
+                    ))
+                    .or_default()
+                    .push(attempt);
+            }
+            for attempts in logical_attempts.values_mut() {
+                attempts.sort_by_key(|attempt| attempt.retry);
+                let total_attempts = attempts[0].total_attempts;
+                for (expected_retry, attempt) in attempts.iter().enumerate() {
+                    if attempt.retry != expected_retry
+                        || attempt.total_attempts != total_attempts
+                        || attempt.retry >= total_attempts
+                        || (expected_retry + 1 < attempts.len() && attempt.result.exit_code() == 0)
+                    {
+                        return Err(RustCompilerTestError::Context(
+                            "nextest retry sequence is noncontiguous, inconsistent, or continues after success"
+                                .into(),
+                        ));
+                    }
+                }
+            }
+        }
+        None => {}
     }
     Ok(units)
 }
@@ -1130,6 +1390,14 @@ fn runner_declaration() -> FrontendRunnerDeclaration {
             reason: "Rust libtest exposes no general application-action lifecycle".into(),
         }],
     }
+}
+
+fn nextest_runner_declaration() -> FrontendRunnerDeclaration {
+    let mut declaration = runner_declaration();
+    declaration.runner = "rust-nextest".into();
+    declaration.limitations[0].reason =
+        "nextest exposes no general application-action lifecycle".into();
+    declaration
 }
 
 fn compiler_runner_declaration() -> FrontendRunnerDeclaration {
@@ -1548,14 +1816,18 @@ fn raw_result(
     RustCompilerTransportHealthRecord,
 ) {
     let worker_id = format!("artifact-{:04}", task.artifact_index);
-    let attempt_id = format!("{run_id}:{:04}:{:08}", task.artifact_index, task.test_index);
+    let attempt_id = task.runner_attempt_id.clone();
+    let runner = match task.runner {
+        RustCargoRunnerKind::CargoTest => "rust-libtest",
+        RustCargoRunnerKind::Nextest => "rust-nextest",
+    };
     let scope = ExecutionScope {
         version: 1,
         run_id: run_id.into(),
         worker_id: worker_id.clone(),
         test_id: task.test_id.clone(),
         test_key: task.test_id.clone(),
-        retry: 0,
+        retry: task.retry,
         attempt_id: attempt_id.clone(),
     };
     let mut phases = vec![base_phase];
@@ -1566,12 +1838,12 @@ fn raw_result(
         test: task.test_id.clone(),
         test_file: Some(task.artifact.source.clone()),
         title: Some(task.test.clone()),
-        retry: Some(0),
+        retry: Some(task.retry),
         status: Some(status.into()),
         expected_status: Some("passed".into()),
         flaky: false,
         provenance: TestProvenance {
-            runner: "rust-libtest".into(),
+            runner: runner.into(),
             kind: task.artifact.kind.clone(),
             project: Some(task.artifact.package.clone()),
             source: "supercov-rustc-process-per-test".into(),
@@ -1592,18 +1864,18 @@ fn raw_result(
                 worker_id,
                 test_id: background_id.clone(),
                 test_key: background_id.clone(),
-                retry: 0,
+                retry: task.retry,
                 attempt_id: format!("{attempt_id}:background"),
             }),
             test: background_id,
             test_file: Some(task.artifact.source.clone()),
             title: Some(format!("Background while running {}", task.test)),
-            retry: Some(0),
+            retry: Some(task.retry),
             status: Some(status.into()),
             expected_status: Some("passed".into()),
             flaky: false,
             provenance: TestProvenance {
-                runner: "rust-libtest".into(),
+                runner: runner.into(),
                 kind: task.artifact.kind.clone(),
                 project: Some(task.artifact.package.clone()),
                 source: "supercov-rustc-context-zero".into(),
@@ -1641,12 +1913,18 @@ pub fn run_rust_compiler_frontend(
         options,
         diagnostics,
     )
-    .map_err(|error| match error {
+    .map_err(|error| {
+        match error {
         crate::rust_compiler_orchestration::RustCompilerOrchestrationError::Interrupted {
             code,
             signal,
         } => RustCompilerTestError::Interrupted { code, signal },
+        crate::rust_compiler_orchestration::RustCompilerOrchestrationError::UnverifiedExecution {
+            code,
+            reason,
+        } => RustCompilerTestError::UnverifiedExecution { code, reason },
         error => RustCompilerTestError::Build(error.to_string()),
+    }
     })?;
     execute_compiler_build(request, build, diagnostics)
 }
@@ -1664,8 +1942,134 @@ fn execute_compiler_build(
         .enumerate()
         .map(|(index, artifact)| (artifact.executable.clone(), (index, artifact.clone())))
         .collect::<BTreeMap<_, _>>();
+    let nextest_version = match build.command_kind {
+        crate::rust_test_runner::RustCargoCommandKind::NextestRun => {
+            Some(build.nextest_version.as_deref().ok_or_else(|| {
+                RustCompilerTestError::Context(
+                    "nextest execution lacks its authenticated version handshake".into(),
+                )
+            })?)
+        }
+        crate::rust_test_runner::RustCargoCommandKind::CargoTest => {
+            if build.nextest_version.is_some() || build.nextest_catalog.is_some() {
+                return Err(RustCompilerTestError::Context(
+                    "standard Cargo execution carries foreign nextest preflight state".into(),
+                ));
+            }
+            None
+        }
+    };
+    let mut nextest_selected =
+        BTreeMap::<(PathBuf, String), (String, usize, TestArtifact, String)>::new();
+    let mut nextest_selected_ids = BTreeSet::new();
+    let mut nextest_binary_by_artifact = BTreeMap::<PathBuf, String>::new();
+    if let Some(catalog) = &build.nextest_catalog {
+        if build.command_kind != crate::rust_test_runner::RustCargoCommandKind::NextestRun {
+            return Err(RustCompilerTestError::Context(
+                "a nextest catalog was attached to a non-nextest build".into(),
+            ));
+        }
+        for (binary_id, suite) in &catalog.rust_suites {
+            if suite.status != RustTestSuiteStatusSummary::LISTED && !suite.test_cases.is_empty() {
+                return Err(RustCompilerTestError::Context(format!(
+                    "nextest skipped suite {binary_id} contains test cases"
+                )));
+            }
+            let executable = fs::canonicalize(suite.binary.binary_path.as_std_path())
+                .map_err(|error| io_error(suite.binary.binary_path.as_std_path(), error))?;
+            let (artifact_index, artifact) =
+                artifact_by_path.get(&executable).ok_or_else(|| {
+                    RustCompilerTestError::Context(format!(
+                        "nextest catalog contains an unknown artifact: {}",
+                        executable.display()
+                    ))
+                })?;
+            if nextest_binary_by_artifact
+                .insert(executable.clone(), binary_id.to_string())
+                .is_some()
+            {
+                return Err(RustCompilerTestError::Context(
+                    "nextest catalog aliases two binary identities to one artifact".into(),
+                ));
+            }
+            let compilation_target = match suite.binary.build_platform {
+                BuildPlatform::Host => catalog
+                    .rust_build_meta
+                    .platforms
+                    .as_ref()
+                    .map(|platforms| platforms.host.platform.triple.as_str()),
+                BuildPlatform::Target => {
+                    catalog
+                        .rust_build_meta
+                        .platforms
+                        .as_ref()
+                        .and_then(|platforms| {
+                            if platforms.targets.len() > 1 {
+                                None
+                            } else {
+                                platforms
+                                    .targets
+                                    .first()
+                                    .map(|target| target.platform.triple.as_str())
+                                    .or(Some(platforms.host.platform.triple.as_str()))
+                            }
+                        })
+                }
+            }
+            .ok_or_else(|| {
+                RustCompilerTestError::Context(format!(
+                    "nextest binary {binary_id} lacks one exact compilation target"
+                ))
+            })?
+            .to_owned();
+            if !request
+                .cargo_runner_plan
+                .targets
+                .iter()
+                .any(|target| target.target == compilation_target)
+            {
+                return Err(RustCompilerTestError::Context(format!(
+                    "nextest binary {binary_id} uses unselected target {compilation_target}"
+                )));
+            }
+            for (test, summary) in &suite.test_cases {
+                if summary.kind.is_none() {
+                    return Err(RustCompilerTestError::Context(format!(
+                        "nextest catalog test {binary_id}::{test} lacks a test kind"
+                    )));
+                }
+                if summary.filter_match == FilterMatch::Matches {
+                    let test = test.to_string();
+                    let test_id = libtest_id(&compilation_target, artifact, &test);
+                    if !nextest_selected_ids.insert(test_id.clone()) {
+                        return Err(RustCompilerTestError::DuplicateTest(test_id));
+                    }
+                    if nextest_selected
+                        .insert(
+                            (executable.clone(), test.clone()),
+                            (
+                                compilation_target.clone(),
+                                *artifact_index,
+                                artifact.clone(),
+                                test,
+                            ),
+                        )
+                        .is_some()
+                    {
+                        return Err(RustCompilerTestError::DuplicateTest(test_id));
+                    }
+                }
+            }
+        }
+    } else if build.command_kind == crate::rust_test_runner::RustCargoCommandKind::NextestRun {
+        return Err(RustCompilerTestError::Context(
+            "nextest execution lacks its exact selected-test catalog".into(),
+        ));
+    }
     let mut outcomes = Vec::new();
     let mut identities = BTreeSet::new();
+    let mut attempt_ids = BTreeSet::new();
+    let mut nextest_attempted = BTreeSet::new();
     for unit in &build.cargo_runner_units {
         let (artifact_index, artifact) = artifact_by_path.get(&unit.artifact).ok_or_else(|| {
             RustCompilerTestError::Context(format!(
@@ -1688,22 +2092,62 @@ fn execute_compiler_build(
                 )));
             }
             let test_id = libtest_id(&unit.target, artifact, &attempt.test);
-            if !identities.insert(test_id.clone()) {
-                return Err(RustCompilerTestError::DuplicateTest(test_id));
+            if unit.runner == RustCargoRunnerKind::Nextest {
+                if unit.runner_version.as_deref() != nextest_version {
+                    return Err(RustCompilerTestError::Context(format!(
+                        "nextest target-runner version disagrees with the authenticated outer handshake for {test_id}"
+                    )));
+                }
+                let expected_binary =
+                    nextest_binary_by_artifact
+                        .get(&unit.artifact)
+                        .ok_or_else(|| {
+                            RustCompilerTestError::Context(format!(
+                                "nextest executed an uncatalogued artifact: {}",
+                                unit.artifact.display()
+                            ))
+                        })?;
+                if unit.runner_binary_id.as_deref() != Some(expected_binary.as_str()) {
+                    return Err(RustCompilerTestError::Context(format!(
+                        "nextest runner binary identity disagrees with the selected-test catalog for {}",
+                        unit.artifact.display()
+                    )));
+                }
+                if !nextest_selected.contains_key(&(unit.artifact.clone(), attempt.test.clone())) {
+                    return Err(RustCompilerTestError::Context(format!(
+                        "nextest executed a test excluded by its machine-readable catalog: {test_id}"
+                    )));
+                }
+                nextest_attempted.insert(test_id.clone());
+            }
+            if !identities.insert((test_id.clone(), attempt.retry)) {
+                return Err(RustCompilerTestError::DuplicateTest(format!(
+                    "{test_id} retry {}",
+                    attempt.retry
+                )));
+            }
+            if !attempt_ids.insert(attempt.runner_attempt_id.clone()) {
+                return Err(RustCompilerTestError::Context(format!(
+                    "Cargo runner attempt ID is duplicated: {}",
+                    attempt.runner_attempt_id
+                )));
             }
             let task = ProcessTask {
                 ordinal: outcomes.len(),
                 artifact_index: *artifact_index,
-                test_index,
                 artifact: artifact.clone(),
                 test: attempt.test.clone(),
                 test_id,
                 context_id: attempt.context_id,
+                retry: attempt.retry,
+                total_attempts: attempt.total_attempts,
+                runner_attempt_id: attempt.runner_attempt_id.clone(),
+                runner: unit.runner,
                 transport: build.compiler_output_directory.join(format!(
                     "cargo-runner/libtest-{:04}-{test_index:08}.json",
                     unit.invocation_ordinal
                 )),
-                run_arguments: Vec::new(),
+                test_arguments: Vec::new(),
                 underlying_runner: None,
             };
             outcomes.push(ProcessOutcome {
@@ -1719,16 +2163,55 @@ fn execute_compiler_build(
             });
         }
     }
+    let standard_cargo_units = build
+        .cargo_runner_units
+        .iter()
+        .filter(|unit| unit.runner == RustCargoRunnerKind::CargoTest)
+        .count();
     if build.execution_exit_code == 0
         && build.run_libtests
-        && build.cargo_runner_units.len() != artifacts.len()
+        && standard_cargo_units != 0
+        && standard_cargo_units != artifacts.len()
     {
         return Err(RustCompilerTestError::Context(format!(
             "Cargo completed successfully but published {} runner unit(s) for {} artifact(s)",
-            build.cargo_runner_units.len(),
+            standard_cargo_units,
             artifacts.len()
         )));
     }
+    let mut nextest_attempt_groups = BTreeMap::<String, Vec<&ProcessOutcome>>::new();
+    for outcome in &outcomes {
+        if outcome.task.runner == RustCargoRunnerKind::Nextest {
+            nextest_attempt_groups
+                .entry(outcome.task.test_id.clone())
+                .or_default()
+                .push(outcome);
+        }
+    }
+    for attempts in nextest_attempt_groups.values_mut() {
+        attempts.sort_by_key(|outcome| outcome.task.retry);
+    }
+    let nextest_terminal_failure = nextest_attempt_groups.values().any(|attempts| {
+        attempts
+            .last()
+            .is_some_and(|outcome| outcome.output.result.exit_code() != 0)
+    });
+    let nextest_flaky = nextest_attempt_groups.values().any(|attempts| {
+        attempts
+            .last()
+            .is_some_and(|outcome| outcome.output.result.exit_code() == 0)
+            && attempts
+                .iter()
+                .take(attempts.len().saturating_sub(1))
+                .any(|outcome| outcome.output.result.exit_code() != 0)
+    });
+    let nextest_unstarted = nextest_selected
+        .values()
+        .filter(|(target, _, artifact, test)| {
+            !nextest_attempted.contains(&libtest_id(target, artifact, test))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
 
     let mut raw_results = ctfe_raw_results(
         &request.run_id,
@@ -1754,14 +2237,45 @@ fn execute_compiler_build(
                 reason: error.to_string(),
             })?;
     }
-    let authenticated_failure = doctest_command_failed(&build.doctest_outcomes)
-        || outcomes
-            .iter()
-            .any(|outcome| outcome.output.result.exit_code() != 0);
-    if (overall_exit != 0) != authenticated_failure {
-        return Err(RustCompilerTestError::Context(
-            "Cargo exit status disagrees with authenticated libtest/doctest outcomes".into(),
-        ));
+    match build.command_kind {
+        crate::rust_test_runner::RustCargoCommandKind::CargoTest => {
+            let authenticated_failure = doctest_command_failed(&build.doctest_outcomes)
+                || outcomes
+                    .iter()
+                    .any(|outcome| outcome.output.result.exit_code() != 0);
+            if (overall_exit != 0) != authenticated_failure {
+                return Err(RustCompilerTestError::Context(
+                    "Cargo exit status disagrees with authenticated libtest/doctest outcomes"
+                        .into(),
+                ));
+            }
+        }
+        crate::rust_test_runner::RustCargoCommandKind::NextestRun => match overall_exit {
+            NextestExitCode::OK => {
+                if nextest_terminal_failure || !nextest_unstarted.is_empty() {
+                    return Err(RustCompilerTestError::Context(
+                        "nextest exited successfully without terminal successful attempts for every selected test"
+                            .into(),
+                    ));
+                }
+            }
+            NextestExitCode::TEST_RUN_FAILED => {
+                if !nextest_terminal_failure && !nextest_flaky {
+                    return Err(RustCompilerTestError::Context(
+                        "nextest reported test failure without an authenticated terminal failure or flaky attempt sequence"
+                            .into(),
+                    ));
+                }
+            }
+            NextestExitCode::NO_TESTS_RUN if nextest_selected.is_empty() => {}
+            code => {
+                return Err(RustCompilerTestError::UnverifiedExecution {
+                    code,
+                    reason: "nextest returned an infrastructure/status code that is not authenticated by test attempts"
+                        .into(),
+                });
+            }
+        },
     }
     for outcome in outcomes {
         let (test_status, exit) = status(&outcome.output);
@@ -1789,10 +2303,7 @@ fn execute_compiler_build(
                 dropped: outcome.read.dropped,
             });
         }
-        let attempt_id = format!(
-            "{}:{:04}:{:08}",
-            request.run_id, outcome.task.artifact_index, outcome.task.test_index
-        );
+        let attempt_id = outcome.task.runner_attempt_id.clone();
         let base_phase = CoveragePhase {
             id: phase_id(&request.run_id, &attempt_id),
             kind: "test".into(),
@@ -1831,6 +2342,31 @@ fn execute_compiler_build(
         }
         transport_health.push(health);
     }
+    for (target, _artifact_index, artifact, test) in nextest_unstarted {
+        let test_id = libtest_id(&target, &artifact, &test);
+        raw_results.push(RawTestResult {
+            test_id: Some(test_id.clone()),
+            scope: None,
+            test: test_id,
+            test_file: Some(artifact.source.clone()),
+            title: Some(test),
+            retry: None,
+            status: Some("unstarted".into()),
+            expected_status: Some("passed".into()),
+            flaky: false,
+            provenance: TestProvenance {
+                runner: "rust-nextest".into(),
+                kind: artifact.kind,
+                project: Some(artifact.package),
+                source: "nextest-selected-but-not-started".into(),
+            },
+            role: "test".into(),
+            phases: Vec::new(),
+            runtime: Vec::new(),
+            browser: Vec::new(),
+            server: Vec::new(),
+        });
+    }
 
     let mut structural_limitations = build
         .normalized
@@ -1856,10 +2392,12 @@ fn execute_compiler_build(
         .iter()
         .map(|result| result.provenance.runner.as_str())
         .collect::<BTreeSet<_>>();
-    if observed_runners
-        .iter()
-        .any(|runner| !matches!(*runner, "rustc" | "rust-libtest" | "rustdoc"))
-    {
+    if observed_runners.iter().any(|runner| {
+        !matches!(
+            *runner,
+            "rustc" | "rust-libtest" | "rust-nextest" | "rustdoc"
+        )
+    }) {
         return Err(RustCompilerTestError::Context(
             "Rust compiler run produced an unknown runner identity".into(),
         ));
@@ -1871,6 +2409,7 @@ fn execute_compiler_build(
     let runners = [
         ("rustc", compiler_runner_declaration()),
         ("rust-libtest", runner_declaration()),
+        ("rust-nextest", nextest_runner_declaration()),
         ("rustdoc", rustdoc_runner_declaration()),
     ]
     .into_iter()
@@ -2044,6 +2583,10 @@ mod tests {
                 version: RUST_CARGO_RUNNER_VERSION,
                 run_id: "run_0123456789abcdef".into(),
                 invocation_ordinal: ordinal,
+                runner: RustCargoRunnerKind::CargoTest,
+                runner_run_id: None,
+                runner_version: None,
+                runner_binary_id: None,
                 target: "aarch64-apple-darwin".into(),
                 artifact: PathBuf::from("target/test-artifact"),
                 arguments: Vec::new(),
@@ -2058,6 +2601,10 @@ mod tests {
                 version: RUST_CARGO_RUNNER_VERSION,
                 run_id: "run_0123456789abcdef".into(),
                 invocation_ordinal: second_ordinal,
+                runner: RustCargoRunnerKind::CargoTest,
+                runner_run_id: None,
+                runner_version: None,
+                runner_binary_id: None,
                 target: "x86_64-unknown-linux-gnu".into(),
                 artifact: PathBuf::from("target/test-artifact"),
                 arguments: Vec::new(),
@@ -2087,6 +2634,122 @@ mod tests {
         .to_string();
         assert!(error.contains("unselected target identity"), "{error}");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nextest_retry_units_preserve_each_exact_attempt_and_reject_gaps() {
+        let root = std::env::temp_dir().join(format!(
+            "supercov-nextest-retries-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let unit = |ordinal: u64, retry: usize, status: i32| RustCargoRunnerUnit {
+            version: RUST_CARGO_RUNNER_VERSION,
+            run_id: "run_0123456789abcdef".into(),
+            invocation_ordinal: ordinal,
+            runner: RustCargoRunnerKind::Nextest,
+            runner_run_id: Some("2ae19189-240a-433a-a31d-acc411fe8e1f".into()),
+            runner_version: Some("0.9.140".into()),
+            runner_binary_id: Some("fixture".into()),
+            target: "aarch64-apple-darwin".into(),
+            artifact: PathBuf::from("target/test-artifact"),
+            arguments: vec!["--exact".into(), "tests::flaky".into()],
+            attempts: vec![RustCargoRunnerAttempt {
+                test: "tests::flaky".into(),
+                context_id: 7,
+                retry,
+                total_attempts: 2,
+                runner_attempt_id: format!(
+                    "2ae19189-240a-433a-a31d-acc411fe8e1f:fixture$tests::flaky{}",
+                    if retry == 0 {
+                        String::new()
+                    } else {
+                        format!("#{}", retry + 1)
+                    }
+                ),
+                result: SupervisedResult {
+                    status: Some(status),
+                    signal: None,
+                    timed_out: false,
+                    interrupted_signal: None,
+                },
+                transport: RustTransportRead {
+                    observations: Vec::new(),
+                    ordinal_hits: Vec::new(),
+                    phases: Vec::new(),
+                    committed: 0,
+                    incomplete: 0,
+                    dropped: 0,
+                    attachments: 0,
+                },
+                started_at_ms: retry as i64,
+                ended_at_ms: retry as i64 + 1,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }],
+        };
+
+        let first = reserve_cargo_runner_ordinal(&root).unwrap();
+        write_cargo_runner_unit(&root, &unit(first, 0, 101)).unwrap();
+        let second = reserve_cargo_runner_ordinal(&root).unwrap();
+        write_cargo_runner_unit(&root, &unit(second, 1, 0)).unwrap();
+        let read = read_cargo_runner_units(
+            &root,
+            "run_0123456789abcdef",
+            &["aarch64-apple-darwin".into()],
+        )
+        .unwrap();
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].attempts[0].retry, 0);
+        assert_eq!(read[1].attempts[0].retry, 1);
+        fs::remove_dir_all(&root).unwrap();
+
+        let gap_root = root.with_extension("gap");
+        fs::create_dir(&gap_root).unwrap();
+        let first = reserve_cargo_runner_ordinal(&gap_root).unwrap();
+        write_cargo_runner_unit(&gap_root, &unit(first, 1, 0)).unwrap();
+        let error = read_cargo_runner_units(
+            &gap_root,
+            "run_0123456789abcdef",
+            &["aarch64-apple-darwin".into()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("retry sequence"), "{error}");
+        fs::remove_dir_all(gap_root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nextest_list_passthrough_preserves_output_and_publishes_no_unit() {
+        let artifact = TestArtifact {
+            executable: PathBuf::from("/bin/echo"),
+            runner_argument: None,
+            package: "fixture".into(),
+            target_key: "lib:fixture".into(),
+            kind: "unit".into(),
+            source: "src/lib.rs".into(),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let execution = run_nextest_list_passthrough(
+            Path::new("/tmp"),
+            &artifact,
+            None,
+            vec![OsString::from("--list"), OsString::from("--format=terse")],
+            None,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+        assert_eq!(execution.exit_code, 0);
+        assert!(execution.unit_path.is_none());
+        assert_eq!(stdout, b"--list --format=terse\n");
+        assert!(stderr.is_empty());
     }
 
     #[test]

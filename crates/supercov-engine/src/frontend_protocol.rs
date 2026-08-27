@@ -39,6 +39,7 @@ pub enum FrontendProtocolError {
         result: usize,
         scope: usize,
     },
+    InvalidUnstartedResult(String),
     InvalidPhaseKind(String),
     DuplicatePhase(String),
     UnknownPhaseReference(String),
@@ -93,6 +94,12 @@ impl std::fmt::Display for FrontendProtocolError {
                 formatter,
                 "frontend runner {runner} retry identity differs: result={result} scope={scope}"
             ),
+            Self::InvalidUnstartedResult(reason) => {
+                write!(
+                    formatter,
+                    "invalid selected-but-unstarted test record: {reason}"
+                )
+            }
             Self::InvalidPhaseKind(kind) => {
                 write!(formatter, "unsupported frontend phase kind: {kind}")
             }
@@ -165,6 +172,18 @@ fn require_exact_identities(
         return Err(missing("test"));
     }
     let has_observations = has_attributable_observations(raw);
+    let unstarted = raw.status.as_deref() == Some("unstarted");
+    if unstarted
+        && (raw.role != "test"
+            || raw.scope.is_some()
+            || raw.retry.is_some()
+            || raw.flaky
+            || has_observations)
+    {
+        return Err(FrontendProtocolError::InvalidUnstartedResult(
+            "it must be a test with no scope, retry, flaky verdict, phase, or observation".into(),
+        ));
+    }
     if let Some(scope) = &raw.scope {
         if scope.run_id != run_id {
             return Err(FrontendProtocolError::ScopeRunMismatch {
@@ -192,7 +211,10 @@ fn require_exact_identities(
         }
     } else if runner.attribution.worker == AttributionPrecision::Exact && has_observations {
         return Err(missing("worker"));
-    } else if runner.attribution.retry == AttributionPrecision::Exact && raw.retry.is_none() {
+    } else if runner.attribution.retry == AttributionPrecision::Exact
+        && raw.retry.is_none()
+        && !unstarted
+    {
         return Err(missing("retry"));
     }
 
@@ -485,6 +507,32 @@ mod tests {
         assert!(matches!(
             validate_frontend_report_request(&declaration(), &cyclic_phase),
             Err(FrontendProtocolError::CyclicPhaseReference(id)) if id == "assertion"
+        ));
+    }
+
+    #[test]
+    fn selected_but_unstarted_tests_have_no_invented_attempt_identity() {
+        let mut unstarted = request();
+        let raw = &mut unstarted.raw_results[0];
+        raw.scope = None;
+        raw.retry = None;
+        raw.status = Some("unstarted".into());
+        raw.phases.clear();
+        raw.runtime.clear();
+        assert!(validate_frontend_report_request(&declaration(), &unstarted).is_ok());
+
+        let mut false_attempt = unstarted.clone();
+        false_attempt.raw_results[0].retry = Some(0);
+        assert!(matches!(
+            validate_frontend_report_request(&declaration(), &false_attempt),
+            Err(FrontendProtocolError::InvalidUnstartedResult(_))
+        ));
+
+        let mut false_observation = unstarted;
+        false_observation.raw_results[0].runtime = request().raw_results[0].runtime.clone();
+        assert!(matches!(
+            validate_frontend_report_request(&declaration(), &false_observation),
+            Err(FrontendProtocolError::InvalidUnstartedResult(_))
         ));
     }
 }

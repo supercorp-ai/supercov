@@ -111,6 +111,31 @@ Failed attempts cannot verify passed-only coverage. Missing/corrupt evidence,
 unknown obligations, ambiguous runner identity, unsupported generated code,
 or any blocking structural limitation makes measurement incomplete.
 
+Standard `cargo test` and rustdoc/libtest each expose exactly one attempt, so
+their frozen retry ordinal is zero. A retry-capable runner must supply attempt
+identity rather than Supercov inferring it from repeated names or output.
+For nextest 0.9.138 through 0.9.140, the target-runner environment is
+authoritative. The outer supervisor authenticates the exact nextest version
+before list or run. Official 0.9.138 and 0.9.140 binaries have executable
+contract gates; no 0.9.139 release exists. Versions outside that frozen range
+fail closed:
+the 1-based `NEXTEST_ATTEMPT` becomes retry ordinal `attempt - 1`, while
+`NEXTEST_ATTEMPT_ID` remains an opaque run-unique runner identity. The list
+phase is a transparent pass-through and publishes no evidence. Partial or
+inconsistent identity fails before the test runs. Stress iterations are not
+retries; until the shared protocol gains that separate axis, stress mode fails
+closed rather than collapsing multiple executions into one logical attempt.
+The machine-readable list is also the exact selected-test catalog. A selected
+test cancelled by fail-fast is retained as `unstarted` with logical test
+identity only; Supercov must not invent a worker, retry, phase, scope or
+observation for an attempt that nextest never launched.
+Pre-separator selection options and post-separator emulated-libtest filters are
+projected byte-for-byte into the machine-readable list command. Concurrent
+target-runner invocations reserve distinct durable ordinals and retain distinct
+opaque attempt IDs. An uncatchable target-runner death publishes no false unit,
+leaves an unmatched durable reservation that makes ingestion fail closed, and
+cannot let its supervised test process escape.
+
 `100%` for this model means every frozen point and branch alternative was
 observed and every atomic condition has a valid masking-MC/DC witness, with no
 blocking measurement limitation. It does not prove input-partition, path,

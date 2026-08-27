@@ -1010,6 +1010,30 @@ substitution, the composed-wrapper signal matrix and relay performance remain
 open. Execution across multiple genuinely distinct installed targets remains
 unproven. These gaps keep Rust private.
 
+Checkpoint (2026-08-27): the first owned cargo-nextest boundary is now exact
+for the two pinned released contracts, 0.9.138 and 0.9.140. Supercov validates
+the full version identity and fails closed for unknown, hypothetical or newer
+releases. Machine-readable list projection preserves selectors on both sides
+of `--`, empty-suite policy, bare timing flags and clustered verbosity without
+changing the user's run command. Each real attempt retains nextest run,
+binary, test, zero-based retry, total-attempt and runner-attempt identity.
+Executable gates cover a retry that becomes passing, a terminally flaky run,
+default fail-fast with an exact selected-but-unstarted outcome, two genuinely
+overlapping attempts with no cross-attribution and both empty-suite exit
+policies. A killed target runner behind the production configured-runner chain
+leaves exactly one durable unmatched reservation, publishes no false attempt
+or stored run and cannot leak its child test process. Original nonzero nextest
+and instrumentation exits remain distinct.
+
+This closes the ordinary nextest catalog/retry/flaky/fail-fast/concurrency and
+target-runner-death slice. It does not close R2: custom harnesses, remaining
+presentation/output modes, late work and subprocess attribution, non-forwarding
+compiler caches, read-only-parent/cross-volume fallback, genuinely distinct
+installed targets and the supported Linux/Windows matrices remain release
+blockers. The compiler corpus also exposed a separate R1 denominator gap:
+constant-literal assertion decisions such as `assert!(false)` must be modeled
+without depending on a generated switch or silently disappearing.
+
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.
 

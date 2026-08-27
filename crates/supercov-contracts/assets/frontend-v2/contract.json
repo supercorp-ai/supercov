@@ -16,6 +16,7 @@
     "identityDowngradeRequiresLimitation": true,
     "unknownPhaseReferenceFatal": true,
     "phaseCausalityAcyclic": true,
+    "selectedUnstartedHasTestIdentityOnly": true,
     "multipleRunnersPerFrontend": true,
     "structuralLimitationsReferenceManifestIds": true,
     "attributionLimitationsRunnerScoped": true,

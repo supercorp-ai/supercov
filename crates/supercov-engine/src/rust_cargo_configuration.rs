@@ -178,15 +178,11 @@ fn io_error(path: &Path, error: impl std::fmt::Display) -> RustCargoConfiguratio
 fn command_targets(
     invocation: &CargoTestInvocation,
 ) -> Result<Vec<String>, RustCargoConfigurationError> {
-    let test_position = invocation
-        .arguments
-        .iter()
-        .position(|argument| argument == "test")
-        .ok_or_else(|| {
-            RustCargoConfigurationError::Invalid("Cargo test subcommand is missing".into())
-        })?;
-    toolchain_selector(invocation, test_position)?;
-    if invocation.arguments[..test_position]
+    let command_position = invocation.command_position().ok_or_else(|| {
+        RustCargoConfigurationError::Invalid("Cargo test runner subcommand is missing".into())
+    })?;
+    toolchain_selector(invocation, command_position)?;
+    if invocation.arguments[..command_position]
         .iter()
         .any(|argument| argument == "-Z" || argument.starts_with("-Z"))
     {
@@ -337,14 +333,10 @@ fn rustup_program(cargo: &Path) -> PathBuf {
 fn selected_cargo_program(
     invocation: &CargoTestInvocation,
 ) -> Result<OsString, RustCargoConfigurationError> {
-    let test_position = invocation
-        .arguments
-        .iter()
-        .position(|argument| argument == "test")
-        .ok_or_else(|| {
-            RustCargoConfigurationError::Invalid("Cargo test subcommand is missing".into())
-        })?;
-    let Some(selector) = toolchain_selector(invocation, test_position)? else {
+    let command_position = invocation.command_position().ok_or_else(|| {
+        RustCargoConfigurationError::Invalid("Cargo test runner subcommand is missing".into())
+    })?;
+    let Some(selector) = toolchain_selector(invocation, command_position)? else {
         return Ok(invocation.program.clone().into());
     };
     let cargo_proxy = which::which(&invocation.program).map_err(|error| {
@@ -868,14 +860,10 @@ fn resolve_with_inputs(
         fs::canonicalize(execution_root).map_err(|error| io_error(execution_root, error))?;
     let command_targets = command_targets(invocation)?;
     let command_config = command_config_arguments(invocation)?;
-    let test_position = invocation
-        .arguments
-        .iter()
-        .position(|argument| argument == "test")
-        .ok_or_else(|| {
-            RustCargoConfigurationError::Invalid("Cargo test subcommand is missing".into())
-        })?;
-    let explicit_toolchain = toolchain_selector(invocation, test_position)?.is_some();
+    let command_position = invocation.command_position().ok_or_else(|| {
+        RustCargoConfigurationError::Invalid("Cargo test runner subcommand is missing".into())
+    })?;
+    let explicit_toolchain = toolchain_selector(invocation, command_position)?.is_some();
     let selected_cargo = selected_cargo_program(invocation)?;
     let model = load_cargo_configuration(&root, model_inputs.cargo_home.clone(), &command_config)
         .map_err(|error| RustCargoConfigurationError::Invalid(error.to_string()))?;
@@ -963,6 +951,7 @@ mod tests {
     fn invocation(arguments: &[&str]) -> CargoTestInvocation {
         CargoTestInvocation {
             program: "cargo".into(),
+            kind: crate::rust_test_runner::RustCargoCommandKind::CargoTest,
             arguments: arguments.iter().map(|value| (*value).into()).collect(),
             runner_arguments: Vec::new(),
         }
@@ -1396,6 +1385,7 @@ mod tests {
             &root,
             &CargoTestInvocation {
                 program: cargo.to_string_lossy().into_owned(),
+                kind: crate::rust_test_runner::RustCargoCommandKind::CargoTest,
                 arguments: vec!["test".into()],
                 runner_arguments: Vec::new(),
             },

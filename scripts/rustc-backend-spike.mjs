@@ -253,6 +253,23 @@ async function runAsync(command, args, options = {}) {
 
 const delay = (milliseconds) =>
   new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+const nextestOnlyComplete = Symbol('nextest-only-complete');
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ESRCH') return false;
+    throw error;
+  }
+}
+
+async function waitForProcessExit(pid, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (processExists(pid) && Date.now() < deadline) await delay(25);
+  return !processExists(pid);
+}
 
 function compilerSources(directory, crate) {
   const snapshots = readdirSync(directory)
@@ -648,7 +665,9 @@ try {
       'const [mode, spaced, artifact, ...args] = process.argv.slice(2);',
       "if (!['--fixed', '--cfg', '--cli'].includes(mode) || spaced !== 'two words' || !artifact) process.exit(97);",
       'if (process.env.SUPERCOV_PRODUCTION_RUNNER_LOG) appendFileSync(process.env.SUPERCOV_PRODUCTION_RUNNER_LOG, JSON.stringify({program: fileURLToPath(import.meta.url), mode, artifact, args}) + "\\n");',
-      "const result = spawnSync(artifact, args, {stdio: 'inherit', env: process.env});",
+      'const env = {...process.env};',
+      "if (env.SUPERCOV_NEXTEST_CRASH_PID) env.SUPERCOV_NEXTEST_TARGET_RUNNER_PID = String(process.ppid);",
+      "const result = spawnSync(artifact, args, {stdio: 'inherit', env});",
       'if (result.error) throw result.error;',
       'if (result.signal) process.kill(process.pid, result.signal);',
       'process.exit(result.status ?? 98);',
@@ -683,6 +702,478 @@ try {
   );
   assert.equal(productionRun.tests, productionRun.libtests + productionRun.doctests);
   assert.equal(productionRun.doctests, 6);
+  let productionFixtureSourceDigest = fixtureSourceDigest;
+  const pinnedNextest = process.env.SUPERCOV_NEXTEST_BIN;
+  if (pinnedNextest) {
+    const nextestVersion = spawnSync(pinnedNextest, ['nextest', '--version'], {
+      encoding: 'utf8',
+    });
+    assert.equal(nextestVersion.status, 0, nextestVersion.stderr);
+    assert.match(nextestVersion.stdout, /^cargo-nextest 0\.9\.140 /u);
+    const pluginDirectory = join(scratch, 'nextest-plugin');
+    mkdirSync(pluginDirectory, { recursive: true });
+    symlinkSync(
+      realpathSync(pinnedNextest),
+      join(pluginDirectory, 'cargo-nextest'),
+    );
+    const productionSource = join(productionFixture, 'src/lib.rs');
+    writeFileSync(
+      productionSource,
+      readFileSync(productionSource, 'utf8') +
+        '\n#[cfg(supercov_spike_instrumented)]\n' +
+        '#[test]\n' +
+        '#[ignore = "nextest retry identity corpus"]\n' +
+        'fn supercov_nextest_flaky_attempt() {\n' +
+        '    assert_ne!(std::env::var("NEXTEST_ATTEMPT").as_deref(), Ok("1"));\n' +
+        '}\n\n' +
+        '#[cfg(supercov_spike_instrumented)]\n' +
+        '#[test]\n' +
+        '#[ignore = "nextest fail-fast identity corpus"]\n' +
+        'fn supercov_nextest_fail_fast_a_fails() {\n' +
+        '    assert!(std::env::var_os("SUPERCOV_NEXTEST_FAIL_FAST_PASS").is_some());\n' +
+        '}\n\n' +
+        '#[cfg(supercov_spike_instrumented)]\n' +
+        '#[test]\n' +
+        '#[ignore = "nextest fail-fast identity corpus"]\n' +
+        'fn supercov_nextest_fail_fast_z_unstarted() {\n' +
+        '    assert!(std::env::var_os("SUPERCOV_NEXTEST_FAIL_FAST_PASS").is_none());\n' +
+        '}\n\n' +
+        '#[cfg(supercov_spike_instrumented)]\n' +
+        'fn supercov_nextest_parallel_barrier(name: &str, peer: &str) {\n' +
+        '    let root = std::path::PathBuf::from(std::env::var_os("SUPERCOV_NEXTEST_PARALLEL_DIR").unwrap());\n' +
+        '    std::fs::write(root.join(name), b"ready").unwrap();\n' +
+        '    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);\n' +
+        '    while !root.join(peer).is_file() {\n' +
+        '        assert!(std::time::Instant::now() < deadline, "nextest attempts did not overlap");\n' +
+        '        std::thread::sleep(std::time::Duration::from_millis(10));\n' +
+        '    }\n' +
+        '    std::thread::sleep(std::time::Duration::from_millis(100));\n' +
+        '}\n\n' +
+        '#[cfg(supercov_spike_instrumented)]\n' +
+        '#[test]\n' +
+        '#[ignore = "nextest concurrency identity corpus"]\n' +
+        'fn supercov_nextest_parallel_a() {\n' +
+        '    supercov_nextest_parallel_barrier("a", "b");\n' +
+        '}\n\n' +
+        '#[cfg(supercov_spike_instrumented)]\n' +
+        '#[test]\n' +
+        '#[ignore = "nextest concurrency identity corpus"]\n' +
+        'fn supercov_nextest_parallel_b() {\n' +
+        '    supercov_nextest_parallel_barrier("b", "a");\n' +
+        '}\n\n' +
+        '#[cfg(all(supercov_spike_instrumented, unix))]\n' +
+        '#[test]\n' +
+        '#[ignore = "nextest target-runner crash corpus"]\n' +
+        'fn supercov_nextest_kills_runner() {\n' +
+        '    unsafe extern "C" {\n' +
+        '        fn getppid() -> i32;\n' +
+        '        fn kill(pid: i32, signal: i32) -> i32;\n' +
+        '    }\n' +
+        '    std::fs::write(std::env::var_os("SUPERCOV_NEXTEST_CRASH_PID").unwrap(), std::process::id().to_string()).unwrap();\n' +
+        '    let parent = std::env::var("SUPERCOV_NEXTEST_TARGET_RUNNER_PID").ok().and_then(|value| value.parse().ok()).unwrap_or_else(|| unsafe { getppid() });\n' +
+        '    assert_eq!(unsafe { kill(parent, 9) }, 0);\n' +
+        '    std::thread::sleep(std::time::Duration::from_secs(30));\n' +
+        '    panic!("the target-runner watchdog did not contain the test process");\n' +
+        '}\n',
+    );
+    productionFixtureSourceDigest = createHash('sha256')
+      .update(readFileSync(productionSource))
+      .digest('hex');
+    const nextestRun = JSON.parse(
+      run(supercov, ['__run-rust-compiler'], {
+        env: {
+          RUSTC: rustc,
+          PATH: `${pluginDirectory}:${process.env.PATH ?? ''}`,
+        },
+        input: JSON.stringify({
+          root: productionFixture,
+          command: [
+            cargo,
+            'nextest',
+            'run',
+            '--retries',
+            '1',
+            '--run-ignored',
+            'all',
+            '--',
+            '--exact',
+            'supercov_nextest_flaky_attempt',
+          ],
+          runId: 'run_e000000000000001',
+          startedAt: '2026-08-27T00:00:00.000Z',
+          wrapperPath: supercov,
+          companionCandidates: [wrapper],
+          requirePublicCapabilities: false,
+        }),
+        timeout: 300_000,
+      }).stdout,
+    );
+    assert.equal(nextestRun.exitCode, 0);
+    assert.equal(nextestRun.libtests, 1);
+    assert.equal(nextestRun.doctests, 0);
+    assert.equal(nextestRun.tests, 1);
+    assert.equal(nextestRun.transportHealth.length, 2);
+    assert(nextestRun.metadata.rawEvidence.files >= 2);
+    assert(nextestRun.denominator.points > 0);
+    assert(
+      !existsSync(
+        join(productionFixture, '.supercov/work/run_e000000000000001'),
+      ),
+      'nextest compiler run left terminal work state behind',
+    );
+
+    const emptyPassingRun = JSON.parse(
+      run(supercov, ['__run-rust-compiler'], {
+        env: {
+          RUSTC: rustc,
+          PATH: `${pluginDirectory}:${process.env.PATH ?? ''}`,
+        },
+        input: JSON.stringify({
+          root: productionFixture,
+          command: [
+            cargo,
+            'nextest',
+            'run',
+            '--no-tests',
+            'pass',
+            '__supercov_no_such_test__',
+          ],
+          runId: 'run_e000000000000002',
+          startedAt: '2026-08-27T00:00:01.000Z',
+          wrapperPath: supercov,
+          companionCandidates: [wrapper],
+          requirePublicCapabilities: false,
+        }),
+        timeout: 300_000,
+      }).stdout,
+    );
+    assert.equal(emptyPassingRun.exitCode, 0);
+    assert.equal(emptyPassingRun.tests, 0);
+    assert.equal(emptyPassingRun.transportHealth.length, 0);
+
+    const emptyFailingProcess = run(supercov, ['__run-rust-compiler'], {
+      env: {
+        RUSTC: rustc,
+        PATH: `${pluginDirectory}:${process.env.PATH ?? ''}`,
+      },
+      input: JSON.stringify({
+        root: productionFixture,
+        command: [cargo, 'nextest', 'run', '__supercov_no_such_test__'],
+        runId: 'run_e000000000000003',
+        startedAt: '2026-08-27T00:00:02.000Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+      expectFailure: true,
+      timeout: 300_000,
+    });
+    assert.equal(emptyFailingProcess.status, 4);
+    const emptyFailingRun = JSON.parse(emptyFailingProcess.stdout);
+    assert.equal(emptyFailingRun.exitCode, 4);
+    assert.equal(emptyFailingRun.tests, 0);
+
+    const failFastProcess = run(supercov, ['__run-rust-compiler'], {
+      env: {
+        RUSTC: rustc,
+        PATH: `${pluginDirectory}:${process.env.PATH ?? ''}`,
+      },
+      input: JSON.stringify({
+        root: productionFixture,
+        command: [
+          cargo,
+          'nextest',
+          'run',
+          '--test-threads',
+          '1',
+          '--fail-fast',
+          '--run-ignored',
+          'all',
+          '-E',
+          'test(/supercov_nextest_fail_fast_/)',
+        ],
+        runId: 'run_e000000000000004',
+        startedAt: '2026-08-27T00:00:03.000Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+      expectFailure: true,
+      timeout: 300_000,
+    });
+    assert.equal(
+      failFastProcess.status,
+      100,
+      `${failFastProcess.stdout}\n${failFastProcess.stderr}`,
+    );
+    const failFastRun = JSON.parse(failFastProcess.stdout);
+    assert.equal(failFastRun.exitCode, 100);
+    assert.equal(failFastRun.tests, 2);
+    assert.equal(failFastRun.transportHealth.length, 1);
+    const failFastQuery = JSON.parse(
+      run(supercov, ['__query-stored-run'], {
+        input: JSON.stringify({
+          root: productionFixture,
+          query: {
+            runId: failFastRun.runId,
+            filter: 'all',
+            command: 'test',
+            selector: 'supercov_nextest_fail_fast_',
+          },
+        }),
+      }).stdout,
+    );
+    assert.equal(failFastQuery.ok, true);
+    assert.deepEqual(
+      failFastQuery.data.tests.map(({ outcome }) => outcome).sort(),
+      ['failed', 'unstarted'],
+      'nextest fail-fast invented an attempt or lost the selected unstarted test',
+    );
+    const unstartedMatch = failFastQuery.data.tests.find(
+      ({ outcome }) => outcome === 'unstarted',
+    );
+    assert(unstartedMatch);
+    const unstartedQuery = JSON.parse(
+      run(supercov, ['__query-stored-run'], {
+        input: JSON.stringify({
+          root: productionFixture,
+          query: {
+            runId: failFastRun.runId,
+            filter: 'all',
+            command: 'test',
+            selector: unstartedMatch.id,
+          },
+        }),
+      }).stdout,
+    );
+    assert.equal(unstartedQuery.ok, true);
+    assert.equal(unstartedQuery.data.tests.length, 1);
+    assert.deepEqual(unstartedQuery.data.tests[0].retries, []);
+    assert.deepEqual(unstartedQuery.data.tests[0].attempts, []);
+
+    const flakyFailProcess = run(supercov, ['__run-rust-compiler'], {
+      env: {
+        RUSTC: rustc,
+        PATH: `${pluginDirectory}:${process.env.PATH ?? ''}`,
+      },
+      input: JSON.stringify({
+        root: productionFixture,
+        command: [
+          cargo,
+          'nextest',
+          'run',
+          '--retries',
+          '1',
+          '--flaky-result',
+          'fail',
+          '--run-ignored',
+          'all',
+          'supercov_nextest_flaky_attempt',
+        ],
+        runId: 'run_e000000000000005',
+        startedAt: '2026-08-27T00:00:04.000Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+      expectFailure: true,
+      timeout: 300_000,
+    });
+    assert.equal(
+      flakyFailProcess.status,
+      100,
+      `${flakyFailProcess.stdout}\n${flakyFailProcess.stderr}`,
+    );
+    const flakyFailRun = JSON.parse(flakyFailProcess.stdout);
+    assert.equal(flakyFailRun.exitCode, 100);
+    assert.equal(flakyFailRun.tests, 1);
+    assert.equal(flakyFailRun.transportHealth.length, 2);
+    const flakyFailQuery = JSON.parse(
+      run(supercov, ['__query-stored-run'], {
+        input: JSON.stringify({
+          root: productionFixture,
+          query: {
+            runId: flakyFailRun.runId,
+            filter: 'all',
+            command: 'test',
+            selector: 'supercov_nextest_flaky_attempt',
+          },
+        }),
+      }).stdout,
+    );
+    assert.equal(flakyFailQuery.ok, true);
+    assert.equal(flakyFailQuery.data.tests.length, 1);
+    assert.equal(flakyFailQuery.data.tests[0].outcome, 'flaky');
+    assert.deepEqual(
+      flakyFailQuery.data.tests[0].attempts.map(({ retry, status }) => ({
+        retry,
+        status,
+      })),
+      [
+        { retry: 0, status: 'failed' },
+        { retry: 1, status: 'passed' },
+      ],
+    );
+
+    const nextestParallelDirectory = join(scratch, 'nextest-parallel-barrier');
+    mkdirSync(nextestParallelDirectory);
+    const parallelRun = JSON.parse(
+      run(supercov, ['__run-rust-compiler'], {
+        env: {
+          RUSTC: rustc,
+          PATH: `${pluginDirectory}:${process.env.PATH ?? ''}`,
+          SUPERCOV_NEXTEST_PARALLEL_DIR: nextestParallelDirectory,
+        },
+        input: JSON.stringify({
+          root: productionFixture,
+          command: [
+            cargo,
+            'nextest',
+            'run',
+            '--test-threads',
+            '2',
+            '--run-ignored',
+            'all',
+            '-E',
+            'test(/supercov_nextest_parallel_/)',
+          ],
+          runId: 'run_e000000000000006',
+          startedAt: '2026-08-27T00:00:05.000Z',
+          wrapperPath: supercov,
+          companionCandidates: [wrapper],
+          requirePublicCapabilities: false,
+        }),
+        timeout: 300_000,
+      }).stdout,
+    );
+    assert.equal(parallelRun.exitCode, 0);
+    assert.equal(parallelRun.tests, 2);
+    assert.equal(parallelRun.transportHealth.length, 2);
+    const parallelQuery = JSON.parse(
+      run(supercov, ['__query-stored-run'], {
+        input: JSON.stringify({
+          root: productionFixture,
+          query: {
+            runId: parallelRun.runId,
+            filter: 'all',
+            command: 'test',
+            selector: 'supercov_nextest_parallel_',
+          },
+        }),
+      }).stdout,
+    );
+    assert.equal(parallelQuery.ok, true);
+    assert.deepEqual(
+      parallelQuery.data.tests.map(({ outcome }) => outcome).sort(),
+      ['passed', 'passed'],
+    );
+    assert.equal(new Set(parallelQuery.data.tests.map(({ id }) => id)).size, 2);
+    const parallelDetails = parallelQuery.data.tests.map(({id}) => {
+      const detail = JSON.parse(
+        run(supercov, ['__query-stored-run'], {
+          input: JSON.stringify({
+            root: productionFixture,
+            query: {
+              runId: parallelRun.runId,
+              filter: 'all',
+              command: 'test',
+              selector: id,
+            },
+          }),
+        }).stdout,
+      );
+      assert.equal(detail.ok, true);
+      assert.equal(detail.data.tests.length, 1);
+      return detail.data.tests[0];
+    });
+    assert(
+      parallelDetails.every(
+        ({ attempts }) =>
+          attempts.length === 1 &&
+          attempts[0].retry === 0 &&
+          attempts[0].status === 'passed',
+      ),
+      'concurrent nextest attempts lost their exact zero-based retry or outcome',
+    );
+    assert(
+      !existsSync(
+        join(productionFixture, '.supercov/work/run_e000000000000006'),
+      ),
+      'concurrent nextest compiler run left terminal work state behind',
+    );
+
+    if (process.platform !== 'win32') {
+      const crashPidPath = join(scratch, 'nextest-crash-test.pid');
+      const crashedRunner = run(supercov, ['__run-rust-compiler'], {
+        env: {
+          RUSTC: rustc,
+          PATH: `${pluginDirectory}:${process.env.PATH ?? ''}`,
+          SUPERCOV_NEXTEST_CRASH_PID: crashPidPath,
+        },
+        input: JSON.stringify({
+          root: productionFixture,
+          command: [
+            cargo,
+            'nextest',
+            'run',
+            '--run-ignored',
+            'all',
+            '--',
+            '--exact',
+            'supercov_nextest_kills_runner',
+          ],
+          runId: 'run_e000000000000007',
+          startedAt: '2026-08-27T00:00:06.000Z',
+          wrapperPath: supercov,
+          companionCandidates: [wrapper],
+          requirePublicCapabilities: false,
+        }),
+        expectFailure: true,
+        timeout: 300_000,
+      });
+      assert.equal(
+        crashedRunner.status,
+        100,
+        `${crashedRunner.stdout}\n${crashedRunner.stderr}`,
+      );
+      assert.match(
+        crashedRunner.stderr,
+        /reserved an invocation without publishing its unit/u,
+      );
+      const crashedTestPid = Number.parseInt(readFileSync(crashPidPath, 'utf8'), 10);
+      assert(Number.isSafeInteger(crashedTestPid) && crashedTestPid > 1);
+      assert(
+        await waitForProcessExit(crashedTestPid),
+        'nextest target-runner death let the supervised test process escape',
+      );
+      assert(
+        !existsSync(
+          join(productionFixture, '.supercov/work/run_e000000000000007'),
+        ),
+        'nextest target-runner death left terminal work state behind',
+      );
+      assert(
+        !existsSync(
+          join(productionFixture, '.supercov/runs/run_e000000000000007'),
+        ),
+        'nextest target-runner death published unauthenticated coverage',
+      );
+    }
+  }
+  assert.equal(
+    createHash('sha256')
+      .update(readFileSync(join(productionFixture, 'src/lib.rs')))
+      .digest('hex'),
+    productionFixtureSourceDigest,
+    'production nextest orchestration modified project source',
+  );
+  if (process.env.SUPERCOV_SPIKE_NEXTEST_ONLY === '1') {
+    assert(pinnedNextest, 'nextest-only mode requires SUPERCOV_NEXTEST_BIN');
+    console.log(
+      '[rustc-backend-spike] production nextest catalog, retries, fail-fast, concurrency and crash contracts passed',
+    );
+    throw nextestOnlyComplete;
+  }
   const productionRunnerInvocations = readFileSync(productionRunnerLog, 'utf8')
     .trim()
     .split('\n')
@@ -1556,7 +2047,7 @@ try {
     createHash('sha256')
       .update(readFileSync(join(productionFixture, 'src/lib.rs')))
       .digest('hex'),
-    fixtureSourceDigest,
+    productionFixtureSourceDigest,
     'production compiler orchestration modified project source',
   );
 
@@ -4544,6 +5035,8 @@ try {
   console.log(
     '[rustc-backend-spike] expanded-HIR obligations keep deterministic identities; compiler mappings become exact Supercov nested/short-circuit/pattern/while/match-guard/assertion vectors and pre-optimization for-loop/match/let-else/try first-commit branches with libtest contexts, while MIR/CTFE/rustdoc interception preserves behavior and source',
   );
+} catch (error) {
+  if (error !== nextestOnlyComplete) throw error;
 } finally {
   rmSync(scratch, {recursive: true, force: true});
 }

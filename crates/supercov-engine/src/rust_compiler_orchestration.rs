@@ -18,6 +18,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use nextest_metadata::TestListSummary;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -36,7 +37,11 @@ use crate::{
         RustdocOutcomeResolution, join_rustdoc_outcomes, read_rustdoc_outcome_units,
         resolve_merged_doctest_candidates,
     },
-    rust_test_runner::{cargo_invocation, rust_cargo_execution_selection},
+    rust_runner_attempt::parse_nextest_version_output,
+    rust_test_runner::{
+        RustCargoCommandKind, cargo_invocation, nextest_list_invocation, nextest_version_arguments,
+        rust_cargo_execution_selection,
+    },
 };
 
 fn inherited_environment(
@@ -276,6 +281,12 @@ pub struct RustCompilerBuild {
     pub ctfe_units: Vec<RustCompilerCtfeUnit>,
     pub doctest_outcomes: RustdocOutcomeResolution,
     pub cargo_runner_units: Vec<RustCargoRunnerUnit>,
+    #[serde(skip)]
+    pub(crate) command_kind: RustCargoCommandKind,
+    #[serde(skip)]
+    pub(crate) nextest_version: Option<String>,
+    #[serde(skip)]
+    pub(crate) nextest_catalog: Option<TestListSummary>,
     pub run_libtests: bool,
     pub run_doctests: bool,
     pub execution_exit_code: i32,
@@ -296,6 +307,7 @@ pub enum RustCompilerOrchestrationError {
     CompilerOutput(String),
     Selection(String),
     Manifest(String),
+    UnverifiedExecution { code: i32, reason: String },
     Interrupted { code: i32, signal: String },
 }
 
@@ -317,6 +329,10 @@ impl std::fmt::Display for RustCompilerOrchestrationError {
                 write!(formatter, "Rust compiler selection failed: {reason}")
             }
             Self::Manifest(reason) => write!(formatter, "Rust compiler manifest failed: {reason}"),
+            Self::UnverifiedExecution { code, reason } => write!(
+                formatter,
+                "Rust test command exited {code}, but Supercov could not authenticate complete coverage evidence: {reason}"
+            ),
             Self::Interrupted { signal, .. } => {
                 write!(formatter, "Rust compiler run was interrupted by {signal}")
             }
@@ -355,6 +371,199 @@ struct CargoTarget {
 #[derive(Debug, Deserialize)]
 struct CargoProfile {
     test: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoMetadataOutput {
+    packages: Vec<CargoMetadataPackage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoMetadataPackage {
+    id: String,
+    name: String,
+    manifest_path: PathBuf,
+    targets: Vec<CargoMetadataTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoMetadataTarget {
+    name: String,
+    kind: Vec<String>,
+    src_path: PathBuf,
+}
+
+fn cargo_metadata_arguments(
+    invocation: &crate::rust_test_runner::CargoTestInvocation,
+) -> Result<Vec<String>, RustCompilerOrchestrationError> {
+    let command = invocation.command_position().ok_or_else(|| {
+        RustCompilerOrchestrationError::InvalidRequest(
+            "the Cargo invocation lost its test subcommand".into(),
+        )
+    })?;
+    let mut arguments = invocation.arguments[..command]
+        .iter()
+        .filter(|argument| argument.starts_with('+'))
+        .cloned()
+        .collect::<Vec<_>>();
+    arguments.extend([
+        "metadata".into(),
+        "--format-version=1".into(),
+        "--no-deps".into(),
+    ]);
+    let command_width = match invocation.kind {
+        RustCargoCommandKind::CargoTest => 1,
+        RustCargoCommandKind::NextestRun => 2,
+    };
+    let mut index = command + command_width;
+    while index < invocation.arguments.len() {
+        let argument = &invocation.arguments[index];
+        let name = argument
+            .split_once('=')
+            .map_or(argument.as_str(), |(name, _)| name);
+        let takes_value = match name {
+            "--manifest-path" | "--config" | "-Z" => Some(!argument.contains('=')),
+            "--frozen" | "--locked" | "--offline" | "--ignore-rust-version" => Some(false),
+            _ => None,
+        };
+        if let Some(takes_value) = takes_value {
+            arguments.push(argument.clone());
+            if takes_value {
+                index += 1;
+                let value = invocation.arguments.get(index).ok_or_else(|| {
+                    RustCompilerOrchestrationError::InvalidRequest(format!(
+                        "Cargo option {argument} has no value"
+                    ))
+                })?;
+                arguments.push(value.clone());
+            }
+        }
+        index += 1;
+    }
+    Ok(arguments)
+}
+
+fn package_identity(
+    manifest_path: &Path,
+    project_root: &Path,
+) -> Result<String, RustCompilerOrchestrationError> {
+    let manifest_metadata =
+        fs::symlink_metadata(manifest_path).map_err(|error| io_error(manifest_path, error))?;
+    let manifest =
+        fs::canonicalize(manifest_path).map_err(|error| io_error(manifest_path, error))?;
+    let package_root = manifest
+        .parent()
+        .and_then(|path| path.strip_prefix(project_root).ok())
+        .filter(|_| {
+            manifest_metadata.file_type().is_file()
+                && manifest
+                    .file_name()
+                    .is_some_and(|name| name == "Cargo.toml")
+        })
+        .ok_or_else(|| {
+            RustCompilerOrchestrationError::CargoOutput(format!(
+                "test artifact manifest escaped the owned project: {}",
+                manifest.display()
+            ))
+        })?;
+    if package_root.as_os_str().is_empty() {
+        Ok("package:.".into())
+    } else if package_root
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
+    {
+        Ok(format!(
+            "package:{}",
+            package_root.to_string_lossy().replace('\\', "/")
+        ))
+    } else {
+        Err(RustCompilerOrchestrationError::CargoOutput(format!(
+            "test artifact has a noncanonical package root: {}",
+            package_root.display()
+        )))
+    }
+}
+
+fn nextest_artifacts(
+    catalog: &TestListSummary,
+    metadata: CargoMetadataOutput,
+    target_directory: &Path,
+    project_root: &Path,
+) -> Result<Vec<RustCompilerTestArtifact>, RustCompilerOrchestrationError> {
+    let canonical_target =
+        fs::canonicalize(target_directory).map_err(|error| io_error(target_directory, error))?;
+    let canonical_project =
+        fs::canonicalize(project_root).map_err(|error| io_error(project_root, error))?;
+    let packages = metadata
+        .packages
+        .into_iter()
+        .map(|package| (package.id.clone(), package))
+        .collect::<BTreeMap<_, _>>();
+    let mut artifacts = Vec::new();
+    for (binary_id, suite) in &catalog.rust_suites {
+        if suite.binary.binary_id != *binary_id {
+            return Err(RustCompilerOrchestrationError::CargoOutput(format!(
+                "nextest suite key disagrees with binary identity {binary_id}"
+            )));
+        }
+        let package = packages.get(&suite.binary.package_id).ok_or_else(|| {
+            RustCompilerOrchestrationError::CargoOutput(format!(
+                "nextest binary {binary_id} names an unknown Cargo package {}",
+                suite.binary.package_id
+            ))
+        })?;
+        if package.name != suite.package_name {
+            return Err(RustCompilerOrchestrationError::CargoOutput(format!(
+                "nextest binary {binary_id} package name disagrees with Cargo metadata"
+            )));
+        }
+        let mut targets = package.targets.iter().filter(|target| {
+            target.name == suite.binary.binary_name
+                && target
+                    .kind
+                    .iter()
+                    .any(|kind| kind == suite.binary.kind.as_str())
+        });
+        let target = targets.next().ok_or_else(|| {
+            RustCompilerOrchestrationError::CargoOutput(format!(
+                "nextest binary {binary_id} has no exact Cargo metadata target"
+            ))
+        })?;
+        if targets.next().is_some() {
+            return Err(RustCompilerOrchestrationError::CargoOutput(format!(
+                "nextest binary {binary_id} ambiguously matches Cargo metadata targets"
+            )));
+        }
+        let executable = fs::canonicalize(suite.binary.binary_path.as_std_path())
+            .map_err(|error| io_error(suite.binary.binary_path.as_std_path(), error))?;
+        let executable_metadata =
+            fs::symlink_metadata(&executable).map_err(|error| io_error(&executable, error))?;
+        if !executable.starts_with(&canonical_target) || !executable_metadata.file_type().is_file()
+        {
+            return Err(RustCompilerOrchestrationError::CargoOutput(format!(
+                "nextest test artifact escaped the private target: {}",
+                executable.display()
+            )));
+        }
+        let source_path = fs::canonicalize(&target.src_path)
+            .map_err(|error| io_error(&target.src_path, error))?;
+        if !source_path.starts_with(&canonical_project) {
+            return Err(RustCompilerOrchestrationError::CargoOutput(format!(
+                "nextest target source escaped the owned project: {}",
+                source_path.display()
+            )));
+        }
+        artifacts.push(RustCompilerTestArtifact {
+            executable,
+            package: package_identity(&package.manifest_path, &canonical_project)?,
+            target_name: target.name.clone(),
+            target_kinds: target.kind.clone(),
+            source_path,
+        });
+    }
+    artifacts.sort_by(|left, right| left.executable.cmp(&right.executable));
+    artifacts.dedup_by(|left, right| left.executable == right.executable);
+    Ok(artifacts)
 }
 
 fn io_error(path: &Path, error: impl std::fmt::Display) -> RustCompilerOrchestrationError {
@@ -990,10 +1199,177 @@ pub fn build_with_rust_compiler_companion_supervised(
         .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
     let execution = rust_cargo_execution_selection(&invocation)
         .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
+    let command_kind = invocation.kind;
     let execution_arguments = invocation.arguments.clone();
     let build_started_at_ms = epoch_ms()?;
     let started = Instant::now();
-    let output = if execution.run_libtests {
+    let (nextest_version, nextest_catalog, nextest_metadata) = if command_kind
+        == RustCargoCommandKind::NextestRun
+    {
+        let version_output = supervisor
+            .supervise_captured(
+                &CommandSpec {
+                    program: invocation.program.clone().into(),
+                    arguments: nextest_version_arguments(&invocation)
+                        .map_err(|error| {
+                            RustCompilerOrchestrationError::InvalidRequest(error.to_string())
+                        })?
+                        .into_iter()
+                        .map(OsString::from)
+                        .collect(),
+                    cwd: project_root.clone(),
+                    environment: Some(inherited_environment([(
+                        OsString::from("CARGO_TARGET_DIR"),
+                        target_directory.clone().into_os_string(),
+                    )])),
+                    captured_output: None,
+                },
+                options,
+                diagnostics,
+            )
+            .map_err(|error| RustCompilerOrchestrationError::Cargo(error.to_string()))?;
+        if let Some(error) = interrupted_error(&version_output) {
+            return Err(error);
+        }
+        if !supervised_success(&version_output) {
+            return Err(RustCompilerOrchestrationError::Cargo(
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&version_output.stderr),
+                    String::from_utf8_lossy(&version_output.stdout)
+                )
+                .trim()
+                .to_owned(),
+            ));
+        }
+        let nextest_version = parse_nextest_version_output(&version_output.stdout)
+            .map_err(|error| RustCompilerOrchestrationError::CargoOutput(error.to_string()))?;
+        let projected = nextest_list_invocation(&invocation)
+            .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
+        let mut list_arguments = projected.arguments;
+        list_arguments.extend(cargo_runner_configuration_arguments(
+            &wrapper,
+            &request.cargo_runner_plan,
+        )?);
+        if !projected.runner_arguments.is_empty() {
+            list_arguments.push("--".into());
+            list_arguments.extend(projected.runner_arguments);
+        }
+        let list_output = supervisor
+            .supervise_captured(
+                &CommandSpec {
+                    program: invocation.program.clone().into(),
+                    arguments: list_arguments.into_iter().map(OsString::from).collect(),
+                    cwd: project_root.clone(),
+                    environment: Some(inherited_environment([
+                        (
+                            OsString::from("CARGO_TARGET_DIR"),
+                            target_directory.clone().into_os_string(),
+                        ),
+                        (
+                            OsString::from("RUSTC_WRAPPER"),
+                            wrapper.clone().into_os_string(),
+                        ),
+                        (
+                            OsString::from("RUSTC_WORKSPACE_WRAPPER"),
+                            wrapper.clone().into_os_string(),
+                        ),
+                        (
+                            OsString::from(RUST_COMPILER_WRAPPER_CONFIG_ENV),
+                            config_path.clone().into_os_string(),
+                        ),
+                        (
+                            OsString::from(RUST_COMPILER_OUTPUT_ENV),
+                            candidate_directory.clone().into_os_string(),
+                        ),
+                        (
+                            OsString::from(RUST_SOURCE_ROOT_ENV),
+                            project_root.clone().into_os_string(),
+                        ),
+                        (
+                            OsString::from(RUST_TARGET_ROOT_ENV),
+                            target_directory.clone().into_os_string(),
+                        ),
+                        (OsString::from(RUST_INSTRUMENT_MIR_ENV), OsString::from("1")),
+                        (
+                            OsString::from(RUST_INSTRUMENT_CTFE_ENV),
+                            OsString::from("1"),
+                        ),
+                        (
+                            OsString::from(RUST_STATIC_RUNTIME_DIRECTORY_ENV),
+                            shared_runtime_directory.clone().into_os_string(),
+                        ),
+                        (
+                            OsString::from(RUST_CARGO_RUNNER_CONFIG_ENV),
+                            cargo_runner_config_path.clone().into_os_string(),
+                        ),
+                    ])),
+                    captured_output: None,
+                },
+                options,
+                diagnostics,
+            )
+            .map_err(|error| RustCompilerOrchestrationError::Cargo(error.to_string()))?;
+        if let Some(error) = interrupted_error(&list_output) {
+            return Err(error);
+        }
+        if !supervised_success(&list_output) {
+            return Err(RustCompilerOrchestrationError::Cargo(
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&list_output.stderr),
+                    String::from_utf8_lossy(&list_output.stdout)
+                )
+                .trim()
+                .to_owned(),
+            ));
+        }
+        let catalog = TestListSummary::parse_json(String::from_utf8_lossy(&list_output.stdout))
+            .map_err(|error| {
+                RustCompilerOrchestrationError::CargoOutput(format!(
+                    "invalid nextest JSON test catalog: {error}"
+                ))
+            })?;
+
+        let metadata_output = supervisor
+            .supervise_captured(
+                &CommandSpec {
+                    program: invocation.program.clone().into(),
+                    arguments: cargo_metadata_arguments(&invocation)?
+                        .into_iter()
+                        .map(OsString::from)
+                        .collect(),
+                    cwd: project_root.clone(),
+                    environment: Some(inherited_environment([(
+                        OsString::from("CARGO_TARGET_DIR"),
+                        target_directory.clone().into_os_string(),
+                    )])),
+                    captured_output: None,
+                },
+                options,
+                diagnostics,
+            )
+            .map_err(|error| RustCompilerOrchestrationError::Cargo(error.to_string()))?;
+        if let Some(error) = interrupted_error(&metadata_output) {
+            return Err(error);
+        }
+        if !supervised_success(&metadata_output) {
+            return Err(RustCompilerOrchestrationError::Cargo(
+                String::from_utf8_lossy(&metadata_output.stderr)
+                    .trim()
+                    .to_owned(),
+            ));
+        }
+        let metadata = serde_json::from_slice(&metadata_output.stdout).map_err(|error| {
+            RustCompilerOrchestrationError::CargoOutput(format!(
+                "invalid Cargo metadata for nextest: {error}"
+            ))
+        })?;
+        (Some(nextest_version), Some(catalog), Some(metadata))
+    } else {
+        (None, None, None)
+    };
+    let output = if execution.run_libtests && command_kind == RustCargoCommandKind::CargoTest {
         invocation.arguments.retain(|argument| {
             argument != "--no-run" && !argument.starts_with("--message-format=")
         });
@@ -1138,6 +1514,7 @@ pub fn build_with_rust_compiler_companion_supervised(
     let execution_ms = execution_started.elapsed().as_secs_f64() * 1000.0;
     let build_ms = started.elapsed().as_secs_f64() * 1000.0;
     let build_ended_at_ms = epoch_ms()?;
+    let execution_exit_code = execution_output.result.exit_code();
     let selection = verified_compiler_selection(
         &selection_directory,
         &request.companion_candidates,
@@ -1167,11 +1544,21 @@ pub fn build_with_rust_compiler_companion_supervised(
     }
     let doctest_outcomes = join_rustdoc_outcomes(resolved.merged_units, doctest_outcomes)
         .map_err(|error| RustCompilerOrchestrationError::CompilerOutput(error.to_string()))?;
-    let artifacts = output
-        .as_ref()
-        .map(|output| cargo_artifacts(&output.stdout, &target_directory, &project_root))
-        .transpose()?
-        .unwrap_or_default();
+    let artifacts = match (&nextest_catalog, nextest_metadata) {
+        (Some(catalog), Some(metadata)) => {
+            nextest_artifacts(catalog, metadata, &target_directory, &project_root)?
+        }
+        (None, None) => output
+            .as_ref()
+            .map(|output| cargo_artifacts(&output.stdout, &target_directory, &project_root))
+            .transpose()?
+            .unwrap_or_default(),
+        _ => {
+            return Err(RustCompilerOrchestrationError::CargoOutput(
+                "nextest catalog and Cargo metadata were only partially captured".into(),
+            ));
+        }
+    };
     let expected_targets = request
         .cargo_runner_plan
         .targets
@@ -1182,11 +1569,15 @@ pub fn build_with_rust_compiler_companion_supervised(
         read_cargo_runner_units(&cargo_runner_directory, &request.run_id, &expected_targets)
             .map_err(|error| {
                 let stderr = String::from_utf8_lossy(&execution_output.stderr);
-                RustCompilerOrchestrationError::CompilerOutput(
-                    format!("{error}\n{stderr}").trim().to_owned(),
-                )
+                RustCompilerOrchestrationError::UnverifiedExecution {
+                    code: if execution_exit_code == 0 {
+                        2
+                    } else {
+                        execution_exit_code
+                    },
+                    reason: format!("{error}\n{stderr}").trim().to_owned(),
+                }
             })?;
-    let execution_exit_code = execution_output.result.exit_code();
     Ok(RustCompilerBuild {
         selection,
         normalized,
@@ -1196,6 +1587,9 @@ pub fn build_with_rust_compiler_companion_supervised(
         ctfe_units,
         doctest_outcomes,
         cargo_runner_units,
+        command_kind,
+        nextest_version,
+        nextest_catalog,
         run_libtests: execution.run_libtests,
         run_doctests: execution.run_doctests,
         execution_exit_code,

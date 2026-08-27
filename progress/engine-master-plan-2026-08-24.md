@@ -1776,6 +1776,29 @@ miss blocks flipping any default.
   blockers alongside retries, custom harnesses, platform coverage and the
   remaining semantic corpora.
 
+## Checkpoint — 2026-08-27 exact cargo-nextest attempt boundary
+
+- Supercov now owns strict cargo-nextest 0.9.138 and 0.9.140 catalog and target-
+  runner contracts. Exact version metadata is required; unverified older,
+  hypothetical intermediate and newer releases fail closed before user tests.
+- Selection is projected losslessly across Cargo, nextest and libtest. Real
+  gates cover arguments on both sides of `--`, empty-suite pass/error policy,
+  retries, terminal flaky status, default fail-fast with an exact unstarted
+  test, bare timing flags and clustered verbosity.
+- Every attempt carries exact nextest run, binary, test, retry, total-attempt
+  and runner-attempt identity. Two real nextest attempts overlap while their
+  contexts, ordinals, evidence and outcomes remain distinct.
+- A production configured-runner composition gate kills Supercov's target
+  runner after its durable reservation. The watchdog contains the child test,
+  no false unit or stored run is published and the unmatched reservation is
+  reported as infrastructure failure. Original nextest and instrumentation
+  exit codes are preserved rather than collapsed into a generic failure.
+- This closes the pinned ordinary nextest retry/concurrency/crash slice, not
+  custom harnesses, remaining presentation modes, late work/subprocesses,
+  cache-bypass wrappers, cross-volume isolation or platform matrices. A newly
+  isolated constant-literal assertion denominator gap also remains an R1
+  blocker.
+
 ## Non-goals and guardrails
 
 - No accidental behavior change during ports; every future language frontend

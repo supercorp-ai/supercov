@@ -97,6 +97,31 @@ fn elapsed_ms(started: Instant) -> f64 {
     (started.elapsed().as_secs_f64() * 10_000.0).round() / 10.0
 }
 
+fn direct_frontend_error(
+    error: crate::rust_compiler_test_runner::RustCompilerTestError,
+) -> DirectRustCompilerRunError {
+    match error {
+        crate::rust_compiler_test_runner::RustCompilerTestError::Interrupted { code, signal } => {
+            DirectRustCompilerRunError {
+                message: format!("Rust compiler run was interrupted by {signal}"),
+                exit_code: code,
+                signal: Some(signal),
+            }
+        }
+        crate::rust_compiler_test_runner::RustCompilerTestError::UnverifiedExecution {
+            code,
+            reason,
+        } => DirectRustCompilerRunError {
+            message: format!(
+                "Rust test command exited {code}, but Supercov could not authenticate complete coverage evidence: {reason}"
+            ),
+            exit_code: code,
+            signal: None,
+        },
+        error => error.to_string().into(),
+    }
+}
+
 pub fn run_direct_rust_compiler(
     request: &DirectRustCompilerRunRequest,
     diagnostics: &mut dyn Write,
@@ -172,17 +197,7 @@ pub fn run_direct_rust_compiler(
             },
             diagnostics,
         )
-        .map_err(|error| match error {
-            crate::rust_compiler_test_runner::RustCompilerTestError::Interrupted {
-                code,
-                signal,
-            } => DirectRustCompilerRunError {
-                message: format!("Rust compiler run was interrupted by {signal}"),
-                exit_code: code,
-                signal: Some(signal),
-            },
-            error => error.to_string().into(),
-        })?;
+        .map_err(direct_frontend_error)?;
 
         let publication_started = Instant::now();
         let archive_path = root
@@ -237,19 +252,31 @@ pub fn run_direct_rust_compiler(
             .raw_results
             .iter()
             .filter(|result| result.role == "test")
-            .count();
+            .map(|result| result.test_id.as_deref().unwrap_or(&result.test))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         let libtests = run
             .request
             .raw_results
             .iter()
-            .filter(|result| result.role == "test" && result.provenance.runner == "rust-libtest")
-            .count();
+            .filter(|result| {
+                result.role == "test"
+                    && matches!(
+                        result.provenance.runner.as_str(),
+                        "rust-libtest" | "rust-nextest"
+                    )
+            })
+            .map(|result| result.test_id.as_deref().unwrap_or(&result.test))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         let doctests = run
             .request
             .raw_results
             .iter()
             .filter(|result| result.role == "test" && result.provenance.runner == "rustdoc")
-            .count();
+            .map(|result| result.test_id.as_deref().unwrap_or(&result.test))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         if tests != libtests + doctests {
             return Err("Rust compiler run contains an unclassified test runner".into());
         }
@@ -331,5 +358,23 @@ pub fn run_direct_rust_compiler(
         (Ok(result), Ok(())) => Ok(result),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unverified_test_runner_status_preserves_the_user_exit_code() {
+        let error = direct_frontend_error(
+            crate::rust_compiler_test_runner::RustCompilerTestError::UnverifiedExecution {
+                code: 104,
+                reason: "runner setup failed".into(),
+            },
+        );
+        assert_eq!(error.exit_code, 104);
+        assert!(error.signal.is_none());
+        assert!(error.message.contains("could not authenticate"));
     }
 }

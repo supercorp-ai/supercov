@@ -38,6 +38,7 @@
     "test:rust-assets": "node scripts/sync-rust-package-assets.mjs --check",
     "test:rustc-backend-spike": "node scripts/rustc-backend-spike.mjs",
     "test:rust-cargo-runner": "cargo build -p supercov && node scripts/rust-cargo-runner-integration.mjs",
+    "test:rust-nextest-runner": "cargo build -p supercov && node scripts/rust-nextest-runner-integration.mjs",
     "test": "cargo test --workspace",
     "test:runtime": "node --test tests/runtime/*.test.mjs",
     "test:fixture": "cargo build -p supercov && node scripts/rust-fixture-matrix.mjs",

@@ -29,6 +29,48 @@
     "reservedRemapXor": "a5a5a5a5a5a5a5a5",
     "collisionPolicy": "fatal-before-launch"
   },
+  "runnerAttemptIdentity": {
+    "version": 1,
+    "cargoTest": {
+      "retry": 0,
+      "totalAttempts": 1,
+      "identityAuthority": "supercov-supervisor"
+    },
+    "rustdoc": {
+      "retry": 0,
+      "totalAttempts": 1,
+      "identityAuthority": "supercov-rustdoc-outcome-unit"
+    },
+    "nextest": {
+      "minimumVersion": "0.9.138",
+      "maximumVersion": "0.9.140",
+      "verifiedReleasedVersions": ["0.9.138", "0.9.140"],
+      "executionMode": "process-per-test",
+      "identityEnvironment": [
+        "NEXTEST",
+        "NEXTEST_RUN_ID",
+        "NEXTEST_VERSION",
+        "NEXTEST_EXECUTION_MODE",
+        "NEXTEST_BINARY_ID",
+        "NEXTEST_TEST_NAME",
+        "NEXTEST_ATTEMPT",
+        "NEXTEST_TOTAL_ATTEMPTS",
+        "NEXTEST_ATTEMPT_ID",
+        "NEXTEST_STRESS_CURRENT",
+        "NEXTEST_STRESS_TOTAL"
+      ],
+      "attemptNumbering": "one-based",
+      "retryDerivation": "attempt-minus-one",
+      "attemptIdSemantics": "opaque-run-unique",
+      "listPhase": "transparent-no-evidence-publication",
+      "selectionProjection": "exact-pre-and-post-separator",
+      "selectedButUnstarted": "logical-test-identity-only",
+      "concurrentAttempts": "distinct-durable-ordinal-and-attempt-id",
+      "targetRunnerDeath": "unmatched-durable-reservation-fatal",
+      "partialIdentity": "fatal",
+      "stressIteration": "distinct-axis-unsupported-fail-closed"
+    }
+  },
   "pointKinds": ["statement", "function"],
   "controlDecisionKinds": [
     "if",

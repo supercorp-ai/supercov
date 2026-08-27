@@ -195,6 +195,7 @@ pub struct LanguageFrontendRequirements {
     pub identity_downgrade_requires_limitation: bool,
     pub unknown_phase_reference_fatal: bool,
     pub phase_causality_acyclic: bool,
+    pub selected_unstarted_has_test_identity_only: bool,
     pub multiple_runners_per_frontend: bool,
     pub structural_limitations_reference_manifest_ids: bool,
     pub attribution_limitations_runner_scoped: bool,
@@ -289,6 +290,7 @@ pub struct RustCoverageV1Contract {
     pub generic_aggregation: String,
     pub source_identity: RustSourceIdentityContract,
     pub test_context_identity: RustTestContextIdentityContract,
+    pub runner_attempt_identity: RustRunnerAttemptIdentityContract,
     pub point_kinds: Vec<String>,
     pub control_decision_kinds: Vec<String>,
     pub branch_kinds: Vec<String>,
@@ -296,6 +298,43 @@ pub struct RustCoverageV1Contract {
     pub required_identity_axes: Vec<String>,
     pub completeness_requires: Vec<String>,
     pub external_coverage_in_product: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustRunnerAttemptIdentityContract {
+    pub version: u32,
+    pub cargo_test: RustSingleAttemptRunnerContract,
+    pub rustdoc: RustSingleAttemptRunnerContract,
+    pub nextest: RustNextestAttemptContract,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustSingleAttemptRunnerContract {
+    pub retry: usize,
+    pub total_attempts: usize,
+    pub identity_authority: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustNextestAttemptContract {
+    pub minimum_version: String,
+    pub maximum_version: String,
+    pub verified_released_versions: Vec<String>,
+    pub execution_mode: String,
+    pub identity_environment: Vec<String>,
+    pub attempt_numbering: String,
+    pub retry_derivation: String,
+    pub attempt_id_semantics: String,
+    pub list_phase: String,
+    pub selection_projection: String,
+    pub selected_but_unstarted: String,
+    pub concurrent_attempts: String,
+    pub target_runner_death: String,
+    pub partial_identity: String,
+    pub stress_iteration: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1078,6 +1117,11 @@ mod tests {
         assert_eq!(contract.manifest_model, "coverage-manifest-v1");
         assert_eq!(contract.observation_model, "evidence-archive-v3");
         assert_eq!(contract.probe_model, "ternary-decision-v2");
+        assert!(
+            contract
+                .requirements
+                .selected_unstarted_has_test_identity_only
+        );
         assert_eq!(
             contract.identity_axes,
             ["run", "worker", "test", "retry", "phase"]
@@ -1410,6 +1454,78 @@ mod tests {
         assert_eq!(
             contract.test_context_identity.collision_policy,
             "fatal-before-launch"
+        );
+        assert_eq!(contract.runner_attempt_identity.version, 1);
+        assert_eq!(contract.runner_attempt_identity.cargo_test.retry, 0);
+        assert_eq!(
+            contract.runner_attempt_identity.cargo_test.total_attempts,
+            1
+        );
+        assert_eq!(contract.runner_attempt_identity.rustdoc.retry, 0);
+        assert_eq!(contract.runner_attempt_identity.rustdoc.total_attempts, 1);
+        assert_eq!(
+            contract.runner_attempt_identity.nextest.minimum_version,
+            "0.9.138"
+        );
+        assert_eq!(
+            contract.runner_attempt_identity.nextest.maximum_version,
+            "0.9.140"
+        );
+        assert_eq!(
+            contract
+                .runner_attempt_identity
+                .nextest
+                .verified_released_versions,
+            ["0.9.138", "0.9.140"]
+        );
+        assert_eq!(
+            contract.runner_attempt_identity.nextest.execution_mode,
+            "process-per-test"
+        );
+        assert_eq!(
+            contract
+                .runner_attempt_identity
+                .nextest
+                .identity_environment,
+            [
+                "NEXTEST",
+                "NEXTEST_RUN_ID",
+                "NEXTEST_VERSION",
+                "NEXTEST_EXECUTION_MODE",
+                "NEXTEST_BINARY_ID",
+                "NEXTEST_TEST_NAME",
+                "NEXTEST_ATTEMPT",
+                "NEXTEST_TOTAL_ATTEMPTS",
+                "NEXTEST_ATTEMPT_ID",
+                "NEXTEST_STRESS_CURRENT",
+                "NEXTEST_STRESS_TOTAL",
+            ]
+        );
+        assert_eq!(
+            contract.runner_attempt_identity.nextest.stress_iteration,
+            "distinct-axis-unsupported-fail-closed"
+        );
+        assert_eq!(
+            contract
+                .runner_attempt_identity
+                .nextest
+                .selected_but_unstarted,
+            "logical-test-identity-only"
+        );
+        assert_eq!(
+            contract
+                .runner_attempt_identity
+                .nextest
+                .selection_projection,
+            "exact-pre-and-post-separator"
+        );
+        assert_eq!(
+            contract.runner_attempt_identity.nextest.concurrent_attempts,
+            "distinct-durable-ordinal-and-attempt-id"
+        );
+        assert_eq!(
+            contract.runner_attempt_identity.nextest.target_runner_death,
+            "unmatched-durable-reservation-fatal"
         );
         assert!(
             contract

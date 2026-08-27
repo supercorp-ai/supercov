@@ -11,6 +11,12 @@ that boundary.
 test phase but cannot causally attribute execution to an action or assertion.
 There is no legacy protocol reader.
 
+A runner may catalog a selected test that never starts because of fail-fast or
+an earlier infrastructure stop. That record has status `unstarted`, exact
+logical test identity, and no scope, worker, retry, phase, flaky verdict or
+observations. Inventing attempt identity for it is forbidden; attaching any
+attempt data to it is fatal.
+
 ## Per-run declaration
 
 Each evidence-v3 archive contains one strict `FrontendRunDeclaration`.

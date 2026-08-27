@@ -736,6 +736,7 @@ struct MutableTest {
     title: Option<String>,
     retries: BTreeSet<usize>,
     attempts: BTreeMap<usize, TestAttempt>,
+    unstarted: bool,
     runner_reported_flaky: bool,
     provenance: TestProvenance,
     role: String,
@@ -803,7 +804,11 @@ fn record_attempt(test: &mut MutableTest, raw: &RawTestResult) {
 
 fn test_outcome(test: &MutableTest) -> String {
     let Some(terminal) = test.attempts.values().next_back() else {
-        return "unknown".into();
+        return if test.unstarted {
+            "unstarted".into()
+        } else {
+            "unknown".into()
+        };
     };
     if terminal.status == "passed"
         && (test.runner_reported_flaky
@@ -826,8 +831,11 @@ fn raw_test_id(raw: &RawTestResult) -> &str {
 pub fn passing_coverage_results(raw_results: &[RawTestResult]) -> Vec<RawTestResult> {
     let mut attempts: BTreeMap<(String, usize), (BTreeSet<String>, bool)> = BTreeMap::new();
     for raw in raw_results {
+        let Some(retry) = raw.retry else {
+            continue;
+        };
         let entry = attempts
-            .entry((raw_test_id(raw).into(), raw.retry.unwrap_or(0)))
+            .entry((raw_test_id(raw).into(), retry))
             .or_default();
         if let Some(status) = &raw.status {
             entry.0.insert(status.clone());
@@ -850,7 +858,10 @@ pub fn passing_coverage_results(raw_results: &[RawTestResult]) -> Vec<RawTestRes
         .collect::<BTreeSet<_>>();
     raw_results
         .iter()
-        .filter(|raw| accepted.contains(&(raw_test_id(raw).into(), raw.retry.unwrap_or(0))))
+        .filter(|raw| {
+            raw.retry
+                .is_some_and(|retry| accepted.contains(&(raw_test_id(raw).into(), retry)))
+        })
         .cloned()
         .collect()
 }
@@ -858,12 +869,20 @@ pub fn passing_coverage_results(raw_results: &[RawTestResult]) -> Vec<RawTestRes
 pub fn failed_coverage_results(raw_results: &[RawTestResult]) -> Vec<RawTestResult> {
     let failed = raw_results
         .iter()
-        .filter(|raw| raw.status.as_deref() == Some("failed"))
-        .map(|raw| (raw_test_id(raw).to_owned(), raw.retry.unwrap_or(0)))
+        .filter_map(|raw| {
+            if raw.status.as_deref() == Some("failed") {
+                raw.retry.map(|retry| (raw_test_id(raw).to_owned(), retry))
+            } else {
+                None
+            }
+        })
         .collect::<BTreeSet<_>>();
     raw_results
         .iter()
-        .filter(|raw| failed.contains(&(raw_test_id(raw).into(), raw.retry.unwrap_or(0))))
+        .filter(|raw| {
+            raw.retry
+                .is_some_and(|retry| failed.contains(&(raw_test_id(raw).into(), retry)))
+        })
         .cloned()
         .collect()
 }
@@ -1115,6 +1134,7 @@ fn create_coverage_view_with_model(
                     title: raw.title.clone(),
                     retries: raw.retry.into_iter().collect(),
                     attempts: BTreeMap::new(),
+                    unstarted: raw.status.as_deref() == Some("unstarted"),
                     runner_reported_flaky: raw.flaky,
                     provenance: raw.provenance.clone(),
                     role: raw.role.clone(),
@@ -1124,6 +1144,7 @@ fn create_coverage_view_with_model(
             );
         }
         let test = tests_by_id.get_mut(&id).expect("test was inserted");
+        test.unstarted |= raw.status.as_deref() == Some("unstarted");
         if let Some(retry) = raw.retry {
             test.retries.insert(retry);
         }
@@ -2319,6 +2340,34 @@ mod tests {
         assert!(!report.filters.passed.points[2].covered);
         assert!(report.filters.failed.points[0].covered);
         assert_eq!(report.view.tests[1].outcome, "flaky");
+    }
+
+    #[test]
+    fn selected_but_unstarted_test_is_not_an_invented_attempt() {
+        let mut unstarted = raw("unstarted", 0, "unstarted", &[]);
+        unstarted.scope = None;
+        unstarted.retry = None;
+        unstarted.runtime.clear();
+        let request = CoverageReportRequest {
+            run_id: "run".into(),
+            manifest: CoverageManifest {
+                decisions: vec![],
+                points: vec![],
+                branches: vec![],
+                limitations: vec![],
+                scope: None,
+            },
+            raw_results: vec![unstarted],
+            generated_at: "time".into(),
+            coverage_model: None,
+            integrity: None,
+            test_exit_code: ExitCodeInput::Present(Some(100)),
+        };
+        let report = analyze_coverage_results(&request).unwrap();
+        assert_eq!(report.view.tests[0].outcome, "unstarted");
+        assert!(report.view.tests[0].attempts.is_empty());
+        assert!(report.filters.passed.tests.is_empty());
+        assert!(report.filters.failed.tests.is_empty());
     }
 
     fn archive(mut entries: Vec<EvidenceArchiveEntry>) -> PathBuf {

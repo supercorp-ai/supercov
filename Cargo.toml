@@ -17,6 +17,7 @@ repository = "https://github.com/supercorp-ai/supercov"
 base64 = "0.22"
 cargo-platform = "0.3.3"
 cargo-config2 = "0.1.45"
+nextest-metadata = "0.15.0"
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 getrandom = "0.3"
 junction = "2.0.0"

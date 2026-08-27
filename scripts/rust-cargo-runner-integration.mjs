@@ -101,7 +101,7 @@ function runCase(runId, noFailFast) {
   writeFileSync(
     configPath,
     JSON.stringify({
-      version: 2,
+      version: 3,
       runId,
       targetDirectory: target,
       outputDirectory: output,
@@ -179,6 +179,18 @@ try {
   assert.deepEqual(
     failFast.units.flatMap(({attempts}) => attempts.map(({test}) => test)),
     ['environment_and_order', 'environment_and_order'],
+  );
+  assert(
+    failFast.units.every(
+      ({runner, runnerRunId, runnerVersion, runnerBinaryId, attempts}) =>
+        runner === 'cargo-test' &&
+        runnerRunId === undefined &&
+        runnerVersion === undefined &&
+        runnerBinaryId === undefined &&
+        attempts.every(({retry, totalAttempts, runnerAttemptId}) =>
+          retry === 0 && totalAttempts === 1 && runnerAttemptId.length > 0
+        ),
+    ),
   );
   assert.deepEqual(
     failFast.units.flatMap(({attempts}) => attempts.map(({result}) => result.status)).sort(),

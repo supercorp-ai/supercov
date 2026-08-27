@@ -242,8 +242,30 @@ fn executable_name(value: &str) -> &str {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CargoTestInvocation {
     pub program: String,
+    pub kind: RustCargoCommandKind,
     pub arguments: Vec<String>,
     pub runner_arguments: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RustCargoCommandKind {
+    CargoTest,
+    NextestRun,
+}
+
+impl CargoTestInvocation {
+    pub(crate) fn command_position(&self) -> Option<usize> {
+        match self.kind {
+            RustCargoCommandKind::CargoTest => self
+                .arguments
+                .iter()
+                .position(|argument| argument == "test"),
+            RustCargoCommandKind::NextestRun => self
+                .arguments
+                .windows(2)
+                .position(|pair| pair == ["nextest", "run"]),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -257,6 +279,231 @@ pub(crate) struct RustCargoExecutionSelection {
     pub run_libtests: bool,
     pub run_doctests: bool,
     pub doctest_arguments: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NextestListInvocation {
+    pub arguments: Vec<String>,
+    pub runner_arguments: Vec<String>,
+}
+
+pub(crate) fn nextest_version_arguments(
+    invocation: &CargoTestInvocation,
+) -> Result<Vec<String>, RustTestRunnerError> {
+    if invocation.kind != RustCargoCommandKind::NextestRun {
+        return Err(RustTestRunnerError::UnsupportedCommand(
+            "a nextest version handshake requires `cargo nextest run`".into(),
+        ));
+    }
+    let command = invocation.command_position().ok_or_else(|| {
+        RustTestRunnerError::UnsupportedCommand(
+            "the expanded Cargo invocation lost its nextest run subcommand".into(),
+        )
+    })?;
+    let mut arguments = invocation.arguments[..command].to_vec();
+    arguments.extend(["nextest".into(), "--version".into()]);
+    Ok(arguments)
+}
+
+fn nextest_run_only_option(argument: &str) -> Option<bool> {
+    let name = argument.split_once('=').map_or(argument, |(name, _)| name);
+    match name {
+        "-j"
+        | "--jobs"
+        | "--test-threads"
+        | "--retries"
+        | "--flaky-result"
+        | "--max-fail"
+        | "--no-tests"
+        | "--failure-output"
+        | "--success-output"
+        | "--status-level"
+        | "--final-status-level"
+        | "--show-progress"
+        | "--max-progress-running"
+        | "--message-format"
+        | "--message-format-version" => Some(!argument.contains('=')),
+        "--fail-fast"
+        | "--ff"
+        | "--no-fail-fast"
+        | "--nff"
+        | "--no-capture"
+        | "--nocapture"
+        | "--no-output-indent"
+        | "--hide-progress-bar"
+        | "--no-input-handler" => Some(false),
+        _ if argument.starts_with("-j") && argument.len() > 2 => Some(false),
+        _ => None,
+    }
+}
+
+fn nextest_unsupported_run_option(argument: &str) -> Option<bool> {
+    let name = argument.split_once('=').map_or(argument, |(name, _)| name);
+    match name {
+        "-R"
+        | "--rerun"
+        | "--debugger"
+        | "--tracer"
+        | "--stress-count"
+        | "--stress-duration"
+        | "--archive-file"
+        | "--archive-format"
+        | "--extract-to"
+        | "--cargo-metadata"
+        | "--workspace-remap"
+        | "--binaries-metadata"
+        | "--target-dir-remap"
+        | "--build-dir-remap" => Some(!argument.contains('=')),
+        "--no-run" | "--extract-overwrite" | "--persist-extract-tempdir" => Some(false),
+        _ => None,
+    }
+}
+
+fn nextest_shared_option(argument: &str) -> Option<bool> {
+    let name = argument.split_once('=').map_or(argument, |(name, _)| name);
+    match name {
+        "--color"
+        | "-p"
+        | "--package"
+        | "--exclude"
+        | "--bin"
+        | "--example"
+        | "--test"
+        | "--bench"
+        | "-F"
+        | "--features"
+        | "--build-jobs"
+        | "--cargo-profile"
+        | "--target"
+        | "--target-dir"
+        | "--cargo-message-format"
+        | "--config"
+        | "--timings"
+        | "-Z"
+        | "--run-ignored"
+        | "--partition"
+        | "--platform-filter"
+        | "-E"
+        | "--filterset"
+        | "--filter-expr"
+        | "--manifest-path"
+        | "--config-file"
+        | "--user-config-file"
+        | "--tool-config-file"
+        | "-P"
+        | "--profile" => Some(!argument.contains('=')),
+        "--no-pager"
+        | "-v"
+        | "--verbose"
+        | "--workspace"
+        | "--all"
+        | "--lib"
+        | "--bins"
+        | "--examples"
+        | "--tests"
+        | "--benches"
+        | "--all-targets"
+        | "--all-features"
+        | "--no-default-features"
+        | "-r"
+        | "--release"
+        | "--unit-graph"
+        | "--frozen"
+        | "--locked"
+        | "--offline"
+        | "--cargo-quiet"
+        | "--cargo-verbose"
+        | "--ignore-rust-version"
+        | "--future-incompat-report"
+        | "--ignore-default-filter"
+        | "--override-version-check" => Some(false),
+        _ if argument.starts_with("-p") && argument.len() > 2 => Some(false),
+        _ if argument.starts_with("-F") && argument.len() > 2 => Some(false),
+        _ if argument.starts_with("-E") && argument.len() > 2 => Some(false),
+        _ if argument.starts_with("-P") && argument.len() > 2 => Some(false),
+        _ if argument.starts_with("-Z") && argument.len() > 2 => Some(false),
+        _ if argument.len() > 2
+            && argument.starts_with('-')
+            && argument[1..].bytes().all(|byte| byte == b'v') =>
+        {
+            Some(false)
+        }
+        _ if argument.starts_with("--timings=") => Some(false),
+        _ => None,
+    }
+}
+
+/// Reprojects a pinned `nextest run` invocation into the stable machine-readable
+/// `nextest list` contract. Selection/build/configuration arguments are kept
+/// byte-for-byte. Runner and presentation arguments are removed because they
+/// do not affect the selected-test catalog. Options whose selection semantics
+/// require an external recording or a different execution mode fail closed.
+pub(crate) fn nextest_list_invocation(
+    invocation: &CargoTestInvocation,
+) -> Result<NextestListInvocation, RustTestRunnerError> {
+    if invocation.kind != RustCargoCommandKind::NextestRun {
+        return Err(RustTestRunnerError::UnsupportedCommand(
+            "a nextest list projection requires `cargo nextest run`".into(),
+        ));
+    }
+    let command = invocation.command_position().ok_or_else(|| {
+        RustTestRunnerError::UnsupportedCommand(
+            "the expanded Cargo invocation lost its nextest run subcommand".into(),
+        )
+    })?;
+    let mut arguments = invocation.arguments[..command].to_vec();
+    arguments.extend(["nextest".into(), "list".into()]);
+    let mut index = command + 2;
+    while index < invocation.arguments.len() {
+        let argument = &invocation.arguments[index];
+        if argument == "--" {
+            arguments.extend(invocation.arguments[index..].iter().cloned());
+            break;
+        }
+        if let Some(takes_value) = nextest_unsupported_run_option(argument) {
+            if takes_value && invocation.arguments.get(index + 1).is_none() {
+                return Err(RustTestRunnerError::UnsupportedCommand(format!(
+                    "nextest option {argument} has no value"
+                )));
+            }
+            return Err(RustTestRunnerError::UnsupportedCommand(format!(
+                "nextest option {argument} cannot yet be assigned exact selected-test identity"
+            )));
+        }
+        if let Some(takes_value) = nextest_run_only_option(argument) {
+            if takes_value {
+                index += 1;
+                if index == invocation.arguments.len() {
+                    return Err(RustTestRunnerError::UnsupportedCommand(format!(
+                        "nextest option {argument} has no value"
+                    )));
+                }
+            }
+        } else if let Some(takes_value) = nextest_shared_option(argument) {
+            arguments.push(argument.clone());
+            if takes_value {
+                index += 1;
+                let value = invocation.arguments.get(index).ok_or_else(|| {
+                    RustTestRunnerError::UnsupportedCommand(format!(
+                        "nextest option {argument} has no value"
+                    ))
+                })?;
+                arguments.push(value.clone());
+            }
+        } else if argument.starts_with('-') {
+            return Err(RustTestRunnerError::UnsupportedCommand(format!(
+                "the pinned nextest run contract does not recognize option {argument}"
+            )));
+        } else {
+            arguments.push(argument.clone());
+        }
+        index += 1;
+    }
+    arguments.extend(["--message-format".into(), "json".into()]);
+    Ok(NextestListInvocation {
+        arguments,
+        runner_arguments: invocation.runner_arguments.clone(),
+    })
 }
 
 pub(crate) fn cargo_invocation(
@@ -279,16 +526,30 @@ pub(crate) fn cargo_invocation(
         .ok_or_else(|| RustTestRunnerError::UnsupportedCommand(
             "Rust was detected, but the expanded command does not expose a stable Cargo invocation".into(),
         ))?;
-    let test = words[cargo + 1..]
+    let cargo_test = words[cargo + 1..]
         .iter()
         .position(|word| word == "test")
-        .map(|position| cargo + 1 + position)
-        .ok_or_else(|| {
-            RustTestRunnerError::UnsupportedCommand(
-                "the first owned Rust runner currently requires `cargo test`; nextest and cross remain detected but explicitly unsupported".into(),
-            )
-        })?;
-    if words[cargo + 1..test]
+        .map(|position| cargo + 1 + position);
+    let nextest = words[cargo + 1..]
+        .windows(2)
+        .position(|pair| pair == ["nextest", "run"])
+        .map(|position| cargo + 1 + position);
+    let (kind, command) = match (cargo_test, nextest) {
+        (Some(test), None) => (RustCargoCommandKind::CargoTest, test),
+        (None, Some(nextest)) => (RustCargoCommandKind::NextestRun, nextest),
+        (Some(_), Some(_)) => {
+            return Err(RustTestRunnerError::UnsupportedCommand(
+                "the Cargo invocation ambiguously contains both test and nextest run".into(),
+            ));
+        }
+        (None, None) => {
+            return Err(RustTestRunnerError::UnsupportedCommand(
+                "the owned Rust runner currently requires `cargo test` or `cargo nextest run`; cross remains explicitly unsupported"
+                    .into(),
+            ));
+        }
+    };
+    if words[cargo + 1..command]
         .iter()
         .any(|word| matches!(word.as_str(), "&&" | "||" | ";" | "|"))
     {
@@ -296,10 +557,16 @@ pub(crate) fn cargo_invocation(
             "the Cargo invocation contains a shell boundary before `test`".into(),
         ));
     }
-    let mut arguments = words[cargo + 1..=test].to_vec();
+    let command_end = command
+        + if kind == RustCargoCommandKind::NextestRun {
+            1
+        } else {
+            0
+        };
+    let mut arguments = words[cargo + 1..=command_end].to_vec();
     let mut runner_arguments = Vec::new();
     let mut after_separator = false;
-    for argument in &words[test + 1..] {
+    for argument in &words[command_end + 1..] {
         if argument == "--" && !after_separator {
             after_separator = true;
             continue;
@@ -317,6 +584,7 @@ pub(crate) fn cargo_invocation(
     }
     Ok(CargoTestInvocation {
         program: words[cargo].clone(),
+        kind,
         arguments,
         runner_arguments,
     })
@@ -366,6 +634,11 @@ fn cargo_option_takes_value(argument: &str) -> Option<bool> {
 pub(crate) fn rust_libtest_selection(
     invocation: &CargoTestInvocation,
 ) -> Result<RustLibtestSelection, RustTestRunnerError> {
+    if invocation.kind != RustCargoCommandKind::CargoTest {
+        return Err(RustTestRunnerError::UnsupportedCommand(
+            "libtest selection cannot be reconstructed from a nextest command".into(),
+        ));
+    }
     let test = invocation
         .arguments
         .iter()
@@ -447,6 +720,13 @@ pub(crate) fn rust_libtest_selection(
 pub(crate) fn rust_cargo_execution_selection(
     invocation: &CargoTestInvocation,
 ) -> Result<RustCargoExecutionSelection, RustTestRunnerError> {
+    if invocation.kind == RustCargoCommandKind::NextestRun {
+        return Ok(RustCargoExecutionSelection {
+            run_libtests: true,
+            run_doctests: false,
+            doctest_arguments: Vec::new(),
+        });
+    }
     let test = invocation
         .arguments
         .iter()
@@ -1011,6 +1291,166 @@ mod tests {
     }
 
     #[test]
+    fn nextest_run_is_detected_without_reclassifying_its_filters_or_retries() {
+        let invocation = cargo_invocation(
+            Path::new("."),
+            &[
+                "cargo".into(),
+                "+1.95.0".into(),
+                "nextest".into(),
+                "run".into(),
+                "--retries".into(),
+                "2".into(),
+                "-E".into(),
+                "test(/flaky/)".into(),
+                "--".into(),
+                "--nocapture".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(invocation.kind, RustCargoCommandKind::NextestRun);
+        assert_eq!(
+            invocation.arguments,
+            [
+                "+1.95.0",
+                "nextest",
+                "run",
+                "--retries",
+                "2",
+                "-E",
+                "test(/flaky/)",
+            ]
+        );
+        assert_eq!(invocation.runner_arguments, ["--nocapture"]);
+        let execution = rust_cargo_execution_selection(&invocation).unwrap();
+        assert!(execution.run_libtests);
+        assert!(!execution.run_doctests);
+        assert!(execution.doctest_arguments.is_empty());
+        assert!(rust_libtest_selection(&invocation).is_err());
+        assert_eq!(
+            nextest_list_invocation(&invocation).unwrap(),
+            NextestListInvocation {
+                arguments: vec![
+                    "+1.95.0".into(),
+                    "nextest".into(),
+                    "list".into(),
+                    "-E".into(),
+                    "test(/flaky/)".into(),
+                    "--message-format".into(),
+                    "json".into(),
+                ],
+                runner_arguments: vec!["--nocapture".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn nextest_list_projection_preserves_selection_and_rejects_external_state() {
+        let invocation = CargoTestInvocation {
+            program: "cargo".into(),
+            kind: RustCargoCommandKind::NextestRun,
+            arguments: vec![
+                "nextest".into(),
+                "run".into(),
+                "--package=fixture".into(),
+                "--partition".into(),
+                "hash:1/2".into(),
+                "--test-threads=8".into(),
+                "--failure-output".into(),
+                "final".into(),
+                "name".into(),
+            ],
+            runner_arguments: vec!["--exact".into(), "full::name".into()],
+        };
+        assert_eq!(
+            nextest_list_invocation(&invocation).unwrap(),
+            NextestListInvocation {
+                arguments: vec![
+                    "nextest".into(),
+                    "list".into(),
+                    "--package=fixture".into(),
+                    "--partition".into(),
+                    "hash:1/2".into(),
+                    "name".into(),
+                    "--message-format".into(),
+                    "json".into(),
+                ],
+                runner_arguments: vec!["--exact".into(), "full::name".into()],
+            }
+        );
+
+        let mut rerun = invocation;
+        rerun.arguments.extend(["--rerun".into(), "latest".into()]);
+        assert!(
+            nextest_list_invocation(&rerun)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot yet be assigned exact selected-test identity")
+        );
+    }
+
+    #[test]
+    fn nextest_list_projection_preserves_post_separator_libtest_selection() {
+        let invocation = cargo_invocation(
+            Path::new("."),
+            &[
+                "cargo".into(),
+                "nextest".into(),
+                "run".into(),
+                "--timings".into(),
+                "-vv".into(),
+                "--".into(),
+                "--include-ignored".into(),
+                "--skip".into(),
+                "slow".into(),
+                "--exact".into(),
+                "tests::selected".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            nextest_list_invocation(&invocation).unwrap(),
+            NextestListInvocation {
+                arguments: vec![
+                    "nextest".to_owned(),
+                    "list".to_owned(),
+                    "--timings".to_owned(),
+                    "-vv".to_owned(),
+                    "--message-format".to_owned(),
+                    "json".to_owned(),
+                ],
+                runner_arguments: vec![
+                    "--include-ignored".to_owned(),
+                    "--skip".to_owned(),
+                    "slow".to_owned(),
+                    "--exact".to_owned(),
+                    "tests::selected".to_owned(),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn nextest_version_handshake_preserves_the_cargo_toolchain_selector() {
+        let invocation = CargoTestInvocation {
+            program: "cargo".into(),
+            kind: RustCargoCommandKind::NextestRun,
+            arguments: vec![
+                "+1.95.0".into(),
+                "nextest".into(),
+                "run".into(),
+                "-p".into(),
+                "fixture".into(),
+            ],
+            runner_arguments: Vec::new(),
+        };
+        assert_eq!(
+            nextest_version_arguments(&invocation).unwrap(),
+            ["+1.95.0", "nextest", "--version"]
+        );
+    }
+
+    #[test]
     fn libtest_modes_that_process_per_test_cannot_reproduce_fail_closed() {
         for arguments in [
             vec!["--test-threads", "4"],
@@ -1021,6 +1461,7 @@ mod tests {
         ] {
             let invocation = CargoTestInvocation {
                 program: "cargo".into(),
+                kind: RustCargoCommandKind::CargoTest,
                 arguments: vec!["test".into()],
                 runner_arguments: arguments.into_iter().map(str::to_owned).collect(),
             };
@@ -1032,6 +1473,7 @@ mod tests {
     fn cargo_test_options_are_not_mistaken_for_the_test_name_filter() {
         let invocation = CargoTestInvocation {
             program: "cargo".into(),
+            kind: RustCargoCommandKind::CargoTest,
             arguments: vec![
                 "test".into(),
                 "--manifest-path".into(),
@@ -1050,6 +1492,7 @@ mod tests {
     fn cargo_target_selection_reproduces_when_cargo_runs_doctests() {
         let invocation = CargoTestInvocation {
             program: "cargo".into(),
+            kind: RustCargoCommandKind::CargoTest,
             arguments: vec![
                 "test".into(),
                 "-p".into(),

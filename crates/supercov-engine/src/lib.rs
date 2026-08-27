@@ -45,6 +45,7 @@ pub mod rust_phase_projection;
 pub mod rust_probe_transport;
 pub mod rust_project;
 pub mod rust_run;
+pub mod rust_runner_attempt;
 pub mod rust_runtime;
 pub mod rust_test_context;
 pub mod rust_test_runner;
