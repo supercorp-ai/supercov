@@ -914,13 +914,38 @@ override, selects the exact rustc companion, preserves the relocated configured
 runner and selected tests, publishes evidence and leaves no terminal work.
 Empty, misplaced and multiple selectors fail before execution.
 
+Cargo 1.95 runner configuration now has one owned selection path instead of a
+split between `cargo-config2` and Supercov's newer layers. The model loads the
+ordinary hierarchy and Cargo home, recursively applies ordered and optional
+`include` files with cycle rejection, then applies command-line `--config`
+files or strict dotted-key values from left to right. It preserves Cargo's
+non-mergeable runner arrays, config-relative program roots, ASCII-whitespace
+string parsing and CLI-over-environment-over-file precedence. Exact target
+entries beat `cfg(...)`; otherwise Supercov obtains the selected target's cfg
+set from the exact configured rustc command and rejects multiple matching cfg
+runners exactly as Cargo does. Forbidden registry token/secret values in
+`--config` fail during preflight. Direct Cargo process argv is no longer
+joined and reparsed, so embedded TOML quotes survive unchanged.
+
+The real compiler corpus proves an exact-target runner supplied by `include`,
+an included cfg runner selected from rustc's target facts and a CLI runner
+overriding the included value. A paired Cargo/Supercov oracle requires both to
+reject two matching cfg runners before a test executes. Each successful run
+preserves configured-runner composition across libtest and rustdoc, publishes
+authenticated evidence and removes terminal work. The full local gate is green
+for 241 engine tests, 19 contract tests, 16 CLI tests, warnings-denied clippy,
+the complete public JavaScript/TypeScript matrix and the authoritative
+rustc/rustdoc corpus. No hosted workflow ran.
+
 This closes copied/ancestor configuration duplication for the current
 same-filesystem writable-parent topology. A checkout whose parent cannot host
 the authenticated sibling still fails closed; an exact read-only-parent,
 cross-volume and supported-platform fallback remains required before public
 promotion. Retry identity, nextest/custom harnesses, complete
-presentation/output modes and their crash matrix likewise remain open and keep
-Rust private.
+presentation/output modes and their crash matrix likewise remain open. Cargo
+configuration that changes `build.rustc`/compiler wrappers through an included
+or CLI layer while host/cfg selection depends on that command still fails
+closed, as does multiple selected targets. These gaps keep Rust private.
 
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.

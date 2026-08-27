@@ -16,6 +16,7 @@ oracle-harnesses = []
 
 [dependencies]
 base64.workspace = true
+cargo-platform.workspace = true
 cargo-config2.workspace = true
 flate2.workspace = true
 getrandom.workspace = true
@@ -42,6 +43,7 @@ sha2.workspace = true
 supercov-contracts.workspace = true
 sysinfo.workspace = true
 toml.workspace = true
+toml_edit.workspace = true
 which.workspace = true
 
 [target.'cfg(windows)'.dependencies]

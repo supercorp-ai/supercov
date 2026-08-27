@@ -518,6 +518,11 @@ try {
 
   const rustc = run('rustup', ['which', 'rustc']).stdout.trim();
   const cargo = run('rustup', ['which', 'cargo']).stdout.trim();
+  const rustcHost = run(rustc, ['-vV']).stdout
+    .split('\n')
+    .find((line) => line.startsWith('host: '))
+    ?.slice('host: '.length);
+  assert(rustcHost, 'selected rustc did not report its host triple');
   const selectionRequest = {
     rustcPath: rustc,
     candidates: [wrapper],
@@ -607,9 +612,15 @@ try {
   const productionRunnerLog = join(scratch, 'configured-runner.jsonl');
   mkdirSync(dirname(productionRunner), {recursive: true});
   mkdirSync(join(productionFixture, '.cargo'), {recursive: true});
+  const configuredRunnerCfgKey =
+    process.platform === 'darwin'
+      ? 'cfg(target_vendor = "apple")'
+      : process.platform === 'win32'
+        ? 'cfg(windows)'
+        : 'cfg(unix)';
   writeFileSync(
     join(productionFixture, '.cargo/config.toml'),
-    '[target.' + JSON.stringify(process.platform === 'darwin' ? 'cfg(target_vendor = "apple")' : 'cfg(unix)') + ']\n' +
+    '[target.' + JSON.stringify(configuredRunnerCfgKey) + ']\n' +
       'runner=["bin with spaces/configured-runner.mjs","--fixed","two words"]\n' +
       '[build]\n' +
       'rustflags=["--cfg","supercov_config_once"]\n',
@@ -634,9 +645,9 @@ try {
       "import {appendFileSync} from 'node:fs';",
       "import {spawnSync} from 'node:child_process';",
       "import {fileURLToPath} from 'node:url';",
-      'const [fixed, spaced, artifact, ...args] = process.argv.slice(2);',
-      "if (fixed !== '--fixed' || spaced !== 'two words' || !artifact) process.exit(97);",
-      'if (process.env.SUPERCOV_PRODUCTION_RUNNER_LOG) appendFileSync(process.env.SUPERCOV_PRODUCTION_RUNNER_LOG, JSON.stringify({program: fileURLToPath(import.meta.url), artifact, args}) + "\\n");',
+      'const [mode, spaced, artifact, ...args] = process.argv.slice(2);',
+      "if (!['--fixed', '--cfg', '--cli'].includes(mode) || spaced !== 'two words' || !artifact) process.exit(97);",
+      'if (process.env.SUPERCOV_PRODUCTION_RUNNER_LOG) appendFileSync(process.env.SUPERCOV_PRODUCTION_RUNNER_LOG, JSON.stringify({program: fileURLToPath(import.meta.url), mode, artifact, args}) + "\\n");',
       "const result = spawnSync(artifact, args, {stdio: 'inherit', env: process.env});",
       'if (result.error) throw result.error;',
       'if (result.signal) process.kill(process.pid, result.signal);',
@@ -767,6 +778,172 @@ try {
     productionTestQuery.data.tests[0].id,
     /^rust:libtest:package:\.:lib:supercov_rustc_spike_fixture:src\/lib\.rs::tests::records_real_runtime_probes$/u,
     'production libtest identity omitted its relocatable package and exact target',
+  );
+
+  const includedRunnerConfig = join(
+    productionFixture,
+    '.cargo',
+    'included-runner.toml',
+  );
+  writeFileSync(
+    includedRunnerConfig,
+    '[target.' + JSON.stringify(rustcHost) + ']\n' +
+      'runner=["bin with spaces/configured-runner.mjs","--fixed","two words"]\n',
+  );
+  writeFileSync(
+    join(productionFixture, '.cargo/config.toml'),
+    'include=["included-runner.toml"]\n' +
+      '[build]\n' +
+      'rustflags=["--cfg","supercov_config_once"]\n',
+  );
+  const includedRunnerLog = join(scratch, 'included-runner.jsonl');
+  const includedRunnerRun = JSON.parse(
+    run(supercov, ['__run-rust-compiler'], {
+      env: {RUSTC: rustc, SUPERCOV_PRODUCTION_RUNNER_LOG: includedRunnerLog},
+      input: JSON.stringify({
+        root: productionFixture,
+        command: [cargo, 'test', 'records_real_runtime_probes'],
+        runId: 'run_7123456789abcdef',
+        startedAt: '2026-08-26T00:00:10.000Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+    }).stdout,
+  );
+  assert.equal(includedRunnerRun.exitCode, 0);
+  assert(includedRunnerRun.tests > 0);
+  assert(
+    readFileSync(includedRunnerLog, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .every(({mode}) => mode === '--fixed'),
+    'included exact-target runner was not preserved',
+  );
+  assert(
+    !existsSync(join(productionFixture, '.supercov/work/run_7123456789abcdef')),
+    'included-runner compiler run left terminal work state behind',
+  );
+
+  writeFileSync(
+    includedRunnerConfig,
+    '[target.' + JSON.stringify(configuredRunnerCfgKey) + ']\n' +
+      'runner=["bin with spaces/configured-runner.mjs","--cfg","two words"]\n',
+  );
+  const includedCfgRunnerLog = join(scratch, 'included-cfg-runner.jsonl');
+  const includedCfgRunnerRun = JSON.parse(
+    run(supercov, ['__run-rust-compiler'], {
+      env: {RUSTC: rustc, SUPERCOV_PRODUCTION_RUNNER_LOG: includedCfgRunnerLog},
+      input: JSON.stringify({
+        root: productionFixture,
+        command: [cargo, 'test', 'records_real_runtime_probes'],
+        runId: 'run_9123456789abcdef',
+        startedAt: '2026-08-26T00:00:12.000Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+    }).stdout,
+  );
+  assert.equal(includedCfgRunnerRun.exitCode, 0);
+  assert(includedCfgRunnerRun.tests > 0);
+  assert(
+    readFileSync(includedCfgRunnerLog, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .every(({mode}) => mode === '--cfg'),
+    'included cfg runner was not selected from rustc\'s exact target cfg set',
+  );
+  assert(
+    !existsSync(join(productionFixture, '.supercov/work/run_9123456789abcdef')),
+    'included-cfg-runner compiler run left terminal work state behind',
+  );
+
+  const duplicateCfgKeys =
+    process.platform === 'darwin'
+      ? ['cfg(target_vendor = "apple")', 'cfg(target_os = "macos")']
+      : process.platform === 'win32'
+        ? ['cfg(windows)', 'cfg(target_family = "windows")']
+        : ['cfg(unix)', 'cfg(target_family = "unix")'];
+  writeFileSync(
+    includedRunnerConfig,
+    duplicateCfgKeys
+      .map(
+        (key, index) =>
+          `[target.${JSON.stringify(key)}]\nrunner=["bin with spaces/configured-runner.mjs","--cfg","two words","${index}"]\n`,
+      )
+      .join(''),
+  );
+  const cargoDuplicateCfg = run(
+    cargo,
+    ['test', 'records_real_runtime_probes'],
+    {cwd: productionFixture, env: {RUSTC: rustc}, expectFailure: true},
+  );
+  assert.match(cargoDuplicateCfg.stderr, /several matching instances/u);
+  const supercovDuplicateCfg = run(supercov, ['__run-rust-compiler'], {
+    env: {RUSTC: rustc},
+    expectFailure: true,
+    input: JSON.stringify({
+      root: productionFixture,
+      command: [cargo, 'test', 'records_real_runtime_probes'],
+      runId: 'run_a123456789abcdef',
+      startedAt: '2026-08-26T00:00:14.000Z',
+      wrapperPath: supercov,
+      companionCandidates: [wrapper],
+      requirePublicCapabilities: false,
+    }),
+  });
+  assert.match(supercovDuplicateCfg.stderr, /several matching instances/u);
+  assert(
+    !existsSync(join(productionFixture, '.supercov/work/run_a123456789abcdef')),
+    'duplicate cfg preflight created terminal work state',
+  );
+
+  writeFileSync(
+    includedRunnerConfig,
+    '[target.' + JSON.stringify(configuredRunnerCfgKey) + ']\n' +
+      'runner=["bin with spaces/configured-runner.mjs","--cfg","two words"]\n',
+  );
+
+  const cliRunnerLog = join(scratch, 'cli-runner.jsonl');
+  const cliRunnerRun = JSON.parse(
+    run(supercov, ['__run-rust-compiler'], {
+      env: {RUSTC: rustc, SUPERCOV_PRODUCTION_RUNNER_LOG: cliRunnerLog},
+      input: JSON.stringify({
+        root: productionFixture,
+        command: [
+          cargo,
+          'test',
+          'records_real_runtime_probes',
+          '--config',
+          `target.${rustcHost}.runner=["bin with spaces/configured-runner.mjs","--cli","two words"]`,
+        ],
+        runId: 'run_8123456789abcdef',
+        startedAt: '2026-08-26T00:00:15.000Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+    }).stdout,
+  );
+  assert.equal(cliRunnerRun.exitCode, 0);
+  assert(cliRunnerRun.tests > 0);
+  assert(
+    readFileSync(cliRunnerLog, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .every(({mode}) => mode === '--cli'),
+    'CLI exact-target runner did not override included configuration',
+  );
+  assert(
+    !existsSync(join(productionFixture, '.supercov/work/run_8123456789abcdef')),
+    'CLI-runner compiler run left terminal work state behind',
   );
 
   const selectedToolchainRunnerLog = join(

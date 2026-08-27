@@ -263,8 +263,16 @@ pub(crate) fn cargo_invocation(
     root: &Path,
     command: &[String],
 ) -> Result<CargoTestInvocation, RustTestRunnerError> {
-    let expanded = crate::project_discovery::expanded_command(root, command);
-    let words = shell_words(&expanded)?;
+    // A process argv is already tokenized. Joining and shell-parsing a direct
+    // Cargo command destroys quotes that are payload (not shell syntax), most
+    // notably TOML strings passed to Cargo's --config. Only opaque wrapper or
+    // package-script commands need textual expansion and shell tokenization.
+    let words = if command.iter().any(|word| executable_name(word) == "cargo") {
+        command.to_vec()
+    } else {
+        let expanded = crate::project_discovery::expanded_command(root, command);
+        shell_words(&expanded)?
+    };
     let cargo = words
         .iter()
         .position(|word| executable_name(word) == "cargo")
@@ -984,6 +992,22 @@ mod tests {
             ]
         );
         assert_eq!(selection.run_arguments, ["--include-ignored"]);
+    }
+
+    #[test]
+    fn direct_cargo_argv_preserves_toml_quotes_inside_config_values() {
+        let config = "target.host.runner=[\"runner with spaces\",\"--fixed\"]";
+        let invocation = cargo_invocation(
+            Path::new("."),
+            &[
+                "cargo".into(),
+                "test".into(),
+                "--config".into(),
+                config.into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(invocation.arguments, ["test", "--config", config]);
     }
 
     #[test]

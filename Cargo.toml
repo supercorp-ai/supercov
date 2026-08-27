@@ -15,6 +15,7 @@ repository = "https://github.com/supercorp-ai/supercov"
 
 [workspace.dependencies]
 base64 = "0.22"
+cargo-platform = "0.3.3"
 cargo-config2 = "0.1.45"
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 getrandom = "0.3"
@@ -44,6 +45,7 @@ supercov-engine = { version = "=0.0.16", path = "crates/supercov-engine" }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
 toml = "1.1.4"
+toml_edit = { version = "0.24.0", features = ["serde"] }
 windows-sys = "0.61.2"
 which = "8.0.6"
 

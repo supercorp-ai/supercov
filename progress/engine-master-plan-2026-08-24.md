@@ -1654,6 +1654,41 @@ miss blocks flipping any default.
   crash/concurrency matrices, remaining R1 semantic corpora,
   supported-platform gates and the 1.10x performance gate remain blocking.
 
+## Checkpoint — 2026-08-27 owned Cargo 1.95 runner configuration
+
+- Target-runner selection no longer splits ordinary files and newer Cargo
+  layers between two implementations. One Rust-owned Cargo 1.95 model loads
+  the ordinary hierarchy and Cargo home, recursive ordered/optional `include`
+  files and left-to-right `--config` files or strict dotted-key assignments.
+  It preserves non-mergeable runner arrays, definition-relative program roots,
+  ASCII-whitespace string parsing and CLI-over-environment-over-file
+  precedence. Include cycles, malformed values and Cargo-forbidden registry
+  token/secret assignments fail during preflight.
+- Exact target entries beat cfg entries. When cfg evaluation is necessary,
+  Supercov invokes the exact configured rustc command with the selected target,
+  parses its cfg facts through Cargo's own `cargo-platform` model and rejects
+  multiple matching cfg runners. Ordinary config files use this owned path as
+  well, eliminating the previous dependency behavior that silently chose one
+  duplicate cfg match and split runner strings only on spaces.
+- Direct Cargo process argv remains structured. Supercov no longer joins and
+  reparses it through shell syntax, which had destroyed quote characters inside
+  TOML `--config` payloads. Opaque package-script commands still use their
+  necessary textual expansion path.
+- The real compiler corpus runs exact-target and cfg runners supplied through
+  `include`, then proves a CLI runner overrides them without losing quoted
+  arguments. An independent paired oracle makes Cargo 1.95 and Supercov reject
+  the same duplicate cfg-runner configuration before tests execute. Successful
+  libtest/rustdoc runs retain authenticated evidence and leave no terminal work.
+- The authoritative corpus, 241 engine tests, 19 contract tests, 16 CLI tests,
+  warnings-denied clippy and the complete public JavaScript/TypeScript matrix
+  are green locally. No hosted workflow ran.
+- This is an R2 checkpoint, not public Rust promotion. Included/CLI changes to
+  `build.rustc` or compiler wrappers still fail closed when host/cfg selection
+  depends on the changed command. Multi-target selection, retries,
+  nextest/custom harnesses, complete presentation modes, read-only/cross-volume
+  fallback, remaining semantic corpora, target matrices and the 1.10x gate
+  remain blocking.
+
 ## Non-goals and guardrails
 
 - No accidental behavior change during ports; every future language frontend
