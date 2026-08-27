@@ -1,13 +1,15 @@
 //! Private production-shaped Cargo orchestration for the exact rustc companion.
 //!
-//! Cargo itself supplies the compiler path to `RUSTC_WORKSPACE_WRAPPER`; the
-//! Supercov wrapper selects an exact companion at that boundary. This avoids
+//! Supercov temporarily occupies Cargo's general and workspace wrapper slots
+//! inside the isolated run. The outer bridge reconstructs the user's original
+//! wrapper chain and the inner bridge selects an exact companion from Cargo's
+//! actual compiler token. This preserves non-workspace compilation and avoids
 //! guessing which toolchain a working command, custom `RUSTC`, or rustup
 //! override will actually use.
 
 use std::{
     collections::BTreeMap,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Component, Path, PathBuf},
@@ -102,6 +104,8 @@ fn cargo_runner_configuration_arguments(
 }
 
 pub const RUST_COMPILER_WRAPPER_CONFIG_ENV: &str = "SUPERCOV_RUST_COMPILER_WRAPPER_CONFIG";
+pub const RUST_COMPILER_INNER_MODE_ENV: &str = "SUPERCOV_RUST_COMPILER_INNER_MODE";
+pub const RUST_ORIGINAL_COMPILER_ENV: &str = "SUPERCOV_RUST_ORIGINAL_COMPILER";
 pub const RUST_COMPILER_OUTPUT_ENV: &str = "SUPERCOV_RUST_COMPILER_OUTPUT";
 pub const RUST_SOURCE_ROOT_ENV: &str = "SUPERCOV_RUST_SOURCE_ROOT";
 pub const RUST_TARGET_ROOT_ENV: &str = "SUPERCOV_RUST_TARGET_ROOT";
@@ -134,6 +138,109 @@ pub struct RustCompilerWrapperConfig {
     pub selection_directory: PathBuf,
     pub shared_runtime_directory: PathBuf,
     pub target_runners: Vec<RustCargoResolvedTargetRunner>,
+    pub project_root: PathBuf,
+    pub compiler: crate::rust_cargo_configuration::RustCargoCompilerCommandPlan,
+    pub original_wrapper_environment: RustCompilerWrapperEnvironment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "encoding", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum RustCompilerEnvironmentValue {
+    UnixBytes { value: Vec<u8> },
+    WindowsWide { value: Vec<u16> },
+}
+
+impl RustCompilerEnvironmentValue {
+    fn capture(value: &OsStr) -> Self {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            Self::UnixBytes {
+                value: value.as_bytes().to_vec(),
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt as _;
+            Self::WindowsWide {
+                value: value.encode_wide().collect(),
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            Self::UnixBytes {
+                value: value.to_string_lossy().as_bytes().to_vec(),
+            }
+        }
+    }
+
+    pub fn decode(&self) -> Result<OsString, RustCompilerOrchestrationError> {
+        match self {
+            Self::UnixBytes { value } => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::ffi::OsStringExt as _;
+                    Ok(OsString::from_vec(value.clone()))
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = value;
+                    Err(RustCompilerOrchestrationError::InvalidRequest(
+                        "Unix compiler-wrapper environment was read on a non-Unix host".into(),
+                    ))
+                }
+            }
+            Self::WindowsWide { value } => {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::ffi::OsStringExt as _;
+                    Ok(OsString::from_wide(value))
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = value;
+                    Err(RustCompilerOrchestrationError::InvalidRequest(
+                        "Windows compiler-wrapper environment was read on a non-Windows host"
+                            .into(),
+                    ))
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCompilerWrapperEnvironment {
+    pub rustc_wrapper: Option<RustCompilerEnvironmentValue>,
+    pub rustc_workspace_wrapper: Option<RustCompilerEnvironmentValue>,
+}
+
+impl RustCompilerWrapperEnvironment {
+    fn capture() -> Self {
+        Self {
+            rustc_wrapper: std::env::var_os("RUSTC_WRAPPER")
+                .as_deref()
+                .map(RustCompilerEnvironmentValue::capture),
+            rustc_workspace_wrapper: std::env::var_os("RUSTC_WORKSPACE_WRAPPER")
+                .as_deref()
+                .map(RustCompilerEnvironmentValue::capture),
+        }
+    }
+
+    pub fn restore(&self, command: &mut Command) -> Result<(), RustCompilerOrchestrationError> {
+        for (name, value) in [
+            ("RUSTC_WRAPPER", &self.rustc_wrapper),
+            ("RUSTC_WORKSPACE_WRAPPER", &self.rustc_workspace_wrapper),
+        ] {
+            if let Some(value) = value {
+                command.env(name, value.decode()?);
+            } else {
+                command.env_remove(name);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -184,7 +291,6 @@ pub struct RustCompilerBuild {
 pub enum RustCompilerOrchestrationError {
     InvalidRequest(String),
     Io { path: PathBuf, reason: String },
-    ExistingCompilerWrapper,
     Cargo(String),
     CargoOutput(String),
     CompilerOutput(String),
@@ -196,15 +302,20 @@ pub enum RustCompilerOrchestrationError {
 impl std::fmt::Display for RustCompilerOrchestrationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidRequest(reason) => write!(formatter, "invalid Rust compiler build: {reason}"),
+            Self::InvalidRequest(reason) => {
+                write!(formatter, "invalid Rust compiler build: {reason}")
+            }
             Self::Io { path, reason } => write!(formatter, "{}: {reason}", path.display()),
-            Self::ExistingCompilerWrapper => formatter.write_str(
-                "a configured Cargo compiler wrapper cannot yet be composed without changing wrapper-visible compiler semantics",
-            ),
             Self::Cargo(reason) => write!(formatter, "Cargo compiler build failed: {reason}"),
-            Self::CargoOutput(reason) => write!(formatter, "invalid Cargo compiler output: {reason}"),
-            Self::CompilerOutput(reason) => write!(formatter, "invalid Rust compiler output: {reason}"),
-            Self::Selection(reason) => write!(formatter, "Rust compiler selection failed: {reason}"),
+            Self::CargoOutput(reason) => {
+                write!(formatter, "invalid Cargo compiler output: {reason}")
+            }
+            Self::CompilerOutput(reason) => {
+                write!(formatter, "invalid Rust compiler output: {reason}")
+            }
+            Self::Selection(reason) => {
+                write!(formatter, "Rust compiler selection failed: {reason}")
+            }
             Self::Manifest(reason) => write!(formatter, "Rust compiler manifest failed: {reason}"),
             Self::Interrupted { signal, .. } => {
                 write!(formatter, "Rust compiler run was interrupted by {signal}")
@@ -811,15 +922,6 @@ pub fn build_with_rust_compiler_companion_supervised(
             "command, safe run ID and companion candidates are required".into(),
         ));
     }
-    if request.cargo_runner_plan.compiler.rustc_wrapper.is_some()
-        || request
-            .cargo_runner_plan
-            .compiler
-            .rustc_workspace_wrapper
-            .is_some()
-    {
-        return Err(RustCompilerOrchestrationError::ExistingCompilerWrapper);
-    }
     if std::env::var_os("RUSTDOC").is_some() {
         return Err(RustCompilerOrchestrationError::InvalidRequest(
             "an existing RUSTDOC executable cannot yet be composed without changing rustdoc semantics"
@@ -867,6 +969,9 @@ pub fn build_with_rust_compiler_companion_supervised(
             selection_directory: selection_directory.clone(),
             shared_runtime_directory: shared_runtime_directory.clone(),
             target_runners: target_runners.clone(),
+            project_root: project_root.clone(),
+            compiler: request.cargo_runner_plan.compiler.clone(),
+            original_wrapper_environment: RustCompilerWrapperEnvironment::capture(),
         },
     )?;
     let cargo_runner_config_path = compiler_output_directory.join("cargo-runner.json");
@@ -899,6 +1004,10 @@ pub fn build_with_rust_compiler_companion_supervised(
             (
                 OsString::from("CARGO_TARGET_DIR"),
                 target_directory.clone().into_os_string(),
+            ),
+            (
+                OsString::from("RUSTC_WRAPPER"),
+                wrapper.clone().into_os_string(),
             ),
             (
                 OsString::from("RUSTC_WORKSPACE_WRAPPER"),
@@ -973,6 +1082,10 @@ pub fn build_with_rust_compiler_companion_supervised(
                     (
                         OsString::from("CARGO_TARGET_DIR"),
                         target_directory.clone().into_os_string(),
+                    ),
+                    (
+                        OsString::from("RUSTC_WRAPPER"),
+                        wrapper.clone().into_os_string(),
                     ),
                     (
                         OsString::from("RUSTC_WORKSPACE_WRAPPER"),
@@ -1128,6 +1241,52 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compiler_wrapper_environment_round_trips_non_utf8_and_exact_absence() {
+        use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+
+        let original = OsString::from_vec(vec![b'w', 0xff, b'r']);
+        let snapshot = RustCompilerWrapperEnvironment {
+            rustc_wrapper: Some(RustCompilerEnvironmentValue::capture(&original)),
+            rustc_workspace_wrapper: None,
+        };
+        assert_eq!(
+            snapshot.rustc_wrapper.as_ref().unwrap().decode().unwrap(),
+            original
+        );
+        assert!(
+            RustCompilerEnvironmentValue::WindowsWide { value: vec![1] }
+                .decode()
+                .unwrap_err()
+                .to_string()
+                .contains("non-Windows")
+        );
+
+        let mut command = Command::new("rustc");
+        command
+            .env("RUSTC_WRAPPER", "temporary")
+            .env("RUSTC_WORKSPACE_WRAPPER", "temporary");
+        snapshot.restore(&mut command).unwrap();
+        let environment = command
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.as_bytes().to_vec(),
+                    value.map(|value| value.as_bytes().to_vec()),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            environment.get(b"RUSTC_WRAPPER".as_slice()),
+            Some(&Some(vec![b'w', 0xff, b'r']))
+        );
+        assert_eq!(
+            environment.get(b"RUSTC_WORKSPACE_WRAPPER".as_slice()),
+            Some(&None)
+        );
     }
 
     #[test]

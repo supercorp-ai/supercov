@@ -1,5 +1,5 @@
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -59,8 +59,11 @@ Usage:\n\
   supercov merge <run-id> <run-id> [...]\n\
   supercov clean [--keep N] [--dry-run]\n";
 
-fn is_executable_wrapper_program(argument: &str) -> bool {
-    if argument.starts_with(['-', '@']) {
+fn is_executable_wrapper_program(argument: &OsStr) -> bool {
+    if argument
+        .to_str()
+        .is_some_and(|argument| argument.starts_with(['-', '@']))
+    {
         return false;
     }
     let path = Path::new(argument);
@@ -102,11 +105,15 @@ fn main() -> ExitCode {
     {
         return rust_cargo_test_runner(os_arguments.into_iter().skip(1).collect());
     }
-    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if std::env::var_os(supercov_engine::rust_compiler_orchestration::RUST_COMPILER_INNER_MODE_ENV)
+        .is_some()
+    {
+        return rust_compiler_inner(os_arguments);
+    }
     // The parent-death watchdog inherits arbitrary wrapper environments. It
     // must dispatch before Cargo/rustdoc wrapper detection and must never emit
     // user-visible output.
-    if arguments.as_slice() == ["__watch-process-group"] {
+    if os_arguments.as_slice() == [OsStr::new("__watch-process-group")] {
         return match supercov_engine::process_supervision::watch_parent_process_group() {
             Ok(()) => ExitCode::SUCCESS,
             Err(_) => ExitCode::from(125),
@@ -121,12 +128,13 @@ fn main() -> ExitCode {
         supercov_engine::rust_compiler_orchestration::RUST_COMPILER_WRAPPER_CONFIG_ENV,
     )
     .is_some()
-        && arguments
+        && os_arguments
             .first()
             .is_some_and(|argument| is_executable_wrapper_program(argument))
     {
-        return rust_compiler_wrapper(arguments);
+        return rust_compiler_wrapper(os_arguments);
     }
+    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     if std::env::var_os(supercov_engine::rust_compiler_orchestration::RUSTDOC_WRAPPER_MODE_ENV)
         .is_some()
     {
@@ -137,7 +145,7 @@ fn main() -> ExitCode {
     )
     .is_some()
     {
-        return rust_compiler_wrapper(arguments);
+        return rust_compiler_wrapper(os_arguments);
     }
     let mut arguments = arguments.into_iter();
     match arguments.next().as_deref() {
@@ -409,50 +417,90 @@ fn rustdoc_wrapper(arguments: Vec<String>) -> ExitCode {
     }
 }
 
-fn rust_compiler_wrapper(arguments: Vec<String>) -> ExitCode {
-    let Some(rustc) = arguments.first() else {
-        eprintln!("[supercov] Cargo compiler wrapper received no rustc path");
-        return ExitCode::from(2);
-    };
+fn load_rust_compiler_wrapper_config()
+-> Result<supercov_engine::rust_compiler_orchestration::RustCompilerWrapperConfig, String> {
     let Some(config_path) = std::env::var_os(
         supercov_engine::rust_compiler_orchestration::RUST_COMPILER_WRAPPER_CONFIG_ENV,
     )
     .map(PathBuf::from) else {
-        eprintln!("[supercov] Cargo compiler wrapper configuration is missing");
-        return ExitCode::from(2);
+        return Err("Cargo compiler wrapper configuration is missing".into());
     };
+    let metadata = fs::symlink_metadata(&config_path).map_err(|error| error.to_string())?;
+    if !metadata.file_type().is_file() {
+        return Err(format!(
+            "unsafe Rust compiler wrapper configuration: {}",
+            config_path.display()
+        ));
+    }
+    serde_json::from_slice(&fs::read(&config_path).map_err(|error| error.to_string())?)
+        .map_err(|error| format!("invalid Rust compiler wrapper configuration: {error}"))
+}
+
+fn canonical_program(path: &Path, cwd: &Path) -> Result<PathBuf, String> {
+    let candidates = if path.is_absolute() {
+        vec![path.to_owned()]
+    } else if path.components().count() > 1 {
+        vec![cwd.join(path)]
+    } else {
+        std::env::var_os("PATH")
+            .map(|value| {
+                std::env::split_paths(&value)
+                    .map(|directory| directory.join(path))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    candidates
+        .into_iter()
+        .find_map(|candidate| fs::canonicalize(candidate).ok())
+        .ok_or_else(|| format!("could not resolve compiler program {}", path.display()))
+}
+
+fn same_program(left: &OsStr, right: &Path, cwd: &Path) -> Result<bool, String> {
+    if left == right.as_os_str() {
+        return Ok(true);
+    }
+    Ok(canonical_program(Path::new(left), cwd)? == canonical_program(right, cwd)?)
+}
+
+fn execute_compiler_command(mut command: Command) -> Result<ExitCode, String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let error = command.exec();
+        Err(format!("could not execute Cargo compiler chain: {error}"))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command
+            .status()
+            .map_err(|error| format!("could not execute Cargo compiler chain: {error}"))?;
+        Ok(ExitCode::from(
+            status.code().unwrap_or(1).clamp(0, 255) as u8
+        ))
+    }
+}
+
+fn rust_compiler_inner(arguments: Vec<OsString>) -> ExitCode {
     let result = (|| -> Result<ExitCode, String> {
-        let metadata = fs::symlink_metadata(&config_path).map_err(|error| error.to_string())?;
-        if !metadata.file_type().is_file() {
-            return Err(format!(
-                "unsafe Rust compiler wrapper configuration: {}",
-                config_path.display()
-            ));
-        }
-        let config: supercov_engine::rust_compiler_orchestration::RustCompilerWrapperConfig =
-            serde_json::from_slice(&fs::read(&config_path).map_err(|error| error.to_string())?)
-                .map_err(|error| format!("invalid Rust compiler wrapper configuration: {error}"))?;
+        let config = load_rust_compiler_wrapper_config()?;
+        let rustc = std::env::var_os(
+            supercov_engine::rust_compiler_orchestration::RUST_ORIGINAL_COMPILER_ENV,
+        )
+        .ok_or_else(|| "Cargo compiler bridge has no original compiler identity".to_owned())?;
         let selection = supercov_engine::rust_compiler_selection::select_rust_compiler_companion(
-            Path::new(rustc),
+            Path::new(&rustc),
             &config.candidates,
             config.require_public_capabilities,
-        )
-        .map_err(|error| error.to_string())?;
-        supercov_engine::rust_compiler_orchestration::publish_compiler_selection_attestation(
-            &config.selection_directory,
-            &selection,
-        )
-        .map_err(|error| error.to_string())?;
-
-        supercov_engine::rust_compiler_orchestration::prepare_shared_rust_runtime(
-            Path::new(rustc),
-            &config.shared_runtime_directory,
         )
         .map_err(|error| error.to_string())?;
 
         let mut command = Command::new(&selection.companion_path);
         command
+            .arg(&selection.rustc_path)
             .args(&arguments)
+            .env_remove(supercov_engine::rust_compiler_orchestration::RUST_COMPILER_INNER_MODE_ENV)
+            .env_remove(supercov_engine::rust_compiler_orchestration::RUST_ORIGINAL_COMPILER_ENV)
             .env_remove(
                 supercov_engine::rust_compiler_orchestration::RUST_COMPILER_WRAPPER_CONFIG_ENV,
             )
@@ -460,28 +508,121 @@ fn rust_compiler_wrapper(arguments: Vec<String>) -> ExitCode {
                 supercov_engine::rust_compiler_orchestration::RUST_STATIC_RUNTIME_DIRECTORY_ENV,
                 &config.shared_runtime_directory,
             );
+        config
+            .original_wrapper_environment
+            .restore(&mut command)
+            .map_err(|error| error.to_string())?;
         supercov_engine::rust_compiler_selection::configure_companion_loader_environment(
             &mut command,
             &selection.compiler_library_directory,
         )
         .map_err(|error| error.to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt as _;
-            let error = command.exec();
-            Err(format!(
-                "could not execute Rust compiler companion: {error}"
-            ))
+        execute_compiler_command(command)
+    })();
+    match result {
+        Ok(status) => status,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            ExitCode::from(2)
         }
-        #[cfg(not(unix))]
-        {
-            let status = command
-                .status()
-                .map_err(|error| format!("could not execute Rust compiler companion: {error}"))?;
-            Ok(ExitCode::from(
-                status.code().unwrap_or(1).clamp(0, 255) as u8
-            ))
+    }
+}
+
+fn rust_compiler_wrapper(arguments: Vec<OsString>) -> ExitCode {
+    let result = (|| -> Result<ExitCode, String> {
+        let config = load_rust_compiler_wrapper_config()?;
+        let engine = fs::canonicalize(std::env::current_exe().map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+        let Some(first) = arguments.first() else {
+            return Err("Cargo compiler wrapper received no compiler path".into());
+        };
+        let workspace_invocation = same_program(first, &engine, &config.project_root)?;
+        let (rustc, compiler_arguments) = if workspace_invocation {
+            let Some(rustc) = arguments.get(1) else {
+                return Err("Cargo workspace compiler bridge received no rustc path".into());
+            };
+            (rustc, &arguments[2..])
+        } else {
+            (first, &arguments[1..])
+        };
+        let general_wrapper = config
+            .compiler
+            .rustc_wrapper
+            .as_ref()
+            .map(|program| program.resolve(&config.project_root));
+        let workspace_wrapper = config
+            .compiler
+            .rustc_workspace_wrapper
+            .as_ref()
+            .map(|program| program.resolve(&config.project_root));
+        for wrapper in general_wrapper.iter().chain(workspace_wrapper.iter()) {
+            if same_program(wrapper.as_os_str(), &engine, &config.project_root)? {
+                return Err(format!(
+                    "the original Cargo compiler-wrapper chain recursively contains Supercov: {}",
+                    wrapper.display()
+                ));
+            }
         }
+
+        let mut chain = Vec::<OsString>::new();
+        if let Some(wrapper) = &general_wrapper {
+            chain.push(wrapper.clone().into_os_string());
+        }
+        if workspace_invocation {
+            if let Some(wrapper) = &workspace_wrapper {
+                chain.push(wrapper.clone().into_os_string());
+            }
+            let selection =
+                supercov_engine::rust_compiler_selection::select_rust_compiler_companion(
+                    Path::new(rustc),
+                    &config.candidates,
+                    config.require_public_capabilities,
+                )
+                .map_err(|error| error.to_string())?;
+            supercov_engine::rust_compiler_orchestration::publish_compiler_selection_attestation(
+                &config.selection_directory,
+                &selection,
+            )
+            .map_err(|error| error.to_string())?;
+            supercov_engine::rust_compiler_orchestration::prepare_shared_rust_runtime(
+                Path::new(rustc),
+                &config.shared_runtime_directory,
+            )
+            .map_err(|error| error.to_string())?;
+            chain.push(engine.clone().into_os_string());
+        } else {
+            chain.push(rustc.clone());
+        }
+        chain.extend(compiler_arguments.iter().cloned());
+        let program = PathBuf::from(chain.remove(0));
+        let mut command = Command::new(program);
+        command.args(chain);
+        config
+            .original_wrapper_environment
+            .restore(&mut command)
+            .map_err(|error| error.to_string())?;
+        if workspace_invocation {
+            command.env(
+                supercov_engine::rust_compiler_orchestration::RUST_COMPILER_INNER_MODE_ENV,
+                "1",
+            );
+            command.env(
+                supercov_engine::rust_compiler_orchestration::RUST_ORIGINAL_COMPILER_ENV,
+                rustc,
+            );
+        } else {
+            command
+                .env_remove(
+                    supercov_engine::rust_compiler_orchestration::RUST_COMPILER_INNER_MODE_ENV,
+                )
+                .env_remove(
+                    supercov_engine::rust_compiler_orchestration::RUST_COMPILER_WRAPPER_CONFIG_ENV,
+                )
+                .env_remove(
+                    supercov_engine::rust_compiler_orchestration::RUST_ORIGINAL_COMPILER_ENV,
+                );
+        }
+        execute_compiler_command(command)
     })();
     match result {
         Ok(status) => status,
@@ -2868,10 +3009,12 @@ mod tests {
     #[test]
     fn nested_cargo_wrapper_dispatch_requires_a_real_executable() {
         let executable = std::env::current_exe().unwrap();
-        assert!(is_executable_wrapper_program(&executable.to_string_lossy()));
-        assert!(!is_executable_wrapper_program("--edition=2024"));
-        assert!(!is_executable_wrapper_program("@rustdoc-arguments"));
-        assert!(!is_executable_wrapper_program("Cargo.toml"));
+        assert!(is_executable_wrapper_program(executable.as_os_str()));
+        assert!(!is_executable_wrapper_program(OsStr::new("--edition=2024")));
+        assert!(!is_executable_wrapper_program(OsStr::new(
+            "@rustdoc-arguments"
+        )));
+        assert!(!is_executable_wrapper_program(OsStr::new("Cargo.toml")));
     }
 
     #[test]

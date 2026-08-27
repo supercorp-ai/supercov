@@ -956,7 +956,7 @@ ordering, fail-fast and cleanup. Synthetic two-target tests prove independent
 runner selection, rustdoc restoration and collision-free publication. This
 machine has only `aarch64-apple-darwin` installed, so execution across two
 genuinely distinct targets is not claimed and remains part of the supported-
-target matrix. The authoritative rustc/rustdoc corpus, 249 engine tests, 19
+target matrix. The authoritative rustc/rustdoc corpus, 251 engine tests, 19
 contract tests, 17 CLI tests, warnings-denied clippy and the complete public
 JavaScript/TypeScript matrix are green locally. No hosted workflow ran.
 
@@ -972,12 +972,32 @@ path stay inside the copied workspace.
 
 General and workspace compiler wrappers are likewise discovered across direct
 environment, `CARGO_BUILD_*`, ordinary files, includes and CLI configuration,
-including Cargo's empty-environment reset behavior. They currently fail closed
-before the wrapper, compiler or test can execute because inserting Supercov
-changes the compiler path visible to an arbitrary wrapper. A real marker gate
-proves the rejected wrapper never runs and no terminal work state is created.
-This closes silent wrapper loss and configured-compiler selection; transparent
-wrapper composition remains an explicit blocker.
+including Cargo's empty-environment reset behavior. During Cargo execution,
+Supercov temporarily owns both wrapper slots as one unambiguous bridge. A
+non-workspace invocation reconstructs the original general-wrapper-to-rustc
+chain unchanged. A workspace invocation reconstructs the original general and
+workspace wrappers in Cargo's order, then supplies one inner Supercov compiler
+relay in place of rustc. The relay selects the exact companion against the
+compiler token from that invocation; run-level selection remains an atomic,
+strict audit checked after Cargo joins every compiler job.
+
+Before user wrapper code executes, the bridge restores exact presence,
+absence, empty values and non-UTF Unix/Windows contents for `RUSTC_WRAPPER` and
+`RUSTC_WORKSPACE_WRAPPER`. Workspace-relative wrappers execute only from the
+authenticated copy. A real two-layer Node wrapper oracle proves the general
+wrapper still sees the workspace wrapper beneath it, the workspace wrapper
+receives the inner compiler relay, neither observes Supercov's temporary Cargo
+overrides, evidence/query publication completes and terminal work is removed.
+A second oracle makes the workspace wrapper fail with exit 73 during a real
+crate compile and requires Cargo's failure plus zero terminal work debris.
+This closes ordinary forwarding/argument-transforming compiler-wrapper
+composition, not compiler-cache hits which bypass the supplied compiler or a
+wrapper that intentionally substitutes an unrelated compiler.
+
+The same work corrected one Cargo-model edge: an exact Cargo executable still
+uses Cargo's default `rustc` search token. Only an explicit rustup
+`+toolchain` is pre-resolved to that selected Cargo's sibling rustc for
+Supercov's preflight; the runtime compiler token is independently attested.
 
 This closes copied/ancestor configuration duplication for the current
 same-filesystem writable-parent topology. A checkout whose parent cannot host
@@ -985,9 +1005,10 @@ the authenticated sibling still fails closed; an exact read-only-parent,
 cross-volume and supported-platform fallback remains required before public
 promotion. Retry identity, nextest/custom harnesses, complete
 presentation/output modes and their crash matrix likewise remain open.
-Compiler-wrapper composition remains unsupported and fails closed. Execution
-across multiple genuinely distinct installed targets remains unproven. These
-gaps keep Rust private.
+Cache-hit/non-forwarding wrapper evidence reuse, wrapper-induced compiler
+substitution, the composed-wrapper signal matrix and relay performance remain
+open. Execution across multiple genuinely distinct installed targets remains
+unproven. These gaps keep Rust private.
 
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.

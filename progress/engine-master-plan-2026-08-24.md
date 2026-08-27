@@ -1746,6 +1746,36 @@ miss blocks flipping any default.
   modes, read-only/cross-volume fallback, real distinct targets, remaining
   semantic corpora and performance remain release blockers.
 
+## Checkpoint — 2026-08-27 exact Cargo compiler-wrapper composition
+
+- Supercov now composes both Cargo compiler-wrapper layers instead of rejecting
+  them. It temporarily occupies Cargo's general and workspace slots only for
+  the isolated command, uses the nested self path as an exact workspace marker,
+  delegates non-workspace compilations through the original general wrapper and
+  rustc, and reconstructs workspace compilations as original general wrapper,
+  original workspace wrapper and one inner Supercov compiler relay.
+- The bridge restores the original wrapper environment before user wrapper
+  code executes, including absence, empty values and non-UTF Unix/Windows
+  values. Definition-relative wrapper programs remain relocated inside the
+  authenticated workspace. Each inner relay independently attests the actual
+  compiler token; the strict atomic run-level selection is read only after all
+  concurrent Cargo jobs finish.
+- A real two-layer Node wrapper corpus proves chain order, isolated executable
+  paths, restored environment, exact evidence/query completion and cleanup. A
+  forced workspace-wrapper exit 73 during crate compilation preserves Cargo's
+  failure and leaves no terminal run debris. The complete rustc/rustdoc corpus,
+  251 engine tests, 19 contract tests, 17 CLI tests, warnings-denied clippy and
+  the standalone Cargo-runner gate are green locally. No hosted workflow ran.
+- Direct execution of a concrete Cargo path now correctly retains Cargo's
+  default `rustc` search behavior; only an explicit rustup `+toolchain` uses a
+  pre-resolved sibling compiler during Supercov preflight.
+- This closes normal forwarding and argument-transforming wrappers, not a
+  compiler cache that returns artifacts without invoking its supplied compiler,
+  intentional wrapper compiler substitution, composed-wrapper signal recovery
+  or the relay's performance gate. Those remain explicit Rust promotion
+  blockers alongside retries, custom harnesses, platform coverage and the
+  remaining semantic corpora.
+
 ## Non-goals and guardrails
 
 - No accidental behavior change during ports; every future language frontend

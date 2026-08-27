@@ -868,27 +868,35 @@ fn resolve_with_inputs(
         fs::canonicalize(execution_root).map_err(|error| io_error(execution_root, error))?;
     let command_targets = command_targets(invocation)?;
     let command_config = command_config_arguments(invocation)?;
+    let test_position = invocation
+        .arguments
+        .iter()
+        .position(|argument| argument == "test")
+        .ok_or_else(|| {
+            RustCargoConfigurationError::Invalid("Cargo test subcommand is missing".into())
+        })?;
+    let explicit_toolchain = toolchain_selector(invocation, test_position)?.is_some();
     let selected_cargo = selected_cargo_program(invocation)?;
     let model = load_cargo_configuration(&root, model_inputs.cargo_home.clone(), &command_config)
         .map_err(|error| RustCargoConfigurationError::Invalid(error.to_string()))?;
     let selected_cargo_path = PathBuf::from(&selected_cargo);
-    let default_rustc = selected_cargo_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(|parent| parent.join(format!("rustc{}", std::env::consts::EXE_SUFFIX)))
-        .filter(|candidate| candidate.is_file())
-        .map(|candidate| runner_program(&root, candidate))
-        .transpose()?
-        .unwrap_or_else(|| RustCargoRunnerProgram::SearchPath {
+    let default_rustc = if explicit_toolchain {
+        selected_cargo_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(|parent| parent.join(format!("rustc{}", std::env::consts::EXE_SUFFIX)))
+            .filter(|candidate| candidate.is_file())
+            .map(|candidate| runner_program(&root, candidate))
+            .transpose()?
+            .unwrap_or_else(|| RustCargoRunnerProgram::SearchPath {
+                value: format!("rustc{}", std::env::consts::EXE_SUFFIX),
+            })
+    } else {
+        RustCargoRunnerProgram::SearchPath {
             value: format!("rustc{}", std::env::consts::EXE_SUFFIX),
-        });
+        }
+    };
     let compiler = compiler_command_plan(&root, &model, default_rustc, &model_inputs)?;
-    if compiler.rustc_wrapper.is_some() || compiler.rustc_workspace_wrapper.is_some() {
-        return Err(RustCargoConfigurationError::Unsupported(
-            "Cargo compiler wrappers are detected exactly but cannot yet be composed without changing wrapper-visible compiler semantics"
-                .into(),
-        ));
-    }
     let host = model_inputs
         .host_override
         .clone()
@@ -1072,45 +1080,72 @@ mod tests {
     }
 
     #[test]
-    fn every_compiler_wrapper_layer_fails_before_compiler_execution() {
+    fn every_compiler_wrapper_layer_is_preserved_in_the_compiler_plan() {
         let root = fixture();
         fs::write(
             root.join(".cargo/config.toml"),
-            "[build]\nrustc-wrapper=\"missing-wrapper-that-must-not-run\"\n",
+            "[build]\nrustc-wrapper=\"wrapper\"\n",
         )
         .unwrap();
-        let error = resolve_with_inputs(&root, &root, &invocation(&["test"]), model_inputs())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("cannot yet be composed"), "{error}");
+        let model = load_cargo_configuration(&root, None, &[]).unwrap();
+        let plan = compiler_command_plan(
+            &root,
+            &model,
+            RustCargoRunnerProgram::SearchPath {
+                value: "rustc".into(),
+            },
+            &model_inputs(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.rustc_wrapper,
+            Some(RustCargoRunnerProgram::SearchPath {
+                value: "wrapper".into()
+            })
+        );
 
         fs::write(root.join(".cargo/config.toml"), "").unwrap();
-        let error = resolve_with_inputs(
+        let model = load_cargo_configuration(
             &root,
-            &root,
-            &invocation(&[
-                "test",
-                "--config",
-                "build.rustc-workspace-wrapper=\"missing-cli-wrapper\"",
-            ]),
-            model_inputs(),
+            None,
+            &["build.rustc-workspace-wrapper=\"workspace-wrapper\"".into()],
         )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("cannot yet be composed"), "{error}");
+        .unwrap();
+        let plan = compiler_command_plan(
+            &root,
+            &model,
+            RustCargoRunnerProgram::SearchPath {
+                value: "rustc".into(),
+            },
+            &model_inputs(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.rustc_workspace_wrapper,
+            Some(RustCargoRunnerProgram::SearchPath {
+                value: "workspace-wrapper".into()
+            })
+        );
 
-        let error = resolve_with_inputs(
+        let model = load_cargo_configuration(&root, None, &[]).unwrap();
+        let plan = compiler_command_plan(
             &root,
-            &root,
-            &invocation(&["test"]),
-            model_inputs_with([(
+            &model,
+            RustCargoRunnerProgram::SearchPath {
+                value: "rustc".into(),
+            },
+            &model_inputs_with([(
                 OsString::from("RUSTC_WRAPPER"),
-                OsString::from("missing-env-wrapper"),
+                OsString::from("environment-wrapper"),
             )]),
         )
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("cannot yet be composed"), "{error}");
+        .unwrap();
+        assert_eq!(
+            plan.rustc_wrapper,
+            Some(RustCargoRunnerProgram::SearchPath {
+                value: "environment-wrapper".into()
+            })
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1352,6 +1387,31 @@ mod tests {
     }
 
     #[test]
+    fn direct_cargo_path_keeps_cargos_default_rustc_search_semantics() {
+        let root = fixture();
+        fs::write(root.join(".cargo/config.toml"), "").unwrap();
+        let cargo = which::which("cargo").unwrap();
+        let plan = resolve_with_inputs(
+            &root,
+            &root,
+            &CargoTestInvocation {
+                program: cargo.to_string_lossy().into_owned(),
+                arguments: vec!["test".into()],
+                runner_arguments: Vec::new(),
+            },
+            model_inputs(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.compiler.rustc,
+            RustCargoRunnerProgram::SearchPath {
+                value: format!("rustc{}", std::env::consts::EXE_SUFFIX)
+            }
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn resolves_an_explicit_installed_rustup_toolchain_before_target_configuration() {
         let root = fixture();
         let rustc = Command::new("rustc")
@@ -1380,6 +1440,13 @@ mod tests {
             model_inputs(),
         )
         .unwrap();
+        let rustc_executable = format!("rustc{}", std::env::consts::EXE_SUFFIX);
+        assert!(matches!(
+            &plan.compiler.rustc,
+            RustCargoRunnerProgram::Absolute { value }
+                if value.file_name().and_then(|name| name.to_str())
+                    == Some(rustc_executable.as_str())
+        ));
         assert_eq!(plan.targets[0].target, host);
         assert_eq!(
             plan.targets[0].underlying_runner,

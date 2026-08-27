@@ -948,28 +948,46 @@ try {
     !existsSync(join(productionFixture, '.supercov/work/run_b123456789abcdef')),
     'configured-compiler run left terminal work state behind',
   );
-  const forbiddenWrapper = join(productionFixture, 'forbidden-wrapper.mjs');
-  const forbiddenWrapperMarker = join(scratch, 'forbidden-wrapper-ran');
-  writeFileSync(
-    forbiddenWrapper,
+  const compilerWrapperLog = join(scratch, 'compiler-wrappers.jsonl');
+  const generalCompilerWrapper = join(
+    productionFixture,
+    'general-compiler-wrapper.mjs',
+  );
+  const workspaceCompilerWrapper = join(
+    productionFixture,
+    'workspace-compiler-wrapper.mjs',
+  );
+  const compilerWrapperSource = (layer) =>
     [
       '#!/usr/bin/env node',
-      "import {writeFileSync} from 'node:fs';",
-      `writeFileSync(${JSON.stringify(forbiddenWrapperMarker)}, 'ran');`,
-      'process.exit(99);',
+      "import {appendFileSync} from 'node:fs';",
+      "import {spawnSync} from 'node:child_process';",
+      "import {fileURLToPath} from 'node:url';",
+      'const [compiler, ...args] = process.argv.slice(2);',
+      `appendFileSync(process.env.SUPERCOV_COMPILER_WRAPPER_LOG, JSON.stringify({layer: ${JSON.stringify(layer)}, program: fileURLToPath(import.meta.url), compiler, args, rustcWrapper: process.env.RUSTC_WRAPPER ?? null, workspaceWrapper: process.env.RUSTC_WORKSPACE_WRAPPER ?? null}) + "\\n");`,
+      `if (${JSON.stringify(layer)} === 'workspace' && process.env.SUPERCOV_FAIL_COMPILER_WRAPPER === '1' && args.includes('--crate-name')) process.exit(73);`,
+      'const result = spawnSync(compiler, args, {stdio: "inherit", env: process.env});',
+      'if (result.error) throw result.error;',
+      'if (result.signal) process.kill(process.pid, result.signal);',
+      'process.exit(result.status ?? 98);',
       '',
-    ].join('\n'),
-  );
-  chmodSync(forbiddenWrapper, 0o755);
+    ].join('\n');
+  writeFileSync(generalCompilerWrapper, compilerWrapperSource('general'));
+  writeFileSync(workspaceCompilerWrapper, compilerWrapperSource('workspace'));
+  chmodSync(generalCompilerWrapper, 0o755);
+  chmodSync(workspaceCompilerWrapper, 0o755);
   writeFileSync(
     includedCompilerConfig,
-    '[build]\nrustc-wrapper="./forbidden-wrapper.mjs"\n',
+    '[build]\n' +
+      'rustc-wrapper="./general-compiler-wrapper.mjs"\n' +
+      'rustc-workspace-wrapper="./workspace-compiler-wrapper.mjs"\n',
   );
-  const configuredWrapperFailure = run(
-    supercov,
-    ['__run-rust-compiler'],
-    {
-      expectFailure: true,
+  const configuredWrapperRun = JSON.parse(
+    run(supercov, ['__run-rust-compiler'], {
+      env: {
+        RUSTC: rustc,
+        SUPERCOV_COMPILER_WRAPPER_LOG: compilerWrapperLog,
+      },
       input: JSON.stringify({
         root: productionFixture,
         command: [cargo, 'test', 'records_real_runtime_probes'],
@@ -979,16 +997,74 @@ try {
         companionCandidates: [wrapper],
         requirePublicCapabilities: false,
       }),
-    },
+    }).stdout,
   );
-  assert.match(configuredWrapperFailure.stderr, /cannot yet be composed/u);
+  assert.equal(configuredWrapperRun.exitCode, 0);
+  assert(configuredWrapperRun.tests > 0);
+  const compilerWrapperInvocations = readFileSync(compilerWrapperLog, 'utf8')
+    .trim()
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const generalCompilerInvocations = compilerWrapperInvocations.filter(
+    ({layer}) => layer === 'general',
+  );
+  const workspaceCompilerInvocations = compilerWrapperInvocations.filter(
+    ({layer}) => layer === 'workspace',
+  );
   assert(
-    !existsSync(forbiddenWrapperMarker),
-    'unsupported configured compiler wrapper executed during preflight',
+    generalCompilerInvocations.length > 0 &&
+      workspaceCompilerInvocations.length > 0,
+    'configured compiler-wrapper chain did not execute both layers',
+  );
+  assert(
+    compilerWrapperInvocations.every(
+      ({program, rustcWrapper, workspaceWrapper}) =>
+        program.startsWith(cargoWorkspace(productionFixture)) &&
+        rustcWrapper === null &&
+        workspaceWrapper === null,
+    ),
+    'compiler wrappers were not relocated or saw Supercov replace their original environment',
+  );
+  assert(
+    generalCompilerInvocations.some(({compiler}) =>
+      compiler.endsWith('workspace-compiler-wrapper.mjs'),
+    ),
+    'general compiler wrapper did not retain the workspace wrapper as its compiler',
+  );
+  assert(
+    workspaceCompilerInvocations.some(({compiler}) => compiler === supercov),
+    'workspace compiler wrapper did not receive the Supercov inner compiler relay',
   );
   assert(
     !existsSync(join(productionFixture, '.supercov/work/run_c123456789abcdef')),
-    'configured-wrapper rejection created terminal work state',
+    'configured-wrapper compiler run left terminal work state',
+  );
+  const configuredWrapperFailure = run(
+    supercov,
+    ['__run-rust-compiler'],
+    {
+      expectFailure: true,
+      env: {
+        RUSTC: rustc,
+        SUPERCOV_COMPILER_WRAPPER_LOG: compilerWrapperLog,
+        SUPERCOV_FAIL_COMPILER_WRAPPER: '1',
+      },
+      input: JSON.stringify({
+        root: productionFixture,
+        command: [cargo, 'test', 'records_real_runtime_probes'],
+        runId: 'run_d123456789abcdef',
+        startedAt: '2026-08-26T00:00:13.750Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+    },
+  );
+  assert.match(configuredWrapperFailure.stderr, /exit status: 73/u);
+  assert(
+    !existsSync(join(productionFixture, '.supercov/work/run_d123456789abcdef')),
+    'failed configured-wrapper compiler run left terminal work state',
   );
   writeFileSync(
     join(productionFixture, '.cargo/config.toml'),
