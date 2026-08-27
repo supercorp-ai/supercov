@@ -1,4 +1,27 @@
-use proc_macro::TokenStream;
+use proc_macro::{TokenStream, TokenTree};
+
+#[proc_macro_derive(SupercovChoice)]
+pub fn derive_choice(item: TokenStream) -> TokenStream {
+    let mut saw_item_keyword = false;
+    let name = item
+        .into_iter()
+        .find_map(|token| match token {
+            TokenTree::Ident(identifier) if saw_item_keyword => Some(identifier.to_string()),
+            TokenTree::Ident(identifier)
+                if matches!(identifier.to_string().as_str(), "struct" | "enum" | "union") =>
+            {
+                saw_item_keyword = true;
+                None
+            }
+            _ => None,
+        })
+        .expect("derive input has an item name");
+    format!(
+        "impl {name} {{ pub fn derived_choice(&self, value: bool) -> usize {{ if value {{ 193 }} else {{ 197 }} }} }}"
+    )
+    .parse()
+    .expect("valid generated derive implementation")
+}
 
 #[proc_macro]
 pub fn generated_function(_input: TokenStream) -> TokenStream {

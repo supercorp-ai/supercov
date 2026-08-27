@@ -1,5 +1,6 @@
 [workspace]
 members = ["probe-macros"]
+exclude = ["external-rules"]
 resolver = "3"
 
 [package]
@@ -9,4 +10,5 @@ edition = "2024"
 publish = false
 
 [dependencies]
+external-rules = { path = "external-rules" }
 probe-macros = { path = "probe-macros" }

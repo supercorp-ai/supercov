@@ -789,11 +789,20 @@ fn stable_source_range(
         ),
     };
     if owned {
-        let source = file
-            .src
-            .as_ref()
-            .ok_or_else(|| format!("rustc retained no source text for {key}"))?
-            .to_string();
+        let source = if let Some(source) = &file.src {
+            source.to_string()
+        } else {
+            if !source_map.ensure_source_file_source_present(&file) {
+                return Err(format!(
+                    "rustc could not hash-verify external source text for {key}"
+                ));
+            }
+            file.external_src
+                .read()
+                .get_source()
+                .ok_or_else(|| format!("rustc retained no external source text for {key}"))?
+                .to_owned()
+        };
         let display = key
             .strip_prefix("source:")
             .map(str::to_owned)
@@ -1061,12 +1070,29 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
         expression: &'tcx hir::Expr<'tcx>,
         condition: &'tcx hir::Expr<'tcx>,
         control_kind: &'static str,
+        opaque_expanded_condition: bool,
     ) -> Option<String> {
+        let authored_macro_guard = (opaque_expanded_condition
+            && control_kind == "match-guard"
+            && condition.span.from_expansion())
+        .then(|| stable_source_range(self.tcx, condition.span.source_callsite(), self.crate_name))
+        .transpose()
+        .ok()?
+        .is_some_and(|source| source.owned);
         let mut atomic = Vec::new();
-        flatten_decision_expression(condition, Some(true), Some(false), &mut atomic);
+        if authored_macro_guard {
+            atomic.push(AtomicDecisionExpression {
+                expression: condition,
+                true_outcome: Some(true),
+                false_outcome: Some(false),
+            });
+        } else {
+            flatten_decision_expression(condition, Some(true), Some(false), &mut atomic);
+        }
         if atomic.iter().any(|condition| {
             let span = condition.expression.span;
             span.from_expansion()
+                && !authored_macro_guard
                 && !self.tcx.def_span(self.def_id).from_expansion()
                 && !span
                     .ctxt()
@@ -1097,29 +1123,37 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
         };
         let mut conditions = Vec::with_capacity(atomic.len());
         for condition in atomic {
-            let source =
-                match stable_source_range(self.tcx, condition.expression.span, self.crate_name) {
-                    Ok(source) if source.owned => source,
-                    Ok(source) => {
-                        self.limitations.insert(format!(
-                            "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: condition: unowned {} source {}",
-                            self.definition, source.class, source.key
-                        ));
-                        return None;
-                    }
-                    Err(error) => {
-                        self.limitations.insert(format!(
-                            "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: condition: {error}",
-                            self.definition
-                        ));
-                        return None;
-                    }
-                };
+            let condition_span = if authored_macro_guard {
+                condition.expression.span.source_callsite()
+            } else {
+                condition.expression.span
+            };
+            let source = match stable_source_range(self.tcx, condition_span, self.crate_name) {
+                Ok(source) if source.owned => source,
+                Ok(source) => {
+                    self.limitations.insert(format!(
+                        "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: condition: unowned {} source {}",
+                        self.definition, source.class, source.key
+                    ));
+                    return None;
+                }
+                Err(error) => {
+                    self.limitations.insert(format!(
+                        "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: condition: {error}",
+                        self.definition
+                    ));
+                    return None;
+                }
+            };
             let branch_source = match stable_source_range(
                 self.tcx,
-                match condition.expression.kind {
-                    hir::ExprKind::Let(let_expression) => let_expression.pat.span,
-                    _ => condition.expression.span,
+                if authored_macro_guard {
+                    condition_span
+                } else {
+                    match condition.expression.kind {
+                        hir::ExprKind::Let(let_expression) => let_expression.pat.span,
+                        _ => condition.expression.span,
+                    }
                 },
                 self.crate_name,
             ) {
@@ -1141,7 +1175,13 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             };
             conditions.push(DecisionCondition {
                 branch_source,
-                text: if condition.expression.span.from_expansion()
+                text: if authored_macro_guard {
+                    self.tcx
+                        .sess
+                        .source_map()
+                        .span_to_snippet(condition_span)
+                        .unwrap_or_else(|_| "<source unavailable>".into())
+                } else if condition.expression.span.from_expansion()
                     && stable_source_range(
                         self.tcx,
                         condition.expression.span.source_callsite(),
@@ -1164,7 +1204,12 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 authored_expression: true,
             });
         }
-        let decision = self.identity("decision", condition.span, decision_kind)?;
+        let authored_condition_span = if authored_macro_guard {
+            condition.span.source_callsite()
+        } else {
+            condition.span
+        };
+        let decision = self.identity("decision", authored_condition_span, decision_kind)?;
         let assertion_source = (decision_kind == "assertion")
             .then(|| {
                 stable_source_range(self.tcx, expression.span.source_callsite(), self.crate_name)
@@ -1179,11 +1224,12 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             ));
             return None;
         }
-        let decision_span = if control_kind == "while" || decision_kind == "assertion" {
-            expression.span.source_callsite()
-        } else {
-            expression.span
-        };
+        let decision_span =
+            if control_kind == "while" || decision_kind == "assertion" || authored_macro_guard {
+                expression.span.source_callsite()
+            } else {
+                expression.span
+            };
         let (branch_kind, alternatives) = if decision_kind == "assertion" {
             (
                 "assertion-outcome",
@@ -1218,6 +1264,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
         } else {
             None
         };
+        let structural_marker = decision_kind == "assertion" || authored_macro_guard;
         let decision_id = decision.id.clone();
         match self.decisions.get_mut(&decision.id) {
             Some(existing) if existing.identity.canonical != decision.canonical => {
@@ -1229,7 +1276,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             Some(existing)
                 if existing.decision_kind != decision_kind
                     || existing.conditions != conditions
-                    || existing.structural_marker != (decision_kind == "assertion")
+                    || existing.structural_marker != structural_marker
                     || existing.assertion_source != assertion_source
                     || existing.outcome_branch_id != outcome_branch_id
                     || existing.loop_branch_id != loop_branch_id =>
@@ -1252,7 +1299,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                         decision_kind,
                         conditions,
                         definitions: vec![self.definition.clone()],
-                        structural_marker: decision_kind == "assertion",
+                        structural_marker,
                         assertion_source,
                         outcome_branch_id,
                         loop_branch_id,
@@ -1419,6 +1466,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
         expression: &'tcx hir::Expr<'tcx>,
         arms: &'tcx [hir::Arm<'tcx>],
     ) -> Option<String> {
+        let authored_match = !expression.span.from_expansion();
         if arms.len() < 2 {
             // An irrefutable single-arm match has no selectable alternative;
             // an empty match diverges while evaluating an uninhabited value.
@@ -1494,9 +1542,9 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             });
         }
         for (selection, arm) in selections.iter_mut().zip(arms) {
-            selection.guard_decision_id = arm
-                .guard
-                .and_then(|guard| self.record_control_decision(guard, guard, "match-guard"));
+            selection.guard_decision_id = arm.guard.and_then(|guard| {
+                self.record_control_decision(guard, guard, "match-guard", authored_match)
+            });
         }
         let group_id = group.id.clone();
         let parent = self.match_context.clone();
@@ -1716,7 +1764,7 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
                     "assert" | "debug-assert",
                     hir::ExprKind::Unary(rustc_ast::UnOp::Not, authored),
                 ) => {
-                    let _ = self.record_control_decision(expression, authored, "assertion");
+                    let _ = self.record_control_decision(expression, authored, "assertion", false);
                 }
                 (
                     "assert-eq" | "debug-assert-eq",
@@ -1744,7 +1792,7 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
                 .control_overrides
                 .remove(&expression.hir_id.local_id.as_u32())
                 .unwrap_or("if");
-            let _ = self.record_control_decision(expression, condition, control_kind);
+            let _ = self.record_control_decision(expression, condition, control_kind, false);
         }
         intravisit::walk_expr(self, expression);
     }
@@ -3052,6 +3100,73 @@ fn structural_decision_condition_marker_assignments<'tcx>(
     Ok(assignments)
 }
 
+fn opaque_authored_decision_marker_assignments<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    crate_name: &str,
+    body: &Body<'tcx>,
+    decisions: &[&DecisionObligation],
+) -> Result<Vec<(String, usize, BasicBlock)>, String> {
+    let mut assignments = Vec::new();
+    for decision in decisions {
+        let [condition] = decision.conditions.as_slice() else {
+            return Err(format!(
+                "opaque authored decision {} has {} conditions",
+                decision.identity.id,
+                decision.conditions.len()
+            ));
+        };
+        let mut switches = body
+            .basic_blocks
+            .iter_enumerated()
+            .filter_map(|(block, data)| {
+                let terminator = data.terminator();
+                let TerminatorKind::SwitchInt { discr, .. } = &terminator.kind else {
+                    return None;
+                };
+                if discr.ty(&body.local_decls, tcx) != tcx.types.bool {
+                    return None;
+                }
+                let source =
+                    stable_source_range(tcx, terminator.source_info.span, crate_name).ok()?;
+                let callsite = stable_source_range(
+                    tcx,
+                    terminator.source_info.span.source_callsite(),
+                    crate_name,
+                )
+                .ok()?;
+                [&source, &callsite]
+                    .iter()
+                    .any(|candidate| source_range_contains(&condition.branch_source, candidate))
+                    .then_some(block)
+            })
+            .collect::<Vec<_>>();
+        switches.sort();
+        switches.dedup();
+        let results = switches
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                switches
+                    .iter()
+                    .all(|other| other == candidate || block_reaches(body, *other, *candidate))
+            })
+            .collect::<Vec<_>>();
+        let [result] = results.as_slice() else {
+            return Err(format!(
+                "opaque authored decision {} at {}:{}-{} has {} Boolean switches and {} unique terminal result switches",
+                decision.identity.id,
+                condition.branch_source.key,
+                condition.branch_source.start,
+                condition.branch_source.end,
+                switches.len(),
+                results.len()
+            ));
+        };
+        assignments.push((decision.identity.id.clone(), 0, *result));
+    }
+    Ok(assignments)
+}
+
 fn source_range_contains(owner: &StableSourceRange, candidate: &StableSourceRange) -> bool {
     owner.key == candidate.key && owner.start <= candidate.start && owner.end >= candidate.end
 }
@@ -3487,18 +3602,32 @@ fn mir_built_with_match_markers<'tcx>(
                 && branch.branch_kind == "try-operator"
         })
         .collect::<Vec<_>>();
-    let assertion_decisions = obligations
+    let structural_decisions = obligations
         .decisions
         .values()
         .filter(|decision| {
-            decision.definitions.contains(&obligations.definition)
-                && decision.decision_kind == "assertion"
+            decision.definitions.contains(&obligations.definition) && decision.structural_marker
         })
+        .collect::<Vec<_>>();
+    let assertion_decisions = structural_decisions
+        .iter()
+        .copied()
+        .filter(|decision| decision.decision_kind == "assertion")
+        .collect::<Vec<_>>();
+    let opaque_guard_decisions = structural_decisions
+        .iter()
+        .copied()
+        .filter(|decision| decision.decision_kind == "match-guard")
+        .collect::<Vec<_>>();
+    let direct_structural_decisions = structural_decisions
+        .iter()
+        .copied()
+        .filter(|decision| decision.decision_kind != "match-guard")
         .collect::<Vec<_>>();
     if synthetic_groups.is_empty()
         && synthetic_let_else.is_empty()
         && try_operators.is_empty()
-        && assertion_decisions.is_empty()
+        && structural_decisions.is_empty()
     {
         return body;
     }
@@ -3560,17 +3689,31 @@ fn mir_built_with_match_markers<'tcx>(
             }
         }
         guard_blocks.extend(
+            opaque_authored_decision_marker_assignments(
+                tcx,
+                &obligations.crate_name,
+                &borrowed,
+                &opaque_guard_decisions,
+            )
+            .unwrap_or_else(|error| {
+                tcx.dcx().fatal(format!(
+                    "Supercov could not bind authored opaque decision conditions in {}: {error}",
+                    obligations.definition
+                ))
+            }),
+        );
+        guard_blocks.extend(
             structural_decision_condition_marker_assignments(
                 tcx,
                 &obligations.crate_name,
                 &borrowed,
-                &assertion_decisions,
+                &direct_structural_decisions,
                 false,
-                "assertion",
+                "structural decision",
             )
             .unwrap_or_else(|error| {
                 tcx.dcx().fatal(format!(
-                    "Supercov could not bind pre-borrow-check assertion conditions in {}: {error}",
+                    "Supercov could not bind pre-borrow-check structural decision conditions in {}: {error}",
                     obligations.definition
                 ))
             }),
@@ -7623,21 +7766,24 @@ fn test_identity_for(tcx: TyCtxt<'_>, definition: &str) -> Option<String> {
                     catalog_path.display()
                 ));
             }
-            let catalog: serde_json::Value = serde_json::from_slice(
-                &fs::read(&catalog_path).unwrap_or_else(|error| {
+            let catalog: serde_json::Value =
+                serde_json::from_slice(&fs::read(&catalog_path).unwrap_or_else(|error| {
                     tcx.dcx().fatal(format!(
                         "Supercov could not read rustdoc catalog {}: {error}",
                         catalog_path.display()
                     ))
-                }),
-            )
-            .unwrap_or_else(|error| {
-                tcx.dcx().fatal(format!(
-                    "Supercov could not parse rustdoc catalog {}: {error}",
-                    catalog_path.display()
-                ))
-            });
-            if catalog.get("format_version").and_then(serde_json::Value::as_u64) != Some(2) {
+                }))
+                .unwrap_or_else(|error| {
+                    tcx.dcx().fatal(format!(
+                        "Supercov could not parse rustdoc catalog {}: {error}",
+                        catalog_path.display()
+                    ))
+                });
+            if catalog
+                .get("format_version")
+                .and_then(serde_json::Value::as_u64)
+                != Some(2)
+            {
                 tcx.dcx()
                     .fatal("Supercov rustdoc catalog has an unsupported format");
             }
@@ -7893,9 +8039,8 @@ fn launch_rustdoc(args: &[String]) -> ! {
         let _ = io::stderr().write_all(&catalog.stderr);
         std::process::exit(catalog.status.code().unwrap_or(1));
     }
-    let catalog_path = PathBuf::from(&directory).join(format!(
-        ".rustdoc-catalog-{invocation}.json"
-    ));
+    let catalog_path =
+        PathBuf::from(&directory).join(format!(".rustdoc-catalog-{invocation}.json"));
     if let Err(error) = write_new_synced(&catalog_path, &catalog.stdout) {
         eprintln!("error: Supercov could not persist exact rustdoc catalog: {error}");
         std::process::exit(1);

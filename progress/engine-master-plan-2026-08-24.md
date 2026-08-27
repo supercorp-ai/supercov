@@ -1823,6 +1823,34 @@ miss blocks flipping any default.
   R2, lifecycle, platform, oracle, performance and dogfood promotion gates are
   unchanged. No hosted workflow ran.
 
+## Checkpoint — 2026-08-27 cross-crate macro and derive expansion
+
+- A project-owned path dependency now exports one declarative macro used in
+  two modules. rustc retains its source through the external-source path, so
+  the companion asks rustc to reload and metadata-hash-verify the exact bytes.
+  Stable function, statement, decision and branch identities aggregate under
+  the dependency source key and receive both exact runtime vectors.
+- A real derive macro emits an impl method. Its complete points, `if` decision,
+  alternatives and false/true vectors remain one distinct synthetic expansion
+  at the authored derive callsite across clean target directories.
+- An ordinary source match guard containing `matches!(...)` remains one opaque
+  authored condition rather than exposing the macro's internal comparisons.
+  A pre-borrow compiler marker binds the unique terminal typed-Boolean result
+  switch reachable from all internal switches, is consumed exactly once and
+  is removed before runtime instrumentation. Generated proc/declarative guards
+  retain their existing expanded models; missing or ambiguous structure fails
+  closed.
+- The authoritative rustc/Cargo/rustdoc/nextest corpus and the complete public
+  JavaScript/TypeScript engine matrix are green locally: 267 engine tests, 19
+  contract tests and 17 CLI tests pass with clippy warnings denied. The
+  expanded cold corpus now has an explicit bounded five-minute harness budget;
+  the public 1.10x performance gate remains entirely open. No hosted workflow
+  ran.
+- This narrows RCV-IDENTITY, POINT, MC/DC, BRANCH and EXPANSION gates. Nested
+  external macros, broader attributes/derives, generic/trait/async corpora,
+  independent oracles and every remaining R1-R4 promotion gate are still
+  blockers.
+
 ## Non-goals and guardrails
 
 - No accidental behavior change during ports; every future language frontend

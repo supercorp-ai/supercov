@@ -28,6 +28,7 @@ macro_rules! generated_match_function {
 
 generated_function!();
 generated_match_function!();
+external_rules::external_choice_function!(generated_by_external_rules);
 probe_macros::generated_function!();
 probe_macros::generated_match_function!();
 probe_macros::generated_guarded_match_function!();
@@ -43,8 +44,12 @@ probe_macros::generated_assertion_function!();
 
 pub mod repeated_expansions {
     generated_function!();
+    external_rules::external_choice_function!(generated_by_external_rules);
     probe_macros::generated_function!();
 }
+
+#[derive(probe_macros::SupercovChoice)]
+pub struct DerivedChoice;
 
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 

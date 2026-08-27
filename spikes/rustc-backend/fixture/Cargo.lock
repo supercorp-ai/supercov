@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "external-rules"
+version = "0.0.0"
+
+[[package]]
 name = "probe-macros"
 version = "0.0.0"
 
@@ -10,5 +14,6 @@ version = "0.0.0"
 name = "supercov-rustc-spike-fixture"
 version = "0.0.0"
 dependencies = [
+ "external-rules",
  "probe-macros",
 ]

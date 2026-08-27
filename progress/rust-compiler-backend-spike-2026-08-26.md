@@ -318,9 +318,15 @@ an unverified rustc commit.
    repeated and nested assertion executions. The shared engine projects these
    into stable evidence-v3 phases and preserves a missing verdict as unknown;
    the compiler supervisor now carries that projection through a real Cargo
-   build and process-per-test run into shared analysis. Bind remaining real MIR/CTFE probes to
-   the same manifest IDs. Add
-   derive, external expansion, generic/trait, include/module and
+   build and process-per-test run into shared analysis. Bind remaining real
+   MIR/CTFE probes to the same manifest IDs. The corpus now includes a derive-
+   generated impl method and a declarative macro from a project-owned path
+   dependency. Exact source snapshots, identities, points, alternatives and
+   runtime vectors survive clean targets; externally retained rustc source is
+   reloaded only through rustc's metadata-hash-verified source map. An authored
+   `matches!` match guard is one opaque source condition bound to its unique
+   terminal typed-Boolean result rather than its internal comparisons. Add
+   nested external, broader attribute/derive, generic/trait, include/module and
    package-fingerprint corpora before treating the candidate as a complete
    manifest.
 2. Extend the proven libtest entry/unwind carrier through child threads, async
@@ -392,8 +398,11 @@ an unverified rustc commit.
    The local gate no longer sends large hidden-command requests through
    `spawnSync`'s pipe-backed `input`: one real run left the projector waiting
    indefinitely for EOF. Requests now use create-new, mode-0600 temporary input
-   files and every synchronous child has a 120-second hard bound, so this gate
-   cannot silently hang and always removes its request file.
+   files and every synchronous child has an explicit hard bound. Short probes
+   retain 120 seconds; the full cold compiler + Cargo/libtest/rustdoc corpus,
+   now including dependency and proc-macro crates, has a separate five-minute
+   bound. A timeout remains an infrastructure failure and every request file is
+   removed.
 
 ## Primary references
 

@@ -695,6 +695,32 @@ policy and preservation of the user's ordinary human output across
 pass/fail/signal cases remain required before these candidates can enter a
 measurement-complete public run.
 
+Checkpoint (2026-08-27): the expansion corpus now crosses crate boundaries.
+A project-owned path dependency exports one declarative macro used from two
+modules. rustc may retain that file only as external source, so the companion
+uses rustc's own source loader and metadata hash check to recover the exact
+normalized bytes; it never reopens an unverified path itself. The resulting
+function, statement, decision and branch obligations aggregate under
+`source:external-rules/src/lib.rs`, remain byte-identical across clean target
+directories and receive exact false/true runtime vectors. A real derive macro
+also emits an impl method whose complete points, decision and alternatives stay
+distinct at the authored derive callsite and publish both vectors.
+
+That corpus exposed a separate authored-control boundary. In an ordinary
+source match guard, `matches!(...)` is one authored Boolean condition, not the
+macro's internal pattern-comparison graph. Expanded HIR now records the exact
+invocation as one opaque condition only when the enclosing match itself is
+authored. Before borrow checking, the compiler bridge selects the unique typed-
+Boolean result switch reachable from every internal comparison, marks it once,
+then removes the marker before runtime instrumentation. Proc/declarative-
+generated guards continue through their existing expanded structural models.
+Missing or non-unique result switches fail closed. The full rustc/Cargo/
+rustdoc/nextest corpus, 267 engine tests, 19 contract tests, 17 CLI tests,
+warnings-denied clippy and every public JavaScript/TypeScript integration gate
+are green locally. The larger cold corpus required its own bounded five-minute
+harness allowance; this is not a performance claim and the 1.10x promotion
+gate remains open. No hosted workflow ran.
+
 Correctness corpus:
 
 - original-versus-instrumented differential programs checking values, panics,

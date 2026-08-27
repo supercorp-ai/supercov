@@ -689,6 +689,10 @@ try {
   const productionRun = JSON.parse(
     run(supercov, ['__run-rust-compiler'], {
       env: {RUSTC: rustc, SUPERCOV_PRODUCTION_RUNNER_LOG: productionRunnerLog},
+      // This is the corpus's full cold compiler + Cargo/libtest/rustdoc path,
+      // including project-owned dependency/proc-macro crates. Keep it bounded
+      // independently of the short command probes below.
+      timeout: 300_000,
       input: JSON.stringify({
         root: productionFixture,
         command: [cargo, 'test'],
@@ -2100,6 +2104,25 @@ try {
     ),
   );
 
+  const externalDeclarative = find('generated_by_external_rules');
+  assert.equal(externalDeclarative?.expanded, true);
+  assert.match(externalDeclarative.span, /external-rules\/src\/lib\.rs:/);
+  assert.match(
+    externalDeclarative.callsite,
+    new RegExp(
+      `src/lib\\.rs:${sourceLine('external_rules::external_choice_function!(generated_by_external_rules);')}:`,
+    ),
+  );
+
+  const derived = find('DerivedChoice::derived_choice');
+  assert.equal(derived?.expanded, true);
+  assert.match(
+    derived.callsite,
+    new RegExp(
+      `src/lib\\.rs:${sourceLine('#[derive(probe_macros::SupercovChoice)]')}:`,
+    ),
+  );
+
   const generated = find('generated_by_build_script');
   assert.equal(generated?.expanded, false);
   assert.match(generated.span, /\/out\/generated\.rs:/);
@@ -2146,11 +2169,15 @@ try {
     {env: {SUPERCOV_INTERNAL_INPUT_FILE: identityManifestPath}},
   );
   assert.equal(productionValidation.stdout.trim(), 'supercov_rustc_spike_fixture');
+  const identitySourcesA = compilerSources(
+    identityDirectoryA,
+    'supercov_rustc_spike_fixture',
+  );
   const normalized = JSON.parse(
     run(supercov, ['__normalize-rust-compiler-manifest'], {
       input: JSON.stringify({
         manifest: identityManifestA,
-        sources: compilerSources(identityDirectoryA, 'supercov_rustc_spike_fixture'),
+        sources: identitySourcesA,
       }),
     }).stdout,
   );
@@ -2296,6 +2323,75 @@ try {
       ({source}) => source,
     ),
     ['value'],
+  );
+  const externalRoot = obligationFor(
+    identityManifestA,
+    'generated_by_external_rules',
+  );
+  const externalRepeated = obligationFor(
+    identityManifestA,
+    'repeated_expansions::generated_by_external_rules',
+  );
+  assert.equal(externalRoot?.id, externalRepeated?.id);
+  assert.equal(externalRoot?.provenance, 'authored-expansion');
+  assert.equal(externalRoot?.sourceKey, 'source:external-rules/src/lib.rs');
+  assert.deepEqual(externalRoot?.definitions, [
+    'generated_by_external_rules',
+    'repeated_expansions::generated_by_external_rules',
+  ]);
+  const externalDecision = decisionFor(
+    identityManifestA,
+    'generated_by_external_rules',
+  );
+  assert.equal(externalDecision?.sourceKey, 'source:external-rules/src/lib.rs');
+  assert.deepEqual(externalDecision?.conditions.map(({source}) => source), [
+    'value',
+  ]);
+  assert.deepEqual(externalDecision?.definitions, externalRoot?.definitions);
+  assert.match(
+    identitySourcesA['source:external-rules/src/lib.rs']?.source ?? '',
+    /macro_rules! external_choice_function/,
+  );
+
+  const deriveRoot = obligationFor(
+    identityManifestA,
+    'DerivedChoice::derived_choice',
+  );
+  assert.equal(deriveRoot?.provenance, 'synthetic-expansion');
+  assert.equal(deriveRoot?.sourceKey, 'source:src/lib.rs');
+  assert.match(deriveRoot?.canonical ?? '', /probe_macros::SupercovChoice/);
+  assert.deepEqual(
+    decisionFor(
+      identityManifestA,
+      'DerivedChoice::derived_choice',
+    )?.conditions.map(({source}) => source),
+    ['value'],
+  );
+  const probeMacroManifest = crateManifest(identityDirectoryA, 'probe_macros');
+  const opaqueAuthoredMacroGuard = probeMacroManifest.decisions.find(
+    ({kind, definitions, conditions}) =>
+      kind === 'match-guard' &&
+      definitions.includes('derive_choice::{closure#0}') &&
+      conditions.length === 1 &&
+      conditions[0].source ===
+        'matches!(identifier.to_string().as_str(), "struct" | "enum" | "union")',
+  );
+  assert(opaqueAuthoredMacroGuard, 'authored matches! guard lost its callsite decision');
+  assert.equal(
+    opaqueAuthoredMacroGuard.sourceKey,
+    'source:probe-macros/src/lib.rs',
+  );
+  const deriveParserGroup = probeMacroManifest.selectionGroups.find(({arms}) =>
+    arms.some(({guardDecisionId}) =>
+      guardDecisionId === opaqueAuthoredMacroGuard.id,
+    ),
+  );
+  assert(deriveParserGroup, 'authored matches! guard lost its match-arm ownership');
+  assert(
+    deriveParserGroup.arms
+      .filter(({guarded}) => guarded)
+      .every(({guardDecisionId}) => guardDecisionId !== null),
+    'an authored macro match guard normalized without a decision identity',
   );
   const generatedObligation = obligationFor(
     identityManifestA,
@@ -2635,7 +2731,10 @@ try {
   );
   assert.match(baselineBehavior.stdout, /drop-order=\["panic-drop", "second", "first"\]/);
   assert.match(baselineBehavior.stdout, /decision-panic=true/);
-  assert.match(baselineBehavior.stdout, /expanded=\[5, 3, 19, 17, 9\]/);
+  assert.match(
+    baselineBehavior.stdout,
+    /expanded=\[5, 3, 191, 181, 197, 193, 19, 17, 9\]/,
+  );
   assert.match(baselineBehavior.stdout, /conditions=\[29, 31, 31, 1, 37, 41, 43, 43\]/);
   assert.match(baselineBehavior.stdout, /or-mixed=\[47, 47, 49, 53, 59, 53, 59\]/);
   assert.match(baselineBehavior.stdout, /nested=\[79, 71, 73, 73\]/);
@@ -3573,6 +3672,14 @@ try {
     ].sort(),
   );
   assert.deepEqual(decisionVectors('generated_by_rules'), [
+    JSON.stringify({values: [false], outcome: false}),
+    JSON.stringify({values: [true], outcome: true}),
+  ].sort());
+  assert.deepEqual(decisionVectors('generated_by_external_rules'), [
+    JSON.stringify({values: [false], outcome: false}),
+    JSON.stringify({values: [true], outcome: true}),
+  ].sort());
+  assert.deepEqual(decisionVectors('DerivedChoice::derived_choice'), [
     JSON.stringify({values: [false], outcome: false}),
     JSON.stringify({values: [true], outcome: true}),
   ].sort());
@@ -4843,9 +4950,9 @@ try {
         {
           module: '__doctest_1',
           displayName:
-            'src/lib.rs - doctest_execution_modes (line 337)',
+            'src/lib.rs - doctest_execution_modes (line 342)',
           path: 'src/lib.rs',
-          line: 337,
+          line: 342,
           ignored: true,
           noRun: false,
           shouldPanic: false,
@@ -4853,9 +4960,9 @@ try {
         {
           module: '__doctest_2',
           displayName:
-            'src/lib.rs - doctest_execution_modes (line 341)',
+            'src/lib.rs - doctest_execution_modes (line 346)',
           path: 'src/lib.rs',
-          line: 341,
+          line: 346,
           ignored: false,
           noRun: true,
           shouldPanic: false,
@@ -4863,9 +4970,9 @@ try {
         {
           module: '__doctest_3',
           displayName:
-            'src/lib.rs - doctest_execution_modes (line 345)',
+            'src/lib.rs - doctest_execution_modes (line 350)',
           path: 'src/lib.rs',
-          line: 345,
+          line: 350,
           ignored: false,
           noRun: false,
           shouldPanic: true,
