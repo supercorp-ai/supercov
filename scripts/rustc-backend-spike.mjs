@@ -11,6 +11,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -47,6 +48,18 @@ const transportHeaderSize = 128;
 const transportDescriptorSize = 40;
 const transportContext = 42;
 let commandInputOrdinal = 0;
+
+function cargoWorkspace(projectRoot) {
+  const canonical = realpathSync(projectRoot);
+  const digest = createHash('sha256').update(canonical).digest('hex').slice(0, 24);
+  return join(
+    dirname(canonical),
+    `.supercov-cargo-${digest}`,
+    'workspace',
+    'root',
+    basename(canonical),
+  );
+}
 
 function createTransport(name, descriptorCapacity = 1024, payloadCapacity = 64 * 1024) {
   const path = join(scratch, `${name}.transport`);
@@ -597,7 +610,22 @@ try {
   writeFileSync(
     join(productionFixture, '.cargo/config.toml'),
     '[target.' + JSON.stringify(process.platform === 'darwin' ? 'cfg(target_vendor = "apple")' : 'cfg(unix)') + ']\n' +
-      'runner=["bin with spaces/configured-runner.mjs","--fixed","two words"]\n',
+      'runner=["bin with spaces/configured-runner.mjs","--fixed","two words"]\n' +
+      '[build]\n' +
+      'rustflags=["--cfg","supercov_config_once"]\n',
+  );
+  const productionBuildScript = join(productionFixture, 'build.rs');
+  const productionBuildScriptSource = readFileSync(productionBuildScript, 'utf8');
+  writeFileSync(
+    productionBuildScript,
+    productionBuildScriptSource.replace(
+      'fn main() {',
+      'fn main() {\n    supercov_config_loaded_once();',
+    ) +
+      '\n#[allow(dead_code)]\nfn supercov_config_loaded_once() {\n' +
+      '    let flags = std::env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();\n' +
+      '    assert_eq!(flags.matches("supercov_config_once").count(), 1, "Cargo config was applied more than once: {flags:?}");\n' +
+      '}\n',
   );
   writeFileSync(
     productionRunner,
@@ -665,7 +693,7 @@ try {
   );
   assert(
     productionRunnerInvocations.every(({program}) =>
-      program.includes('/.supercov/cache/workspace/'),
+      program.startsWith(cargoWorkspace(productionFixture)),
     ),
     'workspace-relative configured runner was not relocated into the isolated workspace',
   );
@@ -755,9 +783,7 @@ try {
     }),
   });
   const killedWorkspaceRun = join(
-    productionFixture,
-    '.supercov/cache/workspace',
-    basename(productionFixture),
+    cargoWorkspace(productionFixture),
     '.supercov/work',
     killedRunId,
   );
@@ -850,6 +876,7 @@ try {
   // shebang runner is not a valid baseline launcher for macOS DYLD paths.
   rmSync(join(productionFixture, '.cargo'), {recursive: true});
   rmSync(dirname(productionRunner), {recursive: true});
+  writeFileSync(productionBuildScript, productionBuildScriptSource);
 
   const productionManifest = join(productionFixture, 'Cargo.toml');
   writeFileSync(
@@ -944,9 +971,7 @@ try {
     }),
   });
   const interruptedWorkspaceRun = join(
-    productionFixture,
-    '.supercov/cache/workspace',
-    basename(productionFixture),
+    cargoWorkspace(productionFixture),
     '.supercov/work',
     interruptedRunId,
   );

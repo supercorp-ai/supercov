@@ -825,6 +825,7 @@ pub fn cleanup_storage_locked(
     let container = workspace_container(root);
     let legacy = [root.join(".supercov/.cache"), root.join(".supercov/cache")];
     let mut caches = Vec::new();
+    let mut removed_cargo_cache = false;
     if remove_build_cache && active.is_empty() {
         if owned_workspace_container(root) {
             caches.push(container);
@@ -834,8 +835,14 @@ pub fn cleanup_storage_locked(
                 .into_iter()
                 .filter(|path| fs::symlink_metadata(path).is_ok()),
         );
+        removed_cargo_cache = crate::workspace::clean_cargo_workspace(root, options.dry_run)
+            .map_err(|error| {
+                LifecycleError::InvalidState(format!(
+                    "could not clean the owned Cargo workspace: {error}"
+                ))
+            })?;
     }
-    result.removed_build_cache = !caches.is_empty();
+    result.removed_build_cache = removed_cargo_cache || !caches.is_empty();
     if !options.dry_run {
         for cache in caches {
             remove_stored_tree_deferred(root, &cache)?;
@@ -1088,6 +1095,10 @@ mod tests {
         fs::create_dir_all(container.join("workspace/project")).unwrap();
         fs::write(container.join(WORKSPACE_MARKER), "owned").unwrap();
         fs::create_dir_all(root.join(".supercov/cache/legacy")).unwrap();
+        let mut preparation = ProjectLock::acquire(&root, "prepare", "start").unwrap();
+        crate::workspace::prepare_cargo_cached_workspace(&root, &preparation).unwrap();
+        let cargo_container = crate::workspace::cargo_workspace_container(&root).unwrap();
+        preparation.release().unwrap();
 
         let mut active = ProjectLock::acquire(&root, "active", "start").unwrap();
         assert!(matches!(
@@ -1102,6 +1113,7 @@ mod tests {
             Err(LifecycleError::ActiveRun { .. })
         ));
         assert!(container.exists());
+        assert!(cargo_container.exists());
         active.release().unwrap();
 
         let cleaned = clean_storage(
@@ -1115,6 +1127,7 @@ mod tests {
         .unwrap();
         assert!(cleaned.removed_build_cache);
         assert!(!container.exists());
+        assert!(!cargo_container.exists());
         assert!(!root.join(".supercov/cache").exists());
         sweep_trash(&root).unwrap();
         fs::remove_dir_all(root).unwrap();

@@ -10,10 +10,12 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::lifecycle::{LifecycleError, ProjectLock, atomic_rename, remove_stored_tree_deferred};
 
 const WORKSPACE_MARKER: &str = ".supercov-workspace-store";
+const CARGO_WORKSPACE_VERSION: u32 = 1;
 const ROOT_EXCLUSIONS: &[&str] = &[
     ".cache",
     ".git",
@@ -120,6 +122,111 @@ pub fn cached_workspace_path(root: &Path) -> Result<PathBuf, WorkspaceError> {
     Ok(workspace_container(root)
         .join("workspace")
         .join(project_name(root)?))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CargoWorkspaceMarker {
+    version: u32,
+    root_sha256: String,
+}
+
+fn canonical_root_and_digest(root: &Path) -> Result<(PathBuf, String), WorkspaceError> {
+    let canonical = fs::canonicalize(root).map_err(|error| io_error(root, error))?;
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(canonical.as_os_str().as_encoded_bytes())
+    );
+    Ok((canonical, digest))
+}
+
+pub fn cargo_workspace_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
+    let (canonical, digest) = canonical_root_and_digest(root)?;
+    let parent = canonical
+        .parent()
+        .ok_or_else(|| WorkspaceError::UnsafePath(canonical.clone()))?;
+    Ok(parent.join(format!(".supercov-cargo-{}", &digest[..24])))
+}
+
+pub fn cargo_cached_workspace_path(root: &Path) -> Result<PathBuf, WorkspaceError> {
+    let container = cargo_workspace_container(root)?;
+    Ok(container.join("workspace/root").join(project_name(root)?))
+}
+
+fn expected_cargo_marker(root: &Path) -> Result<CargoWorkspaceMarker, WorkspaceError> {
+    let (_, digest) = canonical_root_and_digest(root)?;
+    Ok(CargoWorkspaceMarker {
+        version: CARGO_WORKSPACE_VERSION,
+        root_sha256: digest,
+    })
+}
+
+fn read_cargo_marker(path: &Path) -> Result<CargoWorkspaceMarker, WorkspaceError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| io_error(path, error))?;
+    if !metadata.file_type().is_file() {
+        return Err(WorkspaceError::UnsafePath(path.into()));
+    }
+    serde_json::from_slice(&fs::read(path).map_err(|error| io_error(path, error))?)
+        .map_err(WorkspaceError::InvalidCacheMetadata)
+}
+
+fn ensure_cargo_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
+    let container = cargo_workspace_container(root)?;
+    let expected = expected_cargo_marker(root)?;
+    let mut created = false;
+    match fs::symlink_metadata(&container) {
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            return Err(WorkspaceError::UnsafePath(container));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::create_dir(&container).map_err(|source| io_error(&container, source))?;
+            created = true;
+        }
+        Err(source) => return Err(io_error(&container, source)),
+    }
+    let marker_path = container.join(WORKSPACE_MARKER);
+    let result = (|| {
+        match fs::symlink_metadata(&marker_path) {
+            Ok(_) if read_cargo_marker(&marker_path)? != expected => {
+                return Err(WorkspaceError::UnsafePath(container.clone()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound && created => {
+                let mut bytes = serde_json::to_vec_pretty(&expected)
+                    .map_err(WorkspaceError::InvalidCacheMetadata)?;
+                bytes.push(b'\n');
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&marker_path)
+                    .map_err(|source| io_error(&marker_path, source))?;
+                file.write_all(&bytes)
+                    .and_then(|_| file.sync_all())
+                    .map_err(|source| io_error(&marker_path, source))?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(WorkspaceError::UnsafePath(container.clone()));
+            }
+            Err(source) => return Err(io_error(&marker_path, source)),
+        }
+        for path in [container.join(".cargo"), container.join("workspace/.cargo")] {
+            if fs::symlink_metadata(&path).is_ok() {
+                return Err(WorkspaceError::UnsafePath(path));
+            }
+        }
+        if project_name(root)? != ".cargo" {
+            let path = container.join("workspace/root/.cargo");
+            if fs::symlink_metadata(&path).is_ok() {
+                return Err(WorkspaceError::UnsafePath(path));
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() && created {
+        let _ = fs::remove_dir_all(&container);
+    }
+    result.map(|()| container)
 }
 
 pub fn isolated_workspace_path(root: &Path, run_id: &str) -> Result<PathBuf, WorkspaceError> {
@@ -594,6 +701,229 @@ pub fn prepare_cached_workspace(
     prepare_cached_workspace_with_operations(root, lock, reuse_paths, &mut operations)
 }
 
+fn cargo_transaction_prefix(root: &Path, kind: &str) -> Result<String, WorkspaceError> {
+    Ok(format!(
+        ".{}.{}-",
+        project_name(root)?.to_string_lossy(),
+        kind
+    ))
+}
+
+fn cargo_transaction_path(
+    root: &Path,
+    container: &Path,
+    kind: &str,
+) -> Result<PathBuf, WorkspaceError> {
+    Ok(container.join(format!(
+        "{}{}",
+        cargo_transaction_prefix(root, kind)?,
+        unique()
+    )))
+}
+
+fn validate_cargo_descendant(container: &Path, target: &Path) -> Result<(), WorkspaceError> {
+    let local = target
+        .strip_prefix(container)
+        .map_err(|_| WorkspaceError::UnsafePath(target.into()))?;
+    if local.as_os_str().is_empty()
+        || local
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(WorkspaceError::UnsafePath(target.into()));
+    }
+    let mut current = container.to_owned();
+    for component in local.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(WorkspaceError::UnsafePath(current));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(io_error(&current, error)),
+        }
+    }
+    Ok(())
+}
+
+fn remove_cargo_owned_tree(container: &Path, target: &Path) -> Result<bool, WorkspaceError> {
+    validate_cargo_descendant(container, target)?;
+    match fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_dir() => {
+            fs::remove_dir_all(target).map_err(|error| io_error(target, error))?;
+            Ok(true)
+        }
+        Ok(_) => Err(WorkspaceError::UnsafePath(target.into())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(io_error(target, error)),
+    }
+}
+
+fn recover_cargo_workspace_at(
+    root: &Path,
+    container: &Path,
+    workspace: &Path,
+) -> Result<CacheRecoveryResult, WorkspaceError> {
+    let staging_prefix = cargo_transaction_prefix(root, "staging")?;
+    let previous_prefix = cargo_transaction_prefix(root, "previous")?;
+    let mut staging = Vec::new();
+    let mut previous = Vec::new();
+    for entry in fs::read_dir(container)
+        .map_err(|error| io_error(container, error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| io_error(container, error))?
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let metadata = entry
+            .file_type()
+            .map_err(|error| io_error(&entry.path(), error))?;
+        if name.starts_with(&staging_prefix) {
+            if !metadata.is_dir() {
+                return Err(WorkspaceError::UnsafePath(entry.path()));
+            }
+            staging.push(entry.path());
+        } else if name.starts_with(&previous_prefix) {
+            if !metadata.is_dir() {
+                return Err(WorkspaceError::UnsafePath(entry.path()));
+            }
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(UNIX_EPOCH);
+            previous.push((modified, entry.path()));
+        }
+    }
+    previous.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+    let mut restored = false;
+    if fs::symlink_metadata(workspace).is_err()
+        && let Some((_, newest)) = previous.first()
+    {
+        fs::create_dir_all(workspace.parent().expect("Cargo workspace parent"))
+            .map_err(|error| io_error(workspace, error))?;
+        atomic_rename(newest, workspace)?;
+        previous.remove(0);
+        restored = true;
+    }
+    let removed_staging = staging.len();
+    let removed_previous = previous.len();
+    for path in staging
+        .into_iter()
+        .chain(previous.into_iter().map(|(_, path)| path))
+    {
+        remove_cargo_owned_tree(container, &path)?;
+    }
+    Ok(CacheRecoveryResult {
+        restored_previous: restored,
+        removed_staging,
+        removed_previous,
+    })
+}
+
+pub fn recover_cargo_cached_workspace(
+    root: &Path,
+    lock: &ProjectLock,
+) -> Result<CacheRecoveryResult, WorkspaceError> {
+    require_lock(root, lock)?;
+    let container = ensure_cargo_container(root)?;
+    let workspace = cargo_cached_workspace_path(root)?;
+    recover_cargo_workspace_at(root, &container, &workspace)
+}
+
+pub fn prepare_cargo_cached_workspace(
+    root: &Path,
+    lock: &ProjectLock,
+) -> Result<PathBuf, WorkspaceError> {
+    let mut operations = SystemWorkspaceOperations;
+    prepare_cargo_cached_workspace_with_operations(root, lock, &mut operations)
+}
+
+fn prepare_cargo_cached_workspace_with_operations<Operations: WorkspaceOperations>(
+    root: &Path,
+    lock: &ProjectLock,
+    operations: &mut Operations,
+) -> Result<PathBuf, WorkspaceError> {
+    require_lock(root, lock)?;
+    let container = ensure_cargo_container(root)?;
+    let workspace = cargo_cached_workspace_path(root)?;
+    recover_cargo_workspace_at(root, &container, &workspace)?;
+    let staging = cargo_transaction_path(root, &container, "staging")?;
+    let previous = cargo_transaction_path(root, &container, "previous")?;
+    let result = (|| {
+        let canonical_root = fs::canonicalize(root).map_err(|error| io_error(root, error))?;
+        copy_tree(
+            root,
+            &staging,
+            CopyRoots {
+                source: root,
+                destination: &staging,
+                final_destination: &workspace,
+                canonical_source: &canonical_root,
+            },
+            true,
+            operations,
+        )?;
+        link_node_modules(root, &staging, operations)?;
+        fs::create_dir_all(workspace.parent().expect("Cargo workspace parent"))
+            .map_err(|error| io_error(&workspace, error))?;
+        let mut moved_previous = false;
+        if fs::symlink_metadata(&workspace).is_ok() {
+            operations.rename(&workspace, &previous)?;
+            moved_previous = true;
+        }
+        if let Err(error) = operations.rename(&staging, &workspace) {
+            if moved_previous && fs::symlink_metadata(&workspace).is_err() {
+                let _ = operations.rename(&previous, &workspace);
+            }
+            return Err(error);
+        }
+        if fs::symlink_metadata(&previous).is_ok() {
+            remove_cargo_owned_tree(&container, &previous)?;
+        }
+        Ok(workspace.clone())
+    })();
+    if fs::symlink_metadata(&staging).is_ok() {
+        remove_cargo_owned_tree(&container, &staging)?;
+    }
+    result
+}
+
+pub fn remove_cargo_workspace_run(root: &Path, run_id: &str) -> Result<bool, WorkspaceError> {
+    let container = cargo_workspace_container(root)?;
+    match fs::symlink_metadata(&container) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(io_error(&container, error)),
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            return Err(WorkspaceError::UnsafePath(container));
+        }
+        Ok(_) => {}
+    }
+    if read_cargo_marker(&container.join(WORKSPACE_MARKER))? != expected_cargo_marker(root)? {
+        return Err(WorkspaceError::UnsafePath(container));
+    }
+    let workspace = cargo_cached_workspace_path(root)?;
+    remove_cargo_owned_tree(&container, &workspace.join(".supercov/work").join(run_id))
+}
+
+pub fn clean_cargo_workspace(root: &Path, dry_run: bool) -> Result<bool, WorkspaceError> {
+    let container = cargo_workspace_container(root)?;
+    match fs::symlink_metadata(&container) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(io_error(&container, error)),
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            return Err(WorkspaceError::UnsafePath(container));
+        }
+        Ok(_) => {}
+    }
+    if read_cargo_marker(&container.join(WORKSPACE_MARKER))? != expected_cargo_marker(root)? {
+        return Err(WorkspaceError::UnsafePath(container));
+    }
+    if !dry_run {
+        fs::remove_dir_all(&container).map_err(|error| io_error(&container, error))?;
+    }
+    Ok(true)
+}
+
 fn prepare_cached_workspace_with_operations<Operations: WorkspaceOperations>(
     root: &Path,
     lock: &ProjectLock,
@@ -811,6 +1141,110 @@ mod tests {
             prepare_isolated_workspace(&root, "other", &lock),
             Err(WorkspaceError::MissingLock)
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cargo_cache_is_an_owned_same_parent_sibling_and_cleans_exactly() {
+        let root = project();
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[build]\nrustflags=[\"--cfg\",\"copied-once\"]\n",
+        )
+        .unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_cargo_cached_workspace(&root, &lock).unwrap();
+        let container = cargo_workspace_container(&root).unwrap();
+        assert_eq!(
+            container.parent(),
+            fs::canonicalize(&root).unwrap().parent()
+        );
+        assert!(!workspace.starts_with(&root));
+        assert_eq!(workspace.file_name(), root.file_name());
+        assert_eq!(
+            fs::read_to_string(workspace.join(".cargo/config.toml")).unwrap(),
+            "[build]\nrustflags=[\"--cfg\",\"copied-once\"]\n"
+        );
+        fs::create_dir_all(workspace.join(".supercov/work/run_1")).unwrap();
+        assert!(remove_cargo_workspace_run(&root, "run_1").unwrap());
+        assert!(!workspace.join(".supercov/work/run_1").exists());
+        assert!(clean_cargo_workspace(&root, true).unwrap());
+        assert!(container.exists());
+        assert!(clean_cargo_workspace(&root, false).unwrap());
+        assert!(!container.exists());
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cargo_cache_rejects_a_tampered_marker_without_deleting_it() {
+        let root = project();
+        let container = cargo_workspace_container(&root).unwrap();
+        fs::create_dir(&container).unwrap();
+        fs::write(container.join(WORKSPACE_MARKER), "{}\n").unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        assert!(matches!(
+            prepare_cargo_cached_workspace(&root, &lock),
+            Err(WorkspaceError::InvalidCacheMetadata(_)) | Err(WorkspaceError::UnsafePath(_))
+        ));
+        assert!(container.exists());
+        lock.release().unwrap();
+        fs::remove_dir_all(container).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cargo_cache_copy_and_rename_failures_preserve_the_complete_generation() {
+        let root = project();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_cargo_cached_workspace(&root, &lock).unwrap();
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/index.js")).unwrap(),
+            "one"
+        );
+        fs::write(root.join("src/index.js"), "two").unwrap();
+
+        let mut copy_failure = FaultOperations {
+            copy_count: 0,
+            fail_copy_at: Some(1),
+            rename_count: 0,
+            fail_rename_at: None,
+        };
+        assert!(matches!(
+            prepare_cargo_cached_workspace_with_operations(&root, &lock, &mut copy_failure),
+            Err(WorkspaceError::Io { .. })
+        ));
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/index.js")).unwrap(),
+            "one"
+        );
+
+        let mut rename_failure = FaultOperations {
+            copy_count: 0,
+            fail_copy_at: None,
+            rename_count: 0,
+            fail_rename_at: Some(2),
+        };
+        assert!(matches!(
+            prepare_cargo_cached_workspace_with_operations(&root, &lock, &mut rename_failure),
+            Err(WorkspaceError::Io { .. })
+        ));
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/index.js")).unwrap(),
+            "one"
+        );
+
+        let container = cargo_workspace_container(&root).unwrap();
+        let prefix = format!(".{}.", project_name(&root).unwrap().to_string_lossy());
+        assert!(
+            fs::read_dir(&container)
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().starts_with(&prefix))
+        );
+        clean_cargo_workspace(&root, false).unwrap();
+        lock.release().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -881,16 +881,35 @@ three-package Cargo-authority corpus also remains green.
 This deliberately does not claim complete Cargo configuration support. Cargo
 1.95 config `include`, user command-line `--config`, multiple selected targets
 and an explicit rustup `+toolchain` selector stop before user execution until
-their exact merge/selection semantics are owned. The current nested cached
-workspace also lets Cargo discover both the copied project config and the
-original checkout's ancestor config; mergeable non-runner values could
-therefore be applied twice. Move the Cargo workspace outside the original
-configuration ancestry, with recoverable ownership and deterministic cleanup,
-before public promotion. Retry identity, nextest/custom harnesses, complete
+their exact merge/selection semantics are owned.
+
+Checkpoint (2026-08-27): Cargo execution now uses an authenticated
+same-filesystem sibling workspace rather than a descendant of the source
+checkout. The copied project keeps its original basename beneath neutral
+generated ancestors, so Cargo observes the copied project configuration and
+the real parent hierarchy exactly once instead of rediscovering the source
+checkout's project configuration as an ancestor. A real build script asserts
+that a configured rustflag occurs exactly once in `CARGO_ENCODED_RUSTFLAGS`.
+The container name and strict marker bind the canonical source root; a missing,
+linked, malformed or mismatched marker is never trusted or deleted.
+
+Refresh uses staging/current/previous generations and atomic rename. Injected
+copy exhaustion and publication-rename failure preserve the prior complete
+generation and leave no transaction debris. Recovery removes incomplete
+staging, restores the newest prior generation when necessary, terminal run
+cleanup removes only the exact run subtree, and `supercov clean` removes the
+owned sibling only while holding the ordinary project lock. The authoritative
+rustc/rustdoc corpus, public JavaScript/TypeScript matrix, clippy, 234 engine
+tests, 19 contract tests and 16 CLI tests are green locally; no hosted workflow
+ran.
+
+This closes copied/ancestor configuration duplication for the current
+same-filesystem writable-parent topology. A checkout whose parent cannot host
+the authenticated sibling still fails closed; an exact read-only-parent,
+cross-volume and supported-platform fallback remains required before public
+promotion. Retry identity, nextest/custom harnesses, complete
 presentation/output modes and their crash matrix likewise remain open and keep
-Rust private. The full rustc/rustdoc corpus, public JavaScript/TypeScript
-matrix, clippy, 231 engine tests, 19 contract tests and 16 CLI tests are green
-locally; no hosted workflow ran.
+Rust private.
 
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.

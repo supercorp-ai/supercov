@@ -1637,8 +1637,14 @@ miss blocks flipping any default.
   precedence, structured scalar/array argv, isolated workspace relocation and
   rustdoc composition. Cargo config `include`, command-line `--config`,
   multi-target selection and rustup `+toolchain` selection remain fail-closed.
-  Cargo's cached workspace must also move outside the original checkout's
-  configuration ancestry so copied and ancestor config cannot merge twice.
+  Cargo's cached workspace now lives in an authenticated same-filesystem
+  sibling, preserves the project basename beneath neutral generated ancestors,
+  and proves through a real build script that copied and parent configuration
+  is applied exactly once. Atomic staging/current/previous generations,
+  marker-tamper refusal, copy-exhaustion and rename-failure recovery, exact
+  terminal cleanup and `supercov clean` integration are green. A writable
+  same-filesystem parent is still required; the read-only-parent, cross-volume
+  and supported-platform fallback remains a release blocker.
   Retry identity, nextest/custom harnesses, complete presentation modes, their
   crash/concurrency matrices, remaining R1 semantic corpora,
   supported-platform gates and the 1.10x performance gate remain blocking.

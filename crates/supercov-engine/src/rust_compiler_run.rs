@@ -16,7 +16,7 @@ use crate::{
     rust_compiler_test_runner::{RustCompilerRunRequest, run_rust_compiler_frontend},
     rust_run::current_rust_integrity,
     rust_test_runner::cargo_invocation,
-    workspace::{cached_workspace_path, prepare_cached_workspace, recover_cached_workspace},
+    workspace::{prepare_cargo_cached_workspace, remove_cargo_workspace_run},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -129,9 +129,8 @@ pub fn run_direct_rust_compiler(
         let adapter_started = Instant::now();
         let integrity = current_rust_integrity(&root, &request.command)?;
         let workspace_started = Instant::now();
-        recover_cached_workspace(&root, &lock).map_err(|error| error.to_string())?;
         let workspace =
-            prepare_cached_workspace(&root, &lock, &[]).map_err(|error| error.to_string())?;
+            prepare_cargo_cached_workspace(&root, &lock).map_err(|error| error.to_string())?;
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
 
@@ -287,11 +286,7 @@ pub fn run_direct_rust_compiler(
         )
         .map_err(|error| error.to_string())?;
         finalize_published_run(&root, &request.run_id).map_err(|error| error.to_string())?;
-        remove_stored_tree_deferred(
-            &root,
-            &workspace.join(".supercov/work").join(&request.run_id),
-        )
-        .map_err(|error| error.to_string())?;
+        remove_cargo_workspace_run(&root, &request.run_id).map_err(|error| error.to_string())?;
         Ok(DirectRustCompilerRunResult {
             run_id: request.run_id.clone(),
             run_directory,
@@ -329,12 +324,7 @@ pub fn run_direct_rust_compiler(
         }
         let _ =
             remove_stored_tree_deferred(&root, &root.join(".supercov/work").join(&request.run_id));
-        if let Ok(workspace) = cached_workspace_path(&root) {
-            let _ = remove_stored_tree_deferred(
-                &root,
-                &workspace.join(".supercov/work").join(&request.run_id),
-            );
-        }
+        let _ = remove_cargo_workspace_run(&root, &request.run_id);
     }
     let release = lock.release().map_err(|error| error.to_string());
     match (result, release) {
