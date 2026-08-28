@@ -1,34 +1,62 @@
-use std::{cell::RefCell, panic};
+use std::{
+    cell::RefCell,
+    future::Future,
+    panic,
+    task::{Context, Poll, Waker},
+};
+
+use no_std_fixture::{no_std_choice, no_std_logical_value, no_std_match};
 
 use supercov_rustc_spike_fixture::{
     ARRAY_DECISION_LEN, ASSOCIATED_CONST_FALSE, ASSOCIATED_CONST_TRUE, CONST_ASSERTION_FIRST,
     CONST_ASSERTION_SECOND, CONST_DEBUG_ASSERTION_FIRST, CONST_DEBUG_ASSERTION_SECOND,
     CONST_FALSE_VALUE, CONST_GENERIC_FALSE, CONST_GENERIC_TRUE, CONST_LET_ELSE_FALLBACK,
-    CONST_LET_ELSE_MATCHED, CONST_MATCH_FALLBACK, CONST_MATCH_FIRST, CONST_MATCH_SECOND,
+    CONST_LET_ELSE_MATCHED, CONST_LOGICAL_FALSE_FALSE, CONST_LOGICAL_FALSE_TRUE,
+    CONST_LOGICAL_TRUE_FALSE, CONST_LOGICAL_TRUE_TRUE, CONST_MATCH_FALLBACK, CONST_MATCH_FIRST,
+    CONST_MATCH_SECOND,
     CONST_MIXED_FALSE_FALSE, CONST_MIXED_FIRST_TRUE_FALSE, CONST_MIXED_FIRST_TRUE_TRUE,
     CONST_MIXED_SECOND_TRUE, CONST_NESTED_INNER_FALSE, CONST_NESTED_INNER_TRUE,
     CONST_NESTED_OUTER_FALSE, CONST_VALUE, CONST_WHILE_DISABLED, CONST_WHILE_ENTERED,
     CONST_WHILE_ZERO, DIRECT_CONST_ASSERTION, DIRECT_CONST_DEBUG_ASSERTION, DIRECT_CONST_FALSE,
-    DIRECT_CONST_TRUE, STATIC_CONST_FALSE, STATIC_CONST_TRUE, DerivedChoice, assert_compound,
-    assert_constant_expression_true, assert_equal, assert_equal_evaluation_order,
-    assert_literal_conjunction, assert_literal_disjunction, assert_literal_false,
-    assert_literal_true, assert_named_constant_false, assert_not_equal, assert_panicking_condition,
-    assert_panicking_message_argument, authored, chained, compound, context_normal_scope,
-    context_panic_scope, debug_assert_compound, debug_assert_equal, debug_assert_literal_false,
-    debug_assert_literal_true, debug_assert_not_equal,
-    disjoined, drop_order, fallible, for_break, for_values, generated_assertion_by_proc,
+    DIRECT_CONST_TRUE, AssociatedRuntimeChoice, DerivedChoice, DisabledChoice, EnabledChoice,
+    GatRuntimeChoice, OverrideChoice, RuntimeChoice,
+    STATIC_CONST_FALSE, STATIC_CONST_TRUE, assert_compound, assert_constant_expression_true,
+    assert_equal, assert_equal_evaluation_order, assert_literal_conjunction,
+    assert_literal_disjunction, assert_literal_false, assert_literal_true,
+    assert_named_constant_false, assert_not_equal, assert_panicking_condition,
+    assert_panicking_message_argument, async_choice, async_closure_choice, async_trait_choice,
+    attributed_choice, authored, chained, compound, context_normal_scope, context_panic_scope,
+    debug_assert_compound, debug_assert_equal, debug_assert_literal_false, debug_assert_literal_true,
+    debug_assert_not_equal, disjoined, drop_order, dynamic_choice, fallible, for_break, for_values,
+    generated_assertion_by_proc,
     generated_by_build_script, generated_by_external_rules, generated_by_proc, generated_by_rules,
     generated_guarded_match_by_proc, generated_let_else_by_proc, generated_match,
     generated_match_by_proc, generated_nested_guard_match_by_proc, generated_nested_match_by_proc,
     generated_nested_scrutinee_match_by_proc, generated_nested_try_by_proc, generated_try_by_proc,
-    generated_two_let_else_by_proc, generated_two_try_by_proc, inline_const_values,
-    interrupted_decision, interrupted_for, interrupted_match, let_else_value, match_empty,
-    match_identical, match_irrefutable, match_unreachable, match_value, mixed, nested,
-    nested_expression, nested_for_values, nested_let_else, nested_match, nested_try_result,
-    panic_before_try, panic_path, pattern, promoted_array, promoted_literal, repeated_expansions,
-    try_option, try_result, two_for_values, two_let_else, two_try_results, while_compound,
-    while_let_chain,
+    generated_nested_external_by_proc, generated_two_let_else_by_proc, generated_two_try_by_proc,
+    generic_choice, hrtb_choice,
+    inline_const_values,
+    interrupted_decision, interrupted_for, interrupted_match, let_else_value, logical_value_choice,
+    match_empty, match_identical, match_irrefutable, match_unreachable, match_value, mixed, nested,
+    nested_expression, nested_for_values, nested_generic_choice, nested_let_else, nested_match,
+    nested_try_result, opaque_choice, opaque_macro_compound, opaque_macro_guard,
+    opaque_macro_nested, panic_before_try, panic_path, pattern, promoted_array, promoted_literal,
+    repeated_expansions,
+    suspended_borrow_choice, try_option, try_result, two_for_values, two_let_else, two_try_results,
+    while_compound, while_let_chain,
 };
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => return output,
+            Poll::Pending => std::thread::yield_now(),
+        }
+    }
+}
 
 fn main() {
     let log = RefCell::new(Vec::new());
@@ -98,10 +126,7 @@ fn main() {
     println!("assertion-order={:?}", assertion_order.into_inner());
     println!("drop-order={:?}", log.into_inner());
     println!("const-values={CONST_VALUE:?},{CONST_FALSE_VALUE:?}");
-    println!(
-        "promoted={:?}",
-        [*promoted_literal(), promoted_array()[1]]
-    );
+    println!("promoted={:?}", [*promoted_literal(), promoted_array()[1]]);
     println!(
         "ctfe-surfaces={:?}",
         [
@@ -154,6 +179,109 @@ fn main() {
         ]
     );
     println!(
+        "ctfe-logical-value={:?}",
+        [
+            CONST_LOGICAL_FALSE_FALSE,
+            CONST_LOGICAL_FALSE_TRUE,
+            CONST_LOGICAL_TRUE_TRUE,
+            CONST_LOGICAL_TRUE_FALSE,
+        ]
+    );
+    println!(
+        "generic-trait={:?}",
+        [
+            generic_choice(&EnabledChoice),
+            generic_choice(&DisabledChoice),
+            EnabledChoice.default_choice(),
+            DisabledChoice.default_choice(),
+            dynamic_choice(&EnabledChoice),
+            dynamic_choice(&DisabledChoice),
+            OverrideChoice(false).default_choice(),
+            OverrideChoice(true).default_choice(),
+        ]
+    );
+    println!(
+        "async={:?}",
+        [block_on(async_choice(false)), block_on(async_choice(true))]
+    );
+    let async_drop_log = RefCell::new(Vec::new());
+    println!(
+        "advanced-generic-async={:?}",
+        [
+            EnabledChoice::associated_generic_choice(&EnabledChoice, true),
+            EnabledChoice::associated_generic_choice(&DisabledChoice, true),
+            EnabledChoice::associated_generic_choice(&EnabledChoice, false),
+            block_on(async_trait_choice(&EnabledChoice, true)),
+            block_on(async_trait_choice(&EnabledChoice, false)),
+            block_on(async_trait_choice(&DisabledChoice, true)),
+            block_on(async_trait_choice(&OverrideChoice(false), true)),
+            block_on(async_trait_choice(&OverrideChoice(true), true)),
+            block_on(async_closure_choice(false)),
+            block_on(async_closure_choice(true)),
+            block_on(suspended_borrow_choice(false, &async_drop_log)),
+            block_on(suspended_borrow_choice(true, &async_drop_log)),
+        ]
+    );
+    println!("async-drop={:?}", async_drop_log.into_inner());
+    println!(
+        "nested-generic={:?}",
+        [
+            nested_generic_choice(false, false, &EnabledChoice),
+            nested_generic_choice(false, true, &EnabledChoice),
+            nested_generic_choice(true, false, &EnabledChoice),
+            nested_generic_choice(true, false, &DisabledChoice),
+        ]
+    );
+    println!(
+        "logical-value={:?}",
+        [
+            logical_value_choice(false, false, false),
+            logical_value_choice(false, false, true),
+            logical_value_choice(true, true, false),
+            logical_value_choice(true, false, false),
+        ]
+    );
+    println!(
+        "advanced-types={:?}",
+        [
+            EnabledChoice.associated_default(true),
+            EnabledChoice.associated_default(false),
+            DisabledChoice.associated_default(true),
+            EnabledChoice.gat_default(&true),
+            EnabledChoice.gat_default(&false),
+            DisabledChoice.gat_default(&true),
+            opaque_choice(&EnabledChoice, true),
+            opaque_choice(&EnabledChoice, false),
+            opaque_choice(&DisabledChoice, true),
+            hrtb_choice(true, |value| *value),
+            hrtb_choice(false, |value| *value),
+            hrtb_choice(false, |_| true),
+        ]
+    );
+    println!(
+        "nested-expansions={:?}",
+        [
+            attributed_choice(true, true),
+            attributed_choice(true, false),
+            attributed_choice(false, true),
+            generated_nested_external_by_proc(true),
+            generated_nested_external_by_proc(false),
+        ]
+    );
+    println!(
+        "no-std={:?}",
+        [
+            no_std_choice(false, true),
+            no_std_choice(true, false),
+            no_std_choice(true, true),
+            usize::from(no_std_logical_value(false, false)),
+            usize::from(no_std_logical_value(false, true)),
+            usize::from(no_std_logical_value(true, false)),
+            no_std_match(None),
+            no_std_match(Some(421)),
+        ]
+    );
+    println!(
         "conditions={:?}",
         [
             compound(true, true),
@@ -164,6 +292,34 @@ fn main() {
             chained(Some(true), true),
             chained(Some(false), true),
             chained(None, true),
+        ]
+    );
+    println!(
+        "opaque-macro-compound={:?}",
+        [
+            opaque_macro_compound(None, true),
+            opaque_macro_compound(Some(1), false),
+            opaque_macro_compound(Some(2), true),
+        ]
+    );
+    println!(
+        "opaque-macro-nested={:?}",
+        [
+            opaque_macro_nested(false, Some(1), None, true),
+            opaque_macro_nested(false, Some(1), Some(3), false),
+            opaque_macro_nested(false, Some(1), Some(3), true),
+            opaque_macro_nested(true, Some(1), None, false),
+            opaque_macro_nested(true, None, None, true),
+            opaque_macro_nested(true, None, Some(3), false),
+            opaque_macro_nested(true, None, Some(3), true),
+        ]
+    );
+    println!(
+        "opaque-macro-guard={:?}",
+        [
+            opaque_macro_guard(None, true),
+            opaque_macro_guard(Some(1), false),
+            opaque_macro_guard(Some(2), true),
         ]
     );
     println!(

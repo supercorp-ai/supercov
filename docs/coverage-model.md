@@ -1,10 +1,8 @@
 # Coverage model
 
-Line coverage answers a question nobody actually has. "This line executed" says
-nothing about whether the interesting thing on that line was ever true, ever
-false, or ever mattered. Supercov measures **completeness**: of everything the
-structure of the code obliges a suite to exercise, how much has been exercised,
-and with what quality of evidence.
+Supercov derives coverage obligations from code structure. It reports which
+obligations ran and the quality of the available evidence, including line,
+branch, value-path, control-flow, and MC/DC coverage.
 
 ## Obligations
 

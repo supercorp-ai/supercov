@@ -1,9 +1,8 @@
 # Supported suites
 
-Supercov works by wrapping a command and following the processes it launches,
-so the interesting question is not "does my runner work" but "how precisely can
-coverage be attributed to individual tests". Both answers are visible in every
-query.
+Supercov wraps a test command and instruments the processes it launches.
+Runner support differs by attribution level: exact per-test attribution or
+aggregate coverage.
 
 ## Attribution by runner
 

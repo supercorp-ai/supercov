@@ -121,6 +121,34 @@ pub fn generated_local_function(_input: TokenStream) -> TokenStream {
         .expect("valid generated local Rust function")
 }
 
+#[proc_macro]
+pub fn generated_nested_external_function(_input: TokenStream) -> TokenStream {
+    "external_rules::external_choice_function!(generated_nested_external_by_proc);"
+        .parse()
+        .expect("valid nested external declarative invocation")
+}
+
+#[proc_macro_attribute]
+pub fn generated_choice(_attribute: TokenStream, item: TokenStream) -> TokenStream {
+    let mut saw_function_keyword = false;
+    let name = item
+        .into_iter()
+        .find_map(|token| match token {
+            TokenTree::Ident(identifier) if saw_function_keyword => Some(identifier.to_string()),
+            TokenTree::Ident(identifier) if identifier.to_string() == "fn" => {
+                saw_function_keyword = true;
+                None
+            }
+            _ => None,
+        })
+        .expect("attribute input has a function name");
+    format!(
+        "pub fn {name}(first: bool, second: bool) -> usize {{ if first && second {{ 353 }} else {{ 359 }} }}"
+    )
+    .parse()
+    .expect("valid generated attribute function")
+}
+
 #[proc_macro_attribute]
 pub fn generated_test(_attribute: TokenStream, item: TokenStream) -> TokenStream {
     let mut output: TokenStream = "#[test]".parse().expect("valid test attribute");

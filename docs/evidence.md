@@ -1,9 +1,7 @@
 # Evidence and runs
 
-A coverage number is only as trustworthy as the thing it was computed from.
-Supercov keeps exactly one artifact per run and derives every view from it on
-demand, so a report can never quietly disagree with the evidence it claims to
-summarise.
+Each run stores one evidence artifact and its metadata. Reports, queries, and
+comparisons are derived from those files on demand.
 
 ## What a run is
 

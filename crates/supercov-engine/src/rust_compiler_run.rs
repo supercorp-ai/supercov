@@ -1,15 +1,22 @@
 //! Private transactional lifecycle for the compiler-owned Rust frontend.
 
-use std::{fs, io::Write, path::PathBuf, time::Instant};
+use std::{
+    fs,
+    io::Write,
+    path::PathBuf,
+    thread,
+    time::{Duration, Instant},
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
     coverage_report::{ArchiveReportRequest, ExitCodeInput, analyze_coverage_archive},
-    evidence_archive::write_archive,
+    evidence_archive::{EvidenceArchiveWriteFault, write_archive, write_archive_with_fault},
     lifecycle::{
-        ProjectLock, RunState, RunStateStatus, finalize_published_run, publish_run,
-        recover_abandoned_runs, remove_stored_tree_deferred, update_run_state, write_run_state,
+        ProjectLock, RunPublicationFault, RunState, RunStateStatus, atomic_write,
+        finalize_published_run, publish_run, publish_run_with_fault, recover_abandoned_runs,
+        remove_stored_tree_deferred, update_run_state, write_run_state,
     },
     run_store::{RawEvidenceMetadata, RunMetadata, RunTimings},
     rust_cargo_configuration::resolve_cargo_runner_plan,
@@ -31,6 +38,15 @@ pub struct DirectRustCompilerRunRequest {
     pub require_public_capabilities: bool,
     #[serde(skip)]
     pub watchdog_program: Option<PathBuf>,
+    #[serde(skip)]
+    pub publication_fault: Option<RustCompilerPublicationFault>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RustCompilerPublicationFault {
+    ArchiveEnospc,
+    FinalRename,
+    WaitBeforePublication,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -122,6 +138,31 @@ fn direct_frontend_error(
     }
 }
 
+fn wait_before_publication(root: &std::path::Path, run_id: &str) -> Result<(), String> {
+    let work = root.join(".supercov/work").join(run_id);
+    let ready = work.join("spike-publication-ready");
+    let release = work.join("spike-publication-release");
+    atomic_write(root, &ready, b"ready\n").map_err(|error| error.to_string())?;
+    let started = Instant::now();
+    loop {
+        match fs::symlink_metadata(&release) {
+            Ok(metadata) if metadata.file_type().is_file() => return Ok(()),
+            Ok(_) => {
+                return Err(format!(
+                    "invalid private publication release marker: {}",
+                    release.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {error}", release.display())),
+        }
+        if started.elapsed() >= Duration::from_secs(120) {
+            return Err("timed out at private compiler publication gate".into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
 pub fn run_direct_rust_compiler(
     request: &DirectRustCompilerRunRequest,
     diagnostics: &mut dyn Write,
@@ -204,10 +245,15 @@ pub fn run_direct_rust_compiler(
             .join(".supercov/work")
             .join(&request.run_id)
             .join("evidence.raw.gz");
-        let raw = write_archive(
-            run.archive_entries().map_err(|error| error.to_string())?,
-            &archive_path,
-        )
+        let archive_entries = run.archive_entries().map_err(|error| error.to_string())?;
+        let raw = match request.publication_fault {
+            Some(RustCompilerPublicationFault::ArchiveEnospc) => write_archive_with_fault(
+                archive_entries,
+                &archive_path,
+                EvidenceArchiveWriteFault::NoSpaceAfterBytes(128),
+            ),
+            _ => write_archive(archive_entries, &archive_path),
+        }
         .map_err(|error| error.to_string())?;
         let report = analyze_coverage_archive(&ArchiveReportRequest {
             archive_path: archive_path.clone(),
@@ -263,7 +309,7 @@ pub fn run_direct_rust_compiler(
                 result.role == "test"
                     && matches!(
                         result.provenance.runner.as_str(),
-                        "rust-libtest" | "rust-nextest"
+                        "rust-libtest" | "rust-custom-harness" | "rust-nextest"
                     )
             })
             .map(|result| result.test_id.as_deref().unwrap_or(&result.test))
@@ -298,8 +344,27 @@ pub fn run_direct_rust_compiler(
             decisions: run.request.manifest.decisions.len(),
             limitations: run.request.manifest.limitations.len(),
         };
-        let run_directory =
-            publish_run(&root, &metadata, &archive_path).map_err(|error| error.to_string())?;
+        update_run_state(
+            &root,
+            &request.run_id,
+            RunStateStatus::Publishing,
+            &request.started_at,
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        if request.publication_fault == Some(RustCompilerPublicationFault::WaitBeforePublication) {
+            wait_before_publication(&root, &request.run_id)?;
+        }
+        let run_directory = match request.publication_fault {
+            Some(RustCompilerPublicationFault::FinalRename) => publish_run_with_fault(
+                &root,
+                &metadata,
+                &archive_path,
+                Some(RunPublicationFault::FinalRename),
+            ),
+            _ => publish_run(&root, &metadata, &archive_path),
+        }
+        .map_err(|error| error.to_string())?;
         update_run_state(
             &root,
             &request.run_id,

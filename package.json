@@ -1,6 +1,6 @@
 {
   "name": "supercov",
-  "version": "0.0.17",
+  "version": "0.0.18",
   "description": "Zero-edit, runner-aware coverage completeness for JavaScript test suites",
   "license": "MIT",
   "repository": {
@@ -37,6 +37,7 @@
     "sync:rust-assets": "node scripts/sync-rust-package-assets.mjs",
     "test:rust-assets": "node scripts/sync-rust-package-assets.mjs --check",
     "test:rustc-backend-spike": "node scripts/rustc-backend-spike.mjs",
+    "test:rust-compiler-spikes": "cargo build -p supercov && node scripts/rust-libtest-companion-spike.mjs && node scripts/rust-async-attribution-spike.mjs && node scripts/rust-subprocess-attribution-spike.mjs && node scripts/rust-custom-harness-spike.mjs && node scripts/rust-libtest-builder-lifecycle-spike.mjs",
     "test:rust-cargo-runner": "cargo build -p supercov && node scripts/rust-cargo-runner-integration.mjs",
     "test:rust-nextest-runner": "cargo build -p supercov && node scripts/rust-nextest-runner-integration.mjs",
     "test": "cargo test --workspace",
@@ -66,12 +67,12 @@
     "prepublishOnly": "npm run release:check"
   },
   "optionalDependencies": {
-    "@supercov/cli-darwin-arm64": "0.0.17",
-    "@supercov/cli-darwin-x64": "0.0.17",
-    "@supercov/cli-linux-arm64-gnu": "0.0.17",
-    "@supercov/cli-linux-arm64-musl": "0.0.17",
-    "@supercov/cli-linux-x64-gnu": "0.0.17",
-    "@supercov/cli-linux-x64-musl": "0.0.17"
+    "@supercov/cli-darwin-arm64": "0.0.18",
+    "@supercov/cli-darwin-x64": "0.0.18",
+    "@supercov/cli-linux-arm64-gnu": "0.0.18",
+    "@supercov/cli-linux-arm64-musl": "0.0.18",
+    "@supercov/cli-linux-x64-gnu": "0.0.18",
+    "@supercov/cli-linux-x64-musl": "0.0.18"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.55.0",

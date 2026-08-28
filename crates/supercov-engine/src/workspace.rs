@@ -12,11 +12,15 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::lifecycle::{LifecycleError, ProjectLock, atomic_rename, remove_stored_tree_deferred};
+use crate::lifecycle::{
+    LifecycleError, ProjectLock, atomic_rename, atomic_write, remove_stored_tree_deferred,
+};
 
 const WORKSPACE_MARKER: &str = ".supercov-workspace-store";
 const WORKSPACE_MARKER_CONTENTS: &[u8] = b"Supercov instrumented workspace. Safe to delete.\n";
-const CARGO_WORKSPACE_VERSION: u32 = 1;
+const CARGO_WORKSPACE_VERSION: u32 = 2;
+const CARGO_WORKSPACE_LOCATOR_VERSION: u32 = 1;
+const CARGO_WORKSPACE_LOCATOR: &str = ".supercov/cargo-workspace.json";
 const ROOT_EXCLUSIONS: &[&str] = &[
     ".cache",
     ".git",
@@ -146,6 +150,23 @@ pub fn cached_workspace_path(root: &Path) -> Result<PathBuf, WorkspaceError> {
 struct CargoWorkspaceMarker {
     version: u32,
     root_sha256: String,
+    token: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum CargoWorkspacePlacement {
+    Sibling,
+    Temporary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CargoWorkspaceLocator {
+    version: u32,
+    root_sha256: String,
+    placement: CargoWorkspacePlacement,
+    token: String,
 }
 
 fn canonical_root_and_digest(root: &Path) -> Result<(PathBuf, String), WorkspaceError> {
@@ -157,7 +178,7 @@ fn canonical_root_and_digest(root: &Path) -> Result<(PathBuf, String), Workspace
     Ok((canonical, digest))
 }
 
-pub fn cargo_workspace_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
+fn preferred_cargo_workspace_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
     let (canonical, digest) = canonical_root_and_digest(root)?;
     let parent = canonical
         .parent()
@@ -165,16 +186,100 @@ pub fn cargo_workspace_container(root: &Path) -> Result<PathBuf, WorkspaceError>
     Ok(parent.join(format!(".supercov-cargo-{}", &digest[..24])))
 }
 
+fn cargo_locator_path(root: &Path) -> PathBuf {
+    root.join(CARGO_WORKSPACE_LOCATOR)
+}
+
+fn valid_token(token: &str) -> bool {
+    token.len() == 64
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn new_cargo_token() -> Result<String, WorkspaceError> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|source| {
+        io_error(
+            Path::new(CARGO_WORKSPACE_LOCATOR),
+            io::Error::other(source.to_string()),
+        )
+    })?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn container_for_locator(
+    root: &Path,
+    locator: &CargoWorkspaceLocator,
+) -> Result<PathBuf, WorkspaceError> {
+    match locator.placement {
+        CargoWorkspacePlacement::Sibling => preferred_cargo_workspace_container(root),
+        CargoWorkspacePlacement::Temporary => {
+            let temporary_root = fs::canonicalize(std::env::temp_dir())
+                .map_err(|source| io_error(&std::env::temp_dir(), source))?;
+            Ok(temporary_root.join(format!(
+                ".supercov-cargo-{}-{}",
+                &locator.root_sha256[..24],
+                &locator.token[..32]
+            )))
+        }
+    }
+}
+
+fn validate_cargo_locator(
+    root: &Path,
+    locator: CargoWorkspaceLocator,
+) -> Result<CargoWorkspaceLocator, WorkspaceError> {
+    let (_, digest) = canonical_root_and_digest(root)?;
+    if locator.version != CARGO_WORKSPACE_LOCATOR_VERSION
+        || locator.root_sha256 != digest
+        || !valid_token(&locator.token)
+    {
+        return Err(WorkspaceError::UnsafePath(cargo_locator_path(root)));
+    }
+    Ok(locator)
+}
+
+fn read_cargo_locator(root: &Path) -> Result<Option<CargoWorkspaceLocator>, WorkspaceError> {
+    let path = cargo_locator_path(root);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_error(&path, error)),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(WorkspaceError::UnsafePath(path));
+    }
+    let locator = serde_json::from_slice(&fs::read(&path).map_err(|error| io_error(&path, error))?)
+        .map_err(WorkspaceError::InvalidCacheMetadata)?;
+    validate_cargo_locator(root, locator).map(Some)
+}
+
+fn write_cargo_locator(root: &Path, locator: &CargoWorkspaceLocator) -> Result<(), WorkspaceError> {
+    let mut bytes =
+        serde_json::to_vec_pretty(locator).map_err(WorkspaceError::InvalidCacheMetadata)?;
+    bytes.push(b'\n');
+    atomic_write(root, &cargo_locator_path(root), &bytes).map_err(WorkspaceError::from)
+}
+
+pub fn cargo_workspace_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
+    match read_cargo_locator(root)? {
+        Some(locator) => container_for_locator(root, &locator),
+        None => preferred_cargo_workspace_container(root),
+    }
+}
+
 pub fn cargo_cached_workspace_path(root: &Path) -> Result<PathBuf, WorkspaceError> {
     let container = cargo_workspace_container(root)?;
     Ok(container.join("workspace/root").join(project_name(root)?))
 }
 
-fn expected_cargo_marker(root: &Path) -> Result<CargoWorkspaceMarker, WorkspaceError> {
+fn expected_cargo_marker(root: &Path, token: &str) -> Result<CargoWorkspaceMarker, WorkspaceError> {
     let (_, digest) = canonical_root_and_digest(root)?;
     Ok(CargoWorkspaceMarker {
         version: CARGO_WORKSPACE_VERSION,
         root_sha256: digest,
+        token: token.into(),
     })
 }
 
@@ -187,26 +292,51 @@ fn read_cargo_marker(path: &Path) -> Result<CargoWorkspaceMarker, WorkspaceError
         .map_err(WorkspaceError::InvalidCacheMetadata)
 }
 
-fn ensure_cargo_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
-    let container = cargo_workspace_container(root)?;
-    let expected = expected_cargo_marker(root)?;
+fn validate_cargo_marker(
+    root: &Path,
+    container: &Path,
+    marker: &CargoWorkspaceMarker,
+) -> Result<(), WorkspaceError> {
+    let (_, digest) = canonical_root_and_digest(root)?;
+    if marker.version != CARGO_WORKSPACE_VERSION
+        || marker.root_sha256 != digest
+        || !valid_token(&marker.token)
+    {
+        return Err(WorkspaceError::UnsafePath(container.into()));
+    }
+    Ok(())
+}
+
+fn ensure_cargo_container_at(
+    root: &Path,
+    container: &Path,
+    expected: &CargoWorkspaceMarker,
+) -> Result<(), WorkspaceError> {
     let mut created = false;
-    match fs::symlink_metadata(&container) {
+    match fs::symlink_metadata(container) {
         Ok(metadata) if !metadata.file_type().is_dir() => {
-            return Err(WorkspaceError::UnsafePath(container));
+            return Err(WorkspaceError::UnsafePath(container.into()));
         }
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir(&container).map_err(|source| io_error(&container, source))?;
+            let parent = container
+                .parent()
+                .ok_or_else(|| WorkspaceError::UnsafePath(container.into()))?;
+            let parent_metadata =
+                fs::symlink_metadata(parent).map_err(|source| io_error(parent, source))?;
+            if !parent_metadata.file_type().is_dir() {
+                return Err(WorkspaceError::UnsafePath(parent.into()));
+            }
+            fs::create_dir(container).map_err(|source| io_error(container, source))?;
             created = true;
         }
-        Err(source) => return Err(io_error(&container, source)),
+        Err(source) => return Err(io_error(container, source)),
     }
     let marker_path = container.join(WORKSPACE_MARKER);
     let result = (|| {
         match fs::symlink_metadata(&marker_path) {
-            Ok(_) if read_cargo_marker(&marker_path)? != expected => {
-                return Err(WorkspaceError::UnsafePath(container.clone()));
+            Ok(_) if read_cargo_marker(&marker_path)? != *expected => {
+                return Err(WorkspaceError::UnsafePath(container.into()));
             }
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound && created => {
@@ -223,7 +353,7 @@ fn ensure_cargo_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
                     .map_err(|source| io_error(&marker_path, source))?;
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(WorkspaceError::UnsafePath(container.clone()));
+                return Err(WorkspaceError::UnsafePath(container.into()));
             }
             Err(source) => return Err(io_error(&marker_path, source)),
         }
@@ -241,9 +371,72 @@ fn ensure_cargo_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
         Ok(())
     })();
     if result.is_err() && created {
-        let _ = fs::remove_dir_all(&container);
+        let _ = fs::remove_dir_all(container);
     }
-    result.map(|()| container)
+    result
+}
+
+fn fallback_eligible(error: &WorkspaceError) -> bool {
+    matches!(
+        error,
+        WorkspaceError::Io { source, .. }
+            if matches!(
+                source.kind(),
+                io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+            )
+    )
+}
+
+fn ensure_cargo_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
+    if let Some(locator) = read_cargo_locator(root)? {
+        let container = container_for_locator(root, &locator)?;
+        let expected = expected_cargo_marker(root, &locator.token)?;
+        ensure_cargo_container_at(root, &container, &expected)?;
+        return Ok(container);
+    }
+
+    let preferred = preferred_cargo_workspace_container(root)?;
+    if fs::symlink_metadata(&preferred).is_ok() {
+        let marker = read_cargo_marker(&preferred.join(WORKSPACE_MARKER))?;
+        validate_cargo_marker(root, &preferred, &marker)?;
+        let (_, digest) = canonical_root_and_digest(root)?;
+        let locator = CargoWorkspaceLocator {
+            version: CARGO_WORKSPACE_LOCATOR_VERSION,
+            root_sha256: digest,
+            placement: CargoWorkspacePlacement::Sibling,
+            token: marker.token.clone(),
+        };
+        write_cargo_locator(root, &locator)?;
+        ensure_cargo_container_at(root, &preferred, &marker)?;
+        return Ok(preferred);
+    }
+
+    let (_, digest) = canonical_root_and_digest(root)?;
+    let token = new_cargo_token()?;
+    let preferred_locator = CargoWorkspaceLocator {
+        version: CARGO_WORKSPACE_LOCATOR_VERSION,
+        root_sha256: digest.clone(),
+        placement: CargoWorkspacePlacement::Sibling,
+        token: token.clone(),
+    };
+    let expected = expected_cargo_marker(root, &token)?;
+    match ensure_cargo_container_at(root, &preferred, &expected) {
+        Ok(()) => {
+            write_cargo_locator(root, &preferred_locator)?;
+            Ok(preferred)
+        }
+        Err(error) if fallback_eligible(&error) => {
+            let fallback_locator = CargoWorkspaceLocator {
+                placement: CargoWorkspacePlacement::Temporary,
+                ..preferred_locator
+            };
+            write_cargo_locator(root, &fallback_locator)?;
+            let fallback = container_for_locator(root, &fallback_locator)?;
+            ensure_cargo_container_at(root, &fallback, &expected)?;
+            Ok(fallback)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub fn isolated_workspace_path(root: &Path, run_id: &str) -> Result<PathBuf, WorkspaceError> {
@@ -933,28 +1126,46 @@ pub fn remove_cargo_workspace_run(root: &Path, run_id: &str) -> Result<bool, Wor
         }
         Ok(_) => {}
     }
-    if read_cargo_marker(&container.join(WORKSPACE_MARKER))? != expected_cargo_marker(root)? {
-        return Err(WorkspaceError::UnsafePath(container));
-    }
+    let marker = read_cargo_marker(&container.join(WORKSPACE_MARKER))?;
+    validate_cargo_marker(root, &container, &marker)?;
     let workspace = cargo_cached_workspace_path(root)?;
     remove_cargo_owned_tree(&container, &workspace.join(".supercov/work").join(run_id))
 }
 
 pub fn clean_cargo_workspace(root: &Path, dry_run: bool) -> Result<bool, WorkspaceError> {
     let container = cargo_workspace_container(root)?;
+    let locator_path = cargo_locator_path(root);
+    let has_locator = fs::symlink_metadata(&locator_path).is_ok();
     match fs::symlink_metadata(&container) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if has_locator && !dry_run {
+                let metadata = fs::symlink_metadata(&locator_path)
+                    .map_err(|source| io_error(&locator_path, source))?;
+                if !metadata.file_type().is_file() {
+                    return Err(WorkspaceError::UnsafePath(locator_path));
+                }
+                fs::remove_file(&locator_path).map_err(|source| io_error(&locator_path, source))?;
+            }
+            return Ok(has_locator);
+        }
         Err(error) => return Err(io_error(&container, error)),
         Ok(metadata) if !metadata.file_type().is_dir() => {
             return Err(WorkspaceError::UnsafePath(container));
         }
         Ok(_) => {}
     }
-    if read_cargo_marker(&container.join(WORKSPACE_MARKER))? != expected_cargo_marker(root)? {
-        return Err(WorkspaceError::UnsafePath(container));
-    }
+    let marker = read_cargo_marker(&container.join(WORKSPACE_MARKER))?;
+    validate_cargo_marker(root, &container, &marker)?;
     if !dry_run {
         fs::remove_dir_all(&container).map_err(|error| io_error(&container, error))?;
+        if has_locator {
+            let metadata = fs::symlink_metadata(&locator_path)
+                .map_err(|source| io_error(&locator_path, source))?;
+            if !metadata.file_type().is_file() {
+                return Err(WorkspaceError::UnsafePath(locator_path));
+            }
+            fs::remove_file(&locator_path).map_err(|source| io_error(&locator_path, source))?;
+        }
     }
     Ok(true)
 }
@@ -1229,6 +1440,60 @@ mod tests {
         assert!(container.exists());
         assert!(clean_cargo_workspace(&root, false).unwrap());
         assert!(!container.exists());
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_checkout_parent_uses_authenticated_temporary_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let outer = std::env::temp_dir().join(format!("supercov-read-only-parent-{}", unique()));
+        let root = outer.join("project");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/index.rs"), "pub fn value() -> usize { 1 }\n").unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='fallback-fixture'\nversion='0.0.0'\n",
+        )
+        .unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        fs::set_permissions(&outer, fs::Permissions::from_mode(0o555)).unwrap();
+        let prepared = prepare_cargo_cached_workspace(&root, &lock);
+        fs::set_permissions(&outer, fs::Permissions::from_mode(0o700)).unwrap();
+        let workspace = prepared.unwrap();
+        let locator = read_cargo_locator(&root).unwrap().unwrap();
+        assert_eq!(locator.placement, CargoWorkspacePlacement::Temporary);
+        let container = cargo_workspace_container(&root).unwrap();
+        assert_eq!(workspace, container.join("workspace/root/project"));
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/index.rs")).unwrap(),
+            "pub fn value() -> usize { 1 }\n"
+        );
+        assert!(!workspace.starts_with(&root));
+        assert!(clean_cargo_workspace(&root, false).unwrap());
+        assert!(!container.exists());
+        assert!(!cargo_locator_path(&root).exists());
+        lock.release().unwrap();
+        fs::remove_dir_all(outer).unwrap();
+    }
+
+    #[test]
+    fn cargo_locator_and_container_marker_must_share_the_random_token() {
+        let root = project();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        prepare_cargo_cached_workspace(&root, &lock).unwrap();
+        let original = read_cargo_locator(&root).unwrap().unwrap();
+        let mut tampered = original.clone();
+        tampered.token = "0".repeat(64);
+        write_cargo_locator(&root, &tampered).unwrap();
+        assert!(matches!(
+            prepare_cargo_cached_workspace(&root, &lock),
+            Err(WorkspaceError::UnsafePath(_))
+        ));
+        write_cargo_locator(&root, &original).unwrap();
+        clean_cargo_workspace(&root, false).unwrap();
         lock.release().unwrap();
         fs::remove_dir_all(root).unwrap();
     }

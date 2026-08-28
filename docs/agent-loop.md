@@ -1,10 +1,8 @@
 # Agent loop
 
-Supercov exists because coverage reports are built for people and coding agents
-need something different: small answers, a stable format, and a way to prove
-that the test just written actually changed the result. This page describes the
-loop, the prompt, and the failure modes worth guarding against when nobody is
-watching.
+Use Supercov in a repeatable agent loop: run the suite, query uncovered
+obligations, add a focused test, rerun, and compare results. This page covers
+the loop, the recommended prompt, and failure handling.
 
 ## The shape of the loop
 

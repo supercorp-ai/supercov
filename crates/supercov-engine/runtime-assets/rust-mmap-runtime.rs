@@ -31,6 +31,277 @@ mod __SUPERCOV_MODULE__ {
         static CONTEXT_OVERRIDE: Cell<Option<u64>> = const { Cell::new(None) };
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    mod inherited_thread_context {
+        use std::{ffi::c_void, mem, sync::OnceLock};
+
+        type StartRoutine = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+        type PthreadCreate = unsafe extern "C" fn(
+            *mut usize,
+            *const c_void,
+            StartRoutine,
+            *mut c_void,
+        ) -> i32;
+
+        struct ThreadStart {
+            routine: StartRoutine,
+            argument: *mut c_void,
+            context: u64,
+        }
+
+        #[cfg(target_os = "macos")]
+        #[link(name = "System")]
+        unsafe extern "C" {
+            fn dlsym(handle: *mut c_void, symbol: *const i8) -> *mut c_void;
+        }
+
+        #[cfg(target_os = "linux")]
+        #[link(name = "dl")]
+        unsafe extern "C" {
+            fn dlsym(handle: *mut c_void, symbol: *const i8) -> *mut c_void;
+        }
+
+        fn real_pthread_create() -> PthreadCreate {
+            static REAL: OnceLock<usize> = OnceLock::new();
+            let address = *REAL.get_or_init(|| {
+                // RTLD_NEXT resolves the platform implementation after this
+                // executable-owned interposer instead of recursively finding
+                // Supercov's exported symbol.
+                let next = usize::MAX as *mut c_void;
+                // SAFETY: the symbol is NUL-terminated and dlsym accepts the
+                // platform RTLD_NEXT sentinel on macOS and Linux.
+                let resolved = unsafe { dlsym(next, c"pthread_create".as_ptr()) };
+                if resolved.is_null() {
+                    std::process::abort();
+                }
+                resolved as usize
+            });
+            // SAFETY: dlsym returned the platform pthread_create symbol, whose
+            // pointer-shaped ABI is described by PthreadCreate above.
+            unsafe { mem::transmute::<usize, PthreadCreate>(address) }
+        }
+
+        unsafe extern "C" fn run_with_context(opaque: *mut c_void) -> *mut c_void {
+            // SAFETY: pthread_create receives exactly one Box allocation from
+            // the interposer and invokes this start routine at most once.
+            let start = unsafe { Box::from_raw(opaque.cast::<ThreadStart>()) };
+            let previous = super::enter_context(start.context);
+            // SAFETY: the original start routine and argument came directly
+            // from the caller's pthread_create invocation.
+            let result = unsafe { (start.routine)(start.argument) };
+            super::exit_context(previous);
+            result
+        }
+
+        /// Preserve the exact active Supercov context across native thread
+        /// creation without mutating process-global environment or requiring
+        /// cooperation from `std::thread`, an executor, or the test suite.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn pthread_create(
+            thread: *mut usize,
+            attributes: *const c_void,
+            routine: StartRoutine,
+            argument: *mut c_void,
+        ) -> i32 {
+            let context = super::active_context();
+            if matches!(context, 0 | u64::MAX) {
+                // SAFETY: arguments are forwarded unchanged to the platform.
+                return unsafe {
+                    real_pthread_create()(thread, attributes, routine, argument)
+                };
+            }
+            let start = Box::new(ThreadStart {
+                routine,
+                argument,
+                context,
+            });
+            let raw = Box::into_raw(start).cast::<c_void>();
+            // SAFETY: run_with_context has the platform start-routine ABI and
+            // owns raw only if pthread_create succeeds.
+            let result = unsafe {
+                real_pthread_create()(thread, attributes, run_with_context, raw)
+            };
+            if result != 0 {
+                // SAFETY: a failed pthread_create never transfers raw to a
+                // child thread, so the caller must reclaim it exactly once.
+                unsafe { drop(Box::from_raw(raw.cast::<ThreadStart>())) };
+            }
+            result
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    mod inherited_process_context {
+        use std::{ffi::{CStr, CString, c_char, c_void}, mem, sync::OnceLock};
+
+        type PosixSpawn = unsafe extern "C" fn(
+            *mut i32,
+            *const c_char,
+            *const c_void,
+            *const c_void,
+            *const *mut c_char,
+            *const *mut c_char,
+        ) -> i32;
+
+        const CONTEXT_PREFIX: &[u8] = b"SUPERCOV_RUST_CONTEXT_ID=";
+
+        #[cfg(target_os = "macos")]
+        #[link(name = "System")]
+        unsafe extern "C" {
+            fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        }
+
+        #[cfg(target_os = "linux")]
+        #[link(name = "dl")]
+        unsafe extern "C" {
+            fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        }
+
+        fn resolve(slot: &'static OnceLock<usize>, symbol: &'static CStr) -> PosixSpawn {
+            let address = *slot.get_or_init(|| {
+                let next = usize::MAX as *mut c_void;
+                // SAFETY: symbol is NUL-terminated and the platform accepts
+                // RTLD_NEXT for an executable-owned interposer.
+                let resolved = unsafe { dlsym(next, symbol.as_ptr()) };
+                if resolved.is_null() {
+                    std::process::abort();
+                }
+                resolved as usize
+            });
+            // SAFETY: both resolved POSIX spawn functions have PosixSpawn's
+            // pointer-shaped ABI.
+            unsafe { mem::transmute::<usize, PosixSpawn>(address) }
+        }
+
+        struct ChildEnvironment {
+            pointers: Vec<*mut c_char>,
+            _context: CString,
+        }
+
+        unsafe fn child_environment(
+            environment: *const *mut c_char,
+        ) -> Option<ChildEnvironment> {
+            let context = super::active_context();
+            if environment.is_null() || matches!(context, 0 | u64::MAX) {
+                return None;
+            }
+            let mut pointers = Vec::new();
+            let mut found = false;
+            let mut index = 0_usize;
+            loop {
+                // SAFETY: POSIX requires envp to be a null-terminated pointer
+                // array whose entries remain valid for the spawn call.
+                let pointer = unsafe { *environment.add(index) };
+                if pointer.is_null() {
+                    break;
+                }
+                // SAFETY: each non-null envp entry is a NUL-terminated C
+                // string owned by the caller for the duration of this call.
+                let bytes = unsafe { CStr::from_ptr(pointer) }.to_bytes();
+                if bytes.starts_with(CONTEXT_PREFIX) {
+                    found = true;
+                } else {
+                    pointers.push(pointer);
+                }
+                index = index.checked_add(1).unwrap_or_else(|| std::process::abort());
+            }
+            // Absence is meaningful: Command::env_remove explicitly opts the
+            // child into authenticated context-zero/background attribution.
+            if !found {
+                return None;
+            }
+            let context = CString::new(format!(
+                "SUPERCOV_RUST_CONTEXT_ID={context:016x}"
+            ))
+            .unwrap_or_else(|_| std::process::abort());
+            pointers.push(context.as_ptr().cast_mut());
+            pointers.push(std::ptr::null_mut());
+            Some(ChildEnvironment {
+                pointers,
+                _context: context,
+            })
+        }
+
+        unsafe fn spawn_with_context(
+            real: PosixSpawn,
+            pid: *mut i32,
+            path: *const c_char,
+            file_actions: *const c_void,
+            attributes: *const c_void,
+            arguments: *const *mut c_char,
+            environment: *const *mut c_char,
+        ) -> i32 {
+            // SAFETY: child_environment only reads the caller-owned envp for
+            // the duration of this synchronous spawn call.
+            let child = unsafe { child_environment(environment) };
+            let environment = child
+                .as_ref()
+                .map_or(environment, |owned| owned.pointers.as_ptr());
+            // SAFETY: all arguments except the optional replacement envp are
+            // forwarded unchanged to the platform implementation.
+            unsafe {
+                real(
+                    pid,
+                    path,
+                    file_actions,
+                    attributes,
+                    arguments,
+                    environment,
+                )
+            }
+        }
+
+        /// Propagate the active context through std::process::Command and any
+        /// other POSIX-spawn caller without changing process-global env state.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn posix_spawn(
+            pid: *mut i32,
+            path: *const c_char,
+            file_actions: *const c_void,
+            attributes: *const c_void,
+            arguments: *const *mut c_char,
+            environment: *const *mut c_char,
+        ) -> i32 {
+            static REAL: OnceLock<usize> = OnceLock::new();
+            // SAFETY: the wrapper has the exact pointer-shaped POSIX ABI.
+            unsafe {
+                spawn_with_context(
+                    resolve(&REAL, c"posix_spawn"),
+                    pid,
+                    path,
+                    file_actions,
+                    attributes,
+                    arguments,
+                    environment,
+                )
+            }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn posix_spawnp(
+            pid: *mut i32,
+            file: *const c_char,
+            file_actions: *const c_void,
+            attributes: *const c_void,
+            arguments: *const *mut c_char,
+            environment: *const *mut c_char,
+        ) -> i32 {
+            static REAL: OnceLock<usize> = OnceLock::new();
+            // SAFETY: the wrapper has the exact pointer-shaped POSIX ABI.
+            unsafe {
+                spawn_with_context(
+                    resolve(&REAL, c"posix_spawnp"),
+                    pid,
+                    file,
+                    file_actions,
+                    attributes,
+                    arguments,
+                    environment,
+                )
+            }
+        }
+    }
+
     struct Transport {
         pointer: *mut u8,
         length: usize,
@@ -816,6 +1087,11 @@ mod __SUPERCOV_MODULE__ {
         if let Some(transport) = transport() {
             transport.record(KIND_ORDINAL_HIT, 0, "", &ordinal.to_le_bytes());
         }
+    }
+
+    #[inline(never)]
+    pub fn active_context() -> u64 {
+        transport().map_or(0, Transport::active_context)
     }
 
     #[inline(never)]

@@ -166,9 +166,11 @@ fn builder_and_phase<'builder, 'phase>(
     Ok((attributed, phase_id))
 }
 
-/// Project one supervisor-owned process-per-test transport. Context zero is
-/// preserved separately as background evidence and must not be inserted into
-/// an ultimately-passing test result by the caller.
+/// Project one supervisor-owned transport partition. The caller may supply a
+/// complete isolated-process transport or one exact-test partition from a
+/// shared stock-libtest transport. Context zero is preserved separately as
+/// background evidence and must not be inserted into an ultimately-passing
+/// test result by the caller.
 pub fn project_rust_compiler_evidence(
     base_context_id: u64,
     base_phase: &CoveragePhase,
@@ -228,6 +230,17 @@ pub fn project_rust_compiler_evidence(
                         expected: meta.conditions.len(),
                         actual: values.len(),
                     });
+                }
+                if let Some(selections) = normalized.decision_logical_selection_obligations.get(id)
+                {
+                    for selection in selections {
+                        let alternative_id = if values[selection.right_condition_index].is_some() {
+                            &selection.right_evaluated_id
+                        } else {
+                            &selection.short_circuited_id
+                        };
+                        builder.hit(alternative_id, phase_id, base_phase.started_at_ms);
+                    }
                 }
                 builder.decision(
                     id,
@@ -350,6 +363,7 @@ mod tests {
             internal_ordinals: BTreeSet::from([100]),
             decision_outcome_obligations: BTreeMap::new(),
             decision_loop_obligations: BTreeMap::new(),
+            decision_logical_selection_obligations: BTreeMap::new(),
         }
     }
 
@@ -472,5 +486,84 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn projects_logical_selection_hits_from_ternary_vectors_without_ordinals() {
+        let mut normalized = normalized();
+        normalized.manifest.decisions[0].conditions = vec!["left".into(), "right".into()];
+        normalized.manifest.branches.push(BranchMeta {
+            id: "logical".into(),
+            kind: "logical-selection".into(),
+            file: "src/lib.rs".into(),
+            line: 4,
+            column: 4,
+            source: "left && right".into(),
+            alternatives: vec![
+                BranchAlternativeMeta {
+                    id: "short".into(),
+                    label: "short-circuited".into(),
+                },
+                BranchAlternativeMeta {
+                    id: "evaluated".into(),
+                    label: "right operand evaluated".into(),
+                },
+            ],
+        });
+        normalized.decision_logical_selection_obligations.insert(
+            ASSERTION.into(),
+            vec![
+                crate::rust_compiler_manifest::NormalizedRustLogicalSelection {
+                    short_circuited_id: "short".into(),
+                    right_evaluated_id: "evaluated".into(),
+                    right_condition_index: 1,
+                },
+            ],
+        );
+        let read = RustTransportRead {
+            observations: vec![
+                RustTransportObservation {
+                    process_id: 1,
+                    context_id: BASE,
+                    observation: RustProbeObservation::Decision {
+                        id: ASSERTION.into(),
+                        values: vec![Some(false), None],
+                        outcome: false,
+                    },
+                },
+                RustTransportObservation {
+                    process_id: 1,
+                    context_id: BASE,
+                    observation: RustProbeObservation::Decision {
+                        id: ASSERTION.into(),
+                        values: vec![Some(true), Some(true)],
+                        outcome: true,
+                    },
+                },
+            ],
+            ordinal_hits: Vec::new(),
+            phases: Vec::new(),
+            committed: 2,
+            incomplete: 0,
+            dropped: 0,
+            attachments: 1,
+        };
+
+        let projection =
+            project_rust_compiler_evidence(BASE, &base_phase(), &read, &normalized).unwrap();
+        assert_eq!(
+            projection.attributed.hits,
+            vec!["evaluated".to_string(), "short".to_string()]
+        );
+        assert_eq!(
+            projection
+                .attributed
+                .events
+                .iter()
+                .filter(|event| event.event_type == "hit")
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["short", "evaluated"]
+        );
     }
 }

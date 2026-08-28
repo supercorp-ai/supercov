@@ -1,10 +1,11 @@
 //! Exact pre-execution resolution for Cargo target runners.
 //!
 //! Cargo remains the authority for building and ordering test artifacts, but
-//! Supercov must place an already-configured target runner *inside* its
-//! process-per-test boundary. This module resolves the user's original Cargo
-//! configuration before the repository is copied into the isolated workspace.
-//! Unsupported configuration surfaces fail before user code executes.
+//! Supercov must compose an already-configured target runner inside its
+//! authenticated Cargo-runner boundary without changing Cargo or libtest
+//! semantics. This module resolves the user's original Cargo configuration
+//! before the repository is copied into the isolated workspace. Unsupported
+//! configuration surfaces fail before user code executes.
 
 use std::{
     collections::{BTreeSet, HashMap},

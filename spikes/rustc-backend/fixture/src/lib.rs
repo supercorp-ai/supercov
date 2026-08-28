@@ -41,6 +41,12 @@ probe_macros::generated_try_function!();
 probe_macros::generated_two_try_function!();
 probe_macros::generated_nested_try_function!();
 probe_macros::generated_assertion_function!();
+probe_macros::generated_nested_external_function!();
+
+#[probe_macros::generated_choice]
+pub fn attributed_choice(_first: bool, _second: bool) -> usize {
+    unreachable!("the attribute macro replaces this body")
+}
 
 pub mod repeated_expansions {
     generated_function!();
@@ -50,6 +56,9 @@ pub mod repeated_expansions {
 
 #[derive(probe_macros::SupercovChoice)]
 pub struct DerivedChoice;
+
+#[derive(probe_macros::SupercovChoice)]
+pub struct UnusedDerivedChoice;
 
 include!(concat!(env!("OUT_DIR"), "/generated.rs"));
 
@@ -81,6 +90,15 @@ pub const CONST_MIXED_FALSE_FALSE: usize = const_mixed(false, false, true);
 pub const CONST_MIXED_SECOND_TRUE: usize = const_mixed(false, true, true);
 pub const CONST_MIXED_FIRST_TRUE_FALSE: usize = const_mixed(true, false, false);
 pub const CONST_MIXED_FIRST_TRUE_TRUE: usize = const_mixed(true, false, true);
+
+pub const fn const_logical_value(first: bool, second: bool, third: bool) -> bool {
+    first && second || third
+}
+
+pub const CONST_LOGICAL_FALSE_FALSE: bool = const_logical_value(false, false, false);
+pub const CONST_LOGICAL_FALSE_TRUE: bool = const_logical_value(false, false, true);
+pub const CONST_LOGICAL_TRUE_TRUE: bool = const_logical_value(true, true, false);
+pub const CONST_LOGICAL_TRUE_FALSE: bool = const_logical_value(true, false, false);
 
 pub const fn const_nested(first: bool, second: bool) -> usize {
     if first {
@@ -177,6 +195,252 @@ pub fn promoted_literal() -> &'static usize {
 
 pub fn promoted_array() -> &'static [usize; 3] {
     &[2, 3, 5]
+}
+
+pub trait RuntimeChoice {
+    fn enabled(&self) -> bool;
+
+    fn default_choice(&self) -> usize {
+        if self.enabled() { 211 } else { 223 }
+    }
+}
+
+pub struct EnabledChoice;
+
+impl RuntimeChoice for EnabledChoice {
+    fn enabled(&self) -> bool {
+        true
+    }
+}
+
+pub struct DisabledChoice;
+
+impl RuntimeChoice for DisabledChoice {
+    fn enabled(&self) -> bool {
+        false
+    }
+}
+
+pub struct OverrideChoice(pub bool);
+
+impl RuntimeChoice for OverrideChoice {
+    fn enabled(&self) -> bool {
+        self.0
+    }
+
+    fn default_choice(&self) -> usize {
+        if self.0 { 227 } else { 229 }
+    }
+}
+
+pub fn generic_choice<T: RuntimeChoice>(value: &T) -> usize {
+    if value.enabled() { 233 } else { 239 }
+}
+
+pub fn dynamic_choice(value: &dyn RuntimeChoice) -> usize {
+    value.default_choice()
+}
+
+pub struct YieldOnce {
+    value: bool,
+    yielded: bool,
+}
+
+impl YieldOnce {
+    pub fn new(value: bool) -> Self {
+        Self {
+            value,
+            yielded: false,
+        }
+    }
+}
+
+impl std::future::Future for YieldOnce {
+    type Output = bool;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        if this.yielded {
+            std::task::Poll::Ready(this.value)
+        } else {
+            this.yielded = true;
+            context.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+}
+
+pub async fn async_choice(value: bool) -> usize {
+    if YieldOnce::new(value).await {
+        241
+    } else {
+        251
+    }
+}
+
+#[allow(async_fn_in_trait)]
+pub trait AsyncRuntimeChoice: RuntimeChoice {
+    async fn async_default_choice(&self, value: bool) -> usize {
+        let awaited = YieldOnce::new(value).await;
+        if self.enabled() && awaited { 257 } else { 263 }
+    }
+}
+
+impl AsyncRuntimeChoice for EnabledChoice {}
+
+impl AsyncRuntimeChoice for DisabledChoice {}
+
+impl AsyncRuntimeChoice for OverrideChoice {
+    async fn async_default_choice(&self, value: bool) -> usize {
+        if YieldOnce::new(self.0 && value).await {
+            269
+        } else {
+            271
+        }
+    }
+}
+
+pub async fn async_trait_choice<T: AsyncRuntimeChoice>(value: &T, flag: bool) -> usize {
+    value.async_default_choice(flag).await
+}
+
+impl EnabledChoice {
+    pub fn associated_generic_choice<T: RuntimeChoice>(value: &T, outer: bool) -> usize {
+        if outer && value.enabled() { 277 } else { 281 }
+    }
+}
+
+pub fn nested_generic_choice<T: RuntimeChoice>(first: bool, second: bool, value: &T) -> bool {
+    if first && value.enabled() || second {
+        true
+    } else {
+        false
+    }
+}
+
+pub fn logical_value_choice(first: bool, second: bool, third: bool) -> bool {
+    first && second || third
+}
+
+pub trait AssociatedRuntimeChoice: RuntimeChoice {
+    type Marker;
+
+    fn associated_enabled() -> bool;
+
+    fn associated_default(&self, flag: bool) -> usize {
+        if Self::associated_enabled() && flag {
+            307
+        } else {
+            311
+        }
+    }
+}
+
+impl AssociatedRuntimeChoice for EnabledChoice {
+    type Marker = usize;
+
+    fn associated_enabled() -> bool {
+        true
+    }
+}
+
+impl AssociatedRuntimeChoice for DisabledChoice {
+    type Marker = bool;
+
+    fn associated_enabled() -> bool {
+        false
+    }
+}
+
+pub trait GatRuntimeChoice: RuntimeChoice {
+    type Borrowed<'a>: std::ops::Deref<Target = bool>
+    where
+        Self: 'a;
+
+    fn borrow_choice<'a>(&'a self, value: &'a bool) -> Self::Borrowed<'a>;
+
+    fn gat_default(&self, value: &bool) -> usize {
+        if *self.borrow_choice(value) && self.enabled() {
+            313
+        } else {
+            317
+        }
+    }
+}
+
+impl GatRuntimeChoice for EnabledChoice {
+    type Borrowed<'a> = &'a bool;
+
+    fn borrow_choice<'a>(&'a self, value: &'a bool) -> Self::Borrowed<'a> {
+        value
+    }
+}
+
+impl GatRuntimeChoice for DisabledChoice {
+    type Borrowed<'a> = &'a bool;
+
+    fn borrow_choice<'a>(&'a self, value: &'a bool) -> Self::Borrowed<'a> {
+        value
+    }
+}
+
+pub trait OpaqueRuntimeChoice: RuntimeChoice {
+    fn opaque_values(&self, flag: bool) -> impl Iterator<Item = usize> {
+        let value = if self.enabled() && flag { 331 } else { 337 };
+        std::iter::once(value)
+    }
+}
+
+impl OpaqueRuntimeChoice for EnabledChoice {}
+impl OpaqueRuntimeChoice for DisabledChoice {}
+
+pub fn opaque_choice<T: OpaqueRuntimeChoice>(value: &T, flag: bool) -> usize {
+    value.opaque_values(flag).sum()
+}
+
+pub fn hrtb_choice<F>(value: bool, predicate: F) -> usize
+where
+    F: for<'a> Fn(&'a bool) -> bool,
+{
+    if predicate(&value) && value {
+        347
+    } else {
+        349
+    }
+}
+
+pub async fn async_closure_choice(value: bool) -> usize {
+    let choose = async |input: bool| {
+        if YieldOnce::new(input).await {
+            283
+        } else {
+            293
+        }
+    };
+    choose(value).await
+}
+
+struct AsyncDrop<'a>(&'a std::cell::RefCell<Vec<&'static str>>);
+
+impl Drop for AsyncDrop<'_> {
+    fn drop(&mut self) {
+        self.0.borrow_mut().push("async-drop");
+    }
+}
+
+pub async fn suspended_borrow_choice(
+    value: bool,
+    log: &std::cell::RefCell<Vec<&'static str>>,
+) -> usize {
+    let mut number = 5;
+    let borrowed = &mut number;
+    let _drop = AsyncDrop(log);
+    let awaited = YieldOnce::new(value).await;
+    *borrowed += if awaited { 7 } else { 11 };
+    *borrowed
 }
 
 pub fn let_else_value(value: Option<usize>) -> usize {
@@ -367,6 +631,36 @@ pub fn statement_paths(value: bool, log: &mut Vec<&'static str>) {
 
 pub fn compound(left: bool, right: bool) -> usize {
     if left && right { 29 } else { 31 }
+}
+
+pub fn opaque_macro_compound(value: Option<u8>, enabled: bool) -> usize {
+    if matches!(value, Some(1 | 2)) && enabled {
+        433
+    } else {
+        439
+    }
+}
+
+pub fn opaque_macro_nested(
+    first: bool,
+    first_value: Option<u8>,
+    second_value: Option<u8>,
+    fallback: bool,
+) -> usize {
+    if (first && matches!(first_value, Some(1 | 2)))
+        || (matches!(second_value, Some(3 | 5)) && fallback)
+    {
+        443
+    } else {
+        449
+    }
+}
+
+pub fn opaque_macro_guard(value: Option<u8>, enabled: bool) -> usize {
+    match value {
+        candidate if matches!(candidate, Some(1 | 2)) && enabled => 457,
+        _ => 461,
+    }
 }
 
 pub fn disjoined(left: bool, right: bool) -> usize {

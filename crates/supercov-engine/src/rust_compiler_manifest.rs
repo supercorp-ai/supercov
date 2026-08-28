@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::{
     coverage_analysis::PointKind,
@@ -12,9 +13,28 @@ use crate::{
     },
 };
 
-const SCHEMA: &str = "supercov-rust-manifest-candidate-v2";
+const SCHEMA: &str = "supercov-rust-manifest-candidate-v3";
 const MODEL: &str = "rust-source-v1";
 const SOURCE_SNAPSHOT_SCHEMA: &str = "supercov-rust-source-snapshots-v1";
+const SOURCE_FINGERPRINT_DOMAIN: &[u8] = b"supercov-rust-compiler-sources-v1\0";
+
+fn append_fingerprint_field(hash: &mut Sha256, value: &[u8]) {
+    hash.update((value.len() as u64).to_le_bytes());
+    hash.update(value);
+}
+
+fn compiler_source_fingerprint(sources: &BTreeMap<String, RustCompilerSource>) -> (String, usize) {
+    let mut hash = Sha256::new();
+    hash.update(SOURCE_FINGERPRINT_DOMAIN);
+    let mut generated_files = 0;
+    for (key, source) in sources {
+        generated_files += usize::from(key.starts_with("generated:package:"));
+        append_fingerprint_field(&mut hash, key.as_bytes());
+        append_fingerprint_field(&mut hash, source.file.as_bytes());
+        append_fingerprint_field(&mut hash, source.source.as_bytes());
+    }
+    (format!("{:x}", hash.finalize()), generated_files)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -82,6 +102,13 @@ pub struct RustCompilerCondition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCompilerLogicalSelection {
+    pub branch_id: String,
+    pub right_condition_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RustCompilerDecision {
     pub id: String,
     pub kind: String,
@@ -93,6 +120,7 @@ pub struct RustCompilerDecision {
     pub definitions: Vec<String>,
     pub outcome_branch_id: String,
     pub loop_branch_id: Option<String>,
+    pub logical_selections: Vec<RustCompilerLogicalSelection>,
     pub conditions: Vec<RustCompilerCondition>,
     pub canonical: String,
 }
@@ -214,6 +242,16 @@ pub struct NormalizedRustCompilerManifest {
     pub internal_ordinals: BTreeSet<u64>,
     pub decision_outcome_obligations: BTreeMap<String, (String, String)>,
     pub decision_loop_obligations: BTreeMap<String, (String, String)>,
+    pub decision_logical_selection_obligations:
+        BTreeMap<String, Vec<NormalizedRustLogicalSelection>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NormalizedRustLogicalSelection {
+    pub short_circuited_id: String,
+    pub right_evaluated_id: String,
+    pub right_condition_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -628,11 +666,17 @@ impl RustCompilerManifest {
                         | "let-else"
                         | "try-operator"
                         | "assertion-outcome"
+                        | "logical-selection"
                 )
                 || !source_range_for(&branch.source_key, branch.start, branch.end, pending_group)
                 || !provenance_for(&branch.provenance, pending_group)
                 || !sorted_unique_nonempty(&branch.definitions)
                 || branch.alternatives.len() < 2
+                || (branch.kind == "logical-selection"
+                    && !matches!(
+                        branch.discriminator.as_str(),
+                        "logical-selection:and" | "logical-selection:or"
+                    ))
                 || branch.canonical.is_empty()
             {
                 return Err(invalid("malformed branch obligation"));
@@ -657,6 +701,7 @@ impl RustCompilerManifest {
             }
         }
         let mut decision_ids = BTreeSet::new();
+        let mut referenced_logical_branch_ids = BTreeSet::new();
         for decision in &self.decisions {
             if !valid_id(&decision.id, &["decision"])
                 || !matches!(
@@ -677,6 +722,10 @@ impl RustCompilerManifest {
                 || !provenance_for(&decision.provenance, pending_group)
                 || !sorted_unique_nonempty(&decision.definitions)
                 || decision.conditions.is_empty()
+                || !decision
+                    .logical_selections
+                    .windows(2)
+                    .all(|pair| pair[0].right_condition_index < pair[1].right_condition_index)
                 || decision.canonical.is_empty()
                 || decision.conditions.iter().any(|condition| {
                     !source_range_for(
@@ -688,6 +737,33 @@ impl RustCompilerManifest {
                 })
             {
                 return Err(invalid("malformed decision obligation"));
+            }
+            for selection in &decision.logical_selections {
+                if selection.right_condition_index == 0
+                    || selection.right_condition_index >= decision.conditions.len()
+                    || !referenced_logical_branch_ids.insert(selection.branch_id.as_str())
+                {
+                    return Err(invalid("malformed logical-selection relation"));
+                }
+                let Some(branch) = self
+                    .branches
+                    .iter()
+                    .find(|branch| branch.id == selection.branch_id)
+                else {
+                    return Err(invalid(
+                        "decision references a missing logical-selection branch",
+                    ));
+                };
+                if branch.kind != "logical-selection"
+                    || branch
+                        .alternatives
+                        .iter()
+                        .map(|alternative| alternative.label.as_str())
+                        .collect::<BTreeSet<_>>()
+                        != BTreeSet::from(["right operand evaluated", "short-circuited"])
+                {
+                    return Err(invalid("decision has a malformed logical-selection branch"));
+                }
             }
             let Some(outcome_branch) = self
                 .branches
@@ -954,6 +1030,16 @@ impl RustCompilerManifest {
             });
         }
 
+        let decision_logical_branch_ids = self
+            .decisions
+            .iter()
+            .flat_map(|decision| {
+                decision
+                    .logical_selections
+                    .iter()
+                    .map(|selection| selection.branch_id.as_str())
+            })
+            .collect::<BTreeSet<_>>();
         let mut branches = Vec::with_capacity(self.branches.len());
         for branch in &self.branches {
             let (file, line, column, source) =
@@ -966,10 +1052,14 @@ impl RustCompilerManifest {
                 .map(|alternative| {
                     let probe_ordinal = ordinal(&alternative.probe_ordinal)
                         .expect("validated branch alternative ordinal");
-                    hit_obligations_by_ordinal
-                        .entry(probe_ordinal)
-                        .or_default()
-                        .insert(alternative.id.clone());
+                    if decision_logical_branch_ids.contains(branch.id.as_str()) {
+                        internal_ordinals.insert(probe_ordinal);
+                    } else {
+                        hit_obligations_by_ordinal
+                            .entry(probe_ordinal)
+                            .or_default()
+                            .insert(alternative.id.clone());
+                    }
                     BranchAlternativeMeta {
                         id: alternative.id.clone(),
                         label: alternative.label.clone(),
@@ -995,6 +1085,7 @@ impl RustCompilerManifest {
             .collect::<BTreeMap<_, _>>();
         let mut decision_outcome_obligations = BTreeMap::new();
         let mut decision_loop_obligations = BTreeMap::new();
+        let mut decision_logical_selection_obligations = BTreeMap::new();
         for decision in &self.decisions {
             let (file, line, column, source) =
                 location(&decision.source_key, decision.start, decision.end)?;
@@ -1042,6 +1133,31 @@ impl RustCompilerManifest {
                         loop_alternative("entered"),
                     ),
                 );
+            }
+            let logical_selections = decision
+                .logical_selections
+                .iter()
+                .map(|selection| {
+                    let branch = branches_by_id[selection.branch_id.as_str()];
+                    let alternative = |label: &str| {
+                        branch
+                            .alternatives
+                            .iter()
+                            .find(|alternative| alternative.label == label)
+                            .expect("validated logical-selection label")
+                            .id
+                            .clone()
+                    };
+                    NormalizedRustLogicalSelection {
+                        short_circuited_id: alternative("short-circuited"),
+                        right_evaluated_id: alternative("right operand evaluated"),
+                        right_condition_index: selection.right_condition_index,
+                    }
+                })
+                .collect::<Vec<_>>();
+            if !logical_selections.is_empty() {
+                decision_logical_selection_obligations
+                    .insert(decision.id.clone(), logical_selections);
             }
             decisions.push(DecisionMeta {
                 id: decision.id.clone(),
@@ -1107,6 +1223,7 @@ impl RustCompilerManifest {
             })
             .collect();
 
+        let (source_fingerprint, generated_source_files) = compiler_source_fingerprint(sources);
         Ok(NormalizedRustCompilerManifest {
             manifest: CoverageManifest {
                 decisions,
@@ -1118,6 +1235,12 @@ impl RustCompilerManifest {
                     "model": self.model,
                     "crate": self.crate_name,
                     "measurementComplete": self.measurement_complete,
+                    "sourceFingerprint": {
+                        "algorithm": "sha256",
+                        "digest": source_fingerprint,
+                        "files": sources.len(),
+                        "generatedFiles": generated_source_files,
+                    },
                 })),
             },
             hit_obligations_by_ordinal: hit_obligations_by_ordinal
@@ -1127,6 +1250,7 @@ impl RustCompilerManifest {
             internal_ordinals,
             decision_outcome_obligations,
             decision_loop_obligations,
+            decision_logical_selection_obligations,
         })
     }
 }
@@ -1223,6 +1347,7 @@ mod tests {
                 "definitions": ["fixture::function"],
                 "outcomeBranchId": "rs:branch:000000000000000000000002",
                 "loopBranchId": null,
+                "logicalSelections": [],
                 "conditions": [{"sourceKey": "source:src/lib.rs", "start": 11, "end": 15, "source": "value"}],
                 "canonical": "decision"
             }],
@@ -1241,6 +1366,12 @@ mod tests {
         legacy_schema["schema"] = json!("supercov-rust-manifest-candidate-v1");
         assert!(matches!(
             RustCompilerManifest::parse(&serde_json::to_vec(&legacy_schema).unwrap()),
+            Err(RustCompilerManifestError::Invalid(_))
+        ));
+        let mut previous_schema = valid_manifest();
+        previous_schema["schema"] = json!("supercov-rust-manifest-candidate-v2");
+        assert!(matches!(
+            RustCompilerManifest::parse(&serde_json::to_vec(&previous_schema).unwrap()),
             Err(RustCompilerManifestError::Invalid(_))
         ));
 
@@ -1355,6 +1486,150 @@ mod tests {
         non_loop_relation["decisions"][0]["kind"] = json!("if");
         assert!(matches!(
             RustCompilerManifest::parse(&serde_json::to_vec(&non_loop_relation).unwrap()),
+            Err(RustCompilerManifestError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn logical_selections_are_strict_relations_projected_from_decision_vectors() {
+        let mut value = valid_manifest();
+        value["branches"].as_array_mut().unwrap().push(json!({
+            "id": "rs:branch:000000000000000000000006",
+            "kind": "logical-selection",
+            "discriminator": "logical-selection:and",
+            "sourceKey": "source:src/lib.rs",
+            "start": 11,
+            "end": 20,
+            "provenance": "authored-source",
+            "probeOrdinal": "6",
+            "definitions": ["fixture::function"],
+            "alternatives": [
+                {"id": "rs:branch-alternative:000000000000000000000007", "label": "short-circuited", "probeOrdinal": "7", "canonical": "short"},
+                {"id": "rs:branch-alternative:000000000000000000000008", "label": "right operand evaluated", "probeOrdinal": "8", "canonical": "evaluated"}
+            ],
+            "canonical": "logical-selection"
+        }));
+        value["decisions"][0]["conditions"] = json!([
+            {"sourceKey": "source:src/lib.rs", "start": 11, "end": 15, "source": "left"},
+            {"sourceKey": "source:src/lib.rs", "start": 16, "end": 20, "source": "right"}
+        ]);
+        value["decisions"][0]["logicalSelections"] = json!([{
+            "branchId": "rs:branch:000000000000000000000006",
+            "rightConditionIndex": 1
+        }]);
+
+        let manifest = RustCompilerManifest::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let normalized = manifest
+            .normalize(&BTreeMap::from([(
+                "source:src/lib.rs".into(),
+                RustCompilerSource {
+                    file: "src/lib.rs".into(),
+                    source: "0123456789 left && right and more source bytes".into(),
+                },
+            )]))
+            .unwrap();
+        let relation = &normalized.decision_logical_selection_obligations["rs:decision:000000000000000000000005"]
+            [0];
+        assert_eq!(relation.right_condition_index, 1);
+        assert_eq!(
+            relation.short_circuited_id,
+            "rs:branch-alternative:000000000000000000000007"
+        );
+        assert_eq!(
+            relation.right_evaluated_id,
+            "rs:branch-alternative:000000000000000000000008"
+        );
+        assert!(normalized.internal_ordinals.contains(&7));
+        assert!(normalized.internal_ordinals.contains(&8));
+        assert!(!normalized.hit_obligations_by_ordinal.contains_key(&7));
+        assert!(!normalized.hit_obligations_by_ordinal.contains_key(&8));
+
+        let mut missing_relation = value.clone();
+        missing_relation["decisions"][0]["logicalSelections"] = json!([]);
+        let value_selection =
+            RustCompilerManifest::parse(&serde_json::to_vec(&missing_relation).unwrap())
+                .unwrap()
+                .normalize(&BTreeMap::from([(
+                    "source:src/lib.rs".into(),
+                    RustCompilerSource {
+                        file: "src/lib.rs".into(),
+                        source: "0123456789 left && right and more source bytes".into(),
+                    },
+                )]))
+                .unwrap();
+        assert!(value_selection.hit_obligations_by_ordinal.contains_key(&7));
+        assert!(value_selection.hit_obligations_by_ordinal.contains_key(&8));
+
+        let mut source_ordered = value.clone();
+        source_ordered["branches"].as_array_mut().unwrap().push(json!({
+            "id": "rs:branch:000000000000000000000009",
+            "kind": "logical-selection",
+            "discriminator": "logical-selection:or",
+            "sourceKey": "source:src/lib.rs",
+            "start": 11,
+            "end": 20,
+            "provenance": "authored-source",
+            "probeOrdinal": "9",
+            "definitions": ["fixture::function"],
+            "alternatives": [
+                {"id": "rs:branch-alternative:000000000000000000000010", "label": "short-circuited", "probeOrdinal": "10", "canonical": "short-two"},
+                {"id": "rs:branch-alternative:000000000000000000000011", "label": "right operand evaluated", "probeOrdinal": "11", "canonical": "evaluated-two"}
+            ],
+            "canonical": "logical-selection-two"
+        }));
+        source_ordered["decisions"][0]["conditions"] = json!([
+            {"sourceKey": "source:src/lib.rs", "start": 11, "end": 12, "source": "first"},
+            {"sourceKey": "source:src/lib.rs", "start": 13, "end": 14, "source": "second"},
+            {"sourceKey": "source:src/lib.rs", "start": 15, "end": 20, "source": "third"}
+        ]);
+        source_ordered["decisions"][0]["logicalSelections"] = json!([
+            {"branchId": "rs:branch:000000000000000000000009", "rightConditionIndex": 1},
+            {"branchId": "rs:branch:000000000000000000000006", "rightConditionIndex": 2}
+        ]);
+        let parsed_source_ordered =
+            RustCompilerManifest::parse(&serde_json::to_vec(&source_ordered).unwrap()).unwrap();
+        assert_eq!(
+            parsed_source_ordered.decisions[0]
+                .logical_selections
+                .iter()
+                .map(|selection| selection.right_condition_index)
+                .collect::<Vec<_>>(),
+            vec![1, 2],
+        );
+        source_ordered["decisions"][0]["logicalSelections"]
+            .as_array_mut()
+            .unwrap()
+            .reverse();
+        assert!(matches!(
+            RustCompilerManifest::parse(&serde_json::to_vec(&source_ordered).unwrap()),
+            Err(RustCompilerManifestError::Invalid(_))
+        ));
+
+        let mut invalid_index = value;
+        invalid_index["decisions"][0]["logicalSelections"][0]["rightConditionIndex"] = json!(2);
+        assert!(matches!(
+            RustCompilerManifest::parse(&serde_json::to_vec(&invalid_index).unwrap()),
+            Err(RustCompilerManifestError::Invalid(_))
+        ));
+        let mut invalid_discriminator = valid_manifest();
+        invalid_discriminator["branches"].as_array_mut().unwrap().push(json!({
+            "id": "rs:branch:000000000000000000000006",
+            "kind": "logical-selection",
+            "discriminator": "logical-selection:unknown",
+            "sourceKey": "source:src/lib.rs",
+            "start": 11,
+            "end": 20,
+            "provenance": "authored-source",
+            "probeOrdinal": "6",
+            "definitions": ["fixture::function"],
+            "alternatives": [
+                {"id": "rs:branch-alternative:000000000000000000000007", "label": "short-circuited", "probeOrdinal": "7", "canonical": "short"},
+                {"id": "rs:branch-alternative:000000000000000000000008", "label": "right operand evaluated", "probeOrdinal": "8", "canonical": "evaluated"}
+            ],
+            "canonical": "logical-selection"
+        }));
+        assert!(matches!(
+            RustCompilerManifest::parse(&serde_json::to_vec(&invalid_discriminator).unwrap()),
             Err(RustCompilerManifestError::Invalid(_))
         ));
     }
@@ -1480,6 +1755,58 @@ mod tests {
             )
         );
         assert_eq!(normalized.manifest.limitations.len(), 1);
+        let fingerprint = &normalized.manifest.scope.as_ref().unwrap()["sourceFingerprint"];
+        assert_eq!(fingerprint["algorithm"], "sha256");
+        assert_eq!(fingerprint["digest"].as_str().unwrap().len(), 64);
+        assert_eq!(fingerprint["files"], 1);
+        assert_eq!(fingerprint["generatedFiles"], 0);
+    }
+
+    #[test]
+    fn source_fingerprint_binds_full_generated_bytes_outside_obligation_ranges() {
+        let mut candidate = valid_manifest();
+        let generated_key = "generated:package:.:generated.rs";
+        candidate["points"][0]["sourceKey"] = json!(generated_key);
+        candidate["branches"][0]["sourceKey"] = json!(generated_key);
+        candidate["decisions"][0]["sourceKey"] = json!(generated_key);
+        candidate["decisions"][0]["conditions"][0]["sourceKey"] = json!(generated_key);
+        let manifest =
+            RustCompilerManifest::parse(&serde_json::to_vec(&candidate).unwrap()).unwrap();
+        let baseline_sources = BTreeMap::from([(
+            generated_key.into(),
+            RustCompilerSource {
+                file: generated_key.into(),
+                source: "0123456789 value and more source bytes // baseline".into(),
+            },
+        )]);
+        let changed_sources = BTreeMap::from([(
+            generated_key.into(),
+            RustCompilerSource {
+                file: generated_key.into(),
+                source: "0123456789 value and more source bytes // changed!".into(),
+            },
+        )]);
+        let baseline = manifest.normalize(&baseline_sources).unwrap().manifest;
+        let changed = manifest.normalize(&changed_sources).unwrap().manifest;
+        assert_eq!(
+            baseline.scope.as_ref().unwrap()["sourceFingerprint"]["generatedFiles"],
+            1,
+        );
+        assert_ne!(
+            baseline.scope.as_ref().unwrap()["sourceFingerprint"]["digest"],
+            changed.scope.as_ref().unwrap()["sourceFingerprint"]["digest"],
+        );
+        let mut baseline_without_fingerprint = serde_json::to_value(&baseline).unwrap();
+        let mut changed_without_fingerprint = serde_json::to_value(&changed).unwrap();
+        baseline_without_fingerprint["scope"]
+            .as_object_mut()
+            .unwrap()
+            .remove("sourceFingerprint");
+        changed_without_fingerprint["scope"]
+            .as_object_mut()
+            .unwrap()
+            .remove("sourceFingerprint");
+        assert_eq!(baseline_without_fingerprint, changed_without_fingerprint);
     }
 
     #[test]

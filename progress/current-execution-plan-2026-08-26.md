@@ -759,15 +759,18 @@ Work:
   becomes explicit health rather than silent absence;
 - fail closed for genuinely ambiguous mixed-language or unsupported runners.
 
-Prefer an owned in-process context carrier once it proves the same isolation as
-the process-per-test reference. Architecture checkpoint: the compiler backend
-now proves the process-per-test path on a test that spawns a child thread. The
-thread's work inherits the supervisor-owned attempt context through the mmap
-transport environment, while the parent assertion verdict retains its distinct
-authenticated assertion phase; child work is not falsely upgraded to assertion
-confidence. Use this sound process boundary for the first public integration.
-Retain in-process concurrent libtest only as a later optimization after its
-thread/async/subprocess carriers prove equivalent attribution.
+The process-per-test path remains a strict attribution reference: it proves
+thread, async, subprocess, assertion, background and late-work partitioning
+under one supervisor-owned attempt context. It is not the public standard
+libtest architecture. The presentation/process-state differential proved that
+external splitting changes stock libtest's aggregate output and observable
+process-global state. Standard libtest must instead run once under the selected
+toolchain's own scheduler and formatter, with an exact-toolchain replacement
+for `library/test` that emits authenticated lifecycle events and otherwise
+preserves stock behavior. Process-per-test remains appropriate where the
+selected runner itself defines that model, including nextest. Exact subprocess
+context propagation from concurrent in-process libtest tests remains a release
+gate; it cannot be inferred from timestamps or a process-global environment.
 
 Checkpoint (2026-08-26): the production process-per-test path now preserves
 Cargo's pre-separator `TESTNAME` and libtest's positional filters, `--skip`,
@@ -775,9 +778,10 @@ Cargo's pre-separator `TESTNAME` and libtest's positional filters, `--skip`,
 `--exact` and force-in-process selection. The same parsed plan filters each
 artifact before tasks are created and carries only execution-relevant modes to
 the exact child invocation; a deliberately empty selection is a successful
-zero-test run. Supercov no longer injects `--nocapture`. Scheduling and
-presentation options that the split process model cannot yet reproduce—thread
-count, shuffle, fail-fast, formats and capture/display modes—fail closed rather
+zero-test run. Supercov no longer injects `--nocapture`. The reference splitter
+now parses and applies explicit `--test-threads` and `RUST_TEST_THREADS` as its
+exact worker bound. Presentation options the split model cannot reproduce—
+shuffle, fail-fast, formats and capture/display modes—still fail closed rather
 than being discarded. A real compiler run proves
 `cargo test records_real_runtime_probes -- --include-ignored` executes exactly
 the one requested ignored test with authenticated evidence. Full output/order,
@@ -1081,8 +1085,440 @@ tests, 17 CLI tests, warnings-denied clippy and the complete public
 JavaScript/TypeScript integration matrix are green locally. No hosted workflow
 ran. This closes the isolated assertion-denominator blocker, not R1 or R2.
 
+Checkpoint (2026-08-27): downstream generic, trait and async MIR now reaches
+one shared runtime through a serialization-safe ABI. The previous companion
+inserted calls to compiler-injected Rust wrapper bodies. A generic or async
+body serialized in a library could therefore retain a local wrapper reference
+that downstream monomorphization could not load as optimized MIR. The focused
+corpus reproduced that failure before the downstream binary could link.
+
+The companion now injects declarations only and makes every MIR call directly
+to the shared `__supercov_rt_*` C ABI. Cargo still builds and links one exact
+static runtime, so probe calls no longer duplicate per-crate TLS or depend on
+synthetic wrapper MIR. A downstream binary now preserves exact baseline stdout,
+stderr and values while instantiating two generic monomorphizations, calling a
+trait default through static and dynamic dispatch, calling an overriding impl
+and polling a deliberately pending async future to completion. Authenticated
+evidence contains one generic source obligation, one trait-default obligation,
+one distinct override and both exact Boolean vectors for each decision.
+
+The same corpus exposed and corrected an independent denominator error: an
+`async fn` constructor and its generated future body had both been counted as
+function entries. The frozen model now emits exactly one function obligation
+at the async body closure's first poll; merely constructing the future creates
+none. The focused ABI/manifest/evidence gate, the complete
+rustc/Cargo/rustdoc/nextest corpus, warnings-denied Clippy and all workspace
+tests are green locally: 19 CLI, 19 contract and 277 engine tests. The strict
+aggregate audit proves every emitted ordinal belongs to the frozen point or
+branch denominator. Doctest descriptor expectations now derive their source
+lines from the fixture instead of retaining brittle line constants. This
+narrows RCV-IDENTITY, POINT, SEMANTICS and RUNTIME; it does not close R1 or R2.
+No hosted workflow ran.
+
+Checkpoint (2026-08-28): the compiler candidate now implements the frozen
+`logical-selection` denominator rather than merely retaining short-circuit
+information inside MC/DC vectors. Strict manifest candidate v3 adds a sorted,
+validated relation from every decision-contributing `&&`/`||` branch to the
+first atomic condition of its right subtree. Runtime and CTFE projection derive
+`short-circuited` versus `right operand evaluated` directly from that ternary
+condition value. Those alternative ordinals are internal and a direct emitted
+hit is rejected, so control decisions pay no duplicate probe cost.
+
+Logical expressions used as values remain branches but do not invent MC/DC
+decisions. The companion records the right operand as the public obligation and
+the rightmost atomic tail of the left subtree as its exact compiler mapping.
+The MIR plan starts one first-commit branch frame at the alternatives' common
+dominator, so every path entering the right operand is included even for nested
+`(a && b) || c`. Runtime and real CTFE goldens observe both alternatives for
+both nested operators while preserving byte-identical baseline output. The
+strict parser distinguishes decision-derived logical alternatives from emitted
+value-selection alternatives; doctest rebasing translates the new branch IDs
+and relations, and v2 candidates are rejected rather than migrated.
+
+The downstream corpus also now covers an async trait default, an overriding
+async impl, a generic async dispatcher, an async closure, a nested generic
+decision, and a mutable borrow plus `Drop` guard held across a genuine
+suspension. No future constructor contributes a function point; each executed
+body contributes exactly one first-poll entry. The focused gate, complete
+rustc/Cargo/rustdoc/CTFE/nextest corpus, 19 CLI tests, 19 contract tests, 280
+engine tests, warnings-denied Clippy and formatting are green locally. No
+hosted workflow ran. This closes the discovered logical-selection denominator
+hole and narrows generic/trait/async coverage; it does not close R1–R4.
+
+Checkpoint (2026-08-28): the downstream compiler corpus now proves the next
+type-system and expansion slice. Associated-type defaults, GAT projections,
+RPITIT methods and consumers, and a higher-ranked closure bound preserve exact
+baseline output while publishing one source function per definition and all
+three short-circuit vectors for each compound decision. They reuse the direct
+shared ABI across downstream instantiation; no monomorphization-specific
+denominator is introduced.
+
+A body-replacing procedural attribute exposed a real collapsed-span defect:
+its two distinct Boolean atoms shared one synthetic callsite, so the optimized-
+MIR fallback found two candidate switches and failed closed. Synthetic non-
+guard decisions with duplicate condition ranges now receive pre-borrow-check
+typed-Boolean markers ordered by CFG reachability. The attribute publishes the
+exact false/short-circuit, true/false and true/true vectors plus its one logical
+selection. A procedural macro that emits a dependency-owned declarative macro
+invocation aggregates into the dependency macro's authored-source obligation;
+it does not manufacture a parent-expansion duplicate, and exact evidence
+multiplicity is gated.
+
+The focused gate and a fresh complete rustc/Cargo/rustdoc/CTFE/nextest corpus
+pass, followed by 19 CLI, 19 contract and 280 engine tests, warnings-denied
+Clippy, formatting, script syntax and diff safety. No hosted workflow ran.
+This closes the associated-type/GAT/RPITIT sub-gap and two concrete nested
+expansion cases only. R1–R4, broader expansion/toolchain/oracle/platform
+matrices and public Rust readiness remain open.
+
+Checkpoint (2026-08-28): the first generated semantic differential and
+independent condition oracle are now executable promotion evidence. Forty-eight
+deterministic nested Boolean programs run every three-bit input, while sixteen
+cases each cover `if let` chains, match guards, `?` plus `let else`, and
+closure capture/destructor ordering. Baseline and instrumented stdout/stderr
+are exact, each frozen vector and structural alternative is asserted, and no
+runtime ordinal may exist outside the manifest. A separate rustc-native LLVM
+condition run agrees with Supercov's true/false count for all 96 overlapping
+decisions; LLVM is never invoked by the product run.
+
+The same focused gate now includes a real `#![no_std]` library whose probes
+link through the one shared runtime at the final executable, plus identical
+authored denominators and vectors under editions 2015, 2018, 2021 and 2024
+with declared Rust-version floors. This proves compiler-edition compatibility,
+not bare-target support; the installed-target matrix remains open.
+
+The last known compile-diagnostic presentation difference is also closed.
+Stock rustc enables trimmed diagnostic definition paths in its driver
+callback. The companion reproduces that setting, while every Supercov-internal
+identity lookup explicitly uses rustc's no-trimming scope. Compile-fail stderr
+is now exact after normalizing only fixture/output paths; no `std::result` or
+`std::ops` rewrite remains. The focused gate and a fresh complete
+rustc/Cargo/rustdoc/CTFE/nextest corpus pass locally, including production
+orchestration, multi-package libtests and doctests. The full workspace follows
+with 19 CLI, 19 contract and 280 engine tests, warnings-denied Clippy,
+formatting, script syntax and diff safety all green. This checkpoint is fully
+integrated, but R1–R4 remain open.
+
+Checkpoint (2026-08-28): authored Boolean calls into unowned macro
+implementations now remain exact opaque source atoms inside larger decisions.
+The collector collapses an external expansion only when its implementation
+range is unowned and its exact callsite is owned; project-owned declarative
+macro definitions retain their normal authored denominator. Logical-selection
+identity uses the owned invocation when the macro is the right operand, while
+decision-linked alternatives continue to derive from the ternary vector and
+emit no duplicate probes.
+
+Pre-borrow structural markers bind every opaque atom's unique terminal typed-
+Boolean switch and ordinary siblings independently. Post-borrow rebinding may
+cross only a straight-line `goto` or an exactly identified Supercov match-
+runtime call; it never crosses user control or guesses across a branch. The
+corpus proves one and two `matches!` invocations in left/right and nested
+`&&`/`||` positions plus a match guard, with exact source conditions, all
+short-circuit vectors and logical selections, unchanged output, and no macro-
+internal obligations. The focused gate and fresh complete
+rustc/Cargo/rustdoc/CTFE/nextest corpus pass locally, followed by 19 CLI, 19
+contract and 280 engine tests, warnings-denied Clippy, formatting, script
+syntax and diff safety. R1–R4 remain open.
+
+Checkpoint (2026-08-28): the generated differential now supplies an
+independent point oracle as well as condition parity. Three `#[inline(never)]`
+functions execute both paths, only the true path, or no path. Supercov must
+observe the exact function entry and five selected authored statements in each
+case, including the deliberately uncovered false path and wholly uncalled
+function. The separately built rustc/LLVM oracle must expose exactly one
+matching function and at least one contained code region for each selected
+statement; every observed/unobserved Boolean agrees. Oracle profiles and
+artifacts remain separate from the Supercov run. The focused property/oracle
+gate and a fresh complete rustc/Cargo/rustdoc/CTFE/nextest corpus pass locally.
+The workspace then passes 19 CLI, 19 contract and 280 engine tests,
+warnings-denied Clippy, formatting, both script syntax checks, package preflight
+and diff safety. R1–R4 remain open.
+
+Checkpoint (2026-08-28): independent coverage implementations are now guarded
+as development oracles, never product collectors. Package preflight recursively
+audits the shipped launcher and target-language shims plus every normal Rust
+CLI/engine source for external coverage executables or compiler-native coverage
+injection. The coverage.py importer is compile-inaccessible outside tests or
+the explicit non-default `oracle-harnesses` feature, whose default set is empty.
+The preflight passes locally and is included in the complete workspace gate
+above. The supported-platform oracle matrix remains an R1 blocker; this
+checkpoint does not promote Rust or claim another target.
+
+Checkpoint (2026-08-28): repeated derive expansion now has an explicit
+non-contamination gate. Two invocations generate structurally identical impl
+methods at different authored callsites. The called impl publishes every
+function/statement point and both decision outcomes; the uncalled impl retains
+its complete denominator but publishes no point or decision evidence, and all
+synthetic IDs are distinct.
+
+That addition exposed a separate ordering defect: logical-selection relations
+were serialized by hashed branch ID, so unrelated source could reorder the
+source condition indexes. The compiler now orders relations by exact right
+condition index and the strict parser requires increasing source order. A
+negative manifest test uses deliberately reverse-sorted IDs to prove identity
+hashes cannot control semantics. The focused compiler gate, parser test and a
+fresh complete rustc/Cargo/rustdoc/CTFE/nextest corpus pass. The workspace then
+passes 19 CLI, 19 contract and 280 engine tests, warnings-denied Clippy,
+formatting, script syntax, package preflight and diff safety. R1–R4 remain open.
+
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.
+
+### Automatic context inheritance and crash-safe companion builder checkpoint — 2026-08-28
+
+Stock-libtest execution fidelity is now argument-exact: discovery projects only
+selection-affecting arguments while the actual stock run receives the user's
+original argv unchanged, preserving presentation and scheduling; `--list` and
+`--help` remain deliberately fail-closed non-execution surfaces. Persisted
+transport units are strictly recombined and repartitioned before acceptance,
+physical runner-invocation health is separated from zero-copy test-attempt
+health, and background evidence publishes even when no test is selected,
+without inventing an attempt. The libtest companion bundle schema is now
+version 2, so an older canonical artifact with incompatible semantics can
+never be reused.
+
+Native thread and subprocess context propagation is now automatic. Private
+macOS/Linux interposers make `pthread_create` capture the active
+test/assertion context, install it in the new native thread and restore the
+child after its start routine; `posix_spawn`/`posix_spawnp` replace an
+existing `SUPERCOV_RUST_CONTEXT_ID` only in the child environment; explicit
+`Command::env_remove` remains an authenticated opt-out that produces
+background evidence; the parent environment is never mutated. Because
+inheritance captures the active phase, a thread spawned during
+assertion-argument evaluation belongs to the assertion phase itself: the
+corpus now proves the child-thread observation under the exact authenticated
+assertion phase of its spawning test — never under background zero and never
+under the bare base test context — in both the concurrent five-thread slice
+and the supervisor-isolated run. The two corpus expectations that had frozen
+the old contextless behavior were corrected factually after a focused
+reproduction dumped the raw concurrent transport and proved exactly one
+authenticated phase record with no duplication or leakage.
+
+The exact-libtest companion builder is crash-safe and lives in the engine as
+`build_exact_rust_libtest_companion`; the CLI hidden command is a thin
+wrapper. Completed patched source trees are strictly authenticated before
+reuse; source identity rejects unknown fields, compiler/runtime mismatch,
+changed exact toolchain source and changed patched-tree bytes. Source
+preparation and companion publication hold persistent kernel locks that the
+OS releases when a holder is killed, bounded at five minutes so a genuinely
+stuck owner is an explicit error rather than an indefinite wait. On Unix the
+locked open-file description is duplicated into the rustc child before exec,
+so killing the builder cannot let a recovery process publish over a compiler
+still writing. Stale cleanup touches only exact builder-owned partial
+prefixes and refuses symlinks/special files; build and publication partials
+have RAII cleanup; artifacts and their directory are synced before bundle
+publication; existing final artifacts must be byte-identical. A real-
+toolchain lifecycle spike proves two simultaneous builders converge on the
+same bundle and that SIGKILL recovery publishes one authenticated companion
+with no partial debris. The five focused compiler gates are now wired as
+`test:rust-compiler-spikes`, and the obsolete never-constructed
+`DestinationExists` builder error was removed after authenticated reuse
+replaced it.
+
+The focused async, subprocess, custom-harness and builder-lifecycle gates and
+a fresh complete rustc/Cargo/rustdoc/CTFE/nextest corpus pass locally,
+followed by 20 CLI, 19 contract and 313 engine tests, warnings-denied Clippy,
+formatting, runtime and packaged-asset tests and package preflight. No hosted
+workflow ran. Direct `fork`/`execve`, custom `pre_exec`, pre-existing task
+pools, Linux GNU/musl interposer ABI proof, thread-creation failure and
+child-launch-failure gates, and Windows process/lock-handle inheritance
+remain open; R1–R4 remain open.
+
+### Generated-source integrity checkpoint — 2026-08-28
+
+The compiler frontend no longer treats obligation snippets as sufficient
+identity for build-script output. Normalization hashes every measured source
+snapshot's stable key, display path and complete bytes into one
+domain-separated SHA-256 fingerprint. The compiler-owned archive scope carries
+the algorithm, digest and exact total/generated file counts; strict archive
+analysis rejects missing, malformed or extended fingerprint envelopes before
+publication.
+
+The executable corpus proves all of the following:
+
+- two clean Cargo target directories produce byte-identical denominator
+  candidates and identical complete-source fingerprints;
+- changing only a generated trailing comment outside every obligation leaves
+  the complete denominator identical but changes the source fingerprint,
+  including a rebuild that deliberately reuses the same Cargo target;
+- two packages emitting byte-identical `generated.rs` functions retain
+  distinct package-relative source keys, obligation IDs and fingerprints;
+  physical package containment also survives macOS `/var` versus
+  `/private/var` aliases without leaking those aliases into persisted IDs;
+- the transactional compiler runner executes both packages' generated
+  functions on false and true paths under colliding test names, publishes
+  covered points, branches and MC/DC with two healthy transports, retains both
+  exact package-qualified test IDs, preserves source bytes and removes terminal
+  work state;
+- generated source must be a regular file whose canonical path remains below
+  the exact target root; an external symlink contributes no obligation and is
+  surfaced as explicit function/statement/decision identity limitations;
+- a deterministic compiler abort after the root manifest flush but before the
+  matching source snapshot exposes no stored run, leaves no terminal work
+  state and does not poison the next clean compilation.
+
+A fresh full rustc/Cargo/rustdoc/CTFE/nextest/property/oracle corpus passes,
+followed by 19 CLI, 19 contract and 282 engine tests, warnings-denied Clippy,
+formatting, script syntax, package preflight and diff safety. No hosted workflow
+ran. This narrows RCV-GENERATED-1 and compiler-run lifecycle safety; broader
+package/build-script fingerprint matrices, generated probes, supported
+platforms and all remaining R1–R4 gates stay open.
+
+### Complete-run archive/publication fault checkpoint — 2026-08-28
+
+The real compiler transaction now has deterministic, private spike-only fault
+points at the two immutable-store boundaries. They do not alter the ordinary
+archive or run-publication API and are rejected by a public-capability request.
+
+- ENOSPC is raised after bytes have entered the gzip sink. The unique temporary
+  archive is removed and the final `evidence.raw.gz` path never appears.
+- A separate fault occurs only after the archive, copied evidence, metadata and
+  staging-directory sync have completed, immediately before the single rename
+  that makes a run visible. Its staging tree is retired without creating a run.
+- The executable two-package generated-source gate first publishes a healthy
+  run, forces each failure through the complete Cargo/compiler/runtime path,
+  and after each one proves that no failed run or terminal compiler/publication
+  work exists, project source is unchanged, and the earlier run is byte-for-byte
+  unchanged and still queryable with both exact test identities.
+- A fourth clean compiler transaction then publishes successfully with two
+  healthy per-test transports, proving immediate recovery rather than merely
+  inspecting filesystem shape.
+- A fifth real transaction pauses after archive validation in the durable
+  `Publishing` state while retaining the project lock. A second process is
+  rejected before workspace preparation and creates neither work nor a run;
+  releasing the leader publishes both healthy exact transports and removes its
+  private gate state. The earlier immutable run remains byte-identical.
+- With the checkout's private parent made read-only, workspace selection falls
+  back outside the Cargo ancestor chain. The strict in-project locator stores
+  only `temporary`, the canonical-root digest and a random capability token;
+  the cache path is derived under the canonical OS temporary directory and its
+  marker must repeat the token. A real Cargo/compiler run publishes and queries
+  one exact test with healthy evidence, preserves source, and the real `clean`
+  command removes both the external cache and locator.
+
+Focused archive and lifecycle suites, the focused real compiler gate and a
+fresh complete rustc/Cargo/rustdoc/CTFE/nextest/property/oracle corpus pass
+locally. The workspace then passes 19 CLI, 19 contract and 286 engine tests,
+warnings-denied Clippy, formatting, package preflight and diff safety. This
+closes the local APFS complete-run ENOSPC/final-rename, process-lock and
+read-only-parent fallback slices of RCV-ARCHIVE-1 and RCV-LIFECYCLE-1. A
+genuine separate-volume run and supported Linux/Windows fault matrices remain
+release blockers. A second fresh complete corpus after the authenticated
+placement locator and read-only-parent fallback landed is also green. No
+hosted workflow ran.
+
+### Shared Rust runtime crash-recovery checkpoint — 2026-08-28
+
+The compiler wrapper's one-per-run static runtime cache no longer represents
+ownership by creating and deleting `build.lock`. Every builder opens one
+durable regular lock inode and uses Rust's cross-platform kernel-backed
+exclusive file lock. The archive is rechecked after acquisition, so concurrent
+builders still converge on the one atomic archive; ownership itself disappears
+when a file handle closes or its process dies.
+
+Focused executable proofs now require:
+
+- four live builders publish one archive and leave no partial archive;
+- a compiler launch failure releases ownership and a real compiler retry
+  acquires immediately;
+- OS `ENOSPC` injected after rustc produced the partial removes that partial,
+  publishes no archive and permits a clean retry; and
+- a separate helper process is killed with real `SIGKILL` while holding the
+  kernel lock; the following builder acquires in under five seconds, publishes
+  the archive and finds no partial debris.
+
+This closes the local shared-runtime crash/ENOSPC part of RCV-RUNTIME-1. The
+supported-target and Linux/Windows filesystem matrix remains a promotion gate.
+The focused real Cargo/compiler/generated-source gate is green with the durable
+kernel lock in the production wrapper path. The workspace then passes 19 CLI,
+19 contract and 289 engine tests, warnings-denied Clippy, formatting, script
+syntax, package preflight and diff safety.
+No hosted workflow ran.
+
+### Rust custom-harness and dynamic-attribution checkpoint — 2026-08-28
+
+Cargo target classification now happens before execution and preserves
+`harness = false` as an opaque custom invocation rather than attempting
+libtest discovery. A real mixed workspace runs its ordinary libtest and custom
+harness separately; the custom target executes exactly once with its original
+arguments and one stable package/target/source identity. Supercov does not
+invent internal custom-harness test cases it cannot observe.
+
+Dynamic child work now has executable attribution boundaries. An instrumented
+subprocess that inherits the authenticated mmap transport and context is
+credited exactly to its parent test. Clearing the context while retaining the
+authenticated transport publishes the child once as background evidence. A
+child still alive when the attempt returns is killed by the shared process
+group before publication, and its delayed unique probe is absent.
+
+Rust assertions that genuinely suspend now preserve exact confidence across
+executor threads. Before rustc transforms a coroutine, the compiler inserts
+private deterministic marker calls around assertion-internal yields and makes
+the current/previous contexts part of coroutine state. The late MIR pass must
+consume every tagged marker; because the marker has no linked runtime
+implementation, incomplete consumption fails at link time. Suspension restores
+the prior context, resumption enters the assertion on the actual resume thread,
+and cancellation/drop cleanup remains at base-test confidence. The capture is
+emitted only for assertions that contain a real yield, preserving the already-
+proven nested synchronous assertion behavior. Real completion, cancellation
+and nested-sync fixtures prove exact phase events, point/decision attribution,
+zero incomplete transport and no unrelated confidence upgrade.
+
+The lifecycle corpus now gives its publication leader the same bounded
+300-second cold-compiler allowance as the compiler transaction itself and
+includes captured output in timeout diagnostics; this is not a performance
+gate. The focused custom-harness, subprocess and async-attribution gates and a
+fresh complete rustc/Cargo/rustdoc/CTFE/nextest/property/oracle corpus are
+green. The workspace passes 19 CLI, 19 contract and 290 engine tests,
+warnings-denied Clippy, formatting, script syntax, package preflight and diff
+safety. No hosted workflow ran. This closes the local custom-harness,
+subprocess/background/late-work and cross-thread async assertion slices of R2,
+not R2 or Rust promotion. Supported-platform/runtime ecosystem coverage,
+remaining presentation modes and the platform/performance/dogfood gates remain
+open. The process-per-test path remains the reference oracle, not the final
+standard-libtest execution model.
+
+### Exact libtest presentation architecture checkpoint — 2026-08-28
+
+The R2 presentation audit invalidated one earlier promotion assumption. Running
+each stock libtest case as an external process gives exact attempt attribution,
+but changes process-global state and cannot reproduce stock aggregate capture,
+ordering or formatting. It therefore cannot be the public implementation for
+ordinary `cargo test`.
+
+An executable real-toolchain spike now builds a replacement from the selected
+Rust 1.95.0 toolchain's exact `library/test` source and supplies it through
+rustc's explicit `--extern test=...` boundary. The replacement inserts one
+callback before stock console handling. Across `--test-threads=1`,
+`--show-output`, `--nocapture`, pretty format, quiet output and ignored tests,
+the candidate preserves stock exit status, stdout, stderr, capture, scheduling
+and shared process state after normalizing only suite time and panic thread ID.
+
+The callback no longer writes the spike's permissive text log. The frozen Rust
+model now owns `rust-libtest-event-v1`: a supervisor-created 0600 regular file,
+64-byte token-authenticated header, strictly contiguous binary records, bounded
+UTF-8 names, token-bound checksums and exact filtered/start/timeout/terminal
+events. Unknown kinds/results/flags, wrong token, symlinks, nonzero reserved
+bytes, reordering, partial records, invalid semantics and tampering fail closed.
+The runtime requires its transport instead of silently disabling attribution.
+
+Production source preparation is also present. It hashes the exact unmodified
+toolchain source, rejects symlinks and special/non-UTF-8 paths, requires exactly
+one known patch anchor in both `lib.rs` and `console.rs`, embeds the checked-in
+event runtime, computes relocation-stable original/runtime/patched identities,
+and atomically renames a complete patched tree. A deterministic build plan
+requires the selected target libdir's one full `getopts` and `libc` metadata
+file. The real differential spike now invokes this production preparer rather
+than carrying its own patch implementation.
+
+This closes the event wire, source-preparation and stock-presentation design
+spikes, not R2. Before promotion, the companion artifact must be
+cryptographically bound to the exact compiler-companion handshake, injected
+only into genuine test-harness rustc units, executed once per Cargo artifact
+under the shared supervisor, and losslessly joined with probe evidence and
+outcomes. Parallel in-process subprocess propagation, fail-fast/timeout
+lifecycle validation, crash/partial-event publication and supported-platform
+matrices remain open.
 
 ### Public JavaScript field-hardening checkpoint — 2026-08-27
 

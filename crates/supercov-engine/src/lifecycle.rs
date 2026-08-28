@@ -587,6 +587,20 @@ pub fn publish_run(
     metadata: &RunMetadata,
     evidence_source: &Path,
 ) -> Result<PathBuf, LifecycleError> {
+    publish_run_with_fault(root, metadata, evidence_source, None)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunPublicationFault {
+    FinalRename,
+}
+
+pub(crate) fn publish_run_with_fault(
+    root: &Path,
+    metadata: &RunMetadata,
+    evidence_source: &Path,
+    fault: Option<RunPublicationFault>,
+) -> Result<PathBuf, LifecycleError> {
     checked_id(&metadata.id)?;
     let destination = root.join(".supercov/runs").join(&metadata.id);
     reject_linked_ancestors(root, &destination, false)?;
@@ -623,6 +637,17 @@ pub fn publish_run(
     sync_directory(&staging)?;
     let runs = destination.parent().expect("runs parent");
     fs::create_dir_all(runs).map_err(|source| io_error(runs, source))?;
+    if fault == Some(RunPublicationFault::FinalRename) {
+        let error = io_error(
+            &destination,
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected final run publication rename failure",
+            ),
+        );
+        let _ = remove_stored_tree_deferred(root, &staging);
+        return Err(error);
+    }
     fs::rename(&staging, &destination).map_err(|source| io_error(&destination, source))?;
     sync_directory(runs)?;
     Ok(destination)
@@ -996,6 +1021,36 @@ mod tests {
             publish_run(&root, &metadata(id, 8), &evidence),
             Err(LifecycleError::PublicationExists(_))
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn final_rename_failure_exposes_no_run_and_removes_staging() {
+        let root = project();
+        let id = "2026-01-01T00-00-00-000Z";
+        let evidence = root.join("evidence.gz");
+        fs::write(&evidence, b"evidence").unwrap();
+        let error = publish_run_with_fault(
+            &root,
+            &metadata(id, 8),
+            &evidence,
+            Some(RunPublicationFault::FinalRename),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("injected final run publication rename failure")
+        );
+        assert!(!root.join(".supercov/runs").join(id).exists());
+        assert!(
+            !root
+                .join(".supercov/work")
+                .join(id)
+                .join("run-publication")
+                .exists()
+        );
+        sweep_trash(&root).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 

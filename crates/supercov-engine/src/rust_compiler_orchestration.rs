@@ -30,8 +30,8 @@ use crate::{
     rust_compiler_manifest::{NormalizedRustCompilerManifest, normalize_rust_compiler_candidates},
     rust_compiler_selection::{SelectedRustCompilerCompanion, select_rust_compiler_companion},
     rust_compiler_test_runner::{
-        RUST_CARGO_RUNNER_CONFIG_ENV, RUST_CARGO_RUNNER_VERSION, RustCargoRunnerConfig,
-        RustCargoRunnerUnit, read_cargo_runner_units,
+        RUST_CARGO_RUNNER_CONFIG_ENV, RUST_CARGO_RUNNER_VERSION, RustCargoRunnerArtifact,
+        RustCargoRunnerConfig, RustCargoRunnerUnit, read_cargo_runner_units,
     },
     rust_doctest::{
         RustdocOutcomeResolution, join_rustdoc_outcomes, read_rustdoc_outcome_units,
@@ -125,6 +125,7 @@ pub const RUSTDOC_ENGINE_PATH_ENV: &str = "SUPERCOV_RUSTDOC_ENGINE_PATH";
 const SHARED_RUNTIME_TEMPLATE: &str = include_str!("../runtime-assets/rust-mmap-runtime.rs");
 const SHARED_RUNTIME_EXPORTS: &str = r#"
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_ordinal_hit(ordinal: u64) { __supercov_shared_runtime::ordinal_hit(ordinal) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_active_context() -> u64 { __supercov_shared_runtime::active_context() }
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_enter_context(context_id: u64) -> u64 { __supercov_shared_runtime::enter_context(context_id) }
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_exit_context(previous: u64) { __supercov_shared_runtime::exit_context(previous) }
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_enter_assertion_context(id_high: u64, id_low: u32) -> u64 { __supercov_shared_runtime::enter_assertion_context(id_high, id_low) }
@@ -268,6 +269,7 @@ pub struct RustCompilerTestArtifact {
     pub target_name: String,
     pub target_kinds: Vec<String>,
     pub source_path: PathBuf,
+    pub test_harness: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -486,7 +488,7 @@ fn package_identity(
 
 fn nextest_artifacts(
     catalog: &TestListSummary,
-    metadata: CargoMetadataOutput,
+    metadata: &CargoMetadataOutput,
     target_directory: &Path,
     project_root: &Path,
 ) -> Result<Vec<RustCompilerTestArtifact>, RustCompilerOrchestrationError> {
@@ -496,8 +498,8 @@ fn nextest_artifacts(
         fs::canonicalize(project_root).map_err(|error| io_error(project_root, error))?;
     let packages = metadata
         .packages
-        .into_iter()
-        .map(|package| (package.id.clone(), package))
+        .iter()
+        .map(|package| (package.id.as_str(), package))
         .collect::<BTreeMap<_, _>>();
     let mut artifacts = Vec::new();
     for (binary_id, suite) in &catalog.rust_suites {
@@ -506,12 +508,14 @@ fn nextest_artifacts(
                 "nextest suite key disagrees with binary identity {binary_id}"
             )));
         }
-        let package = packages.get(&suite.binary.package_id).ok_or_else(|| {
-            RustCompilerOrchestrationError::CargoOutput(format!(
-                "nextest binary {binary_id} names an unknown Cargo package {}",
-                suite.binary.package_id
-            ))
-        })?;
+        let package = packages
+            .get(suite.binary.package_id.as_str())
+            .ok_or_else(|| {
+                RustCompilerOrchestrationError::CargoOutput(format!(
+                    "nextest binary {binary_id} names an unknown Cargo package {}",
+                    suite.binary.package_id
+                ))
+            })?;
         if package.name != suite.package_name {
             return Err(RustCompilerOrchestrationError::CargoOutput(format!(
                 "nextest binary {binary_id} package name disagrees with Cargo metadata"
@@ -559,6 +563,7 @@ fn nextest_artifacts(
             target_name: target.name.clone(),
             target_kinds: target.kind.clone(),
             source_path,
+            test_harness: true,
         });
     }
     artifacts.sort_by(|left, right| left.executable.cmp(&right.executable));
@@ -746,16 +751,14 @@ impl Drop for RemoveFileOnDrop {
     }
 }
 
-struct RuntimeBuildLock {
-    path: PathBuf,
-    file: Option<fs::File>,
-}
-
-impl Drop for RuntimeBuildLock {
-    fn drop(&mut self) {
-        drop(self.file.take());
-        let _ = fs::remove_file(&self.path);
-    }
+enum SharedRuntimeBuildFault {
+    None,
+    #[cfg(test)]
+    NoSpaceAfterCompile,
+    #[cfg(test)]
+    WaitAfterLock {
+        ready: PathBuf,
+    },
 }
 
 /// Compile the one process-wide Rust probe runtime with the exact rustc path
@@ -765,6 +768,14 @@ impl Drop for RuntimeBuildLock {
 pub fn prepare_shared_rust_runtime(
     rustc: &Path,
     directory: &Path,
+) -> Result<PathBuf, RustCompilerOrchestrationError> {
+    prepare_shared_rust_runtime_with_fault(rustc, directory, SharedRuntimeBuildFault::None)
+}
+
+fn prepare_shared_rust_runtime_with_fault(
+    rustc: &Path,
+    directory: &Path,
+    _fault: SharedRuntimeBuildFault,
 ) -> Result<PathBuf, RustCompilerOrchestrationError> {
     let metadata = fs::symlink_metadata(directory).map_err(|error| io_error(directory, error))?;
     if !metadata.file_type().is_dir() {
@@ -788,31 +799,32 @@ pub fn prepare_shared_rust_runtime(
     let started = Instant::now();
     loop {
         let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
+        options.read(true).write(true).create(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt as _;
             options.mode(0o600);
         }
-        match options.open(&lock) {
-            Ok(lock_file) => {
-                let mut lock_guard = RuntimeBuildLock {
-                    path: lock.clone(),
-                    file: Some(lock_file),
-                };
-                writeln!(
-                    lock_guard.file.as_mut().expect("runtime build lock file"),
-                    "{}",
-                    std::process::id()
-                )
-                .and_then(|()| {
-                    lock_guard
-                        .file
-                        .as_ref()
-                        .expect("runtime build lock file")
-                        .sync_all()
-                })
-                .map_err(|error| io_error(&lock, error))?;
+        let mut lock_file = options
+            .open(&lock)
+            .map_err(|error| io_error(&lock, error))?;
+        match lock_file.try_lock() {
+            Ok(()) => {
+                if valid_shared_runtime_archive(&archive) {
+                    return Ok(archive);
+                }
+                lock_file
+                    .set_len(0)
+                    .and_then(|()| writeln!(lock_file, "{}", std::process::id()))
+                    .and_then(|()| lock_file.sync_all())
+                    .map_err(|error| io_error(&lock, error))?;
+                #[cfg(test)]
+                if let SharedRuntimeBuildFault::WaitAfterLock { ready } = &_fault {
+                    fs::write(ready, b"locked\n").map_err(|error| io_error(ready, error))?;
+                    loop {
+                        thread::sleep(Duration::from_secs(1));
+                    }
+                }
                 let partial = directory.join(format!(
                     ".supercov-runtime-{}-{}.partial",
                     std::process::id(),
@@ -840,6 +852,13 @@ pub fn prepare_shared_rust_runtime(
                     .map_err(|error| io_error(rustc, error));
                 let result = match output {
                     Ok(output) if output.status.success() => {
+                        #[cfg(test)]
+                        if matches!(_fault, SharedRuntimeBuildFault::NoSpaceAfterCompile) {
+                            return Err(io_error(
+                                &partial,
+                                io::Error::from_raw_os_error(libc::ENOSPC),
+                            ));
+                        }
                         let file = OpenOptions::new()
                             .read(true)
                             .open(&partial)
@@ -860,7 +879,7 @@ pub fn prepare_shared_rust_runtime(
                 };
                 return result;
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(fs::TryLockError::WouldBlock) => {
                 if valid_shared_runtime_archive(&archive) {
                     return Ok(archive);
                 }
@@ -872,7 +891,7 @@ pub fn prepare_shared_rust_runtime(
                 }
                 thread::sleep(Duration::from_millis(10));
             }
-            Err(error) => return Err(io_error(&lock, error)),
+            Err(fs::TryLockError::Error(error)) => return Err(io_error(&lock, error)),
         }
     }
 }
@@ -1079,12 +1098,14 @@ fn cargo_artifacts(
                 package_root.display()
             )));
         };
+        let test_harness = cargo_target_uses_test_harness(&manifest, &target)?;
         artifacts.push(RustCompilerTestArtifact {
             executable,
             package,
             target_name: target.name,
             target_kinds: target.kind,
             source_path: target.src_path,
+            test_harness,
         });
     }
     artifacts.sort_by(|left, right| left.executable.cmp(&right.executable));
@@ -1095,6 +1116,62 @@ fn cargo_artifacts(
         ));
     }
     Ok(artifacts)
+}
+
+fn cargo_target_uses_test_harness(
+    manifest: &Path,
+    target: &CargoTarget,
+) -> Result<bool, RustCompilerOrchestrationError> {
+    let source = fs::read_to_string(manifest).map_err(|error| io_error(manifest, error))?;
+    let document = toml::from_str::<toml::Value>(&source).map_err(|error| {
+        RustCompilerOrchestrationError::CargoOutput(format!(
+            "cannot classify test harness from {}: {error}",
+            manifest.display()
+        ))
+    })?;
+    let kind = match target.kind.as_slice() {
+        [kind] => kind.as_str(),
+        _ => {
+            return Err(RustCompilerOrchestrationError::CargoOutput(format!(
+                "Cargo target {} has ambiguous target kinds: {}",
+                target.name,
+                target.kind.join(", ")
+            )));
+        }
+    };
+    let harness = match kind {
+        "lib" | "proc-macro" => document
+            .get("lib")
+            .and_then(toml::Value::as_table)
+            .and_then(|table| table.get("harness")),
+        "bin" | "test" | "bench" | "example" => document
+            .get(kind)
+            .and_then(toml::Value::as_array)
+            .and_then(|targets| {
+                targets.iter().find_map(|candidate| {
+                    let table = candidate.as_table()?;
+                    (table.get("name")?.as_str()? == target.name)
+                        .then(|| table.get("harness"))
+                        .flatten()
+                })
+            }),
+        _ => {
+            return Err(RustCompilerOrchestrationError::CargoOutput(format!(
+                "Cargo test artifact {} has unsupported target kind {kind}",
+                target.name
+            )));
+        }
+    };
+    match harness {
+        None => Ok(true),
+        Some(value) => value.as_bool().ok_or_else(|| {
+            RustCompilerOrchestrationError::CargoOutput(format!(
+                "Cargo target {} has a non-Boolean harness setting in {}",
+                target.name,
+                manifest.display()
+            ))
+        }),
+    }
 }
 
 fn rendered_cargo_diagnostics(stdout: &[u8]) -> String {
@@ -1183,17 +1260,19 @@ pub fn build_with_rust_compiler_companion_supervised(
             original_wrapper_environment: RustCompilerWrapperEnvironment::capture(),
         },
     )?;
-    let cargo_runner_config_path = compiler_output_directory.join("cargo-runner.json");
+    let cargo_runner_list_config_path = compiler_output_directory.join("cargo-runner-list.json");
     write_json_config(
-        &cargo_runner_config_path,
+        &cargo_runner_list_config_path,
         &RustCargoRunnerConfig {
             version: RUST_CARGO_RUNNER_VERSION,
             run_id: request.run_id.clone(),
             target_directory: target_directory.clone(),
             output_directory: cargo_runner_directory.clone(),
-            target_runners,
+            target_runners: target_runners.clone(),
+            artifacts: Vec::new(),
         },
     )?;
+    let cargo_runner_config_path = compiler_output_directory.join("cargo-runner.json");
 
     let mut invocation = cargo_invocation(&project_root, &request.command)
         .map_err(|error| RustCompilerOrchestrationError::InvalidRequest(error.to_string()))?;
@@ -1301,7 +1380,7 @@ pub fn build_with_rust_compiler_companion_supervised(
                         ),
                         (
                             OsString::from(RUST_CARGO_RUNNER_CONFIG_ENV),
-                            cargo_runner_config_path.clone().into_os_string(),
+                            cargo_runner_list_config_path.clone().into_os_string(),
                         ),
                     ])),
                     captured_output: None,
@@ -1438,6 +1517,39 @@ pub fn build_with_rust_compiler_companion_supervised(
     } else {
         None
     };
+    let cargo_test_artifacts = output
+        .as_ref()
+        .map(|output| cargo_artifacts(&output.stdout, &target_directory, &project_root))
+        .transpose()?
+        .unwrap_or_default();
+    let planned_artifacts = match (&nextest_catalog, &nextest_metadata) {
+        (Some(catalog), Some(metadata)) => {
+            nextest_artifacts(catalog, metadata, &target_directory, &project_root)?
+        }
+        (None, None) => cargo_test_artifacts,
+        _ => {
+            return Err(RustCompilerOrchestrationError::CargoOutput(
+                "nextest catalog and Cargo metadata were only partially captured".into(),
+            ));
+        }
+    };
+    write_json_config(
+        &cargo_runner_config_path,
+        &RustCargoRunnerConfig {
+            version: RUST_CARGO_RUNNER_VERSION,
+            run_id: request.run_id.clone(),
+            target_directory: target_directory.clone(),
+            output_directory: cargo_runner_directory.clone(),
+            target_runners,
+            artifacts: planned_artifacts
+                .iter()
+                .map(|artifact| RustCargoRunnerArtifact {
+                    executable: artifact.executable.clone(),
+                    test_harness: artifact.test_harness,
+                })
+                .collect(),
+        },
+    )?;
     let mut full_arguments = execution_arguments;
     full_arguments.extend(cargo_runner_configuration_arguments(
         &wrapper,
@@ -1544,21 +1656,7 @@ pub fn build_with_rust_compiler_companion_supervised(
     }
     let doctest_outcomes = join_rustdoc_outcomes(resolved.merged_units, doctest_outcomes)
         .map_err(|error| RustCompilerOrchestrationError::CompilerOutput(error.to_string()))?;
-    let artifacts = match (&nextest_catalog, nextest_metadata) {
-        (Some(catalog), Some(metadata)) => {
-            nextest_artifacts(catalog, metadata, &target_directory, &project_root)?
-        }
-        (None, None) => output
-            .as_ref()
-            .map(|output| cargo_artifacts(&output.stdout, &target_directory, &project_root))
-            .transpose()?
-            .unwrap_or_default(),
-        _ => {
-            return Err(RustCompilerOrchestrationError::CargoOutput(
-                "nextest catalog and Cargo metadata were only partially captured".into(),
-            ));
-        }
-    };
+    let artifacts = planned_artifacts;
     let expected_targets = request
         .cargo_runner_plan
         .targets
@@ -1708,6 +1806,7 @@ mod tests {
         assert_eq!(
             names,
             BTreeSet::from([
+                "build.lock".into(),
                 "runtime.rs".into(),
                 archives[0]
                     .file_name()
@@ -1720,7 +1819,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_shared_runtime_builder_leaves_no_lock_or_partial_archive() {
+    fn failed_shared_runtime_builder_releases_lock_and_leaves_no_partial_archive() {
         let directory = TemporaryDirectory::new();
         write_shared_runtime_source(&directory.0).unwrap();
         let missing_rustc = directory.0.join("missing-rustc");
@@ -1730,7 +1829,111 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect::<BTreeSet<_>>();
-        assert_eq!(names, BTreeSet::from(["runtime.rs".into()]));
+        assert_eq!(
+            names,
+            BTreeSet::from(["build.lock".into(), "runtime.rs".into()])
+        );
+        let recovery_started = Instant::now();
+        let archive = prepare_shared_rust_runtime(Path::new("rustc"), &directory.0).unwrap();
+        assert!(recovery_started.elapsed() < Duration::from_secs(5));
+        assert!(valid_shared_runtime_archive(&archive));
+    }
+
+    #[test]
+    fn shared_runtime_enospc_is_recoverable_without_partial_archive() {
+        let directory = TemporaryDirectory::new();
+        write_shared_runtime_source(&directory.0).unwrap();
+        let error = prepare_shared_rust_runtime_with_fault(
+            Path::new("rustc"),
+            &directory.0,
+            SharedRuntimeBuildFault::NoSpaceAfterCompile,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            RustCompilerOrchestrationError::Io { reason, .. }
+                if reason == io::Error::from_raw_os_error(libc::ENOSPC).to_string()
+        ));
+        assert!(!valid_shared_runtime_archive(&shared_runtime_archive(
+            &directory.0
+        )));
+        assert!(fs::read_dir(&directory.0).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".partial")
+        }));
+
+        let archive = prepare_shared_rust_runtime(Path::new("rustc"), &directory.0).unwrap();
+        assert!(valid_shared_runtime_archive(&archive));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_runtime_lock_holder_helper() {
+        let Some(directory) = std::env::var_os("SUPERCOV_TEST_RUNTIME_LOCK_DIRECTORY") else {
+            return;
+        };
+        let ready = std::env::var_os("SUPERCOV_TEST_RUNTIME_LOCK_READY")
+            .expect("runtime lock helper ready path");
+        let _ = prepare_shared_rust_runtime_with_fault(
+            Path::new("rustc"),
+            Path::new(&directory),
+            SharedRuntimeBuildFault::WaitAfterLock {
+                ready: PathBuf::from(ready),
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn killed_shared_runtime_builder_releases_lock_immediately() {
+        use std::process::Stdio;
+
+        let directory = TemporaryDirectory::new();
+        write_shared_runtime_source(&directory.0).unwrap();
+        let ready = directory.0.join("builder-ready");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "rust_compiler_orchestration::tests::shared_runtime_lock_holder_helper",
+                "--nocapture",
+            ])
+            .env("SUPERCOV_TEST_RUNTIME_LOCK_DIRECTORY", &directory.0)
+            .env("SUPERCOV_TEST_RUNTIME_LOCK_READY", &ready)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let wait_started = Instant::now();
+        while !ready.is_file() {
+            assert!(
+                wait_started.elapsed() < Duration::from_secs(10),
+                "runtime lock helper did not acquire its kernel lock"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            unsafe { libc::kill(child.id().try_into().unwrap(), libc::SIGKILL) },
+            0
+        );
+        let status = child.wait().unwrap();
+        assert_eq!(status.code(), None);
+        fs::remove_file(&ready).unwrap();
+
+        let recovery_started = Instant::now();
+        let archive = prepare_shared_rust_runtime(Path::new("rustc"), &directory.0).unwrap();
+        assert!(recovery_started.elapsed() < Duration::from_secs(5));
+        assert!(valid_shared_runtime_archive(&archive));
+        assert!(fs::read_dir(&directory.0).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".partial")
+        }));
     }
 
     #[test]
@@ -1799,6 +2002,40 @@ mod tests {
                 .collect::<Vec<_>>(),
             "package identities changed when the workspace moved"
         );
+    }
+
+    #[test]
+    fn cargo_manifest_classifies_only_the_selected_custom_harness() {
+        let directory = TemporaryDirectory::new();
+        let manifest = directory.0.join("Cargo.toml");
+        fs::write(
+            &manifest,
+            r#"
+[package]
+name = "fixture"
+version = "0.0.0"
+
+[lib]
+harness = true
+
+[[test]]
+name = "custom"
+harness = false
+
+[[test]]
+name = "ordinary"
+"#,
+        )
+        .unwrap();
+        let target = |name: &str, kind: &str| CargoTarget {
+            name: name.into(),
+            kind: vec![kind.into()],
+            src_path: directory.0.join("unused.rs"),
+        };
+        assert!(cargo_target_uses_test_harness(&manifest, &target("fixture", "lib")).unwrap());
+        assert!(!cargo_target_uses_test_harness(&manifest, &target("custom", "test")).unwrap());
+        assert!(cargo_target_uses_test_harness(&manifest, &target("ordinary", "test")).unwrap());
+        assert!(cargo_target_uses_test_harness(&manifest, &target("implicit", "test")).unwrap());
     }
 
     #[test]

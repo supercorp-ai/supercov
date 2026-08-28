@@ -71,6 +71,46 @@
       "stressIteration": "distinct-axis-unsupported-fail-closed"
     }
   },
+  "libtestEventTransport": {
+    "protocolVersion": 1,
+    "status": "frozen-private-frontend",
+    "magic": "SCVLTST1",
+    "byteOrder": "little-endian",
+    "headerSize": 64,
+    "recordHeaderSize": 48,
+    "tokenSize": 16,
+    "maximumNameBytes": 1048576,
+    "writer": "exact-toolchain-libtest-console-callback",
+    "eventKinds": ["filtered-out", "filtered", "started", "timeout", "finished"],
+    "terminalResults": ["passed", "failed", "ignored", "benchmarked"],
+    "publication": "append-complete-record-then-flush-before-stock-event-handling",
+    "sequence": "zero-based-strictly-contiguous",
+    "integrity": "token-bound-fnv1a-64",
+    "unknownEvent": "fatal",
+    "truncatedRecord": "fatal",
+    "invalidSemantics": "fatal",
+    "missingTransport": "fatal",
+    "processModel": "one-stock-libtest-process-per-artifact",
+    "outputAuthority": "unmodified-selected-toolchain-libtest",
+    "artifactBinding": {
+      "schemaVersion": 2,
+      "manifestSuffix": ".libtest.json",
+      "digest": "sha256",
+      "requiredBindings": [
+        "compilerCompanionBuildId",
+        "rustcCommitHash",
+        "hostTriple",
+        "eventProtocolVersion",
+        "originalSourceSha256",
+        "eventRuntimeSha256",
+        "patchedSourceSha256",
+        "artifactSha256"
+      ],
+      "artifactLocation": "same-directory-basename-only",
+      "unknownFieldsFatal": true,
+      "mismatch": "fatal-before-test-build"
+    }
+  },
   "pointKinds": ["statement", "function"],
   "controlDecisionKinds": [
     "if",

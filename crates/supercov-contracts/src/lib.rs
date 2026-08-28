@@ -36,6 +36,13 @@ pub const RUST_PROBE_TRANSPORT_V2_MAGIC: &str = "SCVRUST2";
 pub const RUST_PROBE_TRANSPORT_HEADER_SIZE: usize = 128;
 pub const RUST_PROBE_TRANSPORT_DESCRIPTOR_SIZE: usize = 40;
 pub const RUST_PROBE_TRANSPORT_TOKEN_SIZE: usize = 16;
+pub const RUST_LIBTEST_EVENT_PROTOCOL_VERSION: u32 = 1;
+pub const RUST_LIBTEST_EVENT_MAGIC: &str = "SCVLTST1";
+pub const RUST_LIBTEST_EVENT_HEADER_SIZE: usize = 64;
+pub const RUST_LIBTEST_EVENT_RECORD_HEADER_SIZE: usize = 48;
+pub const RUST_LIBTEST_EVENT_TOKEN_SIZE: usize = 16;
+pub const RUST_LIBTEST_EVENT_MAX_NAME_BYTES: usize = 1_048_576;
+pub const RUST_LIBTEST_COMPANION_BUNDLE_SCHEMA_VERSION: u32 = 2;
 
 pub const ERROR_CODES: &[&str] = &[
     "AMBIGUOUS_SELECTOR",
@@ -291,6 +298,7 @@ pub struct RustCoverageV1Contract {
     pub source_identity: RustSourceIdentityContract,
     pub test_context_identity: RustTestContextIdentityContract,
     pub runner_attempt_identity: RustRunnerAttemptIdentityContract,
+    pub libtest_event_transport: RustLibtestEventTransportContract,
     pub point_kinds: Vec<String>,
     pub control_decision_kinds: Vec<String>,
     pub branch_kinds: Vec<String>,
@@ -298,6 +306,44 @@ pub struct RustCoverageV1Contract {
     pub required_identity_axes: Vec<String>,
     pub completeness_requires: Vec<String>,
     pub external_coverage_in_product: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustLibtestEventTransportContract {
+    pub protocol_version: u32,
+    pub status: String,
+    pub magic: String,
+    pub byte_order: String,
+    pub header_size: usize,
+    pub record_header_size: usize,
+    pub token_size: usize,
+    pub maximum_name_bytes: usize,
+    pub writer: String,
+    pub event_kinds: Vec<String>,
+    pub terminal_results: Vec<String>,
+    pub publication: String,
+    pub sequence: String,
+    pub integrity: String,
+    pub unknown_event: String,
+    pub truncated_record: String,
+    pub invalid_semantics: String,
+    pub missing_transport: String,
+    pub process_model: String,
+    pub output_authority: String,
+    pub artifact_binding: RustLibtestArtifactBindingContract,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustLibtestArtifactBindingContract {
+    pub schema_version: u32,
+    pub manifest_suffix: String,
+    pub digest: String,
+    pub required_bindings: Vec<String>,
+    pub artifact_location: String,
+    pub unknown_fields_fatal: bool,
+    pub mismatch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1463,6 +1509,75 @@ mod tests {
         );
         assert_eq!(contract.runner_attempt_identity.rustdoc.retry, 0);
         assert_eq!(contract.runner_attempt_identity.rustdoc.total_attempts, 1);
+        assert_eq!(
+            contract.libtest_event_transport.protocol_version,
+            RUST_LIBTEST_EVENT_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            contract.libtest_event_transport.magic,
+            RUST_LIBTEST_EVENT_MAGIC
+        );
+        assert_eq!(
+            contract.libtest_event_transport.header_size,
+            RUST_LIBTEST_EVENT_HEADER_SIZE
+        );
+        assert_eq!(
+            contract.libtest_event_transport.record_header_size,
+            RUST_LIBTEST_EVENT_RECORD_HEADER_SIZE
+        );
+        assert_eq!(
+            contract.libtest_event_transport.token_size,
+            RUST_LIBTEST_EVENT_TOKEN_SIZE
+        );
+        assert_eq!(
+            contract.libtest_event_transport.maximum_name_bytes,
+            RUST_LIBTEST_EVENT_MAX_NAME_BYTES
+        );
+        assert_eq!(
+            contract.libtest_event_transport.event_kinds,
+            ["filtered-out", "filtered", "started", "timeout", "finished"]
+        );
+        assert_eq!(
+            contract.libtest_event_transport.terminal_results,
+            ["passed", "failed", "ignored", "benchmarked"]
+        );
+        assert_eq!(
+            contract.libtest_event_transport.process_model,
+            "one-stock-libtest-process-per-artifact"
+        );
+        assert_eq!(
+            contract.libtest_event_transport.output_authority,
+            "unmodified-selected-toolchain-libtest"
+        );
+        assert_eq!(
+            contract
+                .libtest_event_transport
+                .artifact_binding
+                .schema_version,
+            RUST_LIBTEST_COMPANION_BUNDLE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            contract
+                .libtest_event_transport
+                .artifact_binding
+                .required_bindings,
+            [
+                "compilerCompanionBuildId",
+                "rustcCommitHash",
+                "hostTriple",
+                "eventProtocolVersion",
+                "originalSourceSha256",
+                "eventRuntimeSha256",
+                "patchedSourceSha256",
+                "artifactSha256",
+            ]
+        );
+        assert!(
+            contract
+                .libtest_event_transport
+                .artifact_binding
+                .unknown_fields_fatal
+        );
         assert_eq!(
             contract.runner_attempt_identity.nextest.minimum_version,
             "0.9.138"

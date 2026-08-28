@@ -15,6 +15,7 @@ default = []
 oracle-harnesses = []
 
 [dependencies]
+ar_archive_writer.workspace = true
 base64.workspace = true
 cargo-platform.workspace = true
 cargo-config2.workspace = true
@@ -23,6 +24,7 @@ getrandom.workspace = true
 libc.workspace = true
 memmap2.workspace = true
 nextest-metadata.workspace = true
+object.workspace = true
 reflink-copy.workspace = true
 ra_ap_syntax.workspace = true
 ruff_python_ast.workspace = true

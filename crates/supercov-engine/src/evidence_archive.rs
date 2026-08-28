@@ -159,6 +159,56 @@ struct CountingWriter<W> {
     written: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvidenceArchiveWriteFault {
+    NoSpaceAfterBytes(u64),
+}
+
+struct FaultingWriter<W> {
+    inner: W,
+    fault: Option<EvidenceArchiveWriteFault>,
+    written: u64,
+}
+
+impl<W> FaultingWriter<W> {
+    fn new(inner: W, fault: Option<EvidenceArchiveWriteFault>) -> Self {
+        Self {
+            inner,
+            fault,
+            written: 0,
+        }
+    }
+}
+
+impl<W: Write> Write for FaultingWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let allowed = match self.fault {
+            Some(EvidenceArchiveWriteFault::NoSpaceAfterBytes(limit)) => {
+                if self.written >= limit {
+                    return Err(io::Error::new(
+                        io::ErrorKind::StorageFull,
+                        "injected ENOSPC while writing evidence archive",
+                    ));
+                }
+                usize::try_from(limit - self.written)
+                    .unwrap_or(usize::MAX)
+                    .min(buffer.len())
+            }
+            None => buffer.len(),
+        };
+        let written = self.inner.write(&buffer[..allowed])?;
+        self.written = self
+            .written
+            .checked_add(written as u64)
+            .ok_or_else(|| io::Error::other("evidence archive size overflow"))?;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 impl<W> CountingWriter<W> {
     fn new(inner: W) -> Self {
         Self { inner, written: 0 }
@@ -374,6 +424,31 @@ pub fn write_archive(
         destination,
         EVIDENCE_ARCHIVE_SCHEMA_VERSION,
         EVIDENCE_ARCHIVE_MAGIC,
+        None,
+    )
+}
+
+pub(crate) fn write_archive_with_fault(
+    entries: Vec<EvidenceArchiveEntry>,
+    destination: &Path,
+    fault: EvidenceArchiveWriteFault,
+) -> Result<EvidenceArchiveMetadata, EvidenceArchiveError> {
+    let paths = entries
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect::<BTreeSet<_>>();
+    if !paths.contains("frontend.json") {
+        return Err(EvidenceArchiveError::MissingFrontend);
+    }
+    if !paths.contains("coverage-model.json") {
+        return Err(EvidenceArchiveError::MissingCoverageModel);
+    }
+    write_archive_version(
+        entries,
+        destination,
+        EVIDENCE_ARCHIVE_SCHEMA_VERSION,
+        EVIDENCE_ARCHIVE_MAGIC,
+        Some(fault),
     )
 }
 
@@ -382,6 +457,7 @@ fn write_archive_version(
     destination: &Path,
     schema_version: u32,
     magic: &str,
+    fault: Option<EvidenceArchiveWriteFault>,
 ) -> Result<EvidenceArchiveMetadata, EvidenceArchiveError> {
     let entries = canonicalize_entries(entries)?;
     let parent = destination
@@ -404,16 +480,17 @@ fn write_archive_version(
     };
 
     let result = (|| {
-        let buffered = BufWriter::new(file);
+        let buffered = BufWriter::new(FaultingWriter::new(file, fault));
         let gzip = GzBuilder::new()
             .mtime(0)
             .operating_system(255)
             .write(buffered, Compression::best());
         let (gzip, uncompressed_bytes) = write_framed_with_magic(&entries, gzip, magic)?;
         let buffered = gzip.finish()?;
-        let file = buffered
+        let faulting = buffered
             .into_inner()
             .map_err(|error| EvidenceArchiveError::Io(error.into_error()))?;
+        let file = faulting.inner;
         file.sync_all()?;
         let compressed_bytes = file.metadata()?.len();
         drop(file);
@@ -646,6 +723,26 @@ mod tests {
                 entry("𐀀/result.bin", &[0, 255, b'\n']),
             ],
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn injected_enospc_removes_partial_archive_and_preserves_no_destination() {
+        let root = temporary_directory("archive-enospc");
+        let destination = root.join("evidence.raw.gz");
+        let error = write_archive_with_fault(
+            identity_entries(),
+            &destination,
+            EvidenceArchiveWriteFault::NoSpaceAfterBytes(8),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            EvidenceArchiveError::Io(ref source)
+                if source.kind() == io::ErrorKind::StorageFull
+        ));
+        assert!(!destination.exists());
+        assert!(fs::read_dir(&root).unwrap().next().is_none());
         fs::remove_dir_all(root).unwrap();
     }
 

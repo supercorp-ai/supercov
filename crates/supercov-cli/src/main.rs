@@ -258,6 +258,8 @@ fn main() -> ExitCode {
         Some("__publish-rustdoc-outcome") => publish_rustdoc_outcome(arguments.collect()),
         Some("__project-rust-compiler-evidence") => project_rust_compiler_evidence(),
         Some("__select-rust-compiler-companion") => select_rust_compiler_companion(),
+        Some("__prepare-rust-libtest-source") => prepare_rust_libtest_source(arguments.collect()),
+        Some("__build-rust-libtest-companion") => build_rust_libtest_companion(arguments.collect()),
         Some("__build-rust-compiler") => build_rust_compiler(),
         Some("__run-rust-compiler") => run_rust_compiler(),
         Some("clean") => cleanup_command(arguments.collect()),
@@ -267,6 +269,67 @@ fn main() -> ExitCode {
         Some("merge") => merge_command(arguments.collect()),
         Some(command) => {
             eprintln!("[supercov] Unknown command: {command}. Try supercov help.");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn prepare_rust_libtest_source(arguments: Vec<String>) -> ExitCode {
+    let result = (|| -> Result<(), String> {
+        let [source_root, destination, rustc] = arguments.as_slice() else {
+            return Err(
+                "__prepare-rust-libtest-source requires SOURCE_ROOT DESTINATION RUSTC".into(),
+            );
+        };
+        let compiler =
+            supercov_engine::rust_compiler_selection::probe_rustc_identity(Path::new(rustc))
+                .map_err(|error| error.to_string())?;
+        let identity = supercov_engine::rust_libtest_companion::prepare_exact_libtest_source(
+            Path::new(source_root),
+            Path::new(destination),
+            &compiler,
+        )
+        .map_err(|error| error.to_string())?;
+        println!(
+            "{}",
+            serde_json::to_string(&identity).map_err(|error| error.to_string())?
+        );
+        Ok(())
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn build_rust_libtest_companion(arguments: Vec<String>) -> ExitCode {
+    let result = (|| -> Result<(), String> {
+        let [source_root, work_root, rustc, compiler_companion] = arguments.as_slice() else {
+            return Err(
+                "__build-rust-libtest-companion requires SOURCE_ROOT WORK_ROOT RUSTC COMPILER_COMPANION"
+                    .into(),
+            );
+        };
+        let selected = supercov_engine::rust_libtest_companion::build_exact_rust_libtest_companion(
+            Path::new(source_root),
+            Path::new(work_root),
+            Path::new(rustc),
+            Path::new(compiler_companion),
+        )
+        .map_err(|error| error.to_string())?;
+        println!(
+            "{}",
+            serde_json::to_string(&selected.bundle).map_err(|error| error.to_string())?
+        );
+        Ok(())
+    })();
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("[supercov] {error}");
             ExitCode::from(2)
         }
     }
@@ -610,7 +673,47 @@ fn execute_compiler_command(mut command: Command) -> Result<ExitCode, String> {
     }
 }
 
-fn rust_compiler_inner(arguments: Vec<OsString>) -> ExitCode {
+fn is_test_extern(value: &OsStr) -> bool {
+    let value = value.to_string_lossy();
+    value
+        .split_once('=')
+        .map_or(value.as_ref(), |(name, _)| name)
+        .split(':')
+        .next_back()
+        == Some("test")
+}
+
+fn rustc_builds_test_harness(arguments: &[OsString]) -> Result<bool, String> {
+    let builds_harness = arguments.iter().any(|argument| argument == "--test");
+    if !builds_harness {
+        return Ok(false);
+    }
+    let mut index = 0;
+    while index < arguments.len() {
+        let argument = &arguments[index];
+        let existing_test = if argument == "--extern" {
+            index += 1;
+            arguments
+                .get(index)
+                .is_some_and(|value| is_test_extern(value))
+        } else {
+            argument
+                .to_string_lossy()
+                .strip_prefix("--extern=")
+                .is_some_and(|value| is_test_extern(OsStr::new(value)))
+        };
+        if existing_test {
+            return Err(
+                "a Cargo test-harness compiler invocation already supplies an external `test` crate"
+                    .into(),
+            );
+        }
+        index += 1;
+    }
+    Ok(true)
+}
+
+fn rust_compiler_inner(mut arguments: Vec<OsString>) -> ExitCode {
     let result = (|| -> Result<ExitCode, String> {
         let config = load_rust_compiler_wrapper_config()?;
         let rustc = std::env::var_os(
@@ -623,6 +726,13 @@ fn rust_compiler_inner(arguments: Vec<OsString>) -> ExitCode {
             config.require_public_capabilities,
         )
         .map_err(|error| error.to_string())?;
+        if rustc_builds_test_harness(&arguments)? {
+            let libtest =
+                supercov_engine::rust_libtest_companion::select_rust_libtest_companion(&selection)
+                    .map_err(|error| error.to_string())?;
+            arguments.push("--extern".into());
+            arguments.push(format!("test={}", libtest.artifact_path.display()).into());
+        }
 
         let mut command = Command::new(&selection.companion_path);
         command
@@ -816,6 +926,30 @@ fn run_rust_compiler() -> ExitCode {
     request.watchdog_program = std::env::current_exe()
         .ok()
         .and_then(|path| fs::canonicalize(path).ok());
+    request.publication_fault = match std::env::var("SUPERCOV_RUSTC_SPIKE_PUBLICATION_FAULT") {
+        Ok(_) if request.require_public_capabilities => {
+            eprintln!("[supercov] Rust compiler publication faults are private spike-only inputs");
+            return ExitCode::from(2);
+        }
+        Ok(value) if value == "archive-enospc" => {
+            Some(supercov_engine::rust_compiler_run::RustCompilerPublicationFault::ArchiveEnospc)
+        }
+        Ok(value) if value == "final-rename" => {
+            Some(supercov_engine::rust_compiler_run::RustCompilerPublicationFault::FinalRename)
+        }
+        Ok(value) if value == "wait-before-publication" => Some(
+            supercov_engine::rust_compiler_run::RustCompilerPublicationFault::WaitBeforePublication,
+        ),
+        Ok(value) => {
+            eprintln!("[supercov] unknown Rust compiler publication fault: {value}");
+            return ExitCode::from(2);
+        }
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => {
+            eprintln!("[supercov] invalid Rust compiler publication fault: {error}");
+            return ExitCode::from(2);
+        }
+    };
     let run = match supercov_engine::rust_compiler_run::run_direct_rust_compiler(
         &request,
         &mut std::io::stderr(),
@@ -3277,6 +3411,36 @@ mod tests {
             "@rustdoc-arguments"
         )));
         assert!(!is_executable_wrapper_program(OsStr::new("Cargo.toml")));
+    }
+
+    #[test]
+    fn exact_libtest_injection_selects_only_unclaimed_test_harness_units() {
+        assert!(
+            rustc_builds_test_harness(&["--crate-name".into(), "fixture".into(), "--test".into(),])
+                .unwrap()
+        );
+        assert!(
+            !rustc_builds_test_harness(&[
+                "--crate-name".into(),
+                "dependency".into(),
+                "--crate-type=lib".into(),
+            ])
+            .unwrap()
+        );
+        for existing in [
+            vec![
+                "--test".into(),
+                "--extern".into(),
+                "test=/tmp/libtest.rlib".into(),
+            ],
+            vec!["--test".into(), "--extern=test=/tmp/libtest.rlib".into()],
+            vec![
+                "--test".into(),
+                "--extern=noprelude:priv:test=/tmp/libtest.rlib".into(),
+            ],
+        ] {
+            assert!(rustc_builds_test_harness(&existing).is_err());
+        }
     }
 
     #[test]

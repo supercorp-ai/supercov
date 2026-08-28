@@ -9,6 +9,16 @@ const repository = resolve(import.meta.dirname, "..");
 const manifest = JSON.parse(readFileSync(resolve(repository, "package.json"), "utf8"));
 const launcher = readFileSync(resolve(repository, "bin/supercov.js"), "utf8");
 const runtime = resolve(repository, "runtime/javascript");
+const forbiddenProductOracle =
+  /(?:\bllvm-(?:cov|profdata)\b|\bgcov\b|\blcov\b|\bcoverage\.py\b|-Cinstrument-coverage)/;
+
+function sourceFiles(root, extension) {
+  return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
+    const path = resolve(root, entry.name);
+    if (entry.isDirectory()) return sourceFiles(path, extension);
+    return entry.isFile() && entry.name.endsWith(extension) ? [path] : [];
+  });
+}
 
 assert.deepEqual(manifest.files, ["bin", "runtime/javascript", "docs", "README.md"]);
 assert.equal(manifest.dependencies, undefined, "the npm launcher must have no engine dependencies");
@@ -37,6 +47,48 @@ for (const name of runtimeFiles) {
   assert.equal(checked.status, 0, `${name} is invalid JavaScript:\n${checked.stderr}`);
 }
 
+// Independent coverage implementations are development oracles only. A user
+// run must never shell out to them or enable compiler-native coverage. Keep
+// this audit over every product Rust source and every shipped executable shim;
+// oracle harnesses live in scripts/tests or behind the explicitly non-default
+// `oracle-harnesses` feature.
+const productSources = [
+  resolve(repository, "bin/supercov.js"),
+  ...runtimeFiles.map((name) => resolve(runtime, name)),
+  ...sourceFiles(resolve(repository, "crates/supercov-cli/src"), ".rs"),
+  ...sourceFiles(resolve(repository, "crates/supercov-engine/src"), ".rs").filter(
+    (path) => !path.endsWith("/python_frontend.rs"),
+  ),
+  ...sourceFiles(
+    resolve(repository, "crates/supercov-engine/runtime-assets"),
+    ".rs",
+  ),
+];
+for (const path of productSources) {
+  assert.doesNotMatch(
+    readFileSync(path, "utf8"),
+    forbiddenProductOracle,
+    `${path} invokes or embeds a development-only coverage oracle`,
+  );
+}
+const engineLibrary = readFileSync(
+  resolve(repository, "crates/supercov-engine/src/lib.rs"),
+  "utf8",
+);
+assert.match(
+  engineLibrary,
+  /#\[cfg\(any\(test, feature = "oracle-harnesses"\)\)\]\s*pub mod python_frontend;/,
+  "the coverage.py importer must remain unavailable to normal product builds",
+);
+const engineManifest = readFileSync(
+  resolve(repository, "crates/supercov-engine/Cargo.toml"),
+  "utf8",
+);
+assert.match(
+  engineManifest,
+  /\[features\]\s*default = \[\]\s*oracle-harnesses = \[\]/,
+);
+
 for (const [subpath, path] of Object.entries(manifest.exports)) {
   assert(existsSync(resolve(repository, path)), `missing npm export ${subpath}: ${path}`);
 }
@@ -46,5 +98,5 @@ for (const [name, version] of Object.entries(manifest.optionalDependencies ?? {}
 }
 
 console.log(
-  `[package-preflight] Rust-only launcher, ${runtimeFiles.length} target-language shims, no legacy engine dependencies`,
+  `[package-preflight] Rust-only launcher, ${runtimeFiles.length} target-language shims, no legacy engine or product-oracle dependencies`,
 );

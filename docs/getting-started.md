@@ -1,8 +1,8 @@
 # Getting started
 
-Supercov measures coverage completeness for a JavaScript or TypeScript test
-suite without changing the suite. There is no config file to add, no import to
-insert, and no reporter to register: you prefix the command you already run.
+Supercov measures coverage for JavaScript, TypeScript, and Rust test suites.
+Prefix the command you already run; no config file, import, or reporter is
+required.
 
 ```sh
 npx supercov -- npm test

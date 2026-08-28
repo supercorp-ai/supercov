@@ -1,9 +1,11 @@
-//! Private process-per-test execution for compiler-instrumented Rust artifacts.
+//! Private execution and attribution for compiler-instrumented Rust artifacts.
 //!
 //! The compiler frontend freezes the complete denominator before this module
-//! launches anything. Every libtest attempt receives its own authenticated,
-//! bounded mmap transport and deterministic context. Context-zero records are
-//! retained as background results and are never credited to the test.
+//! launches anything. Ordinary Cargo artifacts run once under the selected
+//! toolchain's exact libtest companion and share one authenticated mmap whose
+//! dynamic contexts are partitioned by test. Nextest attempts and opaque
+//! custom harnesses retain their intrinsic process boundary. Context-zero
+//! records are always published as invocation background, never as test work.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -48,10 +50,15 @@ use crate::{
         RustCompilerBuild, RustCompilerBuildRequest, RustCompilerTestArtifact,
     },
     rust_doctest::{RustdocJoinedOutcomeState, RustdocOutcomeResolution, RustdocOutcomeStatus},
+    rust_libtest_events::{
+        RUST_LIBTEST_EVENTS_ENV, RUST_LIBTEST_TOKEN_ENV, RustLibtestEvent, RustLibtestRunEvents,
+        RustLibtestTerminalResult, create_rust_libtest_event_file, read_rust_libtest_events,
+        validate_rust_libtest_run_events,
+    },
     rust_probe_transport::{
         DEFAULT_DESCRIPTOR_CAPACITY, DEFAULT_PAYLOAD_CAPACITY, RUST_CONTEXT_ENV,
-        RUST_TRANSPORT_ENV, RUST_TRANSPORT_TOKEN_ENV, RustTransportRead, create_rust_transport,
-        read_rust_transport,
+        RUST_TRANSPORT_ENV, RUST_TRANSPORT_TOKEN_ENV, RustTransportPartition, RustTransportRead,
+        create_rust_transport, partition_rust_transport_by_test_contexts, read_rust_transport,
     },
     rust_runner_attempt::{
         NextestAttemptIdentity, RustRunnerInvocationIdentity, classify_rust_runner_environment,
@@ -62,13 +69,21 @@ use crate::{
 
 const TOKEN_BYTES: usize = supercov_contracts::RUST_PROBE_TRANSPORT_TOKEN_SIZE;
 pub const RUST_CARGO_RUNNER_CONFIG_ENV: &str = "SUPERCOV_RUST_CARGO_RUNNER_CONFIG";
-pub const RUST_CARGO_RUNNER_VERSION: u32 = 3;
+pub const RUST_CARGO_RUNNER_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RustCargoRunnerKind {
     CargoTest,
+    CargoCustomHarness,
     Nextest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCargoRunnerArtifact {
+    pub executable: PathBuf,
+    pub test_harness: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -79,6 +94,7 @@ pub struct RustCargoRunnerConfig {
     pub target_directory: PathBuf,
     pub output_directory: PathBuf,
     pub target_runners: Vec<RustCargoResolvedTargetRunner>,
+    pub artifacts: Vec<RustCargoRunnerArtifact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -89,12 +105,42 @@ pub struct RustCargoRunnerAttempt {
     pub retry: usize,
     pub total_attempts: usize,
     pub runner_attempt_id: String,
-    pub result: SupervisedResult,
+    pub outcome: RustCargoRunnerAttemptOutcome,
     pub transport: RustTransportRead,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum RustCargoRunnerAttemptOutcome {
+    Libtest {
+        result: RustLibtestTerminalResult,
+        timed_out: bool,
+    },
+    Unstarted,
+    OpaqueProcess,
+}
+
+fn attempt_outcome_succeeded(outcome: &RustCargoRunnerAttemptOutcome) -> bool {
+    matches!(
+        outcome,
+        RustCargoRunnerAttemptOutcome::Libtest {
+            result: RustLibtestTerminalResult::Passed
+                | RustLibtestTerminalResult::Ignored
+                | RustLibtestTerminalResult::Benchmarked,
+            ..
+        }
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCargoRunnerInvocation {
+    pub result: SupervisedResult,
     pub started_at_ms: i64,
     pub ended_at_ms: i64,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    pub background_transport: RustTransportRead,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -113,7 +159,90 @@ pub struct RustCargoRunnerUnit {
     pub target: String,
     pub artifact: PathBuf,
     pub arguments: Vec<String>,
+    pub invocation: RustCargoRunnerInvocation,
     pub attempts: Vec<RustCargoRunnerAttempt>,
+}
+
+fn validate_persisted_runner_transport(
+    unit: &RustCargoRunnerUnit,
+) -> Result<(), RustCompilerTestError> {
+    let mut roots = BTreeSet::new();
+    let mut combined = RustTransportRead {
+        observations: unit.invocation.background_transport.observations.clone(),
+        ordinal_hits: unit.invocation.background_transport.ordinal_hits.clone(),
+        phases: unit.invocation.background_transport.phases.clone(),
+        committed: unit.invocation.background_transport.committed,
+        incomplete: unit.invocation.background_transport.incomplete,
+        dropped: unit.invocation.background_transport.dropped,
+        attachments: unit.invocation.background_transport.attachments,
+    };
+    for attempt in &unit.attempts {
+        if matches!(attempt.context_id, 0 | u64::MAX) || !roots.insert(attempt.context_id) {
+            return Err(RustCompilerTestError::Context(format!(
+                "Cargo runner unit {} has a reserved or duplicate test context",
+                unit.invocation_ordinal
+            )));
+        }
+        combined
+            .observations
+            .extend(attempt.transport.observations.iter().cloned());
+        combined
+            .ordinal_hits
+            .extend(attempt.transport.ordinal_hits.iter().copied());
+        combined
+            .phases
+            .extend(attempt.transport.phases.iter().cloned());
+        combined.committed = combined
+            .committed
+            .checked_add(attempt.transport.committed)
+            .ok_or_else(|| {
+                RustCompilerTestError::Context(
+                    "Cargo runner committed transport count overflowed u64".into(),
+                )
+            })?;
+        combined.incomplete = combined
+            .incomplete
+            .checked_add(attempt.transport.incomplete)
+            .ok_or_else(|| {
+                RustCompilerTestError::Context(
+                    "Cargo runner incomplete transport count overflowed u64".into(),
+                )
+            })?;
+        combined.dropped = combined
+            .dropped
+            .checked_add(attempt.transport.dropped)
+            .ok_or_else(|| {
+                RustCompilerTestError::Context(
+                    "Cargo runner dropped transport count overflowed u64".into(),
+                )
+            })?;
+        combined.attachments = combined
+            .attachments
+            .checked_add(attempt.transport.attachments)
+            .ok_or_else(|| {
+                RustCompilerTestError::Context(
+                    "Cargo runner transport attachment count overflowed u64".into(),
+                )
+            })?;
+    }
+    let repartitioned =
+        partition_rust_transport_by_test_contexts(&combined, &roots).map_err(|error| {
+            RustCompilerTestError::Context(format!(
+                "Cargo runner unit {} has invalid persisted attribution: {error}",
+                unit.invocation_ordinal
+            ))
+        })?;
+    if repartitioned.background != unit.invocation.background_transport
+        || unit.attempts.iter().any(|attempt| {
+            repartitioned.attributed.get(&attempt.context_id) != Some(&attempt.transport)
+        })
+    {
+        return Err(RustCompilerTestError::Context(format!(
+            "Cargo runner unit {} does not preserve its exact transport partition",
+            unit.invocation_ordinal
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -298,6 +427,7 @@ struct TestArtifact {
     target_key: String,
     kind: String,
     source: String,
+    test_harness: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -313,6 +443,7 @@ struct ProcessTask {
     runner_attempt_id: String,
     runner: RustCargoRunnerKind,
     transport: PathBuf,
+    libtest_events: PathBuf,
     test_arguments: Vec<OsString>,
     underlying_runner: Option<RustCargoResolvedRunner>,
 }
@@ -322,8 +453,52 @@ struct ProcessOutcome {
     task: ProcessTask,
     output: SupervisedOutput,
     read: RustTransportRead,
+    attempt_outcome: RustCargoRunnerAttemptOutcome,
     started_at_ms: i64,
     ended_at_ms: i64,
+}
+
+struct StockLibtestExecution {
+    output: SupervisedOutput,
+    events: RustLibtestRunEvents,
+    partition: RustTransportPartition,
+    started_at_ms: i64,
+    ended_at_ms: i64,
+}
+
+struct RemoveFileOnDrop(Option<PathBuf>);
+
+impl Drop for RemoveFileOnDrop {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn stock_libtest_transport_reason(
+    reason: impl std::fmt::Display,
+    output: &SupervisedOutput,
+) -> String {
+    const LIMIT: usize = 16 * 1024;
+    fn tail(bytes: &[u8]) -> String {
+        let start = bytes.len().saturating_sub(LIMIT);
+        String::from_utf8_lossy(&bytes[start..]).into_owned()
+    }
+
+    let mut message = format!(
+        "{reason}; stock libtest process exit={} ",
+        output.result.exit_code()
+    );
+    if !output.stdout.is_empty() {
+        message.push_str("\nstdout tail:\n");
+        message.push_str(&tail(&output.stdout));
+    }
+    if !output.stderr.is_empty() {
+        message.push_str("\nstderr tail:\n");
+        message.push_str(&tail(&output.stderr));
+    }
+    message
 }
 
 fn epoch_ms() -> Result<i64, RustCompilerTestError> {
@@ -382,6 +557,7 @@ fn normalize_artifacts(
                     "unit".into()
                 },
                 source: relative_source(project_root, &artifact.source_path)?,
+                test_harness: artifact.test_harness,
             })
         })
         .collect()
@@ -394,6 +570,13 @@ fn libtest_id(compilation_target: &str, artifact: &TestArtifact, test: &str) -> 
     )
 }
 
+fn custom_harness_id(compilation_target: &str, artifact: &TestArtifact) -> String {
+    format!(
+        "rust:custom-harness:{compilation_target}:{}:{}:{}",
+        artifact.package, artifact.target_key, artifact.source,
+    )
+}
+
 fn list_tests(
     project_root: &Path,
     artifact: &TestArtifact,
@@ -401,6 +584,7 @@ fn list_tests(
     underlying_runner: Option<&RustCargoResolvedRunner>,
     supervisor: &ProcessSupervisor,
     options: SupervisionOptions,
+    event_path: &Path,
 ) -> Result<Vec<String>, RustCompilerTestError> {
     let mut test_arguments = selection_arguments
         .iter()
@@ -408,13 +592,33 @@ fn list_tests(
         .collect::<Vec<_>>();
     test_arguments.extend(["--list".into(), "--format".into(), "terse".into()]);
     let (program, arguments) = artifact_command(artifact, underlying_runner, test_arguments);
+    let mut event_token = [0_u8; supercov_contracts::RUST_LIBTEST_EVENT_TOKEN_SIZE];
+    getrandom::fill(&mut event_token).map_err(|error| {
+        RustCompilerTestError::Random(format!("libtest listing token: {error}"))
+    })?;
+    create_rust_libtest_event_file(event_path, event_token).map_err(|error| {
+        RustCompilerTestError::List {
+            artifact: artifact.executable.clone(),
+            reason: error.to_string(),
+        }
+    })?;
+    let mut event_cleanup = RemoveFileOnDrop(Some(event_path.to_owned()));
     let output = supervisor
         .supervise_captured(
             &CommandSpec {
                 program,
                 arguments,
                 cwd: project_root.to_owned(),
-                environment: Some(inherited_environment([])),
+                environment: Some(inherited_environment([
+                    (
+                        OsString::from(RUST_LIBTEST_EVENTS_ENV),
+                        event_path.as_os_str().to_owned(),
+                    ),
+                    (
+                        OsString::from(RUST_LIBTEST_TOKEN_ENV),
+                        OsString::from(token_hex(&event_token)),
+                    ),
+                ])),
                 captured_output: None,
             },
             options,
@@ -438,11 +642,32 @@ fn list_tests(
     }
     let mut tests = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(|line| line.strip_suffix(": test"))
+        .filter_map(|line| {
+            line.strip_suffix(": test")
+                .or_else(|| line.strip_suffix(": benchmark"))
+        })
         .map(str::to_owned)
         .collect::<Vec<_>>();
     tests.sort();
     tests.dedup();
+    let events = read_rust_libtest_events(event_path, &event_token).map_err(|error| {
+        RustCompilerTestError::List {
+            artifact: artifact.executable.clone(),
+            reason: error.to_string(),
+        }
+    })?;
+    if !matches!(
+        events.as_slice(),
+        [RustLibtestEvent::FilteredOut { .. }, RustLibtestEvent::Filtered { count, .. }]
+            if *count == tests.len() as u64
+    ) {
+        return Err(RustCompilerTestError::List {
+            artifact: artifact.executable.clone(),
+            reason: "authenticated libtest listing events disagree with terse output".into(),
+        });
+    }
+    fs::remove_file(event_path).map_err(|error| io_error(event_path, error))?;
+    event_cleanup.0 = None;
     Ok(tests)
 }
 
@@ -471,7 +696,7 @@ fn artifact_command(
     }
 }
 
-fn token_hex(token: &[u8; TOKEN_BYTES]) -> String {
+fn token_hex<const N: usize>(token: &[u8; N]) -> String {
     token.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -512,13 +737,25 @@ fn run_process(
         DEFAULT_PAYLOAD_CAPACITY,
     )
     .map_err(|error| error.to_string())?;
+    let mut transport_cleanup = RemoveFileOnDrop(Some(task.transport.clone()));
+    let event_token = if task.runner == RustCargoRunnerKind::CargoCustomHarness {
+        None
+    } else {
+        let mut token = [0_u8; supercov_contracts::RUST_LIBTEST_EVENT_TOKEN_SIZE];
+        getrandom::fill(&mut token).map_err(|error| error.to_string())?;
+        create_rust_libtest_event_file(&task.libtest_events, token)
+            .map_err(|error| error.to_string())?;
+        Some(token)
+    };
+    let mut event_cleanup =
+        RemoveFileOnDrop(event_token.is_some().then(|| task.libtest_events.clone()));
     let started_at_ms = epoch_ms().map_err(|error| error.to_string())?;
     let (program, arguments) = artifact_command(
         &task.artifact,
         task.underlying_runner.as_ref(),
         task.test_arguments.clone(),
     );
-    let environment = vec![
+    let mut environment = vec![
         (
             OsString::from(RUST_TRANSPORT_ENV),
             task.transport.clone().into_os_string(),
@@ -532,6 +769,18 @@ fn run_process(
             OsString::from(format!("{:016x}", task.context_id)),
         ),
     ];
+    if let Some(event_token) = &event_token {
+        environment.extend([
+            (
+                OsString::from(RUST_LIBTEST_EVENTS_ENV),
+                task.libtest_events.clone().into_os_string(),
+            ),
+            (
+                OsString::from(RUST_LIBTEST_TOKEN_ENV),
+                OsString::from(token_hex(event_token)),
+            ),
+        ]);
+    }
     let output = supervisor
         .supervise_captured(
             &CommandSpec {
@@ -547,11 +796,168 @@ fn run_process(
         .map_err(|error| error.to_string())?;
     let ended_at_ms = epoch_ms().map_err(|error| error.to_string())?;
     let read = read_rust_transport(&task.transport, &token).map_err(|error| error.to_string())?;
+    let attempt_outcome = if let Some(event_token) = &event_token {
+        let events = read_rust_libtest_events(&task.libtest_events, event_token)
+            .map_err(|error| error.to_string())?;
+        let joined = validate_rust_libtest_run_events(&events, [task.test.clone()])
+            .map_err(|error| error.to_string())?;
+        let [attempt] = joined.attempts.as_slice() else {
+            return Err("exact libtest attempt did not produce one terminal event".into());
+        };
+        if !joined.unstarted.is_empty()
+            || (matches!(
+                attempt.result,
+                RustLibtestTerminalResult::Passed
+                    | RustLibtestTerminalResult::Ignored
+                    | RustLibtestTerminalResult::Benchmarked
+            ) != (output.result.exit_code() == 0))
+        {
+            return Err("exact libtest terminal event disagrees with process status".into());
+        }
+        RustCargoRunnerAttemptOutcome::Libtest {
+            result: attempt.result,
+            timed_out: attempt.timed_out,
+        }
+    } else {
+        RustCargoRunnerAttemptOutcome::OpaqueProcess
+    };
     fs::remove_file(&task.transport).map_err(|error| error.to_string())?;
+    transport_cleanup.0 = None;
+    if event_token.is_some() {
+        fs::remove_file(&task.libtest_events).map_err(|error| error.to_string())?;
+        event_cleanup.0 = None;
+    }
     Ok(ProcessOutcome {
         task: task.clone(),
         output,
         read,
+        attempt_outcome,
+        started_at_ms,
+        ended_at_ms,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_stock_libtest_artifact(
+    project_root: &Path,
+    artifact: &TestArtifact,
+    underlying_runner: Option<&RustCargoResolvedRunner>,
+    arguments: Vec<OsString>,
+    selected_tests: &[String],
+    contexts: &BTreeMap<String, u64>,
+    transport_path: &Path,
+    event_path: &Path,
+    supervisor: &ProcessSupervisor,
+    options: SupervisionOptions,
+) -> Result<StockLibtestExecution, RustCompilerTestError> {
+    let mut token = [0_u8; TOKEN_BYTES];
+    getrandom::fill(&mut token)
+        .map_err(|error| RustCompilerTestError::Random(error.to_string()))?;
+    create_rust_transport(
+        transport_path,
+        token,
+        DEFAULT_DESCRIPTOR_CAPACITY,
+        DEFAULT_PAYLOAD_CAPACITY,
+    )
+    .map_err(|error| RustCompilerTestError::Transport {
+        test: artifact.target_key.clone(),
+        reason: error.to_string(),
+    })?;
+    let mut transport_cleanup = RemoveFileOnDrop(Some(transport_path.to_owned()));
+    let mut event_token = [0_u8; supercov_contracts::RUST_LIBTEST_EVENT_TOKEN_SIZE];
+    getrandom::fill(&mut event_token)
+        .map_err(|error| RustCompilerTestError::Random(error.to_string()))?;
+    create_rust_libtest_event_file(event_path, event_token).map_err(|error| {
+        RustCompilerTestError::Transport {
+            test: artifact.target_key.clone(),
+            reason: error.to_string(),
+        }
+    })?;
+    let mut event_cleanup = RemoveFileOnDrop(Some(event_path.to_owned()));
+    let (program, arguments) = artifact_command(artifact, underlying_runner, arguments);
+    let started_at_ms = epoch_ms()?;
+    let output = supervisor
+        .supervise_captured(
+            &CommandSpec {
+                program,
+                arguments,
+                cwd: project_root.to_owned(),
+                environment: Some(inherited_environment([
+                    (
+                        OsString::from(RUST_TRANSPORT_ENV),
+                        transport_path.as_os_str().to_owned(),
+                    ),
+                    (
+                        OsString::from(RUST_TRANSPORT_TOKEN_ENV),
+                        OsString::from(token_hex(&token)),
+                    ),
+                    (
+                        OsString::from(RUST_CONTEXT_ENV),
+                        OsString::from("0000000000000000"),
+                    ),
+                    (
+                        OsString::from(RUST_LIBTEST_EVENTS_ENV),
+                        event_path.as_os_str().to_owned(),
+                    ),
+                    (
+                        OsString::from(RUST_LIBTEST_TOKEN_ENV),
+                        OsString::from(token_hex(&event_token)),
+                    ),
+                ])),
+                captured_output: None,
+            },
+            options,
+            &mut io::sink(),
+        )
+        .map_err(|error| RustCompilerTestError::Launch {
+            test: artifact.target_key.clone(),
+            reason: error.to_string(),
+        })?;
+    let ended_at_ms = epoch_ms()?;
+    let read = read_rust_transport(transport_path, &token).map_err(|error| {
+        RustCompilerTestError::Transport {
+            test: artifact.target_key.clone(),
+            reason: error.to_string(),
+        }
+    })?;
+    let events = read_rust_libtest_events(event_path, &event_token).map_err(|error| {
+        RustCompilerTestError::Transport {
+            test: artifact.target_key.clone(),
+            reason: stock_libtest_transport_reason(error, &output),
+        }
+    })?;
+    let events = validate_rust_libtest_run_events(&events, selected_tests.iter().cloned())
+        .map_err(|error| RustCompilerTestError::Transport {
+            test: artifact.target_key.clone(),
+            reason: stock_libtest_transport_reason(error, &output),
+        })?;
+    let terminal_failure = events
+        .attempts
+        .iter()
+        .any(|attempt| attempt.result == RustLibtestTerminalResult::Failed);
+    let expected_success = !terminal_failure && events.unstarted.is_empty();
+    if expected_success != (output.result.exit_code() == 0) {
+        return Err(RustCompilerTestError::UnverifiedExecution {
+            code: output.result.exit_code(),
+            reason: "stock libtest process status disagrees with authenticated terminal and fail-fast events"
+                .into(),
+        });
+    }
+    let roots = contexts.values().copied().collect::<BTreeSet<_>>();
+    let partition = partition_rust_transport_by_test_contexts(&read, &roots).map_err(|error| {
+        RustCompilerTestError::Transport {
+            test: artifact.target_key.clone(),
+            reason: error.to_string(),
+        }
+    })?;
+    fs::remove_file(transport_path).map_err(|error| io_error(transport_path, error))?;
+    transport_cleanup.0 = None;
+    fs::remove_file(event_path).map_err(|error| io_error(event_path, error))?;
+    event_cleanup.0 = None;
+    Ok(StockLibtestExecution {
+        output,
+        events,
+        partition,
         started_at_ms,
         ended_at_ms,
     })
@@ -560,13 +966,11 @@ fn run_process(
 fn execute_process_tasks(
     project_root: &Path,
     tasks: &[ProcessTask],
+    requested_workers: usize,
     supervisor: &ProcessSupervisor,
     options: SupervisionOptions,
 ) -> Result<Vec<ProcessOutcome>, RustCompilerTestError> {
-    let workers = std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
-        .min(tasks.len());
+    let workers = requested_workers.min(tasks.len());
     let next = AtomicUsize::new(0);
     let outcomes = Mutex::new(Vec::<Result<ProcessOutcome, String>>::with_capacity(
         tasks.len(),
@@ -834,6 +1238,15 @@ pub fn run_cargo_libtest_runner(
             "Cargo runner config has empty or duplicate target identities".into(),
         ));
     }
+    let mut configured_artifacts = BTreeSet::new();
+    if config.artifacts.iter().any(|artifact| {
+        !configured_artifacts.insert(&artifact.executable)
+            || !artifact.executable.starts_with(&target_directory)
+    }) {
+        return Err(RustCompilerTestError::Context(
+            "Cargo runner config has duplicate or out-of-target artifacts".into(),
+        ));
+    }
     let runner_identity = classify_rust_runner_environment()
         .map_err(|error| RustCompilerTestError::Context(error.to_string()))?;
     let run_id = config.run_id.clone();
@@ -875,6 +1288,22 @@ pub fn run_cargo_libtest_runner(
             artifact.display().to_string(),
         ));
     }
+    let test_harness = config
+        .artifacts
+        .iter()
+        .find(|candidate| candidate.executable == artifact)
+        .map(|candidate| candidate.test_harness);
+    if test_harness.is_none()
+        && !matches!(
+            runner_identity,
+            RustRunnerInvocationIdentity::NextestList(_)
+        )
+    {
+        return Err(RustCompilerTestError::Context(format!(
+            "Cargo runner executed an unclassified artifact: {}",
+            artifact.display()
+        )));
+    }
     let arguments = runner_arguments.collect::<Vec<_>>();
     let current_directory = std::env::current_dir()
         .and_then(fs::canonicalize)
@@ -886,6 +1315,7 @@ pub fn run_cargo_libtest_runner(
         target_key: "cargo-pending".into(),
         kind: "cargo-pending".into(),
         source: "cargo-pending".into(),
+        test_harness: test_harness.unwrap_or(true),
     };
     let underlying_runner = target_runner.underlying_runner.clone();
     if matches!(
@@ -946,9 +1376,9 @@ pub fn run_cargo_libtest_runner(
                 reason: error.to_string(),
             }
         })?;
-        let (runner, runner_run_id, runner_version, runner_binary_id, attempts) =
+        let (runner, runner_run_id, runner_version, runner_binary_id, requested_workers, attempts) =
             match &runner_identity {
-                RustRunnerInvocationIdentity::CargoSingleAttempt => {
+                RustRunnerInvocationIdentity::CargoSingleAttempt if test_artifact.test_harness => {
                     let selection = rust_libtest_selection(&invocation).map_err(|error| {
                         RustCompilerTestError::UnsupportedCommand(error.to_string())
                     })?;
@@ -959,32 +1389,124 @@ pub fn run_cargo_libtest_runner(
                         underlying_runner.as_ref(),
                         &supervisor,
                         options,
+                        &transport_directory.join("list.events"),
                     )?;
-                    let attempts = tests
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, test)| {
-                            let mut test_arguments = selection
-                                .run_arguments
-                                .iter()
-                                .map(OsString::from)
-                                .collect::<Vec<_>>();
-                            test_arguments
-                                .extend([OsString::from("--exact"), OsString::from(&test)]);
-                            (
-                                test,
-                                0,
-                                1,
-                                format!(
-                                    "{}:cargo:{invocation_ordinal:016}:{index:08}",
-                                    config.run_id
-                                ),
-                                test_arguments,
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    (RustCargoRunnerKind::CargoTest, None, None, None, attempts)
+                    let contexts = preflight_rust_test_contexts(tests.clone())
+                        .map_err(|error| RustCompilerTestError::Context(error.to_string()))?;
+                    let stock = run_stock_libtest_artifact(
+                        &current_directory,
+                        &test_artifact,
+                        underlying_runner.as_ref(),
+                        arguments.clone(),
+                        &tests,
+                        &contexts,
+                        &transport_directory.join("artifact.mmap"),
+                        &transport_directory.join("artifact.libtest-events"),
+                        &supervisor,
+                        options,
+                    )?;
+                    let StockLibtestExecution {
+                        output,
+                        events,
+                        mut partition,
+                        started_at_ms,
+                        ended_at_ms,
+                    } = stock;
+                    let exit_code = output.result.exit_code();
+                    stdout
+                        .write_all(&output.stdout)
+                        .and_then(|()| stderr.write_all(&output.stderr))
+                        .map_err(|error| io_error(&output_directory, error))?;
+                    let mut attempts = Vec::with_capacity(tests.len());
+                    for attempt in events.attempts {
+                        let context_id = contexts[&attempt.name];
+                        let index = attempts.len();
+                        attempts.push(RustCargoRunnerAttempt {
+                            test: attempt.name,
+                            context_id,
+                            retry: 0,
+                            total_attempts: 1,
+                            runner_attempt_id: format!(
+                                "{}:cargo:{invocation_ordinal:016}:{index:08}",
+                                config.run_id
+                            ),
+                            outcome: RustCargoRunnerAttemptOutcome::Libtest {
+                                result: attempt.result,
+                                timed_out: attempt.timed_out,
+                            },
+                            transport: partition
+                                .attributed
+                                .remove(&context_id)
+                                .expect("every selected test context was partitioned"),
+                        });
+                    }
+                    for test in events.unstarted {
+                        let context_id = contexts[&test];
+                        let index = attempts.len();
+                        attempts.push(RustCargoRunnerAttempt {
+                            test,
+                            context_id,
+                            retry: 0,
+                            total_attempts: 1,
+                            runner_attempt_id: format!(
+                                "{}:cargo:{invocation_ordinal:016}:{index:08}",
+                                config.run_id
+                            ),
+                            outcome: RustCargoRunnerAttemptOutcome::Unstarted,
+                            transport: partition
+                                .attributed
+                                .remove(&context_id)
+                                .expect("every unstarted test context was partitioned"),
+                        });
+                    }
+                    if !partition.attributed.is_empty() {
+                        return Err(RustCompilerTestError::Context(
+                            "stock libtest event join left selected test contexts unclaimed".into(),
+                        ));
+                    }
+                    let unit = RustCargoRunnerUnit {
+                        version: RUST_CARGO_RUNNER_VERSION,
+                        run_id: run_id.clone(),
+                        invocation_ordinal,
+                        runner: RustCargoRunnerKind::CargoTest,
+                        runner_run_id: None,
+                        runner_version: None,
+                        runner_binary_id: None,
+                        target,
+                        artifact,
+                        arguments: utf8_arguments,
+                        invocation: RustCargoRunnerInvocation {
+                            result: output.result,
+                            started_at_ms,
+                            ended_at_ms,
+                            stdout: output.stdout,
+                            stderr: output.stderr,
+                            background_transport: partition.background,
+                        },
+                        attempts,
+                    };
+                    let unit_path = write_cargo_runner_unit(&output_directory, &unit)?;
+                    fs::remove_dir(&transport_directory)
+                        .map_err(|error| io_error(&transport_directory, error))?;
+                    return Ok(RustCargoRunnerExecution {
+                        exit_code,
+                        unit_path: Some(unit_path),
+                    });
                 }
+                RustRunnerInvocationIdentity::CargoSingleAttempt => (
+                    RustCargoRunnerKind::CargoCustomHarness,
+                    None,
+                    None,
+                    None,
+                    1,
+                    vec![(
+                        "custom-harness".into(),
+                        0,
+                        1,
+                        format!("{}:cargo:{invocation_ordinal:016}:00000000", config.run_id),
+                        arguments.clone(),
+                    )],
+                ),
                 RustRunnerInvocationIdentity::NextestAttempt(NextestAttemptIdentity {
                     invocation,
                     test_name,
@@ -992,6 +1514,11 @@ pub fn run_cargo_libtest_runner(
                     total_attempts,
                     runner_attempt_id,
                 }) => {
+                    if !test_artifact.test_harness {
+                        return Err(RustCompilerTestError::Context(
+                            "nextest attempted to execute a custom Cargo harness".into(),
+                        ));
+                    }
                     if !utf8_arguments
                         .windows(2)
                         .any(|pair| pair == ["--exact", test_name])
@@ -1006,6 +1533,7 @@ pub fn run_cargo_libtest_runner(
                         Some(invocation.run_id.clone()),
                         Some(invocation.version.clone()),
                         Some(invocation.binary_id.clone()),
+                        1,
                         vec![(
                             test_name.clone(),
                             *retry,
@@ -1040,38 +1568,63 @@ pub fn run_cargo_libtest_runner(
                         runner_attempt_id,
                         runner,
                         transport: transport_directory.join(format!("{index:08}.mmap")),
+                        libtest_events: transport_directory
+                            .join(format!("{index:08}.libtest-events")),
                         test_arguments,
                         underlying_runner: underlying_runner.clone(),
                     }
                 },
             )
             .collect::<Vec<_>>();
-        let outcomes = execute_process_tasks(&current_directory, &tasks, &supervisor, options)?;
-        let mut exit_code = 0;
-        let attempts = outcomes
-            .into_iter()
-            .map(|outcome| {
-                let result_code = outcome.output.result.exit_code();
-                if exit_code == 0 && result_code != 0 {
-                    exit_code = result_code;
+        let mut outcomes = execute_process_tasks(
+            &current_directory,
+            &tasks,
+            requested_workers,
+            &supervisor,
+            options,
+        )?;
+        let [outcome] = outcomes.as_mut_slice() else {
+            return Err(RustCompilerTestError::Context(
+                "custom-harness and nextest runner invocations must own exactly one process".into(),
+            ));
+        };
+        stdout
+            .write_all(&outcome.output.stdout)
+            .and_then(|()| stderr.write_all(&outcome.output.stderr))
+            .map_err(|error| io_error(&output_directory, error))?;
+        let exit_code = outcome.output.result.exit_code();
+        let roots = BTreeSet::from([outcome.task.context_id]);
+        let mut partition = partition_rust_transport_by_test_contexts(&outcome.read, &roots)
+            .map_err(|error| RustCompilerTestError::Transport {
+                test: outcome.task.test.clone(),
+                reason: error.to_string(),
+            })?;
+        let attempt_outcome = match runner {
+            RustCargoRunnerKind::CargoCustomHarness => RustCargoRunnerAttemptOutcome::OpaqueProcess,
+            RustCargoRunnerKind::Nextest => match outcome.attempt_outcome {
+                RustCargoRunnerAttemptOutcome::Libtest { result, timed_out } => {
+                    RustCargoRunnerAttemptOutcome::Libtest { result, timed_out }
                 }
-                let _ = stdout.write_all(&outcome.output.stdout);
-                let _ = stderr.write_all(&outcome.output.stderr);
-                RustCargoRunnerAttempt {
-                    test: outcome.task.test,
-                    context_id: outcome.task.context_id,
-                    retry: outcome.task.retry,
-                    total_attempts: outcome.task.total_attempts,
-                    runner_attempt_id: outcome.task.runner_attempt_id,
-                    result: outcome.output.result,
-                    transport: outcome.read,
-                    started_at_ms: outcome.started_at_ms,
-                    ended_at_ms: outcome.ended_at_ms,
-                    stdout: outcome.output.stdout,
-                    stderr: outcome.output.stderr,
+                _ => {
+                    return Err(RustCompilerTestError::Context(
+                        "nextest process has no authenticated libtest terminal event".into(),
+                    ));
                 }
-            })
-            .collect();
+            },
+            RustCargoRunnerKind::CargoTest => unreachable!("stock libtest returned above"),
+        };
+        let attempts = vec![RustCargoRunnerAttempt {
+            test: outcome.task.test.clone(),
+            context_id: outcome.task.context_id,
+            retry: outcome.task.retry,
+            total_attempts: outcome.task.total_attempts,
+            runner_attempt_id: outcome.task.runner_attempt_id.clone(),
+            outcome: attempt_outcome,
+            transport: partition
+                .attributed
+                .remove(&outcome.task.context_id)
+                .expect("the one attempt context was partitioned"),
+        }];
         let unit = RustCargoRunnerUnit {
             version: RUST_CARGO_RUNNER_VERSION,
             run_id: run_id.clone(),
@@ -1083,6 +1636,14 @@ pub fn run_cargo_libtest_runner(
             target,
             artifact,
             arguments: utf8_arguments,
+            invocation: RustCargoRunnerInvocation {
+                result: outcome.output.result.clone(),
+                started_at_ms: outcome.started_at_ms,
+                ended_at_ms: outcome.ended_at_ms,
+                stdout: outcome.output.stdout.clone(),
+                stderr: outcome.output.stderr.clone(),
+                background_transport: partition.background,
+            },
             attempts,
         };
         let unit_path = write_cargo_runner_unit(&output_directory, &unit)?;
@@ -1215,6 +1776,7 @@ pub fn read_cargo_runner_units(
                 unit.target
             )));
         }
+        validate_persisted_runner_transport(&unit)?;
         units.push(unit);
     }
     units.sort_by_key(|unit| unit.invocation_ordinal);
@@ -1261,7 +1823,7 @@ pub fn read_cargo_runner_units(
         .iter()
         .map(|unit| unit.runner)
         .collect::<BTreeSet<_>>();
-    if runner_kinds.len() > 1 {
+    if runner_kinds.contains(&RustCargoRunnerKind::Nextest) && runner_kinds.len() > 1 {
         return Err(RustCompilerTestError::Context(
             "Cargo runner mixed standard Cargo and nextest units".into(),
         ));
@@ -1275,77 +1837,75 @@ pub fn read_cargo_runner_units(
             "Cargo runner attempt identity is empty or duplicated".into(),
         ));
     }
-    match runner_kinds.first() {
-        Some(RustCargoRunnerKind::CargoTest) => {
-            let mut artifacts = BTreeSet::new();
-            if units.iter().any(|unit| {
-                unit.runner_run_id.is_some()
-                    || unit.runner_version.is_some()
-                    || unit.runner_binary_id.is_some()
-                    || !artifacts.insert((unit.target.clone(), unit.artifact.clone()))
-                    || unit
-                        .attempts
-                        .iter()
-                        .any(|attempt| attempt.retry != 0 || attempt.total_attempts != 1)
-            }) {
+    if runner_kinds.contains(&RustCargoRunnerKind::Nextest) {
+        let mut nextest_identity = None;
+        let mut logical_attempts =
+            BTreeMap::<(String, PathBuf, String), Vec<&RustCargoRunnerAttempt>>::new();
+        for unit in &units {
+            let identity = (unit.runner_run_id.as_ref(), unit.runner_version.as_ref());
+            if identity.0.is_none()
+                || identity.1.is_none()
+                || unit.runner_binary_id.is_none()
+                || unit.attempts.len() != 1
+            {
                 return Err(RustCompilerTestError::Context(
-                    "standard Cargo runner units violate the single-attempt identity contract"
-                        .into(),
+                    "nextest runner unit lacks exact invocation or attempt identity".into(),
                 ));
             }
-        }
-        Some(RustCargoRunnerKind::Nextest) => {
-            let mut nextest_identity = None;
-            let mut logical_attempts =
-                BTreeMap::<(String, PathBuf, String), Vec<&RustCargoRunnerAttempt>>::new();
-            for unit in &units {
-                let identity = (unit.runner_run_id.as_ref(), unit.runner_version.as_ref());
-                if identity.0.is_none()
-                    || identity.1.is_none()
-                    || unit.runner_binary_id.is_none()
-                    || unit.attempts.len() != 1
-                {
+            match &nextest_identity {
+                Some(expected) if *expected != identity => {
                     return Err(RustCompilerTestError::Context(
-                        "nextest runner unit lacks exact invocation or attempt identity".into(),
+                        "nextest runner units belong to different runs or versions".into(),
                     ));
                 }
-                match &nextest_identity {
-                    Some(expected) if *expected != identity => {
-                        return Err(RustCompilerTestError::Context(
-                            "nextest runner units belong to different runs or versions".into(),
-                        ));
-                    }
-                    None => nextest_identity = Some(identity),
-                    _ => {}
-                }
-                let attempt = &unit.attempts[0];
-                logical_attempts
-                    .entry((
-                        unit.target.clone(),
-                        unit.artifact.clone(),
-                        attempt.test.clone(),
-                    ))
-                    .or_default()
-                    .push(attempt);
+                None => nextest_identity = Some(identity),
+                _ => {}
             }
-            for attempts in logical_attempts.values_mut() {
-                attempts.sort_by_key(|attempt| attempt.retry);
-                let total_attempts = attempts[0].total_attempts;
-                for (expected_retry, attempt) in attempts.iter().enumerate() {
-                    if attempt.retry != expected_retry
-                        || attempt.total_attempts != total_attempts
-                        || attempt.retry >= total_attempts
-                        || (expected_retry + 1 < attempts.len() && attempt.result.exit_code() == 0)
-                    {
-                        return Err(RustCompilerTestError::Context(
-                            "nextest retry sequence is noncontiguous, inconsistent, or continues after success"
-                                .into(),
-                        ));
-                    }
+            let attempt = &unit.attempts[0];
+            logical_attempts
+                .entry((
+                    unit.target.clone(),
+                    unit.artifact.clone(),
+                    attempt.test.clone(),
+                ))
+                .or_default()
+                .push(attempt);
+        }
+        for attempts in logical_attempts.values_mut() {
+            attempts.sort_by_key(|attempt| attempt.retry);
+            let total_attempts = attempts[0].total_attempts;
+            for (expected_retry, attempt) in attempts.iter().enumerate() {
+                if attempt.retry != expected_retry
+                    || attempt.total_attempts != total_attempts
+                    || attempt.retry >= total_attempts
+                    || (expected_retry + 1 < attempts.len()
+                        && attempt_outcome_succeeded(&attempt.outcome))
+                {
+                    return Err(RustCompilerTestError::Context(
+                        "nextest retry sequence is noncontiguous, inconsistent, or continues after success"
+                            .into(),
+                    ));
                 }
             }
         }
-        None => {}
+    } else {
+        let mut artifacts = BTreeSet::new();
+        if units.iter().any(|unit| {
+            unit.runner_run_id.is_some()
+                || unit.runner_version.is_some()
+                || unit.runner_binary_id.is_some()
+                || !artifacts.insert((unit.target.clone(), unit.artifact.clone()))
+                || unit
+                    .attempts
+                    .iter()
+                    .any(|attempt| attempt.retry != 0 || attempt.total_attempts != 1)
+                || (unit.runner == RustCargoRunnerKind::CargoCustomHarness
+                    && (unit.attempts.len() != 1 || unit.attempts[0].test != "custom-harness"))
+        }) {
+            return Err(RustCompilerTestError::Context(
+                "Cargo runner units violate the single-attempt artifact identity contract".into(),
+            ));
+        }
     }
     Ok(units)
 }
@@ -1360,7 +1920,8 @@ fn rust_compiler_coverage_model() -> CoverageModelDeclaration {
             "compiler-derived owned Rust statement and function-entry obligations".into(),
             "compiler-derived control-flow alternatives and atomic decision vectors".into(),
             "macro-expanded and generated owned code with exact compiler provenance".into(),
-            "exact process-per-libtest attribution".into(),
+            "exact stock-libtest in-process context attribution".into(),
+            "exact process-per-custom-harness-invocation attribution".into(),
             "exact assertion-phase attribution for supported assertion macros".into(),
         ],
         not_measured: vec![
@@ -1374,7 +1935,7 @@ fn rust_compiler_coverage_model() -> CoverageModelDeclaration {
 fn runner_declaration() -> FrontendRunnerDeclaration {
     FrontendRunnerDeclaration {
         runner: "rust-libtest".into(),
-        execution_model: ExecutionModel::ProcessPerTest,
+        execution_model: ExecutionModel::ParallelContextPropagated,
         attribution: FrontendAttribution {
             run: AttributionPrecision::Exact,
             worker: AttributionPrecision::Exact,
@@ -1395,8 +1956,24 @@ fn runner_declaration() -> FrontendRunnerDeclaration {
 fn nextest_runner_declaration() -> FrontendRunnerDeclaration {
     let mut declaration = runner_declaration();
     declaration.runner = "rust-nextest".into();
+    declaration.execution_model = ExecutionModel::ProcessPerTest;
     declaration.limitations[0].reason =
         "nextest exposes no general application-action lifecycle".into();
+    declaration
+}
+
+fn custom_harness_runner_declaration() -> FrontendRunnerDeclaration {
+    let mut declaration = runner_declaration();
+    declaration.runner = "rust-custom-harness".into();
+    declaration.execution_model = ExecutionModel::ProcessPerTest;
+    declaration.limitations[0].id = "rust-custom-harness-action-linkage-unavailable".into();
+    declaration.limitations[0].reason =
+        "A custom Cargo harness exposes no general application-action lifecycle".into();
+    declaration.limitations.push(FrontendLimitation {
+        id: "rust-custom-harness-internal-tests-opaque".into(),
+        scopes: vec![FrontendLimitationScope::Test],
+        reason: "Cargo exposes a custom harness as one target invocation; Supercov attributes that invocation exactly without inventing internal test-case identities".into(),
+    });
     declaration
 }
 
@@ -1787,21 +2364,29 @@ fn ctfe_raw_results(
         .collect()
 }
 
-fn status(output: &SupervisedOutput) -> (&'static str, i32) {
-    let exit = output.result.exit_code();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let skipped =
-        exit == 0 && (stdout.contains("running 0 tests") || stdout.contains("; 1 ignored;"));
-    (
-        if exit != 0 {
-            "failed"
-        } else if skipped {
-            "skipped"
-        } else {
-            "passed"
-        },
-        exit,
-    )
+fn status(
+    outcome: &RustCargoRunnerAttemptOutcome,
+    output: &SupervisedOutput,
+) -> (&'static str, i32) {
+    match outcome {
+        RustCargoRunnerAttemptOutcome::Libtest {
+            result: RustLibtestTerminalResult::Passed | RustLibtestTerminalResult::Benchmarked,
+            ..
+        } => ("passed", 0),
+        RustCargoRunnerAttemptOutcome::Libtest {
+            result: RustLibtestTerminalResult::Ignored,
+            ..
+        } => ("skipped", 0),
+        RustCargoRunnerAttemptOutcome::Libtest {
+            result: RustLibtestTerminalResult::Failed,
+            ..
+        } => ("failed", 101),
+        RustCargoRunnerAttemptOutcome::Unstarted => ("unstarted", 0),
+        RustCargoRunnerAttemptOutcome::OpaqueProcess => {
+            let exit = output.result.exit_code();
+            (if exit == 0 { "passed" } else { "failed" }, exit)
+        }
+    }
 }
 
 fn raw_result(
@@ -1810,15 +2395,12 @@ fn raw_result(
     status: &str,
     base_phase: CoveragePhase,
     projection: RustCompilerEvidenceProjection,
-) -> (
-    RawTestResult,
-    Option<RawTestResult>,
-    RustCompilerTransportHealthRecord,
-) {
+) -> (RawTestResult, RustCompilerTransportHealthRecord) {
     let worker_id = format!("artifact-{:04}", task.artifact_index);
     let attempt_id = task.runner_attempt_id.clone();
     let runner = match task.runner {
         RustCargoRunnerKind::CargoTest => "rust-libtest",
+        RustCargoRunnerKind::CargoCustomHarness => "rust-custom-harness",
         RustCargoRunnerKind::Nextest => "rust-nextest",
     };
     let scope = ExecutionScope {
@@ -1837,7 +2419,11 @@ fn raw_result(
         scope: Some(scope),
         test: task.test_id.clone(),
         test_file: Some(task.artifact.source.clone()),
-        title: Some(task.test.clone()),
+        title: Some(if task.runner == RustCargoRunnerKind::CargoCustomHarness {
+            task.artifact.target_key.clone()
+        } else {
+            task.test.clone()
+        }),
         retry: Some(task.retry),
         status: Some(status.into()),
         expected_status: Some("passed".into()),
@@ -1846,7 +2432,12 @@ fn raw_result(
             runner: runner.into(),
             kind: task.artifact.kind.clone(),
             project: Some(task.artifact.package.clone()),
-            source: "supercov-rustc-process-per-test".into(),
+            source: match task.runner {
+                RustCargoRunnerKind::CargoTest => "supercov-rustc-stock-libtest-context",
+                RustCargoRunnerKind::CargoCustomHarness => "supercov-rustc-custom-harness-process",
+                RustCargoRunnerKind::Nextest => "supercov-rustc-nextest-process",
+            }
+            .into(),
         },
         role: "test".into(),
         phases,
@@ -1854,46 +2445,98 @@ fn raw_result(
         browser: Vec::new(),
         server: Vec::new(),
     };
-    let background = snapshot_has_evidence(&projection.background).then(|| {
-        let background_id = format!("background:{attempt_id}");
-        RawTestResult {
-            test_id: Some(background_id.clone()),
-            scope: Some(ExecutionScope {
-                version: 1,
-                run_id: run_id.into(),
-                worker_id,
-                test_id: background_id.clone(),
-                test_key: background_id.clone(),
-                retry: task.retry,
-                attempt_id: format!("{attempt_id}:background"),
-            }),
-            test: background_id,
-            test_file: Some(task.artifact.source.clone()),
-            title: Some(format!("Background while running {}", task.test)),
-            retry: Some(task.retry),
-            status: Some(status.into()),
-            expected_status: Some("passed".into()),
-            flaky: false,
-            provenance: TestProvenance {
-                runner: runner.into(),
-                kind: task.artifact.kind.clone(),
-                project: Some(task.artifact.package.clone()),
-                source: "supercov-rustc-context-zero".into(),
-            },
-            role: "background".into(),
-            phases: Vec::new(),
-            runtime: vec![projection.background],
-            browser: Vec::new(),
-            server: Vec::new(),
-        }
-    });
     let health = RustCompilerTransportHealthRecord {
         scope_id: task.test_id.clone(),
         scope_kind: "test-attempt".into(),
         status: status.into(),
         transport: projection.health,
     };
-    (result, background, health)
+    (result, health)
+}
+
+fn cargo_runner_background_result(
+    run_id: &str,
+    artifact_index: usize,
+    artifact: &TestArtifact,
+    unit: &RustCargoRunnerUnit,
+    normalized: &NormalizedRustCompilerManifest,
+) -> Result<(Option<RawTestResult>, RustCompilerTransportHealthRecord), RustCompilerTestError> {
+    let transport = &unit.invocation.background_transport;
+    let background_id = format!("background:rust-runner:{:016}", unit.invocation_ordinal);
+    let invocation_status = if unit.invocation.result.exit_code() == 0 {
+        "passed"
+    } else {
+        "failed"
+    };
+    let base_phase = CoveragePhase {
+        id: phase_id(run_id, &background_id),
+        kind: "setup".into(),
+        operation: format!("Background while running {}", artifact.target_key),
+        source: Some(artifact.source.clone()),
+        caused_by_phase_id: None,
+        started_at_ms: unit.invocation.started_at_ms,
+        ended_at_ms: Some(unit.invocation.ended_at_ms),
+        status: Some(invocation_status.into()),
+        error: None,
+    };
+    // Persisted runner validation proves every record is context zero. A
+    // non-reserved synthetic base lets the shared projector validate probe
+    // identities while keeping every observation in its background snapshot.
+    let projection = project_rust_compiler_evidence(1, &base_phase, transport, normalized)
+        .map_err(|error| RustCompilerTestError::Projection {
+            test: background_id.clone(),
+            reason: error.to_string(),
+        })?;
+    if snapshot_has_evidence(&projection.attributed) || !projection.assertion_phases.is_empty() {
+        return Err(RustCompilerTestError::Projection {
+            test: background_id,
+            reason: "context-zero Cargo evidence became test-attributed".into(),
+        });
+    }
+    let runner = match unit.runner {
+        RustCargoRunnerKind::CargoTest => "rust-libtest",
+        RustCargoRunnerKind::CargoCustomHarness => "rust-custom-harness",
+        RustCargoRunnerKind::Nextest => "rust-nextest",
+    };
+    let result = snapshot_has_evidence(&projection.background).then(|| RawTestResult {
+        test_id: Some(background_id.clone()),
+        scope: Some(ExecutionScope {
+            version: 1,
+            run_id: run_id.into(),
+            worker_id: format!("artifact-{artifact_index:04}"),
+            test_id: background_id.clone(),
+            test_key: background_id.clone(),
+            retry: 0,
+            attempt_id: format!("{run_id}:cargo:{:016}:background", unit.invocation_ordinal),
+        }),
+        test: background_id.clone(),
+        test_file: Some(artifact.source.clone()),
+        title: Some(format!("Background Rust work for {}", artifact.target_key)),
+        retry: Some(0),
+        status: Some(invocation_status.into()),
+        expected_status: Some("passed".into()),
+        flaky: false,
+        provenance: TestProvenance {
+            runner: runner.into(),
+            kind: artifact.kind.clone(),
+            project: Some(artifact.package.clone()),
+            source: "supercov-rustc-context-zero".into(),
+        },
+        role: "background".into(),
+        phases: Vec::new(),
+        runtime: vec![projection.background],
+        browser: Vec::new(),
+        server: Vec::new(),
+    });
+    Ok((
+        result,
+        RustCompilerTransportHealthRecord {
+            scope_id: background_id,
+            scope_kind: "runner-invocation".into(),
+            status: invocation_status.into(),
+            transport: projection.health,
+        },
+    ))
 }
 
 pub fn run_rust_compiler_frontend(
@@ -2091,7 +2734,14 @@ fn execute_compiler_build(
                     attempt.test
                 )));
             }
-            let test_id = libtest_id(&unit.target, artifact, &attempt.test);
+            let test_id = match unit.runner {
+                RustCargoRunnerKind::CargoCustomHarness => {
+                    custom_harness_id(&unit.target, artifact)
+                }
+                RustCargoRunnerKind::CargoTest | RustCargoRunnerKind::Nextest => {
+                    libtest_id(&unit.target, artifact, &attempt.test)
+                }
+            };
             if unit.runner == RustCargoRunnerKind::Nextest {
                 if unit.runner_version.as_deref() != nextest_version {
                     return Err(RustCompilerTestError::Context(format!(
@@ -2147,26 +2797,36 @@ fn execute_compiler_build(
                     "cargo-runner/libtest-{:04}-{test_index:08}.json",
                     unit.invocation_ordinal
                 )),
+                libtest_events: build.compiler_output_directory.join(format!(
+                    "cargo-runner/libtest-{:04}-{test_index:08}.events",
+                    unit.invocation_ordinal
+                )),
                 test_arguments: Vec::new(),
                 underlying_runner: None,
             };
             outcomes.push(ProcessOutcome {
                 task,
                 output: SupervisedOutput {
-                    result: attempt.result.clone(),
-                    stdout: attempt.stdout.clone(),
-                    stderr: attempt.stderr.clone(),
+                    result: unit.invocation.result.clone(),
+                    stdout: unit.invocation.stdout.clone(),
+                    stderr: unit.invocation.stderr.clone(),
                 },
                 read: attempt.transport.clone(),
-                started_at_ms: attempt.started_at_ms,
-                ended_at_ms: attempt.ended_at_ms,
+                attempt_outcome: attempt.outcome.clone(),
+                started_at_ms: unit.invocation.started_at_ms,
+                ended_at_ms: unit.invocation.ended_at_ms,
             });
         }
     }
     let standard_cargo_units = build
         .cargo_runner_units
         .iter()
-        .filter(|unit| unit.runner == RustCargoRunnerKind::CargoTest)
+        .filter(|unit| {
+            matches!(
+                unit.runner,
+                RustCargoRunnerKind::CargoTest | RustCargoRunnerKind::CargoCustomHarness
+            )
+        })
         .count();
     if build.execution_exit_code == 0
         && build.run_libtests
@@ -2227,6 +2887,25 @@ fn execute_compiler_build(
         &build.normalized,
     )?;
     raw_results.extend(doctest_results);
+    for unit in &build.cargo_runner_units {
+        let (artifact_index, artifact) = artifact_by_path.get(&unit.artifact).ok_or_else(|| {
+            RustCompilerTestError::Context(format!(
+                "Cargo runner published background evidence for an unknown artifact: {}",
+                unit.artifact.display()
+            ))
+        })?;
+        let (background, health) = cargo_runner_background_result(
+            &request.run_id,
+            *artifact_index,
+            artifact,
+            unit,
+            &build.normalized,
+        )?;
+        if let Some(background) = background {
+            raw_results.push(background);
+        }
+        transport_health.push(health);
+    }
     let overall_exit = build.execution_exit_code;
     if overall_exit != 0 {
         diagnostics
@@ -2278,25 +2957,7 @@ fn execute_compiler_build(
         },
     }
     for outcome in outcomes {
-        let (test_status, exit) = status(&outcome.output);
-        if exit != 0 {
-            writeln!(
-                diagnostics,
-                "[supercov] Rust test failed: {}",
-                outcome.task.test_id
-            )
-            .map_err(|error| RustCompilerTestError::Io {
-                path: outcome.task.transport.clone(),
-                reason: error.to_string(),
-            })?;
-            diagnostics
-                .write_all(&outcome.output.stdout)
-                .and_then(|_| diagnostics.write_all(&outcome.output.stderr))
-                .map_err(|error| RustCompilerTestError::Io {
-                    path: outcome.task.transport.clone(),
-                    reason: error.to_string(),
-                })?;
-        }
+        let (test_status, exit) = status(&outcome.attempt_outcome, &outcome.output);
         if outcome.read.dropped != 0 {
             return Err(RustCompilerTestError::DroppedEvidence {
                 test: outcome.task.test_id,
@@ -2307,7 +2968,19 @@ fn execute_compiler_build(
         let base_phase = CoveragePhase {
             id: phase_id(&request.run_id, &attempt_id),
             kind: "test".into(),
-            operation: format!("Rust libtest {}", outcome.task.test),
+            operation: format!(
+                "{} {}",
+                match outcome.task.runner {
+                    RustCargoRunnerKind::CargoTest => "Rust libtest",
+                    RustCargoRunnerKind::CargoCustomHarness => "Rust custom harness",
+                    RustCargoRunnerKind::Nextest => "Rust nextest test",
+                },
+                if outcome.task.runner == RustCargoRunnerKind::CargoCustomHarness {
+                    &outcome.task.artifact.target_key
+                } else {
+                    &outcome.task.test
+                }
+            ),
             source: Some(outcome.task.artifact.source.clone()),
             caused_by_phase_id: None,
             started_at_ms: outcome.started_at_ms,
@@ -2329,7 +3002,13 @@ fn execute_compiler_build(
             test: outcome.task.test_id.clone(),
             reason: error.to_string(),
         })?;
-        let (result, background, health) = raw_result(
+        if snapshot_has_evidence(&projection.background) {
+            return Err(RustCompilerTestError::Projection {
+                test: outcome.task.test_id,
+                reason: "a persisted test partition retained context-zero evidence".into(),
+            });
+        }
+        let (result, health) = raw_result(
             &request.run_id,
             &outcome.task,
             test_status,
@@ -2337,9 +3016,6 @@ fn execute_compiler_build(
             projection,
         );
         raw_results.push(result);
-        if let Some(background) = background {
-            raw_results.push(background);
-        }
         transport_health.push(health);
     }
     for (target, _artifact_index, artifact, test) in nextest_unstarted {
@@ -2395,7 +3071,7 @@ fn execute_compiler_build(
     if observed_runners.iter().any(|runner| {
         !matches!(
             *runner,
-            "rustc" | "rust-libtest" | "rust-nextest" | "rustdoc"
+            "rustc" | "rust-libtest" | "rust-custom-harness" | "rust-nextest" | "rustdoc"
         )
     }) {
         return Err(RustCompilerTestError::Context(
@@ -2409,6 +3085,7 @@ fn execute_compiler_build(
     let runners = [
         ("rustc", compiler_runner_declaration()),
         ("rust-libtest", runner_declaration()),
+        ("rust-custom-harness", custom_harness_runner_declaration()),
         ("rust-nextest", nextest_runner_declaration()),
         ("rustdoc", rustdoc_runner_declaration()),
     ]
@@ -2451,11 +3128,162 @@ fn execute_compiler_build(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rust_doctest::{
-        RustdocDoctestAttributes, RustdocDoctestCode, RustdocDoctestIgnore, RustdocDoctestWrapper,
-        RustdocExtractedDoctest, RustdocJoinedOutcome, RustdocMergedEntry, RustdocOutcomeGroupJoin,
-        RustdocTestOutcome,
+    use crate::{
+        coverage_analysis::PointKind,
+        coverage_report::{CoverageManifest, PointMeta},
+        rust_doctest::{
+            RustdocDoctestAttributes, RustdocDoctestCode, RustdocDoctestIgnore,
+            RustdocDoctestWrapper, RustdocExtractedDoctest, RustdocJoinedOutcome,
+            RustdocMergedEntry, RustdocOutcomeGroupJoin, RustdocTestOutcome,
+        },
+        rust_probe_transport::RustOrdinalHit,
     };
+
+    fn test_transport() -> RustTransportRead {
+        RustTransportRead {
+            observations: Vec::new(),
+            ordinal_hits: Vec::new(),
+            phases: Vec::new(),
+            committed: 0,
+            incomplete: 0,
+            dropped: 0,
+            attachments: 0,
+        }
+    }
+
+    fn test_invocation(status: i32) -> RustCargoRunnerInvocation {
+        RustCargoRunnerInvocation {
+            result: SupervisedResult {
+                status: Some(status),
+                signal: None,
+                timed_out: false,
+                interrupted_signal: None,
+            },
+            started_at_ms: 0,
+            ended_at_ms: 1,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            background_transport: test_transport(),
+        }
+    }
+
+    fn test_runner_unit() -> RustCargoRunnerUnit {
+        RustCargoRunnerUnit {
+            version: RUST_CARGO_RUNNER_VERSION,
+            run_id: "run_0123456789abcdef".into(),
+            invocation_ordinal: 0,
+            runner: RustCargoRunnerKind::CargoTest,
+            runner_run_id: None,
+            runner_version: None,
+            runner_binary_id: None,
+            target: "aarch64-apple-darwin".into(),
+            artifact: PathBuf::from("target/test-artifact"),
+            arguments: Vec::new(),
+            invocation: test_invocation(0),
+            attempts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn persisted_runner_transport_rejects_cross_partition_and_count_tampering() {
+        let mut unit = test_runner_unit();
+        unit.attempts.push(RustCargoRunnerAttempt {
+            test: "tests::one".into(),
+            context_id: 7,
+            retry: 0,
+            total_attempts: 1,
+            runner_attempt_id: "attempt-one".into(),
+            outcome: RustCargoRunnerAttemptOutcome::Libtest {
+                result: RustLibtestTerminalResult::Passed,
+                timed_out: false,
+            },
+            transport: test_transport(),
+        });
+        validate_persisted_runner_transport(&unit).unwrap();
+
+        unit.attempts[0]
+            .transport
+            .ordinal_hits
+            .push(RustOrdinalHit {
+                process_id: 1,
+                context_id: 0,
+                ordinal: 9,
+            });
+        unit.attempts[0].transport.committed = 1;
+        assert!(
+            validate_persisted_runner_transport(&unit)
+                .unwrap_err()
+                .to_string()
+                .contains("exact transport partition")
+        );
+
+        unit.attempts[0].transport.ordinal_hits[0].context_id = 7;
+        unit.attempts[0].transport.committed = 2;
+        assert!(
+            validate_persisted_runner_transport(&unit)
+                .unwrap_err()
+                .to_string()
+                .contains("persisted attribution")
+        );
+    }
+
+    #[test]
+    fn empty_selected_suite_publishes_invocation_background_without_a_test_attempt() {
+        let point_id = "rs:statement:111111111111111111111111";
+        let mut unit = test_runner_unit();
+        unit.invocation.background_transport = RustTransportRead {
+            observations: Vec::new(),
+            ordinal_hits: vec![RustOrdinalHit {
+                process_id: 1,
+                context_id: 0,
+                ordinal: 9,
+            }],
+            phases: Vec::new(),
+            committed: 1,
+            incomplete: 0,
+            dropped: 0,
+            attachments: 1,
+        };
+        validate_persisted_runner_transport(&unit).unwrap();
+        let normalized = NormalizedRustCompilerManifest {
+            manifest: CoverageManifest {
+                decisions: Vec::new(),
+                points: vec![PointMeta {
+                    id: point_id.into(),
+                    kind: PointKind::Statement,
+                    file: "src/lib.rs".into(),
+                    line: 1,
+                    column: 1,
+                    source: "setup();".into(),
+                    label: None,
+                }],
+                branches: Vec::new(),
+                limitations: Vec::new(),
+                scope: None,
+            },
+            hit_obligations_by_ordinal: BTreeMap::from([(9, vec![point_id.into()])]),
+            internal_ordinals: BTreeSet::new(),
+            decision_outcome_obligations: BTreeMap::new(),
+            decision_loop_obligations: BTreeMap::new(),
+            decision_logical_selection_obligations: BTreeMap::new(),
+        };
+        let artifact = TestArtifact {
+            executable: unit.artifact.clone(),
+            runner_argument: None,
+            package: "package:.".into(),
+            target_key: "lib:fixture".into(),
+            kind: "unit".into(),
+            source: "src/lib.rs".into(),
+            test_harness: true,
+        };
+        let (result, health) =
+            cargo_runner_background_result(&unit.run_id, 0, &artifact, &unit, &normalized).unwrap();
+        let result = result.expect("context-zero evidence must remain queryable");
+        assert_eq!(result.role, "background");
+        assert!(result.runtime[0].hits.iter().any(|hit| hit == point_id));
+        assert_eq!(health.scope_kind, "runner-invocation");
+        assert_eq!(health.transport.committed, 1);
+    }
 
     #[test]
     fn tokens_and_phase_ids_are_fixed_width_and_domain_separated() {
@@ -2467,7 +3295,7 @@ mod tests {
     }
 
     #[test]
-    fn libtest_identity_includes_package_target_and_workspace_source() {
+    fn test_identities_include_runner_package_target_and_workspace_source() {
         let artifact = |package: &str, target_key: &str| TestArtifact {
             executable: PathBuf::from("test-artifact"),
             runner_argument: None,
@@ -2475,6 +3303,7 @@ mod tests {
             target_key: target_key.into(),
             kind: "unit".into(),
             source: "shared/src/lib.rs".into(),
+            test_harness: true,
         };
         let root = artifact("package:.", "lib:same");
         let sibling = artifact("package:crates/sibling", "lib:same");
@@ -2494,6 +3323,14 @@ mod tests {
         assert_ne!(
             libtest_id("aarch64-apple-darwin", &root, "tests::same_name"),
             libtest_id("x86_64-apple-darwin", &root, "tests::same_name")
+        );
+        assert_eq!(
+            custom_harness_id("aarch64-apple-darwin", &integration),
+            "rust:custom-harness:aarch64-apple-darwin:package:.:test:same:shared/src/lib.rs"
+        );
+        assert_ne!(
+            custom_harness_id("aarch64-apple-darwin", &integration),
+            libtest_id("aarch64-apple-darwin", &integration, "custom-harness")
         );
     }
 
@@ -2590,6 +3427,7 @@ mod tests {
                 target: "aarch64-apple-darwin".into(),
                 artifact: PathBuf::from("target/test-artifact"),
                 arguments: Vec::new(),
+                invocation: test_invocation(0),
                 attempts: Vec::new(),
             },
         )
@@ -2608,6 +3446,7 @@ mod tests {
                 target: "x86_64-unknown-linux-gnu".into(),
                 artifact: PathBuf::from("target/test-artifact"),
                 arguments: Vec::new(),
+                invocation: test_invocation(0),
                 attempts: Vec::new(),
             },
         )
@@ -2658,6 +3497,11 @@ mod tests {
             target: "aarch64-apple-darwin".into(),
             artifact: PathBuf::from("target/test-artifact"),
             arguments: vec!["--exact".into(), "tests::flaky".into()],
+            invocation: RustCargoRunnerInvocation {
+                started_at_ms: retry as i64,
+                ended_at_ms: retry as i64 + 1,
+                ..test_invocation(status)
+            },
             attempts: vec![RustCargoRunnerAttempt {
                 test: "tests::flaky".into(),
                 context_id: 7,
@@ -2671,25 +3515,15 @@ mod tests {
                         format!("#{}", retry + 1)
                     }
                 ),
-                result: SupervisedResult {
-                    status: Some(status),
-                    signal: None,
+                outcome: RustCargoRunnerAttemptOutcome::Libtest {
+                    result: if status == 0 {
+                        RustLibtestTerminalResult::Passed
+                    } else {
+                        RustLibtestTerminalResult::Failed
+                    },
                     timed_out: false,
-                    interrupted_signal: None,
                 },
-                transport: RustTransportRead {
-                    observations: Vec::new(),
-                    ordinal_hits: Vec::new(),
-                    phases: Vec::new(),
-                    committed: 0,
-                    incomplete: 0,
-                    dropped: 0,
-                    attachments: 0,
-                },
-                started_at_ms: retry as i64,
-                ended_at_ms: retry as i64 + 1,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
+                transport: test_transport(),
             }],
         };
 
@@ -2733,6 +3567,7 @@ mod tests {
             target_key: "lib:fixture".into(),
             kind: "unit".into(),
             source: "src/lib.rs".into(),
+            test_harness: true,
         };
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -2873,6 +3708,7 @@ mod tests {
             internal_ordinals: BTreeSet::new(),
             decision_outcome_obligations: std::collections::BTreeMap::new(),
             decision_loop_obligations: std::collections::BTreeMap::new(),
+            decision_logical_selection_obligations: std::collections::BTreeMap::new(),
         };
         let (results, health) =
             doctest_raw_results("run", &resolution, 10, 20, &normalized).unwrap();

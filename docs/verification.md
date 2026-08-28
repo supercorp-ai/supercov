@@ -1,13 +1,8 @@
 # Verification
 
-Supercov rewrites your source before running it. That is a strong claim to make
-about someone else's production code, so the burden of proof sits with the
-instrumenter: it has to demonstrate, on every release, that the rewritten
-program behaves exactly like the original and that the coverage it reports is
-arithmetically correct.
-
-Seven independent gates block publication. A failure in any one of them stops
-the trusted-publishing workflow.
+Supercov instruments source before the test command runs. Seven release gates
+check that the instrumented program matches the original program and that
+coverage calculations are correct. Any failed gate blocks publication.
 
 ## 1. Semantic differential execution
 

@@ -2784,6 +2784,8 @@ fn alternative_discriminator(
         ("let-else", "else") => "else",
         ("try-operator", "continued") => "continued",
         ("try-operator", "early return") => "returned",
+        ("logical-selection", "short-circuited") => "short-circuit",
+        ("logical-selection", "right operand evaluated") => "evaluated",
         _ => {
             return Err(RustdocJoinError::Invalid(format!(
                 "unknown {} alternative label {label}",
@@ -3045,6 +3047,20 @@ pub fn join_merged_doctest(
                 })
             })
             .transpose()?;
+        for selection in &mut decision.logical_selections {
+            selection.branch_id =
+                branch_ids
+                    .get(&selection.branch_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        RustdocJoinError::Invalid(
+                            "decision logical-selection branch was not rebased".into(),
+                        )
+                    })?;
+        }
+        decision
+            .logical_selections
+            .sort_by(|left, right| left.branch_id.cmp(&right.branch_id));
         for condition in &mut decision.conditions {
             let source = map_obligation_range(
                 &map,
@@ -4181,7 +4197,7 @@ mod tests {
         let decision_identity =
             pending_identity("decision", &key, start, end, "assertion").unwrap();
         let manifest = RustCompilerManifest {
-            schema: "supercov-rust-manifest-candidate-v2".into(),
+            schema: "supercov-rust-manifest-candidate-v3".into(),
             model: "rust-source-v1".into(),
             crate_name: "doctest_bundle_2024".into(),
             measurement_complete: false,
@@ -4234,6 +4250,7 @@ mod tests {
                 definitions: definition,
                 outcome_branch_id: branch_identity.id,
                 loop_branch_id: None,
+                logical_selections: Vec::new(),
                 conditions: vec![RustCompilerCondition {
                     source_key: key.clone(),
                     start,
@@ -4502,7 +4519,7 @@ mod tests {
         let mut branches = vec![outcome.clone(), first_arm.clone(), second_arm.clone()];
         branches.sort_by(|left, right| left.id.cmp(&right.id));
         let manifest = RustCompilerManifest {
-            schema: "supercov-rust-manifest-candidate-v2".into(),
+            schema: "supercov-rust-manifest-candidate-v3".into(),
             model: "rust-source-v1".into(),
             crate_name: "doctest_bundle_2024".into(),
             measurement_complete: false,
@@ -4530,6 +4547,7 @@ mod tests {
                 definitions: vec!["__doctest_0::main".into()],
                 outcome_branch_id: outcome.id,
                 loop_branch_id: None,
+                logical_selections: Vec::new(),
                 conditions: vec![RustCompilerCondition {
                     source_key: key.into(),
                     start: if_flag_start,

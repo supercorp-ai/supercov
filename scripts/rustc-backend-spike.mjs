@@ -44,6 +44,11 @@ const fixtureSourceDigest = createHash('sha256')
   .update(fixtureSourceBytes)
   .digest('hex');
 const fixtureSource = fixtureSourceBytes.toString('utf8').split('\n');
+const noStdFixtureSourcePath = join(
+  root,
+  'spikes/rustc-backend/fixture/no-std-fixture/src/lib.rs',
+);
+const noStdFixtureSource = readFileSync(noStdFixtureSourcePath, 'utf8').split('\n');
 const transportHeaderSize = 128;
 const transportDescriptorSize = 40;
 const transportContext = 42;
@@ -61,7 +66,11 @@ function cargoWorkspace(projectRoot) {
   );
 }
 
-function createTransport(name, descriptorCapacity = 1024, payloadCapacity = 64 * 1024) {
+function createTransport(
+  name,
+  descriptorCapacity = 32_768,
+  payloadCapacity = 4 * 1024 * 1024,
+) {
   const path = join(scratch, `${name}.transport`);
   const token = randomBytes(16);
   const header = Buffer.alloc(transportHeaderSize);
@@ -156,6 +165,765 @@ function sourceLine(fragment) {
   const index = fixtureSource.findIndex((line) => line.includes(fragment));
   assert.notEqual(index, -1, `missing fixture fragment: ${fragment}`);
   return index + 1;
+}
+
+function llvmTool(name) {
+  for (const [command, args] of [
+    ['rustup', ['which', name]],
+    ...(process.platform === 'darwin' ? [['xcrun', ['--find', name]]] : []),
+  ]) {
+    const result = spawnSync(command, args, {encoding: 'utf8'});
+    if (result.status === 0 && result.stdout.trim().length > 0) {
+      return result.stdout.trim();
+    }
+  }
+  assert.fail(
+    `the Rust development-oracle gate requires ${name} from rustup llvm-tools or Xcode`,
+  );
+}
+
+function sourceTokenLocation(lines, lineFragment, token, occurrence = 0) {
+  const lineIndex = lines.findIndex((line) => line.includes(lineFragment));
+  assert.notEqual(lineIndex, -1, `missing oracle source fragment: ${lineFragment}`);
+  let start = -1;
+  let from = 0;
+  for (let index = 0; index <= occurrence; index += 1) {
+    start = lines[lineIndex].indexOf(token, from);
+    assert.notEqual(start, -1, `missing oracle token ${token} in ${lineFragment}`);
+    from = start + token.length;
+  }
+  return {
+    line: lineIndex + 1,
+    start: start + 1,
+    end: start + 1 + token.length,
+  };
+}
+
+function generatedBooleanCorpus(caseCount) {
+  const structuralCaseCount = 16;
+  const expressions = [
+    'observe(&mut trace, 1, a) && observe(&mut trace, 2, b)',
+    'observe(&mut trace, 1, a) || observe(&mut trace, 2, b)',
+    '(observe(&mut trace, 1, a) || observe(&mut trace, 2, b)) && observe(&mut trace, 3, c)',
+    'observe(&mut trace, 1, a) && (observe(&mut trace, 2, b) || observe(&mut trace, 3, c))',
+    '(observe(&mut trace, 1, a) && observe(&mut trace, 2, b)) || observe(&mut trace, 3, c)',
+    'observe(&mut trace, 1, a) || (observe(&mut trace, 2, b) && observe(&mut trace, 3, c))',
+    '(observe(&mut trace, 1, a) || observe(&mut trace, 2, b)) && (observe(&mut trace, 3, c) || observe(&mut trace, 4, a))',
+    '(observe(&mut trace, 1, a) && observe(&mut trace, 2, b)) || (observe(&mut trace, 3, c) && observe(&mut trace, 4, a))',
+  ];
+  const functions = Array.from({length: caseCount}, (_, index) => `
+#[inline(never)]
+fn case_${index}(a: bool, b: bool, c: bool) -> (u64, u64) {
+    let mut trace = ${index + 1}u64;
+    let outcome = if ${expressions[index % expressions.length]} {
+        ${1000 + index}
+    } else {
+        ${2000 + index}
+    };
+    (outcome, trace)
+}`).join('\n');
+  const calls = Array.from(
+    {length: caseCount},
+    (_, index) => `
+        let (outcome, trace) = case_${index}(a, b, c);
+        checksum = checksum.rotate_left(7) ^ outcome ^ trace;`,
+  ).join('');
+  const structuralFunctions = Array.from(
+    {length: structuralCaseCount},
+    (_, index) => `
+#[inline(never)]
+fn pattern_case_${index}(value: Option<bool>, enabled: bool) -> u64 {
+    if let Some(inner) = value && inner && enabled {
+        ${3000 + index}
+    } else {
+        ${4000 + index}
+    }
+}
+
+#[inline(never)]
+fn guard_case_${index}(value: Option<bool>, enabled: bool) -> u64 {
+    match value {
+        Some(inner) if inner && enabled => ${5000 + index},
+        Some(_) => ${6000 + index},
+        None => ${7000 + index},
+    }
+}
+
+#[inline(never)]
+fn error_case_${index}(first: Result<u64, u64>, second: Option<u64>) -> Result<u64, u64> {
+    let first = first?;
+    let Some(second) = second else {
+        return Err(${8000 + index});
+    };
+    Ok(first + second + ${index})
+}
+
+#[inline(never)]
+fn ownership_case_${index}(enabled: bool) -> (u64, Vec<u64>) {
+    let log = std::cell::RefCell::new(Vec::new());
+    let result = {
+        let first = DropMark { id: ${9000 + index}, log: &log };
+        let second = DropMark { id: ${10000 + index}, log: &log };
+        let evaluate = || {
+            let _captures = (&first, &second);
+            if enabled { ${11000 + index} } else { ${12000 + index} }
+        };
+        evaluate()
+    };
+    (result, log.into_inner())
+}
+`,
+  ).join('\n');
+  const structuralCalls = Array.from(
+    {length: structuralCaseCount},
+    (_, index) => `
+    for (value, enabled) in [(None, false), (Some(false), false), (Some(true), false), (Some(true), true)] {
+        checksum = checksum.rotate_left(7) ^ pattern_case_${index}(value, enabled);
+        checksum = checksum.rotate_left(7) ^ guard_case_${index}(value, enabled);
+    }
+    for result in [
+        error_case_${index}(Err(${13000 + index}), Some(1)),
+        error_case_${index}(Ok(2), None),
+        error_case_${index}(Ok(2), Some(3)),
+    ] {
+        checksum = checksum.rotate_left(7) ^ match result { Ok(value) | Err(value) => value };
+    }
+    for enabled in [false, true] {
+        let (value, drops) = ownership_case_${index}(enabled);
+        checksum = checksum.rotate_left(7) ^ value;
+        for drop in drops { checksum = checksum.rotate_left(7) ^ drop; }
+    }
+`,
+  ).join('');
+  const pointFunctions = `
+#[inline(never)]
+fn point_case_both(flag: bool) -> u64 {
+    let seed = 13001u64;
+    if flag {
+        let taken = seed + 3;
+        return taken + 7;
+    }
+    let fallback = seed + 5;
+    fallback + 7
+}
+
+#[inline(never)]
+fn point_case_partial(flag: bool) -> u64 {
+    let seed = 14009u64;
+    if flag {
+        let taken = seed + 11;
+        return taken + 13;
+    }
+    let fallback = seed + 17;
+    fallback + 19
+}
+
+#[inline(never)]
+fn point_case_never(flag: bool) -> u64 {
+    let seed = 15013u64;
+    if flag {
+        let taken = seed + 23;
+        return taken + 29;
+    }
+    let fallback = seed + 31;
+    fallback + 37
+}
+`;
+  return `
+#[inline(never)]
+fn observe(trace: &mut u64, slot: u64, value: bool) -> bool {
+    *trace = trace.rotate_left(5) ^ (slot << 1) ^ u64::from(value);
+    value
+}
+${functions}
+
+struct DropMark<'a> {
+    id: u64,
+    log: &'a std::cell::RefCell<Vec<u64>>,
+}
+
+impl Drop for DropMark<'_> {
+    fn drop(&mut self) {
+        self.log.borrow_mut().push(self.id);
+    }
+}
+${structuralFunctions}
+${pointFunctions}
+
+fn main() {
+    let mut checksum = 0u64;
+    for mask in 0u8..8 {
+        let a = mask & 1 != 0;
+        let b = mask & 2 != 0;
+        let c = mask & 4 != 0;${calls}
+    }
+    ${structuralCalls}
+    checksum = checksum.rotate_left(7) ^ point_case_both(false);
+    checksum = checksum.rotate_left(7) ^ point_case_both(true);
+    checksum = checksum.rotate_left(7) ^ point_case_partial(true);
+    println!("generated-boolean={checksum}");
+}
+`.trimStart();
+}
+
+function generatedEditionCorpus() {
+  return `
+#[inline(never)]
+fn choice(first: bool, second: bool) -> u64 {
+    if first && second { 17 } else { 29 }
+}
+
+fn main() {
+    let checksum = choice(false, false) ^ choice(true, false) ^ choice(true, true);
+    println!("edition={}", checksum);
+}
+`.trimStart();
+}
+
+function byteRangeLocation(source, start, end) {
+  assert(Number.isInteger(start) && Number.isInteger(end) && start < end);
+  const bytes = Buffer.from(source);
+  const prefix = bytes.subarray(0, start).toString('utf8');
+  const selected = bytes.subarray(start, end).toString('utf8');
+  assert.equal(Buffer.byteLength(prefix) + Buffer.byteLength(selected), end);
+  assert(!selected.includes('\n'), 'generated oracle condition unexpectedly spans lines');
+  const lines = prefix.split('\n');
+  return {
+    line: lines.length,
+    start: Buffer.byteLength(lines.at(-1)) + 1,
+    end: Buffer.byteLength(lines.at(-1)) + 1 + Buffer.byteLength(selected),
+  };
+}
+
+async function verifyGeneratedPackageIsolation({
+  cargo,
+  rustc,
+  rustcHost,
+  wrapper,
+  supercov,
+}) {
+  const generatedPackageWorkspace = join(scratch, 'generated-package-workspace');
+  mkdirSync(generatedPackageWorkspace);
+  writeFileSync(
+    join(generatedPackageWorkspace, 'Cargo.toml'),
+    '[workspace]\nmembers = ["alpha", "beta"]\nresolver = "3"\n',
+  );
+  for (const packageName of ['alpha', 'beta']) {
+    const packageRoot = join(generatedPackageWorkspace, packageName);
+    mkdirSync(join(packageRoot, 'src'), {recursive: true});
+    writeFileSync(
+      join(packageRoot, 'Cargo.toml'),
+      `[package]\nname = "${packageName}"\nversion = "0.0.0"\nedition = "2024"\nbuild = "build.rs"\n`,
+    );
+    writeFileSync(
+      join(packageRoot, 'build.rs'),
+      [
+        'fn main() {',
+        '    let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));',
+        '    std::fs::write(output.join("generated.rs"), "pub fn generated_choice(value: bool) -> usize { if value { 17 } else { 19 } }\\n").expect("generated source");',
+        '}',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(packageRoot, 'src/lib.rs'),
+      [
+        'include!(concat!(env!("OUT_DIR"), "/generated.rs"));',
+        '',
+        '#[cfg(test)]',
+        'mod tests {',
+        '    #[test]',
+        '    fn generated_both_paths() {',
+        '        assert_eq!(super::generated_choice(false), 19);',
+        '        assert_eq!(super::generated_choice(true), 17);',
+        '    }',
+        '}',
+        '',
+      ].join('\n'),
+    );
+  }
+  const generatedPackageOutput = join(scratch, 'generated-package-output');
+  run(cargo, ['build', '--quiet', '--workspace'], {
+    cwd: generatedPackageWorkspace,
+    env: {
+      CARGO_TARGET_DIR: join(scratch, 'generated-package-target'),
+      RUSTC: rustc,
+      RUSTC_WRAPPER: wrapper,
+      DYLD_LIBRARY_PATH: [rustcTargetLibdir, process.env.DYLD_LIBRARY_PATH]
+        .filter(Boolean)
+        .join(':'),
+      LD_LIBRARY_PATH: [rustcTargetLibdir, process.env.LD_LIBRARY_PATH]
+        .filter(Boolean)
+        .join(':'),
+      SUPERCOV_RUST_COMPILER_OUTPUT: generatedPackageOutput,
+      SUPERCOV_RUST_SOURCE_ROOT: generatedPackageWorkspace,
+    },
+  });
+  const generatedPackageFacts = ['alpha', 'beta'].map((packageName) => {
+    const manifest = crateManifest(generatedPackageOutput, packageName);
+    const sources = compilerSources(generatedPackageOutput, packageName);
+    const obligation = obligationFor(manifest, 'generated_choice');
+    assert(obligation, `${packageName} omitted its generated function obligation`);
+    assert.equal(obligation.provenance, 'generated-source');
+    assert.equal(
+      obligation.sourceKey,
+      `generated:package:${packageName}:generated.rs`,
+    );
+    assert.equal(
+      sources[obligation.sourceKey]?.source,
+      'pub fn generated_choice(value: bool) -> usize { if value { 17 } else { 19 } }\n',
+    );
+    const normalizedPackage = JSON.parse(
+      run(supercov, ['__normalize-rust-compiler-manifest'], {
+        input: JSON.stringify({manifest, sources}),
+      }).stdout,
+    );
+    return {
+      id: obligation.id,
+      sourceKey: obligation.sourceKey,
+      fingerprint: normalizedPackage.manifest.scope.sourceFingerprint.digest,
+    };
+  });
+  assert.notEqual(
+    generatedPackageFacts[0].id,
+    generatedPackageFacts[1].id,
+    'identical generated functions from different packages shared one obligation identity',
+  );
+  assert.notEqual(
+    generatedPackageFacts[0].sourceKey,
+    generatedPackageFacts[1].sourceKey,
+    'identical generated files from different packages shared one source identity',
+  );
+  assert.notEqual(
+    generatedPackageFacts[0].fingerprint,
+    generatedPackageFacts[1].fingerprint,
+    'generated-source fingerprints omitted workspace package ownership',
+  );
+
+  const sourceDigest = () => {
+    const hash = createHash('sha256');
+    for (const packageName of ['alpha', 'beta']) {
+      for (const file of ['Cargo.toml', 'build.rs', 'src/lib.rs']) {
+        hash.update(`${packageName}/${file}\0`);
+        hash.update(readFileSync(join(generatedPackageWorkspace, packageName, file)));
+      }
+    }
+    return hash.digest('hex');
+  };
+  const sourceBeforeRun = sourceDigest();
+  const generatedPackageRun = JSON.parse(
+    run(supercov, ['__run-rust-compiler'], {
+      timeout: 300_000,
+      env: {
+        RUSTC: rustc,
+        DYLD_LIBRARY_PATH: [rustcTargetLibdir, process.env.DYLD_LIBRARY_PATH]
+          .filter(Boolean)
+          .join(':'),
+        LD_LIBRARY_PATH: [rustcTargetLibdir, process.env.LD_LIBRARY_PATH]
+          .filter(Boolean)
+          .join(':'),
+      },
+      input: JSON.stringify({
+        root: generatedPackageWorkspace,
+        command: [cargo, 'test', '--workspace', '--lib'],
+        runId: 'run_c123456789abcdef',
+        startedAt: '2026-08-26T00:00:00.000Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+    }).stdout,
+  );
+  assert.equal(generatedPackageRun.exitCode, 0);
+  assert.equal(generatedPackageRun.tests, 2);
+  assert.equal(generatedPackageRun.libtests, 2);
+  assert.equal(generatedPackageRun.doctests, 0);
+  assert(generatedPackageRun.denominator.points >= 6);
+  assert(generatedPackageRun.denominator.branches >= 2);
+  assert(generatedPackageRun.denominator.decisions >= 2);
+  assert(generatedPackageRun.summary.lines.covered >= 4);
+  assert(generatedPackageRun.summary.branches.covered >= 4);
+  assert(generatedPackageRun.summary.coveredConditions >= 2);
+  assert.equal(generatedPackageRun.transportHealth.length, 4);
+  assert.equal(
+    generatedPackageRun.transportHealth.filter(
+      ({scopeKind}) => scopeKind === 'runner-invocation',
+    ).length,
+    2,
+  );
+  assert.equal(
+    generatedPackageRun.transportHealth.filter(
+      ({scopeKind}) => scopeKind === 'test-attempt',
+    ).length,
+    2,
+  );
+  assert(
+    generatedPackageRun.transportHealth.every(
+      ({status, transport}) =>
+        status === 'passed' &&
+        transport.dropped === 0 &&
+        transport.incomplete === 0,
+    ),
+    'generated workspace published unhealthy per-test transport',
+  );
+  const generatedPackageQuery = JSON.parse(
+    run(supercov, ['__query-stored-run'], {
+      input: JSON.stringify({
+        root: generatedPackageWorkspace,
+        query: {
+          runId: generatedPackageRun.runId,
+          filter: 'all',
+          command: 'test',
+          selector: 'generated_both_paths',
+        },
+      }),
+    }).stdout,
+  );
+  assert.equal(generatedPackageQuery.ok, true);
+  assert.deepEqual(
+    new Set(generatedPackageQuery.data.tests.map(({id}) => id)),
+    new Set([
+      `rust:libtest:${rustcHost}:package:alpha:lib:alpha:alpha/src/lib.rs::tests::generated_both_paths`,
+      `rust:libtest:${rustcHost}:package:beta:lib:beta:beta/src/lib.rs::tests::generated_both_paths`,
+    ]),
+    'generated package tests lost exact relocatable package identity',
+  );
+  assert.equal(sourceDigest(), sourceBeforeRun, 'generated package run modified project source');
+  assert(
+    !existsSync(
+      join(generatedPackageWorkspace, '.supercov/work/run_c123456789abcdef'),
+    ),
+    'generated package run retained terminal transaction state',
+  );
+
+  const priorRunDirectory = join(
+    generatedPackageWorkspace,
+    '.supercov/runs',
+    generatedPackageRun.runId,
+  );
+  const priorRunDigest = () =>
+    createHash('sha256')
+      .update(readFileSync(join(priorRunDirectory, 'run.json')))
+      .update(readFileSync(join(priorRunDirectory, 'evidence.raw.gz')))
+      .digest('hex');
+  const priorDigest = priorRunDigest();
+  const faultCases = [
+    {
+      fault: 'archive-enospc',
+      runId: 'run_d123456789abcdef',
+      startedAt: '2026-08-26T00:00:01.000Z',
+      error: /injected ENOSPC while writing evidence archive/u,
+    },
+    {
+      fault: 'final-rename',
+      runId: 'run_e123456789abcdef',
+      startedAt: '2026-08-26T00:00:02.000Z',
+      error: /injected final run publication rename failure/u,
+    },
+  ];
+  for (const faultCase of faultCases) {
+    const failure = run(supercov, ['__run-rust-compiler'], {
+      timeout: 300_000,
+      expectFailure: true,
+      env: {
+        RUSTC: rustc,
+        DYLD_LIBRARY_PATH: [rustcTargetLibdir, process.env.DYLD_LIBRARY_PATH]
+          .filter(Boolean)
+          .join(':'),
+        LD_LIBRARY_PATH: [rustcTargetLibdir, process.env.LD_LIBRARY_PATH]
+          .filter(Boolean)
+          .join(':'),
+        SUPERCOV_RUSTC_SPIKE_PUBLICATION_FAULT: faultCase.fault,
+      },
+      input: JSON.stringify({
+        root: generatedPackageWorkspace,
+        command: [cargo, 'test', '--workspace', '--lib'],
+        runId: faultCase.runId,
+        startedAt: faultCase.startedAt,
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+    });
+    assert.match(failure.stderr, faultCase.error);
+    assert(
+      !existsSync(join(generatedPackageWorkspace, '.supercov/runs', faultCase.runId)),
+      `${faultCase.fault} exposed a partial compiler run`,
+    );
+    assert(
+      !existsSync(join(generatedPackageWorkspace, '.supercov/work', faultCase.runId)),
+      `${faultCase.fault} retained terminal publication work`,
+    );
+    assert(
+      !existsSync(
+        join(
+          cargoWorkspace(generatedPackageWorkspace),
+          '.supercov/work',
+          faultCase.runId,
+        ),
+      ),
+      `${faultCase.fault} retained terminal compiler work`,
+    );
+    assert.equal(
+      priorRunDigest(),
+      priorDigest,
+      `${faultCase.fault} changed the previously published run`,
+    );
+    const priorQuery = JSON.parse(
+      run(supercov, ['__query-stored-run'], {
+        input: JSON.stringify({
+          root: generatedPackageWorkspace,
+          query: {
+            runId: generatedPackageRun.runId,
+            filter: 'all',
+            command: 'test',
+            selector: 'generated_both_paths',
+          },
+        }),
+      }).stdout,
+    );
+    assert.equal(priorQuery.ok, true);
+    assert.equal(priorQuery.data.tests.length, 2);
+    assert.equal(
+      sourceDigest(),
+      sourceBeforeRun,
+      `${faultCase.fault} modified project source`,
+    );
+  }
+
+  const recoveryRun = JSON.parse(
+    run(supercov, ['__run-rust-compiler'], {
+      timeout: 300_000,
+      env: {
+        RUSTC: rustc,
+        DYLD_LIBRARY_PATH: [rustcTargetLibdir, process.env.DYLD_LIBRARY_PATH]
+          .filter(Boolean)
+          .join(':'),
+        LD_LIBRARY_PATH: [rustcTargetLibdir, process.env.LD_LIBRARY_PATH]
+          .filter(Boolean)
+          .join(':'),
+      },
+      input: JSON.stringify({
+        root: generatedPackageWorkspace,
+        command: [cargo, 'test', '--workspace', '--lib'],
+        runId: 'run_f123456789abcdef',
+        startedAt: '2026-08-26T00:00:03.000Z',
+        wrapperPath: supercov,
+        companionCandidates: [wrapper],
+        requirePublicCapabilities: false,
+      }),
+    }).stdout,
+  );
+  assert.equal(recoveryRun.exitCode, 0);
+  assert.equal(recoveryRun.tests, 2);
+  assert.equal(recoveryRun.transportHealth.length, 4);
+  assert.equal(priorRunDigest(), priorDigest);
+  assert.equal(sourceDigest(), sourceBeforeRun);
+
+  const leaderRunId = 'run_a123456789abcdef';
+  const contenderRunId = 'run_b123456789abcdef';
+  const leader = spawnCommand(supercov, ['__run-rust-compiler'], {
+    env: {
+      RUSTC: rustc,
+      DYLD_LIBRARY_PATH: [rustcTargetLibdir, process.env.DYLD_LIBRARY_PATH]
+        .filter(Boolean)
+        .join(':'),
+      LD_LIBRARY_PATH: [rustcTargetLibdir, process.env.LD_LIBRARY_PATH]
+        .filter(Boolean)
+        .join(':'),
+      SUPERCOV_RUSTC_SPIKE_PUBLICATION_FAULT: 'wait-before-publication',
+    },
+    input: JSON.stringify({
+      root: generatedPackageWorkspace,
+      command: [cargo, 'test', '--workspace', '--lib'],
+      runId: leaderRunId,
+      startedAt: '2026-08-26T00:00:04.000Z',
+      wrapperPath: supercov,
+      companionCandidates: [wrapper],
+      requirePublicCapabilities: false,
+    }),
+  });
+  const publicationWork = join(
+    generatedPackageWorkspace,
+    '.supercov/work',
+    leaderRunId,
+  );
+  const publicationReady = join(publicationWork, 'spike-publication-ready');
+  const publicationRelease = join(publicationWork, 'spike-publication-release');
+  let reachedPublication = false;
+  // This is a lifecycle gate, not a compile-performance gate. Match the
+  // enclosing compiler-run allowance so a cold or contended build cannot be
+  // mistaken for a publication-lock failure.
+  for (let attempt = 0; attempt < 12_000; attempt += 1) {
+    if (existsSync(publicationReady)) {
+      reachedPublication = true;
+      break;
+    }
+    assert.equal(
+      leader.child.exitCode,
+      null,
+      'the concurrent-run leader exited before reaching publication',
+    );
+    await delay(25);
+  }
+  if (!reachedPublication) {
+    leader.child.kill('SIGKILL');
+    const completed = await leader.result;
+    assert.fail(
+      `the concurrent-run leader never reached publication (exit=${completed.status ?? completed.signal})${completed.stdout ? `\nstdout:\n${completed.stdout.slice(-4_000)}` : ''}${completed.stderr ? `\nstderr:\n${completed.stderr.slice(-4_000)}` : ''}`,
+    );
+  }
+  const contender = run(supercov, ['__run-rust-compiler'], {
+    expectFailure: true,
+    env: {RUSTC: rustc},
+    input: JSON.stringify({
+      root: generatedPackageWorkspace,
+      command: [cargo, 'test', '--workspace', '--lib'],
+      runId: contenderRunId,
+      startedAt: '2026-08-26T00:00:05.000Z',
+      wrapperPath: supercov,
+      companionCandidates: [wrapper],
+      requirePublicCapabilities: false,
+    }),
+  });
+  assert.match(contender.stderr, /coverage run .* is already active/u);
+  assert(
+    !existsSync(join(generatedPackageWorkspace, '.supercov/work', contenderRunId)),
+    'the rejected concurrent compiler run created transaction work',
+  );
+  assert(
+    !existsSync(join(generatedPackageWorkspace, '.supercov/runs', contenderRunId)),
+    'the rejected concurrent compiler run became visible',
+  );
+  assert.equal(priorRunDigest(), priorDigest);
+  writeFileSync(publicationRelease, 'release\n', {flag: 'wx'});
+  const leaderTimeout = setTimeout(() => leader.child.kill('SIGKILL'), 300_000);
+  const leaderResult = await leader.result;
+  clearTimeout(leaderTimeout);
+  assert.equal(leaderResult.signal, null, leaderResult.stderr);
+  assert.equal(leaderResult.status, 0, leaderResult.stderr);
+  const publishedLeader = JSON.parse(leaderResult.stdout);
+  assert.equal(publishedLeader.runId, leaderRunId);
+  assert.equal(publishedLeader.tests, 2);
+  assert.equal(publishedLeader.transportHealth.length, 4);
+  assert(!existsSync(publicationWork));
+  assert.equal(priorRunDigest(), priorDigest);
+  assert.equal(sourceDigest(), sourceBeforeRun);
+
+  if (process.platform !== 'win32') {
+    const readOnlyOuter = join(scratch, 'read-only-parent');
+    const readOnlyProject = join(readOnlyOuter, 'project');
+    mkdirSync(join(readOnlyProject, 'src'), {recursive: true});
+    writeFileSync(
+      join(readOnlyProject, 'Cargo.toml'),
+      '[package]\nname="read-only-parent-fixture"\nversion="0.0.0"\nedition="2024"\n',
+    );
+    writeFileSync(
+      join(readOnlyProject, 'src/lib.rs'),
+      [
+        'pub fn choice(value: bool) -> usize {',
+        '    if value { 17 } else { 19 }',
+        '}',
+        '',
+        '#[cfg(test)]',
+        'mod tests {',
+        '    #[test]',
+        '    fn both_paths() {',
+        '        assert_eq!(super::choice(false), 19);',
+        '        assert_eq!(super::choice(true), 17);',
+        '    }',
+        '}',
+        '',
+      ].join('\n'),
+    );
+    const readOnlySourceDigest = createHash('sha256')
+      .update(readFileSync(join(readOnlyProject, 'Cargo.toml')))
+      .update(readFileSync(join(readOnlyProject, 'src/lib.rs')))
+      .digest('hex');
+    chmodSync(readOnlyOuter, 0o555);
+    let readOnlyRun;
+    try {
+      readOnlyRun = JSON.parse(
+        run(supercov, ['__run-rust-compiler'], {
+          timeout: 300_000,
+          env: {
+            RUSTC: rustc,
+            DYLD_LIBRARY_PATH: [rustcTargetLibdir, process.env.DYLD_LIBRARY_PATH]
+              .filter(Boolean)
+              .join(':'),
+            LD_LIBRARY_PATH: [rustcTargetLibdir, process.env.LD_LIBRARY_PATH]
+              .filter(Boolean)
+              .join(':'),
+          },
+          input: JSON.stringify({
+            root: readOnlyProject,
+            command: [cargo, 'test', '--lib'],
+            runId: 'run_7123456789abcdef',
+            startedAt: '2026-08-26T00:00:06.000Z',
+            wrapperPath: supercov,
+            companionCandidates: [wrapper],
+            requirePublicCapabilities: false,
+          }),
+        }).stdout,
+      );
+    } finally {
+      chmodSync(readOnlyOuter, 0o755);
+    }
+    assert.equal(readOnlyRun.exitCode, 0);
+    assert.equal(readOnlyRun.tests, 1);
+    assert.equal(readOnlyRun.transportHealth.length, 2);
+    assert.equal(
+      readOnlyRun.transportHealth.find(
+        ({scopeKind}) => scopeKind === 'runner-invocation',
+      )?.status,
+      'passed',
+    );
+    assert.equal(
+      readOnlyRun.transportHealth.find(
+        ({scopeKind}) => scopeKind === 'test-attempt',
+      )?.status,
+      'passed',
+    );
+    const locatorPath = join(readOnlyProject, '.supercov/cargo-workspace.json');
+    const locator = JSON.parse(readFileSync(locatorPath, 'utf8'));
+    assert.equal(locator.placement, 'temporary');
+    assert.match(locator.rootSha256, /^[0-9a-f]{64}$/u);
+    assert.match(locator.token, /^[0-9a-f]{64}$/u);
+    const fallbackContainer = join(
+      realpathSync(tmpdir()),
+      `.supercov-cargo-${locator.rootSha256.slice(0, 24)}-${locator.token.slice(0, 32)}`,
+    );
+    assert(existsSync(fallbackContainer));
+    assert(
+      !realpathSync(fallbackContainer).startsWith(`${realpathSync(readOnlyProject)}/`),
+      'read-only-parent fallback remained beneath the Cargo ancestor workspace',
+    );
+    const readOnlyQuery = JSON.parse(
+      run(supercov, ['__query-stored-run'], {
+        input: JSON.stringify({
+          root: readOnlyProject,
+          query: {
+            runId: readOnlyRun.runId,
+            filter: 'all',
+            command: 'test',
+            selector: 'both_paths',
+          },
+        }),
+      }).stdout,
+    );
+    assert.equal(readOnlyQuery.ok, true);
+    assert.equal(readOnlyQuery.data.tests.length, 1);
+    assert.equal(
+      createHash('sha256')
+        .update(readFileSync(join(readOnlyProject, 'Cargo.toml')))
+        .update(readFileSync(join(readOnlyProject, 'src/lib.rs')))
+        .digest('hex'),
+      readOnlySourceDigest,
+    );
+    run(supercov, ['clean'], {cwd: readOnlyProject});
+    assert(!existsSync(fallbackContainer));
+    assert(!existsSync(locatorPath));
+  }
 }
 
 function run(command, args, options = {}) {
@@ -310,13 +1078,14 @@ function manifests(directory) {
 }
 
 function crateManifest(directory, crate) {
-  const matches = manifests(directory).filter(
+  const available = manifests(directory);
+  const matches = available.filter(
     (manifestRecord) => manifestRecord.crate === crate,
   );
   assert.equal(
     matches.length,
     1,
-    `expected one manifest candidate for ${crate}, found ${matches.length}`,
+    `expected one manifest candidate for ${crate}, found ${matches.length}; available: ${available.map(({crate: name}) => name).join(', ')}`,
   );
   return matches[0];
 }
@@ -538,11 +1307,1145 @@ function assertionPhaseContext(evidence, parent, decisionId) {
   return contexts[0];
 }
 
+function buildSharedRuntime() {
+  const directory = join(scratch, 'shared-rust-runtime');
+  const source = join(directory, 'runtime.rs');
+  const archive = join(directory, 'libsupercov_runtime.a');
+  mkdirSync(directory);
+  const runtimeModule = readFileSync(
+    join(root, 'crates/supercov-engine/runtime-assets/rust-mmap-runtime.rs'),
+    'utf8',
+  ).replace('__SUPERCOV_MODULE__', '__supercov_shared_runtime');
+  const runtimeExports = `
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_ordinal_hit(ordinal: u64) { __supercov_shared_runtime::ordinal_hit(ordinal) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_active_context() -> u64 { __supercov_shared_runtime::active_context() }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_enter_context(context_id: u64) -> u64 { __supercov_shared_runtime::enter_context(context_id) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_exit_context(previous: u64) { __supercov_shared_runtime::exit_context(previous) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_enter_assertion_context(id_high: u64, id_low: u32) -> u64 { __supercov_shared_runtime::enter_assertion_context(id_high, id_low) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_decision_start(id_high: u64, id_low: u32, conditions: u64) -> u64 { __supercov_shared_runtime::mir_decision_start(id_high, id_low, conditions) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_decision_condition(token: u64, index: u64, value: bool) { __supercov_shared_runtime::mir_decision_condition(token, index, value) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_decision_finish(token: u64, outcome: bool) { __supercov_shared_runtime::mir_decision_finish(token, outcome) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_branch_start() -> u64 { __supercov_shared_runtime::mir_branch_start() }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_branch_hit(token: u64, ordinal: u64) { __supercov_shared_runtime::mir_branch_hit(token, ordinal) }
+`;
+  writeFileSync(source, `${runtimeModule}\n${runtimeExports}`);
+  run('rustc', [
+    '--edition=2024',
+    '--crate-name=supercov_runtime',
+    '--crate-type=staticlib',
+    '-o',
+    archive,
+    source,
+  ]);
+  return directory;
+}
+
 try {
   run('cargo', ['build', '--manifest-path', manifest], {
     env: {RUSTC_BOOTSTRAP: '1'},
   });
   run('cargo', ['build', '-p', 'supercov']);
+  const bundleRustc = run('rustup', ['which', 'rustc']).stdout.trim();
+  const bundleSysroot = run(bundleRustc, ['--print', 'sysroot']).stdout.trim();
+  const bundleWork = join(scratch, 'libtest-companion-build');
+  mkdirSync(bundleWork);
+  const libtestBundle = JSON.parse(
+    run(supercov, [
+      '__build-rust-libtest-companion',
+      join(bundleSysroot, 'lib/rustlib/src/rust/library/test'),
+      bundleWork,
+      bundleRustc,
+      wrapper,
+    ]).stdout,
+  );
+  assert.equal(libtestBundle.schemaVersion, 2);
+  assert.equal(libtestBundle.eventProtocolVersion, 1);
+  assert.equal(
+    libtestBundle.compilerCompanionBuildId,
+    createHash('sha256').update(readFileSync(wrapper)).digest('hex'),
+  );
+  assert.match(
+    libtestBundle.artifactFile,
+    /^libtest-supercov-v[0-9]+-[0-9a-f-]+\.rlib$/u,
+  );
+  assert.match(libtestBundle.artifactSha256, /^[0-9a-f]{64}$/u);
+  const sharedRuntimeDirectory = buildSharedRuntime();
+
+  // Generic functions, trait defaults and async state machines are serialized
+  // into the library and instantiated by this downstream binary. Keep this
+  // focused gate before the large lifecycle matrix: a probe that references a
+  // non-serializable compiler-injected Rust wrapper fails here immediately.
+  const genericAsyncBaseline = run(
+    'cargo',
+    ['run', '--quiet', '--manifest-path', fixture, '--bin', 'behavior'],
+    {env: {CARGO_TARGET_DIR: join(scratch, 'generic-async-baseline-target')}},
+  );
+  const genericAsyncTransport = createTransport('generic-async-smoke');
+  const genericAsyncInstrumented = run(
+    'cargo',
+    ['run', '--quiet', '--manifest-path', fixture, '--bin', 'behavior'],
+    {
+      env: {
+        CARGO_TARGET_DIR: join(scratch, 'generic-async-instrumented-target'),
+        RUSTC_WRAPPER: wrapper,
+        SUPERCOV_RUST_COMPILER_OUTPUT: join(scratch, 'generic-async-output'),
+        SUPERCOV_RUST_INSTRUMENT_MIR: '1',
+        SUPERCOV_RUST_STATIC_RUNTIME_DIRECTORY: sharedRuntimeDirectory,
+        SUPERCOV_RUST_TRANSPORT_FILE: genericAsyncTransport.path,
+        SUPERCOV_RUST_TRANSPORT_TOKEN: genericAsyncTransport.tokenHex,
+        SUPERCOV_RUST_CONTEXT_ID: transportContext.toString(16).padStart(16, '0'),
+      },
+    },
+  );
+  assert.equal(genericAsyncInstrumented.stdout, genericAsyncBaseline.stdout);
+  assert.equal(genericAsyncInstrumented.stderr, genericAsyncBaseline.stderr);
+  assert.match(
+    genericAsyncBaseline.stdout,
+    /generic-trait=\[233, 239, 211, 223, 211, 223, 229, 227\]/,
+  );
+  assert.match(genericAsyncBaseline.stdout, /async=\[251, 241\]/);
+  assert.match(
+    genericAsyncBaseline.stdout,
+    /advanced-generic-async=\[277, 281, 281, 257, 263, 263, 271, 269, 293, 283, 16, 12\]/,
+  );
+  assert.match(
+    genericAsyncBaseline.stdout,
+    /async-drop=\["async-drop", "async-drop"\]/,
+  );
+  assert.match(
+    genericAsyncBaseline.stdout,
+    /nested-generic=\[false, true, true, false\]/,
+  );
+  assert.match(
+    genericAsyncBaseline.stdout,
+    /logical-value=\[false, true, true, false\]/,
+  );
+  assert.match(
+    genericAsyncBaseline.stdout,
+    /advanced-types=\[307, 311, 311, 313, 317, 317, 331, 337, 337, 347, 349, 349\]/,
+  );
+  assert.match(
+    genericAsyncBaseline.stdout,
+    /nested-expansions=\[353, 359, 359, 181, 191\]/,
+  );
+  assert.match(
+    genericAsyncBaseline.stdout,
+    /no-std=\[409, 409, 401, 0, 1, 1, 419, 421\]/,
+  );
+  assert.match(
+    genericAsyncBaseline.stdout,
+    /opaque-macro-compound=\[439, 439, 433\]/,
+  );
+  assert.match(
+    genericAsyncBaseline.stdout,
+    /opaque-macro-nested=\[449, 449, 443, 443, 449, 449, 443\]/,
+  );
+  assert.match(genericAsyncBaseline.stdout, /opaque-macro-guard=\[461, 461, 457\]/);
+  assert.match(
+    genericAsyncBaseline.stdout,
+    /ctfe-logical-value=\[false, true, true, false\]/,
+  );
+  const genericAsyncManifest = crateManifest(
+    join(scratch, 'generic-async-output'),
+    'supercov_rustc_spike_fixture',
+  );
+  const noStdManifest = crateManifest(
+    join(scratch, 'generic-async-output'),
+    'no_std_fixture',
+  );
+  const genericAsyncEvidence = readTransport(genericAsyncTransport);
+  const genericAsyncOrdinals = new Set(
+    genericAsyncEvidence.ordinals.map(({ordinal}) => ordinal),
+  );
+  const functionPoints = (definition) =>
+    genericAsyncManifest.points.filter(
+      ({kind, definitions}) =>
+        kind === 'function' && definitions.includes(definition),
+    );
+  assert.equal(
+    functionPoints('generic_choice').length,
+    1,
+    'generic monomorphizations created duplicate source function obligations',
+  );
+  assert.equal(
+    functionPoints('RuntimeChoice::default_choice').length,
+    1,
+    'trait default dispatch created duplicate source function obligations',
+  );
+  assert.equal(
+    functionPoints('async_choice').length,
+    0,
+    'constructing an async future incorrectly created a function-entry obligation',
+  );
+  assert.equal(
+    functionPoints('async_choice::{closure#0}').length,
+    1,
+    'an async function must contribute exactly one first-poll body obligation',
+  );
+  for (const constructor of [
+    'async_trait_choice',
+    'AsyncRuntimeChoice::async_default_choice',
+    '<OverrideChoice as AsyncRuntimeChoice>::async_default_choice',
+    'async_closure_choice',
+    'async_closure_choice::{closure#0}::{closure#0}',
+    'suspended_borrow_choice',
+  ]) {
+    assert.equal(
+      functionPoints(constructor).length,
+      0,
+      `${constructor} incorrectly created an async future-constructor obligation`,
+    );
+  }
+  for (const definition of [
+    'generic_choice',
+    'RuntimeChoice::default_choice',
+    '<OverrideChoice as RuntimeChoice>::default_choice',
+    'async_choice::{closure#0}',
+    'AsyncRuntimeChoice::async_default_choice::{closure#0}',
+    '<OverrideChoice as AsyncRuntimeChoice>::async_default_choice::{closure#0}',
+    'async_trait_choice::{closure#0}',
+    'EnabledChoice::associated_generic_choice',
+    'nested_generic_choice',
+    'logical_value_choice',
+    'AssociatedRuntimeChoice::associated_default',
+    '<EnabledChoice as AssociatedRuntimeChoice>::associated_enabled',
+    '<DisabledChoice as AssociatedRuntimeChoice>::associated_enabled',
+    'GatRuntimeChoice::gat_default',
+    '<EnabledChoice as GatRuntimeChoice>::borrow_choice',
+    '<DisabledChoice as GatRuntimeChoice>::borrow_choice',
+    'OpaqueRuntimeChoice::opaque_values',
+    'opaque_choice',
+    'opaque_macro_compound',
+    'opaque_macro_guard',
+    'opaque_macro_nested',
+    'hrtb_choice',
+    'DerivedChoice::derived_choice',
+    'attributed_choice',
+    'generated_nested_external_by_proc',
+    'async_closure_choice::{closure#0}',
+    'async_closure_choice::{closure#0}::{closure#0}::{closure#0}',
+    'suspended_borrow_choice::{closure#0}',
+    "<AsyncDrop<'_> as std::ops::Drop>::drop",
+  ]) {
+    const [point] = functionPoints(definition);
+    assert(
+      point && genericAsyncOrdinals.has(point.probeOrdinal),
+      `${definition} did not publish its exact function-entry ordinal`,
+    );
+  }
+  const pointsForDefinition = (definition) =>
+    genericAsyncManifest.points.filter(({definitions}) =>
+      definitions.includes(definition),
+    );
+  const observedDerivedPoints = pointsForDefinition(
+    'DerivedChoice::derived_choice',
+  );
+  assert(
+    observedDerivedPoints.length >= 4,
+    'the executed derive expansion did not retain its complete point denominator',
+  );
+  assert(
+    observedDerivedPoints.every(({probeOrdinal}) =>
+      genericAsyncOrdinals.has(probeOrdinal),
+    ),
+    'the executed derive expansion lost one of its exact point observations',
+  );
+  const unusedDerivedPoints = pointsForDefinition(
+    'UnusedDerivedChoice::derived_choice',
+  );
+  assert(
+    unusedDerivedPoints.length >= 4,
+    'the uncalled derive expansion disappeared from the point denominator',
+  );
+  assert(
+    unusedDerivedPoints.every(({probeOrdinal}) =>
+      !genericAsyncOrdinals.has(probeOrdinal),
+    ),
+    'the executed derive expansion contaminated an identical uncalled expansion',
+  );
+  assert(
+    genericAsyncEvidence.decisions.every(
+      ({id}) =>
+        id !==
+        decisionFor(
+          genericAsyncManifest,
+          'UnusedDerivedChoice::derived_choice',
+        )?.id,
+    ),
+    'the uncalled derive decision received fabricated runtime evidence',
+  );
+  const smokeDecisionVectors = (definition) => {
+    const decision = decisionFor(genericAsyncManifest, definition);
+    assert(decision, `missing ${definition} decision`);
+    return genericAsyncEvidence.decisions
+      .filter(({id}) => id === decision.id)
+      .map(({values, outcome}) => JSON.stringify({values, outcome}))
+      .sort();
+  };
+  const smokeDecisionVectorsIn = (manifest, definition) => {
+    const decision = decisionFor(manifest, definition);
+    assert(decision, `missing ${definition} decision`);
+    return genericAsyncEvidence.decisions
+      .filter(({id}) => id === decision.id)
+      .map(({values, outcome}) => JSON.stringify({values, outcome}))
+      .sort();
+  };
+  const bothBooleanVectors = [
+    JSON.stringify({values: [false], outcome: false}),
+    JSON.stringify({values: [true], outcome: true}),
+  ].sort();
+  {
+    const definition = 'opaque_macro_compound';
+    const decision = decisionFor(genericAsyncManifest, definition);
+    assert(decision, 'an authored opaque macro nested in a decision was dropped');
+    assert.deepEqual(
+      decision.conditions.map(({source}) => source),
+      ['matches!(value, Some(1 | 2))', 'enabled'],
+      'macro implementation control leaked into the authored denominator',
+    );
+    assert.deepEqual(
+      smokeDecisionVectors(definition),
+      [
+        JSON.stringify({values: [false, null], outcome: false}),
+        JSON.stringify({values: [true, false], outcome: false}),
+        JSON.stringify({values: [true, true], outcome: true}),
+      ].sort(),
+    );
+    const logicalBranch = branchFor(
+      genericAsyncManifest,
+      definition,
+      'logical-selection',
+    );
+    assert.deepEqual(decision.logicalSelections, [
+      {branchId: logicalBranch.id, rightConditionIndex: 1},
+    ]);
+  }
+  {
+    const definition = 'opaque_macro_nested';
+    const decision = decisionFor(genericAsyncManifest, definition);
+    assert(decision, 'nested authored opaque macro conditions were dropped');
+    assert.deepEqual(
+      decision.conditions.map(({source}) => source),
+      [
+        'first',
+        'matches!(first_value, Some(1 | 2))',
+        'matches!(second_value, Some(3 | 5))',
+        'fallback',
+      ],
+      'nested macro implementation control leaked into the authored denominator',
+    );
+    assert.deepEqual(
+      smokeDecisionVectors(definition),
+      [
+        JSON.stringify({values: [false, null, false, null], outcome: false}),
+        JSON.stringify({values: [false, null, true, false], outcome: false}),
+        JSON.stringify({values: [false, null, true, true], outcome: true}),
+        JSON.stringify({values: [true, false, false, null], outcome: false}),
+        JSON.stringify({values: [true, false, true, false], outcome: false}),
+        JSON.stringify({values: [true, false, true, true], outcome: true}),
+        JSON.stringify({values: [true, true, null, null], outcome: true}),
+      ].sort(),
+    );
+    const logicalBranches = branchesFor(
+      genericAsyncManifest,
+      definition,
+      'logical-selection',
+    );
+    assert.equal(logicalBranches.length, 3);
+    assert.deepEqual(
+      decision.logicalSelections.map(({rightConditionIndex}) => rightConditionIndex),
+      [1, 2, 3],
+    );
+    assert(
+      logicalBranches.every((branch) =>
+        branch.alternatives.every(
+          ({probeOrdinal}) => !genericAsyncOrdinals.has(probeOrdinal),
+        ),
+      ),
+      'nested opaque logical selections emitted redundant branch probes',
+    );
+  }
+  {
+    const definition = 'opaque_macro_guard';
+    const decision = decisionFor(genericAsyncManifest, definition);
+    assert(decision, 'an authored opaque macro inside a match guard was dropped');
+    assert.equal(decision.kind, 'match-guard');
+    assert.deepEqual(decision.conditions.map(({source}) => source), [
+      'matches!(candidate, Some(1 | 2))',
+      'enabled',
+    ]);
+    assert.deepEqual(
+      smokeDecisionVectors(definition),
+      [
+        JSON.stringify({values: [false, null], outcome: false}),
+        JSON.stringify({values: [true, false], outcome: false}),
+        JSON.stringify({values: [true, true], outcome: true}),
+      ].sort(),
+    );
+    const logicalBranch = branchFor(
+      genericAsyncManifest,
+      definition,
+      'logical-selection',
+    );
+    assert.deepEqual(decision.logicalSelections, [
+      {branchId: logicalBranch.id, rightConditionIndex: 1},
+    ]);
+  }
+  assert.deepEqual(smokeDecisionVectors('generic_choice'), bothBooleanVectors);
+  assert.deepEqual(
+    smokeDecisionVectors('RuntimeChoice::default_choice'),
+    [...bothBooleanVectors, ...bothBooleanVectors].sort(),
+  );
+  assert.deepEqual(
+    smokeDecisionVectors('<OverrideChoice as RuntimeChoice>::default_choice'),
+    bothBooleanVectors,
+  );
+  assert.deepEqual(
+    smokeDecisionVectors('async_choice::{closure#0}'),
+    bothBooleanVectors,
+  );
+  assert.deepEqual(
+    smokeDecisionVectors('EnabledChoice::associated_generic_choice'),
+    [
+      JSON.stringify({values: [false, null], outcome: false}),
+      JSON.stringify({values: [true, false], outcome: false}),
+      JSON.stringify({values: [true, true], outcome: true}),
+    ].sort(),
+  );
+  assert.deepEqual(
+    smokeDecisionVectors('AsyncRuntimeChoice::async_default_choice::{closure#0}'),
+    [
+      JSON.stringify({values: [false, null], outcome: false}),
+      JSON.stringify({values: [true, false], outcome: false}),
+      JSON.stringify({values: [true, true], outcome: true}),
+    ].sort(),
+  );
+  assert.deepEqual(
+    smokeDecisionVectors('nested_generic_choice'),
+    [
+      JSON.stringify({values: [false, null, false], outcome: false}),
+      JSON.stringify({values: [false, null, true], outcome: true}),
+      JSON.stringify({values: [true, false, false], outcome: false}),
+      JSON.stringify({values: [true, true, null], outcome: true}),
+    ].sort(),
+  );
+  for (const definition of [
+    'AssociatedRuntimeChoice::associated_default',
+    'GatRuntimeChoice::gat_default',
+    'OpaqueRuntimeChoice::opaque_values',
+    'hrtb_choice',
+    'attributed_choice',
+  ]) {
+    assert.deepEqual(
+      smokeDecisionVectors(definition),
+      [
+        JSON.stringify({values: [false, null], outcome: false}),
+        JSON.stringify({values: [true, false], outcome: false}),
+        JSON.stringify({values: [true, true], outcome: true}),
+      ].sort(),
+      `${definition} did not preserve its exact short-circuit vectors`,
+    );
+  }
+  assert.deepEqual(
+    smokeDecisionVectors('generated_nested_external_by_proc'),
+    [...bothBooleanVectors, ...bothBooleanVectors].sort(),
+  );
+  for (const definition of [
+    'no_std_choice',
+    'no_std_logical_value',
+    'no_std_match',
+  ]) {
+    const points = noStdManifest.points.filter(
+      ({kind, definitions}) =>
+        kind === 'function' && definitions.includes(definition),
+    );
+    assert.equal(points.length, 1, `${definition} has no exact no_std entry`);
+    assert(
+      genericAsyncOrdinals.has(points[0].probeOrdinal),
+      `${definition} did not publish its no_std function-entry ordinal`,
+    );
+  }
+  assert.deepEqual(
+    smokeDecisionVectorsIn(noStdManifest, 'no_std_choice'),
+    [
+      JSON.stringify({values: [false, null], outcome: false}),
+      JSON.stringify({values: [true, false], outcome: false}),
+      JSON.stringify({values: [true, true], outcome: true}),
+    ].sort(),
+  );
+  {
+    const definition = 'no_std_choice';
+    const decision = decisionFor(noStdManifest, definition);
+    const logicalBranch = branchFor(
+      noStdManifest,
+      definition,
+      'logical-selection',
+    );
+    assert.deepEqual(decision.logicalSelections, [
+      {branchId: logicalBranch.id, rightConditionIndex: 1},
+    ]);
+  }
+  {
+    const logicalBranch = branchFor(
+      noStdManifest,
+      'no_std_logical_value',
+      'logical-selection',
+    );
+    assert.equal(decisionFor(noStdManifest, 'no_std_logical_value'), undefined);
+    assert(
+      logicalBranch.alternatives.every(({probeOrdinal}) =>
+        genericAsyncOrdinals.has(probeOrdinal),
+      ),
+      'no_std logical value selection did not emit both alternatives',
+    );
+  }
+  {
+    const matchBranches = branchesFor(noStdManifest, 'no_std_match', 'match-arm');
+    assert.equal(matchBranches.length, 2);
+    assert(
+      matchBranches.every((branch) =>
+        branch.alternatives
+          .filter(({label}) => label === 'selected')
+          .every(({probeOrdinal}) => genericAsyncOrdinals.has(probeOrdinal)),
+      ),
+      'no_std match did not emit both selected-arm observations',
+    );
+  }
+  {
+    const llvmProfdata = llvmTool('llvm-profdata');
+    const llvmCov = llvmTool('llvm-cov');
+    const oracleDirectory = join(scratch, 'llvm-condition-oracle');
+    const oracleProfiles = join(oracleDirectory, 'profiles');
+    const oracleTarget = join(oracleDirectory, 'target');
+    mkdirSync(oracleProfiles, {recursive: true});
+    const oracleRun = run(
+      'cargo',
+      ['run', '--quiet', '--manifest-path', fixture, '--bin', 'behavior'],
+      {
+        env: {
+          CARGO_TARGET_DIR: oracleTarget,
+          LLVM_PROFILE_FILE: join(oracleProfiles, '%p-%m.profraw'),
+          RUSTC_BOOTSTRAP: '1',
+          RUSTFLAGS: '-Cinstrument-coverage -Zcoverage-options=condition',
+        },
+      },
+    );
+    assert.equal(oracleRun.stdout, genericAsyncBaseline.stdout);
+    assert.equal(oracleRun.stderr, genericAsyncBaseline.stderr);
+    const rawProfiles = readdirSync(oracleProfiles)
+      .filter((name) => name.endsWith('.profraw'))
+      .map((name) => join(oracleProfiles, name))
+      .sort();
+    assert(rawProfiles.length > 0, 'rustc/LLVM oracle emitted no raw profiles');
+    const mergedProfile = join(oracleDirectory, 'merged.profdata');
+    run(llvmProfdata, ['merge', '-sparse', ...rawProfiles, '-o', mergedProfile]);
+    const oracleExport = JSON.parse(
+      run(llvmCov, [
+        'export',
+        '--format=text',
+        `--instr-profile=${mergedProfile}`,
+        join(oracleTarget, 'debug/behavior'),
+      ]).stdout,
+    );
+    assert.equal(oracleExport.type, 'llvm.coverage.json.export');
+    const noStdOracle = oracleExport.data
+      .flatMap(({files}) => files)
+      .find(({filename}) => realpathSync(filename) === realpathSync(noStdFixtureSourcePath));
+    assert(noStdOracle, 'LLVM oracle omitted the no_std fixture');
+    const oracleCounts = (location) => {
+      const matches = noStdOracle.branches.filter(
+        ([line, start, endLine, end]) =>
+          line === location.line &&
+          start === location.start &&
+          endLine === location.line &&
+          end === location.end,
+      );
+      assert.equal(matches.length, 1, `LLVM oracle location is ambiguous: ${JSON.stringify(location)}`);
+      return {truthy: matches[0][4], falsy: matches[0][5]};
+    };
+    const choiceFirst = oracleCounts(
+      sourceTokenLocation(noStdFixtureSource, 'if first && second', 'first'),
+    );
+    const choiceSecond = oracleCounts(
+      sourceTokenLocation(noStdFixtureSource, 'if first && second', 'second'),
+    );
+    assert.deepEqual(choiceFirst, {truthy: 2, falsy: 1});
+    assert.deepEqual(choiceSecond, {truthy: 1, falsy: 1});
+    const noStdDecision = decisionFor(noStdManifest, 'no_std_choice');
+    const ownedConditionCounts = noStdDecision.conditions.map((_, index) => {
+      let truthy = 0;
+      let falsy = 0;
+      for (const observation of genericAsyncEvidence.decisions.filter(
+        ({id}) => id === noStdDecision.id,
+      )) {
+        if (observation.values[index] === true) truthy += 1;
+        if (observation.values[index] === false) falsy += 1;
+      }
+      return {truthy, falsy};
+    });
+    assert.deepEqual(ownedConditionCounts, [choiceFirst, choiceSecond]);
+
+    const logicalFirst = oracleCounts(
+      sourceTokenLocation(noStdFixtureSource, 'first || second', 'first'),
+    );
+    assert.deepEqual(logicalFirst, {truthy: 1, falsy: 2});
+    const logicalBranch = branchFor(
+      noStdManifest,
+      'no_std_logical_value',
+      'logical-selection',
+    );
+    const ordinalCount = (label) => {
+      const ordinal = logicalBranch.alternatives.find(
+        (alternative) => alternative.label === label,
+      ).probeOrdinal;
+      return genericAsyncEvidence.ordinals.filter(
+        (observation) => observation.ordinal === ordinal,
+      ).length;
+    };
+    assert.equal(ordinalCount('short-circuited'), logicalFirst.truthy);
+    assert.equal(ordinalCount('right operand evaluated'), logicalFirst.falsy);
+  }
+  {
+    const propertyRoot = join(scratch, 'generated-boolean-corpus');
+    const propertySourceDirectory = join(propertyRoot, 'src');
+    const propertySourcePath = join(propertySourceDirectory, 'main.rs');
+    const propertySource = generatedBooleanCorpus(48);
+    const propertyToolchain = {RUSTUP_TOOLCHAIN: '1.95.0'};
+    mkdirSync(propertySourceDirectory, {recursive: true});
+    writeFileSync(
+      join(propertyRoot, 'Cargo.toml'),
+      '[package]\nname = "supercov-rust-property-fixture"\nversion = "0.0.0"\nedition = "2024"\npublish = false\n',
+      {flag: 'wx'},
+    );
+    writeFileSync(propertySourcePath, propertySource, {flag: 'wx'});
+    const canonicalPropertyRoot = realpathSync(propertyRoot);
+    const propertyBaseline = run('cargo', ['run', '--quiet'], {
+      cwd: canonicalPropertyRoot,
+      env: {
+        ...propertyToolchain,
+        CARGO_TARGET_DIR: join(scratch, 'property-baseline-target'),
+      },
+    });
+    const propertyTransport = createTransport('property-corpus');
+    const propertyOutput = join(scratch, 'property-output');
+    const propertyInstrumented = run('cargo', ['run', '--quiet'], {
+      cwd: canonicalPropertyRoot,
+      env: {
+        ...propertyToolchain,
+        CARGO_TARGET_DIR: join(scratch, 'property-instrumented-target'),
+        RUSTC_WRAPPER: wrapper,
+        SUPERCOV_RUST_COMPILER_OUTPUT: propertyOutput,
+        SUPERCOV_RUST_INSTRUMENT_MIR: '1',
+        SUPERCOV_RUST_SOURCE_ROOT: canonicalPropertyRoot,
+        SUPERCOV_RUST_STATIC_RUNTIME_DIRECTORY: sharedRuntimeDirectory,
+        SUPERCOV_RUST_TRANSPORT_FILE: propertyTransport.path,
+        SUPERCOV_RUST_TRANSPORT_TOKEN: propertyTransport.tokenHex,
+        SUPERCOV_RUST_CONTEXT_ID: transportContext.toString(16).padStart(16, '0'),
+      },
+    });
+    assert.equal(propertyInstrumented.stdout, propertyBaseline.stdout);
+    assert.equal(propertyInstrumented.stderr, propertyBaseline.stderr);
+    assert.match(propertyBaseline.stdout, /^generated-boolean=\d+\n$/);
+    const propertyManifest = crateManifest(
+      propertyOutput,
+      'supercov_rust_property_fixture',
+    );
+    const propertyEvidence = readTransport(propertyTransport);
+    const propertyDecisions = propertyManifest.decisions.filter(({definitions}) =>
+      definitions.some((definition) => /^case_\d+$/.test(definition)),
+    );
+    assert.equal(propertyDecisions.length, 48);
+    assert(
+      propertyDecisions.every(
+        (decision) =>
+          propertyEvidence.decisions.filter(({id}) => id === decision.id).length === 8,
+      ),
+      'generated Boolean cases did not publish one exact vector per input tuple',
+    );
+    const observedOrdinals = new Set(
+      propertyEvidence.ordinals.map(({ordinal}) => ordinal),
+    );
+    const exactVectors = (decision) =>
+      propertyEvidence.decisions
+        .filter(({id}) => id === decision.id)
+        .map(({values, outcome}) => JSON.stringify({values, outcome}))
+        .sort();
+    for (let index = 0; index < 16; index += 1) {
+      const patternDefinition = `pattern_case_${index}`;
+      const patternDecision = decisionFor(propertyManifest, patternDefinition);
+      assert(patternDecision, `${patternDefinition} has no exact decision`);
+      assert.equal(patternDecision.kind, 'let-chain');
+      assert.deepEqual(exactVectors(patternDecision), [
+        JSON.stringify({values: [false, null, null], outcome: false}),
+        JSON.stringify({values: [true, false, null], outcome: false}),
+        JSON.stringify({values: [true, true, false], outcome: false}),
+        JSON.stringify({values: [true, true, true], outcome: true}),
+      ].sort());
+      assert.equal(
+        branchesFor(propertyManifest, patternDefinition, 'logical-selection').length,
+        2,
+      );
+
+      const guardDefinition = `guard_case_${index}`;
+      const guardDecision = decisionFor(propertyManifest, guardDefinition);
+      assert(guardDecision, `${guardDefinition} has no exact decision`);
+      assert.equal(guardDecision.kind, 'match-guard');
+      assert.deepEqual(exactVectors(guardDecision), [
+        JSON.stringify({values: [false, null], outcome: false}),
+        JSON.stringify({values: [true, false], outcome: false}),
+        JSON.stringify({values: [true, true], outcome: true}),
+      ].sort());
+      const guardArms = branchesFor(propertyManifest, guardDefinition, 'match-arm');
+      assert.equal(guardArms.length, 3);
+      assert(
+        guardArms.every((branch) =>
+          observedOrdinals.has(
+            branch.alternatives.find(({label}) => label === 'selected').probeOrdinal,
+          ),
+        ),
+        `${guardDefinition} did not select every match arm`,
+      );
+
+      const errorDefinition = `error_case_${index}`;
+      assert.equal(decisionFor(propertyManifest, errorDefinition), undefined);
+      for (const kind of ['try-operator', 'let-else']) {
+        const branch = branchFor(propertyManifest, errorDefinition, kind);
+        assert(
+          branch.alternatives.every(({probeOrdinal}) =>
+            observedOrdinals.has(probeOrdinal),
+          ),
+          `${errorDefinition} did not observe every ${kind} alternative`,
+        );
+      }
+
+      const ownershipDefinition = `ownership_case_${index}::{closure#0}`;
+      const ownershipDecision = decisionFor(propertyManifest, ownershipDefinition);
+      assert(ownershipDecision, `${ownershipDefinition} has no exact decision`);
+      assert.deepEqual(exactVectors(ownershipDecision), [
+        JSON.stringify({values: [false], outcome: false}),
+        JSON.stringify({values: [true], outcome: true}),
+      ].sort());
+    }
+    const propertyPointSource = (point) =>
+      Buffer.from(propertySource)
+        .subarray(point.start, point.end)
+        .toString('utf8')
+        .trim();
+    const pointsFor = (definition) =>
+      propertyManifest.points.filter(({definitions}) =>
+        definitions.includes(definition),
+      );
+    const pointForSource = (definition, source) => {
+      const matches = pointsFor(definition).filter(
+        (point) => propertyPointSource(point) === source,
+      );
+      assert.equal(
+        matches.length,
+        1,
+        `${definition} has ${matches.length} point obligations for ${source}`,
+      );
+      return matches[0];
+    };
+    const pointObserved = (point) => observedOrdinals.has(point.probeOrdinal);
+    const pointExpectations = [
+      {
+        definition: 'point_case_both',
+        called: true,
+        sources: [
+          ['let seed = 13001u64;', true],
+          ['let taken = seed + 3;', true],
+          ['return taken + 7;', true],
+          ['let fallback = seed + 5;', true],
+          ['fallback + 7', true],
+        ],
+      },
+      {
+        definition: 'point_case_partial',
+        called: true,
+        sources: [
+          ['let seed = 14009u64;', true],
+          ['let taken = seed + 11;', true],
+          ['return taken + 13;', true],
+          ['let fallback = seed + 17;', false],
+          ['fallback + 19', false],
+        ],
+      },
+      {
+        definition: 'point_case_never',
+        called: false,
+        sources: [
+          ['let seed = 15013u64;', false],
+          ['let taken = seed + 23;', false],
+          ['return taken + 29;', false],
+          ['let fallback = seed + 31;', false],
+          ['fallback + 37', false],
+        ],
+      },
+    ];
+    for (const expectation of pointExpectations) {
+      const functionPoints = pointsFor(expectation.definition).filter(
+        ({kind}) => kind === 'function',
+      );
+      assert.equal(functionPoints.length, 1);
+      assert.equal(pointObserved(functionPoints[0]), expectation.called);
+      for (const [source, observed] of expectation.sources) {
+        assert.equal(
+          pointObserved(pointForSource(expectation.definition, source)),
+          observed,
+          `${expectation.definition} point ${source} has the wrong observation state`,
+        );
+      }
+    }
+    const propertyManifestOrdinals = allManifestedHitOrdinals(propertyOutput);
+    assert(
+      propertyEvidence.ordinals.every(({ordinal}) =>
+        propertyManifestOrdinals.has(ordinal),
+      ),
+      'generated Boolean corpus emitted an ordinal outside its denominator',
+    );
+
+    const oracleDirectory = join(scratch, 'generated-boolean-oracle');
+    const oracleProfiles = join(oracleDirectory, 'profiles');
+    const oracleTarget = join(oracleDirectory, 'target');
+    mkdirSync(oracleProfiles, {recursive: true});
+    const oracleRun = run('cargo', ['run', '--quiet'], {
+      cwd: canonicalPropertyRoot,
+      env: {
+        ...propertyToolchain,
+        CARGO_TARGET_DIR: oracleTarget,
+        LLVM_PROFILE_FILE: join(oracleProfiles, '%p-%m.profraw'),
+        RUSTC_BOOTSTRAP: '1',
+        RUSTFLAGS: '-Cinstrument-coverage -Zcoverage-options=condition',
+      },
+    });
+    assert.equal(oracleRun.stdout, propertyBaseline.stdout);
+    assert.equal(oracleRun.stderr, propertyBaseline.stderr);
+    const rawProfiles = readdirSync(oracleProfiles)
+      .filter((name) => name.endsWith('.profraw'))
+      .map((name) => join(oracleProfiles, name))
+      .sort();
+    assert(rawProfiles.length > 0, 'generated corpus oracle emitted no profiles');
+    const mergedProfile = join(oracleDirectory, 'merged.profdata');
+    run(llvmTool('llvm-profdata'), [
+      'merge',
+      '-sparse',
+      ...rawProfiles,
+      '-o',
+      mergedProfile,
+    ]);
+    const oracleExport = JSON.parse(
+      run(llvmTool('llvm-cov'), [
+        'export',
+        '--format=text',
+        `--instr-profile=${mergedProfile}`,
+        join(oracleTarget, 'debug/supercov-rust-property-fixture'),
+      ]).stdout,
+    );
+    const oracleFile = oracleExport.data
+      .flatMap(({files}) => files)
+      .find(({filename}) => realpathSync(filename) === realpathSync(propertySourcePath));
+    assert(oracleFile, 'LLVM oracle omitted the generated Boolean source');
+    const oracleFunctions = oracleExport.data
+      .flatMap(({functions}) => functions)
+      .filter(({filenames}) =>
+        filenames.some(
+          (filename) => realpathSync(filename) === realpathSync(propertySourcePath),
+        ),
+      );
+    for (const expectation of pointExpectations) {
+      const functionMatches = oracleFunctions.filter(({name}) =>
+        name.includes(expectation.definition),
+      );
+      assert.equal(
+        functionMatches.length,
+        1,
+        `LLVM oracle has ${functionMatches.length} functions for ${expectation.definition}`,
+      );
+      const [oracleFunction] = functionMatches;
+      const [functionPoint] = pointsFor(expectation.definition).filter(
+        ({kind}) => kind === 'function',
+      );
+      assert.equal(
+        pointObserved(functionPoint),
+        oracleFunction.count > 0,
+        `${expectation.definition} function-entry disagrees with LLVM`,
+      );
+      for (const [source] of expectation.sources) {
+        const point = pointForSource(expectation.definition, source);
+        const location = byteRangeLocation(propertySource, point.start, point.end);
+        const regions = oracleFunction.regions.filter(
+          ([line, start, endLine, end, _count, fileId, _expandedFileId, kind]) =>
+            fileId === 0 &&
+            kind === 0 &&
+            line === location.line &&
+            endLine === location.line &&
+            start >= location.start &&
+            end <= location.end,
+        );
+        assert(
+          regions.length > 0,
+          `LLVM oracle has no code region within ${expectation.definition}: ${source}`,
+        );
+        const oracleObserved = new Set(regions.map((region) => region[4] > 0));
+        assert.equal(
+          oracleObserved.size,
+          1,
+          `LLVM regions disagree within ${expectation.definition}: ${source}`,
+        );
+        assert.equal(
+          pointObserved(point),
+          [...oracleObserved][0],
+          `${expectation.definition} point ${source} disagrees with LLVM`,
+        );
+      }
+    }
+    const oracleDecisions = propertyManifest.decisions.filter(({definitions}) =>
+      definitions.some((definition) =>
+        /^(?:case|pattern_case|guard_case)_\d+$/.test(definition) ||
+        /^ownership_case_\d+::\{closure#0\}$/.test(definition),
+      ),
+    );
+    assert.equal(oracleDecisions.length, 96);
+    for (const decision of oracleDecisions) {
+      const observations = propertyEvidence.decisions.filter(
+        ({id}) => id === decision.id,
+      );
+      for (const [index, condition] of decision.conditions.entries()) {
+        let start = condition.start;
+        let end = condition.end;
+        if (condition.source.startsWith('let ')) {
+          const patternStart = condition.source.indexOf(' ') + 1;
+          const patternEnd = condition.source.lastIndexOf(' =');
+          assert(patternEnd > patternStart, 'generated let condition has no pattern');
+          start += Buffer.byteLength(condition.source.slice(0, patternStart));
+          end = condition.start + Buffer.byteLength(
+            condition.source.slice(0, patternEnd),
+          );
+        }
+        const location = byteRangeLocation(propertySource, start, end);
+        const matches = oracleFile.branches.filter(
+          ([line, start, endLine, end]) =>
+            line === location.line &&
+            start === location.start &&
+            endLine === location.line &&
+            end === location.end,
+        );
+        assert.equal(
+          matches.length,
+          1,
+          `LLVM oracle condition is ambiguous for ${decision.id}:${index}`,
+        );
+        const owned = observations.reduce(
+          (counts, observation) => {
+            if (observation.values[index] === true) counts.truthy += 1;
+            if (observation.values[index] === false) counts.falsy += 1;
+            return counts;
+          },
+          {truthy: 0, falsy: 0},
+        );
+        assert.deepEqual(owned, {truthy: matches[0][4], falsy: matches[0][5]});
+      }
+    }
+  }
+  if (process.env.SUPERCOV_RUSTC_SPIKE_PROPERTY_ONLY === '1') {
+    throw nextestOnlyComplete;
+  }
+  {
+    const editionSource = generatedEditionCorpus();
+    let frozenDenominator = null;
+    for (const {edition, rustVersion} of [
+      {edition: '2015', rustVersion: '1.83'},
+      {edition: '2018', rustVersion: '1.83'},
+      {edition: '2021', rustVersion: '1.83'},
+      {edition: '2024', rustVersion: '1.85'},
+    ]) {
+      const editionRoot = join(scratch, `edition-${edition}`);
+      const editionSourceDirectory = join(editionRoot, 'src');
+      mkdirSync(editionSourceDirectory, {recursive: true});
+      writeFileSync(
+        join(editionRoot, 'Cargo.toml'),
+        `[package]\nname = "supercov-rust-edition-${edition}"\nversion = "0.0.0"\nedition = "${edition}"\nrust-version = "${rustVersion}"\npublish = false\n`,
+        {flag: 'wx'},
+      );
+      writeFileSync(join(editionSourceDirectory, 'main.rs'), editionSource, {
+        flag: 'wx',
+      });
+      const canonicalEditionRoot = realpathSync(editionRoot);
+      const toolchain = {RUSTUP_TOOLCHAIN: '1.95.0'};
+      const baseline = run('cargo', ['run', '--quiet'], {
+        cwd: canonicalEditionRoot,
+        env: {
+          ...toolchain,
+          CARGO_TARGET_DIR: join(scratch, `edition-${edition}-baseline-target`),
+        },
+      });
+      const transport = createTransport(`edition-${edition}`);
+      const output = join(scratch, `edition-${edition}-output`);
+      const instrumented = run('cargo', ['run', '--quiet'], {
+        cwd: canonicalEditionRoot,
+        env: {
+          ...toolchain,
+          CARGO_TARGET_DIR: join(scratch, `edition-${edition}-instrumented-target`),
+          RUSTC_WRAPPER: wrapper,
+          SUPERCOV_RUST_COMPILER_OUTPUT: output,
+          SUPERCOV_RUST_INSTRUMENT_MIR: '1',
+          SUPERCOV_RUST_SOURCE_ROOT: canonicalEditionRoot,
+          SUPERCOV_RUST_STATIC_RUNTIME_DIRECTORY: sharedRuntimeDirectory,
+          SUPERCOV_RUST_TRANSPORT_FILE: transport.path,
+          SUPERCOV_RUST_TRANSPORT_TOKEN: transport.tokenHex,
+          SUPERCOV_RUST_CONTEXT_ID: transportContext.toString(16).padStart(16, '0'),
+        },
+      });
+      assert.equal(instrumented.stdout, baseline.stdout);
+      assert.equal(instrumented.stderr, baseline.stderr);
+      assert.equal(baseline.stdout, 'edition=17\n');
+      const manifest = crateManifest(output, `supercov_rust_edition_${edition}`);
+      const evidence = readTransport(transport);
+      const decision = decisionFor(manifest, 'choice');
+      assert(decision, `edition ${edition} has no choice decision`);
+      assert.deepEqual(
+        evidence.decisions
+          .filter(({id}) => id === decision.id)
+          .map(({values, outcome}) => JSON.stringify({values, outcome}))
+          .sort(),
+        [
+          JSON.stringify({values: [false, null], outcome: false}),
+          JSON.stringify({values: [true, false], outcome: false}),
+          JSON.stringify({values: [true, true], outcome: true}),
+        ].sort(),
+      );
+      assert(
+        evidence.ordinals.every(({ordinal}) =>
+          allManifestedHitOrdinals(output).has(ordinal),
+        ),
+        `edition ${edition} emitted an ordinal outside its denominator`,
+      );
+      const {crate: _crate, ...denominator} = manifest;
+      if (frozenDenominator === null) frozenDenominator = denominator;
+      else assert.deepEqual(denominator, frozenDenominator);
+    }
+  }
+  for (const definition of [
+    '<OverrideChoice as AsyncRuntimeChoice>::async_default_choice::{closure#0}',
+    'async_closure_choice::{closure#0}::{closure#0}::{closure#0}',
+    'suspended_borrow_choice::{closure#0}',
+  ]) {
+    assert.deepEqual(smokeDecisionVectors(definition), bothBooleanVectors);
+  }
+  {
+    const definition = 'nested_generic_choice';
+    const decision = decisionFor(genericAsyncManifest, definition);
+    const logicalBranches = branchesFor(
+      genericAsyncManifest,
+      definition,
+      'logical-selection',
+    );
+    assert.equal(logicalBranches.length, 2);
+    assert.deepEqual(
+      decision.logicalSelections
+        .map(({rightConditionIndex}) => rightConditionIndex)
+        .sort((left, right) => left - right),
+      [1, 2],
+    );
+    const vectors = genericAsyncEvidence.decisions.filter(
+      ({id}) => id === decision.id,
+    );
+    for (const selection of decision.logicalSelections) {
+      const branch = logicalBranches.find(({id}) => id === selection.branchId);
+      assert(branch, 'nested logical-selection relation references no branch');
+      const observed = new Set(
+        vectors.map(({values}) =>
+          values[selection.rightConditionIndex] === null
+            ? 'short-circuited'
+            : 'right operand evaluated',
+        ),
+      );
+      assert.deepEqual(
+        [...observed].sort(),
+        branch.alternatives.map(({label}) => label).sort(),
+      );
+    }
+  }
+  {
+    const definition = 'logical_value_choice';
+    assert.equal(
+      decisionFor(genericAsyncManifest, definition),
+      undefined,
+      'a logical value selection must not invent an MC/DC control decision',
+    );
+    const logicalBranches = branchesFor(
+      genericAsyncManifest,
+      definition,
+      'logical-selection',
+    );
+    assert.equal(logicalBranches.length, 2);
+    assert(
+      logicalBranches.every((branch) =>
+        branch.alternatives.every(({probeOrdinal}) =>
+          genericAsyncOrdinals.has(probeOrdinal),
+        ),
+      ),
+      'logical value selections did not emit every exact runtime alternative',
+    );
+  }
+  for (const definition of [
+    'EnabledChoice::associated_generic_choice',
+    'AsyncRuntimeChoice::async_default_choice::{closure#0}',
+    'AssociatedRuntimeChoice::associated_default',
+    'GatRuntimeChoice::gat_default',
+    'OpaqueRuntimeChoice::opaque_values',
+    'hrtb_choice',
+    'attributed_choice',
+  ]) {
+    const decision = decisionFor(genericAsyncManifest, definition);
+    const logicalBranch = branchFor(
+      genericAsyncManifest,
+      definition,
+      'logical-selection',
+    );
+    assert.deepEqual(
+      decision.logicalSelections,
+      [{branchId: logicalBranch.id, rightConditionIndex: 1}],
+      `${definition} did not publish the exact logical-selection relation`,
+    );
+    const observedAlternatives = new Set(
+      genericAsyncEvidence.decisions
+        .filter(({id}) => id === decision.id)
+        .map(({values}) =>
+          values[1] === null ? 'short-circuited' : 'right operand evaluated',
+        ),
+    );
+    assert.deepEqual(
+      [...observedAlternatives].sort(),
+      logicalBranch.alternatives.map(({label}) => label).sort(),
+      `${definition} decision vectors did not prove every logical-selection alternative`,
+    );
+    assert(
+      logicalBranch.alternatives.every(
+        ({probeOrdinal}) => !genericAsyncOrdinals.has(probeOrdinal),
+      ),
+      `${definition} emitted redundant logical-selection probes`,
+    );
+  }
+  assert(
+    genericAsyncEvidence.ordinals.length > 0,
+    'downstream generic/async execution emitted no authenticated probes',
+  );
+  const genericAsyncManifestOrdinals = allManifestedHitOrdinals(
+    join(scratch, 'generic-async-output'),
+  );
+  assert(
+    genericAsyncEvidence.ordinals.every(({ordinal}) =>
+      genericAsyncManifestOrdinals.has(ordinal),
+    ),
+    'generic/trait/async runtime emitted an ordinal outside its frozen denominator',
+  );
+  if (
+    process.env.SUPERCOV_RUSTC_SPIKE_FOCUSED_ONLY === '1' &&
+    process.env.SUPERCOV_RUSTC_SPIKE_PROPERTY_ONLY !== '1'
+  ) {
+    throw nextestOnlyComplete;
+  }
 
   const rustc = run('rustup', ['which', 'rustc']).stdout.trim();
   const cargo = run('rustup', ['which', 'cargo']).stdout.trim();
@@ -624,6 +2527,11 @@ try {
     duplicateSelection.stderr,
     /multiple exact compiler companions match the selected rustc/,
   );
+
+  await verifyGeneratedPackageIsolation({cargo, rustc, rustcHost, wrapper, supercov});
+  if (process.env.SUPERCOV_RUSTC_SPIKE_GENERATED_ONLY === '1') {
+    throw nextestOnlyComplete;
+  }
 
   const productionFixture = join(scratch, 'production-fixture');
   cpSync(fixtureRoot, productionFixture, {
@@ -717,6 +2625,46 @@ try {
   );
   assert.equal(productionRun.tests, productionRun.libtests + productionRun.doctests);
   assert.equal(productionRun.doctests, 6);
+  const manifestOnlyRunId = 'run_7123456789abcdef';
+  const manifestOnlyReady = join(scratch, 'manifest-only-crash.ready');
+  const manifestOnlyFailure = run(supercov, ['__run-rust-compiler'], {
+    timeout: 300_000,
+    expectFailure: true,
+    env: {
+      RUSTC: rustc,
+      SUPERCOV_RUSTC_SPIKE_ABORT_AFTER_MANIFEST: manifestOnlyReady,
+      SUPERCOV_RUSTC_SPIKE_ABORT_CRATE: 'supercov_rustc_spike_fixture',
+    },
+    input: JSON.stringify({
+      root: productionFixture,
+      command: [cargo, 'test', '--lib', '--no-run'],
+      runId: manifestOnlyRunId,
+      startedAt: '2026-08-26T00:00:05.000Z',
+      wrapperPath: supercov,
+      companionCandidates: [wrapper],
+      requirePublicCapabilities: false,
+    }),
+  });
+  assert.notEqual(manifestOnlyFailure.status, 0);
+  assert.equal(
+    readFileSync(manifestOnlyReady, 'utf8'),
+    'supercov_rustc_spike_fixture',
+    'the manifest-only crash gate did not reach the root-crate publication boundary',
+  );
+  assert(
+    !existsSync(join(productionFixture, '.supercov/runs', manifestOnlyRunId)),
+    'a compiler crash between manifest and snapshot publication exposed a run',
+  );
+  assert(
+    !existsSync(join(productionFixture, '.supercov/work', manifestOnlyRunId)),
+    'a compiler crash between manifest and snapshot publication retained transaction state',
+  );
+  assert(
+    !existsSync(
+      join(cargoWorkspace(productionFixture), '.supercov/work', manifestOnlyRunId),
+    ),
+    'a compiler crash between manifest and snapshot publication retained isolated work state',
+  );
   let productionFixtureSourceDigest = fixtureSourceDigest;
   const pinnedNextest = process.env.SUPERCOV_NEXTEST_BIN;
   if (pinnedNextest) {
@@ -827,7 +2775,7 @@ try {
     assert.equal(nextestRun.libtests, 1);
     assert.equal(nextestRun.doctests, 0);
     assert.equal(nextestRun.tests, 1);
-    assert.equal(nextestRun.transportHealth.length, 2);
+    assert.equal(nextestRun.transportHealth.length, 4);
     assert(nextestRun.metadata.rawEvidence.files >= 2);
     assert(nextestRun.denominator.points > 0);
     assert(
@@ -924,7 +2872,7 @@ try {
     const failFastRun = JSON.parse(failFastProcess.stdout);
     assert.equal(failFastRun.exitCode, 100);
     assert.equal(failFastRun.tests, 2);
-    assert.equal(failFastRun.transportHealth.length, 1);
+    assert.equal(failFastRun.transportHealth.length, 2);
     const failFastQuery = JSON.parse(
       run(supercov, ['__query-stored-run'], {
         input: JSON.stringify({
@@ -1002,7 +2950,7 @@ try {
     const flakyFailRun = JSON.parse(flakyFailProcess.stdout);
     assert.equal(flakyFailRun.exitCode, 100);
     assert.equal(flakyFailRun.tests, 1);
-    assert.equal(flakyFailRun.transportHealth.length, 2);
+    assert.equal(flakyFailRun.transportHealth.length, 4);
     const flakyFailQuery = JSON.parse(
       run(supercov, ['__query-stored-run'], {
         input: JSON.stringify({
@@ -1063,7 +3011,7 @@ try {
     );
     assert.equal(parallelRun.exitCode, 0);
     assert.equal(parallelRun.tests, 2);
-    assert.equal(parallelRun.transportHealth.length, 2);
+    assert.equal(parallelRun.transportHealth.length, 4);
     const parallelQuery = JSON.parse(
       run(supercov, ['__query-stored-run'], {
         input: JSON.stringify({
@@ -1198,13 +3146,27 @@ try {
     productionRunnerInvocations.some(({args}) => args.includes('--list')),
     'configured runner did not wrap libtest discovery',
   );
+  const listedArtifacts = new Set(
+    productionRunnerInvocations
+      .filter(({args}) => args.includes('--list'))
+      .map(({artifact}) => artifact),
+  );
+  const stockLibtestInvocations = productionRunnerInvocations.filter(
+    ({artifact, args}) =>
+      listedArtifacts.has(artifact) && !args.includes('--list'),
+  );
   assert(
-    productionRunnerInvocations.some(({args}) => args.includes('--exact')),
-    'configured runner did not wrap exact libtest execution',
+    stockLibtestInvocations.length > 0,
+    'configured runner did not wrap stock libtest artifact execution',
+  );
+  assert(
+    stockLibtestInvocations.every(({args}) => !args.includes('--exact')),
+    'stock libtest execution was split into synthetic exact-test invocations',
   );
   assert(
     productionRunnerInvocations.some(
-      ({args}) => !args.includes('--list') && !args.includes('--exact'),
+      ({artifact, args}) =>
+        !args.includes('--list') && !listedArtifacts.has(artifact),
     ),
     'configured runner did not wrap rustdoc test execution',
   );
@@ -1220,21 +3182,33 @@ try {
   const productionRunnerHealth = productionRun.transportHealth.filter(
     ({scopeKind}) => scopeKind === 'runner-invocation',
   );
+  const productionCargoRunnerHealth = productionRunnerHealth.filter(
+    ({scopeId}) => scopeId.startsWith('background:rust-runner:'),
+  );
+  const productionRustdocRunnerHealth = productionRunnerHealth.filter(
+    ({scopeId}) => scopeId.startsWith('rustdoc:'),
+  );
   assert.equal(productionAttemptHealth.length, productionRun.libtests);
-  assert.equal(productionRunnerHealth.length, 1);
+  assert.equal(productionCargoRunnerHealth.length, listedArtifacts.size);
+  assert.equal(productionRustdocRunnerHealth.length, 1);
+  assert.equal(
+    productionRunnerHealth.length,
+    productionCargoRunnerHealth.length + productionRustdocRunnerHealth.length,
+  );
   assert(
     productionRun.transportHealth.every(
       ({scopeKind, status, transport}) =>
         transport.dropped === 0 &&
         transport.incomplete === 0 &&
-        (scopeKind === 'runner-invocation' ||
-          status === 'skipped' ||
-          transport.attachments > 0),
+        ((scopeKind === 'runner-invocation' && status === 'passed') ||
+          (scopeKind === 'test-attempt' &&
+            transport.attachments === 0 &&
+            ['passed', 'skipped', 'unstarted'].includes(status))),
     ),
     'production compiler run lost or dropped authenticated test evidence',
   );
   assert(
-    productionRunnerHealth[0].transport.attachments > 0,
+    productionRustdocRunnerHealth[0].transport.attachments > 0,
     'production rustdoc invocation published no authenticated transport attachment',
   );
   assert(productionRun.summary.lines.covered > 0);
@@ -1305,6 +3279,7 @@ try {
   const includedRunnerLog = join(scratch, 'included-runner.jsonl');
   const includedRunnerRun = JSON.parse(
     run(supercov, ['__run-rust-compiler'], {
+      timeout: 300_000,
       env: {RUSTC: rustc, SUPERCOV_PRODUCTION_RUNNER_LOG: includedRunnerLog},
       input: JSON.stringify({
         root: productionFixture,
@@ -1341,6 +3316,7 @@ try {
   const includedCfgRunnerLog = join(scratch, 'included-cfg-runner.jsonl');
   const includedCfgRunnerRun = JSON.parse(
     run(supercov, ['__run-rust-compiler'], {
+      timeout: 300_000,
       env: {RUSTC: rustc, SUPERCOV_PRODUCTION_RUNNER_LOG: includedCfgRunnerLog},
       input: JSON.stringify({
         root: productionFixture,
@@ -1405,6 +3381,7 @@ try {
   );
   const configuredCompilerRun = JSON.parse(
     run(supercov, ['__run-rust-compiler'], {
+      timeout: 300_000,
       env: {
         SUPERCOV_PRODUCTION_RUNNER_LOG: join(
           scratch,
@@ -1503,6 +3480,11 @@ try {
         companionCandidates: [wrapper],
         requirePublicCapabilities: false,
       }),
+      // This path intentionally composes both user compiler-wrapper layers
+      // with Supercov across a clean target. It is a full corpus build, not a
+      // short command probe, and retains the same bounded five-minute budget
+      // as the primary production run.
+      timeout: 300_000,
     }).stdout,
   );
   assert.equal(configuredWrapperRun.exitCode, 0);
@@ -1628,6 +3610,7 @@ try {
   const cliRunnerLog = join(scratch, 'cli-runner.jsonl');
   const cliRunnerRun = JSON.parse(
     run(supercov, ['__run-rust-compiler'], {
+      timeout: 300_000,
       env: {RUSTC: rustc, SUPERCOV_PRODUCTION_RUNNER_LOG: cliRunnerLog},
       input: JSON.stringify({
         root: productionFixture,
@@ -1668,6 +3651,7 @@ try {
   );
   const selectedToolchainRun = JSON.parse(
     run(supercov, ['__run-rust-compiler'], {
+      timeout: 300_000,
       env: {
         SUPERCOV_PRODUCTION_RUNNER_LOG: selectedToolchainRunnerLog,
       },
@@ -1769,6 +3753,7 @@ try {
 
   const filteredProductionRun = JSON.parse(
     run(supercov, ['__run-rust-compiler'], {
+      timeout: 300_000,
       env: {RUSTC: rustc},
       input: JSON.stringify({
         root: productionFixture,
@@ -1796,9 +3781,19 @@ try {
   );
   assert.equal(filteredProductionRun.libtests, 1);
   assert.equal(filteredProductionRun.doctests, 0);
-  assert.equal(filteredProductionRun.transportHealth.length, 1);
-  assert.equal(filteredProductionRun.transportHealth[0].scopeKind, 'test-attempt');
-  assert.equal(filteredProductionRun.transportHealth[0].status, 'passed');
+  assert.equal(filteredProductionRun.transportHealth.length, 2);
+  assert.equal(
+    filteredProductionRun.transportHealth.find(
+      ({scopeKind}) => scopeKind === 'runner-invocation',
+    )?.status,
+    'passed',
+  );
+  assert.equal(
+    filteredProductionRun.transportHealth.find(
+      ({scopeKind}) => scopeKind === 'test-attempt',
+    )?.status,
+    'passed',
+  );
   assert(
     filteredProductionRun.recoveredRuns.includes(killedRunId),
     'the next compiler run did not report the abandoned SIGKILL transaction',
@@ -1830,12 +3825,20 @@ try {
   writeFileSync(productionBuildScript, productionBuildScriptSource);
 
   const productionManifest = join(productionFixture, 'Cargo.toml');
+  const productionManifestSource = readFileSync(productionManifest, 'utf8');
+  const multiPackageManifest = productionManifestSource.replace(
+    /^members = \[(.*)\]$/m,
+    (_line, members) =>
+      `members = [${members}, "sibling-a", "sibling-b"]`,
+  );
+  assert.notEqual(
+    multiPackageManifest,
+    productionManifestSource,
+    'the multi-package corpus could not extend the fixture workspace members',
+  );
   writeFileSync(
     productionManifest,
-    readFileSync(productionManifest, 'utf8').replace(
-      'members = ["probe-macros"]',
-      'members = ["probe-macros", "sibling-a", "sibling-b"]',
-    ),
+    multiPackageManifest,
   );
   for (const sibling of ['sibling-a', 'sibling-b']) {
     const siblingRoot = join(productionFixture, sibling);
@@ -1870,6 +3873,7 @@ try {
   }
   const multiPackageRun = JSON.parse(
     run(supercov, ['__run-rust-compiler'], {
+      timeout: 300_000,
       env: {RUSTC: rustc},
       input: JSON.stringify({
         root: productionFixture,
@@ -1962,6 +3966,7 @@ try {
 
   const docOnlyProductionRun = JSON.parse(
     run(supercov, ['__run-rust-compiler'], {
+      timeout: 300_000,
       env: {RUSTC: rustc},
       input: JSON.stringify({
         root: productionFixture,
@@ -2173,6 +4178,10 @@ try {
     identityDirectoryA,
     'supercov_rustc_spike_fixture',
   );
+  const identitySourcesB = compilerSources(
+    identityDirectoryB,
+    'supercov_rustc_spike_fixture',
+  );
   const normalized = JSON.parse(
     run(supercov, ['__normalize-rust-compiler-manifest'], {
       input: JSON.stringify({
@@ -2183,6 +4192,16 @@ try {
   );
   assert.equal(normalized.manifest.scope.language, 'rust');
   assert.equal(normalized.manifest.scope.crate, 'supercov_rustc_spike_fixture');
+  assert.equal(normalized.manifest.scope.sourceFingerprint.algorithm, 'sha256');
+  assert.match(normalized.manifest.scope.sourceFingerprint.digest, /^[0-9a-f]{64}$/);
+  assert.equal(
+    normalized.manifest.scope.sourceFingerprint.files,
+    Object.keys(identitySourcesA).length,
+  );
+  assert(
+    normalized.manifest.scope.sourceFingerprint.generatedFiles > 0,
+    'the compiler source fingerprint omitted build-script output',
+  );
   assert.equal(normalized.manifest.points.length, identityManifestA.points.length);
   assert.equal(normalized.manifest.branches.length, identityManifestA.branches.length);
   assert.equal(normalized.manifest.decisions.length, identityManifestA.decisions.length);
@@ -2196,11 +4215,80 @@ try {
     identityManifestB,
     'manifest candidate changed across clean target directories',
   );
-  assert.equal(identityManifestA.schema, 'supercov-rust-manifest-candidate-v2');
+  const normalizedB = JSON.parse(
+    run(supercov, ['__normalize-rust-compiler-manifest'], {
+      input: JSON.stringify({
+        manifest: identityManifestB,
+        sources: identitySourcesB,
+      }),
+    }).stdout,
+  );
+  assert.equal(
+    normalized.manifest.scope.sourceFingerprint.digest,
+    normalizedB.manifest.scope.sourceFingerprint.digest,
+    'full compiler source fingerprint changed across clean target directories',
+  );
+
+  const changedGeneratedDirectory = join(scratch, 'generated-variant-output');
+  run('cargo', ['build', '--quiet', '--manifest-path', fixture, '--lib'], {
+    env: {
+      // Reuse the exact baseline target. Cargo must rerun the build script and
+      // root compilation when its declared input changes; a clean target would
+      // not exercise stale generated-output reuse.
+      CARGO_TARGET_DIR: join(scratch, 'identity-target-a'),
+      RUSTC_WRAPPER: wrapper,
+      SUPERCOV_RUST_COMPILER_OUTPUT: changedGeneratedDirectory,
+      SUPERCOV_GENERATED_VARIANT: 'changed!',
+    },
+  });
+  const changedGeneratedManifest = crateManifest(
+    changedGeneratedDirectory,
+    'supercov_rustc_spike_fixture',
+  );
+  const changedGeneratedSources = compilerSources(
+    changedGeneratedDirectory,
+    'supercov_rustc_spike_fixture',
+  );
+  assert.deepEqual(
+    changedGeneratedManifest,
+    identityManifestA,
+    'a comment outside generated obligations changed the frozen denominator candidate',
+  );
+  assert.notEqual(
+    changedGeneratedSources['generated:package:.:generated.rs']?.source,
+    identitySourcesA['generated:package:.:generated.rs']?.source,
+    'the generated-source variant fixture did not change its full bytes',
+  );
+  const changedGeneratedNormalized = JSON.parse(
+    run(supercov, ['__normalize-rust-compiler-manifest'], {
+      input: JSON.stringify({
+        manifest: changedGeneratedManifest,
+        sources: changedGeneratedSources,
+      }),
+    }).stdout,
+  );
+  assert.notEqual(
+    changedGeneratedNormalized.manifest.scope.sourceFingerprint.digest,
+    normalized.manifest.scope.sourceFingerprint.digest,
+    'full compiler source fingerprint ignored generated bytes outside obligations',
+  );
+  const normalizedWithoutFingerprint = structuredClone(normalized.manifest);
+  const changedWithoutFingerprint = structuredClone(
+    changedGeneratedNormalized.manifest,
+  );
+  delete normalizedWithoutFingerprint.scope.sourceFingerprint;
+  delete changedWithoutFingerprint.scope.sourceFingerprint;
+  assert.deepEqual(
+    changedWithoutFingerprint,
+    normalizedWithoutFingerprint,
+    'the generated variant changed more than its full-source fingerprint',
+  );
+
+  assert.equal(identityManifestA.schema, 'supercov-rust-manifest-candidate-v3');
   assert.equal(identityManifestA.model, 'rust-source-v1');
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [
-    'RUST_MANIFEST_CANDIDATE_REMAINING_SURFACES: complete CTFE and doctest obligation/probe mappings are not emitted yet',
+    'RUST_FRONTEND_PRIVATE: the frozen R1-R4 promotion matrix is not complete',
   ]);
   const allIds = [
     ...identityManifestA.points.map(({id}) => id),
@@ -2229,6 +4317,7 @@ try {
         'let-else',
         'try-operator',
         'assertion-outcome',
+        'logical-selection',
       ].includes(kind),
     ),
     'compiler manifest emitted a branch kind outside the frozen Rust contract',
@@ -2337,6 +4426,7 @@ try {
   assert.equal(externalRoot?.sourceKey, 'source:external-rules/src/lib.rs');
   assert.deepEqual(externalRoot?.definitions, [
     'generated_by_external_rules',
+    'generated_nested_external_by_proc',
     'repeated_expansions::generated_by_external_rules',
   ]);
   const externalDecision = decisionFor(
@@ -2353,6 +4443,20 @@ try {
     /macro_rules! external_choice_function/,
   );
 
+  const attributedRoot = obligationFor(identityManifestA, 'attributed_choice');
+  assert.equal(attributedRoot?.provenance, 'synthetic-expansion');
+  assert.equal(attributedRoot?.sourceKey, 'source:src/lib.rs');
+  assert.match(
+    attributedRoot?.canonical ?? '',
+    /probe_macros::generated_choice/,
+  );
+  const attributedDecision = decisionFor(identityManifestA, 'attributed_choice');
+  assert.deepEqual(
+    attributedDecision?.conditions.map(({source}) => source),
+    ['first', 'second'],
+  );
+  assert.equal(attributedDecision?.logicalSelections.length, 1);
+
   const deriveRoot = obligationFor(
     identityManifestA,
     'DerivedChoice::derived_choice',
@@ -2366,6 +4470,32 @@ try {
       'DerivedChoice::derived_choice',
     )?.conditions.map(({source}) => source),
     ['value'],
+  );
+  const unusedDeriveRoot = obligationFor(
+    identityManifestA,
+    'UnusedDerivedChoice::derived_choice',
+  );
+  assert.equal(unusedDeriveRoot?.provenance, 'synthetic-expansion');
+  assert.equal(unusedDeriveRoot?.sourceKey, 'source:src/lib.rs');
+  assert.match(
+    unusedDeriveRoot?.canonical ?? '',
+    /probe_macros::SupercovChoice/,
+  );
+  assert.notEqual(
+    unusedDeriveRoot?.id,
+    deriveRoot?.id,
+    'two derive invocations incorrectly shared one synthetic point identity',
+  );
+  assert.notEqual(
+    decisionFor(
+      identityManifestA,
+      'UnusedDerivedChoice::derived_choice',
+    )?.id,
+    decisionFor(
+      identityManifestA,
+      'DerivedChoice::derived_choice',
+    )?.id,
+    'two derive invocations incorrectly shared one synthetic decision identity',
   );
   const probeMacroManifest = crateManifest(identityDirectoryA, 'probe_macros');
   const opaqueAuthoredMacroGuard = probeMacroManifest.decisions.find(
@@ -2401,6 +4531,46 @@ try {
   assert.equal(
     generatedObligation?.sourceKey,
     'generated:package:.:generated.rs',
+  );
+  const externalGeneratedSource = join(scratch, 'external-generated.rs');
+  writeFileSync(
+    externalGeneratedSource,
+    'pub fn generated_by_build_script(value: bool) -> usize { if value { 7 } else { 9 } }\n',
+  );
+  const symlinkOutput = join(scratch, 'generated-symlink-output');
+  run('cargo', ['build', '--quiet', '--manifest-path', fixture, '--lib'], {
+    env: {
+      CARGO_TARGET_DIR: join(scratch, 'generated-symlink-target'),
+      RUSTC_WRAPPER: wrapper,
+      SUPERCOV_RUST_COMPILER_OUTPUT: symlinkOutput,
+      SUPERCOV_GENERATED_SYMLINK_TARGET: externalGeneratedSource,
+    },
+  });
+  const symlinkManifest = crateManifest(
+    symlinkOutput,
+    'supercov_rustc_spike_fixture',
+  );
+  assert(
+    !obligationFor(symlinkManifest, 'generated_by_build_script') &&
+      !decisionFor(symlinkManifest, 'generated_by_build_script'),
+    'an unowned generated-source symlink entered the measured denominator',
+  );
+  assert.equal(
+    symlinkManifest.limitations.filter((limitation) =>
+      limitation.includes('RUST_SOURCE_IDENTITY_UNRESOLVED: generated_by_build_script'),
+    ).length,
+    3,
+    'an unowned generated-source symlink was not reported at every source obligation surface',
+  );
+  assert(
+    symlinkManifest.limitations.every(
+      (limitation) =>
+        !limitation.includes('generated_by_build_script') ||
+        /generated source is not a regular file|generated source escaped its target root/.test(
+          limitation,
+        ),
+    ),
+    'an unowned generated-source symlink produced an unrelated limitation',
   );
   assert(
     !JSON.stringify(identityManifestA).includes(scratch),
@@ -2447,6 +4617,7 @@ try {
     RUSTC_WRAPPER: wrapper,
     SUPERCOV_RUST_COMPILER_OUTPUT: instrumentedDirectory,
     SUPERCOV_RUST_INSTRUMENT_MIR: '1',
+    SUPERCOV_RUST_STATIC_RUNTIME_DIRECTORY: sharedRuntimeDirectory,
     SUPERCOV_RUST_TRANSPORT_FILE: behaviorTransport.path,
     SUPERCOV_RUST_TRANSPORT_TOKEN: behaviorTransport.tokenHex,
     SUPERCOV_RUST_CONTEXT_ID: transportContext.toString(16).padStart(16, '0'),
@@ -2506,10 +4677,7 @@ try {
       value
         .replaceAll(source, `<${name}>`)
         .replaceAll(baselineOutput, '<output>')
-        .replaceAll(instrumentedOutput, '<output>')
-        .replaceAll('std::result::Result', 'Result')
-        .replaceAll('std::ops::Try', 'Try')
-        .replaceAll('std::ops::FromResidual', 'FromResidual');
+        .replaceAll(instrumentedOutput, '<output>');
     assert.equal(
       normalize(instrumented.stderr),
       normalize(baseline.stderr),
@@ -2523,11 +4691,7 @@ try {
   };
   const {baseline: constTryBaseline, instrumented: constTryInstrumented} =
     compileFailCase('const-try');
-  assert.match(
-    constTryInstrumented.stderr,
-    /std::result::Result/,
-    'the rustc-driver diagnostic-path rendering boundary unexpectedly changed',
-  );
+  assert.doesNotMatch(constTryInstrumented.stderr, /std::result::Result/);
   assert.match(constTryBaseline.stderr, /E0658/);
   assert.match(constTryBaseline.stderr, /Try.*not yet stable as a const trait/s);
   const {baseline: constAssertFailure} = compileFailCase('const-assert');
@@ -3675,14 +5839,27 @@ try {
     JSON.stringify({values: [false], outcome: false}),
     JSON.stringify({values: [true], outcome: true}),
   ].sort());
-  assert.deepEqual(decisionVectors('generated_by_external_rules'), [
-    JSON.stringify({values: [false], outcome: false}),
-    JSON.stringify({values: [true], outcome: true}),
-  ].sort());
+  assert.deepEqual(
+    decisionVectors('generated_by_external_rules'),
+    [
+      JSON.stringify({values: [false], outcome: false}),
+      JSON.stringify({values: [false], outcome: false}),
+      JSON.stringify({values: [true], outcome: true}),
+      JSON.stringify({values: [true], outcome: true}),
+    ].sort(),
+  );
   assert.deepEqual(decisionVectors('DerivedChoice::derived_choice'), [
     JSON.stringify({values: [false], outcome: false}),
     JSON.stringify({values: [true], outcome: true}),
   ].sort());
+  assert.deepEqual(
+    decisionVectors('attributed_choice'),
+    [
+      JSON.stringify({values: [false, null], outcome: false}),
+      JSON.stringify({values: [true, false], outcome: false}),
+      JSON.stringify({values: [true, true], outcome: true}),
+    ].sort(),
+  );
   assert.deepEqual(decisionVectors('generated_by_proc'), [
     JSON.stringify({values: [false], outcome: false}),
   ]);
@@ -3796,6 +5973,7 @@ try {
         SUPERCOV_RUST_COMPILER_OUTPUT: ctfeDirectory,
         SUPERCOV_RUST_INSTRUMENT_MIR: '1',
         SUPERCOV_RUST_INSTRUMENT_CTFE: '1',
+        SUPERCOV_RUST_STATIC_RUNTIME_DIRECTORY: sharedRuntimeDirectory,
       },
     },
   );
@@ -4033,6 +6211,38 @@ try {
       JSON.stringify({values: [true, null, false], outcome: false}),
       JSON.stringify({values: [true, null, true], outcome: true}),
     ].sort(),
+  );
+  assert.equal(
+    decisionFor(runtimeManifest, 'const_logical_value'),
+    undefined,
+    'const logical value selection invented an MC/DC control decision',
+  );
+  const constLogicalBranches = branchesFor(
+    runtimeManifest,
+    'const_logical_value',
+    'logical-selection',
+  );
+  assert.equal(constLogicalBranches.length, 2);
+  const constLogicalOrdinals = new Set(
+    constLogicalBranches.flatMap(({alternatives}) =>
+      alternatives.map(({probeOrdinal}) => probeOrdinal),
+    ),
+  );
+  const observedConstLogicalOrdinals = new Set(
+    ctfeInvocations
+      .filter(({definition}) => definition === 'const_logical_value')
+      .flatMap(({records: invocationRecords}) =>
+        invocationRecords
+          .flatMap((record) =>
+            mappingsByMarker.get(`${record.crate}:${record.marker}`).hitOrdinals,
+          )
+          .filter((ordinal) => constLogicalOrdinals.has(ordinal)),
+      ),
+  );
+  assert.deepEqual(
+    [...observedConstLogicalOrdinals].sort(),
+    [...constLogicalOrdinals].sort(),
+    'CTFE logical value selections did not commit every exact alternative',
   );
   assert.deepEqual(
     ctfeVectorsForDecision(
@@ -4407,16 +6617,22 @@ try {
     nestedOuterContext,
     nestedInnerAssertion.id,
   );
+  const childTestContext = testContextId('tests::child_context');
   validatePhaseContexts(concurrentEvidence, [
     ...contextIds,
     restoreTestContext,
     nestedTestContext,
-    testContextId('tests::child_context'),
+    childTestContext,
   ]);
   const concurrentOrdinalPairs = new Set(
     concurrentEvidence.ordinals.map(
       ({context, ordinal}) => `${context}:${ordinal}`,
     ),
+  );
+  const childAssertionContext = assertionPhaseContext(
+    concurrentEvidence,
+    childTestContext,
+    assertionDecisionIdFor('tests::child_context'),
   );
   const previouslyProvenContextPairs = new Set([
       `${assertionContextIds[0]}:${authoredProbe}`,
@@ -4427,13 +6643,22 @@ try {
       `${restoreTestContext}:${fallibleProbe}`,
       `${nestedInnerContext}:${authoredProbe}`,
       `${nestedOuterContext}:${fallibleProbe}`,
-      `0:${authoredProbe}`,
+      `${childAssertionContext}:${authoredProbe}`,
   ]);
+  const missingPreviouslyProvenContextPairs = [
+    ...previouslyProvenContextPairs,
+  ].filter((pair) => !concurrentOrdinalPairs.has(pair));
   assert(
-    [...previouslyProvenContextPairs].every((pair) =>
-      concurrentOrdinalPairs.has(pair),
-    ),
-    'general point instrumentation lost a previously proven exact-context observation',
+    missingPreviouslyProvenContextPairs.length === 0,
+    `general point instrumentation lost previously proven exact-context observations: ${missingPreviouslyProvenContextPairs.join(', ')}`,
+  );
+  assert(
+    !concurrentOrdinalPairs.has(`0:${authoredProbe}`),
+    'child-thread work escaped automatic context inheritance into background',
+  );
+  assert(
+    !concurrentOrdinalPairs.has(`${childTestContext}:${authoredProbe}`),
+    'child-thread work spawned inside an assertion lost its assertion phase',
   );
   assert(
     concurrentEvidence.ordinals.every(({ordinal}) =>
@@ -4496,18 +6721,25 @@ try {
   assert(isolatedEvidence.attachments > 0);
   assert.equal(isolatedEvidence.dropped, 0);
   assert.equal(isolatedEvidence.incomplete, 0);
-  assert(
-    isolatedEvidence.ordinals.some(
-      ({context, ordinal}) =>
-        context === isolatedTestContext && ordinal === authoredProbe,
-    ),
-    'process-per-test fallback did not bind child-thread work to the exact test phase',
-  );
   const isolatedAssertionId = assertionDecisionIdFor('tests::child_context');
   const isolatedAssertionContext = assertionPhaseContext(
     isolatedEvidence,
     isolatedTestContext,
     isolatedAssertionId,
+  );
+  assert(
+    isolatedEvidence.ordinals.some(
+      ({context, ordinal}) =>
+        context === isolatedAssertionContext && ordinal === authoredProbe,
+    ),
+    'supervisor-isolated run did not bind child-thread work to the exact assertion phase',
+  );
+  assert(
+    isolatedEvidence.ordinals.every(
+      ({context, ordinal}) =>
+        ordinal !== authoredProbe || context === isolatedAssertionContext,
+    ),
+    'supervisor-isolated child-thread work leaked outside its assertion phase',
   );
   assert(
     isolatedEvidence.decisions.some(
@@ -4516,7 +6748,7 @@ try {
         id === isolatedAssertionId &&
         outcome === true,
     ),
-    'process-per-test fallback lost the parent assertion verdict',
+    'supervisor-isolated base context lost the parent assertion verdict',
   );
   const isolatedManifest = manifests(instrumentedDirectory).find(
     (manifestRecord) =>
@@ -4564,10 +6796,12 @@ try {
   );
   const instrumentedRecords = records(instrumentedDirectory);
   assert(instrumentedRecords.some((record) => record.definition === 'authored'));
-  const injectedProbe = instrumentedRecords.find((record) =>
-    record.definition.endsWith('__supercov_spike_runtime::ordinal_hit'),
+  assert(
+    !instrumentedRecords.some((record) =>
+      record.definition.includes('__supercov_spike_runtime'),
+    ),
+    'runtime ABI declarations leaked into authored compiler records',
   );
-  assert.match(injectedProbe?.span ?? '', /<supercov-rust-runtime>/);
   assert.equal(
     createHash('sha256').update(readFileSync(fixtureSourcePath)).digest('hex'),
     fixtureSourceDigest,
@@ -4592,37 +6826,6 @@ try {
   const rustdocLauncher = join(scratch, 'supercov-rustdoc-backend-spike');
   symlinkSync(wrapper, rustdocLauncher);
   const realRustdoc = run('rustup', ['which', 'rustdoc']).stdout.trim();
-  const sharedRuntimeDirectory = join(scratch, 'shared-rust-runtime');
-  const sharedRuntimeSource = join(sharedRuntimeDirectory, 'runtime.rs');
-  const sharedRuntimeArchive = join(
-    sharedRuntimeDirectory,
-    'libsupercov_runtime.a',
-  );
-  mkdirSync(sharedRuntimeDirectory);
-  const runtimeModule = readFileSync(
-    join(root, 'crates/supercov-engine/runtime-assets/rust-mmap-runtime.rs'),
-    'utf8',
-  ).replace('__SUPERCOV_MODULE__', '__supercov_shared_runtime');
-  const runtimeExports = `
-#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_ordinal_hit(ordinal: u64) { __supercov_shared_runtime::ordinal_hit(ordinal) }
-#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_enter_context(context_id: u64) -> u64 { __supercov_shared_runtime::enter_context(context_id) }
-#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_exit_context(previous: u64) { __supercov_shared_runtime::exit_context(previous) }
-#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_enter_assertion_context(id_high: u64, id_low: u32) -> u64 { __supercov_shared_runtime::enter_assertion_context(id_high, id_low) }
-#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_decision_start(id_high: u64, id_low: u32, conditions: u64) -> u64 { __supercov_shared_runtime::mir_decision_start(id_high, id_low, conditions) }
-#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_decision_condition(token: u64, index: u64, value: bool) { __supercov_shared_runtime::mir_decision_condition(token, index, value) }
-#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_decision_finish(token: u64, outcome: bool) { __supercov_shared_runtime::mir_decision_finish(token, outcome) }
-#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_branch_start() -> u64 { __supercov_shared_runtime::mir_branch_start() }
-#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_branch_hit(token: u64, ordinal: u64) { __supercov_shared_runtime::mir_branch_hit(token, ordinal) }
-`;
-  writeFileSync(sharedRuntimeSource, `${runtimeModule}\n${runtimeExports}`);
-  run('rustc', [
-    '--edition=2024',
-    '--crate-name=supercov_runtime',
-    '--crate-type=staticlib',
-    '-o',
-    sharedRuntimeArchive,
-    sharedRuntimeSource,
-  ]);
   const wrappedDoctestDirectory = join(scratch, 'wrapped-doctest');
   const doctestTransport = createTransport('wrapped-doctest');
   const wrappedDoctest = run(
@@ -4933,6 +7136,9 @@ try {
     ),
     'merged doctest map publication retained a partial file',
   );
+  const ignoredDoctestLine = sourceLine('```ignore');
+  const noRunDoctestLine = sourceLine('```no_run');
+  const shouldPanicDoctestLine = sourceLine('```should_panic');
   assert.deepEqual(mergedMaps, [
     {
       schema: 'supercov-rustdoc-merged-map-v2',
@@ -4949,30 +7155,27 @@ try {
         },
         {
           module: '__doctest_1',
-          displayName:
-            'src/lib.rs - doctest_execution_modes (line 342)',
+          displayName: `src/lib.rs - doctest_execution_modes (line ${ignoredDoctestLine})`,
           path: 'src/lib.rs',
-          line: 342,
+          line: ignoredDoctestLine,
           ignored: true,
           noRun: false,
           shouldPanic: false,
         },
         {
           module: '__doctest_2',
-          displayName:
-            'src/lib.rs - doctest_execution_modes (line 346)',
+          displayName: `src/lib.rs - doctest_execution_modes (line ${noRunDoctestLine})`,
           path: 'src/lib.rs',
-          line: 346,
+          line: noRunDoctestLine,
           ignored: false,
           noRun: true,
           shouldPanic: false,
         },
         {
           module: '__doctest_3',
-          displayName:
-            'src/lib.rs - doctest_execution_modes (line 350)',
+          displayName: `src/lib.rs - doctest_execution_modes (line ${shouldPanicDoctestLine})`,
           path: 'src/lib.rs',
-          line: 350,
+          line: shouldPanicDoctestLine,
           ignored: false,
           noRun: false,
           shouldPanic: true,
@@ -5209,5 +7412,9 @@ try {
 } catch (error) {
   if (error !== nextestOnlyComplete) throw error;
 } finally {
-  rmSync(scratch, {recursive: true, force: true});
+  if (process.env.SUPERCOV_RUSTC_SPIKE_KEEP_SCRATCH === '1') {
+    process.stderr.write(`[rustc-backend-spike] retained scratch: ${scratch}\n`);
+  } else {
+    rmSync(scratch, {recursive: true, force: true});
+  }
 }

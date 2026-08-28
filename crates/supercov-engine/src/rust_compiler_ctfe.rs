@@ -453,6 +453,29 @@ fn reconstruct_unit(
                                 .entry(decision.id.clone())
                                 .or_default()
                                 .insert((active.values.clone(), outcome));
+                            if let Some(selections) = normalized
+                                .decision_logical_selection_obligations
+                                .get(&decision.id)
+                            {
+                                for selection in selections {
+                                    let alternative_id =
+                                        if active.values[selection.right_condition_index].is_some()
+                                        {
+                                            &selection.right_evaluated_id
+                                        } else {
+                                            &selection.short_circuited_id
+                                        };
+                                    hits.insert(alternative_id.clone());
+                                    runtime_events.push(RuntimeEvent {
+                                        event_type: "hit".into(),
+                                        id: alternative_id.clone(),
+                                        vector: None,
+                                        timestamp_ms,
+                                        phase_id: None,
+                                        environment: "rust-ctfe".into(),
+                                    });
+                                }
+                            }
                             runtime_events.push(RuntimeEvent {
                                 event_type: "decision".into(),
                                 id: decision.id.clone(),
@@ -653,6 +676,7 @@ mod tests {
                 ("false-alternative".into(), "true-alternative".into()),
             )]),
             decision_loop_obligations: BTreeMap::new(),
+            decision_logical_selection_obligations: BTreeMap::new(),
         }
     }
 
@@ -815,6 +839,95 @@ mod tests {
                 },
                 McdcVector {
                     values: vec![Some(true)],
+                    outcome: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reconstructs_logical_selection_hits_from_ctfe_ternary_vectors() {
+        let scratch = Scratch::new();
+        let mut map = valid_map();
+        map["mappings"].as_array_mut().unwrap().push(mapping(
+            "8",
+            "decision-condition",
+            &[],
+            Some(decision_event(
+                "decision",
+                "condition",
+                Some(1),
+                Some(true),
+                None,
+            )),
+        ));
+        let events = [
+            ("1", "entry"),
+            ("2", "decision-start"),
+            ("3", "decision-condition"),
+            ("4", "decision-finish"),
+            ("2", "decision-start"),
+            ("6", "decision-condition"),
+            ("8", "decision-condition"),
+            ("7", "decision-finish"),
+            ("5", "exit"),
+        ]
+        .into_iter()
+        .map(|(marker, kind)| event(marker, kind))
+        .collect::<Vec<_>>();
+        scratch.write(map, &events);
+
+        let mut normalized = normalized_manifest();
+        normalized.manifest.decisions[0].conditions = vec!["left".into(), "right".into()];
+        normalized.manifest.branches.push(BranchMeta {
+            id: "logical".into(),
+            kind: "logical-selection".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            column: 1,
+            source: "left && right".into(),
+            alternatives: vec![
+                BranchAlternativeMeta {
+                    id: "short".into(),
+                    label: "short-circuited".into(),
+                },
+                BranchAlternativeMeta {
+                    id: "evaluated".into(),
+                    label: "right operand evaluated".into(),
+                },
+            ],
+        });
+        normalized.decision_logical_selection_obligations.insert(
+            "decision".into(),
+            vec![
+                crate::rust_compiler_manifest::NormalizedRustLogicalSelection {
+                    short_circuited_id: "short".into(),
+                    right_evaluated_id: "evaluated".into(),
+                    right_condition_index: 1,
+                },
+            ],
+        );
+
+        let units = read_rust_compiler_ctfe(&scratch.0, &normalized, 42).unwrap();
+        assert_eq!(
+            units[0].snapshot.hits,
+            [
+                "evaluated",
+                "false-alternative",
+                "function",
+                "short",
+                "true-alternative"
+            ]
+        );
+        assert_eq!(
+            units[0].snapshot.decisions[0].vectors,
+            [
+                McdcVector {
+                    values: vec![Some(false), None],
+                    outcome: false,
+                },
+                McdcVector {
+                    values: vec![Some(true), Some(true)],
                     outcome: true,
                 },
             ]

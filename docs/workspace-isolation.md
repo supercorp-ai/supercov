@@ -1,9 +1,8 @@
 # Workspace isolation
 
-Supercov's primary filesystem guarantee is stronger than “we clean up when the
-command exits”: the user's source and ordinary build artifacts are never
-Supercov's write targets. Cleanup is useful for space, but correctness cannot
-depend on a signal handler running.
+Supercov writes generated and temporary files only under the project's
+`.supercov/` directory. Application source and ordinary build artifacts are
+not write targets, and cleanup does not depend on a signal handler.
 
 ## Owned paths
 

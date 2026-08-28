@@ -1,9 +1,11 @@
 //! Stable Cargo/libtest execution for the owned Rust frontend.
 //!
 //! Source preparation happens in an isolated workspace. Cargo builds each test
-//! artifact once; Supercov then executes one exact libtest case per process so
-//! run, worker, test, retry and phase attribution do not depend on thread-local
-//! state inside the program under test.
+//! artifact once. Ordinary libtest artifacts execute once with the selected
+//! toolchain's exact Supercov companion, preserving stock scheduling, capture,
+//! process-global state and presentation while authenticated lifecycle events
+//! provide exact attempt identity. Nextest and opaque custom runners retain
+//! their own intrinsic process boundaries.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -271,7 +273,6 @@ impl CargoTestInvocation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RustLibtestSelection {
     pub list_arguments: Vec<String>,
-    pub run_arguments: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -675,19 +676,13 @@ pub(crate) fn rust_libtest_selection(
     }
 
     let mut list_arguments = cargo_filter.into_iter().collect::<Vec<_>>();
-    let mut run_arguments = Vec::new();
+    let mut test_threads = None;
     let mut index = 0;
     while index < invocation.runner_arguments.len() {
         let argument = &invocation.runner_arguments[index];
         match argument.as_str() {
-            "--ignored"
-            | "--include-ignored"
-            | "--exclude-should-panic"
-            | "--test"
-            | "--bench"
-            | "--force-run-in-process" => {
+            "--ignored" | "--include-ignored" | "--exclude-should-panic" | "--test" | "--bench" => {
                 list_arguments.push(argument.clone());
-                run_arguments.push(argument.clone());
             }
             "--exact" => list_arguments.push(argument.clone()),
             "--skip" => {
@@ -702,19 +697,100 @@ pub(crate) fn rust_libtest_selection(
             _ if argument.starts_with("--skip=") && argument.len() > "--skip=".len() => {
                 list_arguments.push(argument.clone());
             }
+            "--test-threads" => {
+                let value = invocation.runner_arguments.get(index + 1).ok_or_else(|| {
+                    RustTestRunnerError::UnsupportedCommand(
+                        "libtest --test-threads has no value".into(),
+                    )
+                })?;
+                let parsed = parse_libtest_threads(value)?;
+                if test_threads.replace(parsed).is_some() {
+                    return Err(RustTestRunnerError::UnsupportedCommand(
+                        "libtest --test-threads was provided more than once".into(),
+                    ));
+                }
+                index += 1;
+            }
+            _ if argument.starts_with("--test-threads=") => {
+                let value = &argument["--test-threads=".len()..];
+                let parsed = parse_libtest_threads(value)?;
+                if test_threads.replace(parsed).is_some() {
+                    return Err(RustTestRunnerError::UnsupportedCommand(
+                        "libtest --test-threads was provided more than once".into(),
+                    ));
+                }
+            }
+            "-Z" => {
+                let value = invocation.runner_arguments.get(index + 1).ok_or_else(|| {
+                    RustTestRunnerError::UnsupportedCommand(
+                        "libtest -Z has no feature value".into(),
+                    )
+                })?;
+                // `exclude-should-panic` and the other unstable selection
+                // flags must be parsed under the same libtest feature gate
+                // during discovery. The user's exact pair is also preserved
+                // unchanged for the real artifact execution.
+                list_arguments.extend([argument.clone(), value.clone()]);
+                index += 1;
+            }
+            _ if argument.starts_with("-Z") && argument.len() > 2 => {
+                list_arguments.push(argument.clone());
+            }
+            "--logfile" | "--color" | "--format" | "--shuffle-seed" => {
+                if invocation.runner_arguments.get(index + 1).is_none() {
+                    return Err(RustTestRunnerError::UnsupportedCommand(format!(
+                        "libtest {argument} has no value"
+                    )));
+                }
+                // Presentation-only values must not leak into the synthetic
+                // terse listing. The original argument and value are passed
+                // byte-for-byte to the one stock artifact execution.
+                index += 1;
+            }
+            _ if ["--logfile=", "--color=", "--format=", "--shuffle-seed="]
+                .iter()
+                .any(|prefix| argument.starts_with(prefix) && argument.len() > prefix.len()) => {}
+            "--force-run-in-process"
+            | "--fail-fast"
+            | "--no-capture"
+            | "--nocapture"
+            | "-q"
+            | "--quiet"
+            | "--show-output"
+            | "--report-time"
+            | "--ensure-time"
+            | "--shuffle" => {
+                // These affect only scheduling, execution or presentation.
+                // They are intentionally absent from discovery and retained
+                // unchanged in the real artifact argv.
+            }
+            "--list" | "-h" | "--help" => {
+                return Err(RustTestRunnerError::UnsupportedCommand(format!(
+                    "libtest {argument} does not execute a test suite; exact non-execution mode support is not implemented"
+                )));
+            }
             _ if !argument.starts_with('-') => list_arguments.push(argument.clone()),
             _ => {
                 return Err(RustTestRunnerError::UnsupportedCommand(format!(
-                    "libtest option {argument} cannot yet be reproduced exactly by process-per-test execution"
+                    "the pinned Rust 1.95 libtest discovery contract does not recognize option {argument}"
                 )));
             }
         }
         index += 1;
     }
-    Ok(RustLibtestSelection {
-        list_arguments,
-        run_arguments,
-    })
+    Ok(RustLibtestSelection { list_arguments })
+}
+
+fn parse_libtest_threads(value: &str) -> Result<usize, RustTestRunnerError> {
+    match value.parse::<usize>() {
+        Ok(0) => Err(RustTestRunnerError::UnsupportedCommand(
+            "argument for --test-threads must not be 0".into(),
+        )),
+        Ok(value) => Ok(value),
+        Err(error) => Err(RustTestRunnerError::UnsupportedCommand(format!(
+            "argument for --test-threads must be a number > 0 (error: {error})"
+        ))),
+    }
 }
 
 pub(crate) fn rust_cargo_execution_selection(
@@ -1271,7 +1347,6 @@ mod tests {
                 "--include-ignored"
             ]
         );
-        assert_eq!(selection.run_arguments, ["--include-ignored"]);
     }
 
     #[test]
@@ -1451,22 +1526,39 @@ mod tests {
     }
 
     #[test]
-    fn libtest_modes_that_process_per_test_cannot_reproduce_fail_closed() {
-        for arguments in [
-            vec!["--test-threads", "4"],
-            vec!["--shuffle"],
-            vec!["--format=json"],
-            vec!["--nocapture"],
-            vec!["--fail-fast"],
-        ] {
-            let invocation = CargoTestInvocation {
-                program: "cargo".into(),
-                kind: RustCargoCommandKind::CargoTest,
-                arguments: vec!["test".into()],
-                runner_arguments: arguments.into_iter().map(str::to_owned).collect(),
-            };
-            assert!(rust_libtest_selection(&invocation).is_err());
-        }
+    fn stock_libtest_presentation_and_scheduling_options_do_not_change_discovery() {
+        let invocation = CargoTestInvocation {
+            program: "cargo".into(),
+            kind: RustCargoCommandKind::CargoTest,
+            arguments: vec!["test".into(), "cargo-filter".into()],
+            runner_arguments: [
+                "runner-filter",
+                "--nocapture",
+                "--show-output",
+                "--format=json",
+                "--color",
+                "never",
+                "--test-threads=4",
+                "--fail-fast",
+                "--shuffle-seed",
+                "17",
+                "-Zunstable-options",
+                "--exclude-should-panic",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        };
+        let selection = rust_libtest_selection(&invocation).unwrap();
+        assert_eq!(
+            selection.list_arguments,
+            [
+                "cargo-filter",
+                "runner-filter",
+                "-Zunstable-options",
+                "--exclude-should-panic"
+            ]
+        );
     }
 
     #[test]
@@ -1485,7 +1577,38 @@ mod tests {
         };
         let selection = rust_libtest_selection(&invocation).unwrap();
         assert_eq!(selection.list_arguments, ["needle", "--ignored", "other"]);
-        assert_eq!(selection.run_arguments, ["--ignored"]);
+    }
+
+    #[test]
+    fn libtest_thread_count_is_preserved_as_runner_scheduling() {
+        for arguments in [vec!["--test-threads", "1"], vec!["--test-threads=8"]] {
+            let invocation = CargoTestInvocation {
+                program: "cargo".into(),
+                kind: RustCargoCommandKind::CargoTest,
+                arguments: vec!["test".into()],
+                runner_arguments: arguments.into_iter().map(str::to_owned).collect(),
+            };
+            let selection = rust_libtest_selection(&invocation).unwrap();
+            assert!(selection.list_arguments.is_empty());
+        }
+    }
+
+    #[test]
+    fn invalid_or_duplicate_libtest_thread_counts_fail_closed() {
+        for arguments in [
+            vec!["--test-threads"],
+            vec!["--test-threads=0"],
+            vec!["--test-threads=abc"],
+            vec!["--test-threads", "1", "--test-threads=2"],
+        ] {
+            let invocation = CargoTestInvocation {
+                program: "cargo".into(),
+                kind: RustCargoCommandKind::CargoTest,
+                arguments: vec!["test".into()],
+                runner_arguments: arguments.into_iter().map(str::to_owned).collect(),
+            };
+            assert!(rust_libtest_selection(&invocation).is_err());
+        }
     }
 
     #[test]

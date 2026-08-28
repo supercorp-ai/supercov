@@ -94,6 +94,12 @@ pub struct RustPhaseContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustTransportPartition {
+    pub attributed: BTreeMap<u64, RustTransportRead>,
+    pub background: RustTransportRead,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RustTransportError {
     Io(String),
     UnsafeFile(String),
@@ -102,6 +108,7 @@ pub enum RustTransportError {
     InvalidDescriptor(u64),
     InvalidRecord(u64),
     InvalidAssertionContext(String),
+    InvalidAttribution(String),
 }
 
 impl std::fmt::Display for RustTransportError {
@@ -119,6 +126,9 @@ impl std::fmt::Display for RustTransportError {
             }
             Self::InvalidAssertionContext(reason) => {
                 write!(formatter, "invalid Rust assertion context: {reason}")
+            }
+            Self::InvalidAttribution(reason) => {
+                write!(formatter, "invalid Rust transport attribution: {reason}")
             }
         }
     }
@@ -595,6 +605,156 @@ pub fn validate_rust_phase_contexts(
     Ok(())
 }
 
+/// Partition one concurrently written artifact transport without copying any
+/// record between tests. Every non-background context must resolve through the
+/// authenticated assertion-phase graph to exactly one known libtest root.
+pub fn partition_rust_transport_by_test_contexts(
+    read: &RustTransportRead,
+    base_contexts: &BTreeSet<u64>,
+) -> Result<RustTransportPartition, RustTransportError> {
+    if base_contexts
+        .iter()
+        .any(|context| matches!(*context, 0 | u64::MAX))
+    {
+        return Err(RustTransportError::InvalidAttribution(
+            "known test roots must be nonzero and non-reserved".into(),
+        ));
+    }
+    if read.incomplete != 0 || read.dropped != 0 {
+        return Err(RustTransportError::InvalidAttribution(format!(
+            "shared transport is incomplete (incomplete={}, dropped={})",
+            read.incomplete, read.dropped
+        )));
+    }
+
+    let mut parents = BTreeMap::<u64, u64>::new();
+    for phase in &read.phases {
+        if matches!(phase.child_context_id, 0 | u64::MAX)
+            || matches!(phase.parent_context_id, 0 | u64::MAX)
+            || base_contexts.contains(&phase.child_context_id)
+            || parents
+                .insert(phase.child_context_id, phase.parent_context_id)
+                .is_some()
+        {
+            return Err(RustTransportError::InvalidAttribution(format!(
+                "phase {:016x} has an invalid or repeated ownership definition",
+                phase.child_context_id
+            )));
+        }
+    }
+
+    let resolve = |start: u64| -> Result<Option<u64>, RustTransportError> {
+        if start == 0 {
+            return Ok(None);
+        }
+        if start == u64::MAX {
+            return Err(RustTransportError::InvalidAttribution(
+                "evidence used the reserved context sentinel".into(),
+            ));
+        }
+        let mut context = start;
+        let mut seen = BTreeSet::new();
+        while let Some(parent) = parents.get(&context) {
+            if !seen.insert(context) {
+                return Err(RustTransportError::InvalidAttribution(format!(
+                    "phase context cycle at {context:016x}"
+                )));
+            }
+            context = *parent;
+        }
+        if base_contexts.contains(&context) {
+            Ok(Some(context))
+        } else {
+            Err(RustTransportError::InvalidAttribution(format!(
+                "context {start:016x} resolves to unknown test root {context:016x}"
+            )))
+        }
+    };
+
+    let empty = || RustTransportRead {
+        observations: Vec::new(),
+        ordinal_hits: Vec::new(),
+        phases: Vec::new(),
+        committed: 0,
+        incomplete: 0,
+        dropped: 0,
+        attachments: 0,
+    };
+    let mut attributed = base_contexts
+        .iter()
+        .map(|context| (*context, empty()))
+        .collect::<BTreeMap<_, _>>();
+    let mut background = empty();
+    background.attachments = read.attachments;
+
+    for observation in &read.observations {
+        match resolve(observation.context_id)? {
+            Some(root) => attributed
+                .get_mut(&root)
+                .expect("resolved root was preallocated")
+                .observations
+                .push(observation.clone()),
+            None => background.observations.push(observation.clone()),
+        }
+    }
+    for hit in &read.ordinal_hits {
+        match resolve(hit.context_id)? {
+            Some(root) => attributed
+                .get_mut(&root)
+                .expect("resolved root was preallocated")
+                .ordinal_hits
+                .push(*hit),
+            None => background.ordinal_hits.push(*hit),
+        }
+    }
+    for phase in &read.phases {
+        let root = resolve(phase.child_context_id)?.ok_or_else(|| {
+            RustTransportError::InvalidAttribution(format!(
+                "phase {:016x} resolved to background",
+                phase.child_context_id
+            ))
+        })?;
+        attributed
+            .get_mut(&root)
+            .expect("resolved root was preallocated")
+            .phases
+            .push(phase.clone());
+    }
+
+    let set_committed = |transport: &mut RustTransportRead| -> Result<u64, RustTransportError> {
+        transport.committed = u64::try_from(
+            transport.observations.len() + transport.ordinal_hits.len() + transport.phases.len(),
+        )
+        .map_err(|_| {
+            RustTransportError::InvalidAttribution("partition record count exceeds u64".into())
+        })?;
+        Ok(transport.committed)
+    };
+    let mut assigned = set_committed(&mut background)?;
+    for transport in attributed.values_mut() {
+        assigned = assigned
+            .checked_add(set_committed(transport)?)
+            .ok_or_else(|| {
+                RustTransportError::InvalidAttribution(
+                    "partition record count overflowed u64".into(),
+                )
+            })?;
+    }
+    if assigned != read.committed {
+        return Err(RustTransportError::InvalidAttribution(format!(
+            "partition assigned {assigned} of {} committed records",
+            read.committed
+        )));
+    }
+    for (base, transport) in &attributed {
+        validate_rust_phase_contexts(*base, transport)?;
+    }
+    Ok(RustTransportPartition {
+        attributed,
+        background,
+    })
+}
+
 pub fn render_rust_mmap_runtime(module_name: &str) -> Result<String, String> {
     let valid_identifier = !module_name.is_empty()
         && module_name.bytes().enumerate().all(|(index, byte)| {
@@ -869,6 +1029,101 @@ fn main() {{
         assert!(matches!(
             validate_rust_phase_contexts(CONTEXT, &cycle),
             Err(RustTransportError::InvalidAssertionContext(_))
+        ));
+    }
+
+    #[test]
+    fn shared_transport_partitions_each_record_once_by_exact_test_root() {
+        const SECOND: u64 = 84;
+        let outer_id = "rs:decision:0123456789abcdef01234567";
+        let inner_id = "rs:decision:fedcba9876543210fedcba98";
+        let outer = rust_assertion_context_id(CONTEXT, outer_id, 10).unwrap();
+        let inner = rust_assertion_context_id(outer, inner_id, 11).unwrap();
+        let read = RustTransportRead {
+            observations: vec![
+                RustTransportObservation {
+                    process_id: 7,
+                    context_id: inner,
+                    observation: RustProbeObservation::Hit {
+                        id: "rs:statement:0123456789abcdef01234567".into(),
+                    },
+                },
+                RustTransportObservation {
+                    process_id: 7,
+                    context_id: SECOND,
+                    observation: RustProbeObservation::Hit {
+                        id: "rs:function:fedcba9876543210fedcba98".into(),
+                    },
+                },
+                RustTransportObservation {
+                    process_id: 7,
+                    context_id: 0,
+                    observation: RustProbeObservation::Hit {
+                        id: "rs:statement:aaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                    },
+                },
+            ],
+            ordinal_hits: vec![RustOrdinalHit {
+                process_id: 7,
+                context_id: CONTEXT,
+                ordinal: 9,
+            }],
+            phases: vec![
+                RustPhaseContext {
+                    process_id: 7,
+                    child_context_id: outer,
+                    parent_context_id: CONTEXT,
+                    invocation_nonce: 10,
+                    decision_id: outer_id.into(),
+                },
+                RustPhaseContext {
+                    process_id: 7,
+                    child_context_id: inner,
+                    parent_context_id: outer,
+                    invocation_nonce: 11,
+                    decision_id: inner_id.into(),
+                },
+            ],
+            committed: 6,
+            incomplete: 0,
+            dropped: 0,
+            attachments: 3,
+        };
+        let bases = BTreeSet::from([CONTEXT, SECOND]);
+        let partition = partition_rust_transport_by_test_contexts(&read, &bases).unwrap();
+        assert_eq!(partition.attributed[&CONTEXT].committed, 4);
+        assert_eq!(partition.attributed[&SECOND].committed, 1);
+        assert_eq!(partition.background.committed, 1);
+        assert_eq!(partition.background.attachments, 3);
+        assert_eq!(
+            partition
+                .attributed
+                .values()
+                .map(|transport| transport.committed)
+                .sum::<u64>()
+                + partition.background.committed,
+            read.committed
+        );
+
+        let mut foreign = read.clone();
+        foreign.observations[1].context_id = 99;
+        assert!(matches!(
+            partition_rust_transport_by_test_contexts(&foreign, &bases),
+            Err(RustTransportError::InvalidAttribution(_))
+        ));
+
+        let mut incomplete = read.clone();
+        incomplete.dropped = 1;
+        assert!(matches!(
+            partition_rust_transport_by_test_contexts(&incomplete, &bases),
+            Err(RustTransportError::InvalidAttribution(_))
+        ));
+
+        let mut cycle = read;
+        cycle.phases[0].parent_context_id = inner;
+        assert!(matches!(
+            partition_rust_transport_by_test_contexts(&cycle, &bases),
+            Err(RustTransportError::InvalidAttribution(_))
         ));
     }
 
