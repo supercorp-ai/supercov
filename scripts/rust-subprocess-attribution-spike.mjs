@@ -108,7 +108,7 @@ try {
     cwd: project,
     env: {CARGO_TARGET_DIR: join(scratch, 'baseline-target')},
   });
-  assert.match(baseline.stdout + baseline.stderr, /3 passed/u);
+  assert.match(baseline.stdout + baseline.stderr, /9 passed/u);
 
   const covered = JSON.parse(
     run(supercov, ['__run-rust-compiler'], {
@@ -129,11 +129,11 @@ try {
     }).stdout,
   );
   assert.equal(covered.exitCode, 0);
-  assert.equal(covered.tests, 3);
-  assert.equal(covered.libtests, 3);
+  assert.equal(covered.tests, 9);
+  assert.equal(covered.libtests, 9);
   assert.equal(covered.doctests, 0);
   assert.equal(covered.backgroundResults, 1);
-  assert.equal(covered.transportHealth.length, 4);
+  assert.equal(covered.transportHealth.length, 10);
   assert(
     covered.transportHealth.every(
       ({status, transport}) =>
@@ -193,6 +193,31 @@ try {
     'context-zero child evidence was not retained as background',
   );
 
+  const exactPropagationCases = [
+    ['forked_worker_is_attributed', 'pub fn forked_worker_probe'],
+    ['fork_exec_child_is_attributed', 'pub fn exec_child_probe'],
+    ['pre_exec_child_is_attributed', 'pub fn pre_exec_child_probe'],
+    ['spawnp_child_is_attributed', 'pub fn spawnp_child_probe'],
+    ['failed_launch_keeps_exact_context', 'pub fn launch_failure_probe'],
+    ['nested_thread_is_attributed', 'pub fn nested_thread_probe'],
+  ];
+  for (const [test, needle] of exactPropagationCases) {
+    const probeLine = sourceLine(project, childSource, needle);
+    const details = detailsFor(project, covered.runId, test);
+    assert(
+      details.hitDetails.some(
+        ({file, line}) => file === childSource && line === probeLine,
+      ),
+      `${test} evidence was not attributed to its exact parent test`,
+    );
+    assert(
+      !background.hitDetails.some(
+        ({file, line}) => file === childSource && line === probeLine,
+      ),
+      `${test} evidence leaked into background`,
+    );
+  }
+
   const late = detailsFor(
     project,
     covered.runId,
@@ -209,7 +234,7 @@ try {
   assert.equal(processExists(latePid), false, 'late child escaped its test process group');
 
   console.log(
-    '[rust-subprocess-attribution-spike] libtest thread count is preserved, inherited children are exact, context-zero children remain background, and late children are contained',
+    '[rust-subprocess-attribution-spike] libtest thread count is preserved; inherited, forked, fork+execve, pre_exec, posix_spawnp, failed-launch and nested-thread work is exact; context-zero children remain background and late children are contained',
   );
 } finally {
   if (process.env.SUPERCOV_RUST_SPIKE_KEEP_SCRATCH === '1') {

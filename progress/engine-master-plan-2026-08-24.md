@@ -2167,6 +2167,24 @@ miss blocks flipping any default.
   that retains stock scheduling/presentation while emitting authenticated
   lifecycle events; its production integration remains an R2 gate.
 
+## Checkpoint — 2026-08-28 direct exec-family and fork propagation
+
+- Executable-owned `execve`, `execv` and `execvp` interposers extend the
+  posix_spawn child-environment contract to direct exec callers; `execv`/
+  `execvp` swap the process-global environment only for the exec attempt and
+  restore it on failure. Plain `fork` children inherit the forking thread's
+  context and shared transport with no interposition.
+- Six new real gates prove exact attribution with no background leakage:
+  plain-fork worker, fork+execve with verbatim parent environment, std
+  `pre_exec` (fork+execvp fallback), direct `posix_spawnp`, failed launch
+  preserving the platform error and exact context, and nested threads.
+- All focused gates, the complete corpus and the full workspace suite (20
+  CLI, 19 contract, 313 engine, clippy/fmt/runtime/assets/preflight) pass
+  locally. No hosted workflow ran.
+- Open: pre-existing task pools (task-level propagation or an explicit
+  fail-closed boundary), deterministic thread-creation failure, Linux
+  GNU/musl container proof, Windows.
+
 ## Checkpoint — 2026-08-28 automatic context inheritance and crash-safe companion builder
 
 - Stock libtest keeps the user's exact argv: discovery projects only

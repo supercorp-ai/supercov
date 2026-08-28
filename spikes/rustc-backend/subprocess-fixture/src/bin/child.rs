@@ -10,6 +10,18 @@ fn main() {
             "{}",
             supercov_subprocess_fixture::background_child_probe(true)
         ),
+        Some("exec") => println!(
+            "{}",
+            supercov_subprocess_fixture::exec_child_probe(true)
+        ),
+        Some("preexec") => println!(
+            "{}",
+            supercov_subprocess_fixture::pre_exec_child_probe(true)
+        ),
+        Some("spawnp") => println!(
+            "{}",
+            supercov_subprocess_fixture::spawnp_child_probe(true)
+        ),
         Some("late") => {
             let marker = env::var_os("SUPERCOV_LATE_PID_FILE")
                 .expect("late child requires SUPERCOV_LATE_PID_FILE");

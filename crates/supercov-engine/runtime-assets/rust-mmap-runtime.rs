@@ -300,6 +300,115 @@ mod __SUPERCOV_MODULE__ {
                 )
             }
         }
+
+        type Execve = unsafe extern "C" fn(
+            *const c_char,
+            *const *mut c_char,
+            *const *mut c_char,
+        ) -> i32;
+        type Execv = unsafe extern "C" fn(*const c_char, *const *mut c_char) -> i32;
+
+        unsafe extern "C" {
+            static mut environ: *mut *mut c_char;
+        }
+
+        fn resolve_address(slot: &'static OnceLock<usize>, symbol: &'static CStr) -> usize {
+            *slot.get_or_init(|| {
+                let next = usize::MAX as *mut c_void;
+                // SAFETY: symbol is NUL-terminated and the platform accepts
+                // RTLD_NEXT for an executable-owned interposer.
+                let resolved = unsafe { dlsym(next, symbol.as_ptr()) };
+                if resolved.is_null() {
+                    std::process::abort();
+                }
+                resolved as usize
+            })
+        }
+
+        /// Propagate the active context through a direct execve, whose caller
+        /// supplies the child environment explicitly. A fork child still reads
+        /// the forking thread's exact context, so fork+execve compositions and
+        /// std::process pre_exec fallbacks inherit like posix_spawn callers.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn execve(
+            path: *const c_char,
+            arguments: *const *mut c_char,
+            environment: *const *mut c_char,
+        ) -> i32 {
+            static REAL: OnceLock<usize> = OnceLock::new();
+            // SAFETY: dlsym resolved the platform execve with Execve's ABI.
+            let real = unsafe {
+                mem::transmute::<usize, Execve>(resolve_address(&REAL, c"execve"))
+            };
+            // SAFETY: child_environment only reads the caller-owned envp for
+            // the duration of this exec attempt.
+            let child = unsafe { child_environment(environment) };
+            let environment = child
+                .as_ref()
+                .map_or(environment, |owned| owned.pointers.as_ptr());
+            // SAFETY: all arguments except the optional replacement envp are
+            // forwarded unchanged; on success the image is replaced and on
+            // failure the owned buffers are still alive here.
+            unsafe { real(path, arguments, environment) }
+        }
+
+        /// execv and execvp read the process-global environ instead of taking
+        /// an envp argument, and their libc-internal exec calls do not pass
+        /// through the interposed execve symbol. Swap environ to the replaced
+        /// copy only for the duration of the exec attempt and restore it on
+        /// failure, so a successful exec ships the exact context while a
+        /// failed exec leaves the caller's environment untouched.
+        unsafe fn exec_with_environ(
+            real: Execv,
+            path: *const c_char,
+            arguments: *const *mut c_char,
+        ) -> i32 {
+            // SAFETY: environ is the platform-owned NULL-terminated array and
+            // child_environment only reads it for the duration of this call.
+            let child = unsafe { child_environment(environ.cast_const().cast()) };
+            let Some(owned) = child else {
+                // SAFETY: no context replacement applies; forward unchanged.
+                return unsafe { real(path, arguments) };
+            };
+            // SAFETY: exec callers own this thread; a fork child is single
+            // threaded and a direct caller's environ is restored before any
+            // failure return escapes this frame.
+            unsafe {
+                let saved = environ;
+                environ = owned.pointers.as_ptr().cast_mut().cast();
+                let result = real(path, arguments);
+                environ = saved;
+                result
+            }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn execv(
+            path: *const c_char,
+            arguments: *const *mut c_char,
+        ) -> i32 {
+            static REAL: OnceLock<usize> = OnceLock::new();
+            // SAFETY: dlsym resolved the platform execv with Execv's ABI.
+            let real = unsafe {
+                mem::transmute::<usize, Execv>(resolve_address(&REAL, c"execv"))
+            };
+            // SAFETY: forwarded with the documented environ swap contract.
+            unsafe { exec_with_environ(real, path, arguments) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn execvp(
+            file: *const c_char,
+            arguments: *const *mut c_char,
+        ) -> i32 {
+            static REAL: OnceLock<usize> = OnceLock::new();
+            // SAFETY: dlsym resolved the platform execvp with Execv's ABI.
+            let real = unsafe {
+                mem::transmute::<usize, Execv>(resolve_address(&REAL, c"execvp"))
+            };
+            // SAFETY: forwarded with the documented environ swap contract.
+            unsafe { exec_with_environ(real, file, arguments) }
+        }
     }
 
     struct Transport {

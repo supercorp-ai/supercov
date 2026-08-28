@@ -1264,6 +1264,41 @@ formatting, script syntax, package preflight and diff safety. R1–R4 remain ope
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.
 
+### Direct exec-family and fork propagation checkpoint — 2026-08-28
+
+Context propagation now covers the direct process-creation surfaces that
+bypass `posix_spawn`. Executable-owned `execve`, `execv` and `execvp`
+interposers apply the same child-environment contract: an existing
+`SUPERCOV_RUST_CONTEXT_ID` is replaced with the active test/assertion context,
+absence remains the authenticated `env_remove` opt-out, and the parent
+environment is never mutated. Because `execv`/`execvp` read the process-global
+environment and their libc-internal exec calls do not pass through the
+interposed `execve` symbol, they swap the global environment pointer to the
+replaced copy only for the duration of the exec attempt and restore it on a
+failure return; a fork child is single-threaded, so the swap is unobservable
+on the paths that use it. A plain `fork` child needs no interposition at all —
+it inherits the forking thread's context and the shared transport mapping
+directly.
+
+Six new real-fixture gates prove exact attribution with no background
+leakage: a plain `fork` worker, a `fork`+`execve` child receiving the parent
+environment verbatim, a `std::process` `pre_exec` child (std's fork+`execvp`
+fallback), a direct `posix_spawnp` child, a failed launch of a nonexistent
+binary that must surface the platform error and preserve the exact context,
+and transitively inherited nested threads. The focused companion, async,
+subprocess, custom-harness and builder-lifecycle gates and a fresh complete
+rustc/Cargo/rustdoc/CTFE/nextest corpus pass locally, followed by 20 CLI, 19
+contract and 313 engine tests, warnings-denied Clippy, formatting,
+runtime/packaged-asset tests and package preflight. No hosted workflow ran.
+
+Pre-existing task pools remain the open propagation semantics: a pool thread
+created during one test keeps that test's context when another test later
+submits work to it, so exactness requires task-level propagation or an
+explicit fail-closed boundary before any promotion claim. Deterministic
+thread-creation failure, Linux GNU/musl interposer ABI proof (prepared as a
+container gate, blocked only by local VM repair) and Windows remain open;
+R1–R4 remain open.
+
 ### Automatic context inheritance and crash-safe companion builder checkpoint — 2026-08-28
 
 Stock-libtest execution fidelity is now argument-exact: discovery projects only
