@@ -128,6 +128,7 @@ const SHARED_RUNTIME_EXPORTS: &str = r#"
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_active_context() -> u64 { __supercov_shared_runtime::active_context() }
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_enter_context(context_id: u64) -> u64 { __supercov_shared_runtime::enter_context(context_id) }
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_exit_context(previous: u64) { __supercov_shared_runtime::exit_context(previous) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_exit_test_context(context_id: u64, previous: u64) { __supercov_shared_runtime::exit_test_context(context_id, previous) }
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_enter_assertion_context(id_high: u64, id_low: u32) -> u64 { __supercov_shared_runtime::enter_assertion_context(id_high, id_low) }
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_decision_start(id_high: u64, id_low: u32, conditions: u64) -> u64 { __supercov_shared_runtime::mir_decision_start(id_high, id_low, conditions) }
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_decision_condition(token: u64, index: u64, value: bool) { __supercov_shared_runtime::mir_decision_condition(token, index, value) }

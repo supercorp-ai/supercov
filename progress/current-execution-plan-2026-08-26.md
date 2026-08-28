@@ -1264,6 +1264,41 @@ formatting, script syntax, package preflight and diff safety. R1–R4 remain ope
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.
 
+### Join-bounded thread phases checkpoint — 2026-08-29
+
+Automatic thread inheritance is now sound for shared pools. Every inherited
+native thread runs under a fresh derived thread-phase context
+(`rust-probe-transport-v3`, magic `SCVRUST3`, kinds 5 thread phase / 6 thread
+end / 7 test boundary), and offline partitioning attributes a thread phase's
+records to its root test only when the thread's end record committed before
+the root test's boundary record in global transport order. A thread that
+outlives its creating test — including a lazily created shared pool worker —
+fails closed: every record on that chain is background with an explicit
+`RUST_THREAD_OUTLIVED_TEST` limitation carried through persisted runner units
+(runner version 6), transport health and rustdoc outcome units (schema 4).
+Joined and nested threads, fork/exec children and async coroutine phases
+remain exactly attributed; assertion phases entered on executor threads
+collapse their thread parent for phase projection. Test boundaries are
+committed by both the companion context guard and the compiled MIR test exit,
+deduplicated on same-context re-entry; the companion bundle schema is 3.
+
+A real shared-pool gate proves the semantics end to end: a never-joined
+`OnceLock` worker used by two tests passes both, credits neither, retains the
+pool evidence once as background and surfaces the limitation through the
+production runner. The corpus's raw-transport expectations for
+`tests::child_context` moved one level to the authenticated thread phase
+parented by the assertion phase, with negatives for background, base-test and
+direct assertion-phase attribution. Parser corruption gates cover tampered
+thread-phase derivation, duplicate ends, duplicate boundaries, ends without
+phases and boundaries under unknown roots.
+
+The full local suite is green after the change: 20 CLI, 19 contract and 316
+engine tests, warnings-denied Clippy, formatting, packaged assets, all five
+focused compiler gates, runtime tests, package preflight and the fresh
+complete rustc/Cargo/rustdoc/CTFE/nextest corpus. No hosted workflow ran.
+Deterministic thread-creation failure, Linux GNU/musl container proof and
+Windows remain open; R1–R4 remain open.
+
 ### Direct exec-family and fork propagation checkpoint — 2026-08-28
 
 Context propagation now covers the direct process-creation surfaces that

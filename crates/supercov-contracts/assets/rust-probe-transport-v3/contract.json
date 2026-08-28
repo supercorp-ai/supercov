@@ -1,7 +1,7 @@
 {
-  "protocolVersion": 2,
+  "protocolVersion": 3,
   "status": "candidate-private-frontend",
-  "magic": "SCVRUST2",
+  "magic": "SCVRUST3",
   "byteOrder": "little-endian",
   "headerSize": 128,
   "descriptorSize": 40,
@@ -38,16 +38,39 @@
     "hit": 1,
     "decision": 2,
     "ordinalHit": 3,
-    "phase": 4
+    "phase": 4,
+    "threadPhase": 5,
+    "threadEnd": 6,
+    "testBoundary": 7
+  },
+  "threadScope": {
+    "childDerivation": "fnv1a-64-over-thread-domain-parent-le-nonce-le",
+    "domain": "supercov-rust-thread-phase-v1\u0000",
+    "threadEndCommittedWhenStartRoutineReturns": true,
+    "testBoundaryCommittedWhenTestContextExits": true,
+    "acceptance": "chain-thread-phases-must-end-before-root-test-boundary-by-descriptor-index",
+    "escapedThreadRecordsBecomeBackground": true,
+    "escapedThreadLimitation": "RUST_THREAD_OUTLIVED_TEST",
+    "duplicateThreadEndFatal": true,
+    "duplicateTestBoundaryFatal": true
   },
   "context": {
     "zero": "background-or-unattributed",
     "max": "reserved-runtime-sentinel",
     "nonzero": "supervisor-resolved-exact-context",
-    "publishedIdentity": ["run", "worker", "test", "retry", "phase"]
+    "publishedIdentity": [
+      "run",
+      "worker",
+      "test",
+      "retry",
+      "phase"
+    ]
   },
   "publication": {
-    "reservationOrder": ["descriptor", "payload"],
+    "reservationOrder": [
+      "descriptor",
+      "payload"
+    ],
     "commitValue": 1,
     "writerOrdering": "release",
     "readerOrdering": "acquire",

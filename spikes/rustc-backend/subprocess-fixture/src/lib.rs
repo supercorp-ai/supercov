@@ -33,3 +33,7 @@ pub fn launch_failure_probe(enabled: bool) -> &'static str {
 pub fn nested_thread_probe(enabled: bool) -> &'static str {
     if enabled { "nested" } else { "disabled" }
 }
+
+pub fn pool_worker_probe(enabled: bool) -> &'static str {
+    if enabled { "pool" } else { "disabled" }
+}

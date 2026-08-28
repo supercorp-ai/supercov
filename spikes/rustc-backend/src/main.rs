@@ -102,6 +102,7 @@ const CONTEXT_MARKER_FUNCTION: &str = "__supercov_rt_context_marker";
 const ENTER_CONTEXT_FUNCTION: &str = "__supercov_rt_enter_context";
 const ENTER_ASSERTION_CONTEXT_FUNCTION: &str = "__supercov_rt_enter_assertion_context";
 const EXIT_CONTEXT_FUNCTION: &str = "__supercov_rt_exit_context";
+const EXIT_TEST_CONTEXT_FUNCTION: &str = "__supercov_rt_exit_test_context";
 const START_DECISION_FUNCTION: &str = "__supercov_rt_decision_start";
 const RECORD_CONDITION_FUNCTION: &str = "__supercov_rt_decision_condition";
 const FINISH_DECISION_FUNCTION: &str = "__supercov_rt_decision_finish";
@@ -117,6 +118,7 @@ mod __supercov_spike_runtime {
         fn __supercov_rt_context_marker(tag: u64, context: u64, previous: u64);
         fn __supercov_rt_enter_context(context_id: u64) -> u64;
         fn __supercov_rt_exit_context(previous: u64);
+        fn __supercov_rt_exit_test_context(context_id: u64, previous: u64);
         fn __supercov_rt_enter_assertion_context(id_high: u64, id_low: u32) -> u64;
         fn __supercov_rt_decision_start(id_high: u64, id_low: u32, conditions: u64) -> u64;
         fn __supercov_rt_decision_condition(token: u64, index: u64, value: bool);
@@ -8177,7 +8179,8 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
         .then(|| find_runtime_function(tcx, PROBE_FUNCTION))
         .flatten();
     let enter_context = context_id.and_then(|_| find_runtime_function(tcx, ENTER_CONTEXT_FUNCTION));
-    let exit_context = context_id.and_then(|_| find_runtime_function(tcx, EXIT_CONTEXT_FUNCTION));
+    let exit_context =
+        context_id.and_then(|_| find_runtime_function(tcx, EXIT_TEST_CONTEXT_FUNCTION));
     let start_decision = (!decision_plans.is_empty())
         .then(|| find_runtime_function(tcx, START_DECISION_FUNCTION))
         .flatten();
@@ -8292,7 +8295,15 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
             .local_decls
             .push(LocalDecl::new(tcx.types.u64, span))
     });
-    if let (Some(previous), Some(exit)) = (previous_context, exit_context) {
+    if let (Some(context_id), Some(previous), Some(exit)) =
+        (context_id, previous_context, exit_context)
+    {
+        let boundary_context = Operand::const_from_scalar(
+            tcx,
+            tcx.types.u64,
+            Scalar::from_u64(context_id),
+            span,
+        );
         let continuing_unwinds = instrumented
             .basic_blocks
             .iter_enumerated()
@@ -8319,7 +8330,11 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
             instrumented.basic_blocks_mut()[block] = runtime_call_block(
                 tcx,
                 exit,
-                [Operand::Copy(Place::from(previous))].into_iter(),
+                [
+                    boundary_context.clone(),
+                    Operand::Copy(Place::from(previous)),
+                ]
+                .into_iter(),
                 Place::from(unit),
                 continuation,
                 span,
@@ -8337,7 +8352,11 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
             let cleanup = instrumented.basic_blocks_mut().push(runtime_call_block(
                 tcx,
                 exit,
-                [Operand::Copy(Place::from(previous))].into_iter(),
+                [
+                    boundary_context.clone(),
+                    Operand::Copy(Place::from(previous)),
+                ]
+                .into_iter(),
                 Place::from(unit),
                 resume,
                 span,

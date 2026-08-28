@@ -93,7 +93,7 @@
     "processModel": "one-stock-libtest-process-per-artifact",
     "outputAuthority": "unmodified-selected-toolchain-libtest",
     "artifactBinding": {
-      "schemaVersion": 2,
+      "schemaVersion": 3,
       "manifestSuffix": ".libtest.json",
       "digest": "sha256",
       "requiredBindings": [

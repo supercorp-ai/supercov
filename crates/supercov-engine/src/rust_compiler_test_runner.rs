@@ -69,7 +69,7 @@ use crate::{
 
 const TOKEN_BYTES: usize = supercov_contracts::RUST_PROBE_TRANSPORT_TOKEN_SIZE;
 pub const RUST_CARGO_RUNNER_CONFIG_ENV: &str = "SUPERCOV_RUST_CARGO_RUNNER_CONFIG";
-pub const RUST_CARGO_RUNNER_VERSION: u32 = 5;
+pub const RUST_CARGO_RUNNER_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -161,21 +161,16 @@ pub struct RustCargoRunnerUnit {
     pub arguments: Vec<String>,
     pub invocation: RustCargoRunnerInvocation,
     pub attempts: Vec<RustCargoRunnerAttempt>,
+    /// Deterministic join-bounded quarantine notes: one per thread phase whose
+    /// lifetime escaped its creating test in this invocation's transport.
+    pub thread_scope_limitations: BTreeSet<String>,
 }
 
 fn validate_persisted_runner_transport(
     unit: &RustCargoRunnerUnit,
 ) -> Result<(), RustCompilerTestError> {
     let mut roots = BTreeSet::new();
-    let mut combined = RustTransportRead {
-        observations: unit.invocation.background_transport.observations.clone(),
-        ordinal_hits: unit.invocation.background_transport.ordinal_hits.clone(),
-        phases: unit.invocation.background_transport.phases.clone(),
-        committed: unit.invocation.background_transport.committed,
-        incomplete: unit.invocation.background_transport.incomplete,
-        dropped: unit.invocation.background_transport.dropped,
-        attachments: unit.invocation.background_transport.attachments,
-    };
+    let mut combined = unit.invocation.background_transport.clone();
     for attempt in &unit.attempts {
         if matches!(attempt.context_id, 0 | u64::MAX) || !roots.insert(attempt.context_id) {
             return Err(RustCompilerTestError::Context(format!(
@@ -192,6 +187,15 @@ fn validate_persisted_runner_transport(
         combined
             .phases
             .extend(attempt.transport.phases.iter().cloned());
+        combined
+            .thread_phases
+            .extend(attempt.transport.thread_phases.iter().copied());
+        combined
+            .thread_ends
+            .extend(attempt.transport.thread_ends.iter().copied());
+        combined
+            .test_boundaries
+            .extend(attempt.transport.test_boundaries.iter().copied());
         combined.committed = combined
             .committed
             .checked_add(attempt.transport.committed)
@@ -233,6 +237,7 @@ fn validate_persisted_runner_transport(
             ))
         })?;
     if repartitioned.background != unit.invocation.background_transport
+        || repartitioned.thread_scope_limitations != unit.thread_scope_limitations
         || unit.attempts.iter().any(|attempt| {
             repartitioned.attributed.get(&attempt.context_id) != Some(&attempt.transport)
         })
@@ -297,6 +302,10 @@ pub struct RustCompilerTransportHealthRecord {
     pub scope_kind: String,
     pub status: String,
     pub transport: RustCompilerTransportHealth,
+    /// Join-bounded thread quarantine notes for this scope's transport. Work
+    /// under an escaped thread phase is deterministic background evidence.
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub thread_scope_limitations: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1484,6 +1493,7 @@ pub fn run_cargo_libtest_runner(
                             background_transport: partition.background,
                         },
                         attempts,
+                        thread_scope_limitations: partition.thread_scope_limitations,
                     };
                     let unit_path = write_cargo_runner_unit(&output_directory, &unit)?;
                     fs::remove_dir(&transport_directory)
@@ -1645,6 +1655,7 @@ pub fn run_cargo_libtest_runner(
                 background_transport: partition.background,
             },
             attempts,
+            thread_scope_limitations: partition.thread_scope_limitations,
         };
         let unit_path = write_cargo_runner_unit(&output_directory, &unit)?;
         fs::remove_dir(&transport_directory)
@@ -2220,8 +2231,23 @@ fn doctest_raw_results(
                 status: Some("passed".into()),
                 error: None,
             };
+            // The rustdoc background partition may hold join-bounded
+            // quarantined thread evidence with real contexts; flatten every
+            // record to context zero so escaped-thread work can never become
+            // test or phase attributed downstream.
+            let mut flattened = background.clone();
+            for observation in &mut flattened.observations {
+                observation.context_id = 0;
+            }
+            for hit in &mut flattened.ordinal_hits {
+                hit.context_id = 0;
+            }
+            flattened.phases.clear();
+            flattened.thread_phases.clear();
+            flattened.thread_ends.clear();
+            flattened.test_boundaries.clear();
             let projection =
-                project_rust_compiler_evidence(1, &background_phase, &background, normalized)
+                project_rust_compiler_evidence(1, &background_phase, &flattened, normalized)
                     .map_err(|error| RustCompilerTestError::Projection {
                         test: background_id.clone(),
                         reason: error.to_string(),
@@ -2279,6 +2305,12 @@ fn doctest_raw_results(
                 dropped: group.transport.dropped,
                 attachments: group.transport.attachments,
             },
+            thread_scope_limitations: group.thread_scope_limitations().map_err(|error| {
+                RustCompilerTestError::Projection {
+                    test: format!("rustdoc:{}", group.group),
+                    reason: error.to_string(),
+                }
+            })?,
         });
     }
     Ok((results, health))
@@ -2450,6 +2482,7 @@ fn raw_result(
         scope_kind: "test-attempt".into(),
         status: status.into(),
         transport: projection.health,
+        thread_scope_limitations: BTreeSet::new(),
     };
     (result, health)
 }
@@ -2479,10 +2512,24 @@ fn cargo_runner_background_result(
         status: Some(invocation_status.into()),
         error: None,
     };
-    // Persisted runner validation proves every record is context zero. A
-    // non-reserved synthetic base lets the shared projector validate probe
-    // identities while keeping every observation in its background snapshot.
-    let projection = project_rust_compiler_evidence(1, &base_phase, transport, normalized)
+    // The persisted background partition holds context-zero records plus
+    // join-bounded quarantined thread evidence that keeps its real contexts.
+    // Projection deliberately flattens every record to context zero under a
+    // non-reserved synthetic base: the shared projector still validates probe
+    // identities while escaped-thread work can never become test or phase
+    // attributed downstream.
+    let mut flattened = transport.clone();
+    for observation in &mut flattened.observations {
+        observation.context_id = 0;
+    }
+    for hit in &mut flattened.ordinal_hits {
+        hit.context_id = 0;
+    }
+    flattened.phases.clear();
+    flattened.thread_phases.clear();
+    flattened.thread_ends.clear();
+    flattened.test_boundaries.clear();
+    let projection = project_rust_compiler_evidence(1, &base_phase, &flattened, normalized)
         .map_err(|error| RustCompilerTestError::Projection {
             test: background_id.clone(),
             reason: error.to_string(),
@@ -2535,6 +2582,7 @@ fn cargo_runner_background_result(
             scope_kind: "runner-invocation".into(),
             status: invocation_status.into(),
             transport: projection.health,
+            thread_scope_limitations: unit.thread_scope_limitations.clone(),
         },
     ))
 }
@@ -3140,15 +3188,7 @@ mod tests {
     };
 
     fn test_transport() -> RustTransportRead {
-        RustTransportRead {
-            observations: Vec::new(),
-            ordinal_hits: Vec::new(),
-            phases: Vec::new(),
-            committed: 0,
-            incomplete: 0,
-            dropped: 0,
-            attachments: 0,
-        }
+        RustTransportRead::empty()
     }
 
     fn test_invocation(status: i32) -> RustCargoRunnerInvocation {
@@ -3181,6 +3221,7 @@ mod tests {
             arguments: Vec::new(),
             invocation: test_invocation(0),
             attempts: Vec::new(),
+            thread_scope_limitations: BTreeSet::new(),
         }
     }
 
@@ -3232,17 +3273,14 @@ mod tests {
         let point_id = "rs:statement:111111111111111111111111";
         let mut unit = test_runner_unit();
         unit.invocation.background_transport = RustTransportRead {
-            observations: Vec::new(),
             ordinal_hits: vec![RustOrdinalHit {
                 process_id: 1,
                 context_id: 0,
                 ordinal: 9,
             }],
-            phases: Vec::new(),
             committed: 1,
-            incomplete: 0,
-            dropped: 0,
             attachments: 1,
+            ..RustTransportRead::empty()
         };
         validate_persisted_runner_transport(&unit).unwrap();
         let normalized = NormalizedRustCompilerManifest {
@@ -3429,6 +3467,7 @@ mod tests {
                 arguments: Vec::new(),
                 invocation: test_invocation(0),
                 attempts: Vec::new(),
+                thread_scope_limitations: BTreeSet::new(),
             },
         )
         .unwrap();
@@ -3448,6 +3487,7 @@ mod tests {
                 arguments: Vec::new(),
                 invocation: test_invocation(0),
                 attempts: Vec::new(),
+                thread_scope_limitations: BTreeSet::new(),
             },
         )
         .unwrap();
@@ -3525,6 +3565,7 @@ mod tests {
                 },
                 transport: test_transport(),
             }],
+            thread_scope_limitations: BTreeSet::new(),
         };
 
         let first = reserve_cargo_runner_ordinal(&root).unwrap();
@@ -3673,15 +3714,7 @@ mod tests {
                 raw_events_sha256: "3".repeat(64),
                 transport_sha256: "5".repeat(64),
                 join: None,
-                transport: RustTransportRead {
-                    observations: Vec::new(),
-                    ordinal_hits: Vec::new(),
-                    phases: Vec::new(),
-                    committed: 0,
-                    incomplete: 0,
-                    dropped: 0,
-                    attachments: 0,
-                },
+                transport: RustTransportRead::empty(),
                 entries: vec![
                     completed(0, entry("__doctest_0", 3), RustdocOutcomeStatus::Passed),
                     RustdocJoinedOutcome {

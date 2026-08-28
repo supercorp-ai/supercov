@@ -108,7 +108,7 @@ try {
     cwd: project,
     env: {CARGO_TARGET_DIR: join(scratch, 'baseline-target')},
   });
-  assert.match(baseline.stdout + baseline.stderr, /9 passed/u);
+  assert.match(baseline.stdout + baseline.stderr, /11 passed/u);
 
   const covered = JSON.parse(
     run(supercov, ['__run-rust-compiler'], {
@@ -129,11 +129,11 @@ try {
     }).stdout,
   );
   assert.equal(covered.exitCode, 0);
-  assert.equal(covered.tests, 9);
-  assert.equal(covered.libtests, 9);
+  assert.equal(covered.tests, 11);
+  assert.equal(covered.libtests, 11);
   assert.equal(covered.doctests, 0);
   assert.equal(covered.backgroundResults, 1);
-  assert.equal(covered.transportHealth.length, 10);
+  assert.equal(covered.transportHealth.length, 12);
   assert(
     covered.transportHealth.every(
       ({status, transport}) =>
@@ -218,6 +218,39 @@ try {
     );
   }
 
+  // A lazily created shared pool worker outlives both tests that use it, so
+  // its evidence is deterministic background with an explicit limitation:
+  // never attributed to the creating test nor to the second user.
+  const poolLine = sourceLine(project, childSource, 'pub fn pool_worker_probe');
+  for (const poolTest of [
+    'pool_first_use_stays_background',
+    'pool_second_use_stays_background',
+  ]) {
+    const details = detailsFor(project, covered.runId, poolTest);
+    assert.equal(details.outcome, 'passed');
+    assert(
+      !details.hitDetails.some(
+        ({file, line}) => file === childSource && line === poolLine,
+      ),
+      `${poolTest} was falsely credited with shared pool-thread work`,
+    );
+  }
+  assert(
+    background.hitDetails.some(
+      ({file, line}) => file === childSource && line === poolLine,
+    ),
+    'shared pool-thread evidence was not retained as background',
+  );
+  const threadScopeLimitations = covered.transportHealth.flatMap(
+    (record) => record.threadScopeLimitations ?? [],
+  );
+  assert(
+    threadScopeLimitations.some((limitation) =>
+      limitation.startsWith('RUST_THREAD_OUTLIVED_TEST: thread phase '),
+    ),
+    `the run did not surface the RUST_THREAD_OUTLIVED_TEST limitation: ${JSON.stringify(covered.transportHealth)}`,
+  );
+
   const late = detailsFor(
     project,
     covered.runId,
@@ -234,7 +267,7 @@ try {
   assert.equal(processExists(latePid), false, 'late child escaped its test process group');
 
   console.log(
-    '[rust-subprocess-attribution-spike] libtest thread count is preserved; inherited, forked, fork+execve, pre_exec, posix_spawnp, failed-launch and nested-thread work is exact; context-zero children remain background and late children are contained',
+    '[rust-subprocess-attribution-spike] libtest thread count is preserved; inherited, forked, fork+execve, pre_exec, posix_spawnp, failed-launch and nested-thread work is exact; context-zero children remain background, shared pool-thread work is join-bounded background with an explicit limitation, and late children are contained',
   );
 } finally {
   if (process.env.SUPERCOV_RUST_SPIKE_KEEP_SCRATCH === '1') {

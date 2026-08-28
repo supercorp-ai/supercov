@@ -3,7 +3,9 @@ use std::{
     ffi::{CString, c_char, c_void},
     fs,
     process::Command,
-    ptr, thread,
+    ptr,
+    sync::{OnceLock, mpsc},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -155,6 +157,53 @@ fn nested_thread_is_attributed() {
     .join()
     .expect("join outer thread");
     assert_eq!(value, "nested");
+}
+
+type PoolJob = Box<dyn FnOnce() + Send + 'static>;
+
+/// A lazily created long-lived shared worker thread. It is deliberately never
+/// joined: its thread phase has no end record, so every probe it commits must
+/// fail closed to background with an explicit RUST_THREAD_OUTLIVED_TEST note,
+/// including the creating test's own pool work.
+fn shared_pool() -> &'static mpsc::Sender<PoolJob> {
+    static POOL: OnceLock<mpsc::Sender<PoolJob>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<PoolJob>();
+        thread::spawn(move || {
+            for job in receiver {
+                job();
+            }
+        });
+        sender
+    })
+}
+
+fn run_on_shared_pool<T: Send + 'static>(job: impl FnOnce() -> T + Send + 'static) -> T {
+    let (sender, receiver) = mpsc::channel();
+    shared_pool()
+        .send(Box::new(move || {
+            let _ = sender.send(job());
+        }))
+        .expect("send job to the shared pool");
+    receiver
+        .recv_timeout(Duration::from_secs(30))
+        .expect("receive the shared pool result")
+}
+
+#[test]
+fn pool_first_use_stays_background() {
+    assert_eq!(
+        run_on_shared_pool(|| supercov_subprocess_fixture::pool_worker_probe(true)),
+        "pool",
+    );
+}
+
+#[test]
+fn pool_second_use_stays_background() {
+    assert_eq!(
+        run_on_shared_pool(|| supercov_subprocess_fixture::pool_worker_probe(true)),
+        "pool",
+    );
 }
 
 #[test]

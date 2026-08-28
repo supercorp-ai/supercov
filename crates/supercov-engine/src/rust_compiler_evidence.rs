@@ -422,6 +422,7 @@ mod tests {
             incomplete: 1,
             dropped: 2,
             attachments: 1,
+            ..RustTransportRead::empty()
         };
         let projection =
             project_rust_compiler_evidence(BASE, &base_phase(), &read, &normalized()).unwrap();
@@ -458,6 +459,7 @@ mod tests {
             incomplete: 0,
             dropped: 0,
             attachments: 1,
+            ..RustTransportRead::empty()
         };
         assert!(matches!(
             project_rust_compiler_evidence(BASE, &base_phase(), &read, &normalized()),
@@ -547,6 +549,7 @@ mod tests {
             incomplete: 0,
             dropped: 0,
             attachments: 1,
+            ..RustTransportRead::empty()
         };
 
         let projection =

@@ -201,7 +201,7 @@ try {
   });
   writeFileSync(
     contextStubSource,
-    '#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_enter_context(_: u64) -> u64 { 0 }\n#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_exit_context(_: u64) {}\n',
+    '#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_enter_context(_: u64) -> u64 { 0 }\n#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_exit_context(_: u64) {}\n#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_exit_test_context(_: u64, _: u64) {}\n',
   );
   run(
     rustc,

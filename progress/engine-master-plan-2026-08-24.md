@@ -2167,6 +2167,25 @@ miss blocks flipping any default.
   that retains stock scheduling/presentation while emitting authenticated
   lifecycle events; its production integration remains an R2 gate.
 
+## Checkpoint — 2026-08-29 join-bounded thread phases
+
+- `rust-probe-transport-v3` gives every inherited native thread a derived
+  thread-phase context with an end record, and every test a boundary record
+  from both the companion guard and the compiled MIR exit. Partitioning
+  attributes thread work to the root test only when the thread ended before
+  the test's boundary; anything else — notably lazily created shared pool
+  workers — is deterministic background with an explicit
+  `RUST_THREAD_OUTLIVED_TEST` limitation through runner units (v6), transport
+  health and rustdoc outcomes (schema 4). Companion bundle schema is 3.
+- A real two-test shared-pool gate, corpus raw-transport expectation shifts to
+  the authenticated thread phase, parser corruption gates and a
+  phase-projection collapse for assertions entered on executor threads close
+  the pool-contamination soundness hole automatic inheritance had opened.
+- 20 CLI, 19 contract and 316 engine tests, clippy/fmt/assets, all five
+  focused compiler gates, runtime tests, preflight and the fresh complete
+  corpus pass locally. No hosted workflow ran. Thread-creation failure,
+  Linux GNU/musl container proof and Windows remain open.
+
 ## Checkpoint — 2026-08-28 direct exec-family and fork propagation
 
 - Executable-owned `execve`, `execv` and `execvp` interposers extend the

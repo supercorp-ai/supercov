@@ -36,7 +36,7 @@ const CONTEXT_RESERVED_REMAP: u64 = 0xa5a5_a5a5_a5a5_a5a5;
 
 unsafe extern "C" {
     fn __supercov_rt_enter_context(context_id: u64) -> u64;
-    fn __supercov_rt_exit_context(previous: u64);
+    fn __supercov_rt_exit_test_context(context_id: u64, previous: u64);
 }
 
 static EVENTS: OnceLock<Result<Mutex<EventWriter>, String>> = OnceLock::new();
@@ -47,13 +47,17 @@ struct EventWriter {
     sequence: u64,
 }
 
-pub(crate) struct TestContextGuard(u64);
+pub(crate) struct TestContextGuard {
+    context: u64,
+    previous: u64,
+}
 
 impl Drop for TestContextGuard {
     fn drop(&mut self) {
         // SAFETY: every Supercov-instrumented test artifact links the one owned
-        // process runtime exporting this exact C ABI.
-        unsafe { __supercov_rt_exit_context(self.0) };
+        // process runtime exporting this exact C ABI. The test-boundary record
+        // committed here join-bounds every thread phase rooted in this test.
+        unsafe { __supercov_rt_exit_test_context(self.context, self.previous) };
     }
 }
 
@@ -78,7 +82,7 @@ pub(crate) fn enter_test(name: &str) -> io::Result<TestContextGuard> {
     // SAFETY: the linked Supercov runtime owns the exact C ABI and returns the
     // previous thread context for stack-disciplined restoration.
     let previous = unsafe { __supercov_rt_enter_context(context) };
-    Ok(TestContextGuard(previous))
+    Ok(TestContextGuard { context, previous })
 }
 
 pub(crate) fn context_environment(name: &str) -> io::Result<(&'static str, String)> {

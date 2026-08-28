@@ -24,8 +24,8 @@ pub const RUST_CONTEXT_ENV: &str = "SUPERCOV_RUST_CONTEXT_ID";
 pub const DEFAULT_DESCRIPTOR_CAPACITY: u32 = 32_768;
 pub const DEFAULT_PAYLOAD_CAPACITY: u32 = 4 * 1024 * 1024;
 
-const MAGIC: &[u8; 8] = b"SCVRUST2";
-const VERSION: u32 = 2;
+const MAGIC: &[u8; 8] = b"SCVRUST3";
+const VERSION: u32 = 3;
 const HEADER_SIZE: usize = 128;
 const DESCRIPTOR_SIZE: usize = 40;
 const ENDIAN_MARKER: u32 = 0x0102_0304;
@@ -52,6 +52,9 @@ const KIND_HIT: u8 = 1;
 const KIND_DECISION: u8 = 2;
 const KIND_ORDINAL_HIT: u8 = 3;
 const KIND_PHASE: u8 = 4;
+const KIND_THREAD_PHASE: u8 = 5;
+const KIND_THREAD_END: u8 = 6;
+const KIND_TEST_BOUNDARY: u8 = 7;
 
 const RUNTIME_TEMPLATE: &str = include_str!("../runtime-assets/rust-mmap-runtime.rs");
 
@@ -61,10 +64,30 @@ pub struct RustTransportRead {
     pub observations: Vec<RustTransportObservation>,
     pub ordinal_hits: Vec<RustOrdinalHit>,
     pub phases: Vec<RustPhaseContext>,
+    pub thread_phases: Vec<RustThreadPhase>,
+    pub thread_ends: Vec<RustThreadEnd>,
+    pub test_boundaries: Vec<RustTestBoundary>,
     pub committed: u64,
     pub incomplete: u64,
     pub dropped: u64,
     pub attachments: u64,
+}
+
+impl RustTransportRead {
+    pub fn empty() -> Self {
+        Self {
+            observations: Vec::new(),
+            ordinal_hits: Vec::new(),
+            phases: Vec::new(),
+            thread_phases: Vec::new(),
+            thread_ends: Vec::new(),
+            test_boundaries: Vec::new(),
+            committed: 0,
+            incomplete: 0,
+            dropped: 0,
+            attachments: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -93,10 +116,44 @@ pub struct RustPhaseContext {
     pub decision_id: String,
 }
 
+/// An inherited native thread's derived phase context definition. The
+/// `commit_index` is the record's global transport descriptor index, which is
+/// the total order used by the join-bounded acceptance rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustThreadPhase {
+    pub process_id: u32,
+    pub child_context_id: u64,
+    pub parent_context_id: u64,
+    pub invocation_nonce: u64,
+    pub commit_index: u64,
+}
+
+/// The end-of-thread record bounding one thread phase in commit order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustThreadEnd {
+    pub process_id: u32,
+    pub context_id: u64,
+    pub commit_index: u64,
+}
+
+/// The exact-test boundary record committed when a test context is exited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustTestBoundary {
+    pub process_id: u32,
+    pub context_id: u64,
+    pub commit_index: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustTransportPartition {
     pub attributed: BTreeMap<u64, RustTransportRead>,
     pub background: RustTransportRead,
+    /// One entry per thread phase whose lifetime escaped its root test; every
+    /// record under such a chain is deterministic background evidence.
+    pub thread_scope_limitations: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,6 +241,27 @@ pub fn rust_assertion_context_id(
     } else {
         value
     })
+}
+
+/// Derive the exact thread-phase context for an inherited native thread. This
+/// mirrors the in-runtime derivation byte for byte so tampered thread-phase
+/// records fail authentication offline.
+pub fn rust_thread_context_id(parent: u64, invocation_nonce: u64) -> u64 {
+    let mut value = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in b"supercov-rust-thread-phase-v1\0"
+        .iter()
+        .copied()
+        .chain(parent.to_le_bytes())
+        .chain(invocation_nonce.to_le_bytes())
+    {
+        value ^= u64::from(byte);
+        value = value.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    if matches!(value, 0 | u64::MAX) {
+        value ^ 0xa5a5_5a5a_d3c3_b4b4
+    } else {
+        value
+    }
 }
 
 fn put_u32(target: &mut [u8], offset: usize, value: u32) {
@@ -383,7 +461,12 @@ pub fn read_rust_transport(
     let mut observations = Vec::new();
     let mut ordinal_hits = Vec::new();
     let mut phases = Vec::new();
-    let mut phase_definitions = BTreeMap::<u64, (u64, u64, String)>::new();
+    let mut thread_phases = Vec::new();
+    let mut thread_ends = Vec::new();
+    let mut test_boundaries = Vec::new();
+    let mut phase_definitions = BTreeMap::<u64, (u8, u64, u64, String)>::new();
+    let mut thread_end_contexts = BTreeSet::<u64>::new();
+    let mut boundary_contexts = BTreeSet::<u64>::new();
     let mut committed = 0_u64;
     for index in 0..inspect {
         let descriptor = HEADER_SIZE + index as usize * DESCRIPTOR_SIZE;
@@ -444,7 +527,7 @@ pub fn read_rust_transport(
             return Err(RustTransportError::InvalidRecord(index));
         }
         let id = std::str::from_utf8(id).map_err(|_| RustTransportError::InvalidRecord(index))?;
-        if kind != KIND_ORDINAL_HIT && !valid_probe_id(id) {
+        if matches!(kind, KIND_HIT | KIND_DECISION | KIND_PHASE) && !valid_probe_id(id) {
             return Err(RustTransportError::InvalidRecord(index));
         }
         match kind {
@@ -514,7 +597,12 @@ pub fn read_rust_transport(
                         "phase record {index} does not derive child {context_id:016x} from parent {parent_context_id:016x} and {id}"
                     )));
                 }
-                let definition = (parent_context_id, invocation_nonce, id.to_owned());
+                let definition = (
+                    KIND_PHASE,
+                    parent_context_id,
+                    invocation_nonce,
+                    id.to_owned(),
+                );
                 if phase_definitions
                     .insert(context_id, definition.clone())
                     .is_some_and(|existing| existing != definition)
@@ -531,6 +619,81 @@ pub fn read_rust_transport(
                     decision_id: id.into(),
                 });
             }
+            KIND_THREAD_PHASE
+                if outcome == 0
+                    && id.is_empty()
+                    && values.len() == 16
+                    && !matches!(context_id, 0 | u64::MAX) =>
+            {
+                let parent_context_id = u64::from_le_bytes(
+                    values[..8]
+                        .try_into()
+                        .map_err(|_| RustTransportError::InvalidRecord(index))?,
+                );
+                let invocation_nonce = u64::from_le_bytes(
+                    values[8..]
+                        .try_into()
+                        .map_err(|_| RustTransportError::InvalidRecord(index))?,
+                );
+                if matches!(parent_context_id, 0 | u64::MAX)
+                    || rust_thread_context_id(parent_context_id, invocation_nonce) != context_id
+                {
+                    return Err(RustTransportError::InvalidAssertionContext(format!(
+                        "thread phase record {index} does not derive child {context_id:016x} from parent {parent_context_id:016x} and nonce {invocation_nonce}"
+                    )));
+                }
+                let definition = (
+                    KIND_THREAD_PHASE,
+                    parent_context_id,
+                    invocation_nonce,
+                    String::new(),
+                );
+                if phase_definitions
+                    .insert(context_id, definition.clone())
+                    .is_some_and(|existing| existing != definition)
+                {
+                    return Err(RustTransportError::InvalidAssertionContext(format!(
+                        "child {context_id:016x} has conflicting phase definitions"
+                    )));
+                }
+                thread_phases.push(RustThreadPhase {
+                    process_id: pid,
+                    child_context_id: context_id,
+                    parent_context_id,
+                    invocation_nonce,
+                    commit_index: index,
+                });
+            }
+            KIND_THREAD_END
+                if outcome == 0
+                    && id.is_empty()
+                    && values.is_empty()
+                    && !matches!(context_id, 0 | u64::MAX) =>
+            {
+                if !thread_end_contexts.insert(context_id) {
+                    return Err(RustTransportError::InvalidRecord(index));
+                }
+                thread_ends.push(RustThreadEnd {
+                    process_id: pid,
+                    context_id,
+                    commit_index: index,
+                });
+            }
+            KIND_TEST_BOUNDARY
+                if outcome == 0
+                    && id.is_empty()
+                    && values.is_empty()
+                    && !matches!(context_id, 0 | u64::MAX) =>
+            {
+                if !boundary_contexts.insert(context_id) {
+                    return Err(RustTransportError::InvalidRecord(index));
+                }
+                test_boundaries.push(RustTestBoundary {
+                    process_id: pid,
+                    context_id,
+                    commit_index: index,
+                });
+            }
             _ => return Err(RustTransportError::InvalidRecord(index)),
         }
     }
@@ -539,6 +702,9 @@ pub fn read_rust_transport(
         observations,
         ordinal_hits,
         phases,
+        thread_phases,
+        thread_ends,
+        test_boundaries,
         committed,
         incomplete: inspect.saturating_sub(committed),
         dropped: recorded_dropped.max(overflow),
@@ -555,12 +721,38 @@ pub fn validate_rust_phase_contexts(
             "the supervisor base context must be nonzero and not reserved".into(),
         ));
     }
-    let mut definitions = BTreeMap::<u64, (u64, u64, &str)>::new();
+    let mut definitions = BTreeMap::<u64, (u8, u64, u64, &str)>::new();
     for phase in &read.phases {
         let definition = (
+            KIND_PHASE,
             phase.parent_context_id,
             phase.invocation_nonce,
             phase.decision_id.as_str(),
+        );
+        if definitions
+            .insert(phase.child_context_id, definition)
+            .is_some_and(|existing| existing != definition)
+        {
+            return Err(RustTransportError::InvalidAssertionContext(format!(
+                "child {:016x} has conflicting phase definitions",
+                phase.child_context_id
+            )));
+        }
+    }
+    for phase in &read.thread_phases {
+        if rust_thread_context_id(phase.parent_context_id, phase.invocation_nonce)
+            != phase.child_context_id
+        {
+            return Err(RustTransportError::InvalidAssertionContext(format!(
+                "thread phase child {:016x} does not derive from parent {:016x} and nonce {}",
+                phase.child_context_id, phase.parent_context_id, phase.invocation_nonce
+            )));
+        }
+        let definition = (
+            KIND_THREAD_PHASE,
+            phase.parent_context_id,
+            phase.invocation_nonce,
+            "",
         );
         if definitions
             .insert(phase.child_context_id, definition)
@@ -578,6 +770,12 @@ pub fn validate_rust_phase_contexts(
         .iter()
         .map(|observation| observation.context_id)
         .chain(read.ordinal_hits.iter().map(|hit| hit.context_id))
+        .chain(read.thread_ends.iter().map(|end| end.context_id))
+        .chain(
+            read.test_boundaries
+                .iter()
+                .map(|boundary| boundary.context_id),
+        )
         .filter(|context| *context != 0 && *context != base_context_id)
         .collect::<BTreeSet<_>>();
     for start in used_contexts {
@@ -589,7 +787,7 @@ pub fn validate_rust_phase_contexts(
                     "phase context cycle at {context:016x}"
                 )));
             }
-            let (parent, _, _) = definitions.get(&context).ok_or_else(|| {
+            let (_, parent, _, _) = definitions.get(&context).ok_or_else(|| {
                 RustTransportError::InvalidAssertionContext(format!(
                     "context {context:016x} does not resolve to base {base_context_id:016x}"
                 ))
@@ -628,24 +826,67 @@ pub fn partition_rust_transport_by_test_contexts(
     }
 
     let mut parents = BTreeMap::<u64, u64>::new();
-    for phase in &read.phases {
-        if matches!(phase.child_context_id, 0 | u64::MAX)
-            || matches!(phase.parent_context_id, 0 | u64::MAX)
-            || base_contexts.contains(&phase.child_context_id)
-            || parents
-                .insert(phase.child_context_id, phase.parent_context_id)
+    let mut thread_children = BTreeSet::<u64>::new();
+    for (child, parent) in read
+        .phases
+        .iter()
+        .map(|phase| (phase.child_context_id, phase.parent_context_id))
+        .chain(
+            read.thread_phases
+                .iter()
+                .map(|phase| (phase.child_context_id, phase.parent_context_id)),
+        )
+    {
+        if matches!(child, 0 | u64::MAX)
+            || matches!(parent, 0 | u64::MAX)
+            || base_contexts.contains(&child)
+            || parents.insert(child, parent).is_some()
+        {
+            return Err(RustTransportError::InvalidAttribution(format!(
+                "phase {child:016x} has an invalid or repeated ownership definition"
+            )));
+        }
+    }
+    for phase in &read.thread_phases {
+        thread_children.insert(phase.child_context_id);
+    }
+    let mut thread_end_index = BTreeMap::<u64, u64>::new();
+    for end in &read.thread_ends {
+        if !thread_children.contains(&end.context_id)
+            || thread_end_index
+                .insert(end.context_id, end.commit_index)
                 .is_some()
         {
             return Err(RustTransportError::InvalidAttribution(format!(
-                "phase {:016x} has an invalid or repeated ownership definition",
-                phase.child_context_id
+                "thread end {:016x} has no unique thread-phase definition",
+                end.context_id
+            )));
+        }
+    }
+    let mut boundary_index = BTreeMap::<u64, u64>::new();
+    for boundary in &read.test_boundaries {
+        if !base_contexts.contains(&boundary.context_id)
+            || boundary_index
+                .insert(boundary.context_id, boundary.commit_index)
+                .is_some()
+        {
+            return Err(RustTransportError::InvalidAttribution(format!(
+                "test boundary {:016x} does not identify one known test root",
+                boundary.context_id
             )));
         }
     }
 
-    let resolve = |start: u64| -> Result<Option<u64>, RustTransportError> {
+    // One record's exact destination: its root test, safe background, or the
+    // root plus the thread phases whose lifetimes escaped it.
+    enum Resolution {
+        Attributed(u64),
+        Background,
+        Quarantined { root: u64, escaped: Vec<u64> },
+    }
+    let resolve = |start: u64| -> Result<Resolution, RustTransportError> {
         if start == 0 {
-            return Ok(None);
+            return Ok(Resolution::Background);
         }
         if start == u64::MAX {
             return Err(RustTransportError::InvalidAttribution(
@@ -654,7 +895,14 @@ pub fn partition_rust_transport_by_test_contexts(
         }
         let mut context = start;
         let mut seen = BTreeSet::new();
-        while let Some(parent) = parents.get(&context) {
+        let mut chain_threads = Vec::new();
+        loop {
+            if thread_children.contains(&context) {
+                chain_threads.push(context);
+            }
+            let Some(parent) = parents.get(&context) else {
+                break;
+            };
             if !seen.insert(context) {
                 return Err(RustTransportError::InvalidAttribution(format!(
                     "phase context cycle at {context:016x}"
@@ -662,68 +910,147 @@ pub fn partition_rust_transport_by_test_contexts(
             }
             context = *parent;
         }
-        if base_contexts.contains(&context) {
-            Ok(Some(context))
-        } else {
-            Err(RustTransportError::InvalidAttribution(format!(
+        if !base_contexts.contains(&context) {
+            return Err(RustTransportError::InvalidAttribution(format!(
                 "context {start:016x} resolves to unknown test root {context:016x}"
-            )))
+            )));
+        }
+        let boundary = boundary_index.get(&context).copied();
+        let escaped = chain_threads
+            .into_iter()
+            .filter(|thread| {
+                !matches!(
+                    (thread_end_index.get(thread), boundary),
+                    (Some(end), Some(boundary)) if *end < boundary
+                )
+            })
+            .collect::<Vec<_>>();
+        if escaped.is_empty() {
+            Ok(Resolution::Attributed(context))
+        } else {
+            Ok(Resolution::Quarantined {
+                root: context,
+                escaped,
+            })
         }
     };
 
-    let empty = || RustTransportRead {
-        observations: Vec::new(),
-        ordinal_hits: Vec::new(),
-        phases: Vec::new(),
-        committed: 0,
-        incomplete: 0,
-        dropped: 0,
-        attachments: 0,
-    };
     let mut attributed = base_contexts
         .iter()
-        .map(|context| (*context, empty()))
+        .map(|context| (*context, RustTransportRead::empty()))
         .collect::<BTreeMap<_, _>>();
-    let mut background = empty();
+    let mut background = RustTransportRead::empty();
     background.attachments = read.attachments;
+    let mut thread_scope_limitations = BTreeSet::new();
+    let mut note_escape = |root: u64, escaped: Vec<u64>| {
+        for thread in escaped {
+            thread_scope_limitations.insert(format!(
+                "RUST_THREAD_OUTLIVED_TEST: thread phase {thread:016x} escaped test {root:016x}"
+            ));
+        }
+    };
 
     for observation in &read.observations {
         match resolve(observation.context_id)? {
-            Some(root) => attributed
+            Resolution::Attributed(root) => attributed
                 .get_mut(&root)
                 .expect("resolved root was preallocated")
                 .observations
                 .push(observation.clone()),
-            None => background.observations.push(observation.clone()),
+            Resolution::Background => background.observations.push(observation.clone()),
+            Resolution::Quarantined { root, escaped } => {
+                note_escape(root, escaped);
+                background.observations.push(observation.clone());
+            }
         }
     }
     for hit in &read.ordinal_hits {
         match resolve(hit.context_id)? {
-            Some(root) => attributed
+            Resolution::Attributed(root) => attributed
                 .get_mut(&root)
                 .expect("resolved root was preallocated")
                 .ordinal_hits
                 .push(*hit),
-            None => background.ordinal_hits.push(*hit),
+            Resolution::Background => background.ordinal_hits.push(*hit),
+            Resolution::Quarantined { root, escaped } => {
+                note_escape(root, escaped);
+                background.ordinal_hits.push(*hit);
+            }
         }
     }
     for phase in &read.phases {
-        let root = resolve(phase.child_context_id)?.ok_or_else(|| {
-            RustTransportError::InvalidAttribution(format!(
-                "phase {:016x} resolved to background",
-                phase.child_context_id
-            ))
-        })?;
+        match resolve(phase.child_context_id)? {
+            Resolution::Attributed(root) => attributed
+                .get_mut(&root)
+                .expect("resolved root was preallocated")
+                .phases
+                .push(phase.clone()),
+            Resolution::Background => {
+                return Err(RustTransportError::InvalidAttribution(format!(
+                    "phase {:016x} resolved to background",
+                    phase.child_context_id
+                )));
+            }
+            Resolution::Quarantined { root, escaped } => {
+                note_escape(root, escaped);
+                background.phases.push(phase.clone());
+            }
+        }
+    }
+    for phase in &read.thread_phases {
+        match resolve(phase.child_context_id)? {
+            Resolution::Attributed(root) => attributed
+                .get_mut(&root)
+                .expect("resolved root was preallocated")
+                .thread_phases
+                .push(*phase),
+            Resolution::Background => {
+                return Err(RustTransportError::InvalidAttribution(format!(
+                    "thread phase {:016x} resolved to background",
+                    phase.child_context_id
+                )));
+            }
+            Resolution::Quarantined { root, escaped } => {
+                note_escape(root, escaped);
+                background.thread_phases.push(*phase);
+            }
+        }
+    }
+    for end in &read.thread_ends {
+        match resolve(end.context_id)? {
+            Resolution::Attributed(root) => attributed
+                .get_mut(&root)
+                .expect("resolved root was preallocated")
+                .thread_ends
+                .push(*end),
+            Resolution::Background => {
+                return Err(RustTransportError::InvalidAttribution(format!(
+                    "thread end {:016x} resolved to background",
+                    end.context_id
+                )));
+            }
+            Resolution::Quarantined { root, escaped } => {
+                note_escape(root, escaped);
+                background.thread_ends.push(*end);
+            }
+        }
+    }
+    for boundary in &read.test_boundaries {
         attributed
-            .get_mut(&root)
-            .expect("resolved root was preallocated")
-            .phases
-            .push(phase.clone());
+            .get_mut(&boundary.context_id)
+            .expect("boundary contexts were checked against the known roots")
+            .test_boundaries
+            .push(*boundary);
     }
 
     let set_committed = |transport: &mut RustTransportRead| -> Result<u64, RustTransportError> {
         transport.committed = u64::try_from(
-            transport.observations.len() + transport.ordinal_hits.len() + transport.phases.len(),
+            transport.observations.len()
+                + transport.ordinal_hits.len()
+                + transport.phases.len()
+                + transport.thread_phases.len()
+                + transport.thread_ends.len()
+                + transport.test_boundaries.len(),
         )
         .map_err(|_| {
             RustTransportError::InvalidAttribution("partition record count exceeds u64".into())
@@ -752,6 +1079,7 @@ pub fn partition_rust_transport_by_test_contexts(
     Ok(RustTransportPartition {
         attributed,
         background,
+        thread_scope_limitations,
     })
 }
 
@@ -772,7 +1100,7 @@ mod tests {
         fs,
         io::{BufRead as _, BufReader},
         process::{Command, Stdio},
-        sync::atomic::Ordering,
+        sync::atomic::{AtomicUsize, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -914,7 +1242,7 @@ fn main() {{
 
     #[test]
     fn implementation_matches_frozen_transport_contract() {
-        let contract = supercov_contracts::rust_probe_transport_v2_contract().unwrap();
+        let contract = supercov_contracts::rust_probe_transport_v3_contract().unwrap();
         assert_eq!(MAGIC.as_slice(), contract.magic.as_bytes());
         assert_eq!(VERSION, contract.protocol_version);
         assert_eq!(HEADER_SIZE, contract.header_size);
@@ -942,7 +1270,13 @@ fn main() {{
         assert_eq!(KIND_DECISION, contract.record_kinds.decision);
         assert_eq!(KIND_ORDINAL_HIT, contract.record_kinds.ordinal_hit);
         assert_eq!(Some(KIND_PHASE), contract.record_kinds.phase);
-        assert!(RUNTIME_TEMPLATE.contains("b\"SCVRUST2\""));
+        assert_eq!(Some(KIND_THREAD_PHASE), contract.record_kinds.thread_phase);
+        assert_eq!(Some(KIND_THREAD_END), contract.record_kinds.thread_end);
+        assert_eq!(
+            Some(KIND_TEST_BOUNDARY),
+            contract.record_kinds.test_boundary
+        );
+        assert!(RUNTIME_TEMPLATE.contains("b\"SCVRUST3\""));
         assert!(RUNTIME_TEMPLATE.contains("const DESCRIPTOR_SIZE: usize = 40;"));
     }
 
@@ -999,12 +1333,35 @@ fn main() {{
                     decision_id: inner_id.into(),
                 },
             ],
+            thread_phases: Vec::new(),
+            thread_ends: Vec::new(),
+            test_boundaries: Vec::new(),
             committed: 3,
             incomplete: 0,
             dropped: 0,
             attachments: 1,
         };
         validate_rust_phase_contexts(CONTEXT, &read).unwrap();
+
+        let mut threaded = read.clone();
+        let thread_child = rust_thread_context_id(inner, 7);
+        threaded.thread_phases.push(RustThreadPhase {
+            process_id: 7,
+            child_context_id: thread_child,
+            parent_context_id: inner,
+            invocation_nonce: 7,
+            commit_index: 3,
+        });
+        threaded.observations[0].context_id = thread_child;
+        threaded.committed = 4;
+        validate_rust_phase_contexts(CONTEXT, &threaded).unwrap();
+
+        let mut tampered_thread = threaded.clone();
+        tampered_thread.thread_phases[0].invocation_nonce = 8;
+        assert!(matches!(
+            validate_rust_phase_contexts(CONTEXT, &tampered_thread),
+            Err(RustTransportError::InvalidAssertionContext(_))
+        ));
 
         let mut invalid = read.clone();
         invalid.phases[0].parent_context_id = 99;
@@ -1084,6 +1441,9 @@ fn main() {{
                     decision_id: inner_id.into(),
                 },
             ],
+            thread_phases: Vec::new(),
+            thread_ends: Vec::new(),
+            test_boundaries: Vec::new(),
             committed: 6,
             incomplete: 0,
             dropped: 0,
@@ -1095,6 +1455,7 @@ fn main() {{
         assert_eq!(partition.attributed[&SECOND].committed, 1);
         assert_eq!(partition.background.committed, 1);
         assert_eq!(partition.background.attachments, 3);
+        assert!(partition.thread_scope_limitations.is_empty());
         assert_eq!(
             partition
                 .attributed
@@ -1128,6 +1489,334 @@ fn main() {{
     }
 
     #[test]
+    fn thread_phases_are_join_bounded_by_the_test_boundary() {
+        const SECOND: u64 = 84;
+        let bases = BTreeSet::from([CONTEXT, SECOND]);
+        let joined = rust_thread_context_id(CONTEXT, 0);
+        let escaped = rust_thread_context_id(CONTEXT, 1);
+        let hit = |context_id: u64| RustTransportObservation {
+            process_id: 7,
+            context_id,
+            observation: RustProbeObservation::Hit {
+                id: "rs:statement:0123456789abcdef01234567".into(),
+            },
+        };
+        let read = RustTransportRead {
+            observations: vec![hit(joined), hit(escaped), hit(CONTEXT)],
+            thread_phases: vec![
+                RustThreadPhase {
+                    process_id: 7,
+                    child_context_id: joined,
+                    parent_context_id: CONTEXT,
+                    invocation_nonce: 0,
+                    commit_index: 0,
+                },
+                RustThreadPhase {
+                    process_id: 7,
+                    child_context_id: escaped,
+                    parent_context_id: CONTEXT,
+                    invocation_nonce: 1,
+                    commit_index: 1,
+                },
+            ],
+            thread_ends: vec![RustThreadEnd {
+                process_id: 7,
+                context_id: joined,
+                commit_index: 5,
+            }],
+            test_boundaries: vec![
+                RustTestBoundary {
+                    process_id: 7,
+                    context_id: CONTEXT,
+                    commit_index: 6,
+                },
+                RustTestBoundary {
+                    process_id: 7,
+                    context_id: SECOND,
+                    commit_index: 7,
+                },
+            ],
+            committed: 8,
+            attachments: 1,
+            ..RustTransportRead::empty()
+        };
+        let partition = partition_rust_transport_by_test_contexts(&read, &bases).unwrap();
+        // The joined thread's phase, end and hit are exactly attributed; the
+        // escaped thread's definition and hit fail closed to background.
+        assert_eq!(partition.attributed[&CONTEXT].committed, 5);
+        assert_eq!(partition.attributed[&CONTEXT].thread_phases.len(), 1);
+        assert_eq!(partition.attributed[&CONTEXT].thread_ends.len(), 1);
+        assert_eq!(partition.attributed[&CONTEXT].test_boundaries.len(), 1);
+        assert_eq!(partition.attributed[&SECOND].committed, 1);
+        assert_eq!(partition.background.committed, 2);
+        assert_eq!(partition.background.thread_phases.len(), 1);
+        assert_eq!(
+            partition.background.observations,
+            vec![hit(escaped)],
+            "the escaped thread's record must be background"
+        );
+        assert_eq!(
+            partition.thread_scope_limitations,
+            BTreeSet::from([format!(
+                "RUST_THREAD_OUTLIVED_TEST: thread phase {escaped:016x} escaped test {CONTEXT:016x}"
+            )])
+        );
+
+        // An end that commits after the boundary is escaped, not joined.
+        let mut late_end = read.clone();
+        late_end.thread_ends.push(RustThreadEnd {
+            process_id: 7,
+            context_id: escaped,
+            commit_index: 8,
+        });
+        late_end.committed = 9;
+        let partition = partition_rust_transport_by_test_contexts(&late_end, &bases).unwrap();
+        assert_eq!(partition.thread_scope_limitations.len(), 1);
+        assert_eq!(partition.background.committed, 3);
+
+        // A missing boundary for the root quarantines even ended threads.
+        let mut unbounded = read.clone();
+        unbounded.test_boundaries.remove(0);
+        unbounded.committed = 7;
+        let partition = partition_rust_transport_by_test_contexts(&unbounded, &bases).unwrap();
+        assert_eq!(partition.attributed[&CONTEXT].committed, 1);
+        assert_eq!(partition.thread_scope_limitations.len(), 2);
+
+        let mut duplicate_end = read.clone();
+        duplicate_end.thread_ends.push(RustThreadEnd {
+            process_id: 7,
+            context_id: joined,
+            commit_index: 9,
+        });
+        duplicate_end.committed = 9;
+        assert!(matches!(
+            partition_rust_transport_by_test_contexts(&duplicate_end, &bases),
+            Err(RustTransportError::InvalidAttribution(_))
+        ));
+
+        let mut orphan_end = read.clone();
+        orphan_end.thread_ends.push(RustThreadEnd {
+            process_id: 7,
+            context_id: 99,
+            commit_index: 9,
+        });
+        orphan_end.committed = 9;
+        assert!(matches!(
+            partition_rust_transport_by_test_contexts(&orphan_end, &bases),
+            Err(RustTransportError::InvalidAttribution(_))
+        ));
+
+        let mut duplicate_boundary = read.clone();
+        duplicate_boundary.test_boundaries.push(RustTestBoundary {
+            process_id: 7,
+            context_id: CONTEXT,
+            commit_index: 9,
+        });
+        duplicate_boundary.committed = 9;
+        assert!(matches!(
+            partition_rust_transport_by_test_contexts(&duplicate_boundary, &bases),
+            Err(RustTransportError::InvalidAttribution(_))
+        ));
+
+        let mut unknown_boundary = read.clone();
+        unknown_boundary.test_boundaries.push(RustTestBoundary {
+            process_id: 7,
+            context_id: 99,
+            commit_index: 9,
+        });
+        unknown_boundary.committed = 9;
+        assert!(matches!(
+            partition_rust_transport_by_test_contexts(&unknown_boundary, &bases),
+            Err(RustTransportError::InvalidAttribution(_))
+        ));
+
+        let mut duplicate_definition = read;
+        duplicate_definition.phases.push(RustPhaseContext {
+            process_id: 7,
+            child_context_id: joined,
+            parent_context_id: CONTEXT,
+            invocation_nonce: 0,
+            decision_id: "rs:decision:0123456789abcdef01234567".into(),
+        });
+        duplicate_definition.committed = 9;
+        assert!(matches!(
+            partition_rust_transport_by_test_contexts(&duplicate_definition, &bases),
+            Err(RustTransportError::InvalidAttribution(_))
+        ));
+    }
+
+    fn append_record(
+        bytes: &mut [u8],
+        kind: u8,
+        outcome: u8,
+        context_id: u64,
+        id: &[u8],
+        values: &[u8],
+    ) {
+        let descriptor_capacity = get_u32(bytes, 20).unwrap() as usize;
+        let payload_base = HEADER_SIZE + descriptor_capacity * DESCRIPTOR_SIZE;
+        let next = get_u64(bytes, NEXT_DESCRIPTOR_OFFSET).unwrap();
+        let next_payload = get_u64(bytes, NEXT_PAYLOAD_OFFSET).unwrap();
+        let descriptor = HEADER_SIZE + usize::try_from(next).unwrap() * DESCRIPTOR_SIZE;
+        let payload_length = (id.len() + values.len()) as u32;
+        bytes[descriptor + KIND_OFFSET] = kind;
+        bytes[descriptor + OUTCOME_OFFSET] = outcome;
+        bytes[descriptor + 3] = 0;
+        put_u32(bytes, descriptor + PID_OFFSET, 7);
+        bytes[descriptor + CONTEXT_OFFSET..descriptor + CONTEXT_OFFSET + 8]
+            .copy_from_slice(&context_id.to_le_bytes());
+        put_u32(
+            bytes,
+            descriptor + PAYLOAD_OFFSET_OFFSET,
+            next_payload as u32,
+        );
+        put_u32(bytes, descriptor + PAYLOAD_LENGTH_OFFSET, payload_length);
+        put_u32(bytes, descriptor + ID_LENGTH_OFFSET, id.len() as u32);
+        put_u32(bytes, descriptor + VALUE_LENGTH_OFFSET, values.len() as u32);
+        let record_checksum = checksum(
+            kind,
+            outcome,
+            7,
+            context_id,
+            next_payload as u32,
+            payload_length,
+            id.len() as u32,
+            values.len() as u32,
+            id,
+            values,
+        );
+        bytes[descriptor + CHECKSUM_OFFSET..descriptor + CHECKSUM_OFFSET + 8]
+            .copy_from_slice(&record_checksum.to_le_bytes());
+        let payload = payload_base + usize::try_from(next_payload).unwrap();
+        bytes[payload..payload + id.len()].copy_from_slice(id);
+        bytes[payload + id.len()..payload + id.len() + values.len()].copy_from_slice(values);
+        bytes[descriptor + COMMIT_OFFSET] = 1;
+        bytes[NEXT_DESCRIPTOR_OFFSET..NEXT_DESCRIPTOR_OFFSET + 8]
+            .copy_from_slice(&(next + 1).to_le_bytes());
+        bytes[NEXT_PAYLOAD_OFFSET..NEXT_PAYLOAD_OFFSET + 8]
+            .copy_from_slice(&(next_payload + u64::from(payload_length)).to_le_bytes());
+    }
+
+    #[test]
+    fn thread_kind_records_are_authenticated_unique_and_strict() {
+        let directory = temporary_directory("thread-kinds");
+        let child = rust_thread_context_id(CONTEXT, 3);
+        let mut definition = [0_u8; 16];
+        definition[..8].copy_from_slice(&CONTEXT.to_le_bytes());
+        definition[8..].copy_from_slice(&3_u64.to_le_bytes());
+
+        type SyntheticRecord<'bytes> = (u8, u8, u64, &'bytes [u8], &'bytes [u8]);
+        let case = AtomicUsize::new(0);
+        let build = |records: &[SyntheticRecord<'_>]| {
+            let path = directory.join(format!(
+                "case-{}.transport",
+                case.fetch_add(1, Ordering::Relaxed)
+            ));
+            create_rust_transport(&path, TOKEN, 16, 4_096).unwrap();
+            let mut bytes = fs::read(&path).unwrap();
+            for (kind, outcome, context, id, values) in records {
+                append_record(&mut bytes, *kind, *outcome, *context, id, values);
+            }
+            fs::write(&path, bytes).unwrap();
+            path
+        };
+
+        let valid = build(&[
+            (KIND_THREAD_PHASE, 0, child, b"", &definition),
+            (KIND_THREAD_END, 0, child, b"", b""),
+            (KIND_TEST_BOUNDARY, 0, CONTEXT, b"", b""),
+        ]);
+        let read = read_rust_transport(&valid, &TOKEN).unwrap();
+        assert_eq!(read.committed, 3);
+        assert_eq!(
+            read.thread_phases,
+            vec![RustThreadPhase {
+                process_id: 7,
+                child_context_id: child,
+                parent_context_id: CONTEXT,
+                invocation_nonce: 3,
+                commit_index: 0,
+            }]
+        );
+        assert_eq!(
+            read.thread_ends,
+            vec![RustThreadEnd {
+                process_id: 7,
+                context_id: child,
+                commit_index: 1,
+            }]
+        );
+        assert_eq!(
+            read.test_boundaries,
+            vec![RustTestBoundary {
+                process_id: 7,
+                context_id: CONTEXT,
+                commit_index: 2,
+            }]
+        );
+
+        // A thread phase whose context does not derive from its payload fails
+        // authentication like a tampered assertion phase.
+        let tampered = build(&[(KIND_THREAD_PHASE, 0, child ^ 1, b"", &definition)]);
+        assert!(matches!(
+            read_rust_transport(&tampered, &TOKEN),
+            Err(RustTransportError::InvalidAssertionContext(_))
+        ));
+
+        let conflicting_definition = {
+            let mut other = [0_u8; 16];
+            other[..8].copy_from_slice(&CONTEXT.to_le_bytes());
+            other[8..].copy_from_slice(&4_u64.to_le_bytes());
+            build(&[
+                (KIND_THREAD_PHASE, 0, child, b"", &definition),
+                (KIND_THREAD_PHASE, 0, child, b"", &other),
+            ])
+        };
+        assert!(matches!(
+            read_rust_transport(&conflicting_definition, &TOKEN),
+            Err(RustTransportError::InvalidAssertionContext(_))
+        ));
+
+        let duplicate_end = build(&[
+            (KIND_THREAD_PHASE, 0, child, b"", &definition),
+            (KIND_THREAD_END, 0, child, b"", b""),
+            (KIND_THREAD_END, 0, child, b"", b""),
+        ]);
+        assert_eq!(
+            read_rust_transport(&duplicate_end, &TOKEN),
+            Err(RustTransportError::InvalidRecord(2))
+        );
+
+        let duplicate_boundary = build(&[
+            (KIND_TEST_BOUNDARY, 0, CONTEXT, b"", b""),
+            (KIND_TEST_BOUNDARY, 0, CONTEXT, b"", b""),
+        ]);
+        assert_eq!(
+            read_rust_transport(&duplicate_boundary, &TOKEN),
+            Err(RustTransportError::InvalidRecord(1))
+        );
+
+        for invalid in [
+            // Zero and reserved contexts are never valid thread-kind contexts.
+            build(&[(KIND_THREAD_END, 0, 0, b"", b"")]),
+            build(&[(KIND_TEST_BOUNDARY, 0, u64::MAX, b"", b"")]),
+            // Thread-kind records carry no probe identity or extra payload.
+            build(&[(KIND_THREAD_END, 0, CONTEXT, b"x", b"")]),
+            build(&[(KIND_TEST_BOUNDARY, 0, CONTEXT, b"", b"y")]),
+            build(&[(KIND_THREAD_PHASE, 0, child, b"", &definition[..8])]),
+            // Outcomes are meaningless for thread-kind records.
+            build(&[(KIND_THREAD_END, 1, CONTEXT, b"", b"")]),
+        ] {
+            assert_eq!(
+                read_rust_transport(&invalid, &TOKEN),
+                Err(RustTransportError::InvalidRecord(0))
+            );
+        }
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn mmap_transport_is_concurrent_bounded_strict_and_kill_resilient() {
         let directory = temporary_directory("all");
         let binary = compile_fixture(&directory);
@@ -1143,7 +1832,7 @@ fn main() {{
             .unwrap();
         assert!(output.status.success());
         let read = read_rust_transport(&concurrent, &TOKEN).unwrap();
-        assert_eq!(read.committed, 802);
+        assert_eq!(read.committed, 818);
         assert_eq!(read.incomplete, 0);
         assert_eq!(read.dropped, 0);
         assert_eq!(read.attachments, 1);
@@ -1151,11 +1840,39 @@ fn main() {{
         assert!(
             matches!(read.observations.last(), Some(RustTransportObservation { context_id: CONTEXT, observation: RustProbeObservation::Decision { values, outcome: false, .. }, .. }) if values == &[Some(true), Some(false)])
         );
+        // Every spawned thread runs under its own derived thread-phase context
+        // parented to the creating context; the main thread stays exact.
+        assert_eq!(read.thread_phases.len(), 8);
         assert!(
+            read.thread_phases
+                .iter()
+                .all(|phase| phase.parent_context_id == CONTEXT)
+        );
+        assert_eq!(read.thread_ends.len(), 8);
+        let thread_contexts = read
+            .thread_phases
+            .iter()
+            .map(|phase| phase.child_context_id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(thread_contexts.len(), 8);
+        assert_eq!(
+            read.thread_ends
+                .iter()
+                .map(|end| end.context_id)
+                .collect::<BTreeSet<_>>(),
+            thread_contexts
+        );
+        assert!(read.observations.iter().all(|item| {
+            item.context_id == CONTEXT || thread_contexts.contains(&item.context_id)
+        }));
+        assert_eq!(
             read.observations
                 .iter()
-                .all(|item| item.context_id == CONTEXT)
+                .filter(|item| thread_contexts.contains(&item.context_id))
+                .count(),
+            800
         );
+        validate_rust_phase_contexts(CONTEXT, &read).unwrap();
         assert_eq!(read.ordinal_hits.len(), 1);
         assert_eq!(read.ordinal_hits[0].ordinal, 7);
         assert_eq!(read.ordinal_hits[0].context_id, CONTEXT);
@@ -1176,7 +1893,12 @@ fn main() {{
             .unwrap();
         assert!(output.status.success());
         let read = read_rust_transport(&mir_decisions, &TOKEN).unwrap();
-        assert_eq!(read.committed, 3);
+        assert_eq!(
+            read.committed, 7,
+            "two migrated threads add one thread phase and one thread end each"
+        );
+        assert_eq!(read.thread_phases.len(), 2);
+        assert_eq!(read.thread_ends.len(), 2);
         assert_eq!(read.dropped, 0);
         assert_eq!(read.incomplete, 0);
         assert!(read.observations.iter().any(|observation| matches!(

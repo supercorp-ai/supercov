@@ -25,16 +25,16 @@ use crate::rust_compiler_manifest::{
 };
 use crate::{
     rust_probe_transport::{
-        DEFAULT_DESCRIPTOR_CAPACITY, DEFAULT_PAYLOAD_CAPACITY, RustPhaseContext, RustTransportRead,
-        create_rust_transport, read_rust_transport, rust_assertion_context_id,
-        validate_rust_phase_contexts,
+        DEFAULT_DESCRIPTOR_CAPACITY, DEFAULT_PAYLOAD_CAPACITY, RustPhaseContext, RustThreadPhase,
+        RustTransportRead, create_rust_transport, read_rust_transport, rust_assertion_context_id,
+        rust_thread_context_id, validate_rust_phase_contexts,
     },
     rust_runtime::RustProbeObservation,
     rust_test_context::rust_test_context_id,
 };
 
 const MAP_SCHEMA: &str = "supercov-rustdoc-merged-map-v2";
-const OUTCOME_SCHEMA: &str = "supercov-rustdoc-outcome-unit-v3";
+const OUTCOME_SCHEMA: &str = "supercov-rustdoc-outcome-unit-v4";
 const RUSTDOC_CATALOG_FORMAT_VERSION: u32 = 2;
 const MAX_OUTCOME_UNIT_BYTES: u64 = 16 * 1024 * 1024;
 const SOURCE_MODEL: &str = "rust-source-v1";
@@ -331,33 +331,87 @@ impl RustdocOutcomeGroupJoin {
         Ok((base, read))
     }
 
+    /// Background evidence: context-zero records plus every record whose
+    /// chain contains a thread phase that escaped its root test. Quarantined
+    /// records keep their real contexts; projection must flatten them.
     pub fn background_transport(&self) -> Result<RustTransportRead, RustdocOutcomeError> {
-        let observations = self
-            .transport
-            .observations
-            .iter()
-            .filter(|record| record.context_id == 0)
-            .cloned()
-            .collect::<Vec<_>>();
-        let ordinal_hits = self
-            .transport
-            .ordinal_hits
-            .iter()
-            .filter(|record| record.context_id == 0)
-            .copied()
-            .collect::<Vec<_>>();
-        let committed = u64::try_from(observations.len() + ordinal_hits.len()).map_err(|_| {
+        let parents = phase_parent_map(&self.transport)?;
+        let scope = RustdocThreadScope::from_transport(&self.transport)?;
+        let quarantined = |context: u64| -> Result<bool, RustdocOutcomeError> {
+            let root = root_context(context, &parents)?;
+            Ok(!scope.escaped_threads(context, root, &parents)?.is_empty())
+        };
+        let mut observations = Vec::new();
+        for record in &self.transport.observations {
+            if record.context_id == 0 || quarantined(record.context_id)? {
+                observations.push(record.clone());
+            }
+        }
+        let mut ordinal_hits = Vec::new();
+        for record in &self.transport.ordinal_hits {
+            if record.context_id == 0 || quarantined(record.context_id)? {
+                ordinal_hits.push(*record);
+            }
+        }
+        let mut phases = Vec::new();
+        for phase in &self.transport.phases {
+            if quarantined(phase.child_context_id)? {
+                phases.push(phase.clone());
+            }
+        }
+        let mut thread_phases = Vec::new();
+        for phase in &self.transport.thread_phases {
+            if quarantined(phase.child_context_id)? {
+                thread_phases.push(*phase);
+            }
+        }
+        let mut thread_ends = Vec::new();
+        for end in &self.transport.thread_ends {
+            if quarantined(end.context_id)? {
+                thread_ends.push(*end);
+            }
+        }
+        let committed = u64::try_from(
+            observations.len()
+                + ordinal_hits.len()
+                + phases.len()
+                + thread_phases.len()
+                + thread_ends.len(),
+        )
+        .map_err(|_| {
             RustdocOutcomeError::Invalid("rustdoc background transport count exceeds u64".into())
         })?;
         Ok(RustTransportRead {
             committed,
             observations,
             ordinal_hits,
-            phases: Vec::new(),
+            phases,
+            thread_phases,
+            thread_ends,
+            test_boundaries: Vec::new(),
             incomplete: self.transport.incomplete,
             dropped: self.transport.dropped,
             attachments: self.transport.attachments,
         })
+    }
+
+    /// One deterministic note per thread phase whose lifetime escaped its
+    /// root test in this invocation's transport.
+    pub fn thread_scope_limitations(&self) -> Result<BTreeSet<String>, RustdocOutcomeError> {
+        let parents = phase_parent_map(&self.transport)?;
+        let scope = RustdocThreadScope::from_transport(&self.transport)?;
+        let mut limitations = BTreeSet::new();
+        for phase in &self.transport.thread_phases {
+            let root = root_context(phase.child_context_id, &parents)?;
+            for escaped in scope.escaped_threads(phase.child_context_id, root, &parents)? {
+                if escaped == phase.child_context_id {
+                    limitations.insert(format!(
+                        "RUST_THREAD_OUTLIVED_TEST: thread phase {escaped:016x} escaped test {root:016x}"
+                    ));
+                }
+            }
+        }
+        Ok(limitations)
     }
 
     fn validate_transport_ownership(&self) -> Result<(), RustdocOutcomeError> {
@@ -376,6 +430,15 @@ impl RustdocOutcomeGroupJoin {
             }
         }
         let phase_parents = phase_parent_map(&self.transport)?;
+        RustdocThreadScope::from_transport(&self.transport)?;
+        for boundary in &self.transport.test_boundaries {
+            if !expected.contains_key(&boundary.context_id) {
+                return Err(RustdocOutcomeError::Invalid(format!(
+                    "rustdoc test boundary {:016x} does not identify a known test",
+                    boundary.context_id
+                )));
+            }
+        }
         for context in self
             .transport
             .observations
@@ -393,6 +456,13 @@ impl RustdocOutcomeGroupJoin {
                     .iter()
                     .map(|phase| phase.child_context_id),
             )
+            .chain(
+                self.transport
+                    .thread_phases
+                    .iter()
+                    .map(|phase| phase.child_context_id),
+            )
+            .chain(self.transport.thread_ends.iter().map(|end| end.context_id))
             .filter(|context| *context != 0)
         {
             let root = root_context(context, &phase_parents)?;
@@ -433,18 +503,105 @@ impl RustdocOutcomeResolution {
 
 fn phase_parent_map(read: &RustTransportRead) -> Result<BTreeMap<u64, u64>, RustdocOutcomeError> {
     let mut parents = BTreeMap::new();
-    for phase in &read.phases {
-        if parents
-            .insert(phase.child_context_id, phase.parent_context_id)
-            .is_some()
-        {
+    for (child, parent) in read
+        .phases
+        .iter()
+        .map(|phase| (phase.child_context_id, phase.parent_context_id))
+        .chain(
+            read.thread_phases
+                .iter()
+                .map(|phase| (phase.child_context_id, phase.parent_context_id)),
+        )
+    {
+        if parents.insert(child, parent).is_some() {
             return Err(RustdocOutcomeError::Invalid(format!(
-                "rustdoc transport repeats phase context {:016x}",
-                phase.child_context_id
+                "rustdoc transport repeats phase context {child:016x}"
             )));
         }
     }
     Ok(parents)
+}
+
+/// The join-bounded thread acceptance state for one rustdoc invocation's
+/// shared transport: which thread phases exist, when each ended, and when
+/// each test context committed its boundary.
+struct RustdocThreadScope {
+    thread_children: BTreeSet<u64>,
+    thread_end_index: BTreeMap<u64, u64>,
+    boundary_index: BTreeMap<u64, u64>,
+}
+
+impl RustdocThreadScope {
+    fn from_transport(read: &RustTransportRead) -> Result<Self, RustdocOutcomeError> {
+        let thread_children = read
+            .thread_phases
+            .iter()
+            .map(|phase| phase.child_context_id)
+            .collect::<BTreeSet<_>>();
+        let mut thread_end_index = BTreeMap::new();
+        for end in &read.thread_ends {
+            if !thread_children.contains(&end.context_id)
+                || thread_end_index
+                    .insert(end.context_id, end.commit_index)
+                    .is_some()
+            {
+                return Err(RustdocOutcomeError::Invalid(format!(
+                    "rustdoc thread end {:016x} has no unique thread-phase definition",
+                    end.context_id
+                )));
+            }
+        }
+        let mut boundary_index = BTreeMap::new();
+        for boundary in &read.test_boundaries {
+            if boundary_index
+                .insert(boundary.context_id, boundary.commit_index)
+                .is_some()
+            {
+                return Err(RustdocOutcomeError::Invalid(format!(
+                    "rustdoc test boundary {:016x} is repeated",
+                    boundary.context_id
+                )));
+            }
+        }
+        Ok(Self {
+            thread_children,
+            thread_end_index,
+            boundary_index,
+        })
+    }
+
+    /// Thread phases on `context`'s chain whose lifetimes escaped `root`:
+    /// every record under such a chain is deterministic background evidence.
+    fn escaped_threads(
+        &self,
+        mut context: u64,
+        root: u64,
+        parents: &BTreeMap<u64, u64>,
+    ) -> Result<Vec<u64>, RustdocOutcomeError> {
+        let boundary = self.boundary_index.get(&root).copied();
+        let mut escaped = Vec::new();
+        let mut seen = BTreeSet::new();
+        loop {
+            if self.thread_children.contains(&context)
+                && !matches!(
+                    (self.thread_end_index.get(&context), boundary),
+                    (Some(end), Some(boundary)) if *end < boundary
+                )
+            {
+                escaped.push(context);
+            }
+            let Some(parent) = parents.get(&context) else {
+                break;
+            };
+            if !seen.insert(context) {
+                return Err(RustdocOutcomeError::Invalid(format!(
+                    "rustdoc transport phase cycle at {context:016x}"
+                )));
+            }
+            context = *parent;
+        }
+        Ok(escaped)
+    }
 }
 
 fn root_context(
@@ -463,40 +620,127 @@ fn root_context(
     Ok(context)
 }
 
+/// Keep exactly the records whose chain resolves to `expected_root` and whose
+/// thread phases all ended before the root's boundary. Records under an
+/// escaped thread phase are excluded here and belong to background.
 fn transport_for_root(
     read: &RustTransportRead,
     expected_root: u64,
 ) -> Result<RustTransportRead, RustdocOutcomeError> {
     let parents = phase_parent_map(read)?;
+    let scope = RustdocThreadScope::from_transport(read)?;
+    let accepts = |context: u64| -> Result<bool, RustdocOutcomeError> {
+        if root_context(context, &parents)? != expected_root {
+            return Ok(false);
+        }
+        Ok(scope
+            .escaped_threads(context, expected_root, &parents)?
+            .is_empty())
+    };
     let mut observations = Vec::new();
     for record in &read.observations {
-        if record.context_id != 0 && root_context(record.context_id, &parents)? == expected_root {
+        if record.context_id != 0 && accepts(record.context_id)? {
             observations.push(record.clone());
         }
     }
     let mut ordinal_hits = Vec::new();
     for record in &read.ordinal_hits {
-        if record.context_id != 0 && root_context(record.context_id, &parents)? == expected_root {
+        if record.context_id != 0 && accepts(record.context_id)? {
             ordinal_hits.push(*record);
         }
     }
     let mut phases = Vec::new();
     for phase in &read.phases {
-        if root_context(phase.child_context_id, &parents)? == expected_root {
+        if accepts(phase.child_context_id)? {
             phases.push(phase.clone());
         }
     }
-    let committed = u64::try_from(observations.len() + ordinal_hits.len() + phases.len())
-        .map_err(|_| RustdocOutcomeError::Invalid("rustdoc transport count exceeds u64".into()))?;
+    let mut thread_phases = Vec::new();
+    for phase in &read.thread_phases {
+        if accepts(phase.child_context_id)? {
+            thread_phases.push(*phase);
+        }
+    }
+    let mut thread_ends = Vec::new();
+    for end in &read.thread_ends {
+        if accepts(end.context_id)? {
+            thread_ends.push(*end);
+        }
+    }
+    let mut test_boundaries = Vec::new();
+    for boundary in &read.test_boundaries {
+        if boundary.context_id == expected_root {
+            test_boundaries.push(*boundary);
+        }
+    }
+    let committed = u64::try_from(
+        observations.len()
+            + ordinal_hits.len()
+            + phases.len()
+            + thread_phases.len()
+            + thread_ends.len()
+            + test_boundaries.len(),
+    )
+    .map_err(|_| RustdocOutcomeError::Invalid("rustdoc transport count exceeds u64".into()))?;
     Ok(RustTransportRead {
         observations,
         ordinal_hits,
         phases,
+        thread_phases,
+        thread_ends,
+        test_boundaries,
         committed,
         incomplete: 0,
         dropped: 0,
         attachments: 0,
     })
+}
+
+enum RustdocPhaseDefinition<'read> {
+    Assertion(&'read RustPhaseContext),
+    Thread(&'read RustThreadPhase),
+}
+
+impl RustdocPhaseDefinition<'_> {
+    fn parent_context_id(&self) -> u64 {
+        match self {
+            Self::Assertion(phase) => phase.parent_context_id,
+            Self::Thread(phase) => phase.parent_context_id,
+        }
+    }
+}
+
+fn rustdoc_phase_definitions(
+    read: &RustTransportRead,
+) -> Result<BTreeMap<u64, RustdocPhaseDefinition<'_>>, RustdocOutcomeError> {
+    let mut definitions = BTreeMap::new();
+    for phase in &read.phases {
+        if definitions
+            .insert(
+                phase.child_context_id,
+                RustdocPhaseDefinition::Assertion(phase),
+            )
+            .is_some()
+        {
+            return Err(RustdocOutcomeError::Invalid(
+                "rustdoc transport has duplicate assertion contexts".into(),
+            ));
+        }
+    }
+    for phase in &read.thread_phases {
+        if definitions
+            .insert(
+                phase.child_context_id,
+                RustdocPhaseDefinition::Thread(phase),
+            )
+            .is_some()
+        {
+            return Err(RustdocOutcomeError::Invalid(
+                "rustdoc transport has duplicate phase contexts".into(),
+            ));
+        }
+    }
+    Ok(definitions)
 }
 
 fn rebase_transport_root(
@@ -506,21 +750,12 @@ fn rebase_transport_root(
 ) -> Result<RustTransportRead, RustdocOutcomeError> {
     validate_rust_phase_contexts(old_base, read)
         .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?;
-    let definitions = read
-        .phases
-        .iter()
-        .map(|phase| (phase.child_context_id, phase))
-        .collect::<BTreeMap<_, _>>();
-    if definitions.len() != read.phases.len() {
-        return Err(RustdocOutcomeError::Invalid(
-            "rustdoc transport has duplicate assertion contexts".into(),
-        ));
-    }
+    let definitions = rustdoc_phase_definitions(read)?;
     fn translate(
         context: u64,
         old_base: u64,
         new_base: u64,
-        definitions: &BTreeMap<u64, &RustPhaseContext>,
+        definitions: &BTreeMap<u64, RustdocPhaseDefinition<'_>>,
         translated: &mut BTreeMap<u64, u64>,
         visiting: &mut BTreeSet<u64>,
     ) -> Result<u64, RustdocOutcomeError> {
@@ -541,24 +776,31 @@ fn rebase_transport_root(
             ))
         })?;
         let parent = translate(
-            phase.parent_context_id,
+            phase.parent_context_id(),
             old_base,
             new_base,
             definitions,
             translated,
             visiting,
         )?;
-        let context = rust_assertion_context_id(parent, &phase.decision_id, phase.invocation_nonce)
-            .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?;
-        visiting.remove(&phase.child_context_id);
-        translated.insert(phase.child_context_id, context);
-        Ok(context)
+        let rebased = match phase {
+            RustdocPhaseDefinition::Assertion(phase) => {
+                rust_assertion_context_id(parent, &phase.decision_id, phase.invocation_nonce)
+                    .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?
+            }
+            RustdocPhaseDefinition::Thread(phase) => {
+                rust_thread_context_id(parent, phase.invocation_nonce)
+            }
+        };
+        visiting.remove(&context);
+        translated.insert(context, rebased);
+        Ok(rebased)
     }
     let mut translated = BTreeMap::from([(old_base, new_base)]);
     let mut visiting = BTreeSet::new();
-    for phase in &read.phases {
+    for context in definitions.keys() {
         translate(
-            phase.child_context_id,
+            *context,
             old_base,
             new_base,
             &definitions,
@@ -584,6 +826,16 @@ fn rebase_transport_root(
         phase.child_context_id = map_context(phase.child_context_id)?;
         phase.parent_context_id = map_context(phase.parent_context_id)?;
     }
+    for phase in &mut rebased.thread_phases {
+        phase.child_context_id = map_context(phase.child_context_id)?;
+        phase.parent_context_id = map_context(phase.parent_context_id)?;
+    }
+    for end in &mut rebased.thread_ends {
+        end.context_id = map_context(end.context_id)?;
+    }
+    for boundary in &mut rebased.test_boundaries {
+        boundary.context_id = map_context(boundary.context_id)?;
+    }
     validate_rust_phase_contexts(new_base, &rebased)
         .map_err(|error| RustdocOutcomeError::Invalid(error.to_string()))?;
     Ok(rebased)
@@ -597,14 +849,55 @@ fn merge_transport(
         .phases
         .iter()
         .map(|phase| phase.child_context_id)
+        .chain(
+            destination
+                .thread_phases
+                .iter()
+                .map(|phase| phase.child_context_id),
+        )
         .collect::<BTreeSet<_>>();
     if source
         .phases
         .iter()
-        .any(|phase| !phase_ids.insert(phase.child_context_id))
+        .map(|phase| phase.child_context_id)
+        .chain(
+            source
+                .thread_phases
+                .iter()
+                .map(|phase| phase.child_context_id),
+        )
+        .any(|child| !phase_ids.insert(child))
     {
         return Err(RustdocOutcomeError::Invalid(
             "rustdoc standalone and merged assertion contexts collide".into(),
+        ));
+    }
+    let mut end_ids = destination
+        .thread_ends
+        .iter()
+        .map(|end| end.context_id)
+        .collect::<BTreeSet<_>>();
+    if source
+        .thread_ends
+        .iter()
+        .any(|end| !end_ids.insert(end.context_id))
+    {
+        return Err(RustdocOutcomeError::Invalid(
+            "rustdoc standalone and merged thread ends collide".into(),
+        ));
+    }
+    let mut boundary_ids = destination
+        .test_boundaries
+        .iter()
+        .map(|boundary| boundary.context_id)
+        .collect::<BTreeSet<_>>();
+    if source
+        .test_boundaries
+        .iter()
+        .any(|boundary| !boundary_ids.insert(boundary.context_id))
+    {
+        return Err(RustdocOutcomeError::Invalid(
+            "rustdoc standalone and merged test boundaries collide".into(),
         ));
     }
     destination.committed = destination
@@ -614,6 +907,9 @@ fn merge_transport(
     destination.observations.extend(source.observations);
     destination.ordinal_hits.extend(source.ordinal_hits);
     destination.phases.extend(source.phases);
+    destination.thread_phases.extend(source.thread_phases);
+    destination.thread_ends.extend(source.thread_ends);
+    destination.test_boundaries.extend(source.test_boundaries);
     Ok(())
 }
 
@@ -1275,7 +1571,10 @@ impl RustdocOutcomeUnit {
         let committed = u64::try_from(
             self.transport.observations.len()
                 + self.transport.ordinal_hits.len()
-                + self.transport.phases.len(),
+                + self.transport.phases.len()
+                + self.transport.thread_phases.len()
+                + self.transport.thread_ends.len()
+                + self.transport.test_boundaries.len(),
         )
         .map_err(|_| RustdocOutcomeError::Invalid("rustdoc transport count exceeds u64".into()))?;
         if committed != self.transport.committed {
@@ -1296,6 +1595,17 @@ impl RustdocOutcomeUnit {
             {
                 return Err(RustdocOutcomeError::Invalid(
                     "rustdoc transport contains an invalid or duplicate phase context".into(),
+                ));
+            }
+        }
+        for phase in &self.transport.thread_phases {
+            if !children.insert(phase.child_context_id)
+                || rust_thread_context_id(phase.parent_context_id, phase.invocation_nonce)
+                    != phase.child_context_id
+            {
+                return Err(RustdocOutcomeError::Invalid(
+                    "rustdoc transport contains an invalid or duplicate thread phase context"
+                        .into(),
                 ));
             }
         }
@@ -1767,22 +2077,14 @@ impl RustdocMergedJoin {
         validate_rust_phase_contexts(base_context_id, read)
             .map_err(|error| RustdocJoinError::Invalid(error.to_string()))?;
 
-        let definitions = read
-            .phases
-            .iter()
-            .map(|phase| (phase.child_context_id, phase))
-            .collect::<BTreeMap<_, _>>();
-        if definitions.len() != read.phases.len() {
-            return Err(RustdocJoinError::Invalid(
-                "merged doctest transport has duplicate assertion contexts".into(),
-            ));
-        }
+        let definitions = rustdoc_phase_definitions(read)
+            .map_err(|error| RustdocJoinError::Invalid(error.to_string()))?;
         let mut translated_contexts = BTreeMap::from([(base_context_id, base_context_id)]);
         let mut visiting = BTreeSet::new();
         fn translate_context(
             context: u64,
             base: u64,
-            definitions: &BTreeMap<u64, &RustPhaseContext>,
+            definitions: &BTreeMap<u64, RustdocPhaseDefinition<'_>>,
             obligation_ids: &BTreeMap<String, String>,
             translated: &mut BTreeMap<u64, u64>,
             visiting: &mut BTreeSet<u64>,
@@ -1804,25 +2106,32 @@ impl RustdocMergedJoin {
                 ))
             })?;
             let parent = translate_context(
-                phase.parent_context_id,
+                phase.parent_context_id(),
                 base,
                 definitions,
                 obligation_ids,
                 translated,
                 visiting,
             )?;
-            let decision = obligation_ids
-                .get(&phase.decision_id)
-                .map_or(phase.decision_id.as_str(), String::as_str);
-            let final_context = rust_assertion_context_id(parent, decision, phase.invocation_nonce)
-                .map_err(|error| RustdocJoinError::Invalid(error.to_string()))?;
+            let final_context = match phase {
+                RustdocPhaseDefinition::Assertion(phase) => {
+                    let decision = obligation_ids
+                        .get(&phase.decision_id)
+                        .map_or(phase.decision_id.as_str(), String::as_str);
+                    rust_assertion_context_id(parent, decision, phase.invocation_nonce)
+                        .map_err(|error| RustdocJoinError::Invalid(error.to_string()))?
+                }
+                RustdocPhaseDefinition::Thread(phase) => {
+                    rust_thread_context_id(parent, phase.invocation_nonce)
+                }
+            };
             visiting.remove(&context);
             translated.insert(context, final_context);
             Ok(final_context)
         }
-        for phase in &read.phases {
+        for context in definitions.keys() {
             translate_context(
-                phase.child_context_id,
+                *context,
                 base_context_id,
                 &definitions,
                 &self.obligation_ids,
@@ -1870,12 +2179,28 @@ impl RustdocMergedJoin {
                 phase.decision_id = final_id.clone();
             }
         }
+        for phase in &mut translated.thread_phases {
+            phase.child_context_id = translate_record_context(phase.child_context_id)?;
+            phase.parent_context_id = translate_record_context(phase.parent_context_id)?;
+        }
+        for end in &mut translated.thread_ends {
+            end.context_id = translate_record_context(end.context_id)?;
+        }
+        for boundary in &mut translated.test_boundaries {
+            boundary.context_id = translate_record_context(boundary.context_id)?;
+        }
         let unique_phases = translated
             .phases
             .iter()
             .map(|phase| phase.child_context_id)
+            .chain(
+                translated
+                    .thread_phases
+                    .iter()
+                    .map(|phase| phase.child_context_id),
+            )
             .collect::<BTreeSet<_>>();
-        if unique_phases.len() != translated.phases.len() {
+        if unique_phases.len() != translated.phases.len() + translated.thread_phases.len() {
             return Err(RustdocJoinError::Invalid(
                 "merged doctest assertion contexts collided after identity translation".into(),
             ));
@@ -3195,7 +3520,8 @@ mod tests {
         normalize_rust_compiler_candidates,
     };
     use crate::rust_probe_transport::{
-        RustOrdinalHit, RustTransportObservation, rust_assertion_context_id,
+        RustOrdinalHit, RustTestBoundary, RustThreadEnd, RustTransportObservation,
+        rust_assertion_context_id,
     };
 
     fn map() -> RustdocMergedMap {
@@ -3223,15 +3549,7 @@ mod tests {
     }
 
     fn empty_transport() -> RustTransportRead {
-        RustTransportRead {
-            observations: Vec::new(),
-            ordinal_hits: Vec::new(),
-            phases: Vec::new(),
-            committed: 0,
-            incomplete: 0,
-            dropped: 0,
-            attachments: 0,
-        }
+        RustTransportRead::empty()
     }
 
     fn transport_sha256(transport: &RustTransportRead) -> String {
@@ -4908,6 +5226,7 @@ mod tests {
             incomplete: 1,
             dropped: 0,
             attachments: 2,
+            ..RustTransportRead::empty()
         };
 
         let translated = joined
@@ -5003,6 +5322,7 @@ mod tests {
                 incomplete: 0,
                 dropped: 0,
                 attachments: 2,
+                ..RustTransportRead::empty()
             },
             entries: vec![entry.clone()],
             ambiguous_filtered_out: 0,
@@ -5027,6 +5347,121 @@ mod tests {
                 RustProbeObservation::Hit { id } if id == &final_point
             )
         }));
+    }
+
+    #[test]
+    fn doctest_thread_phases_are_join_bounded_and_escapes_become_background() {
+        let canonical_name = "rustdoc:fixture:src/lib.rs:3";
+        let canonical = rust_test_context_id(canonical_name).expect("canonical context");
+        let joined_thread = rust_thread_context_id(canonical, 0);
+        let escaped_thread = rust_thread_context_id(canonical, 1);
+        let hit = |context_id: u64| RustTransportObservation {
+            process_id: 10,
+            context_id,
+            observation: RustProbeObservation::Hit {
+                id: "rs:statement:0123456789abcdef01234567".into(),
+            },
+        };
+        let entry = RustdocJoinedOutcome {
+            catalog_index: 0,
+            catalog: catalog_doctest(
+                "src/lib.rs - (line 3)",
+                3,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
+            merged_entry: None,
+            state: RustdocJoinedOutcomeState::Completed {
+                outcome: outcome("src/lib.rs - (line 3)", RustdocOutcomeStatus::Passed),
+            },
+        };
+        let group = RustdocOutcomeGroupJoin {
+            invocation_id: "1".repeat(64),
+            group: "fixture".into(),
+            companion_build_id: "2".repeat(64),
+            raw_catalog_sha256: "3".repeat(64),
+            raw_events_sha256: "4".repeat(64),
+            transport_sha256: "5".repeat(64),
+            join: None,
+            transport: RustTransportRead {
+                observations: vec![hit(joined_thread), hit(escaped_thread), hit(0)],
+                thread_phases: vec![
+                    RustThreadPhase {
+                        process_id: 10,
+                        child_context_id: joined_thread,
+                        parent_context_id: canonical,
+                        invocation_nonce: 0,
+                        commit_index: 0,
+                    },
+                    RustThreadPhase {
+                        process_id: 10,
+                        child_context_id: escaped_thread,
+                        parent_context_id: canonical,
+                        invocation_nonce: 1,
+                        commit_index: 1,
+                    },
+                ],
+                thread_ends: vec![RustThreadEnd {
+                    process_id: 10,
+                    context_id: joined_thread,
+                    commit_index: 4,
+                }],
+                test_boundaries: vec![RustTestBoundary {
+                    process_id: 10,
+                    context_id: canonical,
+                    commit_index: 5,
+                }],
+                committed: 7,
+                attachments: 1,
+                ..RustTransportRead::empty()
+            },
+            entries: vec![entry.clone()],
+            ambiguous_filtered_out: 0,
+            ambiguous_unstarted_tests: 0,
+        };
+        group
+            .validate_transport_ownership()
+            .expect("thread-kind records stay within known doctest roots");
+
+        let (base, attributed) = group
+            .attributed_transport(&entry)
+            .expect("join-bounded canonical transport");
+        assert_eq!(base, canonical);
+        // Joined thread phase, its end, its hit and the boundary are exact.
+        assert_eq!(attributed.committed, 4);
+        assert_eq!(attributed.observations, vec![hit(joined_thread)]);
+        assert_eq!(attributed.thread_phases.len(), 1);
+        assert_eq!(attributed.thread_ends.len(), 1);
+        assert_eq!(attributed.test_boundaries.len(), 1);
+
+        let background = group.background_transport().expect("background transport");
+        assert_eq!(background.committed, 3);
+        assert_eq!(background.observations, vec![hit(escaped_thread), hit(0)]);
+        assert_eq!(background.thread_phases.len(), 1);
+        assert_eq!(background.thread_phases[0].child_context_id, escaped_thread);
+
+        assert_eq!(
+            group.thread_scope_limitations().expect("limitations"),
+            std::collections::BTreeSet::from([format!(
+                "RUST_THREAD_OUTLIVED_TEST: thread phase {escaped_thread:016x} escaped test {canonical:016x}"
+            )])
+        );
+
+        // A boundary for an unknown context fails ownership validation.
+        let mut unknown_boundary = group;
+        unknown_boundary
+            .transport
+            .test_boundaries
+            .push(RustTestBoundary {
+                process_id: 10,
+                context_id: 99,
+                commit_index: 6,
+            });
+        unknown_boundary.transport.committed = 8;
+        assert!(unknown_boundary.validate_transport_ownership().is_err());
     }
 
     #[test]

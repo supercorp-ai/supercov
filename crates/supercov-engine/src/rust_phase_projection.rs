@@ -16,6 +16,10 @@ use crate::{
 pub struct RustPhaseProjection {
     pub phases: Vec<CoveragePhase>,
     pub phase_id_by_context: BTreeMap<u64, String>,
+    /// Thread phases are execution scope, not evidence-v3 phases: work under
+    /// an accepted thread phase belongs to the nearest enclosing assertion
+    /// phase or test, exactly as it did on the creating thread.
+    pub thread_parent_by_context: BTreeMap<u64, u64>,
 }
 
 impl RustPhaseProjection {
@@ -27,6 +31,17 @@ impl RustPhaseProjection {
     ) -> Result<Option<&'a str>, RustTransportError> {
         if context_id == 0 {
             return Ok(None);
+        }
+        let mut context_id = context_id;
+        let mut hops = 0_usize;
+        while let Some(parent) = self.thread_parent_by_context.get(&context_id) {
+            hops += 1;
+            if hops > self.thread_parent_by_context.len() {
+                return Err(RustTransportError::InvalidAssertionContext(format!(
+                    "thread phase context cycle at {context_id:016x}"
+                )));
+            }
+            context_id = *parent;
         }
         if context_id == base_context_id {
             return Ok(Some(base_phase_id));
@@ -96,6 +111,27 @@ pub fn project_rust_assertion_phases(
     for phase in &read.phases {
         definitions.entry(phase.child_context_id).or_insert(phase);
     }
+    let thread_parent_by_context = read
+        .thread_phases
+        .iter()
+        .map(|phase| (phase.child_context_id, phase.parent_context_id))
+        .collect::<BTreeMap<_, _>>();
+    // Thread phases are execution scope, not causality: an assertion entered
+    // on an inherited thread is caused by the nearest enclosing assertion
+    // phase or the test itself, exactly as on the creating thread.
+    let collapse_thread_parents = |mut context: u64| -> Result<u64, RustTransportError> {
+        let mut hops = 0_usize;
+        while let Some(parent) = thread_parent_by_context.get(&context) {
+            hops += 1;
+            if hops > thread_parent_by_context.len() {
+                return Err(RustTransportError::InvalidAssertionContext(format!(
+                    "thread phase context cycle at {context:016x}"
+                )));
+            }
+            context = *parent;
+        }
+        Ok(context)
+    };
     let phase_id_by_context = definitions
         .values()
         .map(|phase| {
@@ -126,17 +162,18 @@ pub fn project_rust_assertion_phases(
                 phase.child_context_id, phase.decision_id
             )));
         }
-        let caused_by_phase_id = if phase.parent_context_id == base_context_id {
+        let parent_context_id = collapse_thread_parents(phase.parent_context_id)?;
+        let caused_by_phase_id = if parent_context_id == base_context_id {
             Some(base_phase.id.clone())
         } else {
             Some(
                 phase_id_by_context
-                    .get(&phase.parent_context_id)
+                    .get(&parent_context_id)
                     .cloned()
                     .ok_or_else(|| {
                         RustTransportError::InvalidAssertionContext(format!(
                             "phase {:016x} has unresolved parent {:016x}",
-                            phase.child_context_id, phase.parent_context_id
+                            phase.child_context_id, parent_context_id
                         ))
                     })?,
             )
@@ -160,6 +197,7 @@ pub fn project_rust_assertion_phases(
     Ok(RustPhaseProjection {
         phases,
         phase_id_by_context,
+        thread_parent_by_context,
     })
 }
 
@@ -168,8 +206,8 @@ mod tests {
     use crate::{
         coverage_report::{CoverageManifest, CoveragePhase, DecisionMeta},
         rust_probe_transport::{
-            RustPhaseContext, RustTransportObservation, RustTransportRead,
-            rust_assertion_context_id,
+            RustPhaseContext, RustThreadPhase, RustTransportObservation, RustTransportRead,
+            rust_assertion_context_id, rust_thread_context_id,
         },
         rust_runtime::RustProbeObservation,
     };
@@ -251,17 +289,48 @@ mod tests {
                 },
             })
             .collect();
+        let thread_under_first = rust_thread_context_id(first, 9);
+        let thread_under_base = rust_thread_context_id(BASE, 10);
         let read = RustTransportRead {
             observations,
             ordinal_hits: Vec::new(),
             phases,
-            committed: 5,
-            incomplete: 0,
-            dropped: 0,
+            thread_phases: vec![
+                RustThreadPhase {
+                    process_id: 1,
+                    child_context_id: thread_under_first,
+                    parent_context_id: first,
+                    invocation_nonce: 9,
+                    commit_index: 5,
+                },
+                RustThreadPhase {
+                    process_id: 1,
+                    child_context_id: thread_under_base,
+                    parent_context_id: BASE,
+                    invocation_nonce: 10,
+                    commit_index: 6,
+                },
+            ],
+            committed: 7,
             attachments: 2,
+            ..RustTransportRead::empty()
         };
         let projection =
             project_rust_assertion_phases(BASE, &base_phase(), &read, &manifest()).unwrap();
+        assert_eq!(
+            projection
+                .phase_id_for_context(BASE, "test-phase", thread_under_first)
+                .unwrap(),
+            Some(projection.phases[0].id.as_str()),
+            "thread work belongs to the nearest enclosing assertion phase"
+        );
+        assert_eq!(
+            projection
+                .phase_id_for_context(BASE, "test-phase", thread_under_base)
+                .unwrap(),
+            Some("test-phase"),
+            "thread work directly under the test belongs to the test phase"
+        );
         assert_eq!(projection.phases.len(), 3);
         assert_eq!(
             projection

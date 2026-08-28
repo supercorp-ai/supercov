@@ -6,8 +6,8 @@ mod __SUPERCOV_MODULE__ {
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
-    const MAGIC: &[u8; 8] = b"SCVRUST2";
-    const VERSION: u32 = 2;
+    const MAGIC: &[u8; 8] = b"SCVRUST3";
+    const VERSION: u32 = 3;
     const HEADER_SIZE: usize = 128;
     const DESCRIPTOR_SIZE: usize = 40;
     const ENDIAN_MARKER: u32 = 0x0102_0304;
@@ -23,6 +23,9 @@ mod __SUPERCOV_MODULE__ {
     const KIND_DECISION: u8 = 2;
     const KIND_ORDINAL_HIT: u8 = 3;
     const KIND_PHASE: u8 = 4;
+    const KIND_THREAD_PHASE: u8 = 5;
+    const KIND_THREAD_END: u8 = 6;
+    const KIND_TEST_BOUNDARY: u8 = 7;
     const DECISION_ID_PREFIX: &[u8; 12] = b"rs:decision:";
     const DECISION_ID_LENGTH: u32 = 36;
     const NO_CONTEXT_OVERRIDE: u64 = u64::MAX;
@@ -85,11 +88,14 @@ mod __SUPERCOV_MODULE__ {
             // SAFETY: pthread_create receives exactly one Box allocation from
             // the interposer and invokes this start routine at most once.
             let start = unsafe { Box::from_raw(opaque.cast::<ThreadStart>()) };
-            let previous = super::enter_context(start.context);
+            // The thread runs under a fresh derived thread-phase context, so
+            // a thread that outlives its creating test can be detected and
+            // failed closed to background instead of contaminating the test.
+            let previous = super::enter_thread_context(start.context);
             // SAFETY: the original start routine and argument came directly
             // from the caller's pthread_create invocation.
             let result = unsafe { (start.routine)(start.argument) };
-            super::exit_context(previous);
+            super::exit_thread_context(previous);
             result
         }
 
@@ -1080,6 +1086,73 @@ mod __SUPERCOV_MODULE__ {
             value = value.wrapping_mul(0x0000_0100_0000_01b3);
         }
         value
+    }
+
+    fn thread_context_id(parent: u64, nonce: u64) -> u64 {
+        let mut value = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in b"supercov-rust-thread-phase-v1\0"
+            .iter()
+            .copied()
+            .chain(parent.to_le_bytes())
+            .chain(nonce.to_le_bytes())
+        {
+            value ^= u64::from(byte);
+            value = value.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        if matches!(value, 0 | u64::MAX) {
+            value ^ 0xa5a5_5a5a_d3c3_b4b4
+        } else {
+            value
+        }
+    }
+
+    /// Enter a fresh derived thread-phase context for an inherited native
+    /// thread. Offline partitioning attributes the phase's records to the
+    /// root test only when the matching thread-end record commits before the
+    /// root test's boundary, so shared pool threads fail closed to background.
+    pub fn enter_thread_context(parent: u64) -> u64 {
+        debug_assert!(!matches!(parent, 0 | u64::MAX));
+        let Some(transport) = transport() else {
+            return enter_context(parent);
+        };
+        let nonce = transport
+            .atomic_u64(NEXT_PHASE_OFFSET)
+            .fetch_add(1, Ordering::Relaxed);
+        let child = thread_context_id(parent, nonce);
+        let mut definition = [0_u8; 16];
+        definition[..8].copy_from_slice(&parent.to_le_bytes());
+        definition[8..].copy_from_slice(&nonce.to_le_bytes());
+        transport.record_in_context(KIND_THREAD_PHASE, 0, "", &definition, child);
+        let previous = enter_context(child);
+        debug_assert_eq!(previous, NO_CONTEXT_OVERRIDE);
+        previous
+    }
+
+    /// Commit the thread-end record that bounds an inherited thread's phase.
+    pub fn exit_thread_context(previous: u64) {
+        if let Some(transport) = transport() {
+            let child = transport.active_context();
+            if !matches!(child, 0 | u64::MAX) {
+                transport.record_in_context(KIND_THREAD_END, 0, "", &[], child);
+            }
+        }
+        exit_context(previous);
+    }
+
+    /// Exit an exact test context, committing the test-boundary record that
+    /// join-bounds every thread phase rooted in this test. A same-context
+    /// re-entry (the MIR-instrumented test body running inside the libtest
+    /// companion's context guard) is not the outermost exit, so only the
+    /// enclosing exit commits the single authoritative boundary.
+    #[inline(never)]
+    pub fn exit_test_context(context_id: u64, previous: u64) {
+        if previous != context_id
+            && !matches!(context_id, 0 | u64::MAX)
+            && let Some(transport) = transport()
+        {
+            transport.record_in_context(KIND_TEST_BOUNDARY, 0, "", &[], context_id);
+        }
+        exit_context(previous);
     }
 
     fn assertion_context_id(parent: u64, id_high: u64, id_low: u32, nonce: u64) -> u64 {

@@ -31,8 +31,8 @@ pub const LANGUAGE_FRONTEND_PROTOCOL_VERSION: u32 = 2;
 pub const RUST_COMPILER_COMPANION_PROTOCOL_VERSION: u32 = 1;
 pub const RUST_PROBE_TRANSPORT_PROTOCOL_VERSION: u32 = 1;
 pub const RUST_PROBE_TRANSPORT_MAGIC: &str = "SCVRUST1";
-pub const RUST_PROBE_TRANSPORT_V2_PROTOCOL_VERSION: u32 = 2;
-pub const RUST_PROBE_TRANSPORT_V2_MAGIC: &str = "SCVRUST2";
+pub const RUST_PROBE_TRANSPORT_V3_PROTOCOL_VERSION: u32 = 3;
+pub const RUST_PROBE_TRANSPORT_V3_MAGIC: &str = "SCVRUST3";
 pub const RUST_PROBE_TRANSPORT_HEADER_SIZE: usize = 128;
 pub const RUST_PROBE_TRANSPORT_DESCRIPTOR_SIZE: usize = 40;
 pub const RUST_PROBE_TRANSPORT_TOKEN_SIZE: usize = 16;
@@ -42,7 +42,7 @@ pub const RUST_LIBTEST_EVENT_HEADER_SIZE: usize = 64;
 pub const RUST_LIBTEST_EVENT_RECORD_HEADER_SIZE: usize = 48;
 pub const RUST_LIBTEST_EVENT_TOKEN_SIZE: usize = 16;
 pub const RUST_LIBTEST_EVENT_MAX_NAME_BYTES: usize = 1_048_576;
-pub const RUST_LIBTEST_COMPANION_BUNDLE_SCHEMA_VERSION: u32 = 2;
+pub const RUST_LIBTEST_COMPANION_BUNDLE_SCHEMA_VERSION: u32 = 3;
 
 pub const ERROR_CODES: &[&str] = &[
     "AMBIGUOUS_SELECTOR",
@@ -454,12 +454,31 @@ pub struct RustProbeTransportContract {
     pub header_offsets: RustProbeTransportHeaderOffsets,
     pub descriptor_offsets: RustProbeTransportDescriptorOffsets,
     pub record_kinds: RustProbeTransportRecordKinds,
+    #[serde(default)]
+    pub thread_scope: Option<RustProbeTransportThreadScope>,
     pub context: RustProbeTransportContext,
     pub publication: RustProbeTransportPublication,
     pub integrity: RustProbeTransportIntegrity,
     pub completeness: RustProbeTransportCompleteness,
     pub supported_targets: Vec<String>,
     pub unsupported_target: String,
+}
+
+/// The frozen join-bounded thread acceptance rule: a record whose phase chain
+/// includes thread phases is attributed to its root test only when every such
+/// thread phase committed its end before the root test's boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustProbeTransportThreadScope {
+    pub child_derivation: String,
+    pub domain: String,
+    pub thread_end_committed_when_start_routine_returns: bool,
+    pub test_boundary_committed_when_test_context_exits: bool,
+    pub acceptance: String,
+    pub escaped_thread_records_become_background: bool,
+    pub escaped_thread_limitation: String,
+    pub duplicate_thread_end_fatal: bool,
+    pub duplicate_test_boundary_fatal: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -504,6 +523,12 @@ pub struct RustProbeTransportRecordKinds {
     pub ordinal_hit: u8,
     #[serde(default)]
     pub phase: Option<u8>,
+    #[serde(default)]
+    pub thread_phase: Option<u8>,
+    #[serde(default)]
+    pub thread_end: Option<u8>,
+    #[serde(default)]
+    pub test_boundary: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -551,9 +576,9 @@ pub fn rust_probe_transport_contract() -> Result<RustProbeTransportContract, ser
     ))
 }
 
-pub fn rust_probe_transport_v2_contract() -> Result<RustProbeTransportContract, serde_json::Error> {
+pub fn rust_probe_transport_v3_contract() -> Result<RustProbeTransportContract, serde_json::Error> {
     serde_json::from_str(include_str!(
-        "../assets/rust-probe-transport-v2/contract.json"
+        "../assets/rust-probe-transport-v3/contract.json"
     ))
 }
 
@@ -1824,32 +1849,47 @@ mod tests {
     }
 
     #[test]
-    fn rust_probe_transport_v2_adds_authenticated_phase_definitions_only() {
+    fn rust_probe_transport_v3_adds_join_bounded_thread_phases_only() {
         let v1 = rust_probe_transport_contract().unwrap();
-        let v2 = rust_probe_transport_v2_contract().unwrap();
+        let v3 = rust_probe_transport_v3_contract().unwrap();
         assert_eq!(v1.protocol_version, RUST_PROBE_TRANSPORT_PROTOCOL_VERSION);
         assert_eq!(v1.magic, RUST_PROBE_TRANSPORT_MAGIC);
         assert_eq!(v1.record_kinds.phase, None);
+        assert_eq!(v1.thread_scope, None);
         assert_eq!(
-            v2.protocol_version,
-            RUST_PROBE_TRANSPORT_V2_PROTOCOL_VERSION
+            v3.protocol_version,
+            RUST_PROBE_TRANSPORT_V3_PROTOCOL_VERSION
         );
-        assert_eq!(v2.status, "candidate-private-frontend");
-        assert_eq!(v2.magic, RUST_PROBE_TRANSPORT_V2_MAGIC);
-        assert_eq!(v2.record_kinds.phase, Some(4));
-        assert_eq!(v2.header_offsets.next_phase, Some(80));
-        assert_eq!(v2.header_size, v1.header_size);
-        assert_eq!(v2.descriptor_size, v1.descriptor_size);
-        assert_eq!(v2.token_size, v1.token_size);
-        let mut v2_header = v2.header_offsets.clone();
-        v2_header.next_phase = None;
-        assert_eq!(v2_header, v1.header_offsets);
-        assert_eq!(v2.descriptor_offsets, v1.descriptor_offsets);
-        assert_eq!(v2.publication, v1.publication);
-        assert_eq!(v2.integrity, v1.integrity);
-        assert_eq!(v2.completeness, v1.completeness);
-        assert_eq!(v2.supported_targets, v1.supported_targets);
-        assert_eq!(v2.unsupported_target, v1.unsupported_target);
+        assert_eq!(v3.status, "candidate-private-frontend");
+        assert_eq!(v3.magic, RUST_PROBE_TRANSPORT_V3_MAGIC);
+        assert_eq!(v3.record_kinds.phase, Some(4));
+        assert_eq!(v3.record_kinds.thread_phase, Some(5));
+        assert_eq!(v3.record_kinds.thread_end, Some(6));
+        assert_eq!(v3.record_kinds.test_boundary, Some(7));
+        assert_eq!(v3.header_offsets.next_phase, Some(80));
+        let thread_scope = v3.thread_scope.as_ref().expect("v3 freezes threadScope");
+        assert_eq!(thread_scope.domain, "supercov-rust-thread-phase-v1\0");
+        assert_eq!(
+            thread_scope.escaped_thread_limitation,
+            "RUST_THREAD_OUTLIVED_TEST"
+        );
+        assert!(thread_scope.escaped_thread_records_become_background);
+        assert!(thread_scope.duplicate_thread_end_fatal);
+        assert!(thread_scope.duplicate_test_boundary_fatal);
+        assert!(thread_scope.thread_end_committed_when_start_routine_returns);
+        assert!(thread_scope.test_boundary_committed_when_test_context_exits);
+        assert_eq!(v3.header_size, v1.header_size);
+        assert_eq!(v3.descriptor_size, v1.descriptor_size);
+        assert_eq!(v3.token_size, v1.token_size);
+        let mut v3_header = v3.header_offsets.clone();
+        v3_header.next_phase = None;
+        assert_eq!(v3_header, v1.header_offsets);
+        assert_eq!(v3.descriptor_offsets, v1.descriptor_offsets);
+        assert_eq!(v3.publication, v1.publication);
+        assert_eq!(v3.integrity, v1.integrity);
+        assert_eq!(v3.completeness, v1.completeness);
+        assert_eq!(v3.supported_targets, v1.supported_targets);
+        assert_eq!(v3.unsupported_target, v1.unsupported_target);
     }
 
     #[test]

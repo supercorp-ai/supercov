@@ -74,8 +74,8 @@ function createTransport(
   const path = join(scratch, `${name}.transport`);
   const token = randomBytes(16);
   const header = Buffer.alloc(transportHeaderSize);
-  header.write('SCVRUST2', 0, 'ascii');
-  header.writeUInt32LE(2, 8);
+  header.write('SCVRUST3', 0, 'ascii');
+  header.writeUInt32LE(3, 8);
   header.writeUInt32LE(transportHeaderSize, 12);
   header.writeUInt32LE(transportDescriptorSize, 16);
   header.writeUInt32LE(descriptorCapacity, 20);
@@ -95,8 +95,8 @@ function createTransport(
 
 function readTransport(transport) {
   const bytes = readFileSync(transport.path);
-  assert.equal(bytes.subarray(0, 8).toString('ascii'), 'SCVRUST2');
-  assert.equal(bytes.readUInt32LE(8), 2);
+  assert.equal(bytes.subarray(0, 8).toString('ascii'), 'SCVRUST3');
+  assert.equal(bytes.readUInt32LE(8), 3);
   assert.deepEqual(bytes.subarray(56, 72), transport.token);
   const descriptorCapacity = bytes.readUInt32LE(20);
   const payloadCapacity = bytes.readUInt32LE(24);
@@ -106,6 +106,9 @@ function readTransport(transport) {
   const ordinals = [];
   const decisions = [];
   const phases = [];
+  const threadPhases = [];
+  const threadEnds = [];
+  const testBoundaries = [];
   let committed = 0;
   for (let index = 0; index < Math.min(reserved, descriptorCapacity); index += 1) {
     const descriptor = transportHeaderSize + index * transportDescriptorSize;
@@ -146,6 +149,24 @@ function readTransport(transport) {
         nonce: bytes.readBigUInt64LE(payload + idLength + 8).toString(),
         decisionId: bytes.subarray(payload, payload + idLength).toString('utf8'),
       });
+    } else if (kind === 5) {
+      assert.equal(bytes[descriptor + 2], 0);
+      assert.equal(idLength, 0);
+      assert.equal(valueLength, 16);
+      threadPhases.push({
+        child: context,
+        parent: bytes.readBigUInt64LE(payload).toString(),
+        nonce: bytes.readBigUInt64LE(payload + 8).toString(),
+        index,
+      });
+    } else if (kind === 6) {
+      assert.equal(bytes[descriptor + 2], 0);
+      assert.equal(payloadLength, 0);
+      threadEnds.push({context, index});
+    } else if (kind === 7) {
+      assert.equal(bytes[descriptor + 2], 0);
+      assert.equal(payloadLength, 0);
+      testBoundaries.push({context, index});
     } else {
       assert.fail(`unexpected Rust transport record kind ${kind}`);
     }
@@ -158,6 +179,9 @@ function readTransport(transport) {
     decisions,
     ordinals,
     phases,
+    threadPhases,
+    threadEnds,
+    testBoundaries,
   };
 }
 
@@ -1254,6 +1278,25 @@ function assertionPhaseContextId(parent, decisionId, nonce) {
   return value.toString();
 }
 
+function threadPhaseContextId(parent, nonce) {
+  const bytes = Buffer.alloc(
+    Buffer.byteLength('supercov-rust-thread-phase-v1\0') + 8 + 8,
+  );
+  let offset = bytes.write('supercov-rust-thread-phase-v1\0', 'binary');
+  bytes.writeBigUInt64LE(BigInt(parent), offset);
+  offset += 8;
+  bytes.writeBigUInt64LE(BigInt(nonce), offset);
+  let value = 0xcbf29ce484222325n;
+  for (const byte of bytes) {
+    value ^= BigInt(byte);
+    value = BigInt.asUintN(64, value * 0x100000001b3n);
+  }
+  if (value === 0n || value === 0xffffffffffffffffn) {
+    value ^= 0xa5a55a5ad3c3b4b4n;
+  }
+  return value.toString();
+}
+
 function validatePhaseContexts(evidence, baseContexts) {
   const definitions = new Map();
   for (const phase of evidence.phases) {
@@ -1269,10 +1312,24 @@ function validatePhaseContexts(evidence, baseContexts) {
     );
     definitions.set(phase.child, serialized);
   }
+  for (const phase of evidence.threadPhases ?? []) {
+    assert.equal(
+      phase.child,
+      threadPhaseContextId(phase.parent, phase.nonce),
+      'runtime thread-phase definition failed deterministic authentication',
+    );
+    const serialized = `${phase.parent}:${phase.nonce}:thread`;
+    assert(
+      !definitions.has(phase.child) || definitions.get(phase.child) === serialized,
+      `phase context collision for ${phase.child}`,
+    );
+    definitions.set(phase.child, serialized);
+  }
   const roots = new Set([...baseContexts].map(String));
   for (const start of [
     ...evidence.decisions.map(({context}) => context),
     ...evidence.ordinals.map(({context}) => context),
+    ...(evidence.threadEnds ?? []).map(({context}) => context),
   ]) {
     if (start === '0' || roots.has(start)) continue;
     const path = new Set();
@@ -1307,6 +1364,18 @@ function assertionPhaseContext(evidence, parent, decisionId) {
   return contexts[0];
 }
 
+function threadPhaseContext(evidence, parent) {
+  const contexts = (evidence.threadPhases ?? [])
+    .filter((phase) => phase.parent === String(parent))
+    .map(({child}) => child);
+  assert.equal(
+    contexts.length,
+    1,
+    `expected one thread phase under ${parent}`,
+  );
+  return contexts[0];
+}
+
 function buildSharedRuntime() {
   const directory = join(scratch, 'shared-rust-runtime');
   const source = join(directory, 'runtime.rs');
@@ -1321,6 +1390,7 @@ function buildSharedRuntime() {
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_active_context() -> u64 { __supercov_shared_runtime::active_context() }
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_enter_context(context_id: u64) -> u64 { __supercov_shared_runtime::enter_context(context_id) }
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_exit_context(previous: u64) { __supercov_shared_runtime::exit_context(previous) }
+#[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_exit_test_context(context_id: u64, previous: u64) { __supercov_shared_runtime::exit_test_context(context_id, previous) }
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_enter_assertion_context(id_high: u64, id_low: u32) -> u64 { __supercov_shared_runtime::enter_assertion_context(id_high, id_low) }
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_decision_start(id_high: u64, id_low: u32, conditions: u64) -> u64 { __supercov_shared_runtime::mir_decision_start(id_high, id_low, conditions) }
 #[unsafe(no_mangle)] pub extern "C" fn __supercov_rt_decision_condition(token: u64, index: u64, value: bool) { __supercov_shared_runtime::mir_decision_condition(token, index, value) }
@@ -1358,7 +1428,7 @@ try {
       wrapper,
     ]).stdout,
   );
-  assert.equal(libtestBundle.schemaVersion, 2);
+  assert.equal(libtestBundle.schemaVersion, 3);
   assert.equal(libtestBundle.eventProtocolVersion, 1);
   assert.equal(
     libtestBundle.compilerCompanionBuildId,
@@ -6634,6 +6704,13 @@ try {
     childTestContext,
     assertionDecisionIdFor('tests::child_context'),
   );
+  // The thread spawned inside assert_eq! runs under a derived thread-phase
+  // context whose parent is the assertion phase, never the assertion phase
+  // context itself: join-bounded partitioning needs the thread identity.
+  const childThreadContext = threadPhaseContext(
+    concurrentEvidence,
+    childAssertionContext,
+  );
   const previouslyProvenContextPairs = new Set([
       `${assertionContextIds[0]}:${authoredProbe}`,
       `${assertionContextIds[1]}:${fallibleProbe}`,
@@ -6643,7 +6720,7 @@ try {
       `${restoreTestContext}:${fallibleProbe}`,
       `${nestedInnerContext}:${authoredProbe}`,
       `${nestedOuterContext}:${fallibleProbe}`,
-      `${childAssertionContext}:${authoredProbe}`,
+      `${childThreadContext}:${authoredProbe}`,
   ]);
   const missingPreviouslyProvenContextPairs = [
     ...previouslyProvenContextPairs,
@@ -6659,6 +6736,10 @@ try {
   assert(
     !concurrentOrdinalPairs.has(`${childTestContext}:${authoredProbe}`),
     'child-thread work spawned inside an assertion lost its assertion phase',
+  );
+  assert(
+    !concurrentOrdinalPairs.has(`${childAssertionContext}:${authoredProbe}`),
+    'child-thread work was recorded directly under the assertion phase instead of its thread phase',
   );
   assert(
     concurrentEvidence.ordinals.every(({ordinal}) =>
@@ -6727,19 +6808,23 @@ try {
     isolatedTestContext,
     isolatedAssertionId,
   );
+  const isolatedThreadContext = threadPhaseContext(
+    isolatedEvidence,
+    isolatedAssertionContext,
+  );
   assert(
     isolatedEvidence.ordinals.some(
       ({context, ordinal}) =>
-        context === isolatedAssertionContext && ordinal === authoredProbe,
+        context === isolatedThreadContext && ordinal === authoredProbe,
     ),
-    'supervisor-isolated run did not bind child-thread work to the exact assertion phase',
+    'supervisor-isolated run did not bind child-thread work to the thread phase under its exact assertion phase',
   );
   assert(
     isolatedEvidence.ordinals.every(
       ({context, ordinal}) =>
-        ordinal !== authoredProbe || context === isolatedAssertionContext,
+        ordinal !== authoredProbe || context === isolatedThreadContext,
     ),
-    'supervisor-isolated child-thread work leaked outside its assertion phase',
+    'supervisor-isolated child-thread work leaked outside its thread phase',
   );
   assert(
     isolatedEvidence.decisions.some(
