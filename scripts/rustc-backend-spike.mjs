@@ -7684,6 +7684,33 @@ try {
     /misbind check: .* bound the same switch edge/u,
     'the misbind post-condition did not name the duplicated switch edge',
   );
+  // Match arms of one group are alternatives, so they cannot share an entry.
+  const misbindArms = spawnSync(
+    cargo,
+    ['build', '--manifest-path', join(latticeCrate, 'Cargo.toml')],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ...latticeEnvironment,
+        CARGO_TARGET_DIR: join(scratch, 'misbind-arms-target'),
+        SUPERCOV_RUST_COMPILER_OUTPUT: join(scratch, 'misbind-arms-out'),
+        SUPERCOV_RUST_FORCE_UNBINDABLE: '',
+        SUPERCOV_RUST_FORCE_MISBIND: 'unbindable',
+        SUPERCOV_RUST_STRICT_BINDING: '1',
+      },
+    },
+  );
+  assert.notEqual(
+    misbindArms.status,
+    0,
+    'strict binding accepted two match arms entering the same block',
+  );
+  assert.match(
+    misbindArms.stderr,
+    /misbind check: match arms .* both enter block/u,
+    'the match misbind post-condition did not name the shared entry block',
+  );
 
   const strictLattice = spawnSync(
     cargo,

@@ -497,3 +497,22 @@ matching the strict-binding flag.
 Still open for this invariant: the execution differential against
 `-C instrument-coverage` counts, which is the only check that would catch a
 misbind whose structure is locally plausible.
+
+## Match bindings get the same treatment
+
+Two arms of one group are alternatives: they cannot both be entered, so they
+cannot share an entry block, and an arm cannot list its own entry as a
+selection source. Those post-conditions now run on every compile alongside the
+decision ones, pass on the fixture and on bytes, once_cell, proc-macro2, http
+and either, and are proven able to fire by the same fault injection.
+
+Both halves of the automatic check are gated in strict and lattice directions.
+Strict names the duplicated edge or shared block; lattice declines the body, so
+a *suspected* misbind never produces numbers — which is the point, since a
+misbind is the one failure mode that yields confident wrong numbers rather
+than none.
+
+What these checks cannot catch is a misbind that is locally plausible: one
+binding, no collision, no self-reference, but attached to the wrong switch.
+Only the execution differential against `-C instrument-coverage` counts
+reaches that, and it remains the last piece of this invariant.

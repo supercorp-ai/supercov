@@ -7301,6 +7301,43 @@ struct RuntimeDecisionCondition {
 /// numbers, so fail-closed uniqueness never exercises it. These checks are the
 /// automatic half of that guarantee: a binding that picked a plausible but
 /// wrong switch generally violates one of them.
+/// Structural post-conditions every match binding must satisfy.
+///
+/// Two arms of a group are alternatives: they cannot both be entered, so they
+/// cannot share an entry block, and an arm cannot be its own selection source.
+/// A binding that attached an arm to a plausible but wrong block generally
+/// violates one of these.
+fn verify_match_bindings(plans: &[RuntimeMatchPlan], definition: &str) -> Result<(), String> {
+    if let Some(forced) = env::var_os(FORCE_MISBIND)
+        && !forced.is_empty()
+        && definition.contains(&forced.to_string_lossy().into_owned())
+        && let Some(plan) = plans.iter().find(|plan| plan.arms.len() > 1)
+    {
+        return Err(format!(
+            "misbind check: match arms {} and {} in {definition} both enter block {:?} (SUPERCOV_RUST_FORCE_MISBIND fault injection)",
+            plan.arms[0].branch_id, plan.arms[1].branch_id, plan.arms[0].entry_block
+        ));
+    }
+    for plan in plans {
+        let mut entries = BTreeMap::<u32, &str>::new();
+        for arm in &plan.arms {
+            if arm.entry_sources.contains(&arm.entry_block) {
+                return Err(format!(
+                    "misbind check: match arm {} in {definition} lists its own entry {:?} as a selection source",
+                    arm.branch_id, arm.entry_block
+                ));
+            }
+            if let Some(other) = entries.insert(arm.entry_block.as_u32(), &arm.branch_id) {
+                return Err(format!(
+                    "misbind check: match arms {} and {other} in {definition} both enter block {:?}",
+                    arm.branch_id, arm.entry_block
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn verify_decision_bindings(plans: &[RuntimeDecisionPlan], definition: &str) -> Result<(), String> {
     let mut claimed = BTreeMap::<(u32, u32, u32), (String, u64)>::new();
     if let Some(forced) = env::var_os(FORCE_MISBIND)
@@ -8969,6 +9006,7 @@ fn runtime_match_plans<'tcx>(
             arms,
         });
     }
+    verify_match_bindings(&plans, &obligations.definition)?;
     Ok(plans)
 }
 
@@ -9367,6 +9405,7 @@ fn runtime_marked_branch_plans<'tcx>(
             arms,
         });
     }
+    verify_match_bindings(&plans, &obligations.definition)?;
     Ok(plans)
 }
 
