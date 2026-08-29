@@ -302,6 +302,10 @@ struct DecisionObligation {
     outcome_branch_id: String,
     loop_branch_id: Option<String>,
     logical_selections: Vec<DecisionLogicalSelection>,
+    /// The enclosing match arm at recording time. Same-source structural
+    /// conditions generated in parallel arms have no CFG order, so their
+    /// switches are scoped through the bound enclosing group's arm entry.
+    parent_match_arm: Option<(String, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1428,6 +1432,11 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             || collapsed_expansion_conditions
             || conditions.iter().any(|condition| condition.opaque_authored_macro);
         let decision_id = decision.id.clone();
+        let parent_match_arm = self.match_context.as_ref().and_then(|(group, site, index)| {
+            (*site == "body")
+                .then(|| index.map(|index| (group.clone(), index)))
+                .flatten()
+        });
         match self.decisions.get_mut(&decision.id) {
             Some(existing) if existing.identity.canonical != decision.canonical => {
                 self.tcx.dcx().fatal(format!(
@@ -1442,7 +1451,8 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     || existing.assertion_source != assertion_source
                     || existing.outcome_branch_id != outcome_branch_id
                     || existing.loop_branch_id != loop_branch_id
-                    || existing.logical_selections != logical_selections =>
+                    || existing.logical_selections != logical_selections
+                    || existing.parent_match_arm != parent_match_arm =>
             {
                 self.tcx.dcx().fatal(format!(
                     "Supercov Rust decision aggregation mismatch for {}",
@@ -1467,6 +1477,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                         outcome_branch_id,
                         loop_branch_id,
                         logical_selections,
+                        parent_match_arm,
                     },
                 );
             }
@@ -1522,6 +1533,11 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             &[("passed", "passed"), ("failed", "failed")],
         )?;
         let decision_id = decision.id.clone();
+        let parent_match_arm = self.match_context.as_ref().and_then(|(group, site, index)| {
+            (*site == "body")
+                .then(|| index.map(|index| (group.clone(), index)))
+                .flatten()
+        });
         match self.decisions.get_mut(&decision.id) {
             Some(existing) if existing.identity.canonical != decision.canonical => {
                 self.tcx.dcx().fatal(format!(
@@ -1560,6 +1576,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                         outcome_branch_id,
                         loop_branch_id: None,
                         logical_selections: Vec::new(),
+                        parent_match_arm,
                     },
                 );
             }
@@ -3919,6 +3936,7 @@ fn structural_decision_condition_marker_assignments<'tcx>(
     crate_name: &str,
     body: &Body<'tcx>,
     decisions: &[&DecisionObligation],
+    match_assignments: &BTreeMap<String, SyntheticMatchGroupPath>,
     allow_constant_discriminants: bool,
     subject: &str,
 ) -> Result<Vec<(String, usize, BasicBlock)>, String> {
@@ -3943,12 +3961,17 @@ fn structural_decision_condition_marker_assignments<'tcx>(
         return Ok(Vec::new());
     }
     let mut blocks_by_source = BTreeMap::<(String, u32, u32), Vec<BasicBlock>>::new();
+    let mut pattern_blocks_by_source = BTreeMap::<(String, u32, u32), Vec<BasicBlock>>::new();
     for (block, data) in body.basic_blocks.iter_enumerated() {
         let terminator = data.terminator();
-        let TerminatorKind::SwitchInt { discr, .. } = &terminator.kind else {
+        let TerminatorKind::SwitchInt { discr, targets } = &terminator.kind else {
             continue;
         };
-        if discr.ty(&body.local_decls, tcx) != tcx.types.bool {
+        // A refutable pattern condition (`while let`) selects through a
+        // two-way discriminant switch instead of a typed Boolean switch.
+        let pattern_switch = discr.ty(&body.local_decls, tcx) != tcx.types.bool
+            && targets.iter().count() == 1;
+        if discr.ty(&body.local_decls, tcx) != tcx.types.bool && !pattern_switch {
             continue;
         }
         let discriminant_is_constant = match discr {
@@ -4006,14 +4029,107 @@ fn structural_decision_condition_marker_assignments<'tcx>(
                 continue;
             }
         }
-        blocks_by_source
-            .entry(owner.clone())
-            .or_default()
-            .push(block);
+        if pattern_switch {
+            pattern_blocks_by_source
+                .entry(owner.clone())
+                .or_default()
+                .push(block);
+        } else {
+            blocks_by_source
+                .entry(owner.clone())
+                .or_default()
+                .push(block);
+        }
     }
     let mut assignments = Vec::new();
-    for (source, mut source_conditions) in conditions_by_source {
-        let mut blocks = blocks_by_source.remove(&source).unwrap_or_default();
+    for (source, all_conditions) in conditions_by_source {
+        // Pattern-kind conditions pair with discriminant switches; every
+        // other condition pairs with typed Boolean switches. Each class is
+        // ranked and zipped independently within the source.
+        let (pattern_conditions, boolean_conditions): (Vec<_>, Vec<_>) = all_conditions
+            .into_iter()
+            .partition(|(decision, _)| decision.decision_kind == "while-let");
+        // Same-source conditions generated in parallel match arms have no
+        // CFG order among themselves. Scope each class's conditions by their
+        // exact lexical arm; each bound arm entry claims only the switches it
+        // dominates (excluding deeper bound entries) when it has conditions,
+        // and the unscoped remainder ranks sequentially.
+        let bound_arms = match_assignments
+            .iter()
+            .flat_map(|(group, path)| {
+                path.arms
+                    .iter()
+                    .enumerate()
+                    .map(move |(index, arm)| ((group.clone(), index), arm.entry))
+            })
+            .collect::<BTreeMap<(String, usize), BasicBlock>>();
+        let dominators = body.basic_blocks.dominators();
+        let mut class_pools = Vec::new();
+        for (class_conditions, class_blocks) in [
+            (
+                boolean_conditions,
+                blocks_by_source.remove(&source).unwrap_or_default(),
+            ),
+            (
+                pattern_conditions,
+                pattern_blocks_by_source
+                    .remove(&source)
+                    .unwrap_or_default(),
+            ),
+        ] {
+            if class_conditions.is_empty() && class_blocks.is_empty() {
+                continue;
+            }
+            let mut scoped_conditions =
+                BTreeMap::<Option<(String, usize)>, Vec<(&DecisionObligation, usize)>>::new();
+            for (decision, index) in class_conditions {
+                let scope = decision
+                    .parent_match_arm
+                    .clone()
+                    .filter(|key| bound_arms.contains_key(key));
+                scoped_conditions
+                    .entry(scope)
+                    .or_default()
+                    .push((decision, index));
+            }
+            let mut remaining_blocks = class_blocks;
+            let mut scoped = Vec::new();
+            for (scope, scope_conditions) in scoped_conditions {
+                let scope_blocks = match &scope {
+                    Some(key) => {
+                        let entry = bound_arms[key];
+                        let claimed = remaining_blocks
+                            .iter()
+                            .copied()
+                            .filter(|block| {
+                                dominators.dominates(entry, *block)
+                                    && !bound_arms.values().any(|other| {
+                                        *other != entry
+                                            && dominators.dominates(entry, *other)
+                                            && dominators.dominates(*other, *block)
+                                    })
+                            })
+                            .collect::<Vec<_>>();
+                        remaining_blocks.retain(|block| !claimed.contains(block));
+                        claimed
+                    }
+                    None => Vec::new(),
+                };
+                scoped.push((scope, scope_conditions, scope_blocks));
+            }
+            let mut unscoped_present = false;
+            for (scope, _, scope_blocks) in &mut scoped {
+                if scope.is_none() {
+                    unscoped_present = true;
+                    scope_blocks.append(&mut remaining_blocks);
+                }
+            }
+            if !unscoped_present && !remaining_blocks.is_empty() {
+                scoped.push((None, Vec::new(), std::mem::take(&mut remaining_blocks)));
+            }
+            class_pools.extend(scoped);
+        }
+        for (_, mut source_conditions, mut blocks) in class_pools {
         source_conditions
             .sort_by_key(|(decision, index)| (decision.identity.owner_local_ordinal, *index));
         let rank_by_block = blocks
@@ -4071,6 +4187,7 @@ fn structural_decision_condition_marker_assignments<'tcx>(
                 .zip(blocks)
                 .map(|((decision, index), block)| (decision.identity.id.clone(), index, block)),
         );
+        }
     }
     Ok(assignments)
 }
@@ -4592,6 +4709,7 @@ fn mir_built_with_match_markers<'tcx>(
                 &obligations.crate_name,
                 &borrowed,
                 &structural_ctfe_decisions,
+                &BTreeMap::new(),
                 true,
                 "CTFE",
             )
@@ -4818,6 +4936,7 @@ fn mir_built_with_match_markers<'tcx>(
                 &obligations.crate_name,
                 &borrowed,
                 &structural_decisions,
+                &assignments,
                 false,
                 "structural decision",
             )
@@ -7695,6 +7814,7 @@ fn structural_marker_boolean_switch<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
     marker_block: BasicBlock,
+    pattern_condition: bool,
 ) -> Result<BasicBlock, String> {
     let transparent_runtime_calls = [START_BRANCH_FUNCTION, HIT_BRANCH_FUNCTION]
         .into_iter()
@@ -7711,10 +7831,18 @@ fn structural_marker_boolean_switch<'tcx>(
         }
         let terminator = body.basic_blocks[current].terminator();
         match &terminator.kind {
-            TerminatorKind::SwitchInt { discr, .. }
-                if discr.ty(&body.local_decls, tcx) == tcx.types.bool =>
-            {
-                return Ok(current);
+            TerminatorKind::SwitchInt { discr, targets } => {
+                if discr.ty(&body.local_decls, tcx) == tcx.types.bool {
+                    return Ok(current);
+                }
+                // A refutable pattern condition (`while let`) selects through
+                // its two-way discriminant switch.
+                if pattern_condition && targets.iter().count() == 1 {
+                    return Ok(current);
+                }
+                return Err(format!(
+                    "marker path from {marker_block:?} reaches a non-condition switch at {current:?}"
+                ));
             }
             TerminatorKind::Goto { target } => current = *target,
             TerminatorKind::Call {
@@ -7827,22 +7955,55 @@ fn runtime_marked_decision_plans<'tcx>(
                     blocks.len()
                 ));
             };
-            let switch_block = structural_marker_boolean_switch(tcx, body, *entry_block).map_err(
-                |error| {
-                    format!(
-                        "structural decision {decision_id} condition {} {error}",
-                        marker.condition_index
-                    )
-                },
-            )?;
-            let TerminatorKind::SwitchInt { targets, .. } =
+            let pattern_condition = decision.decision_kind == "while-let";
+            let switch_block =
+                structural_marker_boolean_switch(tcx, body, *entry_block, pattern_condition)
+                    .map_err(|error| {
+                        format!(
+                            "structural decision {decision_id} condition {} {error}",
+                            marker.condition_index
+                        )
+                    })?;
+            let TerminatorKind::SwitchInt { discr, targets } =
                 &body.basic_blocks[switch_block].terminator().kind
             else {
                 unreachable!("validated structural marker Boolean switch")
             };
             let condition = &decision.conditions[marker.condition_index];
-            let raw_true_target = targets.target_for_value(1);
-            let raw_false_target = targets.target_for_value(0);
+            let (raw_true_target, raw_false_target) =
+                if discr.ty(&body.local_decls, tcx) == tcx.types.bool {
+                    (targets.target_for_value(1), targets.target_for_value(0))
+                } else {
+                    // The matching variant continues the loop and reaches the
+                    // switch again through the back edge; the refuted variant
+                    // exits.
+                    let successors = targets.all_targets();
+                    let continuing = successors
+                        .iter()
+                        .copied()
+                        .filter(|target| block_reaches(body, *target, switch_block))
+                        .collect::<Vec<_>>();
+                    let [true_target] = continuing.as_slice() else {
+                        return Err(format!(
+                            "structural decision {decision_id} condition {} pattern switch has {} looping successors",
+                            marker.condition_index,
+                            continuing.len()
+                        ));
+                    };
+                    let exits = successors
+                        .iter()
+                        .copied()
+                        .filter(|target| target != true_target)
+                        .collect::<Vec<_>>();
+                    let [false_target] = exits.as_slice() else {
+                        return Err(format!(
+                            "structural decision {decision_id} condition {} pattern switch has {} exit successors",
+                            marker.condition_index,
+                            exits.len()
+                        ));
+                    };
+                    (*true_target, *false_target)
+                };
             let (true_target, false_target) = if condition.invert_value {
                 (raw_false_target, raw_true_target)
             } else {

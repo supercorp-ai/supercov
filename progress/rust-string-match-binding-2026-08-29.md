@@ -103,18 +103,35 @@ kinds.
 The predicate landed after the full corpus proved every derive fixture binds
 structurally with identical exact vectors.
 
-That unmasked the next boundary (previously hidden behind the eq fatal), now
-exactly identified by the improved pairing diagnostic: visit_map's nine
-same-source structural conditions are the eight duplicate-field
-`Option::is_some` checks (which pair with their eight typed Boolean switches)
-plus the `while let Some(__key) = next_key()?` LOOP decision. A while-let
-condition is a refutable pattern test — its runtime selection is an Option
-discriminant switch, not a typed Boolean switch, so the structural condition
-pairing (built for boolean-typed conditions) cannot bind it. Coverage-off
-functions need structural PATTERN binding for while-let/if-let/let-chain
-decision kinds, mirroring the synthetic let-else final-pattern-edge
-machinery. That is the next R3 item; until then the supercov-contracts
-dogfood build fails closed at visit_map's loop decision.
+That unmasked visit_map's structural conditions, now fully bound by two
+further extensions (verified on the repro; corpus verdict pending at this
+note's commit):
+
+- Structural PATTERN binding for `while-let` conditions: a refutable pattern
+  condition selects through a two-way discriminant switch, not a typed
+  Boolean switch. The pairing collects those switches into a separate class,
+  and the post-borrow marker resolution accepts them for while-let decisions,
+  discriminating true/false by the loop back edge (the matching variant's
+  edge reaches the switch again; the refuted edge exits).
+- Arm-scoped structural conditions: the eight duplicate-field
+  `Option::is_some` checks live in parallel key-dispatch arms with no CFG
+  order, exactly like the try operators. Decisions now carry
+  `parent_match_arm`, and the pairing applies the same demand-driven claiming
+  (bound arm entries claim dominated switches when they have conditions;
+  leftovers rank sequentially).
+
+## Remaining boundary (next work item)
+
+With visit_map fully bound, the dogfood build fails closed again at derived
+`PartialEq::eq` — this time its LOGICAL-SELECTION branches ("rustc did not
+retain branch mappings for logical-selection function"). The standalone
+native-mapping path only binds selection branches not referenced by any
+decision's `logical_selections`; eq's selections reaching it means its `&&`
+decision either was not recorded or does not reference them (orphaned
+selection branches). Diagnose why the derived eq decision is absent/detached,
+then either bind its selections through the structural decision vector (as
+decision-linked selections already are) or record the missing decision. Until
+then supercov-contracts fails closed at eq.
 
 ## Gates
 
