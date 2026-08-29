@@ -2167,6 +2167,21 @@ miss blocks flipping any default.
   that retains stock scheduling/presentation while emitting authenticated
   lifecycle events; its production integration remains an R2 gate.
 
+## Checkpoint — 2026-08-29 thread-failure gate and Linux glibc proof
+
+- The interposed `pthread_create` failure path is gated deterministically (a
+  4 EiB stack demand): create fails, exact context survives, no thread phase
+  commits, the start-routine allocation is reclaimed once, and a joined
+  recovery thread stays exactly attributed.
+- All five focused compiler gates pass on `aarch64-unknown-linux-gnu` in a
+  real-toolchain container. Fixes found on the way: the interposer `dlsym`
+  declaration used `*const i8` where Linux `c_char` is unsigned (product
+  bug); the presentation spike now requires the full rmeta+rlib pair like the
+  production builder and links its context stub as a bare object file
+  (GNU-ld/ld64 portable). The proof container needs `--init` for zombie
+  reaping. macOS stays fully green (20/19/316 plus corpus).
+- musl and Windows remain open; no hosted workflow ran.
+
 ## Checkpoint — 2026-08-29 join-bounded thread phases
 
 - `rust-probe-transport-v3` gives every inherited native thread a derived

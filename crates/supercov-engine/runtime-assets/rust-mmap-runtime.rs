@@ -36,7 +36,11 @@ mod __SUPERCOV_MODULE__ {
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     mod inherited_thread_context {
-        use std::{ffi::c_void, mem, sync::OnceLock};
+        use std::{
+            ffi::{c_char, c_void},
+            mem,
+            sync::OnceLock,
+        };
 
         type StartRoutine = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
         type PthreadCreate = unsafe extern "C" fn(
@@ -55,13 +59,13 @@ mod __SUPERCOV_MODULE__ {
         #[cfg(target_os = "macos")]
         #[link(name = "System")]
         unsafe extern "C" {
-            fn dlsym(handle: *mut c_void, symbol: *const i8) -> *mut c_void;
+            fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
         }
 
         #[cfg(target_os = "linux")]
         #[link(name = "dl")]
         unsafe extern "C" {
-            fn dlsym(handle: *mut c_void, symbol: *const i8) -> *mut c_void;
+            fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
         }
 
         fn real_pthread_create() -> PthreadCreate {

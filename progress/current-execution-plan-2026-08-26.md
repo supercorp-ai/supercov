@@ -1264,6 +1264,33 @@ formatting, script syntax, package preflight and diff safety. R1–R4 remain ope
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.
 
+### Thread-failure gate and Linux glibc interposer proof checkpoint — 2026-08-29
+
+Deterministic thread-creation failure is now gated: the subprocess fixture
+calls the interposed `pthread_create` directly with an attribute demanding a
+4 EiB stack (a 16 TiB stack allocates lazily on current macOS, so the size
+must exceed the address space), proves the create fails, the caller's exact
+context survives, no thread phase is committed, and a subsequent joined
+recovery thread stays exactly attributed. The interposer's failure path
+reclaims its start-routine allocation exactly once.
+
+The full focused compiler gate set now also passes on
+`aarch64-unknown-linux-gnu` (rust:1.95 container, real toolchain):
+subprocess/fork/exec/spawnp/pool/thread-failure propagation, async
+suspension/resume, custom harness, exact-libtest presentation and the
+builder lifecycle. Getting there surfaced and fixed one product bug and two
+portability defects in spike harnesses: the thread interposer's `dlsym`
+declaration hard-coded `*const i8` where Linux `c_char` is `u8`; the
+presentation spike selected the toolchain's orphan `.rmeta` instead of the
+full rlib pair (platform-dependent sort order — production's builder already
+required the full pair); and its context stub archive was either
+dead-stripped by GNU ld or duplicated rustc runtime shims under ld64
+`force_load`, so it is now a bare object file linked unconditionally. The
+container needs a zombie-reaping init (`docker run --init`) for the
+late-child containment check to observe the kill. macOS remains fully green
+after every fix (20 CLI, 19 contract, 316 engine tests, all focused gates,
+fresh complete corpus). musl and Windows remain open; no hosted workflow ran.
+
 ### Join-bounded thread phases checkpoint — 2026-08-29
 
 Automatic thread inheritance is now sound for shared pools. Every inherited

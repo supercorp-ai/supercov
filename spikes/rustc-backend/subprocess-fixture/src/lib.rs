@@ -37,3 +37,11 @@ pub fn nested_thread_probe(enabled: bool) -> &'static str {
 pub fn pool_worker_probe(enabled: bool) -> &'static str {
     if enabled { "pool" } else { "disabled" }
 }
+
+pub fn thread_failure_probe(enabled: bool) -> &'static str {
+    if enabled { "thread-failure" } else { "disabled" }
+}
+
+pub fn thread_recovery_probe(enabled: bool) -> &'static str {
+    if enabled { "recovered" } else { "disabled" }
+}

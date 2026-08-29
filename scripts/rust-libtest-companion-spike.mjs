@@ -113,12 +113,21 @@ function run(program, commandArguments, options = {}) {
 }
 
 function one(directory, pattern) {
+  // Mirror the production builder: only a metadata file whose full .rlib
+  // sibling exists identifies the linkable crate. Toolchains ship an extra
+  // orphan .rmeta whose sort order differs across platforms.
   const matches = readdirSync(directory)
     .filter((entry) => pattern.test(entry))
     .map((entry) => join(directory, entry))
-    .filter((entry) => statSync(entry).isFile())
+    .filter(
+      (entry) =>
+        statSync(entry).isFile() &&
+        statSync(entry.replace(/\.rmeta$/u, '.rlib'), {
+          throwIfNoEntry: false,
+        })?.isFile(),
+    )
     .sort();
-  assert(matches.length > 0, `no ${pattern} under ${directory}`);
+  assert.equal(matches.length, 1, `expected one full ${pattern} under ${directory}`);
   return matches[0];
 }
 
@@ -169,7 +178,10 @@ try {
   const libc = one(libdir, /^liblibc-.*\.rmeta$/u);
   const companion = join(scratch, 'libtest-supercov.rlib');
   const contextStubSource = join(scratch, 'context-stub.rs');
-  const contextStub = join(scratch, 'libsupercov_context_stub.a');
+  // A bare object file links unconditionally on both GNU ld and ld64; a
+  // staticlib archive is either dead-stripped (GNU member selection) or
+  // duplicates rustc runtime shims (ld64 force_load).
+  const contextStub = join(scratch, 'supercov-context-stub.o');
   const baseline = join(scratch, 'baseline');
   const candidate = join(scratch, 'candidate');
   mkdirSync(join(scratch, 'out'));
@@ -210,7 +222,8 @@ try {
       '--crate-name',
       'supercov_context_stub',
       '--crate-type',
-      'staticlib',
+      'lib',
+      '--emit=obj',
       '-o',
       contextStub,
     ],
@@ -227,10 +240,8 @@ try {
       `test=${companion}`,
       '-L',
       `dependency=${libdir}`,
-      '-L',
-      `native=${scratch}`,
-      '-l',
-      'static=supercov_context_stub',
+      '-C',
+      `link-arg=${contextStub}`,
       '-o',
       candidate,
     ],

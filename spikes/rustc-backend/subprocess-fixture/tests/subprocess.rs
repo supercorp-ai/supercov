@@ -13,11 +13,27 @@ const CONTEXT_ENV: &str = "SUPERCOV_RUST_CONTEXT_ID";
 
 // Declared directly so the calls bind to the executable's own interposed
 // symbols exactly like arbitrary instrumented user code would.
+/// Oversized storage for the platform pthread_attr_t (64 bytes on macOS,
+/// 56 on glibc); u64 alignment satisfies both ABIs.
+#[repr(C)]
+struct PthreadAttr {
+    storage: [u64; 64],
+}
+
 unsafe extern "C" {
     static mut environ: *mut *mut c_char;
     fn fork() -> i32;
     fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
     fn _exit(status: i32) -> !;
+    fn pthread_attr_init(attributes: *mut PthreadAttr) -> i32;
+    fn pthread_attr_destroy(attributes: *mut PthreadAttr) -> i32;
+    fn pthread_attr_setstacksize(attributes: *mut PthreadAttr, size: usize) -> i32;
+    fn pthread_create(
+        thread: *mut usize,
+        attributes: *const PthreadAttr,
+        routine: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
+        argument: *mut c_void,
+    ) -> i32;
     fn execve(
         path: *const c_char,
         arguments: *const *const c_char,
@@ -145,6 +161,42 @@ fn failed_launch_keeps_exact_context() {
         supercov_subprocess_fixture::launch_failure_probe(true),
         "launch-failure",
     );
+}
+
+unsafe extern "C" fn unexpected_thread(_: *mut c_void) -> *mut c_void {
+    // Only reachable if an unallocatable-stack thread somehow spawned; the
+    // gate below then fails on the create result before this evidence lands.
+    supercov_subprocess_fixture::thread_failure_probe(true);
+    ptr::null_mut()
+}
+
+#[test]
+fn thread_creation_failure_preserves_exact_context() {
+    // A stack larger than the entire virtual address space cannot be mapped
+    // on any supported target, so the interposed pthread_create must take its
+    // failure path: reclaim its start-routine allocation exactly once, commit
+    // no thread phase, and leave the caller's exact context untouched.
+    let mut attributes = PthreadAttr { storage: [0; 64] };
+    assert_eq!(unsafe { pthread_attr_init(&mut attributes) }, 0);
+    assert_eq!(
+        unsafe { pthread_attr_setstacksize(&mut attributes, 1_usize << 62) },
+        0,
+        "the oversized stack must be rejected at create, not at attr setup",
+    );
+    let mut thread = 0_usize;
+    let result = unsafe {
+        pthread_create(&mut thread, &attributes, unexpected_thread, ptr::null_mut())
+    };
+    assert_ne!(result, 0, "a 16 TiB stack thread must fail to spawn");
+    assert_eq!(unsafe { pthread_attr_destroy(&mut attributes) }, 0);
+    assert_eq!(
+        supercov_subprocess_fixture::thread_failure_probe(true),
+        "thread-failure",
+    );
+    let value = thread::spawn(|| supercov_subprocess_fixture::thread_recovery_probe(true))
+        .join()
+        .expect("join recovery thread");
+    assert_eq!(value, "recovered");
 }
 
 #[test]

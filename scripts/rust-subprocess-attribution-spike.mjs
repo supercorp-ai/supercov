@@ -108,7 +108,7 @@ try {
     cwd: project,
     env: {CARGO_TARGET_DIR: join(scratch, 'baseline-target')},
   });
-  assert.match(baseline.stdout + baseline.stderr, /11 passed/u);
+  assert.match(baseline.stdout + baseline.stderr, /12 passed/u);
 
   const covered = JSON.parse(
     run(supercov, ['__run-rust-compiler'], {
@@ -129,11 +129,11 @@ try {
     }).stdout,
   );
   assert.equal(covered.exitCode, 0);
-  assert.equal(covered.tests, 11);
-  assert.equal(covered.libtests, 11);
+  assert.equal(covered.tests, 12);
+  assert.equal(covered.libtests, 12);
   assert.equal(covered.doctests, 0);
   assert.equal(covered.backgroundResults, 1);
-  assert.equal(covered.transportHealth.length, 12);
+  assert.equal(covered.transportHealth.length, 13);
   assert(
     covered.transportHealth.every(
       ({status, transport}) =>
@@ -200,6 +200,8 @@ try {
     ['spawnp_child_is_attributed', 'pub fn spawnp_child_probe'],
     ['failed_launch_keeps_exact_context', 'pub fn launch_failure_probe'],
     ['nested_thread_is_attributed', 'pub fn nested_thread_probe'],
+    ['thread_creation_failure_preserves_exact_context', 'pub fn thread_failure_probe'],
+    ['thread_creation_failure_preserves_exact_context', 'pub fn thread_recovery_probe'],
   ];
   for (const [test, needle] of exactPropagationCases) {
     const probeLine = sourceLine(project, childSource, needle);
