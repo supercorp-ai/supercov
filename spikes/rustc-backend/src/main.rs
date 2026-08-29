@@ -5335,6 +5335,9 @@ fn mir_built_with_match_markers<'tcx>(
             })
         };
         let mut instrumented = body.steal();
+        // Declining after this point cannot hand `body` back: it is stolen, and
+        // returning it panics rustc. Keep the uninstrumented copy for that.
+        let pristine = instrumented.clone();
         let mut markers = Vec::new();
         for (decision_id, condition_index, block) in assignments {
             let marker_local = instrumented
@@ -5356,15 +5359,25 @@ fn mir_built_with_match_markers<'tcx>(
                 .map(|decision| decision.conditions.len())
                 .sum::<usize>()
         {
-            tcx.dcx().fatal(format!(
-                "Supercov CTFE decision markers cover {}/{} conditions in {}",
-                markers.len(),
-                structural_ctfe_decisions
-                    .iter()
-                    .map(|decision| decision.conditions.len())
-                    .sum::<usize>(),
-                obligations.definition
-            ));
+            // Not every CTFE construct exposes a marker site for each of its
+            // conditions. That is a binder blind spot, not a broken
+            // environment, so it declines the body rather than stopping a
+            // user's build; strict binding still keeps it a hard signal here.
+            degrade_unbound_obligations(
+                tcx,
+                def_id,
+                "place CTFE decision markers",
+                &obligations.definition,
+                &format!(
+                    "markers cover {}/{} conditions",
+                    markers.len(),
+                    structural_ctfe_decisions
+                        .iter()
+                        .map(|decision| decision.conditions.len())
+                        .sum::<usize>(),
+                ),
+            );
+            return tcx.alloc_steal_mir(pristine);
         }
         let mut stored = STRUCTURAL_DECISION_MARKERS
             .lock()
