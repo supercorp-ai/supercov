@@ -5462,8 +5462,8 @@ fn mir_built_with_match_markers<'tcx>(
         .filter(|group| {
             group.definitions.contains(&obligations.definition)
                 && (group.identity.provenance == "synthetic-expansion"
-                    || (coverage_ineligible
-                        && group.identity.provenance == "authored-expansion"))
+                    || group.identity.provenance == "authored-expansion"
+                    || coverage_ineligible)
         })
         .collect::<Vec<_>>();
     let synthetic_let_else = obligations

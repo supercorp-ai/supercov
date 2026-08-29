@@ -516,3 +516,30 @@ What these checks cannot catch is a misbind that is locally plausible: one
 binding, no collision, no self-reference, but attached to the wrong switch.
 Only the execution differential against `-C instrument-coverage` counts
 reaches that, and it remains the last piece of this invariant.
+
+## Marker widening, targeted correctly
+
+The earlier attempt marked every match group and regressed proc-macro2, so it
+was reverted with the finding written down. Returning with that data, the
+right cut was narrower: mark **macro-expanded** groups regardless of coverage
+eligibility (synthetic-expansion and authored-expansion alike), and leave
+plain authored matches to the span planner.
+
+That is principled rather than tuned. Span degeneracy is a property of macro
+expansion — collapsed bodies, derives, generated code — while plain authored
+code has real distinct arm spans that the span planner handles correctly and
+the chain walk cannot. The pre-borrow binder never needed to replace the span
+planner wholesale; it needed to cover exactly the cases where spans collapse.
+
+| crate | before | after |
+|---|---|---|
+| proc-macro2 | 94.59% | 95.54% |
+| http | 90.32% | 92.64% |
+| bytes | 99.68% | unchanged |
+| once_cell | 98.99% | unchanged |
+| log | 90.24% | unchanged |
+| either | 94.57% | unchanged |
+
+No crate regressed, and the fixture stays strict-green. The general lesson is
+that the failed wide experiment was worth more than a success would have been:
+it produced the measurement that showed where the real boundary lay.
