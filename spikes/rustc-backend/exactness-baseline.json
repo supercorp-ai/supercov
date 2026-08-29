@@ -1,0 +1,92 @@
+{
+  "build_script_build": {
+    "obligations": 140,
+    "declined": 116,
+    "exact": 17.14
+  },
+  "once_cell": {
+    "obligations": 493,
+    "declined": 5,
+    "exact": 98.99
+  },
+  "itoa": {
+    "obligations": 186,
+    "declined": 0,
+    "exact": 100
+  },
+  "zmij": {
+    "obligations": 593,
+    "declined": 368,
+    "exact": 37.94
+  },
+  "tracing_core": {
+    "obligations": 1185,
+    "declined": 27,
+    "exact": 97.72
+  },
+  "serde_core": {
+    "obligations": 1787,
+    "declined": 87,
+    "exact": 95.13
+  },
+  "proc_macro2": {
+    "obligations": 2108,
+    "declined": 114,
+    "exact": 94.59
+  },
+  "memchr": {
+    "obligations": 2717,
+    "declined": 0,
+    "exact": 100
+  },
+  "bytes": {
+    "obligations": 2199,
+    "declined": 7,
+    "exact": 99.68
+  },
+  "quote": {
+    "obligations": 289,
+    "declined": 0,
+    "exact": 100
+  },
+  "syn": {
+    "obligations": 16154,
+    "declined": 967,
+    "exact": 94.01
+  },
+  "http": {
+    "obligations": 3657,
+    "declined": 354,
+    "exact": 90.32
+  },
+  "either": {
+    "obligations": 350,
+    "declined": 79,
+    "exact": 77.43
+  },
+  "log": {
+    "obligations": 369,
+    "declined": 36,
+    "exact": 90.24
+  },
+  "serde_json": {
+    "obligations": 3256,
+    "declined": 261,
+    "exact": 91.98
+  },
+  "serde": {
+    "obligations": 1426,
+    "declined": 60,
+    "exact": 95.79
+  },
+  "tracing_attributes": {
+    "obligations": 883,
+    "declined": 101,
+    "exact": 88.56
+  },
+  "tracing": {
+    "obligations": 365,
+    "declined": 16,
+    "exact": 95.62
+  }
+}
