@@ -4031,12 +4031,21 @@ fn structural_decision_condition_marker_assignments<'tcx>(
         blocks.sort_by_key(|block| rank_by_block[&block.as_u32()]);
         if source_conditions.len() != blocks.len() {
             return Err(format!(
-                "{} {subject} conditions at {}:{}-{} map to {} typed Boolean switches",
+                "{} {subject} conditions at {}:{}-{} map to {} typed Boolean switches; conditions={:?}",
                 source_conditions.len(),
                 source.0,
                 source.1,
                 source.2,
-                blocks.len()
+                blocks.len(),
+                source_conditions
+                    .iter()
+                    .map(|(decision, index)| (
+                        decision.identity.id.as_str(),
+                        decision.decision_kind,
+                        *index,
+                        decision.conditions[*index].text.as_str(),
+                    ))
+                    .collect::<Vec<_>>(),
             ));
         }
         let ranks = blocks
