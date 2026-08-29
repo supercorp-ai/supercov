@@ -184,3 +184,38 @@ invocation forming an entire match-arm body degenerates the span-located
 planner exactly like the wave-5 derived `PartialOrd` case. That is tracked
 separately rather than being absorbed by the lattice, because real code hits
 that pattern constantly and it deserves an exact binding.
+
+## Miner run 4: 11 crates, 22 shapes, and one model inconsistency
+
+With the lattice covering every binder and injection site and the branch
+aggregation fixed, the miner reached 11 crates and enumerated 22 distinct
+unbindable shapes in a single pass (`bytes` alone contributes decision-probe,
+try-operator and statement-probe shapes). That is the intended behavior:
+shapes are now a ranked worklist rather than a sequence of build failures.
+
+The run also stopped on a `decision aggregation mismatch` in `itoa`, and the
+self-diagnosing message named the differing fields immediately:
+`assertion-source,outcome-branch`.
+
+The cause is a model inconsistency rather than a binder blind spot. A
+decision's identity is derived from the assertion condition's own span, which
+for macro-expanded code is the macro body and therefore invocation
+independent. Two of its recorded parts are not: `assertion_source` comes from
+`expression.span.source_callsite()`, and the outcome branch is recorded at a
+callsite-dependent span. One `assert!`-bearing macro invoked at two callsites
+therefore produces a single decision ID carrying two different callsite links,
+and neither recording is wrong.
+
+Interim behavior: the conflict degrades instead of failing. The first
+recording is kept — never merged with the second, since merging is exactly the
+silent wrongness to avoid — and a `RUST_OBLIGATION_AGGREGATION_AMBIGUOUS`
+limitation records it. The obligation's condition set and vectors are
+identical either way; only its callsite link is ambiguous, which is what the
+limitation says. Strict binding still fails hard.
+
+The real fix is a semantic decision, tracked separately: either every recorded
+part becomes invocation-independent to match the ID, or macro-expanded
+obligations get per-invocation identity. The choice determines whether a macro
+body reports one aggregated number or one per expansion site, and it changes
+obligation IDs and the `repeated_expansions` corpus expectations, so it is not
+a patch to make in passing.

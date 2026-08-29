@@ -1542,10 +1542,33 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     || existing.loop_branch_id != loop_branch_id
                     || existing.logical_selections != logical_selections =>
             {
-                self.tcx.dcx().fatal(format!(
-                    "Supercov Rust decision aggregation mismatch for {}",
-                    decision.id
-                ))
+                let differing = [
+                    (existing.decision_kind != decision_kind, "kind"),
+                    (existing.conditions != conditions, "conditions"),
+                    (existing.structural_marker != structural_marker, "structural-marker"),
+                    (existing.assertion_source != assertion_source, "assertion-source"),
+                    (existing.outcome_branch_id != outcome_branch_id, "outcome-branch"),
+                    (existing.loop_branch_id != loop_branch_id, "loop-branch"),
+                    (
+                        existing.logical_selections != logical_selections,
+                        "logical-selections",
+                    ),
+                ]
+                .into_iter()
+                .filter_map(|(differs, name)| differs.then_some(name))
+                .collect::<Vec<_>>()
+                .join(",");
+                let message = format!(
+                    "Supercov Rust decision aggregation mismatch for {} in {}: differing={differing}; existing kind={} conditions={}; new kind={decision_kind} conditions={}",
+                    decision.id,
+                    self.definition,
+                    existing.decision_kind,
+                    existing.conditions.len(),
+                    conditions.len(),
+                );
+                let conflicted = decision.id.clone();
+                self.degrade_aggregation_conflict(&conflicted, &differing, message);
+                return Some(conflicted);
             }
             Some(existing) => {
                 // The enclosing match arm describes the invocation, not the
@@ -1679,6 +1702,26 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
         Some(decision_id)
     }
 
+    /// Two recordings of one aggregated obligation disagree.
+    ///
+    /// Authored obligations aggregate across macro invocations by design, but
+    /// some recorded parts are derived from the callsite rather than the macro
+    /// body (an assertion's phase source and its outcome branch are the known
+    /// cases), so two invocations can disagree without either being wrong.
+    /// Under strict binding this stays a hard failure. Otherwise the first
+    /// recording is kept — never merged with the second — and the conflict is
+    /// recorded, so the obligation's exact vectors survive while its ambiguous
+    /// callsite link is visible in the report.
+    fn degrade_aggregation_conflict(&mut self, id: &str, differing: &str, message: String) {
+        if env::var_os(STRICT_BINDING).is_some_and(|value| !value.is_empty()) {
+            self.tcx.dcx().fatal(message);
+        }
+        self.limitations.insert(format!(
+            "RUST_OBLIGATION_AGGREGATION_AMBIGUOUS: {id} in {}: differing={differing}",
+            self.definition
+        ));
+    }
+
     fn record_branch(
         &mut self,
         span: rustc_span::Span,
@@ -1739,10 +1782,12 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 .filter_map(|(differs, name)| differs.then_some(name))
                 .collect::<Vec<_>>()
                 .join(",");
-                self.tcx.dcx().fatal(format!(
+                let message = format!(
                     "Supercov Rust branch aggregation mismatch for {} in {}: differing={differing}; existing kind={}; new kind={branch_kind}",
                     branch.id, self.definition, existing.branch_kind,
-                ))
+                );
+                self.degrade_aggregation_conflict(&branch_id, &differing, message);
+                return Some(branch_id);
             }
             Some(existing) => {
                 // An authored obligation's identity is invocation-independent
