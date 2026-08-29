@@ -347,3 +347,35 @@ This is the second defect tonight introduced by mechanically rewriting many
 call sites (the first left a half-populated map that panicked on lookup), and
 both were found only by compiling real third-party crates rather than by the
 type checker or the corpus.
+
+## Unmeasurable, second case: an arm that cannot complete
+
+`once_cell` uses the `match void {}` idiom on an uninhabited type, and such an
+arm lowers to no blocks of its own. The first attempt reused the span-overlap
+test from the cfg-eliminated case and silently did not fire: the enclosing
+match's spans overlap the arm's range, so "no MIR overlaps it" was simply not
+true.
+
+Rather than widen the heuristic until it passed, the arm obligation now
+records a fact about the program instead of a guess about spans: whether the
+arm body's type is uninhabited, taken from typeck at HIR time. `match void {}`
+has type `!`, so the arm provably cannot complete, and an arm that cannot
+complete is unmeasurable rather than unbindable. A loosened span rule could
+have misfired on a real binder miss; a type cannot.
+
+once_cell: 493 obligations, 98.99% exact, the five declined being exactly
+those arms.
+
+## Measured crates so far
+
+| crate | obligations | exact | declined |
+|---|---|---|---|
+| bytes | 2199 | 99.68% | 7 cfg-eliminated statements |
+| once_cell | 493 | 98.99% | 5 uninhabited match arms |
+| proc-macro2 | 2108 | 94.59% | 6 bodies, half from one aggregation question |
+
+proc-macro2's largest remaining family is not a binder defect: `next_ch!`
+contains a match and is invoked twice in the same function, so one aggregated
+obligation faces two independent MIR structures and only one can be bound.
+That is the aggregation semantics decision, recorded with evidence rather than
+guessed at.

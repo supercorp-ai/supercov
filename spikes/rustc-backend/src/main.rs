@@ -281,6 +281,11 @@ struct BranchObligation {
 struct MatchArmSelectionObligation {
     branch_id: String,
     body_source: StableSourceRange,
+    /// The arm body's type is uninhabited, so the arm cannot complete. The
+    /// `match void {}` idiom on an empty enum is the common case: it lowers to
+    /// nothing at all. Such an arm is unmeasurable rather than unbindable, and
+    /// must never be reported as uncovered.
+    uninhabited_body: bool,
     /// The arm pattern's owned stable range when it has one. Foreign derives
     /// such as serde span generated patterns at the authored field/variant
     /// identifiers, so pre-borrow chain binding must accept an arm's own
@@ -2001,9 +2006,15 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     "Supercov match-arm branch {branch_id} has incomplete alternatives"
                 ));
             };
+            let uninhabited_body = self
+                .tcx
+                .typeck(self.def_id.expect_local())
+                .node_type_opt(arm.body.hir_id)
+                .is_some_and(|ty| ty.is_never());
             selections.push(MatchArmSelectionObligation {
                 branch_id,
                 body_source,
+                uninhabited_body,
                 pattern_source: stable_source_range(self.tcx, arm.pat.span, self.crate_name)
                     .ok()
                     .filter(|source| source.owned),
@@ -8754,6 +8765,24 @@ fn runtime_match_plans<'tcx>(
                         .collect::<BTreeSet<_>>()
                 });
             if body_blocks.is_empty() {
+                // An arm whose body type is uninhabited cannot complete, so
+                // it lowers to no blocks of its own — `match void {}` on an
+                // empty enum is the common idiom. That is not a binder blind
+                // spot, and calling it uncovered would report code that cannot
+                // execute as a coverage gap.
+                if arm.uninhabited_body {
+                    return Err(format!(
+                        "match arm {} at {}:{}-{} {}",
+                        arm.branch_id,
+                        arm.body_source.key,
+                        arm.body_source.start,
+                        arm.body_source.end,
+                        unmeasurable(
+                            &arm.branch_id,
+                            "arm body lowers to no MIR at all, so it cannot execute in this build"
+                        )
+                    ));
+                }
                 return Err(format!(
                     "match arm {} has no authored MIR body blocks at {}:{}-{}",
                     arm.branch_id, arm.body_source.key, arm.body_source.start, arm.body_source.end
