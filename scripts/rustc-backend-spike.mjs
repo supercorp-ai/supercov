@@ -7579,6 +7579,11 @@ try {
       '}\n' +
       'pub fn paired(first: bool, second: bool) -> usize {\n' +
       '    if first && second { 5 } else { 6 }\n' +
+      '}\n' +
+      'pub fn narrow(flag: bool, k: Kind) -> usize {\n' +
+      '    let base = 7;\n' +
+      '    let chosen = if flag { base } else { base + 1 };\n' +
+      '    match k { Kind::A => chosen, Kind::B => chosen + 1, Kind::C => chosen + 2 }\n' +
       '}\n',
   );
   const latticeOutput = join(scratch, 'lattice-gate-out');
@@ -7652,6 +7657,97 @@ try {
     obligationsOf('neighbor').filter((id) => declined.includes(id)),
     [],
     'declining one body wrongly marked an unrelated body unmeasured',
+  );
+
+  // Declining is scoped to what the failed phase actually cost. A phase that
+  // degrades its own plan list to empty leaves the rest of the body
+  // instrumented and firing, so declining that body wholesale would report
+  // measured obligations as unmeasured — honest in direction, but it was
+  // costing more exactness than every binder fix in this file recovered
+  // (zmij declined 368 of 593 obligations from eleven narrow failures).
+  //
+  // The narrowing is the direction that can produce a wrong number, so it is
+  // proven rather than argued: fail only the decision bind phase and require
+  // that the same body's statements and match selections stay measured, while
+  // the decision and the branches it owns are declined.
+  const narrowOutput = join(scratch, 'lattice-gate-narrow-out');
+  run(cargo, ['build', '--manifest-path', join(latticeCrate, 'Cargo.toml')], {
+    env: {
+      ...latticeEnvironment,
+      CARGO_TARGET_DIR: join(scratch, 'lattice-gate-narrow-target'),
+      SUPERCOV_RUST_COMPILER_OUTPUT: narrowOutput,
+      SUPERCOV_RUST_STRICT_BINDING: '',
+      SUPERCOV_RUST_FORCE_UNBINDABLE: '',
+      SUPERCOV_RUST_FORCE_UNBOUND_DECISIONS: 'narrow',
+    },
+  });
+  const narrowManifest = crateManifest(narrowOutput, 'lattice_gate');
+  assert.deepEqual(
+    narrowManifest.limitations.filter((limitation) =>
+      limitation.startsWith('RUST_OBLIGATION_UNBOUND:'),
+    ),
+    [
+      'RUST_OBLIGATION_UNBOUND: bind Rust decision probes in narrow: SUPERCOV_RUST_FORCE_UNBOUND_DECISIONS fault injection',
+    ],
+    'the narrow fault injection did not record exactly one unbound limitation',
+  );
+  const narrowDeclined = new Set(narrowManifest.unmeasuredObligations);
+  const narrowOf = (collection) =>
+    collection
+      .filter((obligation) => obligation.definitions.includes('narrow'))
+      .map(({id}) => id);
+  const narrowDecisions = narrowOf(narrowManifest.decisions);
+  const narrowPoints = narrowOf(narrowManifest.points);
+  const narrowGroups = narrowOf(narrowManifest.selectionGroups);
+  assert(
+    narrowDecisions.length > 0 && narrowPoints.length > 0 && narrowGroups.length > 0,
+    'the narrow gate body did not record all three obligation kinds',
+  );
+  assert.deepEqual(
+    narrowDecisions.filter((id) => !narrowDeclined.has(id)),
+    [],
+    'a failed decision phase left its own decisions measured',
+  );
+  assert.deepEqual(
+    narrowPoints.filter((id) => narrowDeclined.has(id)),
+    [],
+    'a failed decision phase declined statements that are still instrumented',
+  );
+  assert.deepEqual(
+    narrowGroups.filter((id) => narrowDeclined.has(id)),
+    [],
+    'a failed decision phase declined match selections that are still instrumented',
+  );
+  // Branch obligations split by owner: the ones carrying the decision's
+  // outcome are instrumented from the decision's plan, which is now empty, so
+  // they must be declined with it. The arm branches come from the match plan,
+  // which bound normally, so they must survive.
+  const narrowBranches = (kinds) =>
+    narrowManifest.branches
+      .filter(
+        (branch) =>
+          branch.definitions.includes('narrow') && kinds.includes(branch.kind),
+      )
+      .map(({id}) => id);
+  const ownedByDecision = narrowBranches([
+    'decision-outcome',
+    'loop-entry',
+    'logical-selection',
+  ]);
+  const ownedByMatch = narrowBranches(['match-arm']);
+  assert(
+    ownedByDecision.length > 0 && ownedByMatch.length > 0,
+    'the narrow gate body did not record both decision-owned and match-owned branches',
+  );
+  assert.deepEqual(
+    ownedByDecision.filter((id) => !narrowDeclined.has(id)),
+    [],
+    'a declined decision left the branches it owns measured',
+  );
+  assert.deepEqual(
+    ownedByMatch.filter((id) => narrowDeclined.has(id)),
+    [],
+    'a declined decision wrongly took the match arms down with it',
   );
   // The never-misbind invariant is the one that outranks everything, and a
   // misbind yields confident wrong numbers rather than no numbers, so

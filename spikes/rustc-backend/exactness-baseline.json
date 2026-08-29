@@ -1,8 +1,8 @@
 {
   "build_script_build": {
     "obligations": 140,
-    "declined": 116,
-    "exact": 17.14
+    "declined": 69,
+    "exact": 50.71
   },
   "once_cell": {
     "obligations": 493,
@@ -14,30 +14,25 @@
     "declined": 0,
     "exact": 100
   },
-  "zmij": {
-    "obligations": 593,
-    "declined": 368,
-    "exact": 37.94
-  },
-  "tracing_core": {
-    "obligations": 1185,
-    "declined": 27,
-    "exact": 97.72
-  },
   "serde_core": {
     "obligations": 1787,
-    "declined": 87,
-    "exact": 95.13
+    "declined": 42,
+    "exact": 97.65
   },
   "proc_macro2": {
     "obligations": 2108,
-    "declined": 114,
-    "exact": 94.59
+    "declined": 53,
+    "exact": 97.49
   },
-  "memchr": {
-    "obligations": 2717,
-    "declined": 0,
-    "exact": 100
+  "zmij": {
+    "obligations": 593,
+    "declined": 219,
+    "exact": 63.07
+  },
+  "tracing_core": {
+    "obligations": 1185,
+    "declined": 12,
+    "exact": 98.99
   },
   "bytes": {
     "obligations": 2199,
@@ -51,42 +46,47 @@
   },
   "syn": {
     "obligations": 16154,
-    "declined": 967,
-    "exact": 94.01
+    "declined": 595,
+    "exact": 96.32
+  },
+  "memchr": {
+    "obligations": 2717,
+    "declined": 0,
+    "exact": 100
   },
   "http": {
     "obligations": 3657,
-    "declined": 354,
-    "exact": 90.32
-  },
-  "either": {
-    "obligations": 350,
-    "declined": 79,
-    "exact": 77.43
+    "declined": 247,
+    "exact": 93.25
   },
   "log": {
     "obligations": 369,
     "declined": 36,
     "exact": 90.24
   },
+  "either": {
+    "obligations": 350,
+    "declined": 11,
+    "exact": 96.86
+  },
   "serde_json": {
     "obligations": 3256,
-    "declined": 261,
-    "exact": 91.98
+    "declined": 42,
+    "exact": 98.71
   },
   "serde": {
     "obligations": 1426,
-    "declined": 60,
-    "exact": 95.79
+    "declined": 32,
+    "exact": 97.76
   },
   "tracing_attributes": {
     "obligations": 883,
-    "declined": 101,
-    "exact": 88.56
+    "declined": 29,
+    "exact": 96.72
   },
   "tracing": {
     "obligations": 365,
-    "declined": 16,
-    "exact": 95.62
+    "declined": 15,
+    "exact": 95.89
   }
 }

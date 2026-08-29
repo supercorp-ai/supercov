@@ -543,3 +543,65 @@ planner wholesale; it needed to cover exactly the cases where spans collapse.
 No crate regressed, and the fixture stays strict-green. The general lesson is
 that the failed wide experiment was worth more than a success would have been:
 it produced the measurement that showed where the real boundary lay.
+
+## Declining is scoped to what the failed phase actually cost
+
+The per-crate baseline made a defect visible that no single-crate run could:
+`zmij` declined 368 of 593 obligations — 37.94% exact — from **eleven**
+limitation entries, and `either` declined 79 obligations from about five
+bodies. The bodies were large and the failures were narrow. Whole-body
+declining, the conservative rule adopted when the lattice was introduced, had
+become the dominant cost of exactness in the whole corpus, larger than every
+binder fix in this file recovered.
+
+The conservatism was not justified. Reading the call sites rather than
+reasoning about them shows two distinct failure shapes:
+
+- a **bind** phase that fails degrades its own plan list to `Vec::new()` and
+  falls through — the body still instruments its other kinds, and those probes
+  still fire;
+- an **inject** phase that fails returns the pristine body, so nothing is
+  instrumented at all.
+
+The distinction is a property of the call site and not of the phase name: two
+`bind ...` sites abandon the body, and two `inject Rust CTFE ...` sites
+continue with a partially instrumented one. So `DeclineScope` is passed
+explicitly at all 46 call sites rather than derived from the phase text, and a
+new call site has to state what its failure costs.
+
+Ownership within a body follows the plan that instruments it. A decision owns
+the branches carrying its outcome, its loop back edge and its logical
+selections; a match group owns its arms' branches and guard decisions. Those
+are declined with their owner and stay measured without it.
+
+| crate | before | after |
+|---|---|---|
+| zmij | 37.94% | 63.07% |
+| either | 77.43% | 96.86% |
+| build_script_build | 17.14% | 50.71% |
+| tracing_attributes | 88.56% | 96.72% |
+| serde_json | 91.98% | 98.71% |
+| http | 90.32% | 93.25% |
+| proc_macro2 | 94.59% | 97.49% |
+| syn | 94.01% | 96.32% |
+| serde_core | 95.13% | 97.65% |
+| serde | 95.79% | 97.76% |
+| tracing_core | 97.72% | 98.99% |
+| tracing | 95.62% | 95.89% |
+
+Twelve crates gained, none regressed, across all 18 measured.
+
+This change declines *less*, which is the direction that can turn an
+unmeasured obligation into a reported-uncovered one — the wrong number the
+whole design exists to prevent. So it is proven rather than argued.
+`SUPERCOV_RUST_FORCE_UNBOUND_DECISIONS` fails only the decision bind phase of
+a chosen body, reproducing the exact shape that dominates the corpus, and the
+lattice gate requires that the same body's statements, match group and arm
+branches stay measured while the decision and the one branch it owns are
+declined. Two obligations declined out of eleven, where the old rule declined
+all eleven.
+
+The first run of that gate passed for the wrong reason — a stale cargo target
+directory served a cached rlib, so the wrapper never ran and the manifest was
+the previous one. Same false-green mechanism as earlier in this work; a gate
+that cannot recompile must fail loudly rather than read whatever is on disk.

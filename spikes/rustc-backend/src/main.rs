@@ -89,6 +89,12 @@ const STRICT_BINDING: &str = "SUPERCOV_RUST_STRICT_BINDING";
 /// unbindable. The degradation path must be provable on demand, or the
 /// lattice that keeps arbitrary code compiling would itself be untested.
 const FORCE_UNBINDABLE: &str = "SUPERCOV_RUST_FORCE_UNBINDABLE";
+/// Fails only the decision bind phase, leaving every other phase of the body
+/// to instrument normally. This is the shape that dominates the real corpus —
+/// a narrow bind failure inside an otherwise bindable body — and the gate
+/// built on it proves the surviving probes still fire, rather than being
+/// reported as uncovered.
+const FORCE_UNBOUND_DECISIONS: &str = "SUPERCOV_RUST_FORCE_UNBOUND_DECISIONS";
 /// Marks a construct that cannot be measured here at all, as opposed to one
 /// the binder failed to prove. Strict binding exists to keep binder blind
 /// spots hard, so it must not fire on code that simply is not in this build.
@@ -687,8 +693,12 @@ fn generated_relative_path(path: &Path) -> Option<PathBuf> {
 }
 
 fn verify_generated_source_path(path: &Path, target_root: &Path) -> Result<(), String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("could not inspect generated source {}: {error}", path.display()))?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        format!(
+            "could not inspect generated source {}: {error}",
+            path.display()
+        )
+    })?;
     if !metadata.file_type().is_file() {
         return Err(format!(
             "generated source is not a regular file: {}",
@@ -1414,16 +1424,15 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                             | hir::PatKind::Struct(ref qpath, ..) => qpath,
                             _ => return None,
                         };
-                        let variant_definition = match typeck
-                            .qpath_res(qpath, let_expression.pat.hir_id)
-                        {
-                            hir::def::Res::Def(
-                                DefKind::Ctor(hir::def::CtorOf::Variant, _),
-                                constructor,
-                            ) => self.tcx.parent(constructor),
-                            hir::def::Res::Def(DefKind::Variant, variant) => variant,
-                            _ => return None,
-                        };
+                        let variant_definition =
+                            match typeck.qpath_res(qpath, let_expression.pat.hir_id) {
+                                hir::def::Res::Def(
+                                    DefKind::Ctor(hir::def::CtorOf::Variant, _),
+                                    constructor,
+                                ) => self.tcx.parent(constructor),
+                                hir::def::Res::Def(DefKind::Variant, variant) => variant,
+                                _ => return None,
+                            };
                         Some(adt.variant_index_with_id(variant_definition).as_u32())
                     });
                     (adt.map(|adt| self.tcx.def_path_str(adt.did())), variant)
@@ -1555,13 +1564,18 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             || decision_kind == "assertion"
             || authored_macro_guard
             || collapsed_expansion_conditions
-            || conditions.iter().any(|condition| condition.opaque_authored_macro);
+            || conditions
+                .iter()
+                .any(|condition| condition.opaque_authored_macro);
         let decision_id = decision.id.clone();
-        let parent_match_arm = self.match_context.as_ref().and_then(|(group, site, index)| {
-            (*site == "body")
-                .then(|| index.map(|index| (group.clone(), index)))
-                .flatten()
-        });
+        let parent_match_arm = self
+            .match_context
+            .as_ref()
+            .and_then(|(group, site, index)| {
+                (*site == "body")
+                    .then(|| index.map(|index| (group.clone(), index)))
+                    .flatten()
+            });
         match self.decisions.get_mut(&decision.id) {
             Some(existing) if existing.identity.canonical != decision.canonical => {
                 self.tcx.dcx().fatal(format!(
@@ -1581,9 +1595,18 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 let differing = [
                     (existing.decision_kind != decision_kind, "kind"),
                     (existing.conditions != conditions, "conditions"),
-                    (existing.structural_marker != structural_marker, "structural-marker"),
-                    (existing.assertion_source != assertion_source, "assertion-source"),
-                    (existing.outcome_branch_id != outcome_branch_id, "outcome-branch"),
+                    (
+                        existing.structural_marker != structural_marker,
+                        "structural-marker",
+                    ),
+                    (
+                        existing.assertion_source != assertion_source,
+                        "assertion-source",
+                    ),
+                    (
+                        existing.outcome_branch_id != outcome_branch_id,
+                        "outcome-branch",
+                    ),
                     (existing.loop_branch_id != loop_branch_id, "loop-branch"),
                     (
                         existing.logical_selections != logical_selections,
@@ -1687,11 +1710,14 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             &[("passed", "passed"), ("failed", "failed")],
         )?;
         let decision_id = decision.id.clone();
-        let parent_match_arm = self.match_context.as_ref().and_then(|(group, site, index)| {
-            (*site == "body")
-                .then(|| index.map(|index| (group.clone(), index)))
-                .flatten()
-        });
+        let parent_match_arm = self
+            .match_context
+            .as_ref()
+            .and_then(|(group, site, index)| {
+                (*site == "body")
+                    .then(|| index.map(|index| (group.clone(), index)))
+                    .flatten()
+            });
         match self.decisions.get_mut(&decision.id) {
             Some(existing) if existing.identity.canonical != decision.canonical => {
                 self.tcx.dcx().fatal(format!(
@@ -1781,11 +1807,14 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             return None;
         }
         let branch_id = branch.id.clone();
-        let parent_match_arm = self.match_context.as_ref().and_then(|(group, site, index)| {
-            (*site == "body")
-                .then(|| index.map(|index| (group.clone(), index)))
-                .flatten()
-        });
+        let parent_match_arm = self
+            .match_context
+            .as_ref()
+            .and_then(|(group, site, index)| {
+                (*site == "body")
+                    .then(|| index.map(|index| (group.clone(), index)))
+                    .flatten()
+            });
         match self.branches.get_mut(&branch.id) {
             Some(existing) if existing.identity.canonical != branch.canonical => {
                 self.tcx.dcx().fatal(format!(
@@ -1879,16 +1908,12 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 self.definition
             )),
         };
-        let branch_span = if authored_opaque_macro_condition(
-            self.tcx,
-            self.def_id,
-            self.crate_name,
-            right,
-        ) {
-            right.span.source_callsite()
-        } else {
-            right.span
-        };
+        let branch_span =
+            if authored_opaque_macro_condition(self.tcx, self.def_id, self.crate_name, right) {
+                right.span.source_callsite()
+            } else {
+                right.span
+            };
         let branch_id = self.record_branch(
             branch_span,
             "logical-selection",
@@ -1942,8 +1967,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             // sources, the same way an assertion's callsite can differ between
             // invocations. Keep the first — never merge the two — and record
             // the ambiguity.
-            let message =
-                format!("Supercov logical-selection mapping changed for {branch_id}");
+            let message = format!("Supercov logical-selection mapping changed for {branch_id}");
             self.degrade_aggregation_conflict(&branch_id.clone(), "mapping-source", message);
         }
         Some(branch_id)
@@ -2353,13 +2377,13 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
             .decision_logical_expressions
             .remove(&expression.hir_id.local_id.as_u32())
             && !(expression.span.from_expansion()
-            && !self.tcx.def_span(self.def_id).from_expansion()
-            && expression
-                .span
-                .ctxt()
-                .outer_expn_data()
-                .macro_def_id
-                .is_some_and(|macro_def| !macro_def.is_local()))
+                && !self.tcx.def_span(self.def_id).from_expansion()
+                && expression
+                    .span
+                    .ctxt()
+                    .outer_expn_data()
+                    .macro_def_id
+                    .is_some_and(|macro_def| !macro_def.is_local()))
         {
             let _ = self.record_logical_branch(expression, true);
         }
@@ -2756,86 +2780,69 @@ impl Callbacks for ProbeCallbacks {
             return Compilation::Continue;
         }
         rustc_middle::ty::print::with_no_trimmed_paths!({
-        COMPILATION_SUCCEEDED.store(true, Ordering::Release);
-        let Ok(directory) = env::var(OUTPUT_DIRECTORY) else {
-            return Compilation::Continue;
-        };
-        let directory = PathBuf::from(directory);
-        if let Err(error) = fs::create_dir_all(&directory) {
-            tcx.dcx().fatal(format!(
-                "Supercov could not create the Rust compiler output directory: {error}"
-            ));
-        }
-
-        let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE);
-        let crate_name_string = crate_name.to_string();
-        let output = directory.join(format!(
-            "{}-{}.jsonl",
-            std::process::id(),
-            sanitize(&crate_name_string)
-        ));
-        let Ok(mut output) = OpenOptions::new().create_new(true).write(true).open(output) else {
-            tcx.dcx()
-                .fatal("Supercov could not create a unique Rust compiler trace");
-        };
-        let source_map = tcx.sess.source_map();
-        let doctest_role = DOCTEST_ROLE.get().copied();
-        let doctest_path = env::var("UNSTABLE_RUSTDOC_TEST_PATH").ok();
-        let doctest_line = env::var("UNSTABLE_RUSTDOC_TEST_LINE").ok();
-        let mut points = BTreeMap::<String, PointObligation>::new();
-        let mut branches = BTreeMap::<String, BranchObligation>::new();
-        let mut decisions = BTreeMap::<String, DecisionObligation>::new();
-        let mut match_groups = BTreeMap::<String, MatchSelectionObligation>::new();
-        let mut merged_doctest_descriptors = BTreeMap::<String, MergedDoctestDescriptor>::new();
-        let mut manifest_limitations = BTreeSet::from([
-            "RUST_FRONTEND_PRIVATE: the frozen R1-R4 promotion matrix is not complete".to_owned(),
-        ]);
-
-        for owner in tcx.hir_body_owners() {
-            let def_id = owner.to_def_id();
-            let definition = exact_def_path!(tcx, def_id);
-            // The reserved injected module is transport machinery, never
-            // authored source. The production shape contains declarations
-            // only; keep this boundary fail-safe if a body is ever added.
-            if definition.contains("__supercov_spike_runtime") {
-                continue;
-            }
-            let span = tcx.def_span(def_id);
-            let callsite = span.source_callsite();
-            let kind = tcx.def_kind(def_id);
-            let mir = if matches!(
-                kind,
-                DefKind::Const
-                    | DefKind::AssocConst
-                    | DefKind::Static { .. }
-                    | DefKind::AnonConst
-                    | DefKind::InlineConst
-            ) {
-                tcx.mir_for_ctfe(def_id)
-            } else {
-                tcx.optimized_mir(def_id)
+            COMPILATION_SUCCEEDED.store(true, Ordering::Release);
+            let Ok(directory) = env::var(OUTPUT_DIRECTORY) else {
+                return Compilation::Continue;
             };
-            let mut mir_spans = mir
-                .basic_blocks
-                .iter()
-                .flat_map(|block| {
-                    block
-                        .statements
-                        .iter()
-                        .map(|statement| statement.source_info.span)
-                        .chain(
-                            block
-                                .terminator
-                                .iter()
-                                .map(|terminator| terminator.source_info.span),
-                        )
-                })
-                .map(|span| source_map.span_to_diagnostic_string(span))
-                .collect::<Vec<_>>();
-            mir_spans.sort();
-            mir_spans.dedup();
-            let mut mir_authored_lines = if doctest_role == Some("standalone") {
-                mir.basic_blocks
+            let directory = PathBuf::from(directory);
+            if let Err(error) = fs::create_dir_all(&directory) {
+                tcx.dcx().fatal(format!(
+                    "Supercov could not create the Rust compiler output directory: {error}"
+                ));
+            }
+
+            let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE);
+            let crate_name_string = crate_name.to_string();
+            let output = directory.join(format!(
+                "{}-{}.jsonl",
+                std::process::id(),
+                sanitize(&crate_name_string)
+            ));
+            let Ok(mut output) = OpenOptions::new().create_new(true).write(true).open(output)
+            else {
+                tcx.dcx()
+                    .fatal("Supercov could not create a unique Rust compiler trace");
+            };
+            let source_map = tcx.sess.source_map();
+            let doctest_role = DOCTEST_ROLE.get().copied();
+            let doctest_path = env::var("UNSTABLE_RUSTDOC_TEST_PATH").ok();
+            let doctest_line = env::var("UNSTABLE_RUSTDOC_TEST_LINE").ok();
+            let mut points = BTreeMap::<String, PointObligation>::new();
+            let mut branches = BTreeMap::<String, BranchObligation>::new();
+            let mut decisions = BTreeMap::<String, DecisionObligation>::new();
+            let mut match_groups = BTreeMap::<String, MatchSelectionObligation>::new();
+            let mut merged_doctest_descriptors = BTreeMap::<String, MergedDoctestDescriptor>::new();
+            let mut manifest_limitations = BTreeSet::from([
+                "RUST_FRONTEND_PRIVATE: the frozen R1-R4 promotion matrix is not complete"
+                    .to_owned(),
+            ]);
+
+            for owner in tcx.hir_body_owners() {
+                let def_id = owner.to_def_id();
+                let definition = exact_def_path!(tcx, def_id);
+                // The reserved injected module is transport machinery, never
+                // authored source. The production shape contains declarations
+                // only; keep this boundary fail-safe if a body is ever added.
+                if definition.contains("__supercov_spike_runtime") {
+                    continue;
+                }
+                let span = tcx.def_span(def_id);
+                let callsite = span.source_callsite();
+                let kind = tcx.def_kind(def_id);
+                let mir = if matches!(
+                    kind,
+                    DefKind::Const
+                        | DefKind::AssocConst
+                        | DefKind::Static { .. }
+                        | DefKind::AnonConst
+                        | DefKind::InlineConst
+                ) {
+                    tcx.mir_for_ctfe(def_id)
+                } else {
+                    tcx.optimized_mir(def_id)
+                };
+                let mut mir_spans = mir
+                    .basic_blocks
                     .iter()
                     .flat_map(|block| {
                         block
@@ -2849,269 +2856,288 @@ impl Callbacks for ProbeCallbacks {
                                     .map(|terminator| terminator.source_info.span),
                             )
                     })
-                    .map(|span| source_map.lookup_char_pos(span.lo()))
-                    .map(|location| {
-                        source_map.doctest_offset_line(&location.file.name, location.line)
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-            mir_authored_lines.sort();
-            mir_authored_lines.dedup();
-            let source_snippet = source_map.span_to_snippet(span).ok();
-            let body_snippet = source_map
-                .span_to_snippet(tcx.hir_body_owned_by(owner).value.span)
-                .ok();
-            match merged_doctest_descriptor(tcx, &definition) {
-                Ok(Some(descriptor)) => {
-                    if merged_doctest_descriptors
-                        .insert(descriptor.module.clone(), descriptor)
-                        .is_some()
-                    {
-                        tcx.dcx().fatal(format!(
-                            "Supercov observed duplicate merged doctest descriptor {definition}"
-                        ));
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => tcx.dcx().fatal(error),
-            }
-            let test_name = test_identity_for(tcx, &definition);
-            let test_context_id = test_name.as_deref().map(test_context_id);
-            let doctest_display_name = merged_doctest_display_name(tcx, &definition);
-            let merged_bundle_module =
-                doctest_role.and_then(|role| merged_doctest_module(&definition, role));
-            let synthetic_merged_main = doctest_role == Some("merged-bundle")
-                && merged_bundle_module.is_some()
-                && definition.ends_with("::main");
-            let synthetic_merged_wrapper =
-                doctest_role == Some("merged-bundle") && definition.ends_with("::__main_fn");
-            let function_identity = if is_function_body(kind)
-                && !is_async_function_constructor(tcx, owner)
-                && !synthetic_merged_main
-                && !synthetic_merged_wrapper
-            {
-                match function_identity(tcx, def_id, span, &crate_name_string) {
-                    Ok(identity) => {
-                        match points.get_mut(&identity.id) {
-                            Some(existing) if existing.canonical != identity.canonical => {
-                                tcx.dcx().fatal(format!(
-                                    "Supercov Rust obligation ID collision for {}",
-                                    identity.id
-                                ))
-                            }
-                            Some(existing) => {
-                                existing.definitions.push(exact_def_path!(tcx, def_id));
-                                existing.definitions.sort();
-                                existing.definitions.dedup();
-                            }
-                            None => {
-                                points.insert(
-                                    identity.id.clone(),
-                                    PointObligation {
-                                        canonical: identity.canonical.clone(),
-                                        source: identity.source.clone(),
-                                        provenance: identity.provenance,
-                                        point_kind: "function",
-                                        discriminator: String::new(),
-                                        probe_ordinal: identity.probe_ordinal,
-                                        definitions: vec![exact_def_path!(tcx, def_id)],
-                                    },
-                                );
-                            }
-                        }
-                        Some(identity)
-                    }
-                    Err(error) => {
-                        manifest_limitations.insert(format!(
-                            "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: {error}",
-                            exact_def_path!(tcx, def_id)
-                        ));
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            if !synthetic_merged_wrapper {
-                let body = tcx.hir_body_owned_by(owner);
-                let mut collector = HirManifestCollector {
-                    tcx,
-                    def_id,
-                    crate_name: &crate_name_string,
-                    definition: definition.clone(),
-                    ordinal: 1,
-                    points: &mut points,
-                    branches: &mut branches,
-                    decisions: &mut decisions,
-                    match_groups: &mut match_groups,
-                    limitations: &mut manifest_limitations,
-                    control_overrides: BTreeMap::new(),
-                    loop_branch_overrides: BTreeMap::new(),
-                    decision_logical_expressions: BTreeSet::new(),
-                    match_context: None,
-                };
-                collector.visit_body(body);
-            }
-            let record = format!(
-                "{{\"crate\":\"{}\",\"definition\":\"{}\",\"kind\":\"{:?}\",\"span\":\"{}\",\"callsite\":\"{}\",\"expanded\":{},\"mirBlocks\":{},\"mirSpans\":{},\"mirAuthoredLines\":{},\"sourceSnippet\":{},\"bodySnippet\":{},\"doctestRole\":{},\"doctestPath\":{},\"doctestLine\":{},\"testName\":{},\"testContextId\":{},\"doctestDisplayName\":{},\"manifestPointCount\":{},\"manifestLimitations\":{},\"functionObligationId\":{},\"sourceKey\":{},\"sourceStart\":{},\"sourceEnd\":{},\"sourceProvenance\":{}}}\n",
-                escape(&crate_name_string),
-                escape(&exact_def_path!(tcx, def_id)),
-                kind,
-                escape(&source_map.span_to_diagnostic_string(span)),
-                escape(&source_map.span_to_diagnostic_string(callsite)),
-                span.from_expansion(),
-                mir.basic_blocks.len(),
-                json_strings(&mir_spans),
-                json_usizes(&mir_authored_lines),
-                json_string(source_snippet.as_deref()),
-                json_string(body_snippet.as_deref()),
-                json_string(doctest_role),
-                json_string(doctest_path.as_deref()),
-                json_string(doctest_line.as_deref()),
-                json_string(test_name.as_deref()),
-                test_context_id.map_or_else(|| "null".into(), |value| format!("\"{value}\"")),
-                json_string(doctest_display_name.as_deref()),
-                points.len(),
-                json_strings(&manifest_limitations.iter().cloned().collect::<Vec<_>>()),
-                json_string(
-                    function_identity
-                        .as_ref()
-                        .map(|identity| identity.id.as_str())
-                ),
-                json_string(
-                    function_identity
-                        .as_ref()
-                        .map(|identity| identity.source.key.as_str()),
-                ),
-                function_identity.as_ref().map_or_else(
-                    || "null".into(),
-                    |identity| identity.source.start.to_string(),
-                ),
-                function_identity
-                    .as_ref()
-                    .map_or_else(|| "null".into(), |identity| identity.source.end.to_string(),),
-                json_string(
-                    function_identity
-                        .as_ref()
-                        .map(|identity| identity.provenance),
-                ),
-            );
-            if output.write_all(record.as_bytes()).is_err() {
-                tcx.dcx()
-                    .fatal("Supercov could not persist the Rust compiler trace");
-            }
-        }
-        if output.flush().is_err() {
-            tcx.dcx()
-                .fatal("Supercov could not flush the Rust compiler trace");
-        }
-        if let Err(error) = write_merged_doctest_map(&directory, &merged_doctest_descriptors) {
-            tcx.dcx().fatal(error);
-        }
-        if points.is_empty()
-            && branches.is_empty()
-            && decisions.is_empty()
-            && match_groups.is_empty()
-        {
-            return Compilation::Continue;
-        }
-        let manifest_path = directory.join(format!(
-            "manifest-{}-{}.json",
-            std::process::id(),
-            sanitize(&crate_name_string)
-        ));
-        prune_unreachable_match_arms(&mut branches, &mut match_groups);
-        // Obligations degraded during MIR binding. The body loop above forced
-        // `optimized_mir`/`mir_for_ctfe` per body, so every degradation has
-        // been recorded by now and reaches this crate's manifest candidate.
-        manifest_limitations.extend(
-            BINDER_LIMITATIONS
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .iter()
-                .cloned(),
-        );
-        let limitations = manifest_limitations.into_iter().collect::<Vec<_>>();
-        reject_probe_ordinal_collisions(tcx, &points, &branches, &decisions, &match_groups);
-        let manifest = manifest_json(
-            &crate_name_string,
-            &points,
-            &branches,
-            &decisions,
-            &match_groups,
-            &limitations,
-        );
-        let Ok(mut manifest_output) = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(manifest_path)
-        else {
-            tcx.dcx()
-                .fatal("Supercov could not create a unique Rust manifest candidate");
-        };
-        if manifest_output.write_all(manifest.as_bytes()).is_err()
-            || manifest_output.flush().is_err()
-        {
-            tcx.dcx()
-                .fatal("Supercov could not persist the Rust manifest candidate");
-        }
-        if let Some(ready_path) = env::var_os(ABORT_AFTER_MANIFEST)
-            && env::var(ABORT_CRATE)
-                .map(|target| target == crate_name_string)
-                .unwrap_or(true)
-        {
-            if let Err(error) = fs::write(&ready_path, crate_name_string.as_bytes()) {
-                tcx.dcx().fatal(format!(
-                    "Supercov could not mark the manifest-only crash checkpoint: {error}"
-                ));
-            }
-            std::process::abort();
-        }
-        let required_sources = points
-            .values()
-            .map(|point| point.source.key.clone())
-            .chain(
-                branches
-                    .values()
-                    .map(|branch| branch.identity.source.key.clone()),
-            )
-            .chain(decisions.values().flat_map(|decision| {
-                std::iter::once(decision.identity.source.key.clone()).chain(
-                    decision
-                        .conditions
+                    .map(|span| source_map.span_to_diagnostic_string(span))
+                    .collect::<Vec<_>>();
+                mir_spans.sort();
+                mir_spans.dedup();
+                let mut mir_authored_lines = if doctest_role == Some("standalone") {
+                    mir.basic_blocks
                         .iter()
-                        .map(|condition| condition.source.key.clone()),
+                        .flat_map(|block| {
+                            block
+                                .statements
+                                .iter()
+                                .map(|statement| statement.source_info.span)
+                                .chain(
+                                    block
+                                        .terminator
+                                        .iter()
+                                        .map(|terminator| terminator.source_info.span),
+                                )
+                        })
+                        .map(|span| source_map.lookup_char_pos(span.lo()))
+                        .map(|location| {
+                            source_map.doctest_offset_line(&location.file.name, location.line)
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                mir_authored_lines.sort();
+                mir_authored_lines.dedup();
+                let source_snippet = source_map.span_to_snippet(span).ok();
+                let body_snippet = source_map
+                    .span_to_snippet(tcx.hir_body_owned_by(owner).value.span)
+                    .ok();
+                match merged_doctest_descriptor(tcx, &definition) {
+                    Ok(Some(descriptor)) => {
+                        if merged_doctest_descriptors
+                            .insert(descriptor.module.clone(), descriptor)
+                            .is_some()
+                        {
+                            tcx.dcx().fatal(format!(
+                                "Supercov observed duplicate merged doctest descriptor {definition}"
+                            ));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => tcx.dcx().fatal(error),
+                }
+                let test_name = test_identity_for(tcx, &definition);
+                let test_context_id = test_name.as_deref().map(test_context_id);
+                let doctest_display_name = merged_doctest_display_name(tcx, &definition);
+                let merged_bundle_module =
+                    doctest_role.and_then(|role| merged_doctest_module(&definition, role));
+                let synthetic_merged_main = doctest_role == Some("merged-bundle")
+                    && merged_bundle_module.is_some()
+                    && definition.ends_with("::main");
+                let synthetic_merged_wrapper =
+                    doctest_role == Some("merged-bundle") && definition.ends_with("::__main_fn");
+                let function_identity = if is_function_body(kind)
+                    && !is_async_function_constructor(tcx, owner)
+                    && !synthetic_merged_main
+                    && !synthetic_merged_wrapper
+                {
+                    match function_identity(tcx, def_id, span, &crate_name_string) {
+                        Ok(identity) => {
+                            match points.get_mut(&identity.id) {
+                                Some(existing) if existing.canonical != identity.canonical => {
+                                    tcx.dcx().fatal(format!(
+                                        "Supercov Rust obligation ID collision for {}",
+                                        identity.id
+                                    ))
+                                }
+                                Some(existing) => {
+                                    existing.definitions.push(exact_def_path!(tcx, def_id));
+                                    existing.definitions.sort();
+                                    existing.definitions.dedup();
+                                }
+                                None => {
+                                    points.insert(
+                                        identity.id.clone(),
+                                        PointObligation {
+                                            canonical: identity.canonical.clone(),
+                                            source: identity.source.clone(),
+                                            provenance: identity.provenance,
+                                            point_kind: "function",
+                                            discriminator: String::new(),
+                                            probe_ordinal: identity.probe_ordinal,
+                                            definitions: vec![exact_def_path!(tcx, def_id)],
+                                        },
+                                    );
+                                }
+                            }
+                            Some(identity)
+                        }
+                        Err(error) => {
+                            manifest_limitations.insert(format!(
+                                "RUST_SOURCE_IDENTITY_UNRESOLVED: {}: {error}",
+                                exact_def_path!(tcx, def_id)
+                            ));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                if !synthetic_merged_wrapper {
+                    let body = tcx.hir_body_owned_by(owner);
+                    let mut collector = HirManifestCollector {
+                        tcx,
+                        def_id,
+                        crate_name: &crate_name_string,
+                        definition: definition.clone(),
+                        ordinal: 1,
+                        points: &mut points,
+                        branches: &mut branches,
+                        decisions: &mut decisions,
+                        match_groups: &mut match_groups,
+                        limitations: &mut manifest_limitations,
+                        control_overrides: BTreeMap::new(),
+                        loop_branch_overrides: BTreeMap::new(),
+                        decision_logical_expressions: BTreeSet::new(),
+                        match_context: None,
+                    };
+                    collector.visit_body(body);
+                }
+                let record = format!(
+                    "{{\"crate\":\"{}\",\"definition\":\"{}\",\"kind\":\"{:?}\",\"span\":\"{}\",\"callsite\":\"{}\",\"expanded\":{},\"mirBlocks\":{},\"mirSpans\":{},\"mirAuthoredLines\":{},\"sourceSnippet\":{},\"bodySnippet\":{},\"doctestRole\":{},\"doctestPath\":{},\"doctestLine\":{},\"testName\":{},\"testContextId\":{},\"doctestDisplayName\":{},\"manifestPointCount\":{},\"manifestLimitations\":{},\"functionObligationId\":{},\"sourceKey\":{},\"sourceStart\":{},\"sourceEnd\":{},\"sourceProvenance\":{}}}\n",
+                    escape(&crate_name_string),
+                    escape(&exact_def_path!(tcx, def_id)),
+                    kind,
+                    escape(&source_map.span_to_diagnostic_string(span)),
+                    escape(&source_map.span_to_diagnostic_string(callsite)),
+                    span.from_expansion(),
+                    mir.basic_blocks.len(),
+                    json_strings(&mir_spans),
+                    json_usizes(&mir_authored_lines),
+                    json_string(source_snippet.as_deref()),
+                    json_string(body_snippet.as_deref()),
+                    json_string(doctest_role),
+                    json_string(doctest_path.as_deref()),
+                    json_string(doctest_line.as_deref()),
+                    json_string(test_name.as_deref()),
+                    test_context_id.map_or_else(|| "null".into(), |value| format!("\"{value}\"")),
+                    json_string(doctest_display_name.as_deref()),
+                    points.len(),
+                    json_strings(&manifest_limitations.iter().cloned().collect::<Vec<_>>()),
+                    json_string(
+                        function_identity
+                            .as_ref()
+                            .map(|identity| identity.id.as_str())
+                    ),
+                    json_string(
+                        function_identity
+                            .as_ref()
+                            .map(|identity| identity.source.key.as_str()),
+                    ),
+                    function_identity.as_ref().map_or_else(
+                        || "null".into(),
+                        |identity| identity.source.start.to_string(),
+                    ),
+                    function_identity
+                        .as_ref()
+                        .map_or_else(|| "null".into(), |identity| identity.source.end.to_string(),),
+                    json_string(
+                        function_identity
+                            .as_ref()
+                            .map(|identity| identity.provenance),
+                    ),
+                );
+                if output.write_all(record.as_bytes()).is_err() {
+                    tcx.dcx()
+                        .fatal("Supercov could not persist the Rust compiler trace");
+                }
+            }
+            if output.flush().is_err() {
+                tcx.dcx()
+                    .fatal("Supercov could not flush the Rust compiler trace");
+            }
+            if let Err(error) = write_merged_doctest_map(&directory, &merged_doctest_descriptors) {
+                tcx.dcx().fatal(error);
+            }
+            if points.is_empty()
+                && branches.is_empty()
+                && decisions.is_empty()
+                && match_groups.is_empty()
+            {
+                return Compilation::Continue;
+            }
+            let manifest_path = directory.join(format!(
+                "manifest-{}-{}.json",
+                std::process::id(),
+                sanitize(&crate_name_string)
+            ));
+            prune_unreachable_match_arms(&mut branches, &mut match_groups);
+            // Obligations degraded during MIR binding. The body loop above forced
+            // `optimized_mir`/`mir_for_ctfe` per body, so every degradation has
+            // been recorded by now and reaches this crate's manifest candidate.
+            manifest_limitations.extend(
+                BINDER_LIMITATIONS
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .iter()
+                    .cloned(),
+            );
+            let limitations = manifest_limitations.into_iter().collect::<Vec<_>>();
+            reject_probe_ordinal_collisions(tcx, &points, &branches, &decisions, &match_groups);
+            let manifest = manifest_json(
+                &crate_name_string,
+                &points,
+                &branches,
+                &decisions,
+                &match_groups,
+                &limitations,
+            );
+            let Ok(mut manifest_output) = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(manifest_path)
+            else {
+                tcx.dcx()
+                    .fatal("Supercov could not create a unique Rust manifest candidate");
+            };
+            if manifest_output.write_all(manifest.as_bytes()).is_err()
+                || manifest_output.flush().is_err()
+            {
+                tcx.dcx()
+                    .fatal("Supercov could not persist the Rust manifest candidate");
+            }
+            if let Some(ready_path) = env::var_os(ABORT_AFTER_MANIFEST)
+                && env::var(ABORT_CRATE)
+                    .map(|target| target == crate_name_string)
+                    .unwrap_or(true)
+            {
+                if let Err(error) = fs::write(&ready_path, crate_name_string.as_bytes()) {
+                    tcx.dcx().fatal(format!(
+                        "Supercov could not mark the manifest-only crash checkpoint: {error}"
+                    ));
+                }
+                std::process::abort();
+            }
+            let required_sources = points
+                .values()
+                .map(|point| point.source.key.clone())
+                .chain(
+                    branches
+                        .values()
+                        .map(|branch| branch.identity.source.key.clone()),
                 )
-            }))
-            .chain(match_groups.values().flat_map(|group| {
-                std::iter::once(group.identity.source.key.clone())
-                    .chain(group.arms.iter().map(|arm| arm.body_source.key.clone()))
-            }))
-            .collect::<BTreeSet<_>>();
-        let snapshots = source_snapshots_json(&crate_name_string, &required_sources)
-            .unwrap_or_else(|error| tcx.dcx().fatal(error));
-        let snapshots_path = directory.join(format!(
-            "sources-{}-{}.json",
-            std::process::id(),
-            sanitize(&crate_name_string)
-        ));
-        let Ok(mut snapshots_output) = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(snapshots_path)
-        else {
-            tcx.dcx()
-                .fatal("Supercov could not create a unique Rust source snapshot");
-        };
-        if snapshots_output.write_all(snapshots.as_bytes()).is_err()
-            || snapshots_output.flush().is_err()
-        {
-            tcx.dcx()
-                .fatal("Supercov could not persist the Rust source snapshot");
-        }
-        Compilation::Continue
+                .chain(decisions.values().flat_map(|decision| {
+                    std::iter::once(decision.identity.source.key.clone()).chain(
+                        decision
+                            .conditions
+                            .iter()
+                            .map(|condition| condition.source.key.clone()),
+                    )
+                }))
+                .chain(match_groups.values().flat_map(|group| {
+                    std::iter::once(group.identity.source.key.clone())
+                        .chain(group.arms.iter().map(|arm| arm.body_source.key.clone()))
+                }))
+                .collect::<BTreeSet<_>>();
+            let snapshots = source_snapshots_json(&crate_name_string, &required_sources)
+                .unwrap_or_else(|error| tcx.dcx().fatal(error));
+            let snapshots_path = directory.join(format!(
+                "sources-{}-{}.json",
+                std::process::id(),
+                sanitize(&crate_name_string)
+            ));
+            let Ok(mut snapshots_output) = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(snapshots_path)
+            else {
+                tcx.dcx()
+                    .fatal("Supercov could not create a unique Rust source snapshot");
+            };
+            if snapshots_output.write_all(snapshots.as_bytes()).is_err()
+                || snapshots_output.flush().is_err()
+            {
+                tcx.dcx()
+                    .fatal("Supercov could not persist the Rust source snapshot");
+            }
+            Compilation::Continue
         })
     }
 }
@@ -3347,14 +3373,18 @@ fn recovered_edge_literal<'tcx>(
             Operand::Copy(place) | Operand::Move(place) => place,
             _ => return None,
         };
-        place.projection.iter().rev().find_map(|element| match element {
-            ProjectionElem::ConstantIndex {
-                offset,
-                min_length,
-                from_end: false,
-            } => Some((offset, min_length)),
-            _ => None,
-        })
+        place
+            .projection
+            .iter()
+            .rev()
+            .find_map(|element| match element {
+                ProjectionElem::ConstantIndex {
+                    offset,
+                    min_length,
+                    from_end: false,
+                } => Some((offset, min_length)),
+                _ => None,
+            })
     }
     let predecessors = body.basic_blocks.predecessors();
     // Only pattern-test switches form the accepting path; FalseEdge imaginary
@@ -3386,8 +3416,12 @@ fn recovered_edge_literal<'tcx>(
                 .iter()
                 .find_map(|(value, target)| (target == current).then_some(value))?;
             let byte = u8::try_from(value).ok()?;
-            if bytes.insert(index, byte).is_some_and(|existing| existing != byte)
-                || length.replace(min_length).is_some_and(|existing| existing != min_length)
+            if bytes
+                .insert(index, byte)
+                .is_some_and(|existing| existing != byte)
+                || length
+                    .replace(min_length)
+                    .is_some_and(|existing| existing != min_length)
             {
                 return None;
             }
@@ -3487,7 +3521,13 @@ fn synthetic_match_candidates<'tcx>(
                 imaginary_target,
                 // Desugared matches (`?`, `while let`, …) are never authored
                 // match groups and must not compete as chain candidates.
-            } if data.terminator().source_info.span.desugaring_kind().is_none() => {
+            } if data
+                .terminator()
+                .source_info
+                .span
+                .desugaring_kind()
+                .is_none() =>
+            {
                 Some((block, real_target, imaginary_target))
             }
             _ => None,
@@ -3529,8 +3569,7 @@ fn synthetic_match_candidates<'tcx>(
         if switches.next().is_some() {
             return None;
         }
-        let TerminatorKind::SwitchInt { discr, .. } =
-            &body.basic_blocks[switch].terminator().kind
+        let TerminatorKind::SwitchInt { discr, .. } = &body.basic_blocks[switch].terminator().kind
         else {
             return None;
         };
@@ -3579,14 +3618,13 @@ fn synthetic_match_candidates<'tcx>(
                                         .as_ref()
                                         .is_some_and(|pattern| pattern == source)
                             });
-                    // Only a positively identified type the patterns never
-                    // test disqualifies an edge; guard structures make the
-                    // discriminant unidentifiable and stay span/order-bound.
+                        // Only a positively identified type the patterns never
+                        // test disqualifies an edge; guard structures make the
+                        // discriminant unidentifiable and stay span/order-bound.
                         span_matched
                             && (group.pattern_adts.is_empty()
-                                || discriminant_adt(**block).is_none_or(|edge_adt| {
-                                    group.pattern_adts.contains(&edge_adt)
-                                }))
+                                || discriminant_adt(**block)
+                                    .is_none_or(|edge_adt| group.pattern_adts.contains(&edge_adt)))
                     })
                     .map(|(block, _)| *block)
                     .collect::<BTreeSet<_>>()
@@ -3729,8 +3767,7 @@ fn synthetic_match_candidates<'tcx>(
             } else {
                 next_synthetic_chain_link(body, &arm_edges[index], current)
             };
-            let Some((real, imaginary)) = link.and_then(|link| by_block.get(&link).copied())
-            else {
+            let Some((real, imaginary)) = link.and_then(|link| by_block.get(&link).copied()) else {
                 valid = false;
                 break;
             };
@@ -3839,12 +3876,7 @@ fn synthetic_match_parent_relation(
             block_reaches(body, arm.entry, child.start)
                 && parent.arms.iter().enumerate().all(|(other, other_arm)| {
                     other == index
-                        || !block_reaches_avoiding(
-                            body,
-                            other_arm.entry,
-                            child.start,
-                            arm.entry,
-                        )
+                        || !block_reaches_avoiding(body, other_arm.entry, child.start, arm.entry)
                 })
         }),
         (Some("guard"), Some(index)) => parent.arms.get(index).is_some_and(|arm| {
@@ -4009,8 +4041,7 @@ fn synthetic_match_assignments<'tcx>(
             // later visit order.
             let ordered = groups[..index].iter().all(|earlier| {
                 if earlier.identity.source != group.identity.source
-                    || related
-                        .contains(&(earlier.identity.id.clone(), group.identity.id.clone()))
+                    || related.contains(&(earlier.identity.id.clone(), group.identity.id.clone()))
                 {
                     return true;
                 }
@@ -4213,8 +4244,7 @@ fn try_operator_assignments<'tcx>(
                 crate_name,
             )
             .ok();
-            let expanded =
-                stable_source_range(tcx, terminator.source_info.span, crate_name).ok();
+            let expanded = stable_source_range(tcx, terminator.source_info.span, crate_name).ok();
             let sources = [expanded, callsite]
                 .into_iter()
                 .flatten()
@@ -4281,7 +4311,8 @@ fn try_operator_assignments<'tcx>(
     let mut assignments = BTreeMap::new();
     for (source, source_branches) in branches_by_source {
         let mut source_paths = paths_by_source.remove(&source).unwrap_or_default();
-        let mut scoped_branches = BTreeMap::<Option<(String, usize)>, Vec<&BranchObligation>>::new();
+        let mut scoped_branches =
+            BTreeMap::<Option<(String, usize)>, Vec<&BranchObligation>>::new();
         for branch in source_branches {
             let scope = branch
                 .parent_match_arm
@@ -4291,7 +4322,7 @@ fn try_operator_assignments<'tcx>(
         }
         let mut scoped = Vec::new();
         for (scope, mut scope_branches) in scoped_branches {
-            let mut scope_paths = match &scope {
+            let scope_paths = match &scope {
                 Some(key) => {
                     let entry = bound_arms[key];
                     let claimed = source_paths
@@ -4306,9 +4337,8 @@ fn try_operator_assignments<'tcx>(
                         })
                         .copied()
                         .collect::<Vec<_>>();
-                    source_paths.retain(|path| {
-                        !claimed.iter().any(|kept| kept.start == path.start)
-                    });
+                    source_paths
+                        .retain(|path| !claimed.iter().any(|kept| kept.start == path.start));
                     claimed
                 }
                 None => Vec::new(),
@@ -4402,7 +4432,9 @@ fn try_operator_assignments<'tcx>(
                         .map(|branch| branch.identity.id.as_str())
                         .collect::<Vec<_>>(),
                     control_flow_switches,
-                ) + &format!("; ControlFlow calls (block, desugaring, from_expansion)={calls:?}"));
+                ) + &format!(
+                    "; ControlFlow calls (block, desugaring, from_expansion)={calls:?}"
+                ));
             }
             let ranks = scope_paths
                 .iter()
@@ -4496,8 +4528,8 @@ fn structural_decision_condition_marker_assignments<'tcx>(
                     .map(|adt| tcx.def_path_str(adt.did()))
             })
         };
-        let pattern_switch = discr.ty(&body.local_decls, tcx) != tcx.types.bool
-            && targets.iter().count() == 1;
+        let pattern_switch =
+            discr.ty(&body.local_decls, tcx) != tcx.types.bool && targets.iter().count() == 1;
         if discr.ty(&body.local_decls, tcx) != tcx.types.bool && !pattern_switch {
             continue;
         }
@@ -4560,9 +4592,7 @@ fn structural_decision_condition_marker_assignments<'tcx>(
             let tested = switch_adt();
             let pattern_adts = conditions_by_source[owner]
                 .iter()
-                .filter_map(|(decision, index)| {
-                    decision.conditions[*index].pattern_adt.as_deref()
-                })
+                .filter_map(|(decision, index)| decision.conditions[*index].pattern_adt.as_deref())
                 .collect::<BTreeSet<_>>();
             if tested
                 .as_deref()
@@ -4612,9 +4642,7 @@ fn structural_decision_condition_marker_assignments<'tcx>(
             ),
             (
                 pattern_conditions,
-                pattern_blocks_by_source
-                    .remove(&source)
-                    .unwrap_or_default(),
+                pattern_blocks_by_source.remove(&source).unwrap_or_default(),
             ),
         ] {
             if class_conditions.is_empty() && class_blocks.is_empty() {
@@ -4670,63 +4698,63 @@ fn structural_decision_condition_marker_assignments<'tcx>(
             class_pools.extend(scoped);
         }
         for (_, mut source_conditions, mut blocks) in class_pools {
-        source_conditions
-            .sort_by_key(|(decision, index)| (decision.identity.owner_local_ordinal, *index));
-        let rank_by_block = blocks
-            .iter()
-            .map(|candidate| {
-                let rank = blocks
-                    .iter()
-                    .filter(|other| {
-                        other != &candidate && semantically_before(body, **other, *candidate)
-                    })
-                    .count();
-                (candidate.as_u32(), rank)
-            })
-            .collect::<BTreeMap<_, _>>();
-        blocks.sort_by_key(|block| rank_by_block[&block.as_u32()]);
-        if source_conditions.len() != blocks.len() {
-            return Err(format!(
-                "{} {subject} conditions at {}:{}-{} map to {} typed Boolean switches; conditions={:?}",
-                source_conditions.len(),
-                source.0,
-                source.1,
-                source.2,
-                blocks.len(),
-                source_conditions
-                    .iter()
-                    .map(|(decision, index)| (
-                        decision.identity.id.as_str(),
-                        decision.decision_kind,
-                        *index,
-                        decision.conditions[*index].text.as_str(),
-                    ))
-                    .collect::<Vec<_>>(),
-            ));
-        }
-        let ranks = blocks
-            .iter()
-            .map(|candidate| {
-                blocks
-                    .iter()
-                    .filter(|other| {
-                        other != &candidate && semantically_before(body, **other, *candidate)
-                    })
-                    .count()
-            })
-            .collect::<Vec<_>>();
-        if ranks.iter().enumerate().any(|(index, rank)| index != *rank) {
-            return Err(format!(
-                "{subject} conditions at {}:{}-{} have no total semantic order",
-                source.0, source.1, source.2
-            ));
-        }
-        assignments.extend(
             source_conditions
-                .into_iter()
-                .zip(blocks)
-                .map(|((decision, index), block)| (decision.identity.id.clone(), index, block)),
-        );
+                .sort_by_key(|(decision, index)| (decision.identity.owner_local_ordinal, *index));
+            let rank_by_block = blocks
+                .iter()
+                .map(|candidate| {
+                    let rank = blocks
+                        .iter()
+                        .filter(|other| {
+                            other != &candidate && semantically_before(body, **other, *candidate)
+                        })
+                        .count();
+                    (candidate.as_u32(), rank)
+                })
+                .collect::<BTreeMap<_, _>>();
+            blocks.sort_by_key(|block| rank_by_block[&block.as_u32()]);
+            if source_conditions.len() != blocks.len() {
+                return Err(format!(
+                    "{} {subject} conditions at {}:{}-{} map to {} typed Boolean switches; conditions={:?}",
+                    source_conditions.len(),
+                    source.0,
+                    source.1,
+                    source.2,
+                    blocks.len(),
+                    source_conditions
+                        .iter()
+                        .map(|(decision, index)| (
+                            decision.identity.id.as_str(),
+                            decision.decision_kind,
+                            *index,
+                            decision.conditions[*index].text.as_str(),
+                        ))
+                        .collect::<Vec<_>>(),
+                ));
+            }
+            let ranks = blocks
+                .iter()
+                .map(|candidate| {
+                    blocks
+                        .iter()
+                        .filter(|other| {
+                            other != &candidate && semantically_before(body, **other, *candidate)
+                        })
+                        .count()
+                })
+                .collect::<Vec<_>>();
+            if ranks.iter().enumerate().any(|(index, rank)| index != *rank) {
+                return Err(format!(
+                    "{subject} conditions at {}:{}-{} have no total semantic order",
+                    source.0, source.1, source.2
+                ));
+            }
+            assignments.extend(
+                source_conditions
+                    .into_iter()
+                    .zip(blocks)
+                    .map(|((decision, index), block)| (decision.identity.id.clone(), index, block)),
+            );
         }
     }
     Ok(assignments)
@@ -4765,9 +4793,7 @@ fn opaque_authored_condition_marker_assignments<'tcx>(
                     .ok()?;
                     [&source, &callsite]
                         .iter()
-                        .any(|candidate| {
-                            source_range_contains(&condition.branch_source, candidate)
-                        })
+                        .any(|candidate| source_range_contains(&condition.branch_source, candidate))
                         .then_some(block)
                 })
                 .collect::<Vec<_>>();
@@ -4841,12 +4867,7 @@ fn assertion_context_marker_block<'tcx>(
         tcx,
         marker_function,
         [
-            Operand::const_from_scalar(
-                tcx,
-                tcx.types.u64,
-                Scalar::from_u64(tag),
-                DUMMY_SP,
-            ),
+            Operand::const_from_scalar(tcx, tcx.types.u64, Scalar::from_u64(tag), DUMMY_SP),
             Operand::Copy(Place::from(context)),
             Operand::Copy(Place::from(previous)),
         ]
@@ -4988,11 +5009,7 @@ fn install_assertion_phase_markers<'tcx>(
             let (resume_marker, resume_data) = assertion_context_marker_block(
                 tcx,
                 context_marker,
-                assertion_context_marker_tag(
-                    &decision.identity.id,
-                    suspension_index,
-                    "resume",
-                ),
+                assertion_context_marker_tag(&decision.identity.id, suspension_index, "resume"),
                 assertion_context,
                 previous,
                 marker_unit,
@@ -5007,8 +5024,7 @@ fn install_assertion_phase_markers<'tcx>(
                 .take()
                 .ok_or_else(|| "assertion suspension block has no yield".to_owned())?;
             let mut yielded = BasicBlockData::new(Some(original), cleanup);
-            let TerminatorKind::Yield { resume, .. } = &mut yielded.terminator_mut().kind
-            else {
+            let TerminatorKind::Yield { resume, .. } = &mut yielded.terminator_mut().kind else {
                 return Err("assertion suspension ceased to be a yield".into());
             };
             *resume = resume_bridge;
@@ -5016,11 +5032,7 @@ fn install_assertion_phase_markers<'tcx>(
             let (suspend, suspend_data) = assertion_context_marker_block(
                 tcx,
                 context_marker,
-                assertion_context_marker_tag(
-                    &decision.identity.id,
-                    suspension_index,
-                    "suspend",
-                ),
+                assertion_context_marker_tag(&decision.identity.id, suspension_index, "suspend"),
                 assertion_context,
                 previous,
                 marker_unit,
@@ -5222,7 +5234,26 @@ fn match_arm_marker_statement<'tcx>(
 /// Under `SUPERCOV_RUST_STRICT_BINDING` this fails the build instead.
 /// Supercov's own gates set it so every unbindable shape stays a hard signal
 /// and the corpus keeps proving exactness rather than silently degrading.
+/// Which obligations a failed phase actually cost.
+///
+/// The distinction is a property of the call site, not of the phase name: a
+/// phase that degrades its plan list to empty leaves the rest of the body
+/// instrumented and firing, while a phase that returns the pristine body — or
+/// that continues with a partially instrumented one — costs everything. Two
+/// `bind ...` sites abandon the body and two `inject ...` sites do not, so the
+/// scope is stated explicitly rather than derived from the phase text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeclineScope {
+    /// No probe of any kind can be trusted in this body.
+    Body,
+    Statements,
+    Decisions,
+    Matches,
+    Branches,
+}
+
 fn degrade_unbound_obligations(
+    scope: DeclineScope,
     tcx: TyCtxt<'_>,
     def_id: LocalDefId,
     phase: &str,
@@ -5234,8 +5265,9 @@ fn degrade_unbound_obligations(
     // declined: unmeasurable is not the same as uncovered.
     let unmeasurable = error.contains(UNMEASURABLE);
     if !unmeasurable && env::var_os(STRICT_BINDING).is_some_and(|value| !value.is_empty()) {
-        tcx.dcx()
-            .fatal(format!("Supercov could not {phase} in {definition}: {error}"));
+        tcx.dcx().fatal(format!(
+            "Supercov could not {phase} in {definition}: {error}"
+        ));
     }
     let kind = if unmeasurable {
         "RUST_OBLIGATION_NOT_COMPILED"
@@ -5246,11 +5278,6 @@ fn degrade_unbound_obligations(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .insert(format!("{kind}: {phase} in {definition}: {error}"));
-    // Decline the whole body, not just the failing phase. Once any phase of a
-    // body could not be bound exactly we cannot prove which of its probes
-    // still fire, and over-declining only under-reports coverage — while
-    // under-declining would report an unmeasured obligation as uncovered,
-    // which is the wrong number this design exists to prevent.
     // An uncompiled construct is identified exactly, so decline just it. The
     // rest of the body bound normally and stays measured.
     if let Some(id) = unmeasurable_obligation(error) {
@@ -5263,23 +5290,73 @@ fn degrade_unbound_obligations(
     let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
         return;
     };
+    // A decision owns the branches carrying its outcome, loop back edge and
+    // logical selections, and a match group owns its arms' branches and guard
+    // decisions. Those are instrumented from the owner's plan, so they are
+    // declined with their owner and stay measured without it.
+    let decision_owned = |unmeasured: &mut BTreeSet<String>| {
+        for (id, decision) in &obligations.decisions {
+            unmeasured.insert(id.clone());
+            unmeasured.insert(decision.outcome_branch_id.clone());
+            unmeasured.extend(decision.loop_branch_id.clone());
+            unmeasured.extend(
+                decision
+                    .logical_selections
+                    .iter()
+                    .map(|selection| selection.branch_id.clone()),
+            );
+        }
+    };
+    let match_owned = |unmeasured: &mut BTreeSet<String>| {
+        for (id, group) in &obligations.match_groups {
+            unmeasured.insert(id.clone());
+            for arm in &group.arms {
+                unmeasured.insert(arm.branch_id.clone());
+                unmeasured.extend(arm.guard_decision_id.clone());
+            }
+        }
+    };
     let mut unmeasured = UNMEASURED_OBLIGATIONS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    unmeasured.extend(obligations.points.keys().cloned());
-    unmeasured.extend(obligations.branches.keys().cloned());
-    unmeasured.extend(obligations.decisions.keys().cloned());
-    unmeasured.extend(obligations.match_groups.keys().cloned());
-    // The function obligation occupies owner-local ordinal zero and is
-    // recorded outside the per-body collector, so it needs declining
-    // explicitly: an uninstrumented body never fires its entry probe either.
-    if let Ok(identity) = function_identity(
-        tcx,
-        def_id.to_def_id(),
-        tcx.def_span(def_id),
-        &obligations.crate_name,
-    ) {
-        unmeasured.insert(identity.id);
+    match scope {
+        DeclineScope::Statements => unmeasured.extend(obligations.points.keys().cloned()),
+        DeclineScope::Decisions => decision_owned(&mut unmeasured),
+        DeclineScope::Matches => match_owned(&mut unmeasured),
+        DeclineScope::Branches => {
+            // Every branch this body records except the ones a decision or
+            // match group owns: those bound from a different plan list, which
+            // this failure did not touch.
+            let mut owned = BTreeSet::new();
+            decision_owned(&mut owned);
+            match_owned(&mut owned);
+            unmeasured.extend(
+                obligations
+                    .branches
+                    .keys()
+                    .filter(|id| !owned.contains(*id))
+                    .cloned(),
+            );
+        }
+        DeclineScope::Body => {
+            unmeasured.extend(obligations.points.keys().cloned());
+            unmeasured.extend(obligations.branches.keys().cloned());
+            unmeasured.extend(obligations.decisions.keys().cloned());
+            unmeasured.extend(obligations.match_groups.keys().cloned());
+            // The function obligation occupies owner-local ordinal zero and is
+            // recorded outside the per-body collector, so it needs declining
+            // explicitly: an uninstrumented body never fires its entry probe
+            // either. Every narrower scope leaves the body instrumented, so
+            // the entry probe still fires there.
+            if let Ok(identity) = function_identity(
+                tcx,
+                def_id.to_def_id(),
+                tcx.def_span(def_id),
+                &obligations.crate_name,
+            ) {
+                unmeasured.insert(identity.id);
+            }
+        }
     }
 }
 
@@ -5295,70 +5372,402 @@ fn mir_built_with_match_markers<'tcx>(
         return body;
     }
     rustc_middle::ty::print::with_no_trimmed_paths!({
-    let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
-        return body;
-    };
-    if let Some(forced) = env::var_os(FORCE_UNBINDABLE)
-        && !forced.is_empty()
-        && obligations
-            .definition
-            .contains(&forced.to_string_lossy().into_owned())
-    {
-        degrade_unbound_obligations(
-            tcx,
-            def_id,
-            "bind injected unbindable shape",
-            &obligations.definition,
-            "SUPERCOV_RUST_FORCE_UNBINDABLE fault injection",
+        let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
+            return body;
+        };
+        if let Some(forced) = env::var_os(FORCE_UNBINDABLE)
+            && !forced.is_empty()
+            && obligations
+                .definition
+                .contains(&forced.to_string_lossy().into_owned())
+        {
+            degrade_unbound_obligations(
+                DeclineScope::Body,
+                tcx,
+                def_id,
+                "bind injected unbindable shape",
+                &obligations.definition,
+                "SUPERCOV_RUST_FORCE_UNBINDABLE fault injection",
+            );
+            return body;
+        }
+        let structural_ctfe_owner = matches!(
+            tcx.def_kind(def_id),
+            DefKind::Const
+                | DefKind::AssocConst
+                | DefKind::Static { .. }
+                | DefKind::AnonConst
+                | DefKind::InlineConst
         );
-        return body;
-    }
-    let structural_ctfe_owner = matches!(
-        tcx.def_kind(def_id),
-        DefKind::Const
-            | DefKind::AssocConst
-            | DefKind::Static { .. }
-            | DefKind::AnonConst
-            | DefKind::InlineConst
-    );
-    let const_context = tcx.hir_body_const_context(def_id).is_some();
-    let structural_ctfe_decisions = obligations
-        .decisions
-        .values()
-        .filter(|decision| {
-            decision.definitions.contains(&obligations.definition)
-                && (structural_ctfe_owner || (const_context && decision.structural_marker))
-        })
-        .collect::<Vec<_>>();
-    if !structural_ctfe_decisions.is_empty() {
-        let assignments = {
+        let const_context = tcx.hir_body_const_context(def_id).is_some();
+        let structural_ctfe_decisions = obligations
+            .decisions
+            .values()
+            .filter(|decision| {
+                decision.definitions.contains(&obligations.definition)
+                    && (structural_ctfe_owner || (const_context && decision.structural_marker))
+            })
+            .collect::<Vec<_>>();
+        if !structural_ctfe_decisions.is_empty() {
+            let assignments = {
+                let borrowed = body.borrow();
+                structural_decision_condition_marker_assignments(
+                    tcx,
+                    &obligations.crate_name,
+                    &borrowed,
+                    &structural_ctfe_decisions,
+                    &BTreeMap::new(),
+                    true,
+                    "CTFE",
+                )
+                .unwrap_or_else(|error| {
+                    degrade_unbound_obligations(
+                        DeclineScope::Decisions,
+                        tcx,
+                        def_id,
+                        "bind pre-borrow-check CTFE decisions",
+                        &obligations.definition,
+                        &error,
+                    );
+                    Vec::new()
+                })
+            };
+            let mut instrumented = body.steal();
+            // Declining after this point cannot hand `body` back: it is stolen, and
+            // returning it panics rustc. Keep the uninstrumented copy for that.
+            let pristine = instrumented.clone();
+            let mut markers = Vec::new();
+            for (decision_id, condition_index, block) in assignments {
+                let marker_local = instrumented
+                    .local_decls
+                    .push(LocalDecl::new(tcx.types.u64, DUMMY_SP));
+                instrumented.basic_blocks_mut()[block].statements.insert(
+                    0,
+                    match_arm_marker_statement(tcx, marker_local, condition_index as u64),
+                );
+                markers.push(StructuralDecisionConditionMarker {
+                    local: marker_local.as_u32(),
+                    decision_id,
+                    condition_index,
+                });
+            }
+            if markers.len()
+                != structural_ctfe_decisions
+                    .iter()
+                    .map(|decision| decision.conditions.len())
+                    .sum::<usize>()
+            {
+                // Not every CTFE construct exposes a marker site for each of its
+                // conditions. That is a binder blind spot, not a broken
+                // environment, so it declines the body rather than stopping a
+                // user's build; strict binding still keeps it a hard signal here.
+                degrade_unbound_obligations(
+                    DeclineScope::Body,
+                    tcx,
+                    def_id,
+                    "place CTFE decision markers",
+                    &obligations.definition,
+                    &format!(
+                        "markers cover {}/{} conditions",
+                        markers.len(),
+                        structural_ctfe_decisions
+                            .iter()
+                            .map(|decision| decision.conditions.len())
+                            .sum::<usize>(),
+                    ),
+                );
+                return tcx.alloc_steal_mir(pristine);
+            }
+            let mut stored = STRUCTURAL_DECISION_MARKERS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(existing) = stored.insert(def_id, markers.clone())
+                && existing != markers
+            {
+                tcx.dcx().fatal(format!(
+                    "Supercov CTFE decision marker collision for {}",
+                    obligations.definition
+                ));
+            }
+            return tcx.alloc_steal_mir(instrumented);
+        }
+        if const_context {
+            return body;
+        }
+        {
             let borrowed = body.borrow();
-            structural_decision_condition_marker_assignments(
+            let block_sources = executable_block_sources(tcx, &obligations.crate_name, &borrowed);
+            let mut reachable = BTreeSet::new();
+            let mut pending = vec![rustc_middle::mir::START_BLOCK];
+            while let Some(block) = pending.pop() {
+                if reachable.insert(block) {
+                    pending.extend(semantic_successors(
+                        borrowed.basic_blocks[block].terminator(),
+                    ));
+                }
+            }
+            let unreachable = obligations
+                .match_groups
+                .values()
+                .filter(|group| {
+                    group.definitions.contains(&obligations.definition)
+                        && group.identity.provenance != "synthetic-expansion"
+                })
+                .flat_map(|group| &group.arms)
+                .filter(|arm| {
+                    !block_sources.iter().any(|(block, sources)| {
+                        reachable.contains(block)
+                            && sources.iter().any(|source| {
+                                source.key == arm.body_source.key
+                                    && source.start >= arm.body_source.start
+                                    && source.end <= arm.body_source.end
+                            })
+                    })
+                })
+                .map(|arm| arm.branch_id.clone())
+                .collect::<Vec<_>>();
+            UNREACHABLE_MATCH_ARMS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .extend(unreachable);
+        }
+        // Coverage-ineligible functions (`#[automatically_derived]`,
+        // `#[coverage(off)]`) have wholly collapsed spans, so even their
+        // authored-expansion match groups can only bind through pre-borrow
+        // markers — the span-located planner degenerates on them.
+        let coverage_ineligible = !tcx.coverage_attr_on(def_id);
+        let synthetic_groups = obligations
+            .match_groups
+            .values()
+            .filter(|group| {
+                group.definitions.contains(&obligations.definition)
+                    && (group.identity.provenance == "synthetic-expansion"
+                        || (coverage_ineligible
+                            && group.identity.provenance == "authored-expansion"))
+            })
+            .collect::<Vec<_>>();
+        let synthetic_let_else = obligations
+            .branches
+            .values()
+            .filter(|branch| {
+                branch.definitions.contains(&obligations.definition)
+                    && branch.branch_kind == "let-else"
+                    && branch.identity.provenance == "synthetic-expansion"
+            })
+            .collect::<Vec<_>>();
+        let try_operators = obligations
+            .branches
+            .values()
+            .filter(|branch| {
+                branch.definitions.contains(&obligations.definition)
+                    && branch.branch_kind == "try-operator"
+            })
+            .collect::<Vec<_>>();
+        let structural_decisions = obligations
+            .decisions
+            .values()
+            .filter(|decision| {
+                decision.definitions.contains(&obligations.definition) && decision.structural_marker
+            })
+            .collect::<Vec<_>>();
+        let assertion_decisions = structural_decisions
+            .iter()
+            .copied()
+            .filter(|decision| decision.decision_kind == "assertion")
+            .collect::<Vec<_>>();
+        let opaque_condition_decisions = structural_decisions
+            .iter()
+            .copied()
+            .filter(|decision| {
+                decision
+                    .conditions
+                    .iter()
+                    .any(|condition| condition.opaque_authored_macro)
+            })
+            .collect::<Vec<_>>();
+        if synthetic_groups.is_empty()
+            && synthetic_let_else.is_empty()
+            && try_operators.is_empty()
+            && structural_decisions.is_empty()
+        {
+            return body;
+        }
+        let (assignments, guard_blocks, let_else_assignments, try_assignments) = {
+            let borrowed = body.borrow();
+            let assignments = if synthetic_groups.is_empty() {
+                BTreeMap::new()
+            } else {
+                match synthetic_match_assignments(
+                    tcx,
+                    &obligations.crate_name,
+                    &borrowed,
+                    &synthetic_groups,
+                ) {
+                    Ok(assignments) => assignments,
+                    Err(error) => {
+                        degrade_unbound_obligations(
+                            DeclineScope::Body,
+                            tcx,
+                            def_id,
+                            "bind pre-borrow-check synthetic matches",
+                            &obligations.definition,
+                            &error,
+                        );
+                        return body;
+                    }
+                }
+            };
+            let mut guard_blocks = Vec::new();
+            for group in &synthetic_groups {
+                let Some(path) = assignments.get(&group.identity.id) else {
+                    return body;
+                };
+                for (arm, arm_path) in group.arms.iter().zip(&path.arms) {
+                    let Some(decision_id) = &arm.guard_decision_id else {
+                        continue;
+                    };
+                    let Some(decision) = obligations.decisions.get(decision_id) else {
+                        return body;
+                    };
+                    let (Some(candidate), Some(rejection)) =
+                        (arm_path.guard_candidate, arm_path.rejection)
+                    else {
+                        return body;
+                    };
+                    let blocks = match guard_condition_blocks(
+                        tcx,
+                        &borrowed,
+                        candidate,
+                        arm_path.entry,
+                        rejection,
+                        decision.conditions.len(),
+                    ) {
+                        Ok(blocks) => blocks,
+                        Err(error) => {
+                            degrade_unbound_obligations(
+                                DeclineScope::Body,
+                                tcx,
+                                def_id,
+                                &format!("bind pre-borrow-check synthetic guard {decision_id}"),
+                                &obligations.definition,
+                                &error,
+                            );
+                            return body;
+                        }
+                    };
+                    guard_blocks.extend(
+                        blocks
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, block)| (decision_id.clone(), index, block)),
+                    );
+                }
+            }
+            guard_blocks.extend(
+                opaque_authored_condition_marker_assignments(
+                    tcx,
+                    &obligations.crate_name,
+                    &borrowed,
+                    &opaque_condition_decisions,
+                )
+                .unwrap_or_else(|error| {
+                    degrade_unbound_obligations(
+                        DeclineScope::Decisions,
+                        tcx,
+                        def_id,
+                        "bind authored opaque decision conditions",
+                        &obligations.definition,
+                        &error,
+                    );
+                    Vec::new()
+                }),
+            );
+            guard_blocks.extend(
+                structural_decision_condition_marker_assignments(
+                    tcx,
+                    &obligations.crate_name,
+                    &borrowed,
+                    &structural_decisions,
+                    &assignments,
+                    false,
+                    "structural decision",
+                )
+                .unwrap_or_else(|error| {
+                    degrade_unbound_obligations(
+                        DeclineScope::Decisions,
+                        tcx,
+                        def_id,
+                        "bind pre-borrow-check structural decision conditions",
+                        &obligations.definition,
+                        &error,
+                    );
+                    Vec::new()
+                }),
+            );
+            let let_else_assignments = synthetic_let_else_assignments(
                 tcx,
                 &obligations.crate_name,
                 &borrowed,
-                &structural_ctfe_decisions,
-                &BTreeMap::new(),
-                true,
-                "CTFE",
+                &synthetic_let_else,
             )
             .unwrap_or_else(|error| {
                 degrade_unbound_obligations(
+                    DeclineScope::Branches,
                     tcx,
                     def_id,
-                    "bind pre-borrow-check CTFE decisions",
+                    "bind pre-borrow-check synthetic let-else",
                     &obligations.definition,
                     &error,
                 );
-                Vec::new()
-            })
+                BTreeMap::new()
+            });
+            let try_assignments = try_operator_assignments(
+                tcx,
+                &obligations.crate_name,
+                &borrowed,
+                &try_operators,
+                &assignments,
+            )
+            .unwrap_or_else(|error| {
+                degrade_unbound_obligations(
+                    DeclineScope::Branches,
+                    tcx,
+                    def_id,
+                    "bind pre-borrow-check try operators",
+                    &obligations.definition,
+                    &error,
+                );
+                BTreeMap::new()
+            });
+            (
+                assignments,
+                guard_blocks,
+                let_else_assignments,
+                try_assignments,
+            )
         };
         let mut instrumented = body.steal();
-        // Declining after this point cannot hand `body` back: it is stolen, and
-        // returning it panics rustc. Keep the uninstrumented copy for that.
-        let pristine = instrumented.clone();
-        let mut markers = Vec::new();
-        for (decision_id, condition_index, block) in assignments {
+        let mut local_ordinals = BTreeMap::new();
+        for group in &synthetic_groups {
+            // A degraded match phase records no assignment for its groups.
+            let Some(path) = assignments.get(&group.identity.id) else {
+                continue;
+            };
+            for (arm, arm_path) in group.arms.iter().zip(&path.arms) {
+                let marker_local = instrumented
+                    .local_decls
+                    .push(LocalDecl::new(tcx.types.u64, DUMMY_SP));
+                instrumented.basic_blocks_mut()[arm_path.entry]
+                    .statements
+                    .insert(
+                        0,
+                        match_arm_marker_statement(tcx, marker_local, arm.selected_ordinal),
+                    );
+                local_ordinals.insert(marker_local.as_u32(), arm.selected_ordinal);
+            }
+        }
+        let mut guard_markers = Vec::new();
+        for (decision_id, condition_index, block) in guard_blocks {
             let marker_local = instrumented
                 .local_decls
                 .push(LocalDecl::new(tcx.types.u64, DUMMY_SP));
@@ -5366,490 +5775,176 @@ fn mir_built_with_match_markers<'tcx>(
                 0,
                 match_arm_marker_statement(tcx, marker_local, condition_index as u64),
             );
-            markers.push(StructuralDecisionConditionMarker {
+            guard_markers.push(StructuralDecisionConditionMarker {
                 local: marker_local.as_u32(),
                 decision_id,
                 condition_index,
             });
         }
-        if markers.len()
-            != structural_ctfe_decisions
-                .iter()
-                .map(|decision| decision.conditions.len())
-                .sum::<usize>()
-        {
-            // Not every CTFE construct exposes a marker site for each of its
-            // conditions. That is a binder blind spot, not a broken
-            // environment, so it declines the body rather than stopping a
-            // user's build; strict binding still keeps it a hard signal here.
-            degrade_unbound_obligations(
-                tcx,
-                def_id,
-                "place CTFE decision markers",
-                &obligations.definition,
-                &format!(
-                    "markers cover {}/{} conditions",
-                    markers.len(),
-                    structural_ctfe_decisions
-                        .iter()
-                        .map(|decision| decision.conditions.len())
-                        .sum::<usize>(),
-                ),
-            );
-            return tcx.alloc_steal_mir(pristine);
-        }
-        let mut stored = STRUCTURAL_DECISION_MARKERS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(existing) = stored.insert(def_id, markers.clone())
-            && existing != markers
-        {
-            tcx.dcx().fatal(format!(
-                "Supercov CTFE decision marker collision for {}",
-                obligations.definition
-            ));
-        }
-        return tcx.alloc_steal_mir(instrumented);
-    }
-    if const_context {
-        return body;
-    }
-    {
-        let borrowed = body.borrow();
-        let block_sources = executable_block_sources(tcx, &obligations.crate_name, &borrowed);
-        let mut reachable = BTreeSet::new();
-        let mut pending = vec![rustc_middle::mir::START_BLOCK];
-        while let Some(block) = pending.pop() {
-            if reachable.insert(block) {
-                pending.extend(semantic_successors(
-                    borrowed.basic_blocks[block].terminator(),
-                ));
-            }
-        }
-        let unreachable = obligations
-            .match_groups
-            .values()
-            .filter(|group| {
-                group.definitions.contains(&obligations.definition)
-                    && group.identity.provenance != "synthetic-expansion"
-            })
-            .flat_map(|group| &group.arms)
-            .filter(|arm| {
-                !block_sources.iter().any(|(block, sources)| {
-                    reachable.contains(block)
-                        && sources.iter().any(|source| {
-                            source.key == arm.body_source.key
-                                && source.start >= arm.body_source.start
-                                && source.end <= arm.body_source.end
-                        })
-                })
-            })
-            .map(|arm| arm.branch_id.clone())
-            .collect::<Vec<_>>();
-        UNREACHABLE_MATCH_ARMS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .extend(unreachable);
-    }
-    // Coverage-ineligible functions (`#[automatically_derived]`,
-    // `#[coverage(off)]`) have wholly collapsed spans, so even their
-    // authored-expansion match groups can only bind through pre-borrow
-    // markers — the span-located planner degenerates on them.
-    let coverage_ineligible = !tcx.coverage_attr_on(def_id);
-    let synthetic_groups = obligations
-        .match_groups
-        .values()
-        .filter(|group| {
-            group.definitions.contains(&obligations.definition)
-                && (group.identity.provenance == "synthetic-expansion"
-                    || (coverage_ineligible
-                        && group.identity.provenance == "authored-expansion"))
-        })
-        .collect::<Vec<_>>();
-    let synthetic_let_else = obligations
-        .branches
-        .values()
-        .filter(|branch| {
-            branch.definitions.contains(&obligations.definition)
-                && branch.branch_kind == "let-else"
-                && branch.identity.provenance == "synthetic-expansion"
-        })
-        .collect::<Vec<_>>();
-    let try_operators = obligations
-        .branches
-        .values()
-        .filter(|branch| {
-            branch.definitions.contains(&obligations.definition)
-                && branch.branch_kind == "try-operator"
-        })
-        .collect::<Vec<_>>();
-    let structural_decisions = obligations
-        .decisions
-        .values()
-        .filter(|decision| {
-            decision.definitions.contains(&obligations.definition) && decision.structural_marker
-        })
-        .collect::<Vec<_>>();
-    let assertion_decisions = structural_decisions
-        .iter()
-        .copied()
-        .filter(|decision| decision.decision_kind == "assertion")
-        .collect::<Vec<_>>();
-    let opaque_condition_decisions = structural_decisions
-        .iter()
-        .copied()
-        .filter(|decision| {
-            decision
-                .conditions
-                .iter()
-                .any(|condition| condition.opaque_authored_macro)
-        })
-        .collect::<Vec<_>>();
-    if synthetic_groups.is_empty()
-        && synthetic_let_else.is_empty()
-        && try_operators.is_empty()
-        && structural_decisions.is_empty()
-    {
-        return body;
-    }
-    let (assignments, guard_blocks, let_else_assignments, try_assignments) = {
-        let borrowed = body.borrow();
-        let assignments = if synthetic_groups.is_empty() {
-            BTreeMap::new()
-        } else {
-            match synthetic_match_assignments(
-                tcx,
-                &obligations.crate_name,
-                &borrowed,
-                &synthetic_groups,
-            ) {
-                Ok(assignments) => assignments,
-                Err(error) => {
-                    degrade_unbound_obligations(
-                        tcx,
-                        def_id,
-                        "bind pre-borrow-check synthetic matches",
-                        &obligations.definition,
-                        &error,
-                    );
-                    return body;
-                }
-            }
-        };
-        let mut guard_blocks = Vec::new();
-        for group in &synthetic_groups {
-            let Some(path) = assignments.get(&group.identity.id) else {
-                return body;
+        let mut let_else_markers = Vec::new();
+        for branch in &synthetic_let_else {
+            let Some(&path) = let_else_assignments.get(&branch.identity.id) else {
+                continue;
             };
-            for (arm, arm_path) in group.arms.iter().zip(&path.arms) {
-                let Some(decision_id) = &arm.guard_decision_id else {
-                    continue;
-                };
-                let Some(decision) = obligations.decisions.get(decision_id) else {
-                    return body;
-                };
-                let (Some(candidate), Some(rejection)) =
-                    (arm_path.guard_candidate, arm_path.rejection)
-                else {
-                    return body;
-                };
-                let blocks = match guard_condition_blocks(
-                    tcx,
-                    &borrowed,
-                    candidate,
-                    arm_path.entry,
-                    rejection,
-                    decision.conditions.len(),
-                ) {
-                    Ok(blocks) => blocks,
-                    Err(error) => {
-                        degrade_unbound_obligations(
-                            tcx,
-                            def_id,
-                            &format!("bind pre-borrow-check synthetic guard {decision_id}"),
-                            &obligations.definition,
-                            &error,
-                        );
-                        return body;
-                    }
-                };
-                guard_blocks.extend(
-                    blocks
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, block)| (decision_id.clone(), index, block)),
+            for (label, block) in [("matched", path.matched), ("else", path.fallback)] {
+                let alternative = branch
+                    .alternatives
+                    .iter()
+                    .find(|alternative| alternative.label == label)
+                    .unwrap_or_else(|| {
+                        tcx.dcx().fatal(format!(
+                            "Supercov synthetic let-else {} has no {label} alternative",
+                            branch.identity.id
+                        ))
+                    });
+                let marker_local = instrumented
+                    .local_decls
+                    .push(LocalDecl::new(tcx.types.u64, DUMMY_SP));
+                instrumented.basic_blocks_mut()[block].statements.insert(
+                    0,
+                    match_arm_marker_statement(
+                        tcx,
+                        marker_local,
+                        alternative.identity.probe_ordinal,
+                    ),
                 );
+                let_else_markers.push(StructuralBranchMarker {
+                    local: marker_local.as_u32(),
+                    branch_id: branch.identity.id.clone(),
+                    alternative_ordinal: alternative.identity.probe_ordinal,
+                });
             }
         }
-        guard_blocks.extend(
-            opaque_authored_condition_marker_assignments(
-                tcx,
-                &obligations.crate_name,
-                &borrowed,
-                &opaque_condition_decisions,
-            )
-            .unwrap_or_else(|error| {
-                degrade_unbound_obligations(
-                    tcx,
-                    def_id,
-                    "bind authored opaque decision conditions",
-                    &obligations.definition,
-                    &error,
+        let mut try_markers = Vec::new();
+        for branch in &try_operators {
+            let Some(&path) = try_assignments.get(&branch.identity.id) else {
+                continue;
+            };
+            for (label, block) in [
+                ("continued", path.continued),
+                ("early return", path.returned),
+            ] {
+                let alternative = branch
+                    .alternatives
+                    .iter()
+                    .find(|alternative| alternative.label == label)
+                    .unwrap_or_else(|| {
+                        tcx.dcx().fatal(format!(
+                            "Supercov try operator {} has no {label} alternative",
+                            branch.identity.id
+                        ))
+                    });
+                let marker_local = instrumented
+                    .local_decls
+                    .push(LocalDecl::new(tcx.types.u64, DUMMY_SP));
+                instrumented.basic_blocks_mut()[block].statements.insert(
+                    0,
+                    match_arm_marker_statement(
+                        tcx,
+                        marker_local,
+                        alternative.identity.probe_ordinal,
+                    ),
                 );
-                Vec::new()
-            }),
-        );
-        guard_blocks.extend(
-            structural_decision_condition_marker_assignments(
-                tcx,
-                &obligations.crate_name,
-                &borrowed,
-                &structural_decisions,
-                &assignments,
-                false,
-                "structural decision",
-            )
-            .unwrap_or_else(|error| {
-                degrade_unbound_obligations(
-                    tcx,
-                    def_id,
-                    "bind pre-borrow-check structural decision conditions",
-                    &obligations.definition,
-                    &error,
-                );
-                Vec::new()
-            }),
-        );
-        let let_else_assignments = synthetic_let_else_assignments(
+                try_markers.push(StructuralBranchMarker {
+                    local: marker_local.as_u32(),
+                    branch_id: branch.identity.id.clone(),
+                    alternative_ordinal: alternative.identity.probe_ordinal,
+                });
+            }
+        }
+        let context_marker =
+            find_runtime_function(tcx, CONTEXT_MARKER_FUNCTION).unwrap_or_else(|| {
+                tcx.dcx().fatal(format!(
+                    "Supercov assertion context marker runtime is unavailable in {}",
+                    obligations.definition
+                ))
+            });
+        let assertion_phase_markers = install_assertion_phase_markers(
             tcx,
             &obligations.crate_name,
-            &borrowed,
-            &synthetic_let_else,
+            &obligations.definition,
+            &mut instrumented,
+            &assertion_decisions,
+            &obligations.points,
+            context_marker,
         )
         .unwrap_or_else(|error| {
             degrade_unbound_obligations(
+                DeclineScope::Decisions,
                 tcx,
                 def_id,
-                "bind pre-borrow-check synthetic let-else",
+                "bind assertion phase boundaries",
                 &obligations.definition,
                 &error,
             );
-            BTreeMap::new()
+            Vec::new()
         });
-        let try_assignments =
-            try_operator_assignments(
-                tcx,
-                &obligations.crate_name,
-                &borrowed,
-                &try_operators,
-                &assignments,
-            )
-                .unwrap_or_else(|error| {
-                    degrade_unbound_obligations(
-                        tcx,
-                        def_id,
-                        "bind pre-borrow-check try operators",
-                        &obligations.definition,
-                        &error,
-                    );
-                    BTreeMap::new()
-                });
-        (
-            assignments,
-            guard_blocks,
-            let_else_assignments,
-            try_assignments,
-        )
-    };
-    let mut instrumented = body.steal();
-    let mut local_ordinals = BTreeMap::new();
-    for group in &synthetic_groups {
-        // A degraded match phase records no assignment for its groups.
-        let Some(path) = assignments.get(&group.identity.id) else {
-            continue;
-        };
-        for (arm, arm_path) in group.arms.iter().zip(&path.arms) {
-            let marker_local = instrumented
-                .local_decls
-                .push(LocalDecl::new(tcx.types.u64, DUMMY_SP));
-            instrumented.basic_blocks_mut()[arm_path.entry]
-                .statements
-                .insert(
-                    0,
-                    match_arm_marker_statement(tcx, marker_local, arm.selected_ordinal),
-                );
-            local_ordinals.insert(marker_local.as_u32(), arm.selected_ordinal);
+        if !local_ordinals.is_empty() {
+            let mut markers = MATCH_ARM_MARKERS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(existing) = markers.insert(def_id, local_ordinals.clone())
+                && existing != local_ordinals
+            {
+                tcx.dcx().fatal(format!(
+                    "Supercov synthetic match marker collision for {}",
+                    obligations.definition
+                ));
+            }
         }
-    }
-    let mut guard_markers = Vec::new();
-    for (decision_id, condition_index, block) in guard_blocks {
-        let marker_local = instrumented
-            .local_decls
-            .push(LocalDecl::new(tcx.types.u64, DUMMY_SP));
-        instrumented.basic_blocks_mut()[block].statements.insert(
-            0,
-            match_arm_marker_statement(tcx, marker_local, condition_index as u64),
-        );
-        guard_markers.push(StructuralDecisionConditionMarker {
-            local: marker_local.as_u32(),
-            decision_id,
-            condition_index,
-        });
-    }
-    let mut let_else_markers = Vec::new();
-    for branch in &synthetic_let_else {
-        let Some(&path) = let_else_assignments.get(&branch.identity.id) else {
-            continue;
-        };
-        for (label, block) in [("matched", path.matched), ("else", path.fallback)] {
-            let alternative = branch
-                .alternatives
-                .iter()
-                .find(|alternative| alternative.label == label)
-                .unwrap_or_else(|| {
-                    tcx.dcx().fatal(format!(
-                        "Supercov synthetic let-else {} has no {label} alternative",
-                        branch.identity.id
-                    ))
-                });
-            let marker_local = instrumented
-                .local_decls
-                .push(LocalDecl::new(tcx.types.u64, DUMMY_SP));
-            instrumented.basic_blocks_mut()[block].statements.insert(
-                0,
-                match_arm_marker_statement(tcx, marker_local, alternative.identity.probe_ordinal),
-            );
-            let_else_markers.push(StructuralBranchMarker {
-                local: marker_local.as_u32(),
-                branch_id: branch.identity.id.clone(),
-                alternative_ordinal: alternative.identity.probe_ordinal,
-            });
+        if !guard_markers.is_empty() {
+            let mut markers = STRUCTURAL_DECISION_MARKERS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(existing) = markers.insert(def_id, guard_markers.clone())
+                && existing != guard_markers
+            {
+                tcx.dcx().fatal(format!(
+                    "Supercov synthetic match guard marker collision for {}",
+                    obligations.definition
+                ));
+            }
         }
-    }
-    let mut try_markers = Vec::new();
-    for branch in &try_operators {
-        let Some(&path) = try_assignments.get(&branch.identity.id) else {
-            continue;
-        };
-        for (label, block) in [
-            ("continued", path.continued),
-            ("early return", path.returned),
-        ] {
-            let alternative = branch
-                .alternatives
-                .iter()
-                .find(|alternative| alternative.label == label)
-                .unwrap_or_else(|| {
-                    tcx.dcx().fatal(format!(
-                        "Supercov try operator {} has no {label} alternative",
-                        branch.identity.id
-                    ))
-                });
-            let marker_local = instrumented
-                .local_decls
-                .push(LocalDecl::new(tcx.types.u64, DUMMY_SP));
-            instrumented.basic_blocks_mut()[block].statements.insert(
-                0,
-                match_arm_marker_statement(tcx, marker_local, alternative.identity.probe_ordinal),
-            );
-            try_markers.push(StructuralBranchMarker {
-                local: marker_local.as_u32(),
-                branch_id: branch.identity.id.clone(),
-                alternative_ordinal: alternative.identity.probe_ordinal,
-            });
+        if !let_else_markers.is_empty() {
+            let mut markers = LET_ELSE_MARKERS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(existing) = markers.insert(def_id, let_else_markers.clone())
+                && existing != let_else_markers
+            {
+                tcx.dcx().fatal(format!(
+                    "Supercov synthetic let-else marker collision for {}",
+                    obligations.definition
+                ));
+            }
         }
-    }
-    let context_marker = find_runtime_function(tcx, CONTEXT_MARKER_FUNCTION).unwrap_or_else(|| {
-        tcx.dcx().fatal(format!(
-            "Supercov assertion context marker runtime is unavailable in {}",
-            obligations.definition
-        ))
-    });
-    let assertion_phase_markers = install_assertion_phase_markers(
-        tcx,
-        &obligations.crate_name,
-        &obligations.definition,
-        &mut instrumented,
-        &assertion_decisions,
-        &obligations.points,
-        context_marker,
-    )
-    .unwrap_or_else(|error| {
-        degrade_unbound_obligations(
-            tcx,
-            def_id,
-            "bind assertion phase boundaries",
-            &obligations.definition,
-            &error,
-        );
-        Vec::new()
-    });
-    if !local_ordinals.is_empty() {
-        let mut markers = MATCH_ARM_MARKERS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(existing) = markers.insert(def_id, local_ordinals.clone())
-            && existing != local_ordinals
-        {
-            tcx.dcx().fatal(format!(
-                "Supercov synthetic match marker collision for {}",
-                obligations.definition
-            ));
+        if !try_markers.is_empty() {
+            let mut markers = TRY_OPERATOR_MARKERS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(existing) = markers.insert(def_id, try_markers.clone())
+                && existing != try_markers
+            {
+                tcx.dcx().fatal(format!(
+                    "Supercov try-operator marker collision for {}",
+                    obligations.definition
+                ));
+            }
         }
-    }
-    if !guard_markers.is_empty() {
-        let mut markers = STRUCTURAL_DECISION_MARKERS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(existing) = markers.insert(def_id, guard_markers.clone())
-            && existing != guard_markers
-        {
-            tcx.dcx().fatal(format!(
-                "Supercov synthetic match guard marker collision for {}",
-                obligations.definition
-            ));
+        if !assertion_phase_markers.is_empty() {
+            let mut markers = ASSERTION_PHASE_MARKERS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(existing) = markers.insert(def_id, assertion_phase_markers.clone())
+                && existing != assertion_phase_markers
+            {
+                tcx.dcx().fatal(format!(
+                    "Supercov assertion phase marker collision for {}",
+                    obligations.definition
+                ));
+            }
         }
-    }
-    if !let_else_markers.is_empty() {
-        let mut markers = LET_ELSE_MARKERS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(existing) = markers.insert(def_id, let_else_markers.clone())
-            && existing != let_else_markers
-        {
-            tcx.dcx().fatal(format!(
-                "Supercov synthetic let-else marker collision for {}",
-                obligations.definition
-            ));
-        }
-    }
-    if !try_markers.is_empty() {
-        let mut markers = TRY_OPERATOR_MARKERS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(existing) = markers.insert(def_id, try_markers.clone())
-            && existing != try_markers
-        {
-            tcx.dcx().fatal(format!(
-                "Supercov try-operator marker collision for {}",
-                obligations.definition
-            ));
-        }
-    }
-    if !assertion_phase_markers.is_empty() {
-        let mut markers = ASSERTION_PHASE_MARKERS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(existing) = markers.insert(def_id, assertion_phase_markers.clone())
-            && existing != assertion_phase_markers
-        {
-            tcx.dcx().fatal(format!(
-                "Supercov assertion phase marker collision for {}",
-                obligations.definition
-            ));
-        }
-    }
-    tcx.alloc_steal_mir(instrumented)
+        tcx.alloc_steal_mir(instrumented)
     })
 }
 
@@ -6384,368 +6479,389 @@ fn mir_drops_with_structural_probes<'tcx>(
         return body;
     }
     rustc_middle::ty::print::with_no_trimmed_paths!({
-    let assertion_phase_markers = ASSERTION_PHASE_MARKERS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&def_id)
-        .cloned()
-        .unwrap_or_default();
-    let (match_plans, for_plans, guard_plans, let_else_plans, try_plans) = {
-        let borrowed = body.borrow();
-        (
-            runtime_match_plans(tcx, def_id, &borrowed),
-            runtime_for_loop_plans(tcx, def_id, &borrowed),
-            runtime_marked_decision_plans(tcx, def_id, &borrowed),
-            runtime_marked_let_else_plans(tcx, def_id, &borrowed),
-            runtime_marked_try_operator_plans(tcx, def_id, &borrowed),
-        )
-    };
-    let match_plans = match_plans.unwrap_or_else(|error| {
-        degrade_unbound_obligations(
-            tcx,
-            def_id,
-            "bind pre-optimization Rust match probes",
-            &exact_def_path!(tcx, def_id),
-            &error,
-        );
-        Vec::new()
-    });
-    let for_plans = for_plans.unwrap_or_else(|error| {
-        degrade_unbound_obligations(
-            tcx,
-            def_id,
-            "bind pre-optimization Rust for-loop probes",
-            &exact_def_path!(tcx, def_id),
-            &error,
-        );
-        Vec::new()
-    });
-    let guard_plans = guard_plans.unwrap_or_else(|error| {
-        degrade_unbound_obligations(
-            tcx,
-            def_id,
-            "bind pre-optimization Rust structural decision probes",
-            &exact_def_path!(tcx, def_id),
-            &error,
-        );
-        Vec::new()
-    });
-    let let_else_plans = let_else_plans.unwrap_or_else(|error| {
-        degrade_unbound_obligations(
-            tcx,
-            def_id,
-            "bind pre-optimization Rust synthetic let-else probes",
-            &exact_def_path!(tcx, def_id),
-            &error,
-        );
-        Vec::new()
-    });
-    let try_plans = try_plans.unwrap_or_else(|error| {
-        degrade_unbound_obligations(
-            tcx,
-            def_id,
-            "bind pre-optimization Rust try-operator probes",
-            &exact_def_path!(tcx, def_id),
-            &error,
-        );
-        Vec::new()
-    });
-    if match_plans.is_empty()
-        && for_plans.is_empty()
-        && guard_plans.is_empty()
-        && let_else_plans.is_empty()
-        && try_plans.is_empty()
-        && assertion_phase_markers.is_empty()
-    {
-        return body;
-    }
-    let has_branch_plans = !match_plans.is_empty()
-        || !for_plans.is_empty()
-        || !let_else_plans.is_empty()
-        || !try_plans.is_empty();
-    let start_branch = has_branch_plans
-        .then(|| find_runtime_function(tcx, START_BRANCH_FUNCTION))
-        .flatten();
-    let hit_branch = has_branch_plans
-        .then(|| find_runtime_function(tcx, HIT_BRANCH_FUNCTION))
-        .flatten();
-    let has_guard_plans = !guard_plans.is_empty();
-    let has_assertion_statement_points = assertion_phase_markers
-        .iter()
-        .any(|marker| marker.statement_ordinal.is_some());
-    let ordinal_hit = (has_guard_plans || has_assertion_statement_points)
-        .then(|| find_runtime_function(tcx, PROBE_FUNCTION))
-        .flatten();
-    let start_decision = has_guard_plans
-        .then(|| find_runtime_function(tcx, START_DECISION_FUNCTION))
-        .flatten();
-    let record_condition = has_guard_plans
-        .then(|| find_runtime_function(tcx, RECORD_CONDITION_FUNCTION))
-        .flatten();
-    let finish_decision = has_guard_plans
-        .then(|| find_runtime_function(tcx, FINISH_DECISION_FUNCTION))
-        .flatten();
-    let has_assertion_phases = !assertion_phase_markers.is_empty();
-    let context_marker = has_assertion_phases
-        .then(|| find_runtime_function(tcx, CONTEXT_MARKER_FUNCTION))
-        .flatten();
-    let enter_assertion_context = has_assertion_phases
-        .then(|| find_runtime_function(tcx, ENTER_ASSERTION_CONTEXT_FUNCTION))
-        .flatten();
-    let active_context = has_assertion_phases
-        .then(|| find_runtime_function(tcx, ACTIVE_CONTEXT_FUNCTION))
-        .flatten();
-    let enter_context = has_assertion_phases
-        .then(|| find_runtime_function(tcx, ENTER_CONTEXT_FUNCTION))
-        .flatten();
-    let exit_context = has_assertion_phases
-        .then(|| find_runtime_function(tcx, EXIT_CONTEXT_FUNCTION))
-        .flatten();
-    if has_branch_plans != (start_branch.is_some() && hit_branch.is_some())
-        || has_guard_plans
-            != (start_decision.is_some()
-                && record_condition.is_some()
-                && finish_decision.is_some()
-                && ordinal_hit.is_some())
-        || (has_assertion_statement_points && ordinal_hit.is_none())
-        || has_assertion_phases
-            != (context_marker.is_some()
-                && enter_assertion_context.is_some()
-                && active_context.is_some()
-                && enter_context.is_some()
-                && exit_context.is_some())
-    {
-        tcx.dcx().fatal(format!(
-            "Supercov structural runtimes are incomplete while instrumenting {}",
-            exact_def_path!(tcx, def_id)
-        ));
-    }
-    let mut instrumented = body.steal();
-    // Degrading after the steal cannot hand `body` back — it is already
-    // stolen, and returning it panics rustc with "attempt to steal from
-    // stolen value". Returning the partially instrumented body would be
-    // worse: half-applied markers produce evidence we cannot justify. Keep
-    // a pristine copy so a decline returns exactly the uninstrumented body.
-    let pristine = instrumented.clone();
-    let span = tcx.def_span(def_id);
-    let unit = instrumented
-        .local_decls
-        .push(LocalDecl::new(tcx.types.unit, span));
-    if let Err(error) =
-        strip_match_arm_markers(&mut instrumented, def_id, &exact_def_path!(tcx, def_id))
-    {
-        degrade_unbound_obligations(
-            tcx,
-            def_id,
-            "consume pre-borrow-check Rust match markers",
-            &exact_def_path!(tcx, def_id),
-            &error,
-        );
-        return tcx.alloc_steal_mir(pristine);
-    }
-    let mut match_plans = match_plans;
-    if let (Some(start), Some(hit)) = (start_branch, hit_branch)
-        && let Err(error) = instrument_runtime_matches(
-            tcx,
-            &mut instrumented,
-            &mut match_plans,
-            start,
-            hit,
-            unit,
-            span,
-        )
-    {
-        degrade_unbound_obligations(
-            tcx,
-            def_id,
-            "inject pre-optimization Rust match probes",
-            &exact_def_path!(tcx, def_id),
-            &error,
-        );
-        return tcx.alloc_steal_mir(pristine);
-    }
-    // Match instrumentation may replace the accepting edge of a guard. Bind
-    // exact Boolean targets after that edit while the semantic markers remain.
-    let guard_plans =
-        runtime_marked_decision_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
+        let assertion_phase_markers = ASSERTION_PHASE_MARKERS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&def_id)
+            .cloned()
+            .unwrap_or_default();
+        let (match_plans, for_plans, guard_plans, let_else_plans, try_plans) = {
+            let borrowed = body.borrow();
+            (
+                runtime_match_plans(tcx, def_id, &borrowed),
+                runtime_for_loop_plans(tcx, def_id, &borrowed),
+                runtime_marked_decision_plans(tcx, def_id, &borrowed),
+                runtime_marked_let_else_plans(tcx, def_id, &borrowed),
+                runtime_marked_try_operator_plans(tcx, def_id, &borrowed),
+            )
+        };
+        let match_plans = match_plans.unwrap_or_else(|error| {
             degrade_unbound_obligations(
+                DeclineScope::Matches,
                 tcx,
                 def_id,
-                "rebind pre-optimization Rust synthetic guard probes",
+                "bind pre-optimization Rust match probes",
                 &exact_def_path!(tcx, def_id),
                 &error,
             );
             Vec::new()
         });
-    if let Err(error) =
-        strip_structural_decision_markers(&mut instrumented, def_id, &exact_def_path!(tcx, def_id))
-    {
-        degrade_unbound_obligations(
-            tcx,
-            def_id,
-            "consume pre-borrow-check Rust match guard markers",
-            &exact_def_path!(tcx, def_id),
-            &error,
-        );
-        return tcx.alloc_steal_mir(pristine);
-    }
-    if let (Some(start), Some(condition), Some(finish)) =
-        (start_decision, record_condition, finish_decision)
-        && let Err(error) = instrument_runtime_decisions(
-            tcx,
-            &mut instrumented,
-            &guard_plans,
-            DecisionRuntime {
+        let for_plans = for_plans.unwrap_or_else(|error| {
+            degrade_unbound_obligations(
+                DeclineScope::Branches,
+                tcx,
+                def_id,
+                "bind pre-optimization Rust for-loop probes",
+                &exact_def_path!(tcx, def_id),
+                &error,
+            );
+            Vec::new()
+        });
+        let guard_plans = guard_plans.unwrap_or_else(|error| {
+            degrade_unbound_obligations(
+                DeclineScope::Decisions,
+                tcx,
+                def_id,
+                "bind pre-optimization Rust structural decision probes",
+                &exact_def_path!(tcx, def_id),
+                &error,
+            );
+            Vec::new()
+        });
+        let let_else_plans = let_else_plans.unwrap_or_else(|error| {
+            degrade_unbound_obligations(
+                DeclineScope::Branches,
+                tcx,
+                def_id,
+                "bind pre-optimization Rust synthetic let-else probes",
+                &exact_def_path!(tcx, def_id),
+                &error,
+            );
+            Vec::new()
+        });
+        let try_plans = try_plans.unwrap_or_else(|error| {
+            degrade_unbound_obligations(
+                DeclineScope::Branches,
+                tcx,
+                def_id,
+                "bind pre-optimization Rust try-operator probes",
+                &exact_def_path!(tcx, def_id),
+                &error,
+            );
+            Vec::new()
+        });
+        if match_plans.is_empty()
+            && for_plans.is_empty()
+            && guard_plans.is_empty()
+            && let_else_plans.is_empty()
+            && try_plans.is_empty()
+            && assertion_phase_markers.is_empty()
+        {
+            return body;
+        }
+        let has_branch_plans = !match_plans.is_empty()
+            || !for_plans.is_empty()
+            || !let_else_plans.is_empty()
+            || !try_plans.is_empty();
+        let start_branch = has_branch_plans
+            .then(|| find_runtime_function(tcx, START_BRANCH_FUNCTION))
+            .flatten();
+        let hit_branch = has_branch_plans
+            .then(|| find_runtime_function(tcx, HIT_BRANCH_FUNCTION))
+            .flatten();
+        let has_guard_plans = !guard_plans.is_empty();
+        let has_assertion_statement_points = assertion_phase_markers
+            .iter()
+            .any(|marker| marker.statement_ordinal.is_some());
+        let ordinal_hit = (has_guard_plans || has_assertion_statement_points)
+            .then(|| find_runtime_function(tcx, PROBE_FUNCTION))
+            .flatten();
+        let start_decision = has_guard_plans
+            .then(|| find_runtime_function(tcx, START_DECISION_FUNCTION))
+            .flatten();
+        let record_condition = has_guard_plans
+            .then(|| find_runtime_function(tcx, RECORD_CONDITION_FUNCTION))
+            .flatten();
+        let finish_decision = has_guard_plans
+            .then(|| find_runtime_function(tcx, FINISH_DECISION_FUNCTION))
+            .flatten();
+        let has_assertion_phases = !assertion_phase_markers.is_empty();
+        let context_marker = has_assertion_phases
+            .then(|| find_runtime_function(tcx, CONTEXT_MARKER_FUNCTION))
+            .flatten();
+        let enter_assertion_context = has_assertion_phases
+            .then(|| find_runtime_function(tcx, ENTER_ASSERTION_CONTEXT_FUNCTION))
+            .flatten();
+        let active_context = has_assertion_phases
+            .then(|| find_runtime_function(tcx, ACTIVE_CONTEXT_FUNCTION))
+            .flatten();
+        let enter_context = has_assertion_phases
+            .then(|| find_runtime_function(tcx, ENTER_CONTEXT_FUNCTION))
+            .flatten();
+        let exit_context = has_assertion_phases
+            .then(|| find_runtime_function(tcx, EXIT_CONTEXT_FUNCTION))
+            .flatten();
+        if has_branch_plans != (start_branch.is_some() && hit_branch.is_some())
+            || has_guard_plans
+                != (start_decision.is_some()
+                    && record_condition.is_some()
+                    && finish_decision.is_some()
+                    && ordinal_hit.is_some())
+            || (has_assertion_statement_points && ordinal_hit.is_none())
+            || has_assertion_phases
+                != (context_marker.is_some()
+                    && enter_assertion_context.is_some()
+                    && active_context.is_some()
+                    && enter_context.is_some()
+                    && exit_context.is_some())
+        {
+            tcx.dcx().fatal(format!(
+                "Supercov structural runtimes are incomplete while instrumenting {}",
+                exact_def_path!(tcx, def_id)
+            ));
+        }
+        let mut instrumented = body.steal();
+        // Degrading after the steal cannot hand `body` back — it is already
+        // stolen, and returning it panics rustc with "attempt to steal from
+        // stolen value". Returning the partially instrumented body would be
+        // worse: half-applied markers produce evidence we cannot justify. Keep
+        // a pristine copy so a decline returns exactly the uninstrumented body.
+        let pristine = instrumented.clone();
+        let span = tcx.def_span(def_id);
+        let unit = instrumented
+            .local_decls
+            .push(LocalDecl::new(tcx.types.unit, span));
+        if let Err(error) =
+            strip_match_arm_markers(&mut instrumented, def_id, &exact_def_path!(tcx, def_id))
+        {
+            degrade_unbound_obligations(
+                DeclineScope::Body,
+                tcx,
+                def_id,
+                "consume pre-borrow-check Rust match markers",
+                &exact_def_path!(tcx, def_id),
+                &error,
+            );
+            return tcx.alloc_steal_mir(pristine);
+        }
+        let mut match_plans = match_plans;
+        if let (Some(start), Some(hit)) = (start_branch, hit_branch)
+            && let Err(error) = instrument_runtime_matches(
+                tcx,
+                &mut instrumented,
+                &mut match_plans,
                 start,
-                condition,
-                finish,
-                ordinal_hit: ordinal_hit.expect("validated structural decision ordinal runtime"),
-                branch_hit: hit_branch,
+                hit,
                 unit,
-            },
-            span,
-        )
-    {
-        degrade_unbound_obligations(
-            tcx,
-            def_id,
-            "inject pre-optimization Rust synthetic guard probes",
-            &exact_def_path!(tcx, def_id),
-            &error,
-        );
-        return tcx.alloc_steal_mir(pristine);
-    }
-    // Match and guard instrumentation may split an endpoint edge. Rebind the
-    // semantic let-else markers only after those enclosing structures settle.
-    let mut let_else_plans =
-        runtime_marked_let_else_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
+                span,
+            )
+        {
             degrade_unbound_obligations(
+                DeclineScope::Body,
                 tcx,
                 def_id,
-                "rebind pre-optimization Rust synthetic let-else probes",
+                "inject pre-optimization Rust match probes",
                 &exact_def_path!(tcx, def_id),
                 &error,
             );
-            Vec::new()
-        });
-    if let Err(error) = strip_let_else_markers(&mut instrumented, def_id, &exact_def_path!(tcx, def_id))
-    {
-        degrade_unbound_obligations(
-            tcx,
-            def_id,
-            "consume pre-borrow-check Rust let-else markers",
-            &exact_def_path!(tcx, def_id),
-            &error,
-        );
-        return tcx.alloc_steal_mir(pristine);
-    }
-    if let (Some(start), Some(hit)) = (start_branch, hit_branch)
-        && let Err(error) = instrument_runtime_matches(
-            tcx,
+            return tcx.alloc_steal_mir(pristine);
+        }
+        // Match instrumentation may replace the accepting edge of a guard. Bind
+        // exact Boolean targets after that edit while the semantic markers remain.
+        let guard_plans =
+            runtime_marked_decision_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
+                degrade_unbound_obligations(
+                    DeclineScope::Matches,
+                    tcx,
+                    def_id,
+                    "rebind pre-optimization Rust synthetic guard probes",
+                    &exact_def_path!(tcx, def_id),
+                    &error,
+                );
+                Vec::new()
+            });
+        if let Err(error) = strip_structural_decision_markers(
             &mut instrumented,
-            &mut let_else_plans,
-            start,
-            hit,
-            unit,
-            span,
-        )
-    {
-        degrade_unbound_obligations(
-            tcx,
             def_id,
-            "inject pre-optimization Rust synthetic let-else probes",
             &exact_def_path!(tcx, def_id),
-            &error,
-        );
-        return tcx.alloc_steal_mir(pristine);
-    }
-    // Structural edits above may split either endpoint of a lowered `?`.
-    // Bind the retained semantic markers only after enclosing selections have
-    // settled, then remove every marker before this MIR leaves the provider.
-    let mut try_plans =
-        runtime_marked_try_operator_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
+        ) {
             degrade_unbound_obligations(
+                DeclineScope::Body,
                 tcx,
                 def_id,
-                "rebind pre-optimization Rust try-operator probes",
+                "consume pre-borrow-check Rust match guard markers",
                 &exact_def_path!(tcx, def_id),
                 &error,
             );
-            Vec::new()
-        });
-    if let Err(error) =
-        strip_try_operator_markers(&mut instrumented, def_id, &exact_def_path!(tcx, def_id))
-    {
-        degrade_unbound_obligations(
-            tcx,
-            def_id,
-            "consume pre-borrow-check Rust try-operator markers",
-            &exact_def_path!(tcx, def_id),
-            &error,
-        );
-        return tcx.alloc_steal_mir(pristine);
-    }
-    if let (Some(start), Some(hit)) = (start_branch, hit_branch)
-        && let Err(error) = instrument_runtime_matches(
-            tcx,
-            &mut instrumented,
-            &mut try_plans,
-            start,
-            hit,
-            unit,
-            span,
-        )
-    {
-        degrade_unbound_obligations(
-            tcx,
-            def_id,
-            "inject pre-optimization Rust try-operator probes",
-            &exact_def_path!(tcx, def_id),
-            &error,
-        );
-        return tcx.alloc_steal_mir(pristine);
-    }
-    // Match instrumentation can split blocks enclosing a nested for loop, so
-    // bind for-loop structure again against the current body before editing it.
-    let mut for_plans =
-        runtime_for_loop_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
+            return tcx.alloc_steal_mir(pristine);
+        }
+        if let (Some(start), Some(condition), Some(finish)) =
+            (start_decision, record_condition, finish_decision)
+            && let Err(error) = instrument_runtime_decisions(
+                tcx,
+                &mut instrumented,
+                &guard_plans,
+                DecisionRuntime {
+                    start,
+                    condition,
+                    finish,
+                    ordinal_hit: ordinal_hit
+                        .expect("validated structural decision ordinal runtime"),
+                    branch_hit: hit_branch,
+                    unit,
+                },
+                span,
+            )
+        {
             degrade_unbound_obligations(
+                DeclineScope::Body,
                 tcx,
                 def_id,
-                "rebind pre-optimization Rust for-loop probes",
+                "inject pre-optimization Rust synthetic guard probes",
                 &exact_def_path!(tcx, def_id),
                 &error,
             );
-            Vec::new()
-        });
-    if let (Some(start), Some(hit)) = (start_branch, hit_branch)
-        && let Err(error) = instrument_runtime_for_loops(
-            tcx,
-            &mut instrumented,
-            &mut for_plans,
-            start,
-            hit,
-            unit,
-            span,
-        )
-    {
-        degrade_unbound_obligations(
-            tcx,
-            def_id,
-            "inject pre-optimization Rust for-loop probes",
-            &exact_def_path!(tcx, def_id),
-            &error,
-        );
-        return tcx.alloc_steal_mir(pristine);
-    }
-    if let (Some(marker), Some(enter), Some(active), Some(resume), Some(exit)) = (
-        context_marker,
-        enter_assertion_context,
-        active_context,
-        enter_context,
-        exit_context,
-    )
-        && let Err(error) = instrument_assertion_phases(
+            return tcx.alloc_steal_mir(pristine);
+        }
+        // Match and guard instrumentation may split an endpoint edge. Rebind the
+        // semantic let-else markers only after those enclosing structures settle.
+        let mut let_else_plans = runtime_marked_let_else_plans(tcx, def_id, &instrumented)
+            .unwrap_or_else(|error| {
+                degrade_unbound_obligations(
+                    DeclineScope::Branches,
+                    tcx,
+                    def_id,
+                    "rebind pre-optimization Rust synthetic let-else probes",
+                    &exact_def_path!(tcx, def_id),
+                    &error,
+                );
+                Vec::new()
+            });
+        if let Err(error) =
+            strip_let_else_markers(&mut instrumented, def_id, &exact_def_path!(tcx, def_id))
+        {
+            degrade_unbound_obligations(
+                DeclineScope::Body,
+                tcx,
+                def_id,
+                "consume pre-borrow-check Rust let-else markers",
+                &exact_def_path!(tcx, def_id),
+                &error,
+            );
+            return tcx.alloc_steal_mir(pristine);
+        }
+        if let (Some(start), Some(hit)) = (start_branch, hit_branch)
+            && let Err(error) = instrument_runtime_matches(
+                tcx,
+                &mut instrumented,
+                &mut let_else_plans,
+                start,
+                hit,
+                unit,
+                span,
+            )
+        {
+            degrade_unbound_obligations(
+                DeclineScope::Body,
+                tcx,
+                def_id,
+                "inject pre-optimization Rust synthetic let-else probes",
+                &exact_def_path!(tcx, def_id),
+                &error,
+            );
+            return tcx.alloc_steal_mir(pristine);
+        }
+        // Structural edits above may split either endpoint of a lowered `?`.
+        // Bind the retained semantic markers only after enclosing selections have
+        // settled, then remove every marker before this MIR leaves the provider.
+        let mut try_plans = runtime_marked_try_operator_plans(tcx, def_id, &instrumented)
+            .unwrap_or_else(|error| {
+                degrade_unbound_obligations(
+                    DeclineScope::Branches,
+                    tcx,
+                    def_id,
+                    "rebind pre-optimization Rust try-operator probes",
+                    &exact_def_path!(tcx, def_id),
+                    &error,
+                );
+                Vec::new()
+            });
+        if let Err(error) =
+            strip_try_operator_markers(&mut instrumented, def_id, &exact_def_path!(tcx, def_id))
+        {
+            degrade_unbound_obligations(
+                DeclineScope::Body,
+                tcx,
+                def_id,
+                "consume pre-borrow-check Rust try-operator markers",
+                &exact_def_path!(tcx, def_id),
+                &error,
+            );
+            return tcx.alloc_steal_mir(pristine);
+        }
+        if let (Some(start), Some(hit)) = (start_branch, hit_branch)
+            && let Err(error) = instrument_runtime_matches(
+                tcx,
+                &mut instrumented,
+                &mut try_plans,
+                start,
+                hit,
+                unit,
+                span,
+            )
+        {
+            degrade_unbound_obligations(
+                DeclineScope::Body,
+                tcx,
+                def_id,
+                "inject pre-optimization Rust try-operator probes",
+                &exact_def_path!(tcx, def_id),
+                &error,
+            );
+            return tcx.alloc_steal_mir(pristine);
+        }
+        // Match instrumentation can split blocks enclosing a nested for loop, so
+        // bind for-loop structure again against the current body before editing it.
+        let mut for_plans =
+            runtime_for_loop_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
+                degrade_unbound_obligations(
+                    DeclineScope::Branches,
+                    tcx,
+                    def_id,
+                    "rebind pre-optimization Rust for-loop probes",
+                    &exact_def_path!(tcx, def_id),
+                    &error,
+                );
+                Vec::new()
+            });
+        if let (Some(start), Some(hit)) = (start_branch, hit_branch)
+            && let Err(error) = instrument_runtime_for_loops(
+                tcx,
+                &mut instrumented,
+                &mut for_plans,
+                start,
+                hit,
+                unit,
+                span,
+            )
+        {
+            degrade_unbound_obligations(
+                DeclineScope::Body,
+                tcx,
+                def_id,
+                "inject pre-optimization Rust for-loop probes",
+                &exact_def_path!(tcx, def_id),
+                &error,
+            );
+            return tcx.alloc_steal_mir(pristine);
+        }
+        if let (Some(marker), Some(enter), Some(active), Some(resume), Some(exit)) = (
+            context_marker,
+            enter_assertion_context,
+            active_context,
+            enter_context,
+            exit_context,
+        ) && let Err(error) = instrument_assertion_phases(
             tcx,
             def_id,
             &mut instrumented,
@@ -6759,18 +6875,18 @@ fn mir_drops_with_structural_probes<'tcx>(
             ordinal_hit,
             unit,
             span,
-        )
-    {
-        degrade_unbound_obligations(
-            tcx,
-            def_id,
-            "inject Rust assertion phases",
-            &exact_def_path!(tcx, def_id),
-            &error,
-        );
-        return tcx.alloc_steal_mir(pristine);
-    }
-    tcx.alloc_steal_mir(instrumented)
+        ) {
+            degrade_unbound_obligations(
+                DeclineScope::Body,
+                tcx,
+                def_id,
+                "inject Rust assertion phases",
+                &exact_def_path!(tcx, def_id),
+                &error,
+            );
+            return tcx.alloc_steal_mir(pristine);
+        }
+        tcx.alloc_steal_mir(instrumented)
     })
 }
 
@@ -6784,194 +6900,261 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
     }
 
     rustc_middle::ty::print::with_no_trimmed_paths!({
-    let mut instrumented = body.clone();
-    let span = tcx.def_span(def_id);
-    let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE).to_string();
-    let definition = exact_def_path!(tcx, def_id);
-    let mut decision_plans = runtime_decision_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, def_id, "bind Rust CTFE decision probes", &definition, &error);
-        Vec::new()
-    });
-    let structural_decision_plans = runtime_marked_decision_plans(tcx, def_id, body)
-        .unwrap_or_else(|error| {
-            degrade_unbound_obligations(tcx, def_id, "bind marked Rust CTFE decisions", &definition, &error);
+        let mut instrumented = body.clone();
+        let span = tcx.def_span(def_id);
+        let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE).to_string();
+        let definition = exact_def_path!(tcx, def_id);
+        let mut decision_plans =
+            runtime_decision_plans(tcx, def_id, body).unwrap_or_else(|error| {
+                degrade_unbound_obligations(
+                    DeclineScope::Decisions,
+                    tcx,
+                    def_id,
+                    "bind Rust CTFE decision probes",
+                    &definition,
+                    &error,
+                );
+                Vec::new()
+            });
+        let structural_decision_plans = runtime_marked_decision_plans(tcx, def_id, body)
+            .unwrap_or_else(|error| {
+                degrade_unbound_obligations(
+                    DeclineScope::Decisions,
+                    tcx,
+                    def_id,
+                    "bind marked Rust CTFE decisions",
+                    &definition,
+                    &error,
+                );
+                Vec::new()
+            });
+        let mut decision_ids = decision_plans
+            .iter()
+            .map(|plan| plan.id.clone())
+            .collect::<BTreeSet<_>>();
+        for plan in structural_decision_plans {
+            if !decision_ids.insert(plan.id.clone()) {
+                tcx.dcx().fatal(format!(
+                    "Supercov bound CTFE decision {} through two compiler paths in {definition}",
+                    plan.id
+                ));
+            }
+            decision_plans.push(plan);
+        }
+        let mut selection_plans = runtime_match_plans(tcx, def_id, body).unwrap_or_else(|error| {
+            degrade_unbound_obligations(
+                DeclineScope::Matches,
+                tcx,
+                def_id,
+                "bind Rust CTFE match selections",
+                &definition,
+                &error,
+            );
             Vec::new()
         });
-    let mut decision_ids = decision_plans
-        .iter()
-        .map(|plan| plan.id.clone())
-        .collect::<BTreeSet<_>>();
-    for plan in structural_decision_plans {
-        if !decision_ids.insert(plan.id.clone()) {
-            tcx.dcx().fatal(format!(
-                "Supercov bound CTFE decision {} through two compiler paths in {definition}",
-                plan.id
-            ));
-        }
-        decision_plans.push(plan);
-    }
-    let mut selection_plans = runtime_match_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, def_id, "bind Rust CTFE match selections", &definition, &error);
-        Vec::new()
-    });
-    let let_else_plans = runtime_let_else_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, def_id, "bind Rust CTFE let-else selections", &definition, &error);
-        Vec::new()
-    });
-    let logical_selection_plans =
-        runtime_logical_selection_plans(tcx, def_id, body).unwrap_or_else(|error| {
-            degrade_unbound_obligations(tcx, def_id, "bind Rust CTFE logical selections", &definition, &error);
+        let let_else_plans = runtime_let_else_plans(tcx, def_id, body).unwrap_or_else(|error| {
+            degrade_unbound_obligations(
+                DeclineScope::Branches,
+                tcx,
+                def_id,
+                "bind Rust CTFE let-else selections",
+                &definition,
+                &error,
+            );
             Vec::new()
         });
-    let mut selection_ids = selection_plans
-        .iter()
-        .map(|plan| plan.id.clone())
-        .collect::<BTreeSet<_>>();
-    for plan in let_else_plans {
-        if !selection_ids.insert(plan.id.clone()) {
-            tcx.dcx().fatal(format!(
-                "Supercov bound CTFE selection {} through two compiler paths in {definition}",
-                plan.id
-            ));
+        let logical_selection_plans = runtime_logical_selection_plans(tcx, def_id, body)
+            .unwrap_or_else(|error| {
+                degrade_unbound_obligations(
+                    DeclineScope::Branches,
+                    tcx,
+                    def_id,
+                    "bind Rust CTFE logical selections",
+                    &definition,
+                    &error,
+                );
+                Vec::new()
+            });
+        let mut selection_ids = selection_plans
+            .iter()
+            .map(|plan| plan.id.clone())
+            .collect::<BTreeSet<_>>();
+        for plan in let_else_plans {
+            if !selection_ids.insert(plan.id.clone()) {
+                tcx.dcx().fatal(format!(
+                    "Supercov bound CTFE selection {} through two compiler paths in {definition}",
+                    plan.id
+                ));
+            }
+            selection_plans.push(plan);
         }
-        selection_plans.push(plan);
-    }
-    for plan in logical_selection_plans {
-        if !selection_ids.insert(plan.id.clone()) {
-            tcx.dcx().fatal(format!(
-                "Supercov bound CTFE selection {} through two compiler paths in {definition}",
-                plan.id
-            ));
+        for plan in logical_selection_plans {
+            if !selection_ids.insert(plan.id.clone()) {
+                tcx.dcx().fatal(format!(
+                    "Supercov bound CTFE selection {} through two compiler paths in {definition}",
+                    plan.id
+                ));
+            }
+            selection_plans.push(plan);
         }
-        selection_plans.push(plan);
-    }
-    let mut hit_ordinals_by_block = BTreeMap::<BasicBlock, BTreeSet<u64>>::new();
-    for plan in runtime_statement_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, def_id, "bind Rust CTFE statement probes", &definition, &error);
-        Vec::new()
-    }) {
-        hit_ordinals_by_block
-            .entry(plan.block)
-            .or_default()
-            .insert(plan.ordinal);
-    }
-    if is_function_body(tcx.def_kind(def_id))
-        && !is_async_function_constructor(tcx, def_id)
-        && let Ok(identity) = function_identity(tcx, def_id.to_def_id(), span, &crate_name)
-    {
-        hit_ordinals_by_block
-            .entry(rustc_middle::mir::START_BLOCK)
-            .or_default()
-            .insert(identity.probe_ordinal);
-    }
-    if let Err(error) = strip_structural_decision_markers(&mut instrumented, def_id, &definition) {
-        degrade_unbound_obligations(tcx, def_id, "consume pre-borrow-check Rust CTFE markers", &definition, &error);
-        return body;
-    }
-    let marker_local = instrumented
-        .local_decls
-        .push(LocalDecl::new(tcx.types.u64, span));
-    for (block, block_data) in instrumented.basic_blocks_mut().iter_enumerated_mut() {
-        let observation_kind = if block == rustc_middle::mir::START_BLOCK {
-            "entry"
-        } else {
-            "block"
-        };
-        let marker = ctfe_marker_identity(
-            tcx,
-            &crate_name,
-            &definition,
-            observation_kind,
-            block.as_u32(),
-        );
-        register_ctfe_hits(
-            tcx,
-            marker,
+        let mut hit_ordinals_by_block = BTreeMap::<BasicBlock, BTreeSet<u64>>::new();
+        for plan in runtime_statement_plans(tcx, def_id, body).unwrap_or_else(|error| {
+            degrade_unbound_obligations(
+                DeclineScope::Statements,
+                tcx,
+                def_id,
+                "bind Rust CTFE statement probes",
+                &definition,
+                &error,
+            );
+            Vec::new()
+        }) {
             hit_ordinals_by_block
-                .get(&block)
-                .into_iter()
-                .flatten()
-                .copied(),
-        );
-        block_data
-            .statements
-            .insert(0, ctfe_marker_statement(tcx, marker_local, marker, span));
-        if matches!(block_data.terminator().kind, TerminatorKind::Return) {
-            let exit = ctfe_marker_identity(tcx, &crate_name, &definition, "exit", block.as_u32());
+                .entry(plan.block)
+                .or_default()
+                .insert(plan.ordinal);
+        }
+        if is_function_body(tcx.def_kind(def_id))
+            && !is_async_function_constructor(tcx, def_id)
+            && let Ok(identity) = function_identity(tcx, def_id.to_def_id(), span, &crate_name)
+        {
+            hit_ordinals_by_block
+                .entry(rustc_middle::mir::START_BLOCK)
+                .or_default()
+                .insert(identity.probe_ordinal);
+        }
+        if let Err(error) =
+            strip_structural_decision_markers(&mut instrumented, def_id, &definition)
+        {
+            degrade_unbound_obligations(
+                DeclineScope::Body,
+                tcx,
+                def_id,
+                "consume pre-borrow-check Rust CTFE markers",
+                &definition,
+                &error,
+            );
+            return body;
+        }
+        let marker_local = instrumented
+            .local_decls
+            .push(LocalDecl::new(tcx.types.u64, span));
+        for (block, block_data) in instrumented.basic_blocks_mut().iter_enumerated_mut() {
+            let observation_kind = if block == rustc_middle::mir::START_BLOCK {
+                "entry"
+            } else {
+                "block"
+            };
+            let marker = ctfe_marker_identity(
+                tcx,
+                &crate_name,
+                &definition,
+                observation_kind,
+                block.as_u32(),
+            );
+            register_ctfe_hits(
+                tcx,
+                marker,
+                hit_ordinals_by_block
+                    .get(&block)
+                    .into_iter()
+                    .flatten()
+                    .copied(),
+            );
             block_data
                 .statements
-                .push(ctfe_marker_statement(tcx, marker_local, exit, span));
+                .insert(0, ctfe_marker_statement(tcx, marker_local, marker, span));
+            if matches!(block_data.terminator().kind, TerminatorKind::Return) {
+                let exit =
+                    ctfe_marker_identity(tcx, &crate_name, &definition, "exit", block.as_u32());
+                block_data
+                    .statements
+                    .push(ctfe_marker_statement(tcx, marker_local, exit, span));
+            }
         }
-    }
-    instrument_ctfe_selections(
-        tcx,
-        &mut instrumented,
-        &selection_plans,
-        marker_local,
-        &crate_name,
-        &definition,
-        span,
-    )
-    .unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, def_id, "inject Rust CTFE match selections", &definition, &error);
-    });
-    instrument_ctfe_decisions(
-        tcx,
-        &mut instrumented,
-        &decision_plans,
-        marker_local,
-        &crate_name,
-        &definition,
-        span,
-    )
-    .unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, def_id, "inject Rust CTFE decision probes", &definition, &error);
-    });
+        instrument_ctfe_selections(
+            tcx,
+            &mut instrumented,
+            &selection_plans,
+            marker_local,
+            &crate_name,
+            &definition,
+            span,
+        )
+        .unwrap_or_else(|error| {
+            degrade_unbound_obligations(
+                DeclineScope::Body,
+                tcx,
+                def_id,
+                "inject Rust CTFE match selections",
+                &definition,
+                &error,
+            );
+        });
+        instrument_ctfe_decisions(
+            tcx,
+            &mut instrumented,
+            &decision_plans,
+            marker_local,
+            &crate_name,
+            &definition,
+            span,
+        )
+        .unwrap_or_else(|error| {
+            degrade_unbound_obligations(
+                DeclineScope::Body,
+                tcx,
+                def_id,
+                "inject Rust CTFE decision probes",
+                &definition,
+                &error,
+            );
+        });
 
-    let decision_edges = instrumented
-        .basic_blocks
-        .iter_enumerated()
-        .filter_map(|(source, block)| {
-            let targets = block.terminator().successors().collect::<Vec<_>>();
-            (targets.len() > 1).then_some(
-                targets
-                    .into_iter()
-                    .enumerate()
-                    .map(move |(edge, target)| (source, edge, target)),
-            )
-        })
-        .flatten()
-        .collect::<Vec<_>>();
-    let mut bridges = Vec::with_capacity(decision_edges.len());
-    for (ordinal, (source, edge, target)) in decision_edges.iter().copied().enumerate() {
-        let ordinal = u32::try_from(ordinal)
-            .unwrap_or_else(|_| tcx.dcx().fatal("Supercov CTFE edge count exceeds u32"));
-        let marker = ctfe_marker_identity(tcx, &crate_name, &definition, "edge", ordinal);
-        let mut bridge = BasicBlockData::new(
-            Some(Terminator {
-                source_info: SourceInfo::outermost(span),
-                kind: TerminatorKind::Goto { target },
-            }),
-            false,
-        );
-        bridge
-            .statements
-            .push(ctfe_marker_statement(tcx, marker_local, marker, span));
-        let bridge = instrumented.basic_blocks_mut().push(bridge);
-        bridges.push((source, edge, bridge));
-    }
-    for (source, edge, bridge) in bridges {
-        let mut current = 0;
-        instrumented.basic_blocks_mut()[source]
-            .terminator_mut()
-            .successors_mut(|target| {
-                if current == edge {
-                    *target = bridge;
-                }
-                current += 1;
-            });
-    }
-    tcx.arena.alloc(instrumented)
+        let decision_edges = instrumented
+            .basic_blocks
+            .iter_enumerated()
+            .filter_map(|(source, block)| {
+                let targets = block.terminator().successors().collect::<Vec<_>>();
+                (targets.len() > 1).then_some(
+                    targets
+                        .into_iter()
+                        .enumerate()
+                        .map(move |(edge, target)| (source, edge, target)),
+                )
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        let mut bridges = Vec::with_capacity(decision_edges.len());
+        for (ordinal, (source, edge, target)) in decision_edges.iter().copied().enumerate() {
+            let ordinal = u32::try_from(ordinal)
+                .unwrap_or_else(|_| tcx.dcx().fatal("Supercov CTFE edge count exceeds u32"));
+            let marker = ctfe_marker_identity(tcx, &crate_name, &definition, "edge", ordinal);
+            let mut bridge = BasicBlockData::new(
+                Some(Terminator {
+                    source_info: SourceInfo::outermost(span),
+                    kind: TerminatorKind::Goto { target },
+                }),
+                false,
+            );
+            bridge
+                .statements
+                .push(ctfe_marker_statement(tcx, marker_local, marker, span));
+            let bridge = instrumented.basic_blocks_mut().push(bridge);
+            bridges.push((source, edge, bridge));
+        }
+        for (source, edge, bridge) in bridges {
+            let mut current = 0;
+            instrumented.basic_blocks_mut()[source]
+                .terminator_mut()
+                .successors_mut(|target| {
+                    if current == edge {
+                        *target = bridge;
+                    }
+                    current += 1;
+                });
+        }
+        tcx.arena.alloc(instrumented)
     })
 }
 
@@ -7767,8 +7950,8 @@ fn runtime_decision_plans<'tcx>(
                             // equality is tried first; containment then
                             // accepts the collapsed form. Ambiguity is still
                             // caught below, because more than one match fails.
-                            let exact = source == condition.branch_source
-                                || source == condition.source;
+                            let exact =
+                                source == condition.branch_source || source == condition.source;
                             let contained = [&condition.branch_source, &condition.source]
                                 .into_iter()
                                 .any(|range| {
@@ -7810,10 +7993,13 @@ fn runtime_decision_plans<'tcx>(
                                 (destination.as_local() == Some(discriminant_local))
                                     .then(|| place.ty(&body.local_decls, tcx).ty.peel_refs())
                             })?;
-                            let expected = scrutinee.ty_adt_def()?.discriminant_for_variant(
-                                tcx,
-                                rustc_abi::VariantIdx::from_u32(variant_index),
-                            ).val;
+                            let expected = scrutinee
+                                .ty_adt_def()?
+                                .discriminant_for_variant(
+                                    tcx,
+                                    rustc_abi::VariantIdx::from_u32(variant_index),
+                                )
+                                .val;
                             let matched = targets
                                 .iter()
                                 .find(|(value, _)| *value == expected)
@@ -7824,12 +8010,8 @@ fn runtime_decision_plans<'tcx>(
                                 .map(|(_, target)| target)
                                 .collect::<Vec<_>>();
                             match (matched, refuted.as_slice()) {
-                                (Some(matched), []) => {
-                                    Some((block, matched, targets.otherwise()))
-                                }
-                                (Some(matched), [refuted]) => {
-                                    Some((block, matched, *refuted))
-                                }
+                                (Some(matched), []) => Some((block, matched, targets.otherwise())),
+                                (Some(matched), [refuted]) => Some((block, matched, *refuted)),
                                 // The pattern's own variant is not tested here;
                                 // binding it would be a guess.
                                 _ => None,
@@ -7847,8 +8029,7 @@ fn runtime_decision_plans<'tcx>(
                                 else {
                                     return None;
                                 };
-                                let is_bool =
-                                    discr.ty(&body.local_decls, tcx) == tcx.types.bool;
+                                let is_bool = discr.ty(&body.local_decls, tcx) == tcx.types.bool;
                                 let range = stable_source_range(
                                     tcx,
                                     data.terminator().source_info.span,
@@ -7987,8 +8168,7 @@ fn runtime_logical_selection_plans<'tcx>(
     // operand IS a typed Boolean switch findable by its exact mapping source,
     // and its two edges are the evaluated/short-circuited alternatives.
     if body.function_coverage_info.is_none() && !tcx.coverage_attr_on(def_id) {
-        let mut branches_by_source =
-            BTreeMap::<(String, u32, u32), Vec<&BranchObligation>>::new();
+        let mut branches_by_source = BTreeMap::<(String, u32, u32), Vec<&BranchObligation>>::new();
         for branch in &branches {
             let mapping_source = branch.mapping_source.as_ref().ok_or_else(|| {
                 format!(
@@ -9052,7 +9232,10 @@ fn structural_marker_boolean_switch<'tcx>(
             } if matches!(
                 func.ty(&body.local_decls, tcx).kind(),
                 ty::FnDef(def_id, _) if transparent_runtime_calls.contains(def_id)
-            ) => current = *target,
+            ) =>
+            {
+                current = *target
+            }
             other => {
                 return Err(format!(
                     "marker path from {marker_block:?} reaches {current:?} with {other:?} before a Boolean switch"
@@ -9155,8 +9338,9 @@ fn runtime_marked_decision_plans<'tcx>(
                     blocks.len()
                 ));
             };
-            let pattern_condition =
-                decision.conditions[marker.condition_index].pattern_adt.is_some();
+            let pattern_condition = decision.conditions[marker.condition_index]
+                .pattern_adt
+                .is_some();
             let switch_block =
                 structural_marker_boolean_switch(tcx, body, *entry_block, pattern_condition)
                     .map_err(|error| {
@@ -9171,99 +9355,92 @@ fn runtime_marked_decision_plans<'tcx>(
                 unreachable!("validated structural marker Boolean switch")
             };
             let condition = &decision.conditions[marker.condition_index];
-            let (raw_true_target, raw_false_target) =
-                if discr.ty(&body.local_decls, tcx) == tcx.types.bool {
-                    (targets.target_for_value(1), targets.target_for_value(0))
-                } else if decision.decision_kind != "while-let" {
-                    // An `if let` discriminant switch has no back edge; the
-                    // true edge is the one accepting the recorded pattern
-                    // variant's discriminant.
-                    let Some(variant_index) = condition.pattern_variant else {
-                        return Err(format!(
-                            "structural decision {decision_id} condition {} let pattern records no variant to discriminate its switch",
-                            marker.condition_index
-                        ));
-                    };
-                    let discriminant_local = match discr {
-                        Operand::Copy(place) | Operand::Move(place) => place.as_local(),
-                        _ => None,
-                    };
-                    let scrutinee_adt = discriminant_local.and_then(|local| {
-                        body.basic_blocks[switch_block]
-                            .statements
-                            .iter()
-                            .rev()
-                            .find_map(|statement| {
-                                let StatementKind::Assign(assignment) = &statement.kind
-                                else {
-                                    return None;
-                                };
-                                let (destination, value) = &**assignment;
-                                let Rvalue::Discriminant(place) = value else {
-                                    return None;
-                                };
-                                if destination.as_local() != Some(local) {
-                                    return None;
-                                }
-                                place
-                                    .ty(&body.local_decls, tcx)
-                                    .ty
-                                    .peel_refs()
-                                    .ty_adt_def()
-                            })
-                    });
-                    let Some(scrutinee_adt) = scrutinee_adt else {
-                        return Err(format!(
-                            "structural decision {decision_id} condition {} pattern switch has no discriminant scrutinee",
-                            marker.condition_index
-                        ));
-                    };
-                    let expected = scrutinee_adt
-                        .discriminant_for_variant(
-                            tcx,
-                            rustc_abi::VariantIdx::from_u32(variant_index),
-                        )
-                        .val;
-                    let valued = targets.iter().collect::<Vec<_>>();
-                    let [(value, valued_target)] = valued.as_slice() else {
-                        unreachable!("validated two-way pattern switch")
-                    };
-                    if *value == expected {
-                        (*valued_target, targets.otherwise())
-                    } else {
-                        (targets.otherwise(), *valued_target)
-                    }
-                } else {
-                    // The matching variant continues the loop and reaches the
-                    // switch again through the back edge; the refuted variant
-                    // exits.
-                    let successors = targets.all_targets();
-                    let continuing = successors
-                        .iter()
-                        .copied()
-                        .filter(|target| block_reaches(body, *target, switch_block))
-                        .collect::<Vec<_>>();
-                    let [true_target] = continuing.as_slice() else {
-                        return Err(format!(
-                            "structural decision {decision_id} condition {} pattern switch has {} looping successors",
-                            marker.condition_index,
-                            continuing.len()
-                        ));
-                    };
-                    let exits = successors
-                        .iter()
-                        .copied()
-                        .filter(|target| target != true_target)
-                        .collect::<Vec<_>>();
-                    let [false_target] = exits.as_slice() else {
-                        return Err(format!(
-                            "structural decision {decision_id} condition {} pattern switch has {} exit successors",
-                            marker.condition_index,
-                            exits.len()
-                        ));
-                    };
-                    (*true_target, *false_target)
+            let (raw_true_target, raw_false_target) = if discr.ty(&body.local_decls, tcx)
+                == tcx.types.bool
+            {
+                (targets.target_for_value(1), targets.target_for_value(0))
+            } else if decision.decision_kind != "while-let" {
+                // An `if let` discriminant switch has no back edge; the
+                // true edge is the one accepting the recorded pattern
+                // variant's discriminant.
+                let Some(variant_index) = condition.pattern_variant else {
+                    return Err(format!(
+                        "structural decision {decision_id} condition {} let pattern records no variant to discriminate its switch",
+                        marker.condition_index
+                    ));
                 };
+                let discriminant_local = match discr {
+                    Operand::Copy(place) | Operand::Move(place) => place.as_local(),
+                    _ => None,
+                };
+                let scrutinee_adt = discriminant_local.and_then(|local| {
+                    body.basic_blocks[switch_block]
+                        .statements
+                        .iter()
+                        .rev()
+                        .find_map(|statement| {
+                            let StatementKind::Assign(assignment) = &statement.kind else {
+                                return None;
+                            };
+                            let (destination, value) = &**assignment;
+                            let Rvalue::Discriminant(place) = value else {
+                                return None;
+                            };
+                            if destination.as_local() != Some(local) {
+                                return None;
+                            }
+                            place.ty(&body.local_decls, tcx).ty.peel_refs().ty_adt_def()
+                        })
+                });
+                let Some(scrutinee_adt) = scrutinee_adt else {
+                    return Err(format!(
+                        "structural decision {decision_id} condition {} pattern switch has no discriminant scrutinee",
+                        marker.condition_index
+                    ));
+                };
+                let expected = scrutinee_adt
+                    .discriminant_for_variant(tcx, rustc_abi::VariantIdx::from_u32(variant_index))
+                    .val;
+                let valued = targets.iter().collect::<Vec<_>>();
+                let [(value, valued_target)] = valued.as_slice() else {
+                    unreachable!("validated two-way pattern switch")
+                };
+                if *value == expected {
+                    (*valued_target, targets.otherwise())
+                } else {
+                    (targets.otherwise(), *valued_target)
+                }
+            } else {
+                // The matching variant continues the loop and reaches the
+                // switch again through the back edge; the refuted variant
+                // exits.
+                let successors = targets.all_targets();
+                let continuing = successors
+                    .iter()
+                    .copied()
+                    .filter(|target| block_reaches(body, *target, switch_block))
+                    .collect::<Vec<_>>();
+                let [true_target] = continuing.as_slice() else {
+                    return Err(format!(
+                        "structural decision {decision_id} condition {} pattern switch has {} looping successors",
+                        marker.condition_index,
+                        continuing.len()
+                    ));
+                };
+                let exits = successors
+                    .iter()
+                    .copied()
+                    .filter(|target| target != true_target)
+                    .collect::<Vec<_>>();
+                let [false_target] = exits.as_slice() else {
+                    return Err(format!(
+                        "structural decision {decision_id} condition {} pattern switch has {} exit successors",
+                        marker.condition_index,
+                        exits.len()
+                    ));
+                };
+                (*true_target, *false_target)
+            };
             let (true_target, false_target) = if condition.invert_value {
                 (raw_false_target, raw_true_target)
             } else {
@@ -10198,268 +10375,332 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
         return body;
     }
     rustc_middle::ty::print::with_no_trimmed_paths!({
-    let definition = exact_def_path!(tcx, def_id);
-    let mut decision_plans = runtime_decision_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, def_id, "bind Rust decision probes", &definition, &error);
-        Vec::new()
-    });
-    let mut branch_plans = runtime_let_else_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, def_id, "bind Rust let-else probes", &definition, &error);
-        Vec::new()
-    });
-    branch_plans.extend(
-        runtime_logical_selection_plans(tcx, def_id, body).unwrap_or_else(|error| {
-            degrade_unbound_obligations(tcx, def_id, "bind Rust logical-selection probes", &definition, &error);
+        let definition = exact_def_path!(tcx, def_id);
+        let mut decision_plans = runtime_decision_plans(tcx, def_id, body)
+            .and_then(|plans| match env::var_os(FORCE_UNBOUND_DECISIONS) {
+                Some(forced)
+                    if !forced.is_empty()
+                        && definition.contains(&forced.to_string_lossy().into_owned()) =>
+                {
+                    Err("SUPERCOV_RUST_FORCE_UNBOUND_DECISIONS fault injection".to_owned())
+                }
+                _ => Ok(plans),
+            })
+            .unwrap_or_else(|error| {
+                degrade_unbound_obligations(
+                    DeclineScope::Decisions,
+                    tcx,
+                    def_id,
+                    "bind Rust decision probes",
+                    &definition,
+                    &error,
+                );
+                Vec::new()
+            });
+        let mut branch_plans = runtime_let_else_plans(tcx, def_id, body).unwrap_or_else(|error| {
+            degrade_unbound_obligations(
+                DeclineScope::Branches,
+                tcx,
+                def_id,
+                "bind Rust let-else probes",
+                &definition,
+                &error,
+            );
             Vec::new()
-        }),
-    );
-    let statement_plans = runtime_statement_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, def_id, "bind Rust statement probes", &definition, &error);
-        Vec::new()
-    });
-    let probe_id = probe_id_for(tcx, def_id, &definition);
-    let context_id = context_id_for(tcx, def_id, &definition);
-    let has_ordinal_probes =
-        probe_id.is_some() || !statement_plans.is_empty() || !decision_plans.is_empty();
-    let probe_function = has_ordinal_probes
-        .then(|| find_runtime_function(tcx, PROBE_FUNCTION))
-        .flatten();
-    let enter_context = context_id.and_then(|_| find_runtime_function(tcx, ENTER_CONTEXT_FUNCTION));
-    let exit_context =
-        context_id.and_then(|_| find_runtime_function(tcx, EXIT_TEST_CONTEXT_FUNCTION));
-    let start_decision = (!decision_plans.is_empty())
-        .then(|| find_runtime_function(tcx, START_DECISION_FUNCTION))
-        .flatten();
-    let record_condition = (!decision_plans.is_empty())
-        .then(|| find_runtime_function(tcx, RECORD_CONDITION_FUNCTION))
-        .flatten();
-    let finish_decision = (!decision_plans.is_empty())
-        .then(|| find_runtime_function(tcx, FINISH_DECISION_FUNCTION))
-        .flatten();
-    let has_loop_plans = decision_plans
-        .iter()
-        .any(|plan| plan.loop_alternatives.is_some());
-    let has_branch_plans = has_loop_plans || !branch_plans.is_empty();
-    let start_branch = has_branch_plans
-        .then(|| find_runtime_function(tcx, START_BRANCH_FUNCTION))
-        .flatten();
-    let hit_branch = has_branch_plans
-        .then(|| find_runtime_function(tcx, HIT_BRANCH_FUNCTION))
-        .flatten();
-    if has_ordinal_probes != probe_function.is_some()
-        || context_id.is_some() != (enter_context.is_some() && exit_context.is_some())
-        || (!decision_plans.is_empty()
-            && (start_decision.is_none()
-                || record_condition.is_none()
-                || finish_decision.is_none()))
-        || has_branch_plans != (start_branch.is_some() && hit_branch.is_some())
-    {
-        tcx.dcx().fatal(format!(
+        });
+        branch_plans.extend(
+            runtime_logical_selection_plans(tcx, def_id, body).unwrap_or_else(|error| {
+                degrade_unbound_obligations(
+                    DeclineScope::Branches,
+                    tcx,
+                    def_id,
+                    "bind Rust logical-selection probes",
+                    &definition,
+                    &error,
+                );
+                Vec::new()
+            }),
+        );
+        let statement_plans = runtime_statement_plans(tcx, def_id, body).unwrap_or_else(|error| {
+            degrade_unbound_obligations(
+                DeclineScope::Statements,
+                tcx,
+                def_id,
+                "bind Rust statement probes",
+                &definition,
+                &error,
+            );
+            Vec::new()
+        });
+        let probe_id = probe_id_for(tcx, def_id, &definition);
+        let context_id = context_id_for(tcx, def_id, &definition);
+        let has_ordinal_probes =
+            probe_id.is_some() || !statement_plans.is_empty() || !decision_plans.is_empty();
+        let probe_function = has_ordinal_probes
+            .then(|| find_runtime_function(tcx, PROBE_FUNCTION))
+            .flatten();
+        let enter_context =
+            context_id.and_then(|_| find_runtime_function(tcx, ENTER_CONTEXT_FUNCTION));
+        let exit_context =
+            context_id.and_then(|_| find_runtime_function(tcx, EXIT_TEST_CONTEXT_FUNCTION));
+        let start_decision = (!decision_plans.is_empty())
+            .then(|| find_runtime_function(tcx, START_DECISION_FUNCTION))
+            .flatten();
+        let record_condition = (!decision_plans.is_empty())
+            .then(|| find_runtime_function(tcx, RECORD_CONDITION_FUNCTION))
+            .flatten();
+        let finish_decision = (!decision_plans.is_empty())
+            .then(|| find_runtime_function(tcx, FINISH_DECISION_FUNCTION))
+            .flatten();
+        let has_loop_plans = decision_plans
+            .iter()
+            .any(|plan| plan.loop_alternatives.is_some());
+        let has_branch_plans = has_loop_plans || !branch_plans.is_empty();
+        let start_branch = has_branch_plans
+            .then(|| find_runtime_function(tcx, START_BRANCH_FUNCTION))
+            .flatten();
+        let hit_branch = has_branch_plans
+            .then(|| find_runtime_function(tcx, HIT_BRANCH_FUNCTION))
+            .flatten();
+        if has_ordinal_probes != probe_function.is_some()
+            || context_id.is_some() != (enter_context.is_some() && exit_context.is_some())
+            || (!decision_plans.is_empty()
+                && (start_decision.is_none()
+                    || record_condition.is_none()
+                    || finish_decision.is_none()))
+            || has_branch_plans != (start_branch.is_some() && hit_branch.is_some())
+        {
+            tcx.dcx().fatal(format!(
             "Supercov injected runtime functions are incomplete while instrumenting {definition}"
         ));
-    }
-
-    let mut instrumented = body.clone();
-    strip_native_coverage(&mut instrumented);
-    let span = tcx.def_span(def_id);
-    if probe_id.is_none()
-        && context_id.is_none()
-        && decision_plans.is_empty()
-        && branch_plans.is_empty()
-        && statement_plans.is_empty()
-    {
-        return tcx.arena.alloc(instrumented);
-    }
-    let unit = instrumented
-        .local_decls
-        .push(LocalDecl::new(tcx.types.unit, span));
-    if let (Some(start), Some(hit)) = (start_branch, hit_branch)
-        && let Err(error) = instrument_runtime_matches(
-            tcx,
-            &mut instrumented,
-            &mut branch_plans,
-            start,
-            hit,
-            unit,
-            span,
-        )
-    {
-        degrade_unbound_obligations(tcx, def_id, "inject Rust branch probes", &definition, &error);
-        return body;
-    }
-    if let Some(start_branch) = start_branch
-        && let Err(error) = instrument_runtime_loop_frames(
-            tcx,
-            &mut instrumented,
-            &mut decision_plans,
-            start_branch,
-            span,
-        )
-    {
-        degrade_unbound_obligations(tcx, def_id, "inject Rust loop frames", &definition, &error);
-        return body;
-    }
-    if let (Some(start), Some(condition), Some(finish)) =
-        (start_decision, record_condition, finish_decision)
-        && let Err(error) = instrument_runtime_decisions(
-            tcx,
-            &mut instrumented,
-            &decision_plans,
-            DecisionRuntime {
-                start,
-                condition,
-                finish,
-                ordinal_hit: probe_function.expect("validated decision ordinal runtime"),
-                branch_hit: hit_branch,
-                unit,
-            },
-            span,
-        )
-    {
-        degrade_unbound_obligations(tcx, def_id, "inject Rust decision probes", &definition, &error);
-        return body;
-    }
-    if let Some(probe_function) = probe_function
-        && let Err(error) = instrument_runtime_points(
-            tcx,
-            &mut instrumented,
-            &statement_plans,
-            probe_function,
-            unit,
-            span,
-        )
-    {
-        degrade_unbound_obligations(tcx, def_id, "inject Rust statement probes", &definition, &error);
-        return body;
-    }
-    let previous_context = context_id.map(|_| {
-        instrumented
-            .local_decls
-            .push(LocalDecl::new(tcx.types.u64, span))
-    });
-    if let (Some(context_id), Some(previous), Some(exit)) =
-        (context_id, previous_context, exit_context)
-    {
-        let boundary_context = Operand::const_from_scalar(
-            tcx,
-            tcx.types.u64,
-            Scalar::from_u64(context_id),
-            span,
-        );
-        let continuing_unwinds = instrumented
-            .basic_blocks
-            .iter_enumerated()
-            .filter_map(|(block, data)| {
-                matches!(data.terminator().unwind(), Some(UnwindAction::Continue)).then_some(block)
-            })
-            .collect::<Vec<_>>();
-        let exits = instrumented
-            .basic_blocks
-            .iter_enumerated()
-            .filter_map(|(block, data)| {
-                matches!(
-                    data.terminator().kind,
-                    TerminatorKind::Return | TerminatorKind::UnwindResume
-                )
-                .then_some((block, data.is_cleanup))
-            })
-            .collect::<Vec<_>>();
-        for (block, cleanup) in exits {
-            let original = instrumented.basic_blocks[block].terminator().clone();
-            let continuation = instrumented
-                .basic_blocks_mut()
-                .push(BasicBlockData::new(Some(original), cleanup));
-            instrumented.basic_blocks_mut()[block] = runtime_call_block(
-                tcx,
-                exit,
-                [
-                    boundary_context.clone(),
-                    Operand::Copy(Place::from(previous)),
-                ]
-                .into_iter(),
-                Place::from(unit),
-                continuation,
-                span,
-                cleanup,
-            );
         }
-        if !continuing_unwinds.is_empty() {
-            let resume = instrumented.basic_blocks_mut().push(BasicBlockData::new(
-                Some(Terminator {
-                    source_info: SourceInfo::outermost(span),
-                    kind: TerminatorKind::UnwindResume,
-                }),
-                true,
-            ));
-            let cleanup = instrumented.basic_blocks_mut().push(runtime_call_block(
+
+        let mut instrumented = body.clone();
+        strip_native_coverage(&mut instrumented);
+        let span = tcx.def_span(def_id);
+        if probe_id.is_none()
+            && context_id.is_none()
+            && decision_plans.is_empty()
+            && branch_plans.is_empty()
+            && statement_plans.is_empty()
+        {
+            return tcx.arena.alloc(instrumented);
+        }
+        let unit = instrumented
+            .local_decls
+            .push(LocalDecl::new(tcx.types.unit, span));
+        if let (Some(start), Some(hit)) = (start_branch, hit_branch)
+            && let Err(error) = instrument_runtime_matches(
                 tcx,
-                exit,
-                [
-                    boundary_context.clone(),
-                    Operand::Copy(Place::from(previous)),
-                ]
-                .into_iter(),
-                Place::from(unit),
-                resume,
+                &mut instrumented,
+                &mut branch_plans,
+                start,
+                hit,
+                unit,
                 span,
-                true,
-            ));
-            for block in continuing_unwinds {
-                *instrumented.basic_blocks_mut()[block]
-                    .terminator_mut()
-                    .unwind_mut()
-                    .expect("collected unwind action") = UnwindAction::Cleanup(cleanup);
+            )
+        {
+            degrade_unbound_obligations(
+                DeclineScope::Body,
+                tcx,
+                def_id,
+                "inject Rust branch probes",
+                &definition,
+                &error,
+            );
+            return body;
+        }
+        if let Some(start_branch) = start_branch
+            && let Err(error) = instrument_runtime_loop_frames(
+                tcx,
+                &mut instrumented,
+                &mut decision_plans,
+                start_branch,
+                span,
+            )
+        {
+            degrade_unbound_obligations(
+                DeclineScope::Body,
+                tcx,
+                def_id,
+                "inject Rust loop frames",
+                &definition,
+                &error,
+            );
+            return body;
+        }
+        if let (Some(start), Some(condition), Some(finish)) =
+            (start_decision, record_condition, finish_decision)
+            && let Err(error) = instrument_runtime_decisions(
+                tcx,
+                &mut instrumented,
+                &decision_plans,
+                DecisionRuntime {
+                    start,
+                    condition,
+                    finish,
+                    ordinal_hit: probe_function.expect("validated decision ordinal runtime"),
+                    branch_hit: hit_branch,
+                    unit,
+                },
+                span,
+            )
+        {
+            degrade_unbound_obligations(
+                DeclineScope::Body,
+                tcx,
+                def_id,
+                "inject Rust decision probes",
+                &definition,
+                &error,
+            );
+            return body;
+        }
+        if let Some(probe_function) = probe_function
+            && let Err(error) = instrument_runtime_points(
+                tcx,
+                &mut instrumented,
+                &statement_plans,
+                probe_function,
+                unit,
+                span,
+            )
+        {
+            degrade_unbound_obligations(
+                DeclineScope::Body,
+                tcx,
+                def_id,
+                "inject Rust statement probes",
+                &definition,
+                &error,
+            );
+            return body;
+        }
+        let previous_context = context_id.map(|_| {
+            instrumented
+                .local_decls
+                .push(LocalDecl::new(tcx.types.u64, span))
+        });
+        if let (Some(context_id), Some(previous), Some(exit)) =
+            (context_id, previous_context, exit_context)
+        {
+            let boundary_context =
+                Operand::const_from_scalar(tcx, tcx.types.u64, Scalar::from_u64(context_id), span);
+            let continuing_unwinds = instrumented
+                .basic_blocks
+                .iter_enumerated()
+                .filter_map(|(block, data)| {
+                    matches!(data.terminator().unwind(), Some(UnwindAction::Continue))
+                        .then_some(block)
+                })
+                .collect::<Vec<_>>();
+            let exits = instrumented
+                .basic_blocks
+                .iter_enumerated()
+                .filter_map(|(block, data)| {
+                    matches!(
+                        data.terminator().kind,
+                        TerminatorKind::Return | TerminatorKind::UnwindResume
+                    )
+                    .then_some((block, data.is_cleanup))
+                })
+                .collect::<Vec<_>>();
+            for (block, cleanup) in exits {
+                let original = instrumented.basic_blocks[block].terminator().clone();
+                let continuation = instrumented
+                    .basic_blocks_mut()
+                    .push(BasicBlockData::new(Some(original), cleanup));
+                instrumented.basic_blocks_mut()[block] = runtime_call_block(
+                    tcx,
+                    exit,
+                    [
+                        boundary_context.clone(),
+                        Operand::Copy(Place::from(previous)),
+                    ]
+                    .into_iter(),
+                    Place::from(unit),
+                    continuation,
+                    span,
+                    cleanup,
+                );
+            }
+            if !continuing_unwinds.is_empty() {
+                let resume = instrumented.basic_blocks_mut().push(BasicBlockData::new(
+                    Some(Terminator {
+                        source_info: SourceInfo::outermost(span),
+                        kind: TerminatorKind::UnwindResume,
+                    }),
+                    true,
+                ));
+                let cleanup = instrumented.basic_blocks_mut().push(runtime_call_block(
+                    tcx,
+                    exit,
+                    [
+                        boundary_context.clone(),
+                        Operand::Copy(Place::from(previous)),
+                    ]
+                    .into_iter(),
+                    Place::from(unit),
+                    resume,
+                    span,
+                    true,
+                ));
+                for block in continuing_unwinds {
+                    *instrumented.basic_blocks_mut()[block]
+                        .terminator_mut()
+                        .unwind_mut()
+                        .expect("collected unwind action") = UnwindAction::Cleanup(cleanup);
+                }
             }
         }
-    }
-    let continuation = {
-        let original_start =
-            instrumented.basic_blocks_mut()[rustc_middle::mir::START_BLOCK].clone();
-        instrumented.basic_blocks_mut().push(original_start)
-    };
-    let mut entry = continuation;
-    if let (Some(probe_id), Some(probe_function)) = (probe_id, probe_function) {
-        let block = runtime_call_block(
-            tcx,
-            probe_function,
-            [Operand::const_from_scalar(
+        let continuation = {
+            let original_start =
+                instrumented.basic_blocks_mut()[rustc_middle::mir::START_BLOCK].clone();
+            instrumented.basic_blocks_mut().push(original_start)
+        };
+        let mut entry = continuation;
+        if let (Some(probe_id), Some(probe_function)) = (probe_id, probe_function) {
+            let block = runtime_call_block(
                 tcx,
-                tcx.types.u64,
-                Scalar::from_u64(probe_id),
+                probe_function,
+                [Operand::const_from_scalar(
+                    tcx,
+                    tcx.types.u64,
+                    Scalar::from_u64(probe_id),
+                    span,
+                )]
+                .into_iter(),
+                Place::from(unit),
+                entry,
                 span,
-            )]
-            .into_iter(),
-            Place::from(unit),
-            entry,
-            span,
-            false,
-        );
-        if context_id.is_some() {
-            entry = instrumented.basic_blocks_mut().push(block);
-        } else {
-            instrumented.basic_blocks_mut()[rustc_middle::mir::START_BLOCK] = block;
+                false,
+            );
+            if context_id.is_some() {
+                entry = instrumented.basic_blocks_mut().push(block);
+            } else {
+                instrumented.basic_blocks_mut()[rustc_middle::mir::START_BLOCK] = block;
+            }
         }
-    }
-    if let (Some(context_id), Some(enter), Some(previous)) =
-        (context_id, enter_context, previous_context)
-    {
-        instrumented.basic_blocks_mut()[rustc_middle::mir::START_BLOCK] = runtime_call_block(
-            tcx,
-            enter,
-            [Operand::const_from_scalar(
+        if let (Some(context_id), Some(enter), Some(previous)) =
+            (context_id, enter_context, previous_context)
+        {
+            instrumented.basic_blocks_mut()[rustc_middle::mir::START_BLOCK] = runtime_call_block(
                 tcx,
-                tcx.types.u64,
-                Scalar::from_u64(context_id),
+                enter,
+                [Operand::const_from_scalar(
+                    tcx,
+                    tcx.types.u64,
+                    Scalar::from_u64(context_id),
+                    span,
+                )]
+                .into_iter(),
+                Place::from(previous),
+                entry,
                 span,
-            )]
-            .into_iter(),
-            Place::from(previous),
-            entry,
-            span,
-            false,
-        );
-    }
-    tcx.arena.alloc(instrumented)
+                false,
+            );
+        }
+        tcx.arena.alloc(instrumented)
     })
 }
 
