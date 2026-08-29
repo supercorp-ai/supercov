@@ -6977,6 +6977,143 @@ fn runtime_logical_selection_plans<'tcx>(
     if branches.is_empty() {
         return Ok(Vec::new());
     }
+    // Coverage-ineligible functions (`#[automatically_derived]`,
+    // `#[coverage(off)]`) never receive native branch mappings, so their
+    // value-position selections bind structurally: each selection's left
+    // operand IS a typed Boolean switch findable by its exact mapping source,
+    // and its two edges are the evaluated/short-circuited alternatives.
+    if body.function_coverage_info.is_none() && !tcx.coverage_attr_on(def_id) {
+        let mut branches_by_source =
+            BTreeMap::<(String, u32, u32), Vec<&BranchObligation>>::new();
+        for branch in &branches {
+            let mapping_source = branch.mapping_source.as_ref().ok_or_else(|| {
+                format!(
+                    "logical-selection branch {} has no exact left-operand mapping",
+                    branch.identity.id
+                )
+            })?;
+            branches_by_source
+                .entry((
+                    mapping_source.key.clone(),
+                    mapping_source.start,
+                    mapping_source.end,
+                ))
+                .or_default()
+                .push(branch);
+        }
+        let mut switches_by_source = BTreeMap::<(String, u32, u32), Vec<BasicBlock>>::new();
+        for (block, data) in body.basic_blocks.iter_enumerated() {
+            let terminator = data.terminator();
+            let TerminatorKind::SwitchInt { discr, .. } = &terminator.kind else {
+                continue;
+            };
+            if discr.ty(&body.local_decls, tcx) != tcx.types.bool {
+                continue;
+            }
+            for span in [
+                terminator.source_info.span,
+                terminator.source_info.span.source_callsite(),
+            ] {
+                let Ok(source) = stable_source_range(tcx, span, &obligations.crate_name) else {
+                    continue;
+                };
+                let key = (source.key.clone(), source.start, source.end);
+                if branches_by_source.contains_key(&key) {
+                    switches_by_source.entry(key).or_default().push(block);
+                    break;
+                }
+            }
+        }
+        let mut plans = Vec::new();
+        for (source, mut source_branches) in branches_by_source {
+            let mut switches = switches_by_source.remove(&source).unwrap_or_default();
+            switches.sort();
+            switches.dedup();
+            source_branches.sort_by_key(|branch| branch.identity.owner_local_ordinal);
+            let rank = |candidate: BasicBlock, pool: &[BasicBlock]| {
+                pool.iter()
+                    .filter(|other| {
+                        **other != candidate && semantically_before(body, **other, candidate)
+                    })
+                    .count()
+            };
+            let pool = switches.clone();
+            switches.sort_by_key(|block| rank(*block, &pool));
+            if source_branches.len() != switches.len() {
+                return Err(format!(
+                    "{} logical-selection branches at {}:{}-{} map to {} structural Boolean switches",
+                    source_branches.len(),
+                    source.0,
+                    source.1,
+                    source.2,
+                    switches.len()
+                ));
+            }
+            if switches
+                .iter()
+                .enumerate()
+                .any(|(index, block)| rank(*block, &pool) != index)
+            {
+                return Err(format!(
+                    "logical-selection switches at {}:{}-{} have no total semantic order",
+                    source.0, source.1, source.2
+                ));
+            }
+            for (branch, switch_block) in source_branches.into_iter().zip(switches) {
+                let TerminatorKind::SwitchInt { targets, .. } =
+                    &body.basic_blocks[switch_block].terminator().kind
+                else {
+                    unreachable!("collected structural Boolean switch")
+                };
+                let true_target = targets.target_for_value(1);
+                let false_target = targets.target_for_value(0);
+                let (evaluated_target, short_target) = match branch.discriminator.as_str() {
+                    "logical-selection:and" => (true_target, false_target),
+                    "logical-selection:or" => (false_target, true_target),
+                    other => {
+                        return Err(format!(
+                            "logical-selection branch {} has unknown discriminator {other}",
+                            branch.identity.id
+                        ));
+                    }
+                };
+                let alternative = |label: &str| {
+                    branch
+                        .alternatives
+                        .iter()
+                        .find(|alternative| alternative.label == label)
+                        .ok_or_else(|| {
+                            format!(
+                                "logical-selection branch {} lacks {label}",
+                                branch.identity.id
+                            )
+                        })
+                };
+                let short = alternative("short-circuited")?;
+                let evaluated = alternative("right operand evaluated")?;
+                plans.push(RuntimeMatchPlan {
+                    id: branch.identity.id.clone(),
+                    start_block: switch_block,
+                    token: None,
+                    arms: vec![
+                        RuntimeMatchArm {
+                            branch_id: short.identity.id.clone(),
+                            entry_block: short_target,
+                            entry_sources: vec![switch_block],
+                            selected_ordinal: short.identity.probe_ordinal,
+                        },
+                        RuntimeMatchArm {
+                            branch_id: evaluated.identity.id.clone(),
+                            entry_block: evaluated_target,
+                            entry_sources: vec![switch_block],
+                            selected_ordinal: evaluated.identity.probe_ordinal,
+                        },
+                    ],
+                });
+            }
+        }
+        return Ok(plans);
+    }
     let coverage = body.function_coverage_info.as_deref().ok_or_else(|| {
         format!(
             "rustc did not retain branch mappings for logical-selection function {}",

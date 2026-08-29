@@ -120,18 +120,23 @@ note's commit):
   (bound arm entries claim dominated switches when they have conditions;
   leftovers rank sequentially).
 
-## Remaining boundary (next work item)
+## Third wave: value-position selections (implemented; supercov-contracts clear)
 
-With visit_map fully bound, the dogfood build fails closed again at derived
-`PartialEq::eq` — this time its LOGICAL-SELECTION branches ("rustc did not
-retain branch mappings for logical-selection function"). The standalone
-native-mapping path only binds selection branches not referenced by any
-decision's `logical_selections`; eq's selections reaching it means its `&&`
-decision either was not recorded or does not reference them (orphaned
-selection branches). Diagnose why the derived eq decision is absent/detached,
-then either bind its selections through the structural decision vector (as
-decision-linked selections already are) or record the missing decision. Until
-then supercov-contracts fails closed at eq.
+Derived `PartialEq::eq` is a value-position `&&` chain: no control decision
+exists, so its logical selections are standalone branches that previously
+bound only through rustc's native branch mappings — which coverage-ineligible
+functions never receive. The selection binder now falls back structurally
+exactly when `function_coverage_info` is absent AND `coverage_attr_on` is
+false: each selection's left operand IS a typed Boolean switch findable by
+the selection's exact `mapping_source` (span or callsite), its value edges
+are the evaluated/short-circuited alternatives per the and/or discriminator,
+and same-source groups rank under `semantically_before` with strict counts.
+
+With that, `supercov-contracts` compiles fully instrumented — every serde
+visitor shape, every derived impl, all decisions, matches, tries and
+selections bound exactly. The next R3 step is the full-workspace dogfood
+(engine and CLI crates), which decides whether more generated-code shapes
+remain, plus corpus fixtures pinning all of this wave's shapes.
 
 ## Gates
 
