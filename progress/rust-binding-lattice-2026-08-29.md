@@ -111,3 +111,76 @@ Fix: `root_relative` keeps the lexical comparison as the fast path and falls
 back to comparing canonical physical paths, matching `package_identity`.
 The lattice gate now doubles as the regression test, because owning that
 crate's obligations at all requires physical containment to work.
+
+## What the shape miner found (first runs)
+
+The miner compiles a shape-dense dependency set in lattice mode with the
+source root pointed at the registry checkout, so every downloaded crate's own
+source is owned and reaches the binder. Three findings in the first runs:
+
+1. **The lattice was incomplete.** Only the pre-borrow sites had been
+   converted, so a real shape in `proc-macro2`'s build script still stopped
+   the build. All binder and injection sites are converted now; the surviving
+   `fatal`s are I/O and rustdoc-catalog integrity, where measurement is
+   genuinely impossible.
+2. **A defect introduced by the lattice itself.** Degrading try-operator
+   binding to an empty map left downstream marker code indexing that map,
+   panicking with `no entry found for key`. Degraded phases now skip their
+   obligations instead of assuming an entry exists. Worth noting the failure
+   mode: a compiler *panic* is not covered by the lattice at all, so
+   degradation must never leave a partially-populated data structure behind.
+3. **Four distinct shapes enumerated in one crate in a single pass** — the
+   parallel discovery the lattice was built for, against one shape per
+   multi-hour dogfood before it.
+
+## A second category: invariant violations, not blind spots
+
+The miner then surfaced a different class, and it should not be degraded
+reflexively:
+
+- `Rust branch aggregation mismatch` fires when two obligations hash to the
+  same stable ID but carry different content (kind, discriminator,
+  alternatives or parent arm). That is an *identity* defect: if it were
+  ignored, two distinct branches would merge under one ID and report a
+  single wrong number. It fired on `bytes`, so the ID derivation has a real
+  collision case in real code, and that is worth fixing rather than
+  degrading.
+- `has no Rust decision kind for X` is the opposite — an authored control
+  shape we do not model yet, which is an ordinary lattice case.
+
+The rule to apply when converting the rest: degrade *shape* problems (we
+cannot bind this construct), fail on *environment* problems (our own runtime
+or evidence path is broken), and treat *identity* problems as bugs to fix
+first — degrading them only as a safety net, and never by merging the
+colliding obligations.
+
+## The `bytes` aggregation mismatch: visit metadata treated as identity
+
+The miner's `Rust branch aggregation mismatch` on `bytes` turned out to be a
+regression, and the first hypothesis was wrong in an instructive way.
+
+An authored obligation's canonical ID deliberately excludes the def path and
+the owner-local ordinal, so one macro's body aggregates into a *single*
+obligation across all of its invocations. The natural suspicion was therefore
+`parent_match_arm` (added in wave 2), which genuinely does describe the
+callsite rather than the obligation. Making the error self-diagnosing settled
+it immediately: the differing field was `alternatives`.
+
+`StableObligationIdentity` carries `owner_local_ordinal`, a visit counter that
+advances on every recorded obligation. Two invocations of the same macro
+therefore produce identical IDs and canonical strings but different counters,
+and aggregation compared whole identity structs — so it reported a mismatch
+between two recordings of the very same alternative. Aggregation now compares
+semantic identity only (each alternative's stable ID and label).
+
+The `parent_match_arm` change was kept anyway on its own merits: it is a
+binding *hint* that narrows a search, so when two invocations disagree the
+honest response is to drop the hint and fall back to sequential ranking, not
+to fail.
+
+Fixture: one macro invoked twice in the same function pins the aggregation
+path. Writing it also surfaced an unrelated unbindable shape — a macro
+invocation forming an entire match-arm body degenerates the span-located
+planner exactly like the wave-5 derived `PartialOrd` case. That is tracked
+separately rather than being absorbed by the lattice, because real code hits
+that pattern constantly and it deserves an exact binding.

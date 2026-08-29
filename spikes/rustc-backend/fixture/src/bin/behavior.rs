@@ -37,7 +37,7 @@ use supercov_rustc_spike_fixture::{
     generic_choice, hrtb_choice,
     inline_const_values,
     interrupted_decision, interrupted_for, interrupted_match, let_else_value, logical_value_choice,
-    AdapterKind, DerivedOrderLine, DerivedStyleIfLet, UnwrapOrSeven, adapter_flavor,
+    AdapterKind, DerivedOrderLine, macro_inside_and_outside_arm, DerivedStyleIfLet, UnwrapOrSeven, adapter_flavor,
     generated_loop_nested_match_by_proc,
     match_empty, match_identical, match_irrefutable, match_unreachable, match_value, mixed, nested,
     nested_expression, nested_for_values, nested_generic_choice, nested_let_else, nested_match,
@@ -578,6 +578,13 @@ fn main() {
     println!(
         "loop-nested-match-proc={}",
         generated_loop_nested_match_by_proc(vec![Ok(5), Ok(0), Err(7)])
+    );
+    println!(
+        "macro-arm-aggregate={:?}",
+        [
+            macro_inside_and_outside_arm(true),
+            macro_inside_and_outside_arm(false),
+        ]
     );
     println!(
         "adapter-flavor={:?}",

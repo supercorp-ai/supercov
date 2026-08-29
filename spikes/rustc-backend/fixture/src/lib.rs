@@ -894,6 +894,20 @@ pub fn context_panic_scope(log: &std::cell::RefCell<Vec<&'static str>>) {
     panic_path(log);
 }
 
+/// One macro body invoked twice in the same function. Both invocations expand
+/// the same authored source, so they aggregate into a single obligation even
+/// though each recording carries its own visit-order metadata.
+#[macro_export]
+macro_rules! flagged_choice {
+    ($flag:expr) => {
+        if $flag { 1 } else { 2 }
+    };
+}
+
+pub fn macro_inside_and_outside_arm(flag: bool) -> usize {
+    flagged_choice!(flag) * 10 + flagged_choice!(flag)
+}
+
 pub enum AdapterKind {
     Vite,
     Generic,

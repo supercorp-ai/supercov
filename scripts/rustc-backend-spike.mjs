@@ -5050,6 +5050,10 @@ try {
   assert.match(baselineBehavior.stdout, /derived-if-let=\[3, 7\]/);
   assert.match(baselineBehavior.stdout, /loop-nested-match-proc=111/);
   assert.match(baselineBehavior.stdout, /adapter-flavor=\[11, 11, 12\]/);
+  // One macro body invoked inside a match arm and outside any arm aggregates
+  // into a single obligation; the enclosing arm belongs to the callsite, not
+  // to the obligation, so the disagreement must not fail the compilation.
+  assert.match(baselineBehavior.stdout, /macro-arm-aggregate=\[11, 22\]/);
   const runtimeManifest = crateManifest(
     instrumentedDirectory,
     'supercov_rustc_spike_fixture',
@@ -7600,7 +7604,7 @@ try {
   assert.deepEqual(
     unboundLimitations,
     [
-      'RUST_OBLIGATION_UNBOUND: injected unbindable shape in unbindable: SUPERCOV_RUST_FORCE_UNBINDABLE fault injection',
+      'RUST_OBLIGATION_UNBOUND: bind injected unbindable shape in unbindable: SUPERCOV_RUST_FORCE_UNBINDABLE fault injection',
     ],
     'a degraded obligation did not record its exact unbound limitation',
   );

@@ -1008,6 +1008,16 @@ fn expansion_identity(
     Ok(frames.join("\0"))
 }
 
+/// The parts of a branch's alternatives that carry meaning for aggregation:
+/// each alternative's stable ID and label, without the visit-order metadata
+/// that legitimately differs between two recordings of the same obligation.
+fn alternative_identities(alternatives: &[BranchAlternativeObligation]) -> Vec<(&str, &str)> {
+    alternatives
+        .iter()
+        .map(|alternative| (alternative.identity.id.as_str(), alternative.label))
+        .collect()
+}
+
 fn obligation_identity(
     tcx: TyCtxt<'_>,
     def_id: rustc_span::def_id::DefId,
@@ -1530,8 +1540,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     || existing.assertion_source != assertion_source
                     || existing.outcome_branch_id != outcome_branch_id
                     || existing.loop_branch_id != loop_branch_id
-                    || existing.logical_selections != logical_selections
-                    || existing.parent_match_arm != parent_match_arm =>
+                    || existing.logical_selections != logical_selections =>
             {
                 self.tcx.dcx().fatal(format!(
                     "Supercov Rust decision aggregation mismatch for {}",
@@ -1539,6 +1548,11 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 ))
             }
             Some(existing) => {
+                // The enclosing match arm describes the invocation, not the
+                // obligation; see the branch aggregation above.
+                if existing.parent_match_arm != parent_match_arm {
+                    existing.parent_match_arm = None;
+                }
                 existing.definitions.push(self.definition.clone());
                 existing.definitions.sort();
                 existing.definitions.dedup();
@@ -1700,18 +1714,49 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     branch.id
                 ))
             }
+            // Aggregation compares semantic identity only. A
+            // StableObligationIdentity also carries visit-order metadata
+            // (owner_local_ordinal advances on every recorded obligation), and
+            // an authored obligation is deliberately visited once per macro
+            // invocation, so comparing whole identity structs reports a
+            // mismatch for two recordings of the very same alternative.
             Some(existing)
                 if existing.branch_kind != branch_kind
                     || existing.discriminator != discriminator
-                    || existing.alternatives != alternatives
-                    || existing.parent_match_arm != parent_match_arm =>
+                    || alternative_identities(&existing.alternatives)
+                        != alternative_identities(&alternatives) =>
             {
+                let differing = [
+                    (existing.branch_kind != branch_kind, "kind"),
+                    (existing.discriminator != discriminator, "discriminator"),
+                    (
+                        alternative_identities(&existing.alternatives)
+                            != alternative_identities(&alternatives),
+                        "alternatives",
+                    ),
+                ]
+                .into_iter()
+                .filter_map(|(differs, name)| differs.then_some(name))
+                .collect::<Vec<_>>()
+                .join(",");
                 self.tcx.dcx().fatal(format!(
-                    "Supercov Rust branch aggregation mismatch for {}",
-                    branch.id
+                    "Supercov Rust branch aggregation mismatch for {} in {}: differing={differing}; existing kind={}; new kind={branch_kind}",
+                    branch.id, self.definition, existing.branch_kind,
                 ))
             }
             Some(existing) => {
+                // An authored obligation's identity is invocation-independent
+                // on purpose, so one macro's code aggregates into a single
+                // obligation across its invocations. The enclosing match arm
+                // is a property of the invocation, not of the obligation: the
+                // same macro can expand inside an arm at one callsite and
+                // outside any arm at another. Treat a disagreement as an
+                // ambiguous hint and drop it, which falls back to sequential
+                // ranking, rather than failing on a difference that carries no
+                // identity meaning.
+                if existing.parent_match_arm != parent_match_arm {
+                    existing.parent_match_arm = None;
+                }
                 existing.definitions.push(self.definition.clone());
                 existing.definitions.sort();
                 existing.definitions.dedup();
@@ -4980,7 +5025,7 @@ fn match_arm_marker_statement<'tcx>(
 fn degrade_unbound_obligations(tcx: TyCtxt<'_>, phase: &str, definition: &str, error: &str) {
     if env::var_os(STRICT_BINDING).is_some_and(|value| !value.is_empty()) {
         tcx.dcx()
-            .fatal(format!("Supercov could not bind {phase} in {definition}: {error}"));
+            .fatal(format!("Supercov could not {phase} in {definition}: {error}"));
     }
     BINDER_LIMITATIONS
         .lock()
@@ -5012,7 +5057,7 @@ fn mir_built_with_match_markers<'tcx>(
     {
         degrade_unbound_obligations(
             tcx,
-            "injected unbindable shape",
+            "bind injected unbindable shape",
             &obligations.definition,
             "SUPERCOV_RUST_FORCE_UNBINDABLE fault injection",
         );
@@ -5048,10 +5093,13 @@ fn mir_built_with_match_markers<'tcx>(
                 "CTFE",
             )
             .unwrap_or_else(|error| {
-                tcx.dcx().fatal(format!(
-                    "Supercov could not bind pre-borrow-check CTFE decisions in {}: {error}",
-                    obligations.definition
-                ))
+                degrade_unbound_obligations(
+                    tcx,
+                    "bind pre-borrow-check CTFE decisions",
+                    &obligations.definition,
+                    &error,
+                );
+                Vec::new()
             })
         };
         let mut instrumented = body.steal();
@@ -5215,7 +5263,7 @@ fn mir_built_with_match_markers<'tcx>(
                 Err(error) => {
                     degrade_unbound_obligations(
                         tcx,
-                        "pre-borrow-check synthetic matches",
+                        "bind pre-borrow-check synthetic matches",
                         &obligations.definition,
                         &error,
                     );
@@ -5252,7 +5300,7 @@ fn mir_built_with_match_markers<'tcx>(
                     Err(error) => {
                         degrade_unbound_obligations(
                             tcx,
-                            &format!("pre-borrow-check synthetic guard {decision_id}"),
+                            &format!("bind pre-borrow-check synthetic guard {decision_id}"),
                             &obligations.definition,
                             &error,
                         );
@@ -5277,7 +5325,7 @@ fn mir_built_with_match_markers<'tcx>(
             .unwrap_or_else(|error| {
                 degrade_unbound_obligations(
                     tcx,
-                    "authored opaque decision conditions",
+                    "bind authored opaque decision conditions",
                     &obligations.definition,
                     &error,
                 );
@@ -5297,7 +5345,7 @@ fn mir_built_with_match_markers<'tcx>(
             .unwrap_or_else(|error| {
                 degrade_unbound_obligations(
                     tcx,
-                    "pre-borrow-check structural decision conditions",
+                    "bind pre-borrow-check structural decision conditions",
                     &obligations.definition,
                     &error,
                 );
@@ -5313,7 +5361,7 @@ fn mir_built_with_match_markers<'tcx>(
         .unwrap_or_else(|error| {
             degrade_unbound_obligations(
                 tcx,
-                "pre-borrow-check synthetic let-else",
+                "bind pre-borrow-check synthetic let-else",
                 &obligations.definition,
                 &error,
             );
@@ -5330,7 +5378,7 @@ fn mir_built_with_match_markers<'tcx>(
                 .unwrap_or_else(|error| {
                     degrade_unbound_obligations(
                         tcx,
-                        "pre-borrow-check try operators",
+                        "bind pre-borrow-check try operators",
                         &obligations.definition,
                         &error,
                     );
@@ -5346,7 +5394,10 @@ fn mir_built_with_match_markers<'tcx>(
     let mut instrumented = body.steal();
     let mut local_ordinals = BTreeMap::new();
     for group in &synthetic_groups {
-        let path = &assignments[&group.identity.id];
+        // A degraded match phase records no assignment for its groups.
+        let Some(path) = assignments.get(&group.identity.id) else {
+            continue;
+        };
         for (arm, arm_path) in group.arms.iter().zip(&path.arms) {
             let marker_local = instrumented
                 .local_decls
@@ -5377,7 +5428,9 @@ fn mir_built_with_match_markers<'tcx>(
     }
     let mut let_else_markers = Vec::new();
     for branch in &synthetic_let_else {
-        let path = let_else_assignments[&branch.identity.id];
+        let Some(&path) = let_else_assignments.get(&branch.identity.id) else {
+            continue;
+        };
         for (label, block) in [("matched", path.matched), ("else", path.fallback)] {
             let alternative = branch
                 .alternatives
@@ -5405,7 +5458,9 @@ fn mir_built_with_match_markers<'tcx>(
     }
     let mut try_markers = Vec::new();
     for branch in &try_operators {
-        let path = try_assignments[&branch.identity.id];
+        let Some(&path) = try_assignments.get(&branch.identity.id) else {
+            continue;
+        };
         for (label, block) in [
             ("continued", path.continued),
             ("early return", path.returned),
@@ -5450,10 +5505,13 @@ fn mir_built_with_match_markers<'tcx>(
         context_marker,
     )
     .unwrap_or_else(|error| {
-        tcx.dcx().fatal(format!(
-            "Supercov could not bind assertion phase boundaries in {}: {error}",
-            obligations.definition
-        ))
+        degrade_unbound_obligations(
+            tcx,
+            "bind assertion phase boundaries",
+            &obligations.definition,
+            &error,
+        );
+        Vec::new()
     });
     if !local_ordinals.is_empty() {
         let mut markers = MATCH_ARM_MARKERS
@@ -6072,34 +6130,49 @@ fn mir_drops_with_structural_probes<'tcx>(
         )
     };
     let match_plans = match_plans.unwrap_or_else(|error| {
-        tcx.dcx().fatal(format!(
-            "Supercov could not bind pre-optimization Rust match probes in {}: {error}",
-            exact_def_path!(tcx, def_id)
-        ))
+        degrade_unbound_obligations(
+            tcx,
+            "bind pre-optimization Rust match probes",
+            &exact_def_path!(tcx, def_id),
+            &error,
+        );
+        Vec::new()
     });
     let for_plans = for_plans.unwrap_or_else(|error| {
-        tcx.dcx().fatal(format!(
-            "Supercov could not bind pre-optimization Rust for-loop probes in {}: {error}",
-            exact_def_path!(tcx, def_id)
-        ))
+        degrade_unbound_obligations(
+            tcx,
+            "bind pre-optimization Rust for-loop probes",
+            &exact_def_path!(tcx, def_id),
+            &error,
+        );
+        Vec::new()
     });
     let guard_plans = guard_plans.unwrap_or_else(|error| {
-        tcx.dcx().fatal(format!(
-            "Supercov could not bind pre-optimization Rust structural decision probes in {}: {error}",
-            exact_def_path!(tcx, def_id)
-        ))
+        degrade_unbound_obligations(
+            tcx,
+            "bind pre-optimization Rust structural decision probes",
+            &exact_def_path!(tcx, def_id),
+            &error,
+        );
+        Vec::new()
     });
     let let_else_plans = let_else_plans.unwrap_or_else(|error| {
-        tcx.dcx().fatal(format!(
-            "Supercov could not bind pre-optimization Rust synthetic let-else probes in {}: {error}",
-            exact_def_path!(tcx, def_id)
-        ))
+        degrade_unbound_obligations(
+            tcx,
+            "bind pre-optimization Rust synthetic let-else probes",
+            &exact_def_path!(tcx, def_id),
+            &error,
+        );
+        Vec::new()
     });
     let try_plans = try_plans.unwrap_or_else(|error| {
-        tcx.dcx().fatal(format!(
-            "Supercov could not bind pre-optimization Rust try-operator probes in {}: {error}",
-            exact_def_path!(tcx, def_id)
-        ))
+        degrade_unbound_obligations(
+            tcx,
+            "bind pre-optimization Rust try-operator probes",
+            &exact_def_path!(tcx, def_id),
+            &error,
+        );
+        Vec::new()
     });
     if match_plans.is_empty()
         && for_plans.is_empty()
@@ -6179,10 +6252,13 @@ fn mir_drops_with_structural_probes<'tcx>(
     if let Err(error) =
         strip_match_arm_markers(&mut instrumented, def_id, &exact_def_path!(tcx, def_id))
     {
-        tcx.dcx().fatal(format!(
-            "Supercov could not consume pre-borrow-check Rust match markers in {}: {error}",
-            exact_def_path!(tcx, def_id)
-        ));
+        degrade_unbound_obligations(
+            tcx,
+            "consume pre-borrow-check Rust match markers",
+            &exact_def_path!(tcx, def_id),
+            &error,
+        );
+        return body;
     }
     let mut match_plans = match_plans;
     if let (Some(start), Some(hit)) = (start_branch, hit_branch)
@@ -6196,27 +6272,36 @@ fn mir_drops_with_structural_probes<'tcx>(
             span,
         )
     {
-        tcx.dcx().fatal(format!(
-            "Supercov could not inject pre-optimization Rust match probes in {}: {error}",
-            exact_def_path!(tcx, def_id)
-        ));
+        degrade_unbound_obligations(
+            tcx,
+            "inject pre-optimization Rust match probes",
+            &exact_def_path!(tcx, def_id),
+            &error,
+        );
+        return body;
     }
     // Match instrumentation may replace the accepting edge of a guard. Bind
     // exact Boolean targets after that edit while the semantic markers remain.
     let guard_plans =
         runtime_marked_decision_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
-            tcx.dcx().fatal(format!(
-                "Supercov could not rebind pre-optimization Rust synthetic guard probes in {}: {error}",
-                exact_def_path!(tcx, def_id)
-            ))
+            degrade_unbound_obligations(
+                tcx,
+                "rebind pre-optimization Rust synthetic guard probes",
+                &exact_def_path!(tcx, def_id),
+                &error,
+            );
+            Vec::new()
         });
     if let Err(error) =
         strip_structural_decision_markers(&mut instrumented, def_id, &exact_def_path!(tcx, def_id))
     {
-        tcx.dcx().fatal(format!(
-            "Supercov could not consume pre-borrow-check Rust match guard markers in {}: {error}",
-            exact_def_path!(tcx, def_id)
-        ));
+        degrade_unbound_obligations(
+            tcx,
+            "consume pre-borrow-check Rust match guard markers",
+            &exact_def_path!(tcx, def_id),
+            &error,
+        );
+        return body;
     }
     if let (Some(start), Some(condition), Some(finish)) =
         (start_decision, record_condition, finish_decision)
@@ -6235,26 +6320,35 @@ fn mir_drops_with_structural_probes<'tcx>(
             span,
         )
     {
-        tcx.dcx().fatal(format!(
-            "Supercov could not inject pre-optimization Rust synthetic guard probes in {}: {error}",
-            exact_def_path!(tcx, def_id)
-        ));
+        degrade_unbound_obligations(
+            tcx,
+            "inject pre-optimization Rust synthetic guard probes",
+            &exact_def_path!(tcx, def_id),
+            &error,
+        );
+        return body;
     }
     // Match and guard instrumentation may split an endpoint edge. Rebind the
     // semantic let-else markers only after those enclosing structures settle.
     let mut let_else_plans =
         runtime_marked_let_else_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
-            tcx.dcx().fatal(format!(
-                "Supercov could not rebind pre-optimization Rust synthetic let-else probes in {}: {error}",
-                exact_def_path!(tcx, def_id)
-            ))
+            degrade_unbound_obligations(
+                tcx,
+                "rebind pre-optimization Rust synthetic let-else probes",
+                &exact_def_path!(tcx, def_id),
+                &error,
+            );
+            Vec::new()
         });
     if let Err(error) = strip_let_else_markers(&mut instrumented, def_id, &exact_def_path!(tcx, def_id))
     {
-        tcx.dcx().fatal(format!(
-            "Supercov could not consume pre-borrow-check Rust let-else markers in {}: {error}",
-            exact_def_path!(tcx, def_id)
-        ));
+        degrade_unbound_obligations(
+            tcx,
+            "consume pre-borrow-check Rust let-else markers",
+            &exact_def_path!(tcx, def_id),
+            &error,
+        );
+        return body;
     }
     if let (Some(start), Some(hit)) = (start_branch, hit_branch)
         && let Err(error) = instrument_runtime_matches(
@@ -6267,28 +6361,37 @@ fn mir_drops_with_structural_probes<'tcx>(
             span,
         )
     {
-        tcx.dcx().fatal(format!(
-            "Supercov could not inject pre-optimization Rust synthetic let-else probes in {}: {error}",
-            exact_def_path!(tcx, def_id)
-        ));
+        degrade_unbound_obligations(
+            tcx,
+            "inject pre-optimization Rust synthetic let-else probes",
+            &exact_def_path!(tcx, def_id),
+            &error,
+        );
+        return body;
     }
     // Structural edits above may split either endpoint of a lowered `?`.
     // Bind the retained semantic markers only after enclosing selections have
     // settled, then remove every marker before this MIR leaves the provider.
     let mut try_plans =
         runtime_marked_try_operator_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
-            tcx.dcx().fatal(format!(
-                "Supercov could not rebind pre-optimization Rust try-operator probes in {}: {error}",
-                exact_def_path!(tcx, def_id)
-            ))
+            degrade_unbound_obligations(
+                tcx,
+                "rebind pre-optimization Rust try-operator probes",
+                &exact_def_path!(tcx, def_id),
+                &error,
+            );
+            Vec::new()
         });
     if let Err(error) =
         strip_try_operator_markers(&mut instrumented, def_id, &exact_def_path!(tcx, def_id))
     {
-        tcx.dcx().fatal(format!(
-            "Supercov could not consume pre-borrow-check Rust try-operator markers in {}: {error}",
-            exact_def_path!(tcx, def_id)
-        ));
+        degrade_unbound_obligations(
+            tcx,
+            "consume pre-borrow-check Rust try-operator markers",
+            &exact_def_path!(tcx, def_id),
+            &error,
+        );
+        return body;
     }
     if let (Some(start), Some(hit)) = (start_branch, hit_branch)
         && let Err(error) = instrument_runtime_matches(
@@ -6301,19 +6404,25 @@ fn mir_drops_with_structural_probes<'tcx>(
             span,
         )
     {
-        tcx.dcx().fatal(format!(
-            "Supercov could not inject pre-optimization Rust try-operator probes in {}: {error}",
-            exact_def_path!(tcx, def_id)
-        ));
+        degrade_unbound_obligations(
+            tcx,
+            "inject pre-optimization Rust try-operator probes",
+            &exact_def_path!(tcx, def_id),
+            &error,
+        );
+        return body;
     }
     // Match instrumentation can split blocks enclosing a nested for loop, so
     // bind for-loop structure again against the current body before editing it.
     let mut for_plans =
         runtime_for_loop_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
-            tcx.dcx().fatal(format!(
-                "Supercov could not rebind pre-optimization Rust for-loop probes in {}: {error}",
-                exact_def_path!(tcx, def_id)
-            ))
+            degrade_unbound_obligations(
+                tcx,
+                "rebind pre-optimization Rust for-loop probes",
+                &exact_def_path!(tcx, def_id),
+                &error,
+            );
+            Vec::new()
         });
     if let (Some(start), Some(hit)) = (start_branch, hit_branch)
         && let Err(error) = instrument_runtime_for_loops(
@@ -6326,10 +6435,13 @@ fn mir_drops_with_structural_probes<'tcx>(
             span,
         )
     {
-        tcx.dcx().fatal(format!(
-            "Supercov could not inject pre-optimization Rust for-loop probes in {}: {error}",
-            exact_def_path!(tcx, def_id)
-        ));
+        degrade_unbound_obligations(
+            tcx,
+            "inject pre-optimization Rust for-loop probes",
+            &exact_def_path!(tcx, def_id),
+            &error,
+        );
+        return body;
     }
     if let (Some(marker), Some(enter), Some(active), Some(resume), Some(exit)) = (
         context_marker,
@@ -6354,10 +6466,13 @@ fn mir_drops_with_structural_probes<'tcx>(
             span,
         )
     {
-        tcx.dcx().fatal(format!(
-            "Supercov could not inject Rust assertion phases in {}: {error}",
-            exact_def_path!(tcx, def_id)
-        ));
+        degrade_unbound_obligations(
+            tcx,
+            "inject Rust assertion phases",
+            &exact_def_path!(tcx, def_id),
+            &error,
+        );
+        return body;
     }
     tcx.alloc_steal_mir(instrumented)
     })
@@ -6378,15 +6493,13 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
     let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE).to_string();
     let definition = exact_def_path!(tcx, def_id);
     let mut decision_plans = runtime_decision_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        tcx.dcx().fatal(format!(
-            "Supercov could not bind Rust CTFE decision probes in {definition}: {error}"
-        ))
+        degrade_unbound_obligations(tcx, "bind Rust CTFE decision probes", &definition, &error);
+        Vec::new()
     });
     let structural_decision_plans = runtime_marked_decision_plans(tcx, def_id, body)
         .unwrap_or_else(|error| {
-            tcx.dcx().fatal(format!(
-                "Supercov could not bind marked Rust CTFE decisions in {definition}: {error}"
-            ))
+            degrade_unbound_obligations(tcx, "bind marked Rust CTFE decisions", &definition, &error);
+            Vec::new()
         });
     let mut decision_ids = decision_plans
         .iter()
@@ -6402,20 +6515,17 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
         decision_plans.push(plan);
     }
     let mut selection_plans = runtime_match_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        tcx.dcx().fatal(format!(
-            "Supercov could not bind Rust CTFE match selections in {definition}: {error}"
-        ))
+        degrade_unbound_obligations(tcx, "bind Rust CTFE match selections", &definition, &error);
+        Vec::new()
     });
     let let_else_plans = runtime_let_else_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        tcx.dcx().fatal(format!(
-            "Supercov could not bind Rust CTFE let-else selections in {definition}: {error}"
-        ))
+        degrade_unbound_obligations(tcx, "bind Rust CTFE let-else selections", &definition, &error);
+        Vec::new()
     });
     let logical_selection_plans =
         runtime_logical_selection_plans(tcx, def_id, body).unwrap_or_else(|error| {
-            tcx.dcx().fatal(format!(
-                "Supercov could not bind Rust CTFE logical selections in {definition}: {error}"
-            ))
+            degrade_unbound_obligations(tcx, "bind Rust CTFE logical selections", &definition, &error);
+            Vec::new()
         });
     let mut selection_ids = selection_plans
         .iter()
@@ -6441,9 +6551,8 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
     }
     let mut hit_ordinals_by_block = BTreeMap::<BasicBlock, BTreeSet<u64>>::new();
     for plan in runtime_statement_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        tcx.dcx().fatal(format!(
-            "Supercov could not bind Rust CTFE statement probes in {definition}: {error}"
-        ))
+        degrade_unbound_obligations(tcx, "bind Rust CTFE statement probes", &definition, &error);
+        Vec::new()
     }) {
         hit_ordinals_by_block
             .entry(plan.block)
@@ -6460,9 +6569,8 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
             .insert(identity.probe_ordinal);
     }
     if let Err(error) = strip_structural_decision_markers(&mut instrumented, def_id, &definition) {
-        tcx.dcx().fatal(format!(
-            "Supercov could not consume pre-borrow-check Rust CTFE markers in {definition}: {error}"
-        ));
+        degrade_unbound_obligations(tcx, "consume pre-borrow-check Rust CTFE markers", &definition, &error);
+        return body;
     }
     let marker_local = instrumented
         .local_decls
@@ -6509,9 +6617,7 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
         span,
     )
     .unwrap_or_else(|error| {
-        tcx.dcx().fatal(format!(
-            "Supercov could not inject Rust CTFE match selections in {definition}: {error}"
-        ))
+        degrade_unbound_obligations(tcx, "inject Rust CTFE match selections", &definition, &error);
     });
     instrument_ctfe_decisions(
         tcx,
@@ -6523,9 +6629,7 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
         span,
     )
     .unwrap_or_else(|error| {
-        tcx.dcx().fatal(format!(
-            "Supercov could not inject Rust CTFE decision probes in {definition}: {error}"
-        ))
+        degrade_unbound_obligations(tcx, "inject Rust CTFE decision probes", &definition, &error);
     });
 
     let decision_edges = instrumented
@@ -9499,26 +9603,22 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
     rustc_middle::ty::print::with_no_trimmed_paths!({
     let definition = exact_def_path!(tcx, def_id);
     let mut decision_plans = runtime_decision_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        tcx.dcx().fatal(format!(
-            "Supercov could not bind Rust decision probes in {definition}: {error}"
-        ))
+        degrade_unbound_obligations(tcx, "bind Rust decision probes", &definition, &error);
+        Vec::new()
     });
     let mut branch_plans = runtime_let_else_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        tcx.dcx().fatal(format!(
-            "Supercov could not bind Rust let-else probes in {definition}: {error}"
-        ))
+        degrade_unbound_obligations(tcx, "bind Rust let-else probes", &definition, &error);
+        Vec::new()
     });
     branch_plans.extend(
         runtime_logical_selection_plans(tcx, def_id, body).unwrap_or_else(|error| {
-            tcx.dcx().fatal(format!(
-                "Supercov could not bind Rust logical-selection probes in {definition}: {error}"
-            ))
+            degrade_unbound_obligations(tcx, "bind Rust logical-selection probes", &definition, &error);
+            Vec::new()
         }),
     );
     let statement_plans = runtime_statement_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        tcx.dcx().fatal(format!(
-            "Supercov could not bind Rust statement probes in {definition}: {error}"
-        ))
+        degrade_unbound_obligations(tcx, "bind Rust statement probes", &definition, &error);
+        Vec::new()
     });
     let probe_id = probe_id_for(tcx, def_id, &definition);
     let context_id = context_id_for(tcx, def_id, &definition);
@@ -9587,9 +9687,8 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
             span,
         )
     {
-        tcx.dcx().fatal(format!(
-            "Supercov could not inject Rust branch probes in {definition}: {error}"
-        ));
+        degrade_unbound_obligations(tcx, "inject Rust branch probes", &definition, &error);
+        return body;
     }
     if let Some(start_branch) = start_branch
         && let Err(error) = instrument_runtime_loop_frames(
@@ -9600,9 +9699,8 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
             span,
         )
     {
-        tcx.dcx().fatal(format!(
-            "Supercov could not inject Rust loop frames in {definition}: {error}"
-        ));
+        degrade_unbound_obligations(tcx, "inject Rust loop frames", &definition, &error);
+        return body;
     }
     if let (Some(start), Some(condition), Some(finish)) =
         (start_decision, record_condition, finish_decision)
@@ -9621,9 +9719,8 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
             span,
         )
     {
-        tcx.dcx().fatal(format!(
-            "Supercov could not inject Rust decision probes in {definition}: {error}"
-        ));
+        degrade_unbound_obligations(tcx, "inject Rust decision probes", &definition, &error);
+        return body;
     }
     if let Some(probe_function) = probe_function
         && let Err(error) = instrument_runtime_points(
@@ -9635,9 +9732,8 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
             span,
         )
     {
-        tcx.dcx().fatal(format!(
-            "Supercov could not inject Rust statement probes in {definition}: {error}"
-        ));
+        degrade_unbound_obligations(tcx, "inject Rust statement probes", &definition, &error);
+        return body;
     }
     let previous_context = context_id.map(|_| {
         instrumented
