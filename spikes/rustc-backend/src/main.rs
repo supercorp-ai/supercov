@@ -278,6 +278,11 @@ struct DecisionCondition {
     source: StableSourceRange,
     branch_source: StableSourceRange,
     text: String,
+    /// The refutable pattern's ADT for let conditions (`while let Some(..)`
+    /// matches on Option). Pattern-class structural switches must test this
+    /// exact type, or a sibling discriminant switch (a two-variant serde
+    /// field dispatch) can pollute the pool.
+    pattern_adt: Option<String>,
     true_outcome: Option<bool>,
     false_outcome: Option<bool>,
     invert_value: bool,
@@ -1307,8 +1312,19 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     return None;
                 }
             };
+            let pattern_adt = match condition.expression.kind {
+                hir::ExprKind::Let(let_expression) => self
+                    .tcx
+                    .typeck(self.def_id.expect_local())
+                    .node_type_opt(let_expression.pat.hir_id)
+                    .map(rustc_middle::ty::Ty::peel_refs)
+                    .and_then(rustc_middle::ty::Ty::ty_adt_def)
+                    .map(|adt| self.tcx.def_path_str(adt.did())),
+                _ => None,
+            };
             conditions.push(DecisionCondition {
                 branch_source,
+                pattern_adt,
                 text: if condition.opaque_authored_macro {
                     self.tcx
                         .sess
@@ -1525,6 +1541,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             invert_value,
             authored_expression: false,
             opaque_authored_macro: false,
+            pattern_adt: None,
         };
         let outcome_branch_id = self.record_branch(
             span,
@@ -2990,15 +3007,49 @@ fn guard_condition_blocks<'tcx>(
 }
 
 /// Strict "executes before" order for same-source sibling structures: one-way
-/// reachability orders sequential structures, and dominance breaks the
-/// mutual-reachability tie that loop back edges introduce.
+/// reachability orders sequential structures, dominance breaks the
+/// mutual-reachability tie that loop back edges introduce, and parallel
+/// branches of one switch follow MIR lowering order, which mirrors source
+/// order (then before else, match arms in order).
 fn semantically_before(body: &Body<'_>, first: BasicBlock, second: BasicBlock) -> bool {
     let forward = block_reaches(body, first, second);
     let backward = block_reaches(body, second, first);
     if forward != backward {
         return forward;
     }
-    forward && body.basic_blocks.dominators().dominates(first, second)
+    let dominators = body.basic_blocks.dominators();
+    if forward {
+        if dominators.dominates(first, second) {
+            return true;
+        }
+        if dominators.dominates(second, first) {
+            return false;
+        }
+    }
+    let Some(join) = nearest_common_dominator(dominators, first, second) else {
+        return false;
+    };
+    if join == first || join == second {
+        return false;
+    }
+    if !matches!(
+        body.basic_blocks[join].terminator().kind,
+        TerminatorKind::SwitchInt { .. }
+    ) {
+        return false;
+    }
+    let branch_of = |block: BasicBlock| {
+        body.basic_blocks[join]
+            .terminator()
+            .successors()
+            .find(|successor| *successor == block || dominators.dominates(*successor, block))
+    };
+    match (branch_of(first), branch_of(second)) {
+        (Some(first_branch), Some(second_branch)) if first_branch != second_branch => {
+            first_branch < second_branch
+        }
+        _ => false,
+    }
 }
 
 /// Recover the exact literal a candidate's FalseEdge accepts from the
@@ -3968,7 +4019,32 @@ fn structural_decision_condition_marker_assignments<'tcx>(
             continue;
         };
         // A refutable pattern condition (`while let`) selects through a
-        // two-way discriminant switch instead of a typed Boolean switch.
+        // two-way discriminant switch instead of a typed Boolean switch, and
+        // must test the condition pattern's exact ADT — sibling two-variant
+        // discriminant switches (serde field dispatch) share the shape.
+        let switch_adt = || -> Option<String> {
+            let local = match discr {
+                Operand::Copy(place) | Operand::Move(place) => place.as_local()?,
+                _ => return None,
+            };
+            data.statements.iter().rev().find_map(|statement| {
+                let StatementKind::Assign(assignment) = &statement.kind else {
+                    return None;
+                };
+                let Rvalue::Discriminant(place) = &assignment.1 else {
+                    return None;
+                };
+                if assignment.0.as_local() != Some(local) {
+                    return None;
+                }
+                place
+                    .ty(&body.local_decls, tcx)
+                    .ty
+                    .peel_refs()
+                    .ty_adt_def()
+                    .map(|adt| tcx.def_path_str(adt.did()))
+            })
+        };
         let pattern_switch = discr.ty(&body.local_decls, tcx) != tcx.types.bool
             && targets.iter().count() == 1;
         if discr.ty(&body.local_decls, tcx) != tcx.types.bool && !pattern_switch {
@@ -4030,10 +4106,22 @@ fn structural_decision_condition_marker_assignments<'tcx>(
             }
         }
         if pattern_switch {
-            pattern_blocks_by_source
-                .entry(owner.clone())
-                .or_default()
-                .push(block);
+            let tested = switch_adt();
+            let pattern_adts = conditions_by_source[owner]
+                .iter()
+                .filter_map(|(decision, index)| {
+                    decision.conditions[*index].pattern_adt.as_deref()
+                })
+                .collect::<BTreeSet<_>>();
+            if tested
+                .as_deref()
+                .is_none_or(|tested| pattern_adts.contains(tested))
+            {
+                pattern_blocks_by_source
+                    .entry(owner.clone())
+                    .or_default()
+                    .push(block);
+            }
         } else {
             blocks_by_source
                 .entry(owner.clone())

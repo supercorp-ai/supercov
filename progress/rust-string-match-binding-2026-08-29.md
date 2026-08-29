@@ -136,18 +136,30 @@ With that, `supercov-contracts` compiles fully instrumented — every serde
 visitor shape, every derived impl, all decisions, matches, tries and
 selections bound exactly.
 
-The full-workspace dogfood then advanced into `supercov-engine` and stopped
-at the next member of the parallel-arm class: serde **Serialize** (not
-Deserialize) for the `AgentError` enum
-(`crates/supercov-engine/src/agent_json.rs:644-653`) — try-operator
-selections in the variant match's arms report "no total semantic order",
-meaning their `parent_match_arm` scoping did not engage (either the
-enclosing variant-match group has no CFG assignment in that body, or the
-tries record without an active match context, e.g. nested one level deeper
-than the arm body site). Diagnose with the established standalone repro loop
-(copy the type into a scratch crate, build under the wrapper) before
-changing anything. This is the current dogfood boundary; all binder work
-through the third wave is committed and corpus-green.
+## Fourth wave (repro-verified; corpus verdict pending at this note)
+
+- The Serialize boundary at `AgentError` was `skip_serializing_if`: two tries
+  in parallel if/else branches, not match arms. `semantically_before` gained
+  a third relation: parallel branches of one switch follow MIR lowering
+  order, which mirrors source order (then before else, arms in order) —
+  implemented as successor-block-index order under the nearest common
+  dominator switch, which is inversion-proof.
+- A one-field struct's serde key dispatch is itself a two-variant
+  discriminant switch and polluted the while-let pattern pool. Conditions now
+  capture their let pattern's ADT (`DecisionCondition.pattern_adt`), and a
+  pattern-class switch qualifies only when it tests one of the source's
+  condition pattern ADTs.
+
+## Remaining boundary (next work item)
+
+The dogfood now advances past all of the above and stops in a NEW PHASE:
+derived `PartialOrd::partial_cmp` for `coverage_report::SourceLine` fails in
+the pre-OPTIMIZATION match probe binder — "match arm … entry bb0 has no
+external incoming edge". This is the post-borrow instrumentation of a
+structurally-bound match group whose arm entry degenerates (optimizes/merges
+to the function entry) in optimized MIR. Diagnose with the standalone repro
+loop (`#[derive(PartialOrd)]` struct) and the pre-optimization plan builder
+before changing anything.
 
 ## Gates
 
