@@ -3493,16 +3493,20 @@ fn synthetic_match_candidates<'tcx>(
         .into_iter()
         .map(|(block, real, imaginary)| (block, (real, imaginary)))
         .collect::<BTreeMap<_, _>>();
+    // An edge inside a declarative macro's body belongs to that body, while
+    // its callsite is the invocation site; the two coincide only for
+    // proc-macro output. Offer both and let matching take whichever the
+    // obligation was keyed at, exactly as try-operator candidates do.
     let edge_sources = by_block
         .keys()
         .copied()
         .map(|block| {
-            let source = body.basic_blocks[block]
-                .terminator()
-                .source_info
-                .span
-                .source_callsite();
-            (block, stable_source_range(tcx, source, crate_name).ok())
+            let span = body.basic_blocks[block].terminator().source_info.span;
+            let sources = [span, span.source_callsite()]
+                .into_iter()
+                .filter_map(|span| stable_source_range(tcx, span, crate_name).ok())
+                .collect::<Vec<_>>();
+            (block, sources)
         })
         .collect::<BTreeMap<_, _>>();
     // A group matching on an ADT can only bind edges whose test switches on
@@ -3562,9 +3566,9 @@ fn synthetic_match_candidates<'tcx>(
             .map(|arm| {
                 edge_sources
                     .iter()
-                    .filter(|(block, source)| {
+                    .filter(|(block, sources)| {
                         let span_matched = ignore_spans
-                            || source.as_ref().is_some_and(|source| {
+                            || sources.iter().any(|source| {
                                 *source == group.identity.source
                                     || arm
                                         .pattern_source
