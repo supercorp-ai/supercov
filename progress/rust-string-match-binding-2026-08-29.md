@@ -67,18 +67,36 @@ wrapper-internal binding aids.
 With all of the above, `visit_str`, `visit_bytes`, `visit_seq` and every
 `visit_map` match group in supercov-contracts bind exactly.
 
+## Second wave (all implemented and verified on supercov-contracts)
+
+- Try operators in parallel match arms bind through demand-driven arm
+  scoping: obligations carry their exact lexical arm
+  (`BranchObligation.parent_match_arm`), each bound arm entry claims only the
+  ControlFlow selections it dominates (excluding deeper bound entries) when
+  it has obligations, and the unscoped remainder ranks sequentially.
+  Domination alone cannot express lexical containment (a diverging sibling
+  arm makes the surviving arm dominate everything after the match), which is
+  why scopes are demand-driven rather than structural.
+- The assignment search precomputes the strict before-ness matrix and
+  ancestor pairs; sibling ordering skips nesting-related pairs (a
+  scrutinee-nested child executes before its parent despite the later HIR
+  visit order).
+- Binding-free integer matches (serde visit_u64) lower to one multiway
+  switchInt with no FalseEdges at all; arms bind directly to their exact
+  value edges via `pattern_int`, the wildcard to the otherwise edge.
+- Nested patterns test several discriminants (visit_enum's `Ok((Field, v))`
+  arms switch on Result and Field), so the edge type constraint is the set of
+  every ADT in the arm patterns (`pattern_adts`, unioned across aggregated
+  recordings), not a single scrutinee type.
+
 ## Remaining boundary (next work item)
 
-`visit_map` still fails closed at try-operator selection binding:
-serde generates one `next_value()?`-style try per field arm of the key
-dispatch, all collapsed to one source, living in PARALLEL match arms — no
-CFG order exists among them, so the flat same-source ranking cannot assign
-them. The fix is arm-scoped assignment: partition try candidates by the
-dominating arm entry of the already-bound enclosing match group and match
-them to obligations by their HIR parent arm (the obligation ordinals were
-recorded during arm visitation). The same scoping likely applies to the
-condition and let-else ranking sites. Until then the dogfood build of
-supercov-contracts stays fail-closed at visit_map.
+With all match/try binding complete, the supercov-contracts dogfood build
+fails closed at a different subsystem: derived `PartialEq::eq` logical
+selections ("rustc did not retain branch mappings for logical-selection
+function"). rustc omits native branch mappings for derive-generated code, so
+the logical-selection binder needs the pre-borrow structural-marker fallback
+that CTFE owner kinds already use. That is the next R3 item.
 
 ## Gates
 

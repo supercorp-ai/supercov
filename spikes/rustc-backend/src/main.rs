@@ -228,6 +228,10 @@ struct BranchObligation {
     alternatives: Vec<BranchAlternativeObligation>,
     definitions: Vec<String>,
     mapping_source: Option<StableSourceRange>,
+    /// The enclosing match arm at recording time. Same-source try operators
+    /// generated in parallel arms have no CFG order, so their ControlFlow
+    /// selections are scoped through the bound enclosing group's arm entry.
+    parent_match_arm: Option<(String, usize)>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -244,6 +248,10 @@ struct MatchArmSelectionObligation {
     /// source arm order, so binding must match each FalseEdge's recovered
     /// literal instead of walking a chain.
     pattern_literal: Option<Vec<u8>>,
+    /// The exact unsigned integer an integer-literal pattern accepts.
+    /// Binding-free integer matches lower to one multiway `switchInt` with no
+    /// FalseEdges, so arms bind directly to the matching value edges.
+    pattern_int: Option<u128>,
     guarded: bool,
     guard_decision_id: Option<String>,
     selected_ordinal: u64,
@@ -258,10 +266,11 @@ struct MatchSelectionObligation {
     parent_group_id: Option<String>,
     parent_site: Option<&'static str>,
     parent_arm_index: Option<usize>,
-    /// The scrutinee's ADT path, when it has one. Same-source structures from
-    /// skipped foreign-macro matches (serde's `tri!` on `Result`) must never
-    /// compete as CFG candidates for a group matching on a different type.
-    scrutinee_adt: Option<String>,
+    /// Every ADT path appearing in the arm patterns (nested patterns test
+    /// multiple discriminants). Same-source structures from skipped
+    /// foreign-macro matches (serde's `tri!` on `Result`) must never compete
+    /// as CFG candidates for a group whose patterns never test that type.
+    pattern_adts: BTreeSet<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1576,6 +1585,11 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             return None;
         }
         let branch_id = branch.id.clone();
+        let parent_match_arm = self.match_context.as_ref().and_then(|(group, site, index)| {
+            (*site == "body")
+                .then(|| index.map(|index| (group.clone(), index)))
+                .flatten()
+        });
         match self.branches.get_mut(&branch.id) {
             Some(existing) if existing.identity.canonical != branch.canonical => {
                 self.tcx.dcx().fatal(format!(
@@ -1586,7 +1600,8 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             Some(existing)
                 if existing.branch_kind != branch_kind
                     || existing.discriminator != discriminator
-                    || existing.alternatives != alternatives =>
+                    || existing.alternatives != alternatives
+                    || existing.parent_match_arm != parent_match_arm =>
             {
                 self.tcx.dcx().fatal(format!(
                     "Supercov Rust branch aggregation mismatch for {}",
@@ -1608,6 +1623,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                         alternatives,
                         definitions: vec![self.definition.clone()],
                         mapping_source: None,
+                        parent_match_arm,
                     },
                 );
             }
@@ -1772,6 +1788,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     .ok()
                     .filter(|source| source.owned),
                 pattern_literal: string_pattern_literal(arm.pat),
+                pattern_int: integer_pattern_literal(arm.pat),
                 guarded: arm.guard.is_some(),
                 guard_decision_id: None,
                 selected_ordinal,
@@ -1785,6 +1802,27 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
         }
         let group_id = group.id.clone();
         let parent = self.match_context.clone();
+        // Nested patterns test several discriminants (an `Ok((Field, v))`
+        // arm switches on both Result and Field), so the edge constraint is
+        // the set of every ADT appearing anywhere in the arm patterns.
+        // Recordings from different bodies union their sets.
+        let pattern_adts = {
+            let typeck = self.tcx.typeck(self.def_id.expect_local());
+            let mut adts = BTreeSet::new();
+            for arm in arms {
+                arm.pat.walk(|pattern| {
+                    if let Some(adt) = typeck
+                        .node_type_opt(pattern.hir_id)
+                        .map(rustc_middle::ty::Ty::peel_refs)
+                        .and_then(rustc_middle::ty::Ty::ty_adt_def)
+                    {
+                        adts.insert(self.tcx.def_path_str(adt.did()));
+                    }
+                    true
+                });
+            }
+            adts
+        };
         match self.match_groups.get_mut(&group.id) {
             Some(existing) if existing.identity.canonical != group.canonical => {
                 self.tcx.dcx().fatal(format!(
@@ -1807,18 +1845,9 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 existing.definitions.push(self.definition.clone());
                 existing.definitions.sort();
                 existing.definitions.dedup();
+                existing.pattern_adts.extend(pattern_adts.iter().cloned());
             }
             None => {
-                let scrutinee_adt = if let hir::ExprKind::Match(scrutinee, ..) = expression.kind {
-                    self.tcx
-                        .typeck(self.def_id.expect_local())
-                        .expr_ty_adjusted_opt(scrutinee)
-                        .map(rustc_middle::ty::Ty::peel_refs)
-                        .and_then(rustc_middle::ty::Ty::ty_adt_def)
-                        .map(|adt| self.tcx.def_path_str(adt.did()))
-                } else {
-                    None
-                };
                 self.match_groups.insert(
                     group.id.clone(),
                     MatchSelectionObligation {
@@ -1828,7 +1857,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                         parent_group_id: parent.as_ref().map(|value| value.0.clone()),
                         parent_site: parent.as_ref().map(|value| value.1),
                         parent_arm_index: parent.as_ref().and_then(|value| value.2),
-                        scrutinee_adt,
+                        pattern_adts,
                     },
                 );
             }
@@ -3191,25 +3220,82 @@ fn synthetic_match_candidates<'tcx>(
                                 .as_ref()
                                 .is_some_and(|pattern| pattern == source)
                     });
-                    // Only a positively identified DIFFERENT scrutinee type
-                    // disqualifies an edge; guard structures make the
+                    // Only a positively identified type the patterns never
+                    // test disqualifies an edge; guard structures make the
                     // discriminant unidentifiable and stay span/order-bound.
                     span_matched
-                        && match &group.scrutinee_adt {
-                            None => true,
-                            Some(adt) => discriminant_adt(**block)
-                                .is_none_or(|edge_adt| edge_adt == *adt),
-                        }
+                        && (group.pattern_adts.is_empty()
+                            || discriminant_adt(**block)
+                                .is_none_or(|edge_adt| group.pattern_adts.contains(&edge_adt)))
                 })
                 .map(|(block, _)| *block)
                 .collect::<BTreeSet<_>>()
         })
         .collect::<Vec<_>>();
+    // Integer-switch mode: binding-free integer matches lower to one multiway
+    // switchInt with no FalseEdge blocks at all. Bind each arm to its exact
+    // value edge; the wildcard arm takes the otherwise edge.
+    let tested_arms = &group.arms[..arm_count - 1];
+    if by_block.is_empty()
+        && tested_arms
+            .iter()
+            .all(|arm| !arm.guarded && arm.pattern_int.is_some())
+    {
+        let mut switches = body
+            .basic_blocks
+            .iter_enumerated()
+            .filter(|(_, data)| {
+                let terminator = data.terminator();
+                let TerminatorKind::SwitchInt { discr, .. } = &terminator.kind else {
+                    return false;
+                };
+                discr.ty(&body.local_decls, tcx) != tcx.types.bool
+                    && terminator.source_info.span.desugaring_kind().is_none()
+                    && stable_source_range(
+                        tcx,
+                        terminator.source_info.span.source_callsite(),
+                        crate_name,
+                    )
+                    .is_ok_and(|source| source == group.identity.source)
+            })
+            .map(|(block, _)| block);
+        if let Some(switch) = switches.next()
+            && switches.next().is_none()
+            && let TerminatorKind::SwitchInt { targets, .. } =
+                &body.basic_blocks[switch].terminator().kind
+        {
+            let entries = tested_arms
+                .iter()
+                .map(|arm| {
+                    let value = arm.pattern_int?;
+                    targets
+                        .iter()
+                        .find_map(|(edge, target)| (edge == value).then_some(target))
+                })
+                .chain([Some(targets.otherwise())])
+                .collect::<Option<Vec<_>>>();
+            if let Some(entries) = entries
+                && entries.iter().collect::<BTreeSet<_>>().len() == entries.len()
+            {
+                return vec![SyntheticMatchGroupPath {
+                    start: switch,
+                    arms: entries
+                        .into_iter()
+                        .map(|entry| SyntheticMatchArmPath {
+                            entry,
+                            guard_candidate: None,
+                            rejection: None,
+                        })
+                        .collect(),
+                }];
+            }
+        }
+        return Vec::new();
+    }
     // Literal mode: when every tested arm is an unguarded string/byte-string
     // literal, bind each arm to the edge whose recovered accepted literal is
     // exactly the arm's pattern. Same-length literals lower into a shared
     // multiway test tree that erases source order, so no chain walk applies.
-    let tested_arms = &group.arms[..arm_count - 1];
     if tested_arms
         .iter()
         .all(|arm| !arm.guarded && arm.pattern_literal.is_some())
@@ -3342,6 +3428,24 @@ fn string_pattern_literal(pattern: &rustc_hir::Pat<'_>) -> Option<Vec<u8>> {
     }
 }
 
+/// The exact unsigned integer an integer-literal pattern accepts.
+fn integer_pattern_literal(pattern: &rustc_hir::Pat<'_>) -> Option<u128> {
+    let rustc_hir::PatKind::Expr(expression) = pattern.kind else {
+        return None;
+    };
+    let rustc_hir::PatExprKind::Lit {
+        lit,
+        negated: false,
+    } = expression.kind
+    else {
+        return None;
+    };
+    match lit.node {
+        rustc_ast::LitKind::Int(value, _) => Some(value.get()),
+        _ => None,
+    }
+}
+
 fn synthetic_match_parent_relation(
     body: &Body<'_>,
     child_group: &MatchSelectionObligation,
@@ -3393,10 +3497,45 @@ fn synthetic_match_assignments<'tcx>(
             paths.len()
         ));
     }
+    // Precompute the sibling ordering inputs once: the strict before-ness
+    // matrix over every candidate start, and the ancestor pairs. The search
+    // may have to visit the complete assignment space when solutions are
+    // scarce, so its inner checks must be pure lookups.
+    let candidate_starts = candidates
+        .values()
+        .flatten()
+        .map(|path| path.start)
+        .collect::<BTreeSet<_>>();
+    let before = candidate_starts
+        .iter()
+        .flat_map(|first| {
+            candidate_starts.iter().map(move |second| {
+                (
+                    (first.as_u32(), second.as_u32()),
+                    first != second && semantically_before(body, *first, *second),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut related = BTreeSet::new();
+    for group in groups {
+        let mut current = group.parent_group_id.as_deref();
+        while let Some(id) = current {
+            related.insert((group.identity.id.clone(), id.to_owned()));
+            related.insert((id.to_owned(), group.identity.id.clone()));
+            current = groups
+                .iter()
+                .find(|candidate| candidate.identity.id == id)
+                .and_then(|candidate| candidate.parent_group_id.as_deref());
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
     fn recurse(
         body: &Body<'_>,
         groups: &[&MatchSelectionObligation],
         candidates: &BTreeMap<String, Vec<SyntheticMatchGroupPath>>,
+        before: &BTreeMap<(u32, u32), bool>,
+        related: &BTreeSet<(String, String)>,
         index: usize,
         used_starts: &mut BTreeSet<u32>,
         current: &mut BTreeMap<String, SyntheticMatchGroupPath>,
@@ -3429,30 +3568,16 @@ fn synthetic_match_assignments<'tcx>(
             }
             // Structurally identical same-source sibling groups (repeated
             // macro expansions) permute freely under parent constraints
-            // alone. Comparable UNRELATED pairs must follow HIR visit order:
-            // one-way reachability orders sequential structures, and
-            // dominance breaks the mutual-reachability tie inside loops.
-            // Nested pairs are exactly constrained by their parent relation
-            // instead — a scrutinee-nested child executes before its parent
-            // despite the later visit order.
-            let ancestor_of = |from: &MatchSelectionObligation, target: &str| {
-                let mut current = from.parent_group_id.as_deref();
-                while let Some(id) = current {
-                    if id == target {
-                        return true;
-                    }
-                    current = groups
-                        .iter()
-                        .find(|candidate| candidate.identity.id == id)
-                        .and_then(|candidate| candidate.parent_group_id.as_deref());
-                }
-                false
-            };
-            let dominators = body.basic_blocks.dominators();
+            // alone. Comparable UNRELATED pairs must follow HIR visit order
+            // (precomputed strict before-ness: one-way reachability ordered,
+            // dominance breaking loop ties). Nested pairs are exactly
+            // constrained by their parent relation instead — a
+            // scrutinee-nested child executes before its parent despite the
+            // later visit order.
             let ordered = groups[..index].iter().all(|earlier| {
                 if earlier.identity.source != group.identity.source
-                    || ancestor_of(earlier, &group.identity.id)
-                    || ancestor_of(group, &earlier.identity.id)
+                    || related
+                        .contains(&(earlier.identity.id.clone(), group.identity.id.clone()))
                 {
                     return true;
                 }
@@ -3461,17 +3586,12 @@ fn synthetic_match_assignments<'tcx>(
                 };
                 let source_order =
                     earlier.identity.owner_local_ordinal < group.identity.owner_local_ordinal;
-                let forward = block_reaches(body, earlier_path.start, candidate.start);
-                let backward = block_reaches(body, candidate.start, earlier_path.start);
-                if forward != backward {
-                    return source_order == forward;
+                let forward = before[&(earlier_path.start.as_u32(), candidate.start.as_u32())];
+                let backward = before[&(candidate.start.as_u32(), earlier_path.start.as_u32())];
+                if forward == backward {
+                    return true;
                 }
-                let forward = dominators.dominates(earlier_path.start, candidate.start);
-                let backward = dominators.dominates(candidate.start, earlier_path.start);
-                if forward != backward {
-                    return source_order == forward;
-                }
-                true
+                source_order == forward
             });
             if !ordered {
                 used_starts.remove(&candidate.start.as_u32());
@@ -3482,6 +3602,8 @@ fn synthetic_match_assignments<'tcx>(
                 body,
                 groups,
                 candidates,
+                before,
+                related,
                 index + 1,
                 used_starts,
                 current,
@@ -3498,6 +3620,8 @@ fn synthetic_match_assignments<'tcx>(
         body,
         &ordered,
         &candidates,
+        &before,
+        &related,
         0,
         &mut BTreeSet::new(),
         &mut BTreeMap::new(),
@@ -3579,6 +3703,7 @@ fn try_operator_assignments<'tcx>(
     crate_name: &str,
     body: &Body<'tcx>,
     branches: &[&BranchObligation],
+    match_assignments: &BTreeMap<String, SyntheticMatchGroupPath>,
 ) -> Result<BTreeMap<String, TryOperatorPath>, String> {
     let mut branches_by_source = BTreeMap::<(String, u32, u32), Vec<&BranchObligation>>::new();
     for branch in branches {
@@ -3662,58 +3787,124 @@ fn try_operator_assignments<'tcx>(
         };
         paths_by_source.entry(owner.clone()).or_default().push(path);
     }
+    // Same-source try operators generated in parallel match arms have no CFG
+    // order among themselves. Obligations carry their exact lexical arm, and
+    // each arm scope with obligations claims exactly the candidates dominated
+    // by its bound entry (and by no deeper bound entry); leftovers form the
+    // unscoped sequence. Every scope is then ranked independently.
+    let bound_arms = match_assignments
+        .iter()
+        .flat_map(|(group, path)| {
+            path.arms
+                .iter()
+                .enumerate()
+                .map(move |(index, arm)| ((group.clone(), index), arm.entry))
+        })
+        .collect::<BTreeMap<(String, usize), BasicBlock>>();
+    let dominators = body.basic_blocks.dominators();
     let mut assignments = BTreeMap::new();
-    for (source, mut source_branches) in branches_by_source {
+    for (source, source_branches) in branches_by_source {
         let mut source_paths = paths_by_source.remove(&source).unwrap_or_default();
-        source_branches.sort_by_key(|branch| branch.identity.owner_local_ordinal);
-        let rank_by_start = source_paths
-            .iter()
-            .map(|candidate| {
-                let rank = source_paths
-                    .iter()
-                    .filter(|other| {
-                        other.start != candidate.start
-                            && semantically_before(body, other.start, candidate.start)
-                    })
-                    .count();
-                (candidate.start.as_u32(), rank)
-            })
-            .collect::<BTreeMap<_, _>>();
-        source_paths.sort_by_key(|candidate| rank_by_start[&candidate.start.as_u32()]);
-        if source_branches.len() != source_paths.len() {
+        let mut scoped_branches = BTreeMap::<Option<(String, usize)>, Vec<&BranchObligation>>::new();
+        for branch in source_branches {
+            let scope = branch
+                .parent_match_arm
+                .clone()
+                .filter(|key| bound_arms.contains_key(key));
+            scoped_branches.entry(scope).or_default().push(branch);
+        }
+        let mut scoped = Vec::new();
+        for (scope, mut scope_branches) in scoped_branches {
+            let mut scope_paths = match &scope {
+                Some(key) => {
+                    let entry = bound_arms[key];
+                    let claimed = source_paths
+                        .iter()
+                        .filter(|path| {
+                            dominators.dominates(entry, path.start)
+                                && !bound_arms.values().any(|other| {
+                                    *other != entry
+                                        && dominators.dominates(entry, *other)
+                                        && dominators.dominates(*other, path.start)
+                                })
+                        })
+                        .copied()
+                        .collect::<Vec<_>>();
+                    source_paths.retain(|path| {
+                        !claimed.iter().any(|kept| kept.start == path.start)
+                    });
+                    claimed
+                }
+                None => Vec::new(),
+            };
+            scoped.push((scope, std::mem::take(&mut scope_branches), scope_paths));
+        }
+        // The unscoped obligations take every candidate no arm claimed.
+        for (scope, _, scope_paths) in &mut scoped {
+            if scope.is_none() {
+                scope_paths.append(&mut source_paths);
+            }
+        }
+        if !source_paths.is_empty() {
             return Err(format!(
-                "{} try-operator obligations at {}:{}-{} map to {} ControlFlow selections",
-                source_branches.len(),
+                "{} unclaimed try-operator selections at {}:{}-{}",
+                source_paths.len(),
                 source.0,
                 source.1,
-                source.2,
-                source_paths.len()
+                source.2
             ));
         }
-        let ranks = source_paths
-            .iter()
-            .map(|candidate| {
-                source_paths
-                    .iter()
-                    .filter(|other| {
-                        other.start != candidate.start
-                            && semantically_before(body, other.start, candidate.start)
-                    })
-                    .count()
-            })
-            .collect::<Vec<_>>();
-        if ranks.iter().enumerate().any(|(index, rank)| index != *rank) {
-            return Err(format!(
-                "try-operator selections at {}:{}-{} have no total semantic order",
-                source.0, source.1, source.2
-            ));
+        for (_, mut scope_branches, mut scope_paths) in scoped {
+            scope_branches.sort_by_key(|branch| branch.identity.owner_local_ordinal);
+            let rank_by_start = scope_paths
+                .iter()
+                .map(|candidate| {
+                    let rank = scope_paths
+                        .iter()
+                        .filter(|other| {
+                            other.start != candidate.start
+                                && semantically_before(body, other.start, candidate.start)
+                        })
+                        .count();
+                    (candidate.start.as_u32(), rank)
+                })
+                .collect::<BTreeMap<_, _>>();
+            scope_paths.sort_by_key(|candidate| rank_by_start[&candidate.start.as_u32()]);
+            if scope_branches.len() != scope_paths.len() {
+                return Err(format!(
+                    "{} try-operator obligations at {}:{}-{} map to {} ControlFlow selections",
+                    scope_branches.len(),
+                    source.0,
+                    source.1,
+                    source.2,
+                    scope_paths.len()
+                ));
+            }
+            let ranks = scope_paths
+                .iter()
+                .map(|candidate| {
+                    scope_paths
+                        .iter()
+                        .filter(|other| {
+                            other.start != candidate.start
+                                && semantically_before(body, other.start, candidate.start)
+                        })
+                        .count()
+                })
+                .collect::<Vec<_>>();
+            if ranks.iter().enumerate().any(|(index, rank)| index != *rank) {
+                return Err(format!(
+                    "try-operator selections at {}:{}-{} have no total semantic order",
+                    source.0, source.1, source.2
+                ));
+            }
+            assignments.extend(
+                scope_branches
+                    .into_iter()
+                    .zip(scope_paths)
+                    .map(|(branch, path)| (branch.identity.id.clone(), path)),
+            );
         }
-        assignments.extend(
-            source_branches
-                .into_iter()
-                .zip(source_paths)
-                .map(|(branch, path)| (branch.identity.id.clone(), path)),
-        );
     }
     Ok(assignments)
 }
@@ -4636,7 +4827,13 @@ fn mir_built_with_match_markers<'tcx>(
             ))
         });
         let try_assignments =
-            try_operator_assignments(tcx, &obligations.crate_name, &borrowed, &try_operators)
+            try_operator_assignments(
+                tcx,
+                &obligations.crate_name,
+                &borrowed,
+                &try_operators,
+                &assignments,
+            )
                 .unwrap_or_else(|error| {
                     tcx.dcx().fatal(format!(
                         "Supercov could not bind pre-borrow-check try operators in {}: {error}",
