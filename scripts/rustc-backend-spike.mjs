@@ -7618,6 +7618,38 @@ try {
   // the /var -> /private/var symlink, so owning its obligations at all also
   // proves source ownership compares physical paths. Comparing them lexically
   // made every file "external" and measured nothing at all.
+  //
+  // The declined body's obligations must reach the manifest as explicitly
+  // unmeasured. Without this the analyzer would see obligations with no hits
+  // and count them as uncovered, reporting a measurement gap as a coverage
+  // gap. The analyzer half is unit tested; this proves the seam between the
+  // two, which is where such a defect would otherwise hide.
+  const obligationsOf = (definition) =>
+    [
+      ...latticeManifest.points,
+      ...latticeManifest.branches,
+      ...latticeManifest.decisions,
+      ...latticeManifest.selectionGroups,
+    ]
+      .filter((obligation) => obligation.definitions.includes(definition))
+      .map(({id}) => id)
+      .sort();
+  const declined = [...latticeManifest.unmeasuredObligations].sort();
+  const unbindableObligations = obligationsOf('unbindable');
+  assert(
+    unbindableObligations.length > 0,
+    'the declined body recorded no obligations to check',
+  );
+  assert.deepEqual(
+    unbindableObligations.filter((id) => !declined.includes(id)),
+    [],
+    'a declined body left obligations that would be counted as uncovered',
+  );
+  assert.deepEqual(
+    obligationsOf('neighbor').filter((id) => declined.includes(id)),
+    [],
+    'declining one body wrongly marked an unrelated body unmeasured',
+  );
   const strictLattice = spawnSync(
     cargo,
     ['build', '--manifest-path', join(latticeCrate, 'Cargo.toml')],

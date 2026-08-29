@@ -5202,6 +5202,17 @@ fn degrade_unbound_obligations(
     unmeasured.extend(obligations.branches.keys().cloned());
     unmeasured.extend(obligations.decisions.keys().cloned());
     unmeasured.extend(obligations.match_groups.keys().cloned());
+    // The function obligation occupies owner-local ordinal zero and is
+    // recorded outside the per-body collector, so it needs declining
+    // explicitly: an uninstrumented body never fires its entry probe either.
+    if let Ok(identity) = function_identity(
+        tcx,
+        def_id.to_def_id(),
+        tcx.def_span(def_id),
+        &obligations.crate_name,
+    ) {
+        unmeasured.insert(identity.id);
+    }
 }
 
 fn mir_built_with_match_markers<'tcx>(

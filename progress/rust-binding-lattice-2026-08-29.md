@@ -253,3 +253,34 @@ Still owed: an end-to-end corpus gate proving a wrapper-declined obligation
 arrives in the report as unmeasured rather than uncovered. The unit test
 covers the analyzer and the lattice gate covers the wrapper, but the seam
 between them is exactly where a defect would hide.
+
+## What the seam gate found immediately
+
+Writing the end-to-end gate (wrapper declines an obligation -> it arrives in
+the manifest as unmeasured) failed on its first run, and the failure was real:
+the declined body's `rs:function:` obligation was never declined. Function
+identity occupies owner-local ordinal zero and is recorded outside the
+per-body collector, so the marking missed it, and every uninstrumented body
+would still have reported its function-entry obligation as uncovered — the
+same defect the change had just fixed, surviving in the one corner not
+checked.
+
+Both sides of that seam were green: the analyzer had a passing unit test and
+the wrapper had a passing lattice gate. Only the assertion that crossed
+between them found the gap. Declining a body now covers all five obligation
+kinds.
+
+## Note on the wave-9 relaxations and the misbind invariant
+
+Every wave-9 fix made binding more permissive: containment as a fallback when
+a terminator span collapses, accepting either the expanded or callsite span
+for a try operator, and accepting a pattern switch in either lowering shape.
+Each relaxation is a potential misbind source, so each keeps the property that
+matters: candidates must still resolve to exactly one match, and ambiguity
+still fails closed rather than picking one. The pattern-switch binder
+explicitly declines when the recorded variant is not among the tested values,
+rather than guessing an edge.
+
+That reasoning is currently held by review, not by a machine check. A
+differential oracle against rustc's own branch mappings would catch a misbind
+automatically wherever both exist, and is tracked separately.
