@@ -1925,12 +1925,22 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             .branches
             .get_mut(&branch_id)
             .expect("recorded logical-selection branch");
+        let conflicting_mapping = matches!(
+            &branch.mapping_source,
+            Some(existing) if existing != &mapping_source
+        );
         match &branch.mapping_source {
-            Some(existing) if existing != &mapping_source => self.tcx.dcx().fatal(format!(
-                "Supercov logical-selection mapping changed for {branch_id}"
-            )),
             Some(_) => {}
             None => branch.mapping_source = Some(mapping_source),
+        }
+        if conflicting_mapping {
+            // One aggregated selection reached through two different mapping
+            // sources, the same way an assertion's callsite can differ between
+            // invocations. Keep the first — never merge the two — and record
+            // the ambiguity.
+            let message =
+                format!("Supercov logical-selection mapping changed for {branch_id}");
+            self.degrade_aggregation_conflict(&branch_id.clone(), "mapping-source", message);
         }
         Some(branch_id)
     }

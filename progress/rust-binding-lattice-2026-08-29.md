@@ -414,3 +414,27 @@ collapse to the macro body and chain walking cannot recover arm order. So
 marking everything currently makes some groups worse. The prerequisite is for
 `synthetic_match_candidates` to bind collapsed authored groups as reliably as
 the span planner does.
+
+## Miner run 8: 157 crates, and what the ranking says
+
+Unblocking http, log and the CTFE marker path let the miner reach 157 crates
+in one pass, up from 23. At that scale the ranking is decisive rather than
+anecdotal, and it says the remaining work is concentrated in two families:
+
+- **350 occurrences** of "match arm entry edge was not found", across axum,
+  axum_core, h2, hyper_util and tracing. This is the macro-aggregation
+  question: a macro containing a match, invoked more than once in one function
+  body. All invocations are one obligation, they lower to independent MIR
+  structures, and only the first can be bound. proc-macro2's `next_ch!` was
+  the first instance; it is plainly a common idiom.
+- **59 occurrences** in `either` of the degenerate-span family, which needs
+  the marker-first prerequisite.
+
+Everything else is a long tail: winnow decision probes at 39, tracing
+statement probes at 31, and so on.
+
+The useful conclusion is that the biggest remaining obstacle to universality
+is not a binder defect at all. It is a semantic decision about what a
+twice-expanded macro's branch means — one number covered when either
+expansion takes it, or one number per expansion site — and no amount of
+binder work substitutes for making it.
