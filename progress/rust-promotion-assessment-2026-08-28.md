@@ -76,3 +76,21 @@ blockers that keep Rust-language coverage fail-closed on musl hosts:
 Neither is required for the JavaScript frontend's musl native packages,
 which need no interposers. Rust on musl stays private until one of the two
 strategies is implemented and proven.
+
+
+## R4 performance findings from R3 iteration (2026-08-29)
+
+- Per-invocation companion selection content-hashes multi-megabyte binaries
+  (wrapper + libtest artifact) on every rustc proxy call. With unoptimized
+  sha2 in dev builds this alone added tens of seconds per crate and blew
+  gate-stage budgets; fixed for dev builds via profile overrides
+  (`[profile.dev.package.sha2/digest/block-buffer] opt-level = 3`). For R4:
+  release builds are fast, but per-crate re-hashing is still O(binary size ×
+  crates) — consider a per-run selection cache keyed by content hash.
+- The compiler trace (`<pid>-<crate>.jsonl`) records one line per HIR body
+  for EVERY crate, including out-of-source-root dependencies that contribute
+  zero obligations. Compiling this workspace's dependency graph wrote ~33GB
+  of traces (zerocopy 4.4GB, object 4.3GB, syn 3.3GB) and nearly filled the
+  disk. For R4: skip or aggressively summarize trace records for bodies
+  outside the source root — they carry no evidence value and dominate run
+  I/O and disk footprint.
