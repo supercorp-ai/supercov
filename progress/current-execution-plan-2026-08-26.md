@@ -1264,6 +1264,48 @@ formatting, script syntax, package preflight and diff safety. R1–R4 remain ope
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.
 
+### Gate-verification correction and serde match binding checkpoint — 2026-08-29
+
+CORRECTION. The two prior 2026-08-29 checkpoints below ("Join-bounded thread
+phases" and "Thread-failure gate and Linux glibc interposer proof") claimed a
+fresh complete corpus pass. That claim was false at their commits (`c39c0e4`,
+`877a30f`): the session's background gate chains used a success marker that a
+shell `set -e` defect could print even when the corpus stage failed, and both
+runs' corpora actually failed on one stale corpus expectation
+(`supercov-rustdoc-outcome-unit-v3` vs the schema-4 bump). Every other gate
+those checkpoints list (workspace tests, clippy, formatting, the five focused
+compiler gates, runtime/assets/preflight, the Linux container proof) did pass
+as stated. The stale expectation is now corrected, gate chains require the
+corpus's own success summary before declaring green, and the complete corpus
+passes at this checkpoint's commit, restoring the invariant both earlier
+checkpoints intended to record.
+
+R3 dogfooding on Supercov's own workspace then exposed that pre-borrow
+synthetic match binding could not bind serde-derive visitors, and the fixes
+are part of this checkpoint (design and MIR evidence in
+`progress/rust-string-match-binding-2026-08-29.md`):
+
+- arms carry their pattern's owned stable range, so chain edges may match the
+  authored field/variant identifier spans serde puts on generated patterns;
+- unguarded string/byte-string literal groups bind by exact recovered
+  literal (equality-call consts and per-byte switch values), the only exact
+  assignment once same-length candidates lower into a shared multiway test
+  tree that erases source arm order;
+- desugared matches (`?`, `while let`) no longer compete as chain candidates,
+  and a group matching on an ADT rejects edges positively identified as
+  switching on a different ADT (serde `tri!` on `Result` vs field matches on
+  `Option`), while unidentifiable guard structures stay span/order-bound;
+- same-source sibling structures follow HIR visit order under a strict
+  one-way-reachability-then-dominance relation, applied to match assignment
+  and the try-operator/condition/let-else rankings.
+
+With these, every match group in the serde-derived supercov-contracts
+visitors binds exactly. The dogfood build still fails closed at try-operator
+selections generated in parallel match arms (no CFG order exists; they need
+arm-scoped assignment through the bound enclosing group) — that boundary is
+documented and is the next R3 work item. Rust remains private and
+fail-closed.
+
 ### Thread-failure gate and Linux glibc interposer proof checkpoint — 2026-08-29
 
 Deterministic thread-creation failure is now gated: the subprocess fixture

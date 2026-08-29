@@ -38,8 +38,9 @@ use rustc_hir::{
 use rustc_interface::interface::{Compiler, Config};
 use rustc_middle::{
     mir::{
-        BasicBlock, BasicBlockData, Body, CallSource, Local, LocalDecl, Operand, Place, Rvalue,
-        SourceInfo, Statement, StatementKind, Terminator, TerminatorKind, UnwindAction,
+        BasicBlock, BasicBlockData, Body, CallSource, Const, ConstOperand, Local, LocalDecl,
+        Operand, Place, ProjectionElem, Rvalue, SourceInfo, Statement, StatementKind, Terminator,
+        TerminatorKind, UnwindAction,
         coverage::{CoverageKind, MappingKind},
         interpret::Scalar,
     },
@@ -233,6 +234,16 @@ struct BranchObligation {
 struct MatchArmSelectionObligation {
     branch_id: String,
     body_source: StableSourceRange,
+    /// The arm pattern's owned stable range when it has one. Foreign derives
+    /// such as serde span generated patterns at the authored field/variant
+    /// identifiers, so pre-borrow chain binding must accept an arm's own
+    /// pattern range as well as the collapsed group source.
+    pattern_source: Option<StableSourceRange>,
+    /// The exact literal a string/byte-string pattern accepts. Same-length
+    /// literal candidates lower into a shared multiway test tree that erases
+    /// source arm order, so binding must match each FalseEdge's recovered
+    /// literal instead of walking a chain.
+    pattern_literal: Option<Vec<u8>>,
     guarded: bool,
     guard_decision_id: Option<String>,
     selected_ordinal: u64,
@@ -247,6 +258,10 @@ struct MatchSelectionObligation {
     parent_group_id: Option<String>,
     parent_site: Option<&'static str>,
     parent_arm_index: Option<usize>,
+    /// The scrutinee's ADT path, when it has one. Same-source structures from
+    /// skipped foreign-macro matches (serde's `tri!` on `Result`) must never
+    /// compete as CFG candidates for a group matching on a different type.
+    scrutinee_adt: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1753,6 +1768,10 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             selections.push(MatchArmSelectionObligation {
                 branch_id,
                 body_source,
+                pattern_source: stable_source_range(self.tcx, arm.pat.span, self.crate_name)
+                    .ok()
+                    .filter(|source| source.owned),
+                pattern_literal: string_pattern_literal(arm.pat),
                 guarded: arm.guard.is_some(),
                 guard_decision_id: None,
                 selected_ordinal,
@@ -1790,6 +1809,16 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 existing.definitions.dedup();
             }
             None => {
+                let scrutinee_adt = if let hir::ExprKind::Match(scrutinee, ..) = expression.kind {
+                    self.tcx
+                        .typeck(self.def_id.expect_local())
+                        .expr_ty_adjusted_opt(scrutinee)
+                        .map(rustc_middle::ty::Ty::peel_refs)
+                        .and_then(rustc_middle::ty::Ty::ty_adt_def)
+                        .map(|adt| self.tcx.def_path_str(adt.did()))
+                } else {
+                    None
+                };
                 self.match_groups.insert(
                     group.id.clone(),
                     MatchSelectionObligation {
@@ -1799,6 +1828,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                         parent_group_id: parent.as_ref().map(|value| value.0.clone()),
                         parent_site: parent.as_ref().map(|value| value.1),
                         parent_arm_index: parent.as_ref().and_then(|value| value.2),
+                        scrutinee_adt,
                     },
                 );
             }
@@ -2908,10 +2938,158 @@ fn guard_condition_blocks<'tcx>(
     Ok(ranked.into_iter().map(|(_, block)| block).collect())
 }
 
-fn synthetic_match_candidates(
-    tcx: TyCtxt<'_>,
-    crate_name: &str,
+/// Strict "executes before" order for same-source sibling structures: one-way
+/// reachability orders sequential structures, and dominance breaks the
+/// mutual-reachability tie that loop back edges introduce.
+fn semantically_before(body: &Body<'_>, first: BasicBlock, second: BasicBlock) -> bool {
+    let forward = block_reaches(body, first, second);
+    let backward = block_reaches(body, second, first);
+    if forward != backward {
+        return forward;
+    }
+    forward && body.basic_blocks.dominators().dominates(first, second)
+}
+
+/// Recover the exact literal a candidate's FalseEdge accepts from the
+/// pattern tests on its unique predecessor path: either the const operand of
+/// a `<str as PartialEq>::eq` call whose success edge enters the region, or
+/// the per-byte `switchInt((*scrutinee)[index of len])` edge values, whose
+/// indices must cover the complete literal.
+fn recovered_edge_literal<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    edge: BasicBlock,
+) -> Option<Vec<u8>> {
+    fn byte_index(operand: &Operand<'_>) -> Option<(u64, u64)> {
+        let place = match operand {
+            Operand::Copy(place) | Operand::Move(place) => place,
+            _ => return None,
+        };
+        place.projection.iter().rev().find_map(|element| match element {
+            ProjectionElem::ConstantIndex {
+                offset,
+                min_length,
+                from_end: false,
+            } => Some((offset, min_length)),
+            _ => None,
+        })
+    }
+    let predecessors = body.basic_blocks.predecessors();
+    // Only pattern-test switches form the accepting path; FalseEdge imaginary
+    // edges from other candidates may also enter it and must be ignored.
+    let test_predecessor = |block: BasicBlock| {
+        let mut tests = predecessors[block].iter().copied().filter(|predecessor| {
+            matches!(
+                body.basic_blocks[*predecessor].terminator().kind,
+                TerminatorKind::SwitchInt { .. }
+            )
+        });
+        let predecessor = tests.next()?;
+        tests.next().is_none().then_some(predecessor)
+    };
+    let mut current = edge;
+    let mut bytes = BTreeMap::new();
+    let mut length = None;
+    for _ in 0..body.basic_blocks.len() {
+        let Some(predecessor) = test_predecessor(current) else {
+            return None;
+        };
+        let predecessor = &predecessor;
+        let terminator = body.basic_blocks[*predecessor].terminator();
+        let TerminatorKind::SwitchInt { discr, targets } = &terminator.kind else {
+            return None;
+        };
+        if let Some((index, min_length)) = byte_index(discr) {
+            let value = targets
+                .iter()
+                .find_map(|(value, target)| (target == current).then_some(value))?;
+            let byte = u8::try_from(value).ok()?;
+            if bytes.insert(index, byte).is_some_and(|existing| existing != byte)
+                || length.replace(min_length).is_some_and(|existing| existing != min_length)
+            {
+                return None;
+            }
+            current = *predecessor;
+            continue;
+        }
+        if discr.ty(&body.local_decls, tcx) == tcx.types.bool {
+            if targets.otherwise() != current {
+                return None;
+            }
+            // A byte tree terminates at its length check; a string test's
+            // bool comes from the equality call in the switch's predecessor.
+            if let Some(collected_length) = length {
+                return (bytes.len() as u64 == collected_length
+                    && bytes.keys().copied().eq(0..collected_length))
+                .then(|| bytes.into_values().collect());
+            }
+            let mut calls = predecessors[*predecessor].iter().copied().filter(|block| {
+                matches!(
+                    body.basic_blocks[*block].terminator().kind,
+                    TerminatorKind::Call { .. }
+                )
+            });
+            let call_block = calls.next()?;
+            if calls.next().is_some() {
+                return None;
+            }
+            let TerminatorKind::Call { args, .. } =
+                &body.basic_blocks[call_block].terminator().kind
+            else {
+                return None;
+            };
+            return args.iter().find_map(|argument| {
+                let Operand::Constant(constant) = &argument.node else {
+                    return None;
+                };
+                let ConstOperand { const_, .. } = **constant;
+                let Const::Val(value, ty) = const_ else {
+                    return None;
+                };
+                (ty.peel_refs() == tcx.types.str_)
+                    .then(|| value.try_get_slice_bytes_for_diagnostics(tcx))
+                    .flatten()
+                    .map(<[u8]>::to_vec)
+            });
+        }
+        return None;
+    }
+    None
+}
+
+/// Resolve the next chain link from a candidate-test region. Pattern tests
+/// for string and byte-slice literals interpose equality calls, length checks
+/// and per-byte switches between consecutive `FalseEdge` blocks, so the link
+/// is not always the immediate block. Among the group's span-matching
+/// `FalseEdge` blocks reachable from `current`, exactly one reaches all the
+/// others — the earliest in candidate order; anything else is ambiguous and
+/// yields no link, failing closed.
+fn next_synthetic_chain_link(
     body: &Body<'_>,
+    matching_edges: &BTreeSet<BasicBlock>,
+    current: BasicBlock,
+) -> Option<BasicBlock> {
+    if matching_edges.contains(&current) {
+        return Some(current);
+    }
+    let reachable = matching_edges
+        .iter()
+        .copied()
+        .filter(|edge| block_reaches(body, current, *edge))
+        .collect::<Vec<_>>();
+    let mut links = reachable.iter().copied().filter(|edge| {
+        reachable
+            .iter()
+            .all(|other| other == edge || block_reaches(body, *edge, *other))
+    });
+    let link = links.next()?;
+    links.next().is_none().then_some(link)
+}
+
+fn synthetic_match_candidates<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    crate_name: &str,
+    body: &Body<'tcx>,
     group: &MatchSelectionObligation,
 ) -> Vec<SyntheticMatchGroupPath> {
     let arm_count = group.arms.len();
@@ -2925,7 +3103,11 @@ fn synthetic_match_candidates(
             TerminatorKind::FalseEdge {
                 real_target,
                 imaginary_target,
-            } => Some((block, real_target, imaginary_target)),
+                // Desugared matches (`?`, `while let`, …) are never authored
+                // match groups and must not compete as chain candidates.
+            } if data.terminator().source_info.span.desugaring_kind().is_none() => {
+                Some((block, real_target, imaginary_target))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -2933,23 +3115,164 @@ fn synthetic_match_candidates(
         .into_iter()
         .map(|(block, real, imaginary)| (block, (real, imaginary)))
         .collect::<BTreeMap<_, _>>();
-    let mut candidates = Vec::new();
-    for head in by_block.keys().copied() {
-        let head_source = body.basic_blocks[head]
-            .terminator()
-            .source_info
-            .span
-            .source_callsite();
-        if !stable_source_range(tcx, head_source, crate_name)
-            .is_ok_and(|source| source == group.identity.source)
-        {
-            continue;
+    let edge_sources = by_block
+        .keys()
+        .copied()
+        .map(|block| {
+            let source = body.basic_blocks[block]
+                .terminator()
+                .source_info
+                .span
+                .source_callsite();
+            (block, stable_source_range(tcx, source, crate_name).ok())
+        })
+        .collect::<BTreeMap<_, _>>();
+    // A group matching on an ADT can only bind edges whose test switches on
+    // that ADT's discriminant; skipped foreign-macro matches on other types
+    // (serde's `tri!` on `Result`) share the collapsed span but never the
+    // scrutinee type.
+    let block_predecessors = body.basic_blocks.predecessors();
+    let discriminant_adt = |block: BasicBlock| -> Option<String> {
+        let mut switches = block_predecessors[block].iter().copied().filter(|block| {
+            matches!(
+                body.basic_blocks[*block].terminator().kind,
+                TerminatorKind::SwitchInt { .. }
+            )
+        });
+        let switch = switches.next()?;
+        if switches.next().is_some() {
+            return None;
         }
+        let TerminatorKind::SwitchInt { discr, .. } =
+            &body.basic_blocks[switch].terminator().kind
+        else {
+            return None;
+        };
+        let local = match discr {
+            Operand::Copy(place) | Operand::Move(place) => place.as_local()?,
+            _ => return None,
+        };
+        body.basic_blocks[switch]
+            .statements
+            .iter()
+            .rev()
+            .find_map(|statement| {
+                let StatementKind::Assign(assignment) = &statement.kind else {
+                    return None;
+                };
+                let Rvalue::Discriminant(place) = &assignment.1 else {
+                    return None;
+                };
+                if assignment.0.as_local() != Some(local) {
+                    return None;
+                }
+                place
+                    .ty(&body.local_decls, tcx)
+                    .ty
+                    .peel_refs()
+                    .ty_adt_def()
+                    .map(|adt| tcx.def_path_str(adt.did()))
+            })
+    };
+    // An arm's chain edge carries either the collapsed group source or the
+    // arm's own pattern source (foreign derives span generated patterns at
+    // the authored field/variant identifiers).
+    let arm_edges = group
+        .arms
+        .iter()
+        .map(|arm| {
+            edge_sources
+                .iter()
+                .filter(|(block, source)| {
+                    let span_matched = source.as_ref().is_some_and(|source| {
+                        *source == group.identity.source
+                            || arm
+                                .pattern_source
+                                .as_ref()
+                                .is_some_and(|pattern| pattern == source)
+                    });
+                    // Only a positively identified DIFFERENT scrutinee type
+                    // disqualifies an edge; guard structures make the
+                    // discriminant unidentifiable and stay span/order-bound.
+                    span_matched
+                        && match &group.scrutinee_adt {
+                            None => true,
+                            Some(adt) => discriminant_adt(**block)
+                                .is_none_or(|edge_adt| edge_adt == *adt),
+                        }
+                })
+                .map(|(block, _)| *block)
+                .collect::<BTreeSet<_>>()
+        })
+        .collect::<Vec<_>>();
+    // Literal mode: when every tested arm is an unguarded string/byte-string
+    // literal, bind each arm to the edge whose recovered accepted literal is
+    // exactly the arm's pattern. Same-length literals lower into a shared
+    // multiway test tree that erases source order, so no chain walk applies.
+    let tested_arms = &group.arms[..arm_count - 1];
+    if tested_arms
+        .iter()
+        .all(|arm| !arm.guarded && arm.pattern_literal.is_some())
+    {
+        let mut edges_by_literal = BTreeMap::<Vec<u8>, Vec<BasicBlock>>::new();
+        for block in arm_edges.iter().flatten().copied().collect::<BTreeSet<_>>() {
+            if let Some(literal) = recovered_edge_literal(tcx, body, block) {
+                edges_by_literal.entry(literal).or_default().push(block);
+            }
+        }
+        let assigned = tested_arms
+            .iter()
+            .map(|arm| {
+                let literal = arm.pattern_literal.as_deref()?;
+                match edges_by_literal.get(literal).map(Vec::as_slice) {
+                    Some([block]) => Some(*block),
+                    _ => None,
+                }
+            })
+            .collect::<Option<Vec<_>>>();
+        if let Some(assigned) = assigned
+            && assigned.iter().collect::<BTreeSet<_>>().len() == assigned.len()
+        {
+            let mut entries = assigned
+                .iter()
+                .map(|block| SyntheticMatchArmPath {
+                    entry: by_block[block].0,
+                    guard_candidate: None,
+                    rejection: None,
+                })
+                .collect::<Vec<_>>();
+            entries.push(SyntheticMatchArmPath {
+                entry: by_block[assigned.last().expect("at least one tested arm")].1,
+                guard_candidate: None,
+                rejection: None,
+            });
+            if entries
+                .iter()
+                .map(|entry| entry.entry)
+                .collect::<BTreeSet<_>>()
+                .len()
+                == entries.len()
+            {
+                return vec![SyntheticMatchGroupPath {
+                    start: *assigned.first().expect("at least one tested arm"),
+                    arms: entries,
+                }];
+            }
+        }
+    }
+    let mut candidates = Vec::new();
+    for head in arm_edges[0].iter().copied() {
         let mut current = head;
         let mut entries = Vec::with_capacity(arm_count);
         let mut valid = true;
         for (index, arm) in group.arms[..arm_count - 1].iter().enumerate() {
-            let Some((real, imaginary)) = by_block.get(&current).copied() else {
+            let link = if index == 0 {
+                Some(head)
+            } else {
+                next_synthetic_chain_link(body, &arm_edges[index], current)
+            };
+            let Some((real, imaginary)) = link.and_then(|link| by_block.get(&link).copied())
+            else {
                 valid = false;
                 break;
             };
@@ -2999,6 +3322,26 @@ fn synthetic_match_candidates(
     candidates
 }
 
+/// The exact bytes a string or byte-string literal pattern accepts, when the
+/// pattern is such a literal.
+fn string_pattern_literal(pattern: &rustc_hir::Pat<'_>) -> Option<Vec<u8>> {
+    let rustc_hir::PatKind::Expr(expression) = pattern.kind else {
+        return None;
+    };
+    let rustc_hir::PatExprKind::Lit {
+        lit,
+        negated: false,
+    } = expression.kind
+    else {
+        return None;
+    };
+    match lit.node {
+        rustc_ast::LitKind::Str(value, _) => Some(value.as_str().as_bytes().to_vec()),
+        rustc_ast::LitKind::ByteStr(value, _) => Some(value.as_byte_str().to_vec()),
+        _ => None,
+    }
+}
+
 fn synthetic_match_parent_relation(
     body: &Body<'_>,
     child_group: &MatchSelectionObligation,
@@ -3029,10 +3372,10 @@ fn synthetic_match_parent_relation(
     }
 }
 
-fn synthetic_match_assignments(
-    tcx: TyCtxt<'_>,
+fn synthetic_match_assignments<'tcx>(
+    tcx: TyCtxt<'tcx>,
     crate_name: &str,
-    body: &Body<'_>,
+    body: &Body<'tcx>,
     groups: &[&MatchSelectionObligation],
 ) -> Result<BTreeMap<String, SyntheticMatchGroupPath>, String> {
     let candidates = groups
@@ -3082,6 +3425,56 @@ fn synthetic_match_assignments(
         let group = groups[index];
         for candidate in &candidates[&group.identity.id] {
             if !used_starts.insert(candidate.start.as_u32()) {
+                continue;
+            }
+            // Structurally identical same-source sibling groups (repeated
+            // macro expansions) permute freely under parent constraints
+            // alone. Comparable UNRELATED pairs must follow HIR visit order:
+            // one-way reachability orders sequential structures, and
+            // dominance breaks the mutual-reachability tie inside loops.
+            // Nested pairs are exactly constrained by their parent relation
+            // instead — a scrutinee-nested child executes before its parent
+            // despite the later visit order.
+            let ancestor_of = |from: &MatchSelectionObligation, target: &str| {
+                let mut current = from.parent_group_id.as_deref();
+                while let Some(id) = current {
+                    if id == target {
+                        return true;
+                    }
+                    current = groups
+                        .iter()
+                        .find(|candidate| candidate.identity.id == id)
+                        .and_then(|candidate| candidate.parent_group_id.as_deref());
+                }
+                false
+            };
+            let dominators = body.basic_blocks.dominators();
+            let ordered = groups[..index].iter().all(|earlier| {
+                if earlier.identity.source != group.identity.source
+                    || ancestor_of(earlier, &group.identity.id)
+                    || ancestor_of(group, &earlier.identity.id)
+                {
+                    return true;
+                }
+                let Some(earlier_path) = current.get(&earlier.identity.id) else {
+                    return true;
+                };
+                let source_order =
+                    earlier.identity.owner_local_ordinal < group.identity.owner_local_ordinal;
+                let forward = block_reaches(body, earlier_path.start, candidate.start);
+                let backward = block_reaches(body, candidate.start, earlier_path.start);
+                if forward != backward {
+                    return source_order == forward;
+                }
+                let forward = dominators.dominates(earlier_path.start, candidate.start);
+                let backward = dominators.dominates(candidate.start, earlier_path.start);
+                if forward != backward {
+                    return source_order == forward;
+                }
+                true
+            });
+            if !ordered {
+                used_starts.remove(&candidate.start.as_u32());
                 continue;
             }
             current.insert(group.identity.id.clone(), candidate.clone());
@@ -3280,7 +3673,7 @@ fn try_operator_assignments<'tcx>(
                     .iter()
                     .filter(|other| {
                         other.start != candidate.start
-                            && block_reaches(body, other.start, candidate.start)
+                            && semantically_before(body, other.start, candidate.start)
                     })
                     .count();
                 (candidate.start.as_u32(), rank)
@@ -3304,7 +3697,7 @@ fn try_operator_assignments<'tcx>(
                     .iter()
                     .filter(|other| {
                         other.start != candidate.start
-                            && block_reaches(body, other.start, candidate.start)
+                            && semantically_before(body, other.start, candidate.start)
                     })
                     .count()
             })
@@ -3432,7 +3825,9 @@ fn structural_decision_condition_marker_assignments<'tcx>(
             .map(|candidate| {
                 let rank = blocks
                     .iter()
-                    .filter(|other| other != &candidate && block_reaches(body, **other, *candidate))
+                    .filter(|other| {
+                        other != &candidate && semantically_before(body, **other, *candidate)
+                    })
                     .count();
                 (candidate.as_u32(), rank)
             })
@@ -3453,7 +3848,9 @@ fn structural_decision_condition_marker_assignments<'tcx>(
             .map(|candidate| {
                 blocks
                     .iter()
-                    .filter(|other| other != &candidate && block_reaches(body, **other, *candidate))
+                    .filter(|other| {
+                        other != &candidate && semantically_before(body, **other, *candidate)
+                    })
                     .count()
             })
             .collect::<Vec<_>>();
@@ -3886,7 +4283,7 @@ fn synthetic_let_else_assignments(
                     .iter()
                     .filter(|other| {
                         other.start != candidate.start
-                            && block_reaches(body, other.start, candidate.start)
+                            && semantically_before(body, other.start, candidate.start)
                     })
                     .count();
                 (candidate.start.as_u32(), rank)
@@ -3910,7 +4307,7 @@ fn synthetic_let_else_assignments(
                     .iter()
                     .filter(|other| {
                         other.start != candidate.start
-                            && block_reaches(body, other.start, candidate.start)
+                            && semantically_before(body, other.start, candidate.start)
                     })
                     .count()
             })

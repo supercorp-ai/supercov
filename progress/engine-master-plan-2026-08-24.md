@@ -2167,6 +2167,23 @@ miss blocks flipping any default.
   that retains stock scheduling/presentation while emitting authenticated
   lifecycle events; its production integration remains an R2 gate.
 
+## Checkpoint — 2026-08-29 gate-verification correction and serde match binding
+
+- CORRECTION: the two checkpoints below claimed fresh corpus passes their
+  commits did not have — a shell defect let the session's chain marker print
+  green past a failed corpus stage, which had tripped on one stale corpus
+  expectation (rustdoc outcome schema v3 vs v4). All other listed gates were
+  genuinely green. The expectation is fixed, chains now require the corpus's
+  own success summary, and the complete corpus passes at this commit.
+- R3 dogfood exposed serde-derive visitors as unbindable by pre-borrow
+  synthetic match binding. Now binding exactly: per-arm pattern sources,
+  literal-value correspondence for string/byte-string groups (multiway test
+  trees erase source order), desugar-match exclusion, scrutinee-ADT edge
+  rejection, and a reachability-then-dominance sibling order shared with the
+  try/condition/let-else rankings. Remaining fail-closed boundary: try
+  operators in parallel match arms need arm-scoped assignment; documented in
+  `progress/rust-string-match-binding-2026-08-29.md` as the next R3 item.
+
 ## Checkpoint — 2026-08-29 thread-failure gate and Linux glibc proof
 
 - The interposed `pthread_create` failure path is gated deterministically (a

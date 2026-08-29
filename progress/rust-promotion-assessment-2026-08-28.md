@@ -56,3 +56,23 @@ the agent run. Rerun it after the VM is recreated and after the thread-phase
 v3 work lands (the proof must cover the final runtime, not the interim one).
 musl needs the same script against a musl-host toolchain image; expect
 rustc-dev component availability to be the sticking point on Alpine.
+
+Update 2026-08-29 — the glibc proof is green (all five focused gates on
+`aarch64-unknown-linux-gnu`). The musl attempt characterized two hard
+blockers that keep Rust-language coverage fail-closed on musl hosts:
+
+1. Alpine's rustup `rustc-dev` ships the compiler internals without rlibs,
+   and musl's default `+crt-static` forces fully static linking, so a
+   rustc_private wrapper only builds with `-C target-feature=-crt-static`
+   (verified: it then builds cleanly).
+2. More fundamentally, default static musl test binaries have no dynamic
+   linker, so the `dlsym(RTLD_NEXT)` interposers cannot resolve the real
+   `pthread_create`/`posix_spawn`/exec symbols at all. Supporting static musl
+   requires a different propagation strategy — the compiler wrapper injecting
+   `-Wl,--wrap=<symbol>` link args and `__wrap_`/`__real_` shims — or an
+   explicit fail-closed boundary (threads/processes on static musl attribute
+   to background with a limitation).
+
+Neither is required for the JavaScript frontend's musl native packages,
+which need no interposers. Rust on musl stays private until one of the two
+strategies is implemented and proven.

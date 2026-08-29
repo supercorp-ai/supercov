@@ -6990,7 +6990,7 @@ try {
   const outcomeUnit = JSON.parse(
     readFileSync(join(capturedDoctestDirectory, outcomeFiles[0]), 'utf8'),
   );
-  assert.equal(outcomeUnit.schema, 'supercov-rustdoc-outcome-unit-v3');
+  assert.equal(outcomeUnit.schema, 'supercov-rustdoc-outcome-unit-v4');
   assert.equal(outcomeUnit.catalog.format_version, 2);
   assert.equal(outcomeUnit.catalog.doctests.length, 6);
   assert.equal(
