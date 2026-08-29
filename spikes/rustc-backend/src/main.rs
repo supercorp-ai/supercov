@@ -80,6 +80,15 @@ macro_rules! exact_def_path {
 
 const OUTPUT_DIRECTORY: &str = "SUPERCOV_RUST_COMPILER_OUTPUT";
 const INSTRUMENT_MIR: &str = "SUPERCOV_RUST_INSTRUMENT_MIR";
+/// Fail the compilation when an obligation cannot be bound exactly, instead
+/// of degrading it to a recorded limitation. Supercov's own gates set this so
+/// the corpus keeps proving exactness and every new generated-code shape stays
+/// a hard, discoverable signal; user builds degrade instead.
+const STRICT_BINDING: &str = "SUPERCOV_RUST_STRICT_BINDING";
+/// Fault injection: treat every body whose definition contains this value as
+/// unbindable. The degradation path must be provable on demand, or the
+/// lattice that keeps arbitrary code compiling would itself be untested.
+const FORCE_UNBINDABLE: &str = "SUPERCOV_RUST_FORCE_UNBINDABLE";
 const INSTRUMENT_CTFE: &str = "SUPERCOV_RUST_INSTRUMENT_CTFE";
 const REAL_RUSTDOC: &str = "SUPERCOV_RUST_REAL_RUSTDOC";
 const COMPANION_PATH: &str = "SUPERCOV_RUST_COMPANION_PATH";
@@ -140,6 +149,12 @@ static ORIGINAL_OPTIMIZED_MIR: OnceLock<OptimizedMirProvider> = OnceLock::new();
 static ORIGINAL_MIR_FOR_CTFE: OnceLock<MirForCtfeProvider> = OnceLock::new();
 static ORIGINAL_MIR_BUILT: OnceLock<MirBuiltProvider> = OnceLock::new();
 static ORIGINAL_MIR_DROPS: OnceLock<MirDropsProvider> = OnceLock::new();
+/// Obligations that could not be bound exactly and were degraded to recorded
+/// limitations instead of failing the build. MIR passes run inside
+/// `after_analysis` (it forces `optimized_mir`/`mir_for_ctfe` per body before
+/// the manifest is written), so degradations recorded here always reach the
+/// crate's manifest candidate.
+static BINDER_LIMITATIONS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static CTFE_EVENTS: Mutex<Vec<CtfeObservation>> = Mutex::new(Vec::new());
 static CTFE_MARKERS: Mutex<BTreeMap<u64, CtfeMarkerIdentity>> = Mutex::new(BTreeMap::new());
 static CTFE_MAPPINGS: Mutex<BTreeMap<u64, CtfeMarkerMapping>> = Mutex::new(BTreeMap::new());
@@ -592,6 +607,28 @@ fn normalized_path(path: &Path) -> PathBuf {
     normalized
 }
 
+/// Relative path of `path` inside `root`, or `None` when it is outside.
+///
+/// The lexical comparison is the fast path and decides almost every call.
+/// It fails, however, when the root is reached through a symlink while the
+/// compiler reports the physical file path — macOS `/tmp` and `/var` are the
+/// common cases, along with symlinked worktrees and network mounts. Ownership
+/// is a physical containment fact (`package_identity` already compares
+/// canonical directories for exactly this reason), so fall back to comparing
+/// canonical paths rather than declaring a file external and silently
+/// measuring nothing.
+fn root_relative(path: &Path, root: &Path) -> Option<PathBuf> {
+    if let Ok(relative) = path.strip_prefix(root) {
+        return Some(relative.to_owned());
+    }
+    let canonical_root = fs::canonicalize(root).ok()?;
+    let canonical_path = fs::canonicalize(path).ok()?;
+    canonical_path
+        .strip_prefix(&canonical_root)
+        .ok()
+        .map(Path::to_owned)
+}
+
 fn normalized_root(variable: &str) -> Option<PathBuf> {
     env::var_os(variable)
         .map(PathBuf::from)
@@ -858,7 +895,7 @@ fn stable_source_range(
                 .into_owned();
             let path = normalized_path(Path::new(&local_name));
             if let Some(root) = normalized_root(SOURCE_ROOT)
-                && let Ok(relative) = path.strip_prefix(&root)
+                && let Some(relative) = root_relative(&path, &root)
             {
                 (
                     format!("source:{}", relative.to_string_lossy().replace('\\', "/")),
@@ -866,8 +903,8 @@ fn stable_source_range(
                     true,
                 )
             } else if let Some(root) = normalized_root(TARGET_ROOT)
-                && let Ok(relative) = path.strip_prefix(&root)
-                && let Some(generated) = generated_relative_path(relative)
+                && let Some(relative) = root_relative(&path, &root)
+                && let Some(generated) = generated_relative_path(&relative)
             {
                 verify_generated_source_path(&path, &root)?;
                 let (package, owned) = package_identity(crate_name);
@@ -2809,6 +2846,16 @@ impl Callbacks for ProbeCallbacks {
             sanitize(&crate_name_string)
         ));
         prune_unreachable_match_arms(&mut branches, &mut match_groups);
+        // Obligations degraded during MIR binding. The body loop above forced
+        // `optimized_mir`/`mir_for_ctfe` per body, so every degradation has
+        // been recorded by now and reaches this crate's manifest candidate.
+        manifest_limitations.extend(
+            BINDER_LIMITATIONS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .iter()
+                .cloned(),
+        );
         let limitations = manifest_limitations.into_iter().collect::<Vec<_>>();
         reject_probe_ordinal_collisions(tcx, &points, &branches, &decisions, &match_groups);
         let manifest = manifest_json(
@@ -4917,6 +4964,32 @@ fn match_arm_marker_statement<'tcx>(
     )
 }
 
+/// Record obligations that could not be bound exactly, instead of failing the
+/// compilation.
+///
+/// Supercov's guarantee is that every reported number is either exact or
+/// explicitly unmeasured — never silently approximate. When a body's
+/// obligations cannot be bound, the honest outcome is to leave that body
+/// uninstrumented and record precisely what lost measurement and why, so the
+/// report can separate "not covered" from "not measured". An arbitrary
+/// codebase then always compiles; only its unbindable shapes go unmeasured.
+///
+/// Under `SUPERCOV_RUST_STRICT_BINDING` this fails the build instead.
+/// Supercov's own gates set it so every unbindable shape stays a hard signal
+/// and the corpus keeps proving exactness rather than silently degrading.
+fn degrade_unbound_obligations(tcx: TyCtxt<'_>, phase: &str, definition: &str, error: &str) {
+    if env::var_os(STRICT_BINDING).is_some_and(|value| !value.is_empty()) {
+        tcx.dcx()
+            .fatal(format!("Supercov could not bind {phase} in {definition}: {error}"));
+    }
+    BINDER_LIMITATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(format!(
+            "RUST_OBLIGATION_UNBOUND: {phase} in {definition}: {error}"
+        ));
+}
+
 fn mir_built_with_match_markers<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: LocalDefId,
@@ -4932,6 +5005,19 @@ fn mir_built_with_match_markers<'tcx>(
     let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
         return body;
     };
+    if let Some(forced) = env::var_os(FORCE_UNBINDABLE)
+        && obligations
+            .definition
+            .contains(&forced.to_string_lossy().into_owned())
+    {
+        degrade_unbound_obligations(
+            tcx,
+            "injected unbindable shape",
+            &obligations.definition,
+            "SUPERCOV_RUST_FORCE_UNBINDABLE fault injection",
+        );
+        return body;
+    }
     let structural_ctfe_owner = matches!(
         tcx.def_kind(def_id),
         DefKind::Const
@@ -5126,10 +5212,15 @@ fn mir_built_with_match_markers<'tcx>(
                 &synthetic_groups,
             ) {
                 Ok(assignments) => assignments,
-                Err(error) => tcx.dcx().fatal(format!(
-                    "Supercov could not bind pre-borrow-check synthetic matches in {}: {error}",
-                    obligations.definition
-                )),
+                Err(error) => {
+                    degrade_unbound_obligations(
+                        tcx,
+                        "pre-borrow-check synthetic matches",
+                        &obligations.definition,
+                        &error,
+                    );
+                    return body;
+                }
             }
         };
         let mut guard_blocks = Vec::new();
@@ -5158,10 +5249,15 @@ fn mir_built_with_match_markers<'tcx>(
                     decision.conditions.len(),
                 ) {
                     Ok(blocks) => blocks,
-                    Err(error) => tcx.dcx().fatal(format!(
-                        "Supercov could not bind pre-borrow-check synthetic guard {} in {}: {error}",
-                        decision_id, obligations.definition
-                    )),
+                    Err(error) => {
+                        degrade_unbound_obligations(
+                            tcx,
+                            &format!("pre-borrow-check synthetic guard {decision_id}"),
+                            &obligations.definition,
+                            &error,
+                        );
+                        return body;
+                    }
                 };
                 guard_blocks.extend(
                     blocks
@@ -5179,10 +5275,13 @@ fn mir_built_with_match_markers<'tcx>(
                 &opaque_condition_decisions,
             )
             .unwrap_or_else(|error| {
-                tcx.dcx().fatal(format!(
-                    "Supercov could not bind authored opaque decision conditions in {}: {error}",
-                    obligations.definition
-                ))
+                degrade_unbound_obligations(
+                    tcx,
+                    "authored opaque decision conditions",
+                    &obligations.definition,
+                    &error,
+                );
+                Vec::new()
             }),
         );
         guard_blocks.extend(
@@ -5196,10 +5295,13 @@ fn mir_built_with_match_markers<'tcx>(
                 "structural decision",
             )
             .unwrap_or_else(|error| {
-                tcx.dcx().fatal(format!(
-                    "Supercov could not bind pre-borrow-check structural decision conditions in {}: {error}",
-                    obligations.definition
-                ))
+                degrade_unbound_obligations(
+                    tcx,
+                    "pre-borrow-check structural decision conditions",
+                    &obligations.definition,
+                    &error,
+                );
+                Vec::new()
             }),
         );
         let let_else_assignments = synthetic_let_else_assignments(
@@ -5209,10 +5311,13 @@ fn mir_built_with_match_markers<'tcx>(
             &synthetic_let_else,
         )
         .unwrap_or_else(|error| {
-            tcx.dcx().fatal(format!(
-                "Supercov could not bind pre-borrow-check synthetic let-else in {}: {error}",
-                obligations.definition
-            ))
+            degrade_unbound_obligations(
+                tcx,
+                "pre-borrow-check synthetic let-else",
+                &obligations.definition,
+                &error,
+            );
+            BTreeMap::new()
         });
         let try_assignments =
             try_operator_assignments(
@@ -5223,10 +5328,13 @@ fn mir_built_with_match_markers<'tcx>(
                 &assignments,
             )
                 .unwrap_or_else(|error| {
-                    tcx.dcx().fatal(format!(
-                        "Supercov could not bind pre-borrow-check try operators in {}: {error}",
-                        obligations.definition
-                    ))
+                    degrade_unbound_obligations(
+                        tcx,
+                        "pre-borrow-check try operators",
+                        &obligations.definition,
+                        &error,
+                    );
+                    BTreeMap::new()
                 });
         (
             assignments,

@@ -972,6 +972,11 @@ function run(command, args, options = {}) {
       env: {
         ...process.env,
         SUPERCOV_RUST_SOURCE_ROOT: fixtureRoot,
+        // Every corpus compile binds strictly: an obligation the binder cannot
+        // prove must stay a hard, discoverable failure here. User builds
+        // degrade the same obligation to a recorded limitation instead, and
+        // the lattice gate below proves that path explicitly.
+        SUPERCOV_RUST_STRICT_BINDING: '1',
         ...(commandEnvironment.CARGO_TARGET_DIR
           ? {SUPERCOV_RUST_TARGET_ROOT: commandEnvironment.CARGO_TARGET_DIR}
           : {}),
@@ -7543,6 +7548,95 @@ try {
     createHash('sha256').update(readFileSync(fixtureSourcePath)).digest('hex'),
     fixtureSourceDigest,
     'the rustdoc companion modified the fixture source',
+  );
+
+  // Binding lattice: an obligation the binder cannot prove exactly must never
+  // silently become an approximate number. Under Supercov's own gates it fails
+  // the build (every corpus compile above ran strict); in a user's build the
+  // same obligation is left uninstrumented and recorded as an explicit
+  // limitation, so arbitrary code still compiles and the report can separate
+  // "not covered" from "not measured". Both directions are proven here through
+  // a fault injection, because an untested degradation path would be exactly
+  // the silent-wrongness this design exists to prevent.
+  const latticeCrate = join(scratch, 'lattice-gate');
+  mkdirSync(join(latticeCrate, 'src'), {recursive: true});
+  writeFileSync(
+    join(latticeCrate, 'Cargo.toml'),
+    '[package]\nname = "lattice-gate"\nversion = "0.0.0"\nedition = "2021"\npublish = false\n\n[workspace]\n',
+  );
+  writeFileSync(
+    join(latticeCrate, 'src/lib.rs'),
+    'pub enum Kind { A, B, C }\n' +
+      'pub fn unbindable(k: Kind) -> usize {\n' +
+      '    match k { Kind::A | Kind::B => 1, Kind::C => 2 }\n' +
+      '}\n' +
+      'pub fn neighbor(flag: bool) -> usize {\n' +
+      '    if flag { 3 } else { 4 }\n' +
+      '}\n',
+  );
+  const latticeOutput = join(scratch, 'lattice-gate-out');
+  const latticeEnvironment = {
+    CARGO_TARGET_DIR: join(scratch, 'lattice-gate-target'),
+    RUSTC_WRAPPER: wrapper,
+    DYLD_LIBRARY_PATH: [rustcTargetLibdir, process.env.DYLD_LIBRARY_PATH]
+      .filter(Boolean)
+      .join(':'),
+    LD_LIBRARY_PATH: [rustcTargetLibdir, process.env.LD_LIBRARY_PATH]
+      .filter(Boolean)
+      .join(':'),
+    SUPERCOV_RUST_COMPILER_OUTPUT: latticeOutput,
+    SUPERCOV_RUST_INSTRUMENT_MIR: '1',
+    SUPERCOV_RUST_SOURCE_ROOT: latticeCrate,
+    SUPERCOV_RUST_STATIC_RUNTIME_DIRECTORY: sharedRuntimeDirectory,
+    SUPERCOV_RUST_FORCE_UNBINDABLE: 'unbindable',
+  };
+  run(cargo, ['build', '--manifest-path', join(latticeCrate, 'Cargo.toml')], {
+    env: {...latticeEnvironment, SUPERCOV_RUST_STRICT_BINDING: ''},
+  });
+  const latticeManifest = crateManifest(latticeOutput, 'lattice_gate');
+  const unboundLimitations = latticeManifest.limitations.filter((limitation) =>
+    limitation.startsWith('RUST_OBLIGATION_UNBOUND:'),
+  );
+  assert.deepEqual(
+    unboundLimitations,
+    [
+      'RUST_OBLIGATION_UNBOUND: injected unbindable shape in unbindable: SUPERCOV_RUST_FORCE_UNBINDABLE fault injection',
+    ],
+    'a degraded obligation did not record its exact unbound limitation',
+  );
+  assert(
+    latticeManifest.decisions.some((decision) =>
+      decision.definitions.includes('neighbor'),
+    ),
+    'degrading one body dropped an unrelated body\'s obligations',
+  );
+  // This crate lives under the scratch directory, which macOS reaches through
+  // the /var -> /private/var symlink, so owning its obligations at all also
+  // proves source ownership compares physical paths. Comparing them lexically
+  // made every file "external" and measured nothing at all.
+  const strictLattice = spawnSync(
+    cargo,
+    ['build', '--manifest-path', join(latticeCrate, 'Cargo.toml')],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ...latticeEnvironment,
+        CARGO_TARGET_DIR: join(scratch, 'lattice-gate-strict-target'),
+        SUPERCOV_RUST_COMPILER_OUTPUT: join(scratch, 'lattice-gate-strict-out'),
+        SUPERCOV_RUST_STRICT_BINDING: '1',
+      },
+    },
+  );
+  assert.notEqual(
+    strictLattice.status,
+    0,
+    'strict binding accepted an unbindable obligation instead of failing closed',
+  );
+  assert.match(
+    strictLattice.stderr,
+    /Supercov could not bind injected unbindable shape in unbindable/u,
+    'strict binding did not name the exact unbindable obligation',
   );
 
   console.log(

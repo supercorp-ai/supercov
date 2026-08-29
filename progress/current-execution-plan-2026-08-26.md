@@ -1264,6 +1264,43 @@ formatting, script syntax, package preflight and diff safety. R1–R4 remain ope
 Exit gate: the concurrency/crash/retry matrix produces exact, deterministic
 per-test evidence with no contamination, loss or repository-specific setup.
 
+### Binding lattice checkpoint — 2026-08-29
+
+R3 dogfooding produced eight binder waves (waves 1-8, design and MIR evidence
+in `progress/rust-string-match-binding-2026-08-29.md`), each one a generated
+or authored shape whose obligations the pre-borrow binder could not prove:
+serde string/byte multiway tries, parallel-arm try operators, integer and
+nested-enum matches, coverage-ineligible derives and their value-position
+selections, while-let and if-let pattern switches, loop-nested arm
+membership, and or-pattern arm entries. Every one of them stopped the build,
+because an unbindable obligation was a `fatal`.
+
+That default is correct for Supercov's own gates and wrong for a user's
+codebase: the shape space of generated Rust is open, so a single unknown
+expansion anywhere would make the tool unusable. Obligations now degrade
+instead (`progress/rust-binding-lattice-2026-08-29.md`): the failing body is
+left uninstrumented and recorded as an explicit `RUST_OBLIGATION_UNBOUND`
+limitation naming the phase, exact definition and the binder's own
+diagnosis, while every other body keeps exact measurement. The guarantee
+becomes "every number is exact or explicitly unmeasured" rather than "exact
+or the build fails" - nothing is ever silently approximate, and an unbound
+obligation is never reported as uncovered.
+
+`SUPERCOV_RUST_STRICT_BINDING=1` keeps the old behavior and every corpus
+compile sets it, so unbindable shapes stay hard, discoverable signals here.
+The degradation path is itself gated through a `SUPERCOV_RUST_FORCE_UNBINDABLE`
+fault injection proving, in one crate, that the lattice build succeeds and
+records the exact limitation, that an unrelated body keeps its obligations,
+and that the strict build fails naming the same obligation - an untested
+degradation path would be exactly the silent wrongness the design prevents.
+
+Dev builds also now hash at full speed (`[profile.dev.package.sha2]` and
+friends): companion selection content-hashes multi-megabyte binaries on
+every rustc proxy invocation, and unoptimized sha2 was adding tens of
+seconds per crate, which had been misread as gate hangs.
+
+Rust remains private and fail-closed. R4 is unchanged.
+
 ### Gate-verification correction and serde match binding checkpoint — 2026-08-29
 
 CORRECTION. The two prior 2026-08-29 checkpoints below ("Join-bounded thread
