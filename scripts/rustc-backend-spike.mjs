@@ -5041,6 +5041,8 @@ try {
     /match-generated-guarded-proc=\[3, 2, 2, 0\]/,
   );
   assert.match(baselineBehavior.stdout, /match-nested=\[3, 14, 0\]/);
+  assert.match(baselineBehavior.stdout, /derived-order=\[true, false\]/);
+  assert.match(baselineBehavior.stdout, /derived-if-let=\[3, 7\]/);
   const runtimeManifest = crateManifest(
     instrumentedDirectory,
     'supercov_rustc_spike_fixture',
@@ -5609,6 +5611,22 @@ try {
     [1, 1],
     'a declarative-macro match lost authored arm selection identity',
   );
+  const derivedOrderGroups = matchGroupsFor(
+    runtimeManifest,
+    '<DerivedOrderLine as std::cmp::PartialOrd>::partial_cmp',
+  );
+  assert.equal(
+    derivedOrderGroups.length,
+    1,
+    'derived PartialOrd did not record its builtin-derive match group',
+  );
+  assert.deepEqual(
+    derivedOrderGroups[0].arms.map(({selectedOrdinal}) =>
+      ordinalCount(selectedOrdinal),
+    ),
+    [1, 1],
+    'derived PartialOrd match arms did not select exactly',
+  );
   assert.deepEqual(
     unreachableMatchGroups[0].arms.map(({selectedOrdinal}) =>
       ordinalCount(selectedOrdinal),
@@ -6015,6 +6033,20 @@ try {
       JSON.stringify({values: [true, true, true], outcome: true}),
       JSON.stringify({values: [true, true, true], outcome: true}),
     ].sort(),
+  );
+  assert.deepEqual(
+    vectorsForDecision(
+      decisionForConditions(
+        runtimeManifest,
+        '<DerivedStyleIfLet as UnwrapOrSeven>::unwrap_or_seven',
+        ['let Ok(value) = input'],
+      ),
+    ),
+    [
+      JSON.stringify({values: [true], outcome: true}),
+      JSON.stringify({values: [false], outcome: false}),
+    ].sort(),
+    'a coverage-ineligible if-let did not discriminate its pattern switch by variant',
   );
   const behaviorPairs = new Set(
     behaviorEvidence.ordinals.map(({context, ordinal}) => `${context}:${ordinal}`),

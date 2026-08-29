@@ -1,5 +1,6 @@
 #![feature(rustc_private)]
 
+extern crate rustc_abi;
 extern crate rustc_ast;
 extern crate rustc_data_structures;
 extern crate rustc_driver;
@@ -283,6 +284,11 @@ struct DecisionCondition {
     /// exact type, or a sibling discriminant switch (a two-variant serde
     /// field dispatch) can pollute the pool.
     pattern_adt: Option<String>,
+    /// The matched variant's index for let conditions on variant patterns
+    /// (`if let Ok(..)` matches Result's first variant). An `if let` has no
+    /// loop back edge to discriminate its two-way discriminant switch, so
+    /// the true edge is the one accepting this variant's discriminant.
+    pattern_variant: Option<u32>,
     true_outcome: Option<bool>,
     false_outcome: Option<bool>,
     invert_value: bool,
@@ -1312,19 +1318,39 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     return None;
                 }
             };
-            let pattern_adt = match condition.expression.kind {
-                hir::ExprKind::Let(let_expression) => self
-                    .tcx
-                    .typeck(self.def_id.expect_local())
-                    .node_type_opt(let_expression.pat.hir_id)
-                    .map(rustc_middle::ty::Ty::peel_refs)
-                    .and_then(rustc_middle::ty::Ty::ty_adt_def)
-                    .map(|adt| self.tcx.def_path_str(adt.did())),
-                _ => None,
+            let (pattern_adt, pattern_variant) = match condition.expression.kind {
+                hir::ExprKind::Let(let_expression) => {
+                    let typeck = self.tcx.typeck(self.def_id.expect_local());
+                    let adt = typeck
+                        .node_type_opt(let_expression.pat.hir_id)
+                        .map(rustc_middle::ty::Ty::peel_refs)
+                        .and_then(rustc_middle::ty::Ty::ty_adt_def);
+                    let variant = adt.and_then(|adt| {
+                        let qpath = match let_expression.pat.kind {
+                            hir::PatKind::TupleStruct(ref qpath, ..)
+                            | hir::PatKind::Struct(ref qpath, ..) => qpath,
+                            _ => return None,
+                        };
+                        let variant_definition = match typeck
+                            .qpath_res(qpath, let_expression.pat.hir_id)
+                        {
+                            hir::def::Res::Def(
+                                DefKind::Ctor(hir::def::CtorOf::Variant, _),
+                                constructor,
+                            ) => self.tcx.parent(constructor),
+                            hir::def::Res::Def(DefKind::Variant, variant) => variant,
+                            _ => return None,
+                        };
+                        Some(adt.variant_index_with_id(variant_definition).as_u32())
+                    });
+                    (adt.map(|adt| self.tcx.def_path_str(adt.did())), variant)
+                }
+                _ => (None, None),
             };
             conditions.push(DecisionCondition {
                 branch_source,
                 pattern_adt,
+                pattern_variant,
                 text: if condition.opaque_authored_macro {
                     self.tcx
                         .sess
@@ -1542,6 +1568,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             authored_expression: false,
             opaque_authored_macro: false,
             pattern_adt: None,
+            pattern_variant: None,
         };
         let outcome_branch_id = self.record_branch(
             span,
@@ -3279,32 +3306,47 @@ fn synthetic_match_candidates<'tcx>(
     // An arm's chain edge carries either the collapsed group source or the
     // arm's own pattern source (foreign derives span generated patterns at
     // the authored field/variant identifiers).
-    let arm_edges = group
-        .arms
-        .iter()
-        .map(|arm| {
-            edge_sources
-                .iter()
-                .filter(|(block, source)| {
-                    let span_matched = source.as_ref().is_some_and(|source| {
-                        *source == group.identity.source
-                            || arm
-                                .pattern_source
-                                .as_ref()
-                                .is_some_and(|pattern| pattern == source)
-                    });
+    let arm_edges_with = |ignore_spans: bool| {
+        group
+            .arms
+            .iter()
+            .map(|arm| {
+                edge_sources
+                    .iter()
+                    .filter(|(block, source)| {
+                        let span_matched = ignore_spans
+                            || source.as_ref().is_some_and(|source| {
+                                *source == group.identity.source
+                                    || arm
+                                        .pattern_source
+                                        .as_ref()
+                                        .is_some_and(|pattern| pattern == source)
+                            });
                     // Only a positively identified type the patterns never
                     // test disqualifies an edge; guard structures make the
                     // discriminant unidentifiable and stay span/order-bound.
-                    span_matched
-                        && (group.pattern_adts.is_empty()
-                            || discriminant_adt(**block)
-                                .is_none_or(|edge_adt| group.pattern_adts.contains(&edge_adt)))
-                })
-                .map(|(block, _)| *block)
-                .collect::<BTreeSet<_>>()
-        })
-        .collect::<Vec<_>>();
+                        span_matched
+                            && (group.pattern_adts.is_empty()
+                                || discriminant_adt(**block).is_none_or(|edge_adt| {
+                                    group.pattern_adts.contains(&edge_adt)
+                                }))
+                    })
+                    .map(|(block, _)| *block)
+                    .collect::<BTreeSet<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    // Coverage-ineligible functions can scatter generated spans across
+    // unrelated authored tokens (a builtin derive puts the match, its
+    // patterns and its pattern tests on different fields). Span matching
+    // stays primary; only when it starves an arm entirely does structure
+    // carry the binding alone.
+    let mut arm_edges = arm_edges_with(false);
+    if arm_edges.iter().all(BTreeSet::is_empty)
+        && !tcx.coverage_attr_on(body.source.def_id().expect_local())
+    {
+        arm_edges = arm_edges_with(true);
+    }
     // Integer-switch mode: binding-free integer matches lower to one multiway
     // switchInt with no FalseEdge blocks at all. Bind each arm to its exact
     // value edge; the wildcard arm takes the otherwise edge.
@@ -3565,9 +3607,41 @@ fn synthetic_match_assignments<'tcx>(
         })
         .collect::<BTreeMap<_, _>>();
     if let Some((group_id, paths)) = candidates.iter().find(|(_, paths)| paths.is_empty()) {
+        let group = groups
+            .iter()
+            .find(|group| &group.identity.id == group_id)
+            .expect("empty candidate list came from a known group");
+        let false_edges = body
+            .basic_blocks
+            .iter_enumerated()
+            .filter_map(|(block, data)| match data.terminator().kind {
+                TerminatorKind::FalseEdge { .. } => Some((
+                    block,
+                    stable_source_range(
+                        tcx,
+                        data.terminator().source_info.span.source_callsite(),
+                        crate_name,
+                    )
+                    .map(|source| (source.start, source.end))
+                    .ok(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         return Err(format!(
-            "collapsed match group {group_id} has {} structurally valid arm chains",
-            paths.len()
+            "collapsed match group {group_id} has {} structurally valid arm chains; group={}-{}; arm_patterns={:?}; false_edges={:?}",
+            paths.len(),
+            group.identity.source.start,
+            group.identity.source.end,
+            group
+                .arms
+                .iter()
+                .map(|arm| arm
+                    .pattern_source
+                    .as_ref()
+                    .map(|source| (source.start, source.end)))
+                .collect::<Vec<_>>(),
+            false_edges,
         ));
     }
     // Precompute the sibling ordering inputs once: the strict before-ness
@@ -4131,12 +4205,13 @@ fn structural_decision_condition_marker_assignments<'tcx>(
     }
     let mut assignments = Vec::new();
     for (source, all_conditions) in conditions_by_source {
-        // Pattern-kind conditions pair with discriminant switches; every
-        // other condition pairs with typed Boolean switches. Each class is
-        // ranked and zipped independently within the source.
+        // Let-pattern conditions (`while let`, `if let`, let-chain lets)
+        // pair with discriminant switches; every other condition pairs with
+        // typed Boolean switches. Each class is ranked and zipped
+        // independently within the source.
         let (pattern_conditions, boolean_conditions): (Vec<_>, Vec<_>) = all_conditions
             .into_iter()
-            .partition(|(decision, _)| decision.decision_kind == "while-let");
+            .partition(|(decision, index)| decision.conditions[*index].pattern_adt.is_some());
         // Same-source conditions generated in parallel match arms have no
         // CFG order among themselves. Scope each class's conditions by their
         // exact lexical arm; each bound arm entry claims only the switches it
@@ -4893,12 +4968,19 @@ fn mir_built_with_match_markers<'tcx>(
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .extend(unreachable);
     }
+    // Coverage-ineligible functions (`#[automatically_derived]`,
+    // `#[coverage(off)]`) have wholly collapsed spans, so even their
+    // authored-expansion match groups can only bind through pre-borrow
+    // markers — the span-located planner degenerates on them.
+    let coverage_ineligible = !tcx.coverage_attr_on(def_id);
     let synthetic_groups = obligations
         .match_groups
         .values()
         .filter(|group| {
             group.definitions.contains(&obligations.definition)
-                && group.identity.provenance == "synthetic-expansion"
+                && (group.identity.provenance == "synthetic-expansion"
+                    || (coverage_ineligible
+                        && group.identity.provenance == "authored-expansion"))
         })
         .collect::<Vec<_>>();
     let synthetic_let_else = obligations
@@ -8180,7 +8262,8 @@ fn runtime_marked_decision_plans<'tcx>(
                     blocks.len()
                 ));
             };
-            let pattern_condition = decision.decision_kind == "while-let";
+            let pattern_condition =
+                decision.conditions[marker.condition_index].pattern_adt.is_some();
             let switch_block =
                 structural_marker_boolean_switch(tcx, body, *entry_block, pattern_condition)
                     .map_err(|error| {
@@ -8198,6 +8281,65 @@ fn runtime_marked_decision_plans<'tcx>(
             let (raw_true_target, raw_false_target) =
                 if discr.ty(&body.local_decls, tcx) == tcx.types.bool {
                     (targets.target_for_value(1), targets.target_for_value(0))
+                } else if decision.decision_kind != "while-let" {
+                    // An `if let` discriminant switch has no back edge; the
+                    // true edge is the one accepting the recorded pattern
+                    // variant's discriminant.
+                    let Some(variant_index) = condition.pattern_variant else {
+                        return Err(format!(
+                            "structural decision {decision_id} condition {} let pattern records no variant to discriminate its switch",
+                            marker.condition_index
+                        ));
+                    };
+                    let discriminant_local = match discr {
+                        Operand::Copy(place) | Operand::Move(place) => place.as_local(),
+                        _ => None,
+                    };
+                    let scrutinee_adt = discriminant_local.and_then(|local| {
+                        body.basic_blocks[switch_block]
+                            .statements
+                            .iter()
+                            .rev()
+                            .find_map(|statement| {
+                                let StatementKind::Assign(assignment) = &statement.kind
+                                else {
+                                    return None;
+                                };
+                                let (destination, value) = &**assignment;
+                                let Rvalue::Discriminant(place) = value else {
+                                    return None;
+                                };
+                                if destination.as_local() != Some(local) {
+                                    return None;
+                                }
+                                place
+                                    .ty(&body.local_decls, tcx)
+                                    .ty
+                                    .peel_refs()
+                                    .ty_adt_def()
+                            })
+                    });
+                    let Some(scrutinee_adt) = scrutinee_adt else {
+                        return Err(format!(
+                            "structural decision {decision_id} condition {} pattern switch has no discriminant scrutinee",
+                            marker.condition_index
+                        ));
+                    };
+                    let expected = scrutinee_adt
+                        .discriminant_for_variant(
+                            tcx,
+                            rustc_abi::VariantIdx::from_u32(variant_index),
+                        )
+                        .val;
+                    let valued = targets.iter().collect::<Vec<_>>();
+                    let [(value, valued_target)] = valued.as_slice() else {
+                        unreachable!("validated two-way pattern switch")
+                    };
+                    if *value == expected {
+                        (*valued_target, targets.otherwise())
+                    } else {
+                        (targets.otherwise(), *valued_target)
+                    }
                 } else {
                     // The matching variant continues the loop and reaches the
                     // switch again through the back edge; the refuted variant

@@ -37,6 +37,7 @@ use supercov_rustc_spike_fixture::{
     generic_choice, hrtb_choice,
     inline_const_values,
     interrupted_decision, interrupted_for, interrupted_match, let_else_value, logical_value_choice,
+    DerivedOrderLine, DerivedStyleIfLet, UnwrapOrSeven,
     match_empty, match_identical, match_irrefutable, match_unreachable, match_value, mixed, nested,
     nested_expression, nested_for_values, nested_generic_choice, nested_let_else, nested_match,
     nested_try_result, opaque_choice, opaque_macro_compound, opaque_macro_guard,
@@ -545,6 +546,32 @@ fn main() {
             nested_match(Some(Ok(3))),
             nested_match(Some(Err(4))),
             nested_match(None),
+        ]
+    );
+    println!(
+        "derived-order={:?}",
+        [
+            DerivedOrderLine {
+                file: "a.rs".into(),
+                line: 1,
+            } < DerivedOrderLine {
+                file: "a.rs".into(),
+                line: 2,
+            },
+            DerivedOrderLine {
+                file: "b.rs".into(),
+                line: 1,
+            } < DerivedOrderLine {
+                file: "a.rs".into(),
+                line: 9,
+            },
+        ]
+    );
+    println!(
+        "derived-if-let={:?}",
+        [
+            DerivedStyleIfLet::unwrap_or_seven(Ok(3)),
+            DerivedStyleIfLet::unwrap_or_seven(Err(true)),
         ]
     );
 }

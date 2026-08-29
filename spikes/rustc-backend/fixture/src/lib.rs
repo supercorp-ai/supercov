@@ -893,6 +893,25 @@ pub fn context_panic_scope(log: &std::cell::RefCell<Vec<&'static str>>) {
     panic_path(log);
 }
 
+#[derive(PartialEq, PartialOrd)]
+pub struct DerivedOrderLine {
+    pub file: String,
+    pub line: usize,
+}
+
+pub struct DerivedStyleIfLet;
+
+pub trait UnwrapOrSeven {
+    fn unwrap_or_seven(input: Result<usize, bool>) -> usize;
+}
+
+#[automatically_derived]
+impl UnwrapOrSeven for DerivedStyleIfLet {
+    fn unwrap_or_seven(input: Result<usize, bool>) -> usize {
+        if let Ok(value) = input { value } else { 7 }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

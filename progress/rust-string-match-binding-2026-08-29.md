@@ -150,23 +150,70 @@ selections bound exactly.
   pattern-class switch qualifies only when it tests one of the source's
   condition pattern ADTs.
 
-## Remaining boundary (next work item)
+## Fifth wave: builtin-derive matches (repro-verified; corpus verdict pending)
 
-The dogfood now advances past all of the above and stops in a NEW PHASE:
-derived `PartialOrd::partial_cmp` (standalone repro: any two-field
-`#[derive(PartialOrd)]` struct) fails in the pre-optimization match probe
-binder with "match arm … entry bb0 has no external incoming edge". Mechanism,
-confirmed from the plan builder (`marker_blocks.get(selected_ordinal)` with a
-span-location fallback): the group's arm MARKERS are absent from the body
-being planned, so the fallback locates arm bodies by source span — and every
-span in a derived fn collapses to the callsite, making body_blocks ≈ all
-blocks, entry = common dominator = bb0, which has no predecessors. The open
-question is why the arm markers are missing for this tiny generic function
-(marker statements assign to dead locals; suspicion: an optimization pass or
-the group not entering the pre-borrow marking path at all — check
-`identity.provenance` for builtin-derive matches vs the "synthetic-expansion"
-filter on `synthetic_groups`). First move next session: env-gated dump of
-marker_blocks and the group's provenance for the repro's partial_cmp.
+Builtin derives (`PartialOrd`, `Ord`) place generated match groups at
+"authored-expansion" provenance with spans scattered across UNRELATED
+authored tokens (the match at one field, its pattern tests at another), so
+neither the marked path nor span location could bind them. Two coordinated
+rules, both keyed on rustc's own coverage-ineligibility:
+
+- Pre-borrow marking now includes authored-expansion groups recorded in
+  coverage-ineligible functions (the span-located planner degenerates on
+  their collapsed spans — entry ends up bb0).
+- Candidate span matching stays primary, but when EVERY arm's span pool is
+  empty in a coverage-ineligible body, the group binds structurally with all
+  FalseEdges admitted (pattern-type and ordering constraints still apply).
+  The all-arms condition matters: an unused wildcard arm's empty pool is
+  normal for serde groups, and an any-arm trigger regressed them — caught by
+  a git-stash bisect against the last green commit, since the corpus still
+  lacks serde-shape fixtures (that gap is now actively biting; the fixture
+  work is due).
+
+The zero-chains error now also self-diagnoses (group source, per-arm pattern
+sources, every FalseEdge's source).
+
+## Sixth wave: untagged-enum if-let (repro-verified; corpus verdict pending)
+
+Wave 5 unblocked the dogfood into `#[serde(untagged)]` deserialization:
+each variant is tried through `if let Ok(__ok) = Result::map(...)` — an
+`if-let` decision in a coverage-ineligible function, selecting through a
+two-way Result discriminant switch. Two changes:
+
+- The structural pairing partitions per-condition on the recorded let
+  pattern ADT (`DecisionCondition.pattern_adt`), not on the `while-let`
+  decision kind, so `if let` (and let-chain let conditions) enter the
+  pattern-switch class.
+- An `if let` has no loop back edge to discriminate true/false, so
+  conditions record their pattern's variant index at HIR
+  (`DecisionCondition.pattern_variant`, TupleStruct/Struct patterns via
+  qpath res). The marker resolution reads the switch's `Discriminant`
+  scrutinee ADT, computes the recorded variant's discriminant value, and
+  takes the edge accepting that value as true (the otherwise edge when the
+  switch tests the refuted variant). `while let` keeps the proven back-edge
+  rule.
+
+Verified standalone: untagged-repro binds both variant tries; ord-repro,
+skip-repro, contracts-repro all green with real (non-cached) rebuilds.
+
+Fixture debt (Gates below) started being paid in the same wave: the corpus
+fixture now pins `#[derive(PartialOrd)]` on a two-field struct (builtin-
+derive match group, exact arm selection counts) and an `#[automatically_derived]`
+trait impl containing `if let Ok(value) = input` (exact decision vectors
+proving the variant-discriminant orientation). Note `#[automatically_derived]`
+is only honored on trait impl blocks — on inherent impls it is ignored with
+a future-incompat warning, which would silently test the wrong path.
+
+## Resolved boundary: derived PartialOrd (fixed by wave 5)
+
+The wave-5 diagnosis, kept for the record: derived `PartialOrd::partial_cmp`
+failed in the pre-optimization match probe binder with "match arm … entry
+bb0 has no external incoming edge" because the group's arm markers were
+absent from the body being planned (builtin-derive groups carry
+"authored-expansion" provenance and never entered the pre-borrow marking
+path), so the span-location fallback degenerated: every span in a derived fn
+collapses to the callsite, making body_blocks ≈ all blocks and entry = bb0
+with no predecessors. Both wave-5 rules above close this.
 
 ## Gates
 
