@@ -438,3 +438,33 @@ is not a binder defect at all. It is a semantic decision about what a
 twice-expanded macro's branch means — one number covered when either
 expansion takes it, or one number per expansion site — and no amount of
 binder work substitutes for making it.
+
+## Marker-first, measured
+
+The dual-span candidate fix (candidates offering both the expanded span and
+the callsite, mirroring the wave-9 try-operator defect) unblocked the
+marker-first experiment, and two further prerequisites fell out of trying it:
+guard conditions must keep the narrow marking rule or they get recorded twice,
+and marker survival must be required only for arms that still exist in the
+pruned obligations, because markers are placed before rustc prunes the arms it
+proves unreachable.
+
+With all three in place the widening was measured rather than assumed:
+
+| crate | before | after |
+|---|---|---|
+| either | did not compile | 350 obligations @ 94.57% |
+| once_cell | 98.99% | 100.00% |
+| bytes | 99.68% | unchanged |
+| log | 90.24% | unchanged |
+| proc-macro2 | 94.59% | 86.62% |
+
+It was reverted for the last row. The regression is six authored match groups
+that the span planner binds today and the pre-borrow chain walk cannot, so
+marking them makes them decline. Marker-first remains the right direction —
+it eliminates a 59-occurrence family and takes once_cell to 100% — but the
+pre-borrow binder has to be a full replacement for the span planner first, and
+the exact fraction must never regress for any crate.
+
+Those six groups are now the specification for the next step, and they are
+reproducible in seconds via the pm2-repro crate.
