@@ -5043,6 +5043,7 @@ try {
   assert.match(baselineBehavior.stdout, /match-nested=\[3, 14, 0\]/);
   assert.match(baselineBehavior.stdout, /derived-order=\[true, false\]/);
   assert.match(baselineBehavior.stdout, /derived-if-let=\[3, 7\]/);
+  assert.match(baselineBehavior.stdout, /loop-nested-match-proc=111/);
   const runtimeManifest = crateManifest(
     instrumentedDirectory,
     'supercov_rustc_spike_fixture',
@@ -5682,6 +5683,13 @@ try {
     nestedSelectionCounts(generatedNestedScrutineeProcMatchGroups),
     {root: [1, 1], child: [2, 1], childSite: 'scrutinee'},
     'a proc-macro match nested in a scrutinee lost semantic identity',
+  );
+  assert.deepEqual(
+    nestedSelectionCounts(
+      matchGroupsFor(runtimeManifest, 'generated_loop_nested_match_by_proc'),
+    ),
+    {root: [2, 1], child: [1, 1], childSite: 'body'},
+    'a loop back edge broke exclusive arm membership for a nested proc-macro match',
   );
   assert.deepEqual(
     nestedSelectionCounts(generatedNestedGuardProcMatchGroups),

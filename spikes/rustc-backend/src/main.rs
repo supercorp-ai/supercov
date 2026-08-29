@@ -2926,6 +2926,35 @@ fn block_reaches(body: &Body<'_>, start: BasicBlock, target: BasicBlock) -> bool
     false
 }
 
+/// Reachability that refuses to pass through `barrier`. Arm-region
+/// membership inside a loop needs this: from any arm body the loop back
+/// edge re-enters the match, so plain reachability makes every arm reach
+/// every block. Barring the claimed arm's entry keeps only paths that enter
+/// the region some other way — which exist exactly when the block is not
+/// exclusive to that arm.
+fn block_reaches_avoiding(
+    body: &Body<'_>,
+    start: BasicBlock,
+    target: BasicBlock,
+    barrier: BasicBlock,
+) -> bool {
+    if start == barrier {
+        return start == target;
+    }
+    let mut pending = vec![start];
+    let mut visited = BTreeSet::new();
+    while let Some(block) = pending.pop() {
+        if block == target {
+            return true;
+        }
+        if block == barrier || !visited.insert(block) {
+            continue;
+        }
+        pending.extend(semantic_successors(body.basic_blocks[block].terminator()));
+    }
+    false
+}
+
 fn guarded_match_arm_entry(
     body: &Body<'_>,
     candidate: BasicBlock,
@@ -3573,9 +3602,21 @@ fn synthetic_match_parent_relation(
                 && !block_reaches(body, parent.start, child.start)
         }
         (Some("body"), Some(index)) => parent.arms.get(index).is_some_and(|arm| {
+            // Exclusive membership cannot bar re-entry through the parent's
+            // start: inside a loop (serde's visit_map key dispatch) the back
+            // edge re-enters each arm without revisiting the recorded group
+            // start. What holds in every shape is that any other arm's path
+            // to a block inside this arm's body must pass through THIS arm's
+            // entry — so exclusivity bars that entry instead.
             block_reaches(body, arm.entry, child.start)
-                && parent.arms.iter().enumerate().all(|(other, arm)| {
-                    other == index || !block_reaches(body, arm.entry, child.start)
+                && parent.arms.iter().enumerate().all(|(other, other_arm)| {
+                    other == index
+                        || !block_reaches_avoiding(
+                            body,
+                            other_arm.entry,
+                            child.start,
+                            arm.entry,
+                        )
                 })
         }),
         (Some("guard"), Some(index)) => parent.arms.get(index).is_some_and(|arm| {
@@ -3699,9 +3740,26 @@ fn synthetic_match_assignments<'tcx>(
                 let (Some(child), Some(parent)) =
                     (current.get(&group.identity.id), current.get(parent_id))
                 else {
+                    if std::env::var_os("SUPERCOV_RUST_DEBUG_MATCH_ASSIGN").is_some() {
+                        eprintln!(
+                            "[assign-debug] complete assignment missing parent binding: child={} parent={parent_id}",
+                            group.identity.id
+                        );
+                    }
                     return false;
                 };
-                synthetic_match_parent_relation(body, group, child, parent)
+                let held = synthetic_match_parent_relation(body, group, child, parent);
+                if !held && std::env::var_os("SUPERCOV_RUST_DEBUG_MATCH_ASSIGN").is_some() {
+                    eprintln!(
+                        "[assign-debug] parent relation failed: child={} at {:?} parent={} at {:?} arm={:?}",
+                        group.identity.id,
+                        child.start,
+                        parent_id,
+                        parent.start,
+                        group.parent_arm_index
+                    );
+                }
+                held
             });
             if valid {
                 solutions.push(current.clone());
@@ -3760,6 +3818,15 @@ fn synthetic_match_assignments<'tcx>(
             used_starts.remove(&candidate.start.as_u32());
         }
     }
+    if std::env::var_os("SUPERCOV_RUST_DEBUG_MATCH_ASSIGN").is_some() {
+        for (block, data) in body.basic_blocks.iter_enumerated() {
+            eprintln!(
+                "[assign-debug] cfg {block:?}: {:?} -> {:?}",
+                std::mem::discriminant(&data.terminator().kind),
+                semantic_successors(data.terminator())
+            );
+        }
+    }
     let mut ordered = groups.to_vec();
     ordered.sort_by_key(|group| candidates[&group.identity.id].len());
     let mut solutions = Vec::new();
@@ -3775,10 +3842,28 @@ fn synthetic_match_assignments<'tcx>(
         &mut solutions,
     );
     let [solution] = solutions.as_slice() else {
+        let group_diagnostics = groups
+            .iter()
+            .map(|group| {
+                format!(
+                    "{{id={}; source={}-{}; ordinal={}; arms={}; parent={:?}/{:?}/{:?}; adts={:?}}}",
+                    group.identity.id,
+                    group.identity.source.start,
+                    group.identity.source.end,
+                    group.identity.owner_local_ordinal,
+                    group.arms.len(),
+                    group.parent_group_id,
+                    group.parent_site,
+                    group.parent_arm_index,
+                    group.pattern_adts,
+                )
+            })
+            .collect::<Vec<_>>();
         return Err(format!(
-            "{} collapsed match groups have {} parent-consistent CFG assignments; candidates={candidates:?}; solutions={solutions:?}",
+            "{} collapsed match groups have {} parent-consistent CFG assignments; groups=[{}]; candidates={candidates:?}; solutions={solutions:?}",
             groups.len(),
-            solutions.len()
+            solutions.len(),
+            group_diagnostics.join(", "),
         ));
     };
     Ok(solution.clone())

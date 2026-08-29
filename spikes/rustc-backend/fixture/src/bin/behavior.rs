@@ -37,7 +37,7 @@ use supercov_rustc_spike_fixture::{
     generic_choice, hrtb_choice,
     inline_const_values,
     interrupted_decision, interrupted_for, interrupted_match, let_else_value, logical_value_choice,
-    DerivedOrderLine, DerivedStyleIfLet, UnwrapOrSeven,
+    DerivedOrderLine, DerivedStyleIfLet, UnwrapOrSeven, generated_loop_nested_match_by_proc,
     match_empty, match_identical, match_irrefutable, match_unreachable, match_value, mixed, nested,
     nested_expression, nested_for_values, nested_generic_choice, nested_let_else, nested_match,
     nested_try_result, opaque_choice, opaque_macro_compound, opaque_macro_guard,
@@ -573,5 +573,9 @@ fn main() {
             DerivedStyleIfLet::unwrap_or_seven(Ok(3)),
             DerivedStyleIfLet::unwrap_or_seven(Err(true)),
         ]
+    );
+    println!(
+        "loop-nested-match-proc={}",
+        generated_loop_nested_match_by_proc(vec![Ok(5), Ok(0), Err(7)])
     );
 }

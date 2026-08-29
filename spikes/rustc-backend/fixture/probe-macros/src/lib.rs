@@ -45,6 +45,13 @@ pub fn generated_guarded_match_function(_input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro]
+pub fn generated_loop_nested_match_function(_input: TokenStream) -> TokenStream {
+    "pub fn generated_loop_nested_match_by_proc(values: Vec<Result<usize, usize>>) -> usize { let mut total = 0; for value in values { match value { Ok(value) => match value.checked_sub(1) { Some(remaining) => total += remaining, None => total += 100 }, Err(value) => total += value } } total }"
+        .parse()
+        .expect("valid generated loop-nested Rust match")
+}
+
+#[proc_macro]
 pub fn generated_nested_match_function(_input: TokenStream) -> TokenStream {
     "pub fn generated_nested_match_by_proc(value: Option<Result<usize, usize>>) -> usize { match value { Some(result) => match result { Ok(value) => value + 10, Err(value) => value + 20 }, None => 0 } }"
         .parse()
