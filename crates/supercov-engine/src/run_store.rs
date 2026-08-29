@@ -145,6 +145,7 @@ pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
         kind: "if".into(),
     };
     let manifest = CoverageManifest {
+        unmeasured: Vec::new(),
         decisions: vec![decision.clone()],
         points: vec![PointMeta {
             id: "statement".into(),

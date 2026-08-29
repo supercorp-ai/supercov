@@ -839,6 +839,7 @@ pub fn import_python_coverage_json(
         request: CoverageReportRequest {
             run_id: run_id.into(),
             manifest: CoverageManifest {
+                unmeasured: Vec::new(),
                 decisions: Vec::new(),
                 points,
                 branches,

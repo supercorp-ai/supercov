@@ -13,7 +13,7 @@ use crate::{
     },
 };
 
-const SCHEMA: &str = "supercov-rust-manifest-candidate-v3";
+const SCHEMA: &str = "supercov-rust-manifest-candidate-v4";
 const MODEL: &str = "rust-source-v1";
 const SOURCE_SNAPSHOT_SCHEMA: &str = "supercov-rust-source-snapshots-v1";
 const SOURCE_FINGERPRINT_DOMAIN: &[u8] = b"supercov-rust-compiler-sources-v1\0";
@@ -49,6 +49,9 @@ pub struct RustCompilerManifest {
     pub decisions: Vec<RustCompilerDecision>,
     pub selection_groups: Vec<RustCompilerSelectionGroup>,
     pub limitations: Vec<String>,
+    /// Obligations the compiler frontend declined to measure exactly.
+    #[serde(default)]
+    pub unmeasured_obligations: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -285,6 +288,7 @@ pub fn normalize_rust_compiler_candidates(
     let mut decisions = BTreeMap::<String, RustCompilerDecision>::new();
     let mut groups = BTreeMap::<String, RustCompilerSelectionGroup>::new();
     let mut limitations = BTreeSet::new();
+    let mut unmeasured_obligations = BTreeSet::new();
     let mut sources = BTreeMap::<String, RustCompilerSource>::new();
     for (manifest, snapshots) in candidates {
         manifest.validate()?;
@@ -297,6 +301,7 @@ pub fn normalize_rust_compiler_candidates(
         }
         crate_names.insert(manifest.crate_name);
         limitations.extend(manifest.limitations);
+        unmeasured_obligations.extend(manifest.unmeasured_obligations);
         for (key, source) in snapshots.sources {
             if let Some(existing) = sources.insert(key.clone(), source.clone())
                 && existing != source
@@ -333,6 +338,7 @@ pub fn normalize_rust_compiler_candidates(
         decisions: decisions.into_values().collect(),
         selection_groups: groups.into_values().collect(),
         limitations: limitations.into_iter().collect(),
+        unmeasured_obligations: unmeasured_obligations.into_iter().collect(),
     };
     manifest.normalize(&sources)
 }
@@ -1230,6 +1236,7 @@ impl RustCompilerManifest {
                 points,
                 branches,
                 limitations,
+                unmeasured: self.unmeasured_obligations.clone(),
                 scope: Some(json!({
                     "language": "rust",
                     "model": self.model,

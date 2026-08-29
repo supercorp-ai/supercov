@@ -2470,6 +2470,8 @@ impl<'a> CoverageIndex<'a> {
                 return Err(CoverageIndexError::InvalidRecord("decision count ordering"));
             }
             let summary = CoverageSummary {
+                unmeasured_obligations: None,
+                exact_fraction_pct: None,
                 decisions,
                 executed_decisions,
                 covered_decisions,
@@ -3684,6 +3686,8 @@ fn decode_summary(
         return Err(CoverageIndexError::InvalidRecord("summary count ordering"));
     }
     Ok(CoverageSummary {
+        unmeasured_obligations: None,
+        exact_fraction_pct: None,
         decisions,
         executed_decisions,
         covered_decisions,
@@ -3774,6 +3778,7 @@ mod tests {
         analyze_coverage_results(&CoverageReportRequest {
             run_id: "run".into(),
             manifest: CoverageManifest {
+                unmeasured: Vec::new(),
                 decisions: vec![decision.clone()],
                 points: vec![PointMeta {
                     id: "point".into(),
@@ -3933,6 +3938,7 @@ mod tests {
         let report = analyze_coverage_results(&CoverageReportRequest {
             run_id: "run".into(),
             manifest: CoverageManifest {
+                unmeasured: Vec::new(),
                 decisions: Vec::new(),
                 points: Vec::new(),
                 branches: Vec::new(),

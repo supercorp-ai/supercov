@@ -219,3 +219,37 @@ obligations get per-invocation identity. The choice determines whether a macro
 body reports one aggregated number or one per expansion site, and it changes
 obligation IDs and the `repeated_expansions` corpus expectations, so it is not
 a patch to make in passing.
+
+## Closing the honesty gap the lattice opened
+
+The lattice let unbindable code compile, but it left a defect behind that the
+north star names explicitly: a declined obligation still appeared in the
+manifest with no hits, so the analyzer counted it as **uncovered**. That is a
+measurement gap reported as a coverage gap — a wrong number, and wrong numbers
+get trusted. It was introduced by the lattice itself.
+
+The fix runs end to end:
+
+- The wrapper records the exact obligation IDs it declines
+  (`UNMEASURED_OBLIGATIONS`) and publishes them as `unmeasuredObligations`;
+  the manifest candidate schema moves to v4.
+- Declining is per body, not per phase. Once any phase of a body fails to bind
+  we cannot prove which of its probes still fire, so the whole body is
+  declined. Over-declining only under-reports coverage; under-declining would
+  recreate exactly the defect above.
+- The analyzer removes declined obligations from the covered/uncovered
+  denominator and reports `unmeasuredObligations` alongside
+  `exactFractionPct` — the share measured exactly, which is the number that
+  must ratchet toward 100 and never regress.
+- Both fields are omitted when nothing was declined, so a fully exact run
+  serializes byte for byte as before and no existing consumer sees a change.
+
+A unit test pins all four properties, including the byte-identical
+serialization of a fully measured summary. The compiler route carries the
+declined set through `normalize`; the legacy source-rewriting route has none
+by construction.
+
+Still owed: an end-to-end corpus gate proving a wrapper-declined obligation
+arrives in the report as unmeasured rather than uncovered. The unit test
+covers the analyzer and the lattice gate covers the wrapper, but the seam
+between them is exactly where a defect would hide.

@@ -651,6 +651,7 @@ mod tests {
         };
         NormalizedRustCompilerManifest {
             manifest: CoverageManifest {
+                unmeasured: Vec::new(),
                 decisions: vec![decision],
                 points: vec![PointMeta {
                     id: "function".into(),

@@ -3391,6 +3391,7 @@ mod tests {
         analyze_coverage_results(&CoverageReportRequest {
             run_id: "run".into(),
             manifest: CoverageManifest {
+                unmeasured: Vec::new(),
                 decisions: vec![decision()],
                 points: Vec::new(),
                 branches: Vec::new(),

@@ -292,6 +292,7 @@ impl<'a> RustObligationCollector<'a> {
             file,
             locations: SourceLocations::new(source),
             manifest: CoverageManifest {
+                unmeasured: Vec::new(),
                 decisions: Vec::new(),
                 points: Vec::new(),
                 branches: Vec::new(),

@@ -261,6 +261,7 @@ mod tests {
         fs::create_dir_all(target.join("debug")).unwrap();
         fs::write(target.join("debug/test-bin"), b"binary").unwrap();
         let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
             decisions: Vec::new(),
             points: vec![PointMeta {
                 id: "rs:statement:000000000000000000000000".into(),

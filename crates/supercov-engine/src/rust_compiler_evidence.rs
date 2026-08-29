@@ -311,6 +311,7 @@ mod tests {
     fn normalized() -> NormalizedRustCompilerManifest {
         NormalizedRustCompilerManifest {
             manifest: CoverageManifest {
+                unmeasured: Vec::new(),
                 decisions: vec![DecisionMeta {
                     id: ASSERTION.into(),
                     file: "src/lib.rs".into(),

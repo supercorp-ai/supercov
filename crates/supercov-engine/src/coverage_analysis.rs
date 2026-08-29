@@ -240,6 +240,33 @@ pub struct CoverageSummary {
     pub coverage_complete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completeness_blocked: Option<bool>,
+    /// Obligations Supercov declined to measure exactly. They are excluded
+    /// from every covered/uncovered count above, because a measurement gap is
+    /// not a coverage gap and reporting one as the other is a wrong number.
+    /// Absent when everything was measured, so fully exact runs keep their
+    /// existing output byte for byte.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unmeasured_obligations: Option<usize>,
+    /// Share of obligations Supercov measured exactly, as a percentage. This
+    /// is the number that must ratchet toward 100 and never regress.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_javascript_number"
+    )]
+    pub exact_fraction_pct: Option<f64>,
+}
+
+pub(crate) fn serialize_optional_javascript_number<S>(
+    value: &Option<f64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(value) => serialize_javascript_number(value, serializer),
+        None => serializer.serialize_none(),
+    }
 }
 
 /// `JSON.stringify` emits integer-valued Numbers without a trailing `.0`.
@@ -401,6 +428,8 @@ pub fn analyze_core(input: &CoverageCoreInput) -> Result<CoverageCoreOutput, Ana
     Ok(CoverageCoreOutput {
         witnesses,
         summary: CoverageSummary {
+            unmeasured_obligations: None,
+            exact_fraction_pct: None,
             decisions: input.decisions.len(),
             executed_decisions,
             covered_decisions,

@@ -71,6 +71,11 @@ pub struct CoverageManifest {
     pub branches: Vec<BranchMeta>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limitations: Vec<Value>,
+    /// Obligation IDs the frontend declined to measure exactly. They stay in
+    /// the manifest so the report can say what was not measured, but they must
+    /// never be counted as uncovered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmeasured: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<Value>,
 }
@@ -1815,7 +1820,41 @@ fn create_coverage_view_with_model(
         })
         .collect::<Vec<_>>();
 
+    // Obligations the frontend declined to measure leave the covered/uncovered
+    // denominator entirely. Counting them as uncovered would report a
+    // measurement gap as a coverage gap — a wrong number, and wrong numbers get
+    // trusted. They are reported separately instead, alongside the share of
+    // obligations that were measured exactly.
+    let declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
+    let total_obligations = decisions.len() + points.len() + branches.len();
+    let (decisions, points, branches) = if declined.is_empty() {
+        (decisions, points, branches)
+    } else {
+        (
+            decisions
+                .into_iter()
+                .filter(|result| !declined.contains(&result.meta.id))
+                .collect::<Vec<_>>(),
+            points
+                .into_iter()
+                .filter(|result| !declined.contains(&result.meta.id))
+                .collect::<Vec<_>>(),
+            branches
+                .into_iter()
+                .filter(|result| !declined.contains(&result.meta.id))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let measured_obligations = decisions.len() + points.len() + branches.len();
     let mut summary = summary_for_results(&decisions, &points, &branches, &lines, None)?;
+    if total_obligations > measured_obligations {
+        summary.unmeasured_obligations = Some(total_obligations - measured_obligations);
+        summary.exact_fraction_pct = Some(if total_obligations == 0 {
+            100.0
+        } else {
+            (measured_obligations as f64) * 100.0 / (total_obligations as f64)
+        });
+    }
     if !manifest.limitations.is_empty() {
         summary.coverage_complete = false;
         summary.completeness_blocked = Some(true);
@@ -2260,8 +2299,64 @@ mod tests {
     }
 
     #[test]
+    fn declined_obligations_are_unmeasured_never_uncovered() {
+        // Two statements, neither executed. One of them Supercov declined to
+        // measure. The declined one must not appear as a coverage gap: it
+        // leaves the denominator and is reported as unmeasured instead.
+        let point = |id: &str, line: usize| PointMeta {
+            id: id.into(),
+            kind: PointKind::Statement,
+            file: "src/app.js".into(),
+            line,
+            column: 0,
+            source: "work();".into(),
+            label: None,
+        };
+        let measured_only = CoverageManifest {
+            decisions: vec![],
+            points: vec![point("measured", 1)],
+            branches: vec![],
+            limitations: vec![],
+            unmeasured: Vec::new(),
+            scope: None,
+        };
+        let with_declined = CoverageManifest {
+            decisions: vec![],
+            points: vec![point("measured", 1), point("declined", 2)],
+            branches: vec![],
+            limitations: vec![],
+            unmeasured: vec!["declined".into()],
+            scope: None,
+        };
+
+        let baseline =
+            create_coverage_view(&measured_only, &[raw("test", 0, "passed", &[])], "time").unwrap();
+        let view =
+            create_coverage_view(&with_declined, &[raw("test", 0, "passed", &[])], "time").unwrap();
+
+        // The declined statement never inflates the uncovered count.
+        assert_eq!(
+            view.summary.statements.total, baseline.summary.statements.total,
+            "a declined obligation stayed in the covered/uncovered denominator"
+        );
+        assert_eq!(view.summary.unmeasured_obligations, Some(1));
+        assert_eq!(view.summary.exact_fraction_pct, Some(50.0));
+
+        // A fully measured run keeps its previous output exactly: the new
+        // fields are absent, not zero, so existing consumers see no change.
+        assert_eq!(baseline.summary.unmeasured_obligations, None);
+        assert_eq!(baseline.summary.exact_fraction_pct, None);
+        let encoded = serde_json::to_string(&baseline.summary).unwrap();
+        assert!(
+            !encoded.contains("unmeasured") && !encoded.contains("exactFraction"),
+            "a fully measured summary must serialize unchanged: {encoded}"
+        );
+    }
+
+    #[test]
     fn report_retains_unexecuted_manifest_conditions() {
         let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
             decisions: vec![DecisionMeta {
                 id: "decision".into(),
                 file: "src/app.js".into(),
@@ -2286,6 +2381,7 @@ mod tests {
     #[test]
     fn frozen_manifest_ignores_out_of_scope_synthetic_decisions() {
         let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
             decisions: vec![DecisionMeta {
                 id: "application-decision".into(),
                 file: "src/app.js".into(),
@@ -2335,6 +2431,7 @@ mod tests {
             kind: "if".into(),
         };
         let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
             decisions: vec![expected.clone()],
             points: vec![],
             branches: vec![],
@@ -2381,6 +2478,7 @@ mod tests {
     #[test]
     fn timestamp_overlap_cannot_upgrade_assertion_confidence() {
         let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
             decisions: vec![],
             points: vec![point("hit", 1)],
             branches: vec![],
@@ -2421,6 +2519,7 @@ mod tests {
     #[test]
     fn verified_view_uses_only_the_terminal_successful_attempt() {
         let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
             decisions: vec![],
             points: vec![point("failed", 1), point("passed", 2), point("expected", 3)],
             branches: vec![],
@@ -2467,6 +2566,7 @@ mod tests {
         let request = CoverageReportRequest {
             run_id: "run".into(),
             manifest: CoverageManifest {
+                unmeasured: Vec::new(),
                 decisions: vec![],
                 points: vec![point("expected", 1)],
                 branches: vec![],
@@ -2494,6 +2594,7 @@ mod tests {
         let request = CoverageReportRequest {
             run_id: "run".into(),
             manifest: CoverageManifest {
+                unmeasured: Vec::new(),
                 decisions: vec![],
                 points: vec![],
                 branches: vec![],
@@ -2577,6 +2678,7 @@ mod tests {
     #[test]
     fn archive_analysis_rejects_any_malformed_recognized_jsonl() {
         let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
             decisions: vec![],
             points: vec![point("background-hit", 1), point("test-hit", 2)],
             branches: vec![],
@@ -2621,6 +2723,7 @@ mod tests {
     #[test]
     fn archive_analysis_rejects_cross_run_evidence() {
         let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
             decisions: vec![],
             points: vec![],
             branches: vec![],
@@ -2683,6 +2786,7 @@ mod tests {
         }
 
         let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
             decisions: vec![],
             points: vec![],
             branches: vec![],
@@ -2725,6 +2829,7 @@ mod tests {
     #[test]
     fn rust_compiler_scope_requires_an_exact_full_source_fingerprint() {
         let mut manifest = CoverageManifest {
+            unmeasured: Vec::new(),
             decisions: vec![],
             points: vec![],
             branches: vec![],

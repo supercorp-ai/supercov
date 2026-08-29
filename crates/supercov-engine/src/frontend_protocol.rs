@@ -384,6 +384,7 @@ mod tests {
         CoverageReportRequest {
             run_id: "run".into(),
             manifest: CoverageManifest {
+                unmeasured: Vec::new(),
                 decisions: vec![],
                 points: vec![PointMeta {
                     id: "point".into(),

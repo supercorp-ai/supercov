@@ -347,6 +347,7 @@ pub fn prepare_rust_project(workspace: &Path) -> Result<PreparedRustProject, Rus
     let runtime_module = runtime_module_name(&sources);
     let runtime_path = format!("crate::{runtime_module}");
     let mut manifest = CoverageManifest {
+        unmeasured: Vec::new(),
         decisions: Vec::new(),
         points: Vec::new(),
         branches: Vec::new(),

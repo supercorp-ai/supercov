@@ -4359,7 +4359,7 @@ try {
     'the generated variant changed more than its full-source fingerprint',
   );
 
-  assert.equal(identityManifestA.schema, 'supercov-rust-manifest-candidate-v3');
+  assert.equal(identityManifestA.schema, 'supercov-rust-manifest-candidate-v4');
   assert.equal(identityManifestA.model, 'rust-source-v1');
   assert.equal(identityManifestA.measurementComplete, false);
   assert.deepEqual(identityManifestA.limitations, [

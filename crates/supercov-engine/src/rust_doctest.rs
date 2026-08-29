@@ -4515,7 +4515,8 @@ mod tests {
         let decision_identity =
             pending_identity("decision", &key, start, end, "assertion").unwrap();
         let manifest = RustCompilerManifest {
-            schema: "supercov-rust-manifest-candidate-v3".into(),
+            unmeasured_obligations: Vec::new(),
+            schema: "supercov-rust-manifest-candidate-v4".into(),
             model: "rust-source-v1".into(),
             crate_name: "doctest_bundle_2024".into(),
             measurement_complete: false,
@@ -4837,7 +4838,8 @@ mod tests {
         let mut branches = vec![outcome.clone(), first_arm.clone(), second_arm.clone()];
         branches.sort_by(|left, right| left.id.cmp(&right.id));
         let manifest = RustCompilerManifest {
-            schema: "supercov-rust-manifest-candidate-v3".into(),
+            unmeasured_obligations: Vec::new(),
+            schema: "supercov-rust-manifest-candidate-v4".into(),
             model: "rust-source-v1".into(),
             crate_name: "doctest_bundle_2024".into(),
             measurement_complete: false,

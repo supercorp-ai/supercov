@@ -3285,6 +3285,7 @@ mod tests {
         validate_persisted_runner_transport(&unit).unwrap();
         let normalized = NormalizedRustCompilerManifest {
             manifest: CoverageManifest {
+                unmeasured: Vec::new(),
                 decisions: Vec::new(),
                 points: vec![PointMeta {
                     id: point_id.into(),
@@ -3731,6 +3732,7 @@ mod tests {
         };
         let normalized = NormalizedRustCompilerManifest {
             manifest: crate::coverage_report::CoverageManifest {
+                unmeasured: Vec::new(),
                 decisions: Vec::new(),
                 points: Vec::new(),
                 branches: Vec::new(),

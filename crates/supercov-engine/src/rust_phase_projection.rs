@@ -233,6 +233,7 @@ mod tests {
 
     fn manifest() -> CoverageManifest {
         CoverageManifest {
+            unmeasured: Vec::new(),
             decisions: vec![DecisionMeta {
                 id: ASSERTION.into(),
                 file: "src/lib.rs".into(),

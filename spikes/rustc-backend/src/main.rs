@@ -155,6 +155,10 @@ static ORIGINAL_MIR_DROPS: OnceLock<MirDropsProvider> = OnceLock::new();
 /// the manifest is written), so degradations recorded here always reach the
 /// crate's manifest candidate.
 static BINDER_LIMITATIONS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+/// Obligations Supercov declines to measure. A measurement gap is not a
+/// coverage gap: these must be reported as unmeasured, never as uncovered,
+/// and must leave the covered/uncovered denominator entirely.
+static UNMEASURED_OBLIGATIONS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static CTFE_EVENTS: Mutex<Vec<CtfeObservation>> = Mutex::new(Vec::new());
 static CTFE_MARKERS: Mutex<BTreeMap<u64, CtfeMarkerIdentity>> = Mutex::new(BTreeMap::new());
 static CTFE_MAPPINGS: Mutex<BTreeMap<u64, CtfeMarkerMapping>> = Mutex::new(BTreeMap::new());
@@ -2568,14 +2572,24 @@ fn manifest_json(
         .map(|limitation| format!("\"{}\"", escape(limitation)))
         .collect::<Vec<_>>()
         .join(",");
+    // Obligations Supercov declined to measure. The analyzer must keep these
+    // out of the covered/uncovered denominator and report them separately.
+    let unmeasured = UNMEASURED_OBLIGATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .map(|id| format!("\"{}\"", escape(id)))
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
-        "{{\"schema\":\"supercov-rust-manifest-candidate-v3\",\"model\":\"rust-source-v1\",\"crate\":\"{}\",\"measurementComplete\":false,\"points\":[{}],\"branches\":[{}],\"decisions\":[{}],\"selectionGroups\":[{}],\"limitations\":[{}]}}\n",
+        "{{\"schema\":\"supercov-rust-manifest-candidate-v4\",\"model\":\"rust-source-v1\",\"crate\":\"{}\",\"measurementComplete\":false,\"points\":[{}],\"branches\":[{}],\"decisions\":[{}],\"selectionGroups\":[{}],\"limitations\":[{}],\"unmeasuredObligations\":[{}]}}\n",
         escape(crate_name),
         points,
         branches,
         decisions,
         selection_groups,
-        limitations
+        limitations,
+        unmeasured
     )
 }
 
@@ -4136,14 +4150,25 @@ fn try_operator_assignments<'tcx>(
                 return None;
             }
             let (continued, returned) = control_flow_switch_targets(tcx, body, target)?;
-            let source = stable_source_range(
+            // A `?` written inside a declarative macro body is owned by that
+            // body, so its obligation is keyed there while the callsite points
+            // at the macro invocation. The two coincide only for proc-macro
+            // output, where source and callsite are the same span. Offer both
+            // and let owner matching take whichever the obligation used.
+            let callsite = stable_source_range(
                 tcx,
                 terminator.source_info.span.source_callsite(),
                 crate_name,
             )
-            .ok()?;
-            Some((
-                source,
+            .ok();
+            let expanded =
+                stable_source_range(tcx, terminator.source_info.span, crate_name).ok();
+            let sources = [expanded, callsite]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            (!sources.is_empty()).then_some((
+                sources,
                 TryOperatorPath {
                     start: target,
                     continued,
@@ -4153,11 +4178,13 @@ fn try_operator_assignments<'tcx>(
         })
         .collect::<Vec<_>>();
     let mut paths_by_source = BTreeMap::<(String, u32, u32), Vec<TryOperatorPath>>::new();
-    for (source, path) in candidates {
+    for (sources, path) in candidates {
         let owners = branches_by_source
             .iter()
             .filter(|((key, start, end), _)| {
-                key == &source.key && *start <= source.start && *end >= source.end
+                sources.iter().any(|source| {
+                    key == &source.key && *start <= source.start && *end >= source.end
+                })
             })
             .collect::<Vec<_>>();
         let Some(minimum_width) = owners
@@ -4175,8 +4202,11 @@ fn try_operator_assignments<'tcx>(
         let exact_owners = exact_owners.into_iter().collect::<Vec<_>>();
         let [owner] = exact_owners.as_slice() else {
             return Err(format!(
-                "question-mark path at {}:{}-{} has ambiguous authored owners",
-                source.key, source.start, source.end
+                "question-mark path at {:?} has ambiguous authored owners",
+                sources
+                    .iter()
+                    .map(|source| (source.key.as_str(), source.start, source.end))
+                    .collect::<Vec<_>>()
             ));
         };
         paths_by_source.entry(owner.clone()).or_default().push(path);
@@ -4265,14 +4295,62 @@ fn try_operator_assignments<'tcx>(
                 .collect::<BTreeMap<_, _>>();
             scope_paths.sort_by_key(|candidate| rank_by_start[&candidate.start.as_u32()]);
             if scope_branches.len() != scope_paths.len() {
+                let control_flow_switches = body
+                    .basic_blocks
+                    .iter_enumerated()
+                    .filter(|(_, data)| {
+                        matches!(data.terminator().kind, TerminatorKind::SwitchInt { .. })
+                    })
+                    .map(|(block, data)| {
+                        (
+                            block,
+                            stable_source_range(
+                                tcx,
+                                data.terminator().source_info.span,
+                                crate_name,
+                            )
+                            .map(|range| (range.key, range.start, range.end))
+                            .ok(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let calls = body
+                    .basic_blocks
+                    .iter_enumerated()
+                    .filter_map(|(block, data)| {
+                        let terminator = data.terminator();
+                        let TerminatorKind::Call { destination, .. } = &terminator.kind else {
+                            return None;
+                        };
+                        let ty = destination.ty(&body.local_decls, tcx).ty;
+                        let is_control_flow = matches!(
+                            ty.kind(),
+                            ty::Adt(definition, _)
+                                if tcx.lang_items().cf_continue_variant()
+                                    .is_some_and(|variant| tcx.parent(variant) == definition.did())
+                        );
+                        (is_control_flow).then(|| {
+                            (
+                                block,
+                                format!("{:?}", terminator.source_info.span.desugaring_kind()),
+                                terminator.source_info.span.from_expansion(),
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
                 return Err(format!(
-                    "{} try-operator obligations at {}:{}-{} map to {} ControlFlow selections",
+                    "{} try-operator obligations at {}:{}-{} map to {} ControlFlow selections; branches={:?}; every switch in body={:?}",
                     scope_branches.len(),
                     source.0,
                     source.1,
                     source.2,
-                    scope_paths.len()
-                ));
+                    scope_paths.len(),
+                    scope_branches
+                        .iter()
+                        .map(|branch| branch.identity.id.as_str())
+                        .collect::<Vec<_>>(),
+                    control_flow_switches,
+                ) + &format!("; ControlFlow calls (block, desugaring, from_expansion)={calls:?}"));
             }
             let ranks = scope_paths
                 .iter()
@@ -5092,7 +5170,13 @@ fn match_arm_marker_statement<'tcx>(
 /// Under `SUPERCOV_RUST_STRICT_BINDING` this fails the build instead.
 /// Supercov's own gates set it so every unbindable shape stays a hard signal
 /// and the corpus keeps proving exactness rather than silently degrading.
-fn degrade_unbound_obligations(tcx: TyCtxt<'_>, phase: &str, definition: &str, error: &str) {
+fn degrade_unbound_obligations(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+    phase: &str,
+    definition: &str,
+    error: &str,
+) {
     if env::var_os(STRICT_BINDING).is_some_and(|value| !value.is_empty()) {
         tcx.dcx()
             .fatal(format!("Supercov could not {phase} in {definition}: {error}"));
@@ -5103,6 +5187,21 @@ fn degrade_unbound_obligations(tcx: TyCtxt<'_>, phase: &str, definition: &str, e
         .insert(format!(
             "RUST_OBLIGATION_UNBOUND: {phase} in {definition}: {error}"
         ));
+    // Decline the whole body, not just the failing phase. Once any phase of a
+    // body could not be bound exactly we cannot prove which of its probes
+    // still fire, and over-declining only under-reports coverage — while
+    // under-declining would report an unmeasured obligation as uncovered,
+    // which is the wrong number this design exists to prevent.
+    let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
+        return;
+    };
+    let mut unmeasured = UNMEASURED_OBLIGATIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unmeasured.extend(obligations.points.keys().cloned());
+    unmeasured.extend(obligations.branches.keys().cloned());
+    unmeasured.extend(obligations.decisions.keys().cloned());
+    unmeasured.extend(obligations.match_groups.keys().cloned());
 }
 
 fn mir_built_with_match_markers<'tcx>(
@@ -5127,6 +5226,7 @@ fn mir_built_with_match_markers<'tcx>(
     {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "bind injected unbindable shape",
             &obligations.definition,
             "SUPERCOV_RUST_FORCE_UNBINDABLE fault injection",
@@ -5165,6 +5265,7 @@ fn mir_built_with_match_markers<'tcx>(
             .unwrap_or_else(|error| {
                 degrade_unbound_obligations(
                     tcx,
+                    def_id,
                     "bind pre-borrow-check CTFE decisions",
                     &obligations.definition,
                     &error,
@@ -5333,6 +5434,7 @@ fn mir_built_with_match_markers<'tcx>(
                 Err(error) => {
                     degrade_unbound_obligations(
                         tcx,
+                        def_id,
                         "bind pre-borrow-check synthetic matches",
                         &obligations.definition,
                         &error,
@@ -5370,6 +5472,7 @@ fn mir_built_with_match_markers<'tcx>(
                     Err(error) => {
                         degrade_unbound_obligations(
                             tcx,
+                            def_id,
                             &format!("bind pre-borrow-check synthetic guard {decision_id}"),
                             &obligations.definition,
                             &error,
@@ -5395,6 +5498,7 @@ fn mir_built_with_match_markers<'tcx>(
             .unwrap_or_else(|error| {
                 degrade_unbound_obligations(
                     tcx,
+                    def_id,
                     "bind authored opaque decision conditions",
                     &obligations.definition,
                     &error,
@@ -5415,6 +5519,7 @@ fn mir_built_with_match_markers<'tcx>(
             .unwrap_or_else(|error| {
                 degrade_unbound_obligations(
                     tcx,
+                    def_id,
                     "bind pre-borrow-check structural decision conditions",
                     &obligations.definition,
                     &error,
@@ -5431,6 +5536,7 @@ fn mir_built_with_match_markers<'tcx>(
         .unwrap_or_else(|error| {
             degrade_unbound_obligations(
                 tcx,
+                def_id,
                 "bind pre-borrow-check synthetic let-else",
                 &obligations.definition,
                 &error,
@@ -5448,6 +5554,7 @@ fn mir_built_with_match_markers<'tcx>(
                 .unwrap_or_else(|error| {
                     degrade_unbound_obligations(
                         tcx,
+                        def_id,
                         "bind pre-borrow-check try operators",
                         &obligations.definition,
                         &error,
@@ -5577,6 +5684,7 @@ fn mir_built_with_match_markers<'tcx>(
     .unwrap_or_else(|error| {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "bind assertion phase boundaries",
             &obligations.definition,
             &error,
@@ -6202,6 +6310,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     let match_plans = match_plans.unwrap_or_else(|error| {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "bind pre-optimization Rust match probes",
             &exact_def_path!(tcx, def_id),
             &error,
@@ -6211,6 +6320,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     let for_plans = for_plans.unwrap_or_else(|error| {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "bind pre-optimization Rust for-loop probes",
             &exact_def_path!(tcx, def_id),
             &error,
@@ -6220,6 +6330,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     let guard_plans = guard_plans.unwrap_or_else(|error| {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "bind pre-optimization Rust structural decision probes",
             &exact_def_path!(tcx, def_id),
             &error,
@@ -6229,6 +6340,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     let let_else_plans = let_else_plans.unwrap_or_else(|error| {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "bind pre-optimization Rust synthetic let-else probes",
             &exact_def_path!(tcx, def_id),
             &error,
@@ -6238,6 +6350,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     let try_plans = try_plans.unwrap_or_else(|error| {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "bind pre-optimization Rust try-operator probes",
             &exact_def_path!(tcx, def_id),
             &error,
@@ -6324,6 +6437,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "consume pre-borrow-check Rust match markers",
             &exact_def_path!(tcx, def_id),
             &error,
@@ -6344,6 +6458,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "inject pre-optimization Rust match probes",
             &exact_def_path!(tcx, def_id),
             &error,
@@ -6356,6 +6471,7 @@ fn mir_drops_with_structural_probes<'tcx>(
         runtime_marked_decision_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
             degrade_unbound_obligations(
                 tcx,
+                def_id,
                 "rebind pre-optimization Rust synthetic guard probes",
                 &exact_def_path!(tcx, def_id),
                 &error,
@@ -6367,6 +6483,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "consume pre-borrow-check Rust match guard markers",
             &exact_def_path!(tcx, def_id),
             &error,
@@ -6392,6 +6509,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "inject pre-optimization Rust synthetic guard probes",
             &exact_def_path!(tcx, def_id),
             &error,
@@ -6404,6 +6522,7 @@ fn mir_drops_with_structural_probes<'tcx>(
         runtime_marked_let_else_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
             degrade_unbound_obligations(
                 tcx,
+                def_id,
                 "rebind pre-optimization Rust synthetic let-else probes",
                 &exact_def_path!(tcx, def_id),
                 &error,
@@ -6414,6 +6533,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "consume pre-borrow-check Rust let-else markers",
             &exact_def_path!(tcx, def_id),
             &error,
@@ -6433,6 +6553,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "inject pre-optimization Rust synthetic let-else probes",
             &exact_def_path!(tcx, def_id),
             &error,
@@ -6446,6 +6567,7 @@ fn mir_drops_with_structural_probes<'tcx>(
         runtime_marked_try_operator_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
             degrade_unbound_obligations(
                 tcx,
+                def_id,
                 "rebind pre-optimization Rust try-operator probes",
                 &exact_def_path!(tcx, def_id),
                 &error,
@@ -6457,6 +6579,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "consume pre-borrow-check Rust try-operator markers",
             &exact_def_path!(tcx, def_id),
             &error,
@@ -6476,6 +6599,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "inject pre-optimization Rust try-operator probes",
             &exact_def_path!(tcx, def_id),
             &error,
@@ -6488,6 +6612,7 @@ fn mir_drops_with_structural_probes<'tcx>(
         runtime_for_loop_plans(tcx, def_id, &instrumented).unwrap_or_else(|error| {
             degrade_unbound_obligations(
                 tcx,
+                def_id,
                 "rebind pre-optimization Rust for-loop probes",
                 &exact_def_path!(tcx, def_id),
                 &error,
@@ -6507,6 +6632,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "inject pre-optimization Rust for-loop probes",
             &exact_def_path!(tcx, def_id),
             &error,
@@ -6538,6 +6664,7 @@ fn mir_drops_with_structural_probes<'tcx>(
     {
         degrade_unbound_obligations(
             tcx,
+            def_id,
             "inject Rust assertion phases",
             &exact_def_path!(tcx, def_id),
             &error,
@@ -6563,12 +6690,12 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
     let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE).to_string();
     let definition = exact_def_path!(tcx, def_id);
     let mut decision_plans = runtime_decision_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, "bind Rust CTFE decision probes", &definition, &error);
+        degrade_unbound_obligations(tcx, def_id, "bind Rust CTFE decision probes", &definition, &error);
         Vec::new()
     });
     let structural_decision_plans = runtime_marked_decision_plans(tcx, def_id, body)
         .unwrap_or_else(|error| {
-            degrade_unbound_obligations(tcx, "bind marked Rust CTFE decisions", &definition, &error);
+            degrade_unbound_obligations(tcx, def_id, "bind marked Rust CTFE decisions", &definition, &error);
             Vec::new()
         });
     let mut decision_ids = decision_plans
@@ -6585,16 +6712,16 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
         decision_plans.push(plan);
     }
     let mut selection_plans = runtime_match_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, "bind Rust CTFE match selections", &definition, &error);
+        degrade_unbound_obligations(tcx, def_id, "bind Rust CTFE match selections", &definition, &error);
         Vec::new()
     });
     let let_else_plans = runtime_let_else_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, "bind Rust CTFE let-else selections", &definition, &error);
+        degrade_unbound_obligations(tcx, def_id, "bind Rust CTFE let-else selections", &definition, &error);
         Vec::new()
     });
     let logical_selection_plans =
         runtime_logical_selection_plans(tcx, def_id, body).unwrap_or_else(|error| {
-            degrade_unbound_obligations(tcx, "bind Rust CTFE logical selections", &definition, &error);
+            degrade_unbound_obligations(tcx, def_id, "bind Rust CTFE logical selections", &definition, &error);
             Vec::new()
         });
     let mut selection_ids = selection_plans
@@ -6621,7 +6748,7 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
     }
     let mut hit_ordinals_by_block = BTreeMap::<BasicBlock, BTreeSet<u64>>::new();
     for plan in runtime_statement_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, "bind Rust CTFE statement probes", &definition, &error);
+        degrade_unbound_obligations(tcx, def_id, "bind Rust CTFE statement probes", &definition, &error);
         Vec::new()
     }) {
         hit_ordinals_by_block
@@ -6639,7 +6766,7 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
             .insert(identity.probe_ordinal);
     }
     if let Err(error) = strip_structural_decision_markers(&mut instrumented, def_id, &definition) {
-        degrade_unbound_obligations(tcx, "consume pre-borrow-check Rust CTFE markers", &definition, &error);
+        degrade_unbound_obligations(tcx, def_id, "consume pre-borrow-check Rust CTFE markers", &definition, &error);
         return body;
     }
     let marker_local = instrumented
@@ -6687,7 +6814,7 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
         span,
     )
     .unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, "inject Rust CTFE match selections", &definition, &error);
+        degrade_unbound_obligations(tcx, def_id, "inject Rust CTFE match selections", &definition, &error);
     });
     instrument_ctfe_decisions(
         tcx,
@@ -6699,7 +6826,7 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
         span,
     )
     .unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, "inject Rust CTFE decision probes", &definition, &error);
+        degrade_unbound_obligations(tcx, def_id, "inject Rust CTFE decision probes", &definition, &error);
     });
 
     let decision_edges = instrumented
@@ -7399,7 +7526,20 @@ fn runtime_decision_plans<'tcx>(
                             else {
                                 return None;
                             };
-                            if discr.ty(&body.local_decls, tcx) != tcx.types.bool {
+                            // A let condition (`if let Some(x) = ..`) selects
+                            // through a two-way discriminant switch rather than
+                            // a typed Boolean one, exactly as in the structural
+                            // marker path. Its true edge is the one accepting
+                            // the recorded pattern variant.
+                            let is_bool = discr.ty(&body.local_decls, tcx) == tcx.types.bool;
+                            // Two shapes occur: one value edge with an
+                            // `otherwise`, or every variant enumerated with an
+                            // unreachable `otherwise` (Option<T> lowers this
+                            // way). Both are two-way selections.
+                            let pattern_switch = !is_bool
+                                && condition.pattern_variant.is_some()
+                                && matches!(targets.iter().count(), 1 | 2);
+                            if !is_bool && !pattern_switch {
                                 return None;
                             }
                             let source = stable_source_range(
@@ -7408,17 +7548,122 @@ fn runtime_decision_plans<'tcx>(
                                 &crate_name,
                             )
                             .ok()?;
-                            (source == condition.branch_source || source == condition.source)
-                                .then_some((
+                            // A condition written inside a macro body keeps
+                            // the body's range, while the lowered switch's
+                            // span can collapse to a point inside it. Exact
+                            // equality is tried first; containment then
+                            // accepts the collapsed form. Ambiguity is still
+                            // caught below, because more than one match fails.
+                            let exact = source == condition.branch_source
+                                || source == condition.source;
+                            let contained = [&condition.branch_source, &condition.source]
+                                .into_iter()
+                                .any(|range| {
+                                    range.key == source.key
+                                        && range.start <= source.start
+                                        && range.end >= source.end
+                                });
+                            if !(exact || contained) {
+                                return None;
+                            }
+                            if !pattern_switch {
+                                return Some((
                                     block,
                                     targets.target_for_value(1),
                                     targets.target_for_value(0),
-                                ))
+                                ));
+                            }
+                            let variant_index = condition.pattern_variant?;
+                            let discriminant_local = match discr {
+                                Operand::Copy(place) | Operand::Move(place) => place.as_local(),
+                                _ => None,
+                            }?;
+                            let scrutinee = data.statements.iter().rev().find_map(|statement| {
+                                let StatementKind::Assign(assignment) = &statement.kind else {
+                                    return None;
+                                };
+                                let (destination, value) = &**assignment;
+                                let Rvalue::Discriminant(place) = value else {
+                                    return None;
+                                };
+                                (destination.as_local() == Some(discriminant_local))
+                                    .then(|| place.ty(&body.local_decls, tcx).ty.peel_refs())
+                            })?;
+                            let expected = scrutinee.ty_adt_def()?.discriminant_for_variant(
+                                tcx,
+                                rustc_abi::VariantIdx::from_u32(variant_index),
+                            ).val;
+                            let matched = targets
+                                .iter()
+                                .find(|(value, _)| *value == expected)
+                                .map(|(_, target)| target);
+                            let refuted = targets
+                                .iter()
+                                .filter(|(value, _)| *value != expected)
+                                .map(|(_, target)| target)
+                                .collect::<Vec<_>>();
+                            match (matched, refuted.as_slice()) {
+                                (Some(matched), []) => {
+                                    Some((block, matched, targets.otherwise()))
+                                }
+                                (Some(matched), [refuted]) => {
+                                    Some((block, matched, *refuted))
+                                }
+                                // The pattern's own variant is not tested here;
+                                // binding it would be a guess.
+                                _ => None,
+                            }
                         })
                         .collect::<Vec<_>>();
                     let [(source_block, true_target, false_target)] = source_blocks.as_slice()
                     else {
+                        let all_bool_switches = body
+                            .basic_blocks
+                            .iter_enumerated()
+                            .filter_map(|(block, data)| {
+                                let TerminatorKind::SwitchInt { discr, .. } =
+                                    &data.terminator().kind
+                                else {
+                                    return None;
+                                };
+                                let is_bool =
+                                    discr.ty(&body.local_decls, tcx) == tcx.types.bool;
+                                let range = stable_source_range(
+                                    tcx,
+                                    data.terminator().source_info.span,
+                                    &crate_name,
+                                )
+                                .map(|range| (range.key, range.start, range.end))
+                                .ok();
+                                let TerminatorKind::SwitchInt { targets, .. } =
+                                    &data.terminator().kind
+                                else {
+                                    return None;
+                                };
+                                Some((
+                                    block,
+                                    is_bool,
+                                    range,
+                                    fallback_blocks.contains(&block.as_u32()),
+                                    targets.iter().count(),
+                                ))
+                            })
+                            .collect::<Vec<_>>();
                         return Err(format!(
+                            "condition branch_source={:?} source={:?} pattern_variant={:?} pattern_adt={:?}; switches (block, is_bool, range, is_fallback, value_targets)={all_bool_switches:?}; ",
+                            (
+                                condition.branch_source.key.as_str(),
+                                condition.branch_source.start,
+                                condition.branch_source.end
+                            ),
+                            (
+                                condition.source.key.as_str(),
+                                condition.source.start,
+                                condition.source.end
+                            ),
+                            condition.pattern_variant,
+                            condition.pattern_adt,
+                        ) + &format!(
                             "could not bind one expanded boolean MIR branch for {} condition {}; found {}",
                             decision.identity.id,
                             index,
@@ -9673,21 +9918,21 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
     rustc_middle::ty::print::with_no_trimmed_paths!({
     let definition = exact_def_path!(tcx, def_id);
     let mut decision_plans = runtime_decision_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, "bind Rust decision probes", &definition, &error);
+        degrade_unbound_obligations(tcx, def_id, "bind Rust decision probes", &definition, &error);
         Vec::new()
     });
     let mut branch_plans = runtime_let_else_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, "bind Rust let-else probes", &definition, &error);
+        degrade_unbound_obligations(tcx, def_id, "bind Rust let-else probes", &definition, &error);
         Vec::new()
     });
     branch_plans.extend(
         runtime_logical_selection_plans(tcx, def_id, body).unwrap_or_else(|error| {
-            degrade_unbound_obligations(tcx, "bind Rust logical-selection probes", &definition, &error);
+            degrade_unbound_obligations(tcx, def_id, "bind Rust logical-selection probes", &definition, &error);
             Vec::new()
         }),
     );
     let statement_plans = runtime_statement_plans(tcx, def_id, body).unwrap_or_else(|error| {
-        degrade_unbound_obligations(tcx, "bind Rust statement probes", &definition, &error);
+        degrade_unbound_obligations(tcx, def_id, "bind Rust statement probes", &definition, &error);
         Vec::new()
     });
     let probe_id = probe_id_for(tcx, def_id, &definition);
@@ -9757,7 +10002,7 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
             span,
         )
     {
-        degrade_unbound_obligations(tcx, "inject Rust branch probes", &definition, &error);
+        degrade_unbound_obligations(tcx, def_id, "inject Rust branch probes", &definition, &error);
         return body;
     }
     if let Some(start_branch) = start_branch
@@ -9769,7 +10014,7 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
             span,
         )
     {
-        degrade_unbound_obligations(tcx, "inject Rust loop frames", &definition, &error);
+        degrade_unbound_obligations(tcx, def_id, "inject Rust loop frames", &definition, &error);
         return body;
     }
     if let (Some(start), Some(condition), Some(finish)) =
@@ -9789,7 +10034,7 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
             span,
         )
     {
-        degrade_unbound_obligations(tcx, "inject Rust decision probes", &definition, &error);
+        degrade_unbound_obligations(tcx, def_id, "inject Rust decision probes", &definition, &error);
         return body;
     }
     if let Some(probe_function) = probe_function
@@ -9802,7 +10047,7 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
             span,
         )
     {
-        degrade_unbound_obligations(tcx, "inject Rust statement probes", &definition, &error);
+        degrade_unbound_obligations(tcx, def_id, "inject Rust statement probes", &definition, &error);
         return body;
     }
     let previous_context = context_id.map(|_| {
