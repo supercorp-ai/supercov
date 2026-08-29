@@ -6478,6 +6478,12 @@ fn mir_drops_with_structural_probes<'tcx>(
         ));
     }
     let mut instrumented = body.steal();
+    // Degrading after the steal cannot hand `body` back — it is already
+    // stolen, and returning it panics rustc with "attempt to steal from
+    // stolen value". Returning the partially instrumented body would be
+    // worse: half-applied markers produce evidence we cannot justify. Keep
+    // a pristine copy so a decline returns exactly the uninstrumented body.
+    let pristine = instrumented.clone();
     let span = tcx.def_span(def_id);
     let unit = instrumented
         .local_decls
@@ -6492,7 +6498,7 @@ fn mir_drops_with_structural_probes<'tcx>(
             &exact_def_path!(tcx, def_id),
             &error,
         );
-        return body;
+        return tcx.alloc_steal_mir(pristine);
     }
     let mut match_plans = match_plans;
     if let (Some(start), Some(hit)) = (start_branch, hit_branch)
@@ -6513,7 +6519,7 @@ fn mir_drops_with_structural_probes<'tcx>(
             &exact_def_path!(tcx, def_id),
             &error,
         );
-        return body;
+        return tcx.alloc_steal_mir(pristine);
     }
     // Match instrumentation may replace the accepting edge of a guard. Bind
     // exact Boolean targets after that edit while the semantic markers remain.
@@ -6538,7 +6544,7 @@ fn mir_drops_with_structural_probes<'tcx>(
             &exact_def_path!(tcx, def_id),
             &error,
         );
-        return body;
+        return tcx.alloc_steal_mir(pristine);
     }
     if let (Some(start), Some(condition), Some(finish)) =
         (start_decision, record_condition, finish_decision)
@@ -6564,7 +6570,7 @@ fn mir_drops_with_structural_probes<'tcx>(
             &exact_def_path!(tcx, def_id),
             &error,
         );
-        return body;
+        return tcx.alloc_steal_mir(pristine);
     }
     // Match and guard instrumentation may split an endpoint edge. Rebind the
     // semantic let-else markers only after those enclosing structures settle.
@@ -6588,7 +6594,7 @@ fn mir_drops_with_structural_probes<'tcx>(
             &exact_def_path!(tcx, def_id),
             &error,
         );
-        return body;
+        return tcx.alloc_steal_mir(pristine);
     }
     if let (Some(start), Some(hit)) = (start_branch, hit_branch)
         && let Err(error) = instrument_runtime_matches(
@@ -6608,7 +6614,7 @@ fn mir_drops_with_structural_probes<'tcx>(
             &exact_def_path!(tcx, def_id),
             &error,
         );
-        return body;
+        return tcx.alloc_steal_mir(pristine);
     }
     // Structural edits above may split either endpoint of a lowered `?`.
     // Bind the retained semantic markers only after enclosing selections have
@@ -6634,7 +6640,7 @@ fn mir_drops_with_structural_probes<'tcx>(
             &exact_def_path!(tcx, def_id),
             &error,
         );
-        return body;
+        return tcx.alloc_steal_mir(pristine);
     }
     if let (Some(start), Some(hit)) = (start_branch, hit_branch)
         && let Err(error) = instrument_runtime_matches(
@@ -6654,7 +6660,7 @@ fn mir_drops_with_structural_probes<'tcx>(
             &exact_def_path!(tcx, def_id),
             &error,
         );
-        return body;
+        return tcx.alloc_steal_mir(pristine);
     }
     // Match instrumentation can split blocks enclosing a nested for loop, so
     // bind for-loop structure again against the current body before editing it.
@@ -6687,7 +6693,7 @@ fn mir_drops_with_structural_probes<'tcx>(
             &exact_def_path!(tcx, def_id),
             &error,
         );
-        return body;
+        return tcx.alloc_steal_mir(pristine);
     }
     if let (Some(marker), Some(enter), Some(active), Some(resume), Some(exit)) = (
         context_marker,
@@ -6719,7 +6725,7 @@ fn mir_drops_with_structural_probes<'tcx>(
             &exact_def_path!(tcx, def_id),
             &error,
         );
-        return body;
+        return tcx.alloc_steal_mir(pristine);
     }
     tcx.alloc_steal_mir(instrumented)
     })

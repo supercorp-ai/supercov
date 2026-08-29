@@ -321,3 +321,29 @@ true/false targets, no two obligations sharing a switch edge), cheap enough to
 run on every compile; and an execution differential against
 `-C instrument-coverage` counts for the same run, which is the strongest
 available check and does cover the fallbacks.
+
+## A crash the lattice could not catch
+
+Converting the injection sites to degradations was done by rewriting many call
+sites at once, and in `mir_drops_with_structural_probes` that produced
+`return body;` paths *after* `body.steal()`. Returning an already-stolen
+`Steal` makes rustc panic with "attempt to steal from stolen value", which
+killed `proc-macro2` outright.
+
+Two things this is worth remembering for:
+
+A panic is not covered by the lattice at all. There is no limitation, no
+degradation and no report — just a dead build. Every degradation path must
+therefore leave the compiler in a state it can still use, which is a stronger
+requirement than merely returning an error.
+
+Returning the partially instrumented body would have been worse than the
+crash. Half-applied markers produce evidence we cannot justify, and wrong
+numbers outrank broken builds in the priority order. The fix keeps a pristine
+copy taken immediately after the steal, so a decline returns exactly the
+uninstrumented body.
+
+This is the second defect tonight introduced by mechanically rewriting many
+call sites (the first left a half-populated map that panicked on lookup), and
+both were found only by compiling real third-party crates rather than by the
+type checker or the corpus.
