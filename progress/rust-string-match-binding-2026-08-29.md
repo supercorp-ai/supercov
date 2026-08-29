@@ -237,6 +237,23 @@ Corpus fixture added: `generated_loop_nested_match_by_proc` (proc-generated
 match-in-arm-in-loop) pinning root [2,1]/child [1,1] arm selections with
 parent site "body".
 
+## Eighth wave: or-pattern arm entry edges (repro-verified; corpus verdict pending)
+
+Wave 7 cleared every serde shape; the dogfood advanced into authored engine
+code and failed injecting pre-optimization match probes in
+`javascript_frontend::prepare_javascript_frontend`: "entry edge from bb68
+was not found". Minimal repro: any authored `match` with an or-pattern arm
+(`A | B => …`). Each pattern alternative contributes one switch edge, so the
+arm's `entry_sources` lists the switch block once per alternative; injection
+bridges a source by replacing EVERY edge from it to the arm entry, so the
+duplicate source then finds nothing and fails closed. Injection now bridges
+each unique source once (one bridge captures all its edges — arm-selection
+semantics unchanged). The injection error also self-diagnoses now (plan
+start, per-arm entries/sources, actual successors).
+
+Corpus fixture added: `adapter_flavor` (three-variant enum, `Vite | Generic`
+or-pattern arm) pinning arm selections [2, 1] and behavior [11, 11, 12].
+
 ## Gates
 
 - Corpus fixture additions: proc-macro-generated visit_str-like and

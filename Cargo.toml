@@ -58,3 +58,17 @@ lto = "fat"
 opt-level = 3
 panic = "abort"
 strip = "symbols"
+
+# Debug-build supercov acts as the per-crate rustc proxy in gates and
+# dogfoods, and companion selection content-hashes multi-megabyte binaries
+# on every invocation. Unoptimized sha2 turns that into tens of seconds per
+# crate and blows production-stage timeouts; hashing must run optimized even
+# in dev builds. No effect on release.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.digest]
+opt-level = 3
+
+[profile.dev.package.block-buffer]
+opt-level = 3

@@ -8816,7 +8816,15 @@ fn instrument_runtime_matches<'tcx>(
     for plan in plans.iter_mut() {
         let token = body.local_decls.push(LocalDecl::new(tcx.types.u64, span));
         for arm in &plan.arms {
-            for source in &arm.entry_sources {
+            // An or-pattern arm records one entry edge per pattern
+            // alternative, so the same source block can appear repeatedly.
+            // One bridge per unique source redirects every edge from it.
+            for source in &arm
+                .entry_sources
+                .iter()
+                .copied()
+                .collect::<BTreeSet<BasicBlock>>()
+            {
                 let cleanup = body.basic_blocks[*source].is_cleanup;
                 let bridge = body.basic_blocks_mut().push(runtime_call_block(
                     tcx,
@@ -8847,8 +8855,20 @@ fn instrument_runtime_matches<'tcx>(
                     });
                 if replaced == 0 {
                     return Err(format!(
-                        "match arm {} entry edge from {:?} was not found",
-                        arm.branch_id, source
+                        "match arm {} entry edge from {:?} was not found; entry_block={:?}; entry_sources={:?}; source successors={:?}; plan start={:?}; arms={:?}",
+                        arm.branch_id,
+                        source,
+                        arm.entry_block,
+                        arm.entry_sources,
+                        body.basic_blocks[*source]
+                            .terminator()
+                            .successors()
+                            .collect::<Vec<_>>(),
+                        plan.start_block,
+                        plan.arms
+                            .iter()
+                            .map(|arm| (arm.entry_block, arm.entry_sources.clone()))
+                            .collect::<Vec<_>>(),
                     ));
                 }
             }

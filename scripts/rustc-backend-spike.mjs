@@ -5044,6 +5044,7 @@ try {
   assert.match(baselineBehavior.stdout, /derived-order=\[true, false\]/);
   assert.match(baselineBehavior.stdout, /derived-if-let=\[3, 7\]/);
   assert.match(baselineBehavior.stdout, /loop-nested-match-proc=111/);
+  assert.match(baselineBehavior.stdout, /adapter-flavor=\[11, 11, 12\]/);
   const runtimeManifest = crateManifest(
     instrumentedDirectory,
     'supercov_rustc_spike_fixture',
@@ -5611,6 +5612,19 @@ try {
     ),
     [1, 1],
     'a declarative-macro match lost authored arm selection identity',
+  );
+  const orPatternGroups = matchGroupsFor(runtimeManifest, 'adapter_flavor');
+  assert.equal(
+    orPatternGroups.length,
+    1,
+    'an or-pattern match did not record its selection group',
+  );
+  assert.deepEqual(
+    orPatternGroups[0].arms.map(({selectedOrdinal}) =>
+      ordinalCount(selectedOrdinal),
+    ),
+    [2, 1],
+    'an or-pattern arm did not commit once per selecting alternative',
   );
   const derivedOrderGroups = matchGroupsFor(
     runtimeManifest,

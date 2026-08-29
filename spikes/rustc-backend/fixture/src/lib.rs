@@ -894,6 +894,20 @@ pub fn context_panic_scope(log: &std::cell::RefCell<Vec<&'static str>>) {
     panic_path(log);
 }
 
+pub enum AdapterKind {
+    Vite,
+    Generic,
+    Direct,
+}
+
+pub fn adapter_flavor(kind: AdapterKind) -> usize {
+    let output = match kind {
+        AdapterKind::Vite | AdapterKind::Generic => 1,
+        AdapterKind::Direct => 2,
+    };
+    output + 10
+}
+
 #[derive(PartialEq, PartialOrd)]
 pub struct DerivedOrderLine {
     pub file: String,

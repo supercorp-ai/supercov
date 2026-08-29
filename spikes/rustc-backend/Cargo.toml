@@ -12,3 +12,14 @@ sha2 = "0.10"
 
 [build-dependencies]
 sha2 = "0.10"
+
+# The wrapper content-hashes itself for every handshake; hashing must run
+# optimized even in dev builds (mirrors the engine workspace override).
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.digest]
+opt-level = 3
+
+[profile.dev.package.block-buffer]
+opt-level = 3
