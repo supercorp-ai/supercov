@@ -134,9 +134,20 @@ and same-source groups rank under `semantically_before` with strict counts.
 
 With that, `supercov-contracts` compiles fully instrumented — every serde
 visitor shape, every derived impl, all decisions, matches, tries and
-selections bound exactly. The next R3 step is the full-workspace dogfood
-(engine and CLI crates), which decides whether more generated-code shapes
-remain, plus corpus fixtures pinning all of this wave's shapes.
+selections bound exactly.
+
+The full-workspace dogfood then advanced into `supercov-engine` and stopped
+at the next member of the parallel-arm class: serde **Serialize** (not
+Deserialize) for the `AgentError` enum
+(`crates/supercov-engine/src/agent_json.rs:644-653`) — try-operator
+selections in the variant match's arms report "no total semantic order",
+meaning their `parent_match_arm` scoping did not engage (either the
+enclosing variant-match group has no CFG assignment in that body, or the
+tries record without an active match context, e.g. nested one level deeper
+than the arm body site). Diagnose with the established standalone repro loop
+(copy the type into a scratch crate, build under the wrapper) before
+changing anything. This is the current dogfood boundary; all binder work
+through the third wave is committed and corpus-green.
 
 ## Gates
 
