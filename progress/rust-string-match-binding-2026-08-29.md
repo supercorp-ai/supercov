@@ -153,13 +153,20 @@ selections bound exactly.
 ## Remaining boundary (next work item)
 
 The dogfood now advances past all of the above and stops in a NEW PHASE:
-derived `PartialOrd::partial_cmp` for `coverage_report::SourceLine` fails in
-the pre-OPTIMIZATION match probe binder — "match arm … entry bb0 has no
-external incoming edge". This is the post-borrow instrumentation of a
-structurally-bound match group whose arm entry degenerates (optimizes/merges
-to the function entry) in optimized MIR. Diagnose with the standalone repro
-loop (`#[derive(PartialOrd)]` struct) and the pre-optimization plan builder
-before changing anything.
+derived `PartialOrd::partial_cmp` (standalone repro: any two-field
+`#[derive(PartialOrd)]` struct) fails in the pre-optimization match probe
+binder with "match arm … entry bb0 has no external incoming edge". Mechanism,
+confirmed from the plan builder (`marker_blocks.get(selected_ordinal)` with a
+span-location fallback): the group's arm MARKERS are absent from the body
+being planned, so the fallback locates arm bodies by source span — and every
+span in a derived fn collapses to the callsite, making body_blocks ≈ all
+blocks, entry = common dominator = bb0, which has no predecessors. The open
+question is why the arm markers are missing for this tiny generic function
+(marker statements assign to dead locals; suspicion: an optimization pass or
+the group not entering the pre-borrow marking path at all — check
+`identity.provenance` for builtin-derive matches vs the "synthetic-expansion"
+filter on `synthetic_groups`). First move next session: env-gated dump of
+marker_blocks and the group's provenance for the repro's partial_cmp.
 
 ## Gates
 
