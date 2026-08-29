@@ -284,3 +284,40 @@ rather than guessing an edge.
 That reasoning is currently held by review, not by a machine check. A
 differential oracle against rustc's own branch mappings would catch a misbind
 automatically wherever both exist, and is tracked separately.
+
+## Precision of declining, and the first real exactness number
+
+Declining a whole body is the correct conservative rule for a binder failure:
+once a phase cannot be bound we cannot prove which of that body's probes still
+fire. It is the wrong rule for an uncompiled construct, which is identified
+exactly. Splitting the two took `bytes` from 98.68% to 99.68% exact — 29
+declined obligations down to exactly 7, one per cfg-eliminated statement, with
+no collateral. The unmeasurable marker carries its obligation ID through an
+explicit constructor/parser pair rather than ad-hoc string parsing.
+
+`bytes` is now the first real third-party measurement: 2199 obligations, zero
+binder blind spots, and the entire remainder explained as code this target
+does not compile.
+
+Two traps worth remembering from taking that measurement. `Finished` is not
+evidence — cargo had not rebuilt the crate at all on the first attempt. And
+`SUPERCOV_RUST_COMPILER_OUTPUT` must be absolute: cargo runs a dependency with
+its own directory as the working directory, so a relative path sends that
+crate's manifest into the registry checkout and leaves an empty output
+directory that reads exactly like "nothing to report".
+
+## Misbind detection: the obvious oracle is vacuous
+
+Diffing Supercov's bindings against rustc's own branch mappings sounds like
+the natural check for the never-misbind invariant, but it only applies where
+rustc supplies mappings — and on that path Supercov's binding is derived from
+those mappings, so it compares a thing to itself. The misbind risk lives in
+the fallback paths, which exist precisely because rustc gives no mapping
+there.
+
+What would reach it: structural post-conditions on each binding (the chosen
+switch dominated by the decision's entry and dominating its outcome, distinct
+true/false targets, no two obligations sharing a switch edge), cheap enough to
+run on every compile; and an execution differential against
+`-C instrument-coverage` counts for the same run, which is the strongest
+available check and does cover the fallbacks.

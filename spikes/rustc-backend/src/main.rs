@@ -92,7 +92,26 @@ const FORCE_UNBINDABLE: &str = "SUPERCOV_RUST_FORCE_UNBINDABLE";
 /// Marks a construct that cannot be measured here at all, as opposed to one
 /// the binder failed to prove. Strict binding exists to keep binder blind
 /// spots hard, so it must not fire on code that simply is not in this build.
-const UNMEASURABLE: &str = "UNMEASURABLE: ";
+///
+/// The marker carries the exact obligation it refers to, written as
+/// `UNMEASURABLE<id>|reason`. Unlike a binder failure — where we cannot know
+/// which of a body's probes still fire and must decline the whole body — an
+/// uncompiled construct is known precisely, so only that obligation is
+/// declined and the rest of its body keeps exact measurement.
+const UNMEASURABLE: &str = "UNMEASURABLE";
+
+/// Build the marker for an obligation that is not present in this build.
+fn unmeasurable(id: &str, reason: &str) -> String {
+    format!("{UNMEASURABLE}{id}|{reason}")
+}
+
+/// Recover the obligation an unmeasurable marker names, if the error carries
+/// one.
+fn unmeasurable_obligation(error: &str) -> Option<&str> {
+    let rest = error.split_once(UNMEASURABLE)?.1;
+    let (id, _) = rest.split_once('|')?;
+    (!id.is_empty()).then_some(id)
+}
 const INSTRUMENT_CTFE: &str = "SUPERCOV_RUST_INSTRUMENT_CTFE";
 const REAL_RUSTDOC: &str = "SUPERCOV_RUST_REAL_RUSTDOC";
 const COMPANION_PATH: &str = "SUPERCOV_RUST_COMPANION_PATH";
@@ -5203,6 +5222,15 @@ fn degrade_unbound_obligations(
     // still fire, and over-declining only under-reports coverage — while
     // under-declining would report an unmeasured obligation as uncovered,
     // which is the wrong number this design exists to prevent.
+    // An uncompiled construct is identified exactly, so decline just it. The
+    // rest of the body bound normally and stays measured.
+    if let Some(id) = unmeasurable_obligation(error) {
+        UNMEASURED_OBLIGATIONS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id.to_owned());
+        return;
+    }
     let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
         return;
     };
@@ -8220,11 +8248,17 @@ fn runtime_statement_plans<'tcx>(
                 });
             if !overlaps_any_mir {
                 return Err(format!(
-                    "statement {id} in {definition} at {}:{}..{} {UNMEASURABLE}not compiled in this configuration: no MIR span overlaps it, so the enclosing branch was eliminated before lowering; mapped ranges: {}",
+                    "statement {id} in {definition} at {}:{}..{} {}",
                     point.source.key,
                     point.source.start,
                     point.source.end,
-                    mapped.join(", ")
+                    unmeasurable(
+                        &id,
+                        &format!(
+                            "not compiled in this configuration: no MIR span overlaps it, so the enclosing branch was eliminated before lowering; mapped ranges: {}",
+                            mapped.join(", ")
+                        )
+                    )
                 ));
             }
             return Err(format!(
