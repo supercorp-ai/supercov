@@ -215,6 +215,28 @@ path), so the span-location fallback degenerated: every span in a derived fn
 collapses to the callsite, making body_blocks ≈ all blocks and entry = bb0
 with no predecessors. Both wave-5 rules above close this.
 
+## Seventh wave: loop-nested arm membership (corpus-verified)
+
+Wave 6 advanced the dogfood to CoverageReportRequest's visit_map, which
+failed with zero parent-consistent assignments. Diagnosis (via the new
+self-diagnosing assignment error + an env-gated CFG dump,
+`SUPERCOV_RUST_DEBUG_MATCH_ASSIGN=1`): the `deserialize_with` field wraps
+`next_value` in a real generated match nested in dispatch arm 6, and the
+dispatch lives inside the key loop — the back edge re-enters every arm
+without revisiting the group's recorded start, so the body parent relation's
+exclusivity test ("no other arm reaches the child") failed for every arm.
+The relation now bars the CLAIMED arm's entry instead
+(`block_reaches_avoiding`): any other arm's path into this arm's body must
+pass through that entry, which holds in loops and straight-line shapes
+alike; true cross-arm sharing still reaches the child another way and fails
+closed. Verified on default-repro (the CoverageReportRequest shape:
+`#[serde(default)]`, `deserialize_with`, Option tails), real rebuilds of
+untagged/ord/skip/contracts repros, and the full corpus.
+
+Corpus fixture added: `generated_loop_nested_match_by_proc` (proc-generated
+match-in-arm-in-loop) pinning root [2,1]/child [1,1] arm selections with
+parent site "body".
+
 ## Gates
 
 - Corpus fixture additions: proc-macro-generated visit_str-like and
