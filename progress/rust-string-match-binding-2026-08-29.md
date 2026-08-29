@@ -92,11 +92,24 @@ With all of the above, `visit_str`, `visit_bytes`, `visit_seq` and every
 ## Remaining boundary (next work item)
 
 With all match/try binding complete, the supercov-contracts dogfood build
-fails closed at a different subsystem: derived `PartialEq::eq` logical
-selections ("rustc did not retain branch mappings for logical-selection
-function"). rustc omits native branch mappings for derive-generated code, so
-the logical-selection binder needs the pre-borrow structural-marker fallback
-that CTFE owner kinds already use. That is the next R3 item.
+failed closed at derived `PartialEq::eq` logical selections: rustc treats
+`#[automatically_derived]` (and `#[coverage(off)]`) functions as
+coverage-ineligible (`rustc_mir_transform::coverage::query`), so their
+decisions can never bind through native branch mappings. The wrapper now
+mirrors that exact predicate: decisions in functions where
+`tcx.coverage_attr_on` is false carry structural markers, like CTFE owner
+kinds.
+
+That unmasked the next latent boundary (previously hidden behind the eq
+fatal): visit_map's structural decision conditions — nine same-source
+conditions map to eight typed Boolean switches (the eight duplicate-field
+`Option::is_some` checks pair up; a ninth same-source condition, likely the
+map-loop decision, has no typed Boolean switch of its own). Structural
+condition pairing needs the same scoping/diagnosis treatment the match and
+try binding received. This is where the dogfood build currently fails closed;
+the corpus verdict on the coverage-off predicate (all derive fixtures shift
+to structural binding) decides whether the predicate lands now or is refined
+first.
 
 ## Gates
 

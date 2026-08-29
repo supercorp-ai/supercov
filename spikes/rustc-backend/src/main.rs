@@ -1417,11 +1417,16 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     .iter()
                     .any(|previous| previous.branch_source == condition.branch_source)
             });
-        let structural_marker =
-            decision_kind == "assertion"
-                || authored_macro_guard
-                || collapsed_expansion_conditions
-                || conditions.iter().any(|condition| condition.opaque_authored_macro);
+        // rustc treats `#[automatically_derived]` (and `#[coverage(off)]`)
+        // functions as coverage-ineligible, so decisions in them can never
+        // bind through native branch mappings and must carry structural
+        // markers exactly like CTFE owner kinds.
+        let coverage_instrumented = self.tcx.coverage_attr_on(self.def_id.expect_local());
+        let structural_marker = !coverage_instrumented
+            || decision_kind == "assertion"
+            || authored_macro_guard
+            || collapsed_expansion_conditions
+            || conditions.iter().any(|condition| condition.opaque_authored_macro);
         let decision_id = decision.id.clone();
         match self.decisions.get_mut(&decision.id) {
             Some(existing) if existing.identity.canonical != decision.canonical => {
