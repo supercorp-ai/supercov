@@ -89,6 +89,10 @@ const STRICT_BINDING: &str = "SUPERCOV_RUST_STRICT_BINDING";
 /// unbindable. The degradation path must be provable on demand, or the
 /// lattice that keeps arbitrary code compiling would itself be untested.
 const FORCE_UNBINDABLE: &str = "SUPERCOV_RUST_FORCE_UNBINDABLE";
+/// Marks a construct that cannot be measured here at all, as opposed to one
+/// the binder failed to prove. Strict binding exists to keep binder blind
+/// spots hard, so it must not fire on code that simply is not in this build.
+const UNMEASURABLE: &str = "UNMEASURABLE: ";
 const INSTRUMENT_CTFE: &str = "SUPERCOV_RUST_INSTRUMENT_CTFE";
 const REAL_RUSTDOC: &str = "SUPERCOV_RUST_REAL_RUSTDOC";
 const COMPANION_PATH: &str = "SUPERCOV_RUST_COMPANION_PATH";
@@ -5177,16 +5181,23 @@ fn degrade_unbound_obligations(
     definition: &str,
     error: &str,
 ) {
-    if env::var_os(STRICT_BINDING).is_some_and(|value| !value.is_empty()) {
+    // A construct that is not in this build cannot be bound by anyone, so it
+    // is never a binder defect and never fails strict binding. It is still
+    // declined: unmeasurable is not the same as uncovered.
+    let unmeasurable = error.contains(UNMEASURABLE);
+    if !unmeasurable && env::var_os(STRICT_BINDING).is_some_and(|value| !value.is_empty()) {
         tcx.dcx()
             .fatal(format!("Supercov could not {phase} in {definition}: {error}"));
     }
+    let kind = if unmeasurable {
+        "RUST_OBLIGATION_NOT_COMPILED"
+    } else {
+        "RUST_OBLIGATION_UNBOUND"
+    };
     BINDER_LIMITATIONS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(format!(
-            "RUST_OBLIGATION_UNBOUND: {phase} in {definition}: {error}"
-        ));
+        .insert(format!("{kind}: {phase} in {definition}: {error}"));
     // Decline the whole body, not just the failing phase. Once any phase of a
     // body could not be bound exactly we cannot prove which of its probes
     // still fire, and over-declining only under-reports coverage — while
@@ -7524,7 +7535,10 @@ fn runtime_decision_plans<'tcx>(
                         true_target,
                         false_target,
                     )
-                } else if tcx.def_span(def_id).from_expansion() {
+                } else if tcx.def_span(def_id).from_expansion()
+                    || condition.branch_source != condition.source
+                    || condition.authored_expression
+                {
                     let source_blocks = body
                         .basic_blocks
                         .iter_enumerated()
@@ -8179,6 +8193,40 @@ fn runtime_statement_plans<'tcx>(
                 .collect::<Vec<_>>();
             mapped.sort();
             mapped.dedup();
+            // Distinguish "not compiled here" from "we could not bind it".
+            // A statement inside a branch rustc proved dead — `cfg!` on this
+            // target being the common case — has no MIR anywhere: no span in
+            // the body overlaps its range. That is not a binder blind spot and
+            // must not read as one, and reporting it as uncovered would claim
+            // the user has untested code that this build does not contain.
+            let overlaps_any_mir = body
+                .basic_blocks
+                .iter()
+                .flat_map(|data| {
+                    data.statements
+                        .iter()
+                        .map(|statement| statement.source_info.span)
+                        .chain(std::iter::once(data.terminator().source_info.span))
+                })
+                .filter_map(|span| {
+                    stable_source_range(tcx, span, &crate_name)
+                        .or_else(|_| stable_source_range(tcx, span.source_callsite(), &crate_name))
+                        .ok()
+                })
+                .any(|source| {
+                    source.key == point.source.key
+                        && source.start < point.source.end
+                        && source.end > point.source.start
+                });
+            if !overlaps_any_mir {
+                return Err(format!(
+                    "statement {id} in {definition} at {}:{}..{} {UNMEASURABLE}not compiled in this configuration: no MIR span overlaps it, so the enclosing branch was eliminated before lowering; mapped ranges: {}",
+                    point.source.key,
+                    point.source.start,
+                    point.source.end,
+                    mapped.join(", ")
+                ));
+            }
             return Err(format!(
                 "statement {id} in {definition} at {}:{}..{} has no exact MIR entry mapping; mapped ranges: {}",
                 point.source.key,
