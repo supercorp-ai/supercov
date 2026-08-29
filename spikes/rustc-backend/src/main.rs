@@ -2029,10 +2029,35 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     || existing.parent_site != parent.as_ref().map(|value| value.1)
                     || existing.parent_arm_index != parent.as_ref().and_then(|value| value.2) =>
             {
-                self.tcx.dcx().fatal(format!(
-                    "Supercov Rust match selection aggregation mismatch for {}",
-                    group.id
-                ))
+                let differing = [
+                    (existing.arms != selections, "arms"),
+                    (
+                        existing.parent_group_id != parent.as_ref().map(|value| value.0.clone()),
+                        "parent-group",
+                    ),
+                    (
+                        existing.parent_site != parent.as_ref().map(|value| value.1),
+                        "parent-site",
+                    ),
+                    (
+                        existing.parent_arm_index != parent.as_ref().and_then(|value| value.2),
+                        "parent-arm-index",
+                    ),
+                ]
+                .into_iter()
+                .filter_map(|(differs, name)| differs.then_some(name))
+                .collect::<Vec<_>>()
+                .join(",");
+                let message = format!(
+                    "Supercov Rust match selection aggregation mismatch for {} in {}: differing={differing}; existing arms={} new arms={}",
+                    group.id,
+                    self.definition,
+                    existing.arms.len(),
+                    selections.len(),
+                );
+                let conflicted = group.id.clone();
+                self.degrade_aggregation_conflict(&conflicted, &differing, message);
+                return Some(conflicted);
             }
             Some(existing) => {
                 existing.definitions.push(self.definition.clone());
