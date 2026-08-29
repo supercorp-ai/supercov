@@ -379,3 +379,38 @@ contains a match and is invoked twice in the same function, so one aggregated
 obligation faces two independent MIR structures and only one can be bound.
 That is the aggregation semantics decision, recorded with evidence rather than
 guessed at.
+
+## Containment must be a fallback, not an equal alternative
+
+`http` exposed a defect in the wave-9 collapsed-span fix. That change admitted
+a switch whose range is contained in the condition's range, to handle spans
+that collapse to a point — but it admitted containment *simultaneously* with
+exact matches. In `HeaderMap::find` the condition's own switch sits at
+13349..13402 and a nested switch sits at 13349..13357, so both matched and the
+pair failed as ambiguous.
+
+Exact matches now win outright; containment applies only when nothing matches
+exactly. The uniqueness requirement still fails closed on real ambiguity. This
+is worth remembering as a general rule for the binder: a relaxation added for
+one shape has to be ordered below the precise rule it backs up, or it competes
+with it.
+
+http: 3657 obligations, 90.32% exact.
+
+## Marker-first has a prerequisite
+
+Marking every match group pre-borrow — the direction that would eliminate the
+degenerate-span family (28 occurrences in syn, derived PartialOrd, macro-bodied
+arms) — was attempted and reverted. Two findings:
+
+`synthetic_groups` feeds guard-condition markers as well as arm markers, so
+widening both records a guard condition twice. Only arm marking should widen;
+that part works.
+
+The blocker is that the pre-borrow binder is weaker than the span planner for
+macro-generated authored groups. `generated_match` binds today by span but
+reports "0 structurally valid arm chains" once marked, because its spans
+collapse to the macro body and chain walking cannot recover arm order. So
+marking everything currently makes some groups worse. The prerequisite is for
+`synthetic_match_candidates` to bind collapsed authored groups as reliably as
+the span planner does.

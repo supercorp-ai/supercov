@@ -7597,6 +7597,26 @@ fn runtime_decision_plans<'tcx>(
                     || condition.branch_source != condition.source
                     || condition.authored_expression
                 {
+                    // Whether any switch carries the condition's exact range.
+                    // Exact matches win outright; containment only applies when
+                    // nothing matches exactly.
+                    let exact_match_exists = body
+                        .basic_blocks
+                        .iter_enumerated()
+                        .filter(|(block, _)| !fallback_blocks.contains(&block.as_u32()))
+                        .any(|(_, data)| {
+                            let TerminatorKind::SwitchInt { .. } = &data.terminator().kind else {
+                                return false;
+                            };
+                            stable_source_range(
+                                tcx,
+                                data.terminator().source_info.span,
+                                &crate_name,
+                            )
+                            .is_ok_and(|source| {
+                                source == condition.branch_source || source == condition.source
+                            })
+                        });
                     let source_blocks = body
                         .basic_blocks
                         .iter_enumerated()
@@ -7647,6 +7667,14 @@ fn runtime_decision_plans<'tcx>(
                                         && range.end >= source.end
                                 });
                             if !(exact || contained) {
+                                return None;
+                            }
+                            // Containment is a fallback for spans that collapse
+                            // to a point, not an equal alternative. Admitting
+                            // both at once lets a nested switch inside the
+                            // condition's range compete with the condition's
+                            // own switch, and the pair then fails as ambiguous.
+                            if !exact && exact_match_exists {
                                 return None;
                             }
                             if !pattern_switch {
