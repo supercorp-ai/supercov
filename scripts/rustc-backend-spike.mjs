@@ -7576,6 +7576,9 @@ try {
       '}\n' +
       'pub fn neighbor(flag: bool) -> usize {\n' +
       '    if flag { 3 } else { 4 }\n' +
+      '}\n' +
+      'pub fn paired(first: bool, second: bool) -> usize {\n' +
+      '    if first && second { 5 } else { 6 }\n' +
       '}\n',
   );
   const latticeOutput = join(scratch, 'lattice-gate-out');
@@ -7650,6 +7653,38 @@ try {
     [],
     'declining one body wrongly marked an unrelated body unmeasured',
   );
+  // The never-misbind invariant is the one that outranks everything, and a
+  // misbind yields confident wrong numbers rather than no numbers, so
+  // fail-closed uniqueness never exercises it. The structural post-conditions
+  // are the automatic half of that guarantee — proven here by injecting one,
+  // because a safety check never shown to fire is not a guarantee.
+  const misbindStrict = spawnSync(
+    cargo,
+    ['build', '--manifest-path', join(latticeCrate, 'Cargo.toml')],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        ...latticeEnvironment,
+        CARGO_TARGET_DIR: join(scratch, 'misbind-strict-target'),
+        SUPERCOV_RUST_COMPILER_OUTPUT: join(scratch, 'misbind-strict-out'),
+        SUPERCOV_RUST_FORCE_UNBINDABLE: '',
+        SUPERCOV_RUST_FORCE_MISBIND: 'paired',
+        SUPERCOV_RUST_STRICT_BINDING: '1',
+      },
+    },
+  );
+  assert.notEqual(
+    misbindStrict.status,
+    0,
+    'strict binding accepted a decision bound to an already-claimed switch edge',
+  );
+  assert.match(
+    misbindStrict.stderr,
+    /misbind check: .* bound the same switch edge/u,
+    'the misbind post-condition did not name the duplicated switch edge',
+  );
+
   const strictLattice = spawnSync(
     cargo,
     ['build', '--manifest-path', join(latticeCrate, 'Cargo.toml')],

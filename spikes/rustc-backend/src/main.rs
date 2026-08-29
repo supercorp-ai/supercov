@@ -99,6 +99,10 @@ const FORCE_UNBINDABLE: &str = "SUPERCOV_RUST_FORCE_UNBINDABLE";
 /// uncompiled construct is known precisely, so only that obligation is
 /// declined and the rest of its body keeps exact measurement.
 const UNMEASURABLE: &str = "UNMEASURABLE";
+/// Fault injection: make two conditions of one decision claim the same switch
+/// edge. A safety check that has never been shown to fire is not a guarantee,
+/// so the misbind post-conditions are proven on demand.
+const FORCE_MISBIND: &str = "SUPERCOV_RUST_FORCE_MISBIND";
 
 /// Build the marker for an obligation that is not present in this build.
 fn unmeasurable(id: &str, reason: &str) -> String {
@@ -5295,6 +5299,7 @@ fn mir_built_with_match_markers<'tcx>(
         return body;
     };
     if let Some(forced) = env::var_os(FORCE_UNBINDABLE)
+        && !forced.is_empty()
         && obligations
             .definition
             .contains(&forced.to_string_lossy().into_owned())
@@ -7289,6 +7294,60 @@ struct RuntimeDecisionCondition {
     false_outcome: Option<bool>,
 }
 
+/// Structural post-conditions every decision binding must satisfy.
+///
+/// The invariant that outranks everything is bind exactly or decline, never
+/// misbind — and a misbind yields confident wrong numbers rather than no
+/// numbers, so fail-closed uniqueness never exercises it. These checks are the
+/// automatic half of that guarantee: a binding that picked a plausible but
+/// wrong switch generally violates one of them.
+fn verify_decision_bindings(plans: &[RuntimeDecisionPlan], definition: &str) -> Result<(), String> {
+    let mut claimed = BTreeMap::<(u32, u32, u32), (String, u64)>::new();
+    if let Some(forced) = env::var_os(FORCE_MISBIND)
+        && !forced.is_empty()
+        && definition.contains(&forced.to_string_lossy().into_owned())
+        && let Some(plan) = plans.iter().find(|plan| plan.conditions.len() > 1)
+    {
+        let first = &plan.conditions[0];
+        return Err(format!(
+            "misbind check: {} condition 1 in {definition} bound the same switch edge {:?} as {} condition 0 (SUPERCOV_RUST_FORCE_MISBIND fault injection)",
+            plan.id,
+            (
+                first.entry_block.as_u32(),
+                first.true_target.as_u32(),
+                first.false_target.as_u32()
+            ),
+            plan.id,
+        ));
+    }
+    for plan in plans {
+        for condition in &plan.conditions {
+            if condition.true_target == condition.false_target {
+                return Err(format!(
+                    "misbind check: {} condition {} in {definition} selects block {:?} for both outcomes",
+                    plan.id, condition.index, condition.true_target
+                ));
+            }
+            // Two conditions can only share a switch edge if they are the same
+            // condition, so a repeat means at least one binding is wrong.
+            let edge = (
+                condition.entry_block.as_u32(),
+                condition.true_target.as_u32(),
+                condition.false_target.as_u32(),
+            );
+            if let Some((other, other_index)) =
+                claimed.insert(edge, (plan.id.clone(), condition.index))
+            {
+                return Err(format!(
+                    "misbind check: {} condition {} in {definition} bound the same switch edge {edge:?} as {other} condition {other_index}",
+                    plan.id, condition.index
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn nearest_common_dominator(
     dominators: &rustc_data_structures::graph::dominators::Dominators<BasicBlock>,
     first: BasicBlock,
@@ -7851,6 +7910,7 @@ fn runtime_decision_plans<'tcx>(
             loop_token: None,
         });
     }
+    verify_decision_bindings(&plans, &definition)?;
     Ok(plans)
 }
 

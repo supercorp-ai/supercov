@@ -468,3 +468,32 @@ the exact fraction must never regress for any crate.
 
 Those six groups are now the specification for the next step, and they are
 reproducible in seconds via the pm2-repro crate.
+
+## The never-misbind invariant gets its first automatic check
+
+Until now the invariant that outranks everything was held by reasoning and by
+fail-closed uniqueness at each binding site. That is not enough on its own: a
+misbind produces confident wrong numbers rather than no numbers, so the
+fail-closed paths never exercise it, and every relaxation added for one shape
+widens the space where one could hide.
+
+Decision bindings now carry structural post-conditions. No condition may select
+the same block for both outcomes, and no two conditions may claim the same
+switch edge — two conditions can only share a switch if they are the same
+condition, so a repeat means at least one binding is wrong. They run on every
+compile, including the corpus.
+
+They pass on the fixture and on bytes, once_cell, proc-macro2, http, log and
+either. A clean pass is exactly the kind of result that can be vacuous, so the
+check is proven by fault injection (`SUPERCOV_RUST_FORCE_MISBIND`) and gated in
+both directions: strict binding fails naming the duplicated edge, and lattice
+mode declines the body, so a *suspected* misbind never produces numbers.
+
+Chasing that also exposed a latent trap in the older fault injection: an empty
+`SUPERCOV_RUST_FORCE_UNBINDABLE` made `definition.contains("")` true for every
+body, silently declining everything. Empty now means unset for both injections,
+matching the strict-binding flag.
+
+Still open for this invariant: the execution differential against
+`-C instrument-coverage` counts, which is the only check that would catch a
+misbind whose structure is locally plausible.
