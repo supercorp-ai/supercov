@@ -10190,6 +10190,12 @@ fn instrument_runtime_decisions<'tcx>(
     span: rustc_span::Span,
     snapshots: &[(&str, Vec<Vec<BasicBlock>>)],
 ) -> Result<(), String> {
+    // Bridges this call has already spliced, keyed by the exact edge each one
+    // replaced. Two decision obligations can legitimately observe the same
+    // edge, and the first injected redirects it, leaving the second with
+    // nothing to replace. Keying by the precise pair lets the second splice
+    // onto the first so both fire, in order, on exactly that edge and no other.
+    let mut edge_bridges = BTreeMap::<(BasicBlock, BasicBlock), BasicBlock>::new();
     let mut starts = BTreeSet::new();
     for plan in plans {
         let Some(first) = plan.conditions.first() else {
@@ -10218,6 +10224,26 @@ fn instrument_runtime_decisions<'tcx>(
                 ),
             ] {
                 for source in sources {
+                    // Strictly below the exact rule: only when the source no
+                    // longer carries the recorded edge does a bridge this call
+                    // spliced stand in for it, and only one registered for
+                    // precisely this pair. Walk the chain, since several plans
+                    // may already have claimed the edge. Bounded by the map
+                    // size so a cycle can never spin.
+                    let mut target = target;
+                    for _ in 0..=edge_bridges.len() {
+                        if body.basic_blocks[*source]
+                            .terminator()
+                            .successors()
+                            .any(|edge| edge == target)
+                        {
+                            break;
+                        }
+                        let Some(bridged) = edge_bridges.get(&(*source, target)).copied() else {
+                            break;
+                        };
+                        target = bridged;
+                    }
                     let cleanup = body.basic_blocks[*source].is_cleanup;
                     let mut continuation = target;
                     if let Some(outcome) = outcome {
@@ -10319,6 +10345,9 @@ fn instrument_runtime_decisions<'tcx>(
                                 replaced += 1;
                             }
                         });
+                    if replaced > 0 {
+                        edge_bridges.insert((*source, target), bridge);
+                    }
                     if replaced == 0 {
                         // Name what the block targets now. Decisions are
                         // injected after match arms and loop frames, and those

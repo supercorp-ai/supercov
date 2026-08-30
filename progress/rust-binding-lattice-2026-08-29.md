@@ -693,3 +693,54 @@ The repair needs no heuristic, because we create every bridge ourselves: keep a
 map from each inserted bridge to the edge it replaced, and have later
 injections resolve recorded edges through it, requiring the resolved chain to
 consist only of blocks we inserted and to terminate at the recorded target.
+
+## The injection phase that rewrote its own edge
+
+Three inject-decision failures cost 259 obligations — the most per occurrence
+of any family, because an inject failure returns the pristine body and declines
+everything in it. Finding the cause took four diagnostic rounds, and rounds
+three and four each moved the fix to a different function than the previous
+round implied. That is worth recording, because every round in between looked
+like enough to act on.
+
+1. "condition 0 true edge from bb0 was not found" — no cause, just a symptom.
+2. Testing for a single intervening block returned an empty reachability set,
+   refuting the obvious reading.
+3. Following the bridge showed a chain, `bb0 -> bb8 -> bb7`, and 22 identical
+   targets — the signature of a match-arm bridge.
+4. Snapshotting the CFG after each phase showed the edge surviving both match
+   arms and loop frames untouched:
+
+       [("before injection", [bb2 x22, bb1]),
+        ("after match arms", [bb2 x22, bb1]),
+        ("after loop frames", [bb2 x22, bb1])]
+
+`instrument_runtime_decisions` rewrites it itself. Two decision obligations
+legitimately claim the same CFG edge; the first injected redirects it, and the
+second finds nothing to replace and declines the whole body.
+
+A first repair was built on round three's reading — a bridge map populated in
+`instrument_runtime_matches` — and reverted: it compiled, changed nothing, and
+was keyed in a function that turns out to be uninvolved. The working fix is
+local to one function: record `(source, replaced_target) -> bridge` at the
+existing replacement site, and when a later plan finds nothing to replace, walk
+that map until the source targets the result, bounded by the map size.
+
+This is semantically right rather than merely effective. When two obligations
+observe one edge, both probes *should* fire, and a keyed chain makes them fire
+in order on exactly that edge and no other. The unkeyed alternative — walking
+appended blocks until the chain reaches the target — was rejected: a bridge
+deliberately collects every edge between its pair, so it would place a probe
+where edges the decision never claimed also arrive. It would have worked in
+`Punct::new`, where all 22 edges share an outcome, and been wrong in general.
+
+| crate | before | after |
+|---|---|---|
+| syn | 96.32% | 97.88% |
+| proc_macro2 | 97.49% | 97.77% |
+
+No crate regressed across the 18 measured. The gain landed with the exactness
+ratchet as its guard rather than a dedicated fixture: which source construct
+makes two decision plans share an edge is not yet established, and encoding
+that guess as an assertion would be worse than recording the gap. Task #32
+carries the method for establishing it.
