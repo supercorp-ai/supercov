@@ -160,6 +160,12 @@ function measure() {
       uncompiled,
       conditions,
       measurable,
+      // Bodies whose obligations were actually BOUND. Exactness alone cannot
+      // tell "everything bound" from "nothing was checked": both drive declines
+      // to zero and both score 100%. A change that stopped binding entirely
+      // once scored +28.26 and +21.37 here and reported "held or improved".
+      // This is the number that falls when checking stops.
+      boundBodies: manifest.boundBodies ?? 0,
       exact:
         measurable > 0
           ? Number((((measurable - unbound) / measurable) * 100).toFixed(2))
@@ -292,6 +298,17 @@ for (const name of names) {
   const before = baseline[name];
   if (!before) {
     console.log(`  ${name}: ${measured[name].exact}% (new)`);
+    continue;
+  }
+  // Checked before exactness, because a fall here invalidates the fraction
+  // rather than merely lowering it.
+  const boundBefore = before.boundBodies ?? 0;
+  const boundNow = measured[name].boundBodies ?? 0;
+  if (boundBefore > 0 && boundNow < boundBefore) {
+    regressions.push(
+      `${name} bound ${boundNow} bodies, was ${boundBefore} — binding stopped, ` +
+        `so its ${measured[name].exact}% is not a measurement`,
+    );
     continue;
   }
   const delta = Number((measured[name].exact - before.exact).toFixed(2));

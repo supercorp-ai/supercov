@@ -44,6 +44,11 @@ pub struct RustCompilerManifest {
     #[serde(rename = "crate")]
     pub crate_name: String,
     pub measurement_complete: bool,
+    /// Bodies whose obligations were actually bound, not merely collected.
+    /// Collected counts come from HIR and do not move when binding stops, so
+    /// this is the number that falls if checking is skipped.
+    #[serde(default)]
+    pub bound_bodies: u64,
     pub points: Vec<RustCompilerPoint>,
     pub branches: Vec<RustCompilerBranch>,
     pub decisions: Vec<RustCompilerDecision>,
@@ -290,8 +295,10 @@ pub fn normalize_rust_compiler_candidates(
     let mut limitations = BTreeSet::new();
     let mut unmeasured_obligations = BTreeSet::new();
     let mut sources = BTreeMap::<String, RustCompilerSource>::new();
+    let mut bound_bodies = 0_u64;
     for (manifest, snapshots) in candidates {
         manifest.validate()?;
+        bound_bodies = bound_bodies.saturating_add(manifest.bound_bodies);
         snapshots.validate()?;
         if snapshots.crate_name != manifest.crate_name {
             return Err(RustCompilerManifestError::InvalidSource(format!(
@@ -333,6 +340,7 @@ pub fn normalize_rust_compiler_candidates(
             "workspace".into()
         },
         measurement_complete: false,
+        bound_bodies,
         points: points.into_values().collect(),
         branches: branches.into_values().collect(),
         decisions: decisions.into_values().collect(),

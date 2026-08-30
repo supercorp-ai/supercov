@@ -25,7 +25,7 @@ use std::{
     process::{Command, Stdio},
     sync::{
         LazyLock, Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -217,6 +217,18 @@ static CFG_ELIMINATED_POINTS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new
 static SOURCE_SNAPSHOTS: Mutex<BTreeMap<String, ExactSourceSnapshot>> = Mutex::new(BTreeMap::new());
 static DOCTEST_ROLE: OnceLock<&'static str> = OnceLock::new();
 static COMPILATION_SUCCEEDED: AtomicBool = AtomicBool::new(false);
+/// Binding passes actually run, not obligations merely collected.
+///
+/// Obligations are collected from HIR and their count never moves when binding
+/// stops, so the exact fraction cannot tell "everything bound" from "nothing was
+/// checked" -- both drive declines to zero. A change that skipped binding
+/// entirely once scored +28 and +21 on the ratchet.
+///
+/// Counted at the four plan functions rather than at a query provider: an
+/// earlier attempt counted `mir_drops` entries, which that same change still
+/// triggered, so the number never moved and the gate missed it. Binding is what
+/// must be counted, not the pass that usually precedes it.
+static BOUND_BODIES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ExactSourceSnapshot {
@@ -2887,8 +2899,9 @@ fn manifest_json(
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"schema\":\"supercov-rust-manifest-candidate-v4\",\"model\":\"rust-source-v1\",\"crate\":\"{}\",\"measurementComplete\":false,\"points\":[{}],\"branches\":[{}],\"decisions\":[{}],\"selectionGroups\":[{}],\"limitations\":[{}],\"unmeasuredObligations\":[{}]}}\n",
+        "{{\"schema\":\"supercov-rust-manifest-candidate-v4\",\"model\":\"rust-source-v1\",\"crate\":\"{}\",\"measurementComplete\":false,\"boundBodies\":{},\"points\":[{}],\"branches\":[{}],\"decisions\":[{}],\"selectionGroups\":[{}],\"limitations\":[{}],\"unmeasuredObligations\":[{}]}}\n",
         escape(crate_name),
+        BOUND_BODIES.load(Ordering::Relaxed),
         points,
         branches,
         decisions,
@@ -8071,6 +8084,7 @@ fn runtime_decision_plans<'tcx>(
     def_id: LocalDefId,
     body: &Body<'tcx>,
 ) -> Result<Vec<RuntimeDecisionPlan>, String> {
+    BOUND_BODIES.fetch_add(1, Ordering::Relaxed);
     let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
         return Ok(Vec::new());
     };
@@ -8475,6 +8489,7 @@ fn runtime_logical_selection_plans<'tcx>(
     def_id: LocalDefId,
     body: &Body<'tcx>,
 ) -> Result<Vec<RuntimeMatchPlan>, String> {
+    BOUND_BODIES.fetch_add(1, Ordering::Relaxed);
     let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
         return Ok(Vec::new());
     };
@@ -8893,6 +8908,7 @@ fn runtime_statement_plans<'tcx>(
     def_id: LocalDefId,
     body: &Body<'tcx>,
 ) -> Result<Vec<RuntimePointPlan>, String> {
+    BOUND_BODIES.fetch_add(1, Ordering::Relaxed);
     let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
         return Ok(Vec::new());
     };
@@ -9575,6 +9591,7 @@ fn runtime_match_plans<'tcx>(
     def_id: LocalDefId,
     body: &Body<'tcx>,
 ) -> Result<Vec<RuntimeMatchPlan>, String> {
+    BOUND_BODIES.fetch_add(1, Ordering::Relaxed);
     let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
         return Ok(Vec::new());
     };

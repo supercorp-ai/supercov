@@ -4520,6 +4520,7 @@ mod tests {
             model: "rust-source-v1".into(),
             crate_name: "doctest_bundle_2024".into(),
             measurement_complete: false,
+            bound_bodies: 1,
             points: vec![RustCompilerPoint {
                 id: point_identity.id,
                 kind: "statement".into(),
@@ -4843,6 +4844,7 @@ mod tests {
             model: "rust-source-v1".into(),
             crate_name: "doctest_bundle_2024".into(),
             measurement_complete: false,
+            bound_bodies: 1,
             points: vec![RustCompilerPoint {
                 id: point_identity.id,
                 kind: "statement".into(),

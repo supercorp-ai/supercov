@@ -5,7 +5,17 @@
     "uncompiled": 0,
     "conditions": 31,
     "measurable": 138,
+    "boundBodies": 45,
     "exact": 71.74
+  },
+  "itoa": {
+    "obligations": 343,
+    "declined": 0,
+    "uncompiled": 0,
+    "conditions": 37,
+    "measurable": 343,
+    "boundBodies": 130,
+    "exact": 100
   },
   "once_cell": {
     "obligations": 493,
@@ -13,6 +23,7 @@
     "uncompiled": 5,
     "conditions": 27,
     "measurable": 488,
+    "boundBodies": 646,
     "exact": 100
   },
   "serde_core": {
@@ -21,14 +32,16 @@
     "uncompiled": 10,
     "conditions": 487,
     "measurable": 7758,
+    "boundBodies": 11605,
     "exact": 99.38
   },
-  "itoa": {
-    "obligations": 343,
-    "declined": 0,
-    "uncompiled": 0,
-    "conditions": 37,
-    "measurable": 343,
+  "proc_macro2": {
+    "obligations": 2353,
+    "declined": 1,
+    "uncompiled": 1,
+    "conditions": 194,
+    "measurable": 2352,
+    "boundBodies": 2355,
     "exact": 100
   },
   "zmij": {
@@ -37,6 +50,7 @@
     "uncompiled": 8,
     "conditions": 70,
     "measurable": 585,
+    "boundBodies": 198,
     "exact": 78.63
   },
   "tracing_core": {
@@ -45,14 +59,7 @@
     "uncompiled": 2,
     "conditions": 51,
     "measurable": 1261,
-    "exact": 100
-  },
-  "proc_macro2": {
-    "obligations": 2353,
-    "declined": 1,
-    "uncompiled": 1,
-    "conditions": 194,
-    "measurable": 2352,
+    "boundBodies": 2159,
     "exact": 100
   },
   "bytes": {
@@ -61,6 +68,7 @@
     "uncompiled": 8,
     "conditions": 261,
     "measurable": 3284,
+    "boundBodies": 4012,
     "exact": 100
   },
   "quote": {
@@ -69,6 +77,7 @@
     "uncompiled": 0,
     "conditions": 5,
     "measurable": 657,
+    "boundBodies": 1010,
     "exact": 100
   },
   "memchr": {
@@ -77,6 +86,7 @@
     "uncompiled": 0,
     "conditions": 334,
     "measurable": 2741,
+    "boundBodies": 2348,
     "exact": 100
   },
   "syn": {
@@ -85,6 +95,7 @@
     "uncompiled": 113,
     "conditions": 1317,
     "measurable": 19074,
+    "boundBodies": 17763,
     "exact": 99.84
   },
   "http": {
@@ -93,6 +104,7 @@
     "uncompiled": 14,
     "conditions": 249,
     "measurable": 3865,
+    "boundBodies": 4100,
     "exact": 99.4
   },
   "serde": {
@@ -101,6 +113,7 @@
     "uncompiled": 0,
     "conditions": 44,
     "measurable": 2162,
+    "boundBodies": 3350,
     "exact": 98.52
   },
   "serde_json": {
@@ -109,6 +122,7 @@
     "uncompiled": 0,
     "conditions": 161,
     "measurable": 4458,
+    "boundBodies": 5291,
     "exact": 99.35
   },
   "either": {
@@ -117,6 +131,7 @@
     "uncompiled": 2,
     "conditions": 3,
     "measurable": 643,
+    "boundBodies": 870,
     "exact": 99.22
   },
   "log": {
@@ -125,6 +140,7 @@
     "uncompiled": 0,
     "conditions": 16,
     "measurable": 376,
+    "boundBodies": 615,
     "exact": 90.43
   },
   "tracing_attributes": {
@@ -133,6 +149,7 @@
     "uncompiled": 19,
     "conditions": 117,
     "measurable": 1329,
+    "boundBodies": 1045,
     "exact": 98.34
   },
   "tracing": {
@@ -141,6 +158,7 @@
     "uncompiled": 16,
     "conditions": 25,
     "measurable": 364,
+    "boundBodies": 545,
     "exact": 100
   }
 }
