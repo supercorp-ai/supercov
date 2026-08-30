@@ -1146,6 +1146,26 @@ fn obligation_identity(
             exact_def_path!(tcx, def_id),
             owner_local_ordinal,
         )
+    } else if provenance == "authored-expansion" {
+        // Per expanding definition, not per macro body. Every expansion shares
+        // the one source range of the macro body, so without this they collapse
+        // onto a single obligation and exercising one call site marks every
+        // other site covered -- coverage reported for code that never ran.
+        //
+        // The enclosing definition is the right discriminator and the full
+        // expansion chain is not: the binder matches obligations to MIR
+        // constructs by source range, and two expansions inside ONE body share
+        // that range exactly, so per-expansion identity hands it two
+        // indistinguishable obligations and it declines the body's whole scope.
+        format!(
+            "rust-source-v1\0{}\0{}\0{}\0{}\0{}\0authored-expansion\0{}\0",
+            obligation_kind,
+            source.key,
+            source.start,
+            source.end,
+            discriminator,
+            exact_def_path!(tcx, def_id),
+        )
     } else {
         format!(
             "rust-source-v1\0{}\0{}\0{}\0{}\0{}\0",

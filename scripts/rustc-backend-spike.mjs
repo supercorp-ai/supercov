@@ -1834,9 +1834,13 @@ try {
       `${definition} did not preserve its exact short-circuit vectors`,
     );
   }
+  // One set, not two. The external macro's obligation used to aggregate the
+  // observations of every expansion, so this definition carried a duplicate of
+  // each vector -- one from its own call site and one from the other. Per
+  // expanding definition it reports only what it actually observed.
   assert.deepEqual(
     smokeDecisionVectors('generated_nested_external_by_proc'),
-    [...bothBooleanVectors, ...bothBooleanVectors].sort(),
+    [...bothBooleanVectors].sort(),
   );
   for (const definition of [
     'no_std_choice',
@@ -4525,17 +4529,25 @@ try {
     identityManifestA,
     'repeated_expansions::generated_by_rules',
   );
-  assert.equal(declarativeRoot?.id, declarativeRepeated?.id);
+  // Two invocations of one macro_rules body are two obligations, matching what
+  // the procedural case below has always done. They used to share an id, so
+  // exercising either call site marked BOTH covered -- coverage reported for
+  // code that never ran. The bodies are identical, so only the expanding
+  // definition tells them apart.
+  assert.notEqual(declarativeRoot?.id, declarativeRepeated?.id);
   assert.equal(declarativeRoot?.provenance, 'authored-expansion');
-  assert.equal(declarativeRoot?.definitions.length, 2);
-  const declarativeDecision = decisionFor(
-    identityManifestA,
-    'generated_by_rules',
-  );
-  assert.deepEqual(declarativeDecision?.definitions, [
-    'generated_by_rules',
+  assert.equal(declarativeRepeated?.provenance, 'authored-expansion');
+  assert.deepEqual(declarativeRoot?.definitions, ['generated_by_rules']);
+  assert.deepEqual(declarativeRepeated?.definitions, [
     'repeated_expansions::generated_by_rules',
   ]);
+  assert.notEqual(
+    decisionFor(identityManifestA, 'generated_by_rules')?.id,
+    decisionFor(identityManifestA, 'repeated_expansions::generated_by_rules')
+      ?.id,
+  );
+  assert.deepEqual(decisionFor(identityManifestA, 'generated_by_rules')
+    ?.definitions, ['generated_by_rules']);
   const proceduralRoot = obligationFor(identityManifestA, 'generated_by_proc');
   const proceduralRepeated = obligationFor(
     identityManifestA,
@@ -4562,12 +4574,16 @@ try {
     identityManifestA,
     'repeated_expansions::generated_by_external_rules',
   );
-  assert.equal(externalRoot?.id, externalRepeated?.id);
+  // Same rule across a crate boundary: a macro from another crate expanded at
+  // three sites is three obligations, all still attributed to the macro's own
+  // source file.
+  assert.notEqual(externalRoot?.id, externalRepeated?.id);
   assert.equal(externalRoot?.provenance, 'authored-expansion');
+  assert.equal(externalRepeated?.provenance, 'authored-expansion');
   assert.equal(externalRoot?.sourceKey, 'source:external-rules/src/lib.rs');
-  assert.deepEqual(externalRoot?.definitions, [
-    'generated_by_external_rules',
-    'generated_nested_external_by_proc',
+  assert.equal(externalRepeated?.sourceKey, 'source:external-rules/src/lib.rs');
+  assert.deepEqual(externalRoot?.definitions, ['generated_by_external_rules']);
+  assert.deepEqual(externalRepeated?.definitions, [
     'repeated_expansions::generated_by_external_rules',
   ]);
   const externalDecision = decisionFor(
@@ -6020,18 +6036,27 @@ try {
       JSON.stringify({values: [true, true], outcome: true}),
     ].sort(),
   );
+  // Each expansion reports only its OWN call site. behavior.rs calls
+  // `generated_by_rules(false)` and `repeated_expansions::generated_by_rules(
+  // true)`, so neither site exercises both branches -- and that is the point.
+  // While the two shared one obligation it carried both vectors and looked
+  // fully covered, which is coverage credited to a branch no call site took.
   assert.deepEqual(decisionVectors('generated_by_rules'), [
     JSON.stringify({values: [false], outcome: false}),
-    JSON.stringify({values: [true], outcome: true}),
-  ].sort());
+  ]);
+  assert.deepEqual(
+    decisionVectors('repeated_expansions::generated_by_rules'),
+    [JSON.stringify({values: [true], outcome: true})],
+  );
+  // Same across a crate boundary: behavior.rs calls the external macro's two
+  // expansions with false and true respectively.
   assert.deepEqual(
     decisionVectors('generated_by_external_rules'),
-    [
-      JSON.stringify({values: [false], outcome: false}),
-      JSON.stringify({values: [false], outcome: false}),
-      JSON.stringify({values: [true], outcome: true}),
-      JSON.stringify({values: [true], outcome: true}),
-    ].sort(),
+    [JSON.stringify({values: [false], outcome: false})],
+  );
+  assert.deepEqual(
+    decisionVectors('repeated_expansions::generated_by_external_rules'),
+    [JSON.stringify({values: [true], outcome: true})],
   );
   assert.deepEqual(decisionVectors('DerivedChoice::derived_choice'), [
     JSON.stringify({values: [false], outcome: false}),
