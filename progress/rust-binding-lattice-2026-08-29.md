@@ -946,3 +946,34 @@ once the I/O is understood.
 
 None of this is optimisation work yet. It is the first time the cost has been
 attributed to anything at all.
+
+### The 82x, decomposed
+
+Running the wrapper with instrumentation off, and again with instrumentation
+on but no static runtime directory, splits the cost cleanly:
+
+| configuration | wall | user | sys |
+|---|---|---|---|
+| no wrapper | 0.46s | 0.41s | 0.05s |
+| wrapper, instrumentation off | 0.56s | 0.27s | 0.10s |
+| instrumented, no runtime archive | 26.67s | 16.62s | 10.01s |
+| instrumented, archive linked | 37.75s | 22.23s | 15.50s |
+
+| stage | cost | share |
+|---|---|---|
+| wrapper process overhead | ~0.10s | negligible |
+| instrumentation analysis (user) | 16.6s | 44% |
+| instrumentation I/O (sys) | 10.0s | 26% |
+| linking the 17 MB runtime archive | 11.1s | 29% |
+
+The wrapper itself is free — being a rustc driver costs nothing measurable.
+The cost is three roughly comparable pieces, and two of them are not analysis:
+linking a 17 MB static archive into the crate, and 10 seconds of filesystem
+work during instrumentation, against an 8.5 MB manifest for 3,600 lines of
+source.
+
+That is an encouraging shape. Better than half the overhead is I/O and
+linking, which are usually structural — a smaller or dynamically linked
+runtime, and a leaner manifest format — rather than algorithmic work that
+would need the binder rewritten. The 16.6 seconds of analysis is the part that
+would be genuinely hard, and it is the minority.
