@@ -1339,6 +1339,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
         .is_some_and(|source| source.owned);
         let mut atomic = Vec::new();
         let mut logical = Vec::new();
+        let mut subsumed = Vec::new();
         if authored_macro_guard {
             atomic.push(AtomicDecisionExpression {
                 expression: condition,
@@ -1356,19 +1357,13 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 Some(false),
                 &mut atomic,
                 &mut logical,
+                &mut subsumed,
             );
         }
-        if atomic.iter().any(|condition| {
-            let span = condition.expression.span;
-            span.from_expansion()
-                && !condition.opaque_authored_macro
-                && !self.tcx.def_span(self.def_id).from_expansion()
-                && !span
-                    .ctxt()
-                    .outer_expn_data()
-                    .macro_def_id
-                    .is_some_and(|macro_def| macro_def.is_local())
-        }) {
+        if atomic
+            .iter()
+            .any(|condition| external_macro_condition(self.tcx, self.def_id, condition))
+        {
             // Hidden control flow emitted by an external macro (for example
             // assert! or println!) is implementation code of that macro, not
             // an authored decision in the caller's denominator.
@@ -1547,6 +1542,9 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             &format!("{branch_kind}:{decision_kind}"),
             &alternatives,
         )?;
+        for expression in subsumed {
+            self.decision_logical_expressions.insert(expression);
+        }
         let mut logical_selections = Vec::with_capacity(logical.len());
         for selection in logical {
             self.decision_logical_expressions
@@ -2231,6 +2229,25 @@ fn authored_opaque_macro_condition(
             .is_ok_and(|callsite| callsite.owned)
 }
 
+/// Whether a condition is control flow a non-local macro emitted, rather than
+/// anything the author wrote. A decision containing one is implementation code
+/// of that macro and is dropped from the caller's denominator.
+fn external_macro_condition<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: rustc_span::def_id::DefId,
+    condition: &AtomicDecisionExpression<'tcx>,
+) -> bool {
+    let span = condition.expression.span;
+    span.from_expansion()
+        && !condition.opaque_authored_macro
+        && !tcx.def_span(def_id).from_expansion()
+        && !span
+            .ctxt()
+            .outer_expn_data()
+            .macro_def_id
+            .is_some_and(|macro_def| macro_def.is_local())
+}
+
 fn flatten_decision_expression<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: rustc_span::def_id::DefId,
@@ -2240,6 +2257,7 @@ fn flatten_decision_expression<'tcx>(
     false_outcome: Option<bool>,
     output: &mut Vec<AtomicDecisionExpression<'tcx>>,
     logical: &mut Vec<LogicalDecisionExpression<'tcx>>,
+    subsumed: &mut Vec<u32>,
 ) {
     if authored_opaque_macro_condition(tcx, def_id, crate_name, expression) {
         output.push(AtomicDecisionExpression {
@@ -2251,6 +2269,80 @@ fn flatten_decision_expression<'tcx>(
         return;
     }
     match expression.kind {
+        // `!(a || b)` has two conditions, not one. Negation only exchanges the
+        // outcomes: the inner expression's true outcome is the outer's false
+        // one, which is De Morgan without any special handling. Without this
+        // arm a negated chain falls through to the atomic case below and is
+        // recorded as a single condition — a merged MC/DC number rather than
+        // an absent one, which is the worse of the two failures.
+        // Only when the inner expression actually decomposes. Recursing into
+        // an opaque inner — `!matches!(..)` is the case in the wild — strips
+        // the negation, yields a single condition that no longer matches a
+        // switch, and turns a working binding into a decline. `!(a || b)`
+        // does decompose, which is the shape that was being merged.
+        hir::ExprKind::Unary(hir::UnOp::Not, inner)
+            if matches!(
+                inner.kind,
+                hir::ExprKind::Binary(
+                    rustc_span::source_map::Spanned {
+                        node: rustc_ast::BinOpKind::And | rustc_ast::BinOpKind::Or,
+                        ..
+                    },
+                    ..
+                )
+            ) =>
+        {
+            // Decomposing must never cost a decision. The caller drops any
+            // decision holding an external-macro condition, so a chain mixing
+            // authored operands with one — `!(a || (cfg!(unix) && b))` — would
+            // decompose into conditions that take the whole authored `if` out
+            // of the denominator with it. Splice the decomposition only when
+            // it survives that filter, and otherwise fall through to the
+            // atomic arm: a merged MC/DC number, but a branch still measured.
+            let mut inner_output = Vec::new();
+            let mut inner_logical = Vec::new();
+            flatten_decision_expression(
+                tcx,
+                def_id,
+                crate_name,
+                inner,
+                false_outcome,
+                true_outcome,
+                &mut inner_output,
+                &mut inner_logical,
+                subsumed,
+            );
+            if !inner_output
+                .iter()
+                .any(|condition| external_macro_condition(tcx, def_id, condition))
+            {
+                let offset = output.len();
+                output.append(&mut inner_output);
+                logical.extend(inner_logical.into_iter().map(|selection| {
+                    LogicalDecisionExpression {
+                        right_condition_index: selection.right_condition_index + offset,
+                        ..selection
+                    }
+                }));
+                return;
+            }
+            // The short-circuits stay part of this decision even though it is
+            // recorded atomically, so claim them. Left unclaimed they are
+            // resurrected as standalone selection obligations by the visitor
+            // over unowned `&&`/`||`, and a `cfg!`-folded operand has no
+            // switch to bind to — the decline this fallback exists to avoid.
+            subsumed.extend(
+                inner_logical
+                    .iter()
+                    .map(|selection| selection.expression.hir_id.local_id.as_u32()),
+            );
+            output.push(AtomicDecisionExpression {
+                expression,
+                true_outcome,
+                false_outcome,
+                opaque_authored_macro: false,
+            });
+        }
         hir::ExprKind::Binary(operator, left, right) => match operator.node {
             rustc_ast::BinOpKind::And => {
                 flatten_decision_expression(
@@ -2262,6 +2354,7 @@ fn flatten_decision_expression<'tcx>(
                     false_outcome,
                     output,
                     logical,
+                    subsumed,
                 );
                 let right_condition_index = output.len();
                 logical.push(LogicalDecisionExpression {
@@ -2277,6 +2370,7 @@ fn flatten_decision_expression<'tcx>(
                     false_outcome,
                     output,
                     logical,
+                    subsumed,
                 );
             }
             rustc_ast::BinOpKind::Or => {
@@ -2289,6 +2383,7 @@ fn flatten_decision_expression<'tcx>(
                     None,
                     output,
                     logical,
+                    subsumed,
                 );
                 let right_condition_index = output.len();
                 logical.push(LogicalDecisionExpression {
@@ -2304,6 +2399,7 @@ fn flatten_decision_expression<'tcx>(
                     false_outcome,
                     output,
                     logical,
+                    subsumed,
                 );
             }
             _ => output.push(AtomicDecisionExpression {

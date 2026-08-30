@@ -672,6 +672,25 @@ pub fn mixed(first: bool, second: bool, third: bool) -> usize {
     if (first || second) && third { 53 } else { 59 }
 }
 
+/// A negated chain is two conditions, not one. Recorded atomically it reports a
+/// merged MC/DC number for a decision that genuinely has two operands.
+pub fn negated_chain(first: bool, second: bool) -> usize {
+    if !(first || second) { 83 } else { 89 }
+}
+
+/// The same shape with a compile-time operand. `cfg!` folds away, leaving no
+/// switch for a decomposed condition to bind to, so this one must stay atomic —
+/// and must keep its decision rather than dropping out of the denominator.
+pub fn negated_chain_with_cfg(first: bool, second: bool) -> usize {
+    // `none` is a known target_os (bare metal), so this is false on every
+    // platform the corpus runs on and the expectation stays platform-stable.
+    if !(first || (cfg!(target_os = "none") && second)) {
+        97
+    } else {
+        101
+    }
+}
+
 pub fn nested(first: bool, second: bool, third: bool) -> usize {
     if first {
         if second && third { 71 } else { 73 }

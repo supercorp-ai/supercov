@@ -4451,6 +4451,41 @@ try {
     chainedDecision?.conditions.map(({source}) => source),
     ['let Some(value) = value', 'value', 'enabled'],
   );
+  // A negated chain decomposes: `!(first || second)` has two conditions and one
+  // short-circuit selection, not the single merged condition it was recorded as
+  // before. Values are read from the fixture source, not from observed output.
+  const negatedChainDecision = decisionFor(identityManifestA, 'negated_chain');
+  assert.equal(negatedChainDecision?.kind, 'if');
+  assert.deepEqual(
+    negatedChainDecision?.conditions.map(({source}) => source),
+    ['first', 'second'],
+  );
+  assert.equal(negatedChainDecision?.logicalSelections.length, 1);
+  // The cfg! operand folds at compile time, so decomposing would produce
+  // conditions with no switch to bind to. Falling back to one atomic condition
+  // keeps the decision measurable; dropping it would be a silent coverage hole,
+  // and leaving its short-circuits unclaimed would strand them as orphan
+  // selection obligations that can never bind.
+  const negatedCfgDecision = decisionFor(
+    identityManifestA,
+    'negated_chain_with_cfg',
+  );
+  assert.equal(negatedCfgDecision?.kind, 'if');
+  assert.equal(negatedCfgDecision?.conditions.length, 1);
+  assert.deepEqual(negatedCfgDecision?.logicalSelections, []);
+  assert.ok(
+    branchFor(identityManifestA, 'negated_chain_with_cfg', 'decision-outcome'),
+    'the authored decision must stay in the denominator',
+  );
+  assert.deepEqual(
+    branchesFor(
+      identityManifestA,
+      'negated_chain_with_cfg',
+      'logical-selection',
+    ),
+    [],
+    'subsumed short-circuits must not reappear as standalone obligations',
+  );
   const declarativeRoot = obligationFor(
     identityManifestA,
     'generated_by_rules',

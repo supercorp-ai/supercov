@@ -1,10 +1,10 @@
 {
   "build_script_build": {
-    "obligations": 140,
-    "declined": 40,
+    "obligations": 138,
+    "declined": 39,
     "uncompiled": 0,
     "conditions": 31,
-    "exact": 71.43
+    "exact": 71.74
   },
   "itoa": {
     "obligations": 186,
@@ -13,13 +13,6 @@
     "conditions": 18,
     "exact": 100
   },
-  "serde_core": {
-    "obligations": 1787,
-    "declined": 44,
-    "uncompiled": 10,
-    "conditions": 85,
-    "exact": 97.54
-  },
   "once_cell": {
     "obligations": 493,
     "declined": 5,
@@ -27,12 +20,12 @@
     "conditions": 27,
     "exact": 98.99
   },
-  "zmij": {
-    "obligations": 593,
-    "declined": 133,
-    "uncompiled": 8,
-    "conditions": 70,
-    "exact": 77.57
+  "serde_core": {
+    "obligations": 1787,
+    "declined": 44,
+    "uncompiled": 10,
+    "conditions": 85,
+    "exact": 97.54
   },
   "tracing_core": {
     "obligations": 1185,
@@ -41,19 +34,19 @@
     "conditions": 51,
     "exact": 99.83
   },
+  "zmij": {
+    "obligations": 593,
+    "declined": 133,
+    "uncompiled": 8,
+    "conditions": 70,
+    "exact": 77.57
+  },
   "proc_macro2": {
     "obligations": 2108,
-    "declined": 46,
+    "declined": 21,
     "uncompiled": 0,
-    "conditions": 169,
-    "exact": 97.82
-  },
-  "memchr": {
-    "obligations": 2717,
-    "declined": 0,
-    "uncompiled": 0,
-    "conditions": 328,
-    "exact": 100
+    "conditions": 170,
+    "exact": 99
   },
   "bytes": {
     "obligations": 2199,
@@ -69,12 +62,19 @@
     "conditions": 5,
     "exact": 100
   },
+  "memchr": {
+    "obligations": 2717,
+    "declined": 0,
+    "uncompiled": 0,
+    "conditions": 328,
+    "exact": 100
+  },
   "syn": {
     "obligations": 16154,
-    "declined": 253,
+    "declined": 92,
     "uncompiled": 110,
-    "conditions": 1293,
-    "exact": 98.43
+    "conditions": 1317,
+    "exact": 99.43
   },
   "http": {
     "obligations": 3657,
@@ -83,19 +83,12 @@
     "conditions": 225,
     "exact": 95.05
   },
-  "either": {
-    "obligations": 350,
-    "declined": 11,
-    "uncompiled": 2,
-    "conditions": 3,
-    "exact": 96.86
-  },
-  "log": {
-    "obligations": 369,
-    "declined": 36,
+  "serde": {
+    "obligations": 1426,
+    "declined": 32,
     "uncompiled": 0,
-    "conditions": 16,
-    "exact": 90.24
+    "conditions": 44,
+    "exact": 97.76
   },
   "serde_json": {
     "obligations": 3256,
@@ -104,12 +97,19 @@
     "conditions": 139,
     "exact": 98.77
   },
-  "serde": {
-    "obligations": 1426,
-    "declined": 32,
+  "log": {
+    "obligations": 369,
+    "declined": 36,
     "uncompiled": 0,
-    "conditions": 44,
-    "exact": 97.76
+    "conditions": 16,
+    "exact": 90.24
+  },
+  "either": {
+    "obligations": 350,
+    "declined": 11,
+    "uncompiled": 2,
+    "conditions": 3,
+    "exact": 96.86
   },
   "tracing_attributes": {
     "obligations": 883,

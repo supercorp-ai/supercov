@@ -1081,3 +1081,74 @@ cold build, about 1.8x CPU, and warm rebuilds free. Publishing a single
 multiplier would repeat exactly the merged-number mistake this project refuses
 everywhere else — and the first figure measured tonight, 4.9x, was already
 misleading for that reason.
+
+## Wave: negated condition chains, and the decomposition invariant (#36)
+
+`flatten_decision_expression` had no arm for `Unary(Not, ..)`, so `!(a || b)`
+fell through to the atomic case and was recorded as a *single* condition. That
+is a live wrong MC/DC number: a decision with two operands reported as one.
+
+The naive fix — recurse through the negation — made it worse, and the exactness
+ratchet caught it as −0.42 on `build_script_build`. Diffing obligation ids
+rather than trusting the percentage showed what the percentage could not: two
+obligations **vanished** (140 → 138) while the declined count stayed at 40.
+They left the manifest without being declined.
+
+The cause is at main.rs:1361. A decision is dropped whole (`return None`) when
+any of its atomic conditions is an external-macro expansion — sound for the
+case it was written for, hidden control flow inside `assert!` or `println!`.
+But decomposing
+
+```rust
+!(err.kind() == ErrorKind::NotFound
+    || (cfg!(target_os = "linux") && err.raw_os_error() == Some(ENOTEMPTY)))
+```
+
+exposes the `cfg!` operand, so an **authored** `if` was taken out of the
+denominator because a sub-expression came from a macro. A vanished branch is
+strictly worse than a declined one: it is a silent coverage hole, and we would
+report 100% on code containing a real, unmeasured branch. This is the same
+family as the uncovered-vs-unmeasured defect fixed in 413d2e2.
+
+Falling back to atomic fixed the vanish but left one decline, which exposed a
+second finding worth more than the fix: **there are two independent collectors
+of short-circuit operators.** `flatten_decision_expression` claims the ones it
+owns in `decision_logical_expressions`; a separate HIR visitor at main.rs:2511
+records a logical-selection branch for every `&&`/`||` *not* so claimed. The
+fallback discarded its selections without claiming them, so the visitor
+resurrected them as orphans — and a `cfg!`-folded operand has no MIR switch to
+bind to, so one could never bind. The two collectors disagreed, and the
+disagreement was the decline.
+
+The fix keeps both consistent. The drop predicate is extracted as
+`external_macro_condition` and shared by both sites. The `Not` arm decomposes
+into scratch vectors and splices only if the result survives that filter;
+otherwise it falls back to atomic *and* records the discarded short-circuits in
+a `subsumed` list the caller inserts into `decision_logical_expressions`.
+
+The invariant this establishes, which outranks the decomposition itself:
+
+> **Decomposing must never cost a decision.** A better MC/DC number is never
+> worth losing a branch. When decomposition cannot bind, record the decision
+> atomically — a merged number is honest and measurable; an absent one is not.
+
+Evidence, `scratchpad/not-chain` under strict binding, 0 declined:
+
+| function | conditions | selections |
+| --- | --- | --- |
+| `negated_or` | 2 | 1 |
+| `negated_and` | 2 | 1 |
+| `negated_chain_with_cfg` | 1 | 0, decision-outcome branch preserved |
+
+Ratchet: 18 crates, zero regressions, `proc_macro2` +1.18, `syn` +1.00,
+`build_script_build` +0.31 — the crate that regressed under the naive fix now
+gains, because claiming subsumed short-circuits also retired pre-existing
+orphan declines.
+
+Two process notes. The percentage said "−0.42, regression"; only the id diff
+said "two obligations disappeared", which is a different and more serious
+claim. Diff identities, not aggregates. And the chain script reported exit 0
+while dying at stage four: zsh treats an unmatched glob as a fatal error, so
+`rm -f target/debug/*.libtest.json` aborted the script when no bundle was
+present. Only the `CHAIN COMPLETE` check caught it — the exit code was from the
+backgrounding wrapper, not the chain. Replaced with `find -delete`.
