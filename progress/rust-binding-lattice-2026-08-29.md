@@ -1930,3 +1930,45 @@ refinement "cannot widen a binding that already works"; the measurement refutes
 it. The lesson is procedural as much as technical: measure a candidate on its
 own before measuring it stacked on the change it is meant to unblock, because
 the combined reading hid a regression the isolated one showed immediately.
+
+## The last family: arms colliding on the dominator
+
+22 messages across the crate set — serde_core 13, serde_json 4, syn 2, and one
+each in http, serde, tracing_attributes — all of the form
+
+```
+misbind check: match arms <a> and <b> in <fn> both enter block <bb>
+```
+
+and serde_json's four are #22's only remaining regression.
+
+#28 solved the case where arms share a body *span*, a macro fragment used in
+several arms, by refining each arm's blocks through its variant's switch
+target. These arms have **distinct** spans and collide anyway:
+`format_escaped_str_contents` matches eight constants whose bodies are single
+unit-variant assignments.
+
+Two triggers were tried, both measured alone, both reverted.
+
+Refining **whenever the variant is known** looked good stacked on #22 and
+regressed serde_core −0.06 in isolation — refuting the safety property its own
+comment asserted, so an arm's variant target does not always reach its own body
+blocks.
+
+Refining **when block sets overlap** was neutral and left all 22 messages
+standing. The flaw is worth stating precisely, because it explains why the
+obvious test fails: collision happens at the *entry block*, which is the
+nearest common **dominator** of an arm's body blocks, and two arms with
+disjoint block sets can still reduce to the same dominator. Set overlap misses
+exactly the colliding cases.
+
+So the third attempt needs a pre-pass — compute every arm's blocks and its
+dominator-reduced entry block first, group by that entry block, and refine only
+arms that actually share one. The current code decides per arm inside the loop
+and structurally cannot see the collision it is trying to resolve. That same
+pre-pass is what would keep the refinement narrow enough to avoid the first
+attempt's regression.
+
+One procedural note earned twice over: **measure a candidate alone before
+measuring it stacked on the change it is meant to unblock.** The combined
+reading hid a regression that the isolated reading exposed on the first try.
