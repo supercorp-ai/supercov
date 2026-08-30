@@ -15,6 +15,7 @@ extern crate rustc_session;
 extern crate rustc_span;
 extern crate tracing_tree;
 
+use std::rc::Rc;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -208,6 +209,12 @@ static TRY_OPERATOR_MARKERS: LazyLock<Mutex<HashMap<LocalDefId, Vec<StructuralBr
 static ASSERTION_PHASE_MARKERS: LazyLock<Mutex<HashMap<LocalDefId, Vec<AssertionPhaseMarker>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static UNREACHABLE_MATCH_ARMS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+/// Bumped whenever an arm becomes known-unreachable.
+///
+/// Pruning depends on that set, so a cached pruning is only reusable while the
+/// set is unchanged. Comparing this counter is what lets the body cache hand
+/// back a shared value instead of cloning four maps per call.
+static UNREACHABLE_MATCH_ARMS_VERSION: AtomicU64 = AtomicU64::new(0);
 /// Obligations inside a branch a constant condition eliminates. `cfg!(..)`
 /// expands to a bool literal, so `if cfg!(feature = "x")` with the feature off
 /// never lowers its body. Such an obligation is unmeasurable in this
@@ -5826,10 +5833,14 @@ fn mir_built_with_match_markers<'tcx>(
                 })
                 .map(|arm| arm.branch_id.clone())
                 .collect::<Vec<_>>();
-            UNREACHABLE_MATCH_ARMS
+            let mut arms = UNREACHABLE_MATCH_ARMS
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .extend(unreachable);
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let before = arms.len();
+            arms.extend(unreachable);
+            if arms.len() != before {
+                UNREACHABLE_MATCH_ARMS_VERSION.fetch_add(1, Ordering::Relaxed);
+            }
         }
         // Coverage-ineligible functions (`#[automatically_derived]`,
         // `#[coverage(off)]`) have wholly collapsed spans, so even their
@@ -7927,6 +7938,10 @@ struct RuntimeDecisionPlan {
     loop_token: Option<rustc_middle::mir::Local>,
 }
 
+/// A cached body walk: the unreachable-set version its pruning was done
+/// against, and the shared obligations themselves.
+type CachedBodyObligations = (u64, Option<Rc<RuntimeBodyObligations>>);
+
 #[derive(Clone)]
 struct RuntimeBodyObligations {
     definition: String,
@@ -8042,31 +8057,43 @@ thread_local! {
     /// was repeated many times per body. Profiling a 400-function crate put
     /// 86% of samples under the pre-optimization phase, with the collector's
     /// `visit_expr` recursion the dominant frame beneath it.
-    static BODY_OBLIGATIONS: RefCell<BTreeMap<u32, Option<RuntimeBodyObligations>>> =
+    /// Body obligations, already pruned, with the unreachable-set version the
+    /// pruning was done against.
+    static BODY_OBLIGATIONS: RefCell<BTreeMap<u32, CachedBodyObligations>> =
         const { RefCell::new(BTreeMap::new()) };
 }
 
-fn runtime_body_obligations(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<RuntimeBodyObligations> {
+fn runtime_body_obligations(
+    tcx: TyCtxt<'_>,
+    def_id: LocalDefId,
+) -> Option<Rc<RuntimeBodyObligations>> {
     let key = def_id.local_def_index.as_u32();
-    let cached = BODY_OBLIGATIONS.with(|cache| cache.borrow().get(&key).cloned());
-    let mut collected = match cached {
-        Some(hit) => hit,
-        None => {
-            let fresh = collect_body_obligations(tcx, def_id);
-            BODY_OBLIGATIONS.with(|cache| {
-                cache.borrow_mut().insert(key, fresh.clone());
-            });
-            fresh
-        }
-    };
-    // Prune against the CURRENT unreachable set on every call. The walk is
-    // cacheable, this is not: arms become known-unreachable as later bodies
-    // are bound, and a cached pruning would freeze whichever view existed at
-    // the first call.
+    let version = UNREACHABLE_MATCH_ARMS_VERSION.load(Ordering::Relaxed);
+    // A hit whose pruning was done against the current set is handed back
+    // shared. Cloning it meant copying four BTreeMaps on every call, and the
+    // binder calls this once per obligation kind per body, which put
+    // `clone_subtree` among the hottest frames in the wrapper.
+    if let Some(shared) = BODY_OBLIGATIONS.with(|cache| {
+        cache
+            .borrow()
+            .get(&key)
+            .filter(|(cached_version, _)| *cached_version == version)
+            .map(|(_, obligations)| obligations.clone())
+    }) {
+        return shared;
+    }
+    // Either never collected, or collected before an arm became unreachable.
+    // The walk is cacheable and the pruning is not, so re-prune from a fresh
+    // walk rather than freezing whichever view existed first.
+    let mut collected = collect_body_obligations(tcx, def_id);
     if let Some(obligations) = collected.as_mut() {
         prune_unreachable_match_arms(&mut obligations.branches, &mut obligations.match_groups);
     }
-    collected
+    let shared = collected.map(Rc::new);
+    BODY_OBLIGATIONS.with(|cache| {
+        cache.borrow_mut().insert(key, (version, shared.clone()));
+    });
+    shared
 }
 
 fn collect_body_obligations(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<RuntimeBodyObligations> {
@@ -8122,6 +8149,9 @@ fn runtime_decision_plans<'tcx>(
     let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
         return Ok(Vec::new());
     };
+    // Cloned here because this caller consumes the maps; the other four read
+    // them through the shared handle.
+    let obligations = (*obligations).clone();
     let RuntimeBodyObligations {
         definition,
         crate_name,
@@ -8946,6 +8976,9 @@ fn runtime_statement_plans<'tcx>(
     let Some(obligations) = runtime_body_obligations(tcx, def_id) else {
         return Ok(Vec::new());
     };
+    // Cloned here because this caller consumes the maps; the other four read
+    // them through the shared handle.
+    let obligations = (*obligations).clone();
     let RuntimeBodyObligations {
         definition,
         crate_name,
