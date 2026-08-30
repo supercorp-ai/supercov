@@ -154,6 +154,61 @@ mod {module_name} {{
         true
     }}
 
+    // Decisions cannot collapse by id the way hits do: MC/DC needs the SET of
+    // distinct condition vectors, so every vector must reach the log once. What
+    // carries nothing is the REPEAT of a vector already seen, and in a loop that
+    // is nearly all of them -- bytes' advance_bytes_mut_remaining_capacity took
+    // 40.6s against a 0.367s baseline writing one syscall per evaluation across
+    // ~2.8M iterations.
+    //
+    // Entries hold the whole record -- id pointer, outcome, width, values -- and
+    // are compared byte for byte. A hash would be smaller and faster, but a
+    // collision would silently drop a distinct vector and understate MC/DC, and
+    // that is exactly the kind of wrong number this project refuses to risk.
+    // A full probe chain falls back to writing, which costs a duplicate.
+    const DECISION_SLOTS: usize = 1 << 11;
+    const DECISION_ENTRY: usize = 10 + MAX_CONDITIONS;
+
+    struct DecisionTable {{
+        entries: [[u8; DECISION_ENTRY]; DECISION_SLOTS],
+    }}
+
+    impl DecisionTable {{
+        const fn new() -> Self {{
+            Self {{ entries: [[0; DECISION_ENTRY]; DECISION_SLOTS] }}
+        }}
+    }}
+
+    // `Mutex::new` is const, so the table is a genuine static with no lazy
+    // allocation of its own. Its first lock still boxes a platform mutex, which
+    // `writer()` forces during startup.
+    static DECISIONS: Mutex<DecisionTable> = Mutex::new(DecisionTable::new());
+
+    fn first_decision(frame: &DecisionFrame, outcome: bool) -> bool {{
+        let key = frame.id.as_ptr() as usize;
+        let mut entry = [0u8; DECISION_ENTRY];
+        entry[..8].copy_from_slice(&(key as u64).to_le_bytes());
+        // Non-zero for an occupied slot, so an all-zero entry means empty.
+        entry[8] = if outcome {{ 2 }} else {{ 1 }};
+        entry[9] = frame.conditions as u8;
+        entry[10..10 + frame.conditions].copy_from_slice(&frame.values[..frame.conditions]);
+        let Ok(mut table) = DECISIONS.lock() else {{
+            return true;
+        }};
+        let mut slot = (key >> 4) & (DECISION_SLOTS - 1);
+        for _ in 0..16 {{
+            if table.entries[slot] == entry {{
+                return false;
+            }}
+            if table.entries[slot][8] == 0 {{
+                table.entries[slot] = entry;
+                return true;
+            }}
+            slot = (slot + 1) & (DECISION_SLOTS - 1);
+        }}
+        true
+    }}
+
     fn writer() -> Option<&'static Mutex<File>> {{
         static WRITER: OnceLock<Option<Mutex<File>>> = OnceLock::new();
         static OPENING: AtomicBool = AtomicBool::new(false);
@@ -185,6 +240,8 @@ mod {module_name} {{
             // re-enter the host allocator. Force it here, where `OPENING`
             // already makes re-entry harmless.
             drop(guarded.lock());
+            // Same reason: the decision table's mutex boxes on first lock.
+            drop(DECISIONS.lock());
             Some(guarded)
         }});
         OPENING.store(false, Ordering::SeqCst);
@@ -252,7 +309,12 @@ mod {module_name} {{
 
     #[inline]
     pub fn decision(value: bool, frame: &mut DecisionFrame) -> bool {{
-        if !frame.recordable {{
+        // `writer()` must come FIRST: it forces the decision table's mutex to box
+        // its platform mutex while `OPENING` still makes re-entry harmless.
+        // Deduplicating before that put the very first lock -- and its
+        // allocation -- on the probe path, which recursed straight back through
+        // an instrumented allocator. The allocator gate caught it.
+        if !frame.recordable || writer().is_none() || !first_decision(frame, value) {{
             return value;
         }}
         let mut record = [0u8; RECORD_CAPACITY];
@@ -695,17 +757,26 @@ fn main() {
             "a repeated hit was written more than once: {hits:?}"
         );
 
-        // The decision still records per iteration, and both outcomes survive:
-        // deduplicating hits must not collapse decision evidence.
-        let outcomes = observations
+        // MC/DC needs the SET of condition vectors, not how often each recurred,
+        // so a repeat of an already-seen vector carries nothing -- but every
+        // DISTINCT vector must still arrive. `doubled > 4` is evaluated 64 times
+        // and takes exactly two distinct shapes, so exactly two records survive.
+        let decisions = observations
             .iter()
             .filter_map(|observation| match observation {
-                RustProbeObservation::Decision { outcome, .. } => Some(*outcome),
+                RustProbeObservation::Decision {
+                    values, outcome, ..
+                } => Some((values.clone(), *outcome)),
                 RustProbeObservation::Hit { .. } => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(outcomes.iter().filter(|outcome| **outcome).count(), 61);
-        assert_eq!(outcomes.iter().filter(|outcome| !**outcome).count(), 3);
+        assert_eq!(
+            decisions,
+            // In first-occurrence order: `step(0)` is false before any value
+            // exceeds the threshold.
+            [(vec![Some(false)], false), (vec![Some(true)], true)],
+            "both distinct vectors must survive, and neither may repeat"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
