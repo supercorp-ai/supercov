@@ -1341,13 +1341,39 @@ evidence is a wider callsite span would be swept up by the same rule. Exactness
 holding proves nothing about the labelling, since both classes count as
 declined.
 
-So it needs validation before it can land — read the source at a sample of the
-reclassified ranges across several crates and confirm each really is
-eliminated. If any is live code, decide it in HIR instead: mark statements
-under a constant-false condition at collection time, which is exact and cannot
-mistake a macro's callsite span for a dead branch.
+### The validation, and the verdict
 
-The finding stands regardless of how it is fixed: **the true remaining
-blind-spot count is far smaller than the raw unbound number suggests**, because
-a large share of it is cfg-disabled code. That matters for ranking the
-remaining work honestly.
+All 284 statements the rule marks "not compiled" were extracted and the source
+read at each reported range. The result rejects the rule.
+
+Correctly classified — genuinely eliminated before lowering:
+
+| crate | statement | eliminated by |
+| --- | --- | --- |
+| build_script_build | `return;` | `if !cfg!(feature = "proc-macro")` |
+| bytes (×2) | `self.get_int(nbytes)` | `if cfg!(target_endian = "big")` |
+| proc_macro2 | `debug.field("span", ..)` | `if cfg!(span_locations)` |
+| tracing | `LevelFilter::OFF` | `else if cfg!(feature = "max_level_off")` |
+
+Misclassified — live code inside `macro_rules!` bodies, whose MIR spans point
+at the wider *callsite*: syn 165 (`_ = $content;`), tracing_attributes 19 (the
+same syn macro), http 25, either 2. http's is the clearest tell — its range
+slices a fragment mid-token, so the "statement" text is literally `"y "`, part
+of `$body`.
+
+That is roughly 209 of 284 in the macro-fragment class: exactly the failure
+mode predicted before measuring. Since not-compiled obligations do not fail
+strict binding, landing this would have dropped ~200 cases from our own gate,
+most of them live code.
+
+The correct fix is to decide it in HIR rather than by span arithmetic: mark a
+statement not-compiled when it sits under a condition that is a constant
+boolean, which is what a `cfg!` expands to. That is exact, covers all four
+validated cases, and cannot mistake a macro's callsite span for a dead branch.
+#36 already had to reason about `cfg!` folding to a constant inside decision
+conditions, so the same predicate is wanted in both places.
+
+One correction to the earlier reading of this: the raw unbound count *does*
+overstate real blind spots, but not by the ~200 the span rule suggested — by
+closer to the handful validated above. Ranking work off the unvalidated number
+would have been a mistake.
