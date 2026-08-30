@@ -1795,3 +1795,58 @@ That is settled by looking at what the callsite range actually covers.
 #42 is the same byte-range fragility on the reporting side, which suggests
 treating fragment-straddling ranges as a first-class concept rather than
 handling each symptom where it surfaces.
+
+## Wave: selections in bodies rustc maps no branches for (#43)
+
+The diagnostic had carried the answer all along, in a part none of four
+theories had read:
+
+```
+maps to 0 rustc branches at ...:15715-15746; available: []
+```
+
+`available` is **empty**. rustc emits no branch region for a span inside a
+macro expansion, so a body whose branching is entirely macro-generated yields
+no mappings at all — http's `try_append2`/`try_entry2`/`try_insert2`, whose
+branching comes from `insert_phase_one!`, and serde_json's `parse_integer`. The
+range never failed to match a rival; there was nothing to match against.
+
+Decisions already fall through to finding the switch structurally in MIR when
+the mapping is absent. Selections had no such fallback and simply declined.
+They now search for the short-circuit's own switch by the span the mapping
+would have pointed at, with the plan tail factored into a closure so both paths
+build the plan identically. The per-obligation matching rule is untouched:
+loosening it would blind the misbind check for every body that *does* have
+mappings, and this absence is body-level.
+
+A second bug hid behind the first and surfaced only once the fallback ran. MIR
+encodes a bool switch as `[0: false, otherwise: true]`, so asking for value 1
+falls through to the otherwise arm — taking `target_for_value(1)` and
+`otherwise()` returned the **same block** for both targets, their common
+dominator was that block, the switch was not dominated by it, and the terminal
+edges came back empty. The family moved from "maps to 0" to "incomplete
+terminal edges" at an *identical count*, which is exactly what showed the
+search was finding the switch and something downstream was wrong.
+
+http 97.56% → 97.61%, serde_json 99.32% → 99.39%, no regressions. Both families
+eliminated; total unbound messages across the crate set fall to 86.
+
+### #22, after every blocker
+
+| after | regressions | worst |
+| --- | --- | --- |
+| #36 | 6 | either −29.11 |
+| #28 | 6 | serde_core −3.80 |
+| bridge chaining | 4 | serde_core **+0.52** |
+| #39 | 2 | syn −0.51 |
+| metric fix | 2 | tracing and syn drop out |
+| #43 | **2** | http **−0.07** |
+
+Five gains against −0.07 and −0.04. What remains is no longer one family:
+http's statement obligations in the three `try_*2` bodies, and serde_json's
+derive-generated misbind arms. One caution recorded for whoever picks it up —
+a sampled http "statement" failure is `RUST_OBLIGATION_NOT_COMPILED`, not
+unbound, so that delta mixes real binder failures with uncompiled statements
+splitting per definition. Separate the two before chasing either; if uncompiled
+declines are not being excluded there, that is a metric bug rather than a
+binder one.
