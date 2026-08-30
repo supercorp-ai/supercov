@@ -923,3 +923,26 @@ This reframes FAST from "document the cold cost" to a genuine engineering
 problem. The sys-time share is the first thing to look at, because I/O per
 body is the kind of overhead that is usually structural rather than
 algorithmic.
+
+### Where the time goes
+
+Artefacts written for that 3,600-line crate:
+
+| artefact | size |
+|---|---|
+| `manifest-*.json` | 8.5 MB (~2.4 KB per source line) |
+| `*.jsonl` trace | 0.9 MB |
+| `sources-*.json` | 0.17 MB |
+| target directory | 49 MB, against 8.4 MB baseline |
+| `libsupercov_runtime.a` | 17 MB, linked into **every** instrumented crate |
+
+The 17 MB static archive is the first suspect: it is linked per crate, so a
+workspace pays it once per member, and it plausibly explains both the system
+time and the 6x target bloat. The 8.5 MB manifest is the second — that is real
+serialisation work per crate, and 2.4 KB of manifest per source line invites
+the question of whether obligations carry redundant fields or the JSON is
+pretty-printed. The 22 seconds of user time is third, and only worth attacking
+once the I/O is understood.
+
+None of this is optimisation work yet. It is the first time the cost has been
+attributed to anything at all.
