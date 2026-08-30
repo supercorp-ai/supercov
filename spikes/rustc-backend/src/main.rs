@@ -2535,7 +2535,16 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
                     .macro_def_id
                     .is_some_and(|macro_def| !macro_def.is_local()))
         {
-            let _ = self.record_logical_branch(expression, true);
+            let branch_id = self.record_logical_branch(expression, true);
+            if let Some(branch_id) = branch_id
+                && let hir::ExprKind::Binary(_, left, _) = expression.kind
+                && constant_condition(left).is_some()
+            {
+                CFG_ELIMINATED_POINTS
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(branch_id);
+            }
         }
         if let hir::ExprKind::Loop(block, _, source, _) = expression.kind {
             match source {
@@ -8601,6 +8610,21 @@ fn runtime_logical_selection_plans<'tcx>(
     for branch in branches {
         let failed_id = branch.identity.id.clone();
         let planned = (|| -> Result<RuntimeMatchPlan, String> {
+            // A short-circuit whose left operand is a compile-time constant
+            // makes no decision at run time, so rustc emits no switch for it:
+            // `false && x` never evaluates the right operand and `true && x`
+            // always does. Neither is a branch, and the selection is
+            // unmeasurable in this configuration rather than a blind spot.
+            if CFG_ELIMINATED_POINTS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains(&branch.identity.id)
+            {
+                return Err(unmeasurable(
+                    &branch.identity.id,
+                    "not compiled in this configuration: a constant operand decides the short-circuit, so rustc emitted no branch for it",
+                ));
+            }
             let mapping_source = branch.mapping_source.as_ref().ok_or_else(|| {
                 format!(
                     "logical-selection branch {} has no exact left-operand mapping",
@@ -8716,17 +8740,27 @@ fn runtime_logical_selection_plans<'tcx>(
         }
     }
     for (id, error) in failures {
-        if env::var_os(STRICT_BINDING).is_some_and(|value| !value.is_empty()) {
+        // An uncompiled construct is not a binder defect and never fails strict
+        // binding; an unbound one still does, so our own gates keep catching
+        // real blind spots. Matches how statement probes classify their
+        // failures.
+        let unmeasurable = error.contains(UNMEASURABLE);
+        if !unmeasurable && env::var_os(STRICT_BINDING).is_some_and(|value| !value.is_empty()) {
             tcx.dcx().fatal(format!(
                 "Supercov could not bind Rust logical-selection probes in {}: {error}",
                 obligations.definition
             ));
         }
+        let kind = if unmeasurable {
+            "RUST_OBLIGATION_NOT_COMPILED"
+        } else {
+            "RUST_OBLIGATION_UNBOUND"
+        };
         BINDER_LIMITATIONS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(format!(
-                "RUST_OBLIGATION_UNBOUND: bind Rust logical-selection probes in {}: {error}",
+                "{kind}: bind Rust logical-selection probes in {}: {error}",
                 obligations.definition
             ));
         UNMEASURED_OBLIGATIONS

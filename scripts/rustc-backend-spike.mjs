@@ -7641,6 +7641,12 @@ try {
       '        value + 109\n' +
       '    }\n' +
       '}\n' +
+      // A short-circuit whose left operand is a compile-time constant makes no
+      // run-time decision, so rustc emits no branch for it.
+      'pub fn short_circuit_constant(v: usize) -> bool {\n' +
+      '    let decided = cfg!(target_os = "none") && v > 3;\n' +
+      '    decided\n' +
+      '}\n' +
       'pub fn paired(first: bool, second: bool) -> usize {\n' +
       '    if first && second { 5 } else { 6 }\n' +
       '}\n' +
@@ -7738,6 +7744,19 @@ try {
       latticeManifest.unmeasuredObligations.includes(id),
     ),
     'the eliminated branch must be explicitly unmeasured, not uncovered',
+  );
+  // Same rule as the eliminated branch above, one level down: a constant
+  // operand removes the switch, so the selection is unmeasurable rather than a
+  // binder blind spot. The deepEqual on unboundLimitations is again the other
+  // half — it fails if this lands in the unbound bucket instead.
+  assert(
+    latticeManifest.limitations.some(
+      (limitation) =>
+        limitation.startsWith('RUST_OBLIGATION_NOT_COMPILED:') &&
+        limitation.includes('short_circuit_constant') &&
+        limitation.includes('constant operand decides the short-circuit'),
+    ),
+    'a constant-operand short-circuit must record a not-compiled limitation',
   );
   const declined = [...latticeManifest.unmeasuredObligations].sort();
   const unbindableObligations = obligationsOf('unbindable');
