@@ -2714,3 +2714,44 @@ obligation where LLVM emits one `add`. M2 targets the 1.30s of collection, which
 is the HIR walk itself and not the manifest. M3 needs both to land near zero,
 and on current evidence the honest expectation is closer to 1.3x than 1.1x
 unless what is measured per obligation changes.
+
+### Where the collection cost actually was
+
+Asked to work on the slowest part, and profiling kept giving the same answer:
+**JSON escaping**, not the HIR walk.
+
+The first fast path checked whether a string needed escaping and returned it
+untouched otherwise. That helped ids and paths and did nothing for the strings
+that matter — canonical strings are NUL-separated, so they *always* need
+escaping and always fell to the character-by-character loop. Copying the runs
+between escapes instead took scale-400 from 1.06s to ~0.95s.
+
+| workload | session start | now |
+| --- | --- | --- |
+| real crates | 6.53s CPU — 3.2x | **~4.32s CPU — 2.14x** |
+| collection only | 3.60s — 1.75x | ~3.19s — 1.58x |
+| scale-400 | 4.46s wall — 8.1x | **~0.97s wall — 1.8x** |
+
+Five wins landed, every one located by the profile rather than the plan:
+per-file source identity, the escape fast path, `Rc`-shared body obligations,
+`format!` removed from id construction, and run-based escaping.
+
+**Two things were tried and reverted**, both because the measurement said so
+rather than because they looked wrong. Rewriting `json_strings` and
+`json_usizes` to build in place removed four allocations per call and measured
+*slightly slower* — the capacity precomputation walks the slice twice and
+`definitions` is usually one element. And the manifest's `canonical` strings,
+proposed for deletion as a third of its bytes, turned out to be worth about 1%.
+
+**M1's original delivery route is closed.** A foreign `#[thread_local]` static
+cannot be declared in a user crate: the feature gate fires and user crates are
+never bootstrap. Statement-form probes therefore need a crate-local array plus
+registering its base pointer with the runtime, which is materially more work
+than "dense indices and a delivery route" implied when the milestone was
+written.
+
+What is left in the profile is no longer waste. `escape` remains top at ~48
+samples even after the rewrite, SHA-256 is ~61 and is inherent to obligation
+identity unless the digest changes (which would rewrite every id in stored
+evidence), and `stable_source_range` still costs ~52 after memoisation. The
+cheap allocations are gone; what remains is the work itself.
