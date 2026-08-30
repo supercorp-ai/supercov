@@ -1264,3 +1264,47 @@ recommendation is to keep closing the newly exposed gaps first — 46 of
 serde_core's messages are "inject pre-optimization Rust match probes" — and
 land the identity change with no regression at all, which is exactly how this
 wave unblocked `either`.
+
+## Wave: chaining match-arm bridges on shared entry edges
+
+With the `bb0` split letting planning succeed, the largest remaining family
+moved one stage later, to injection: "match arm entry edge from bbN was not
+found" (49 messages). That is why the `bb0` wave retired 98 diagnostics without
+moving declined counts — the same bodies were failing again, further along.
+
+The diagnostic carried its own answer:
+
+    entry edge from bb1 was not found; entry_block=bb3;
+    entry_sources=[bb1]; source successors=[bb24, bb4, bb2]
+
+`bb3` is absent from bb1's successors and `bb24` is a bridge block, so an
+earlier plan had already redirected that edge. The edge was never missing — it
+was already bridged. And nested matches share entry edges *by design*; the
+function's own comment says an outer arm commits on the edge entering the inner
+match's frame. Both arms must commit, so the fix chains this arm's bridge onto
+the existing one rather than declaring the edge lost.
+
+No crate regressed: `proc_macro2` 99% → 99.95%, `serde_core` 97.54% → 98.15%.
+Corpus obligation-weighted exactness 98.54% → **98.62%**, declined 557 → 526.
+
+### Where #22 stands after three gaps closed
+
+Per-definition identity, measured after each wave:
+
+| after | either | serde_core | regressions |
+| --- | --- | --- | --- |
+| #36 | −29.11 | −3.80 | 6 |
+| #28 | **+0.62** | −3.80 | 6 |
+| bridge chaining | +0.62 | **+0.52** | 4 |
+
+Now eight gains against four small regressions: tracing −0.65, syn −0.51, http
+−0.25, serde_json −0.03. Both remaining tails are narrow — every one of
+tracing's eleven messages is statement binding inside a single function,
+`level_filters::get_max_level_inner`, and syn's fifteen are spread over 19,173
+obligations.
+
+The pattern is now well established: each closed gap converts a large #22
+regression into a gain, because aggregation had been crediting one successful
+binding to many bodies. Closing the last two tails should let per-definition
+identity land at zero regression, so HONEST and the exactness ratchet agree
+instead of being traded against each other.
