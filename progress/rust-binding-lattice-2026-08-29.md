@@ -1213,3 +1213,54 @@ for every invocation and fail when each body must bind its own. Fix that first,
 then land def-path identity — the same sequencing that worked for bb0. Then
 honesty improves *and* the exact fraction does not regress, instead of trading
 one for the other.
+
+## Wave: match arms that share one macro body fragment (#28)
+
+A macro that writes its body fragment once and expands it into several arms
+gives every arm the identical body span. `either`'s `for_both!` is the case in
+the wild — `$result` appears twice, once per arm. The binder selects an arm's
+MIR blocks by that body range, so both arms resolved to the *same* block set,
+computed the same entry block, and the misbind post-condition correctly refused
+two arms entering one block, declining the whole body's match plans. It was 67
+of `either`'s 72 unbound diagnostics, and http's `$body` case is the same
+family.
+
+The first fix attempt was to refine each arm's block set to those dominated by
+blocks carrying the arm's own *pattern* range. Instrumenting it killed the idea
+cleanly: the pattern block set comes back **empty**, because pre-optimization
+MIR carries the scrutinee span on the test blocks, not the arm patterns. Spans
+cannot separate these arms at all — only the CFG can.
+
+So arms now carry `pattern_variant`, derived exactly as `if let` decision
+conditions already derive theirs, and when an arm shares its body span with a
+sibling the binder keeps only the blocks reached by that arm's `SwitchInt`
+target. Arms with distinct body ranges stay on the existing path.
+
+Deliberately rejected: matching arm order to switch-target order. Enum variant
+order need not follow arm order, and that assumption is precisely what the
+misbind check exists to catch.
+
+No crate regressed: http 95.05% → 97.29% (+2.24), either 96.86% → 98.29%
+(+1.43), tracing_attributes +0.34, syn +0.26. Corpus obligation-weighted
+exactness 98.19% → 98.54%, declined 689 → 557.
+
+### What it unblocked
+
+#22's def-path identity was held at `either` 67.75% (−29.11) entirely by this
+shape. With it fixed, `either` now *gains* +0.62 under per-definition identity,
+and the remaining regressions are small: serde_core −3.80, tracing −0.65, syn
+−0.51, proc_macro2 −0.44, http −0.25, serde_json −0.03.
+
+serde_core is the one that matters, and its shape says honest splitting rather
+than breakage: obligations 1787 → 7768 (+5981) against declines 44 → 486
+(+442). Declines growing far slower than obligations is the inverse of the
+full-expansion-chain variant, where declines *outran* obligation growth because
+scope degradation was taking unrelated authored code down with it.
+
+That leaves #22 as a judgement rather than a bug: the exact fraction falls
+because the denominator became more honest, so the before and after percentages
+measure different things and the ratchet cannot adjudicate between them. The
+recommendation is to keep closing the newly exposed gaps first — 46 of
+serde_core's messages are "inject pre-optimization Rust match probes" — and
+land the identity change with no regression at all, which is exactly how this
+wave unblocked `either`.
