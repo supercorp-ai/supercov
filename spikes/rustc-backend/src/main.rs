@@ -7479,19 +7479,9 @@ fn instrument_ctfe_decisions<'tcx>(
             .insert(1, ctfe_marker_statement(tcx, marker_local, start, span));
 
         for condition in &plan.conditions {
-            for (value, sources, target, outcome) in [
-                (
-                    true,
-                    condition.true_sources.as_slice(),
-                    condition.true_target,
-                    condition.true_outcome,
-                ),
-                (
-                    false,
-                    condition.false_sources.as_slice(),
-                    condition.false_target,
-                    condition.false_outcome,
-                ),
+            for (value, groups, outcome) in [
+                (true, &condition.true_edges, condition.true_outcome),
+                (false, &condition.false_edges, condition.false_outcome),
             ] {
                 let site = condition_site;
                 condition_site = condition_site
@@ -7535,43 +7525,46 @@ fn instrument_ctfe_decisions<'tcx>(
                     register_ctfe_hits(tcx, marker, hits.into_iter());
                     marker
                 });
-                for source in sources {
-                    let mut bridge = BasicBlockData::new(
-                        Some(Terminator {
-                            source_info: SourceInfo::outermost(span),
-                            kind: TerminatorKind::Goto { target },
-                        }),
-                        body.basic_blocks[*source].is_cleanup,
-                    );
-                    bridge.statements.push(ctfe_marker_statement(
-                        tcx,
-                        marker_local,
-                        condition_marker,
-                        span,
-                    ));
-                    if let Some(finish_marker) = finish_marker {
+                for (sources, target) in groups {
+                    let target = *target;
+                    for source in sources {
+                        let mut bridge = BasicBlockData::new(
+                            Some(Terminator {
+                                source_info: SourceInfo::outermost(span),
+                                kind: TerminatorKind::Goto { target },
+                            }),
+                            body.basic_blocks[*source].is_cleanup,
+                        );
                         bridge.statements.push(ctfe_marker_statement(
                             tcx,
                             marker_local,
-                            finish_marker,
+                            condition_marker,
                             span,
                         ));
-                    }
-                    let bridge = body.basic_blocks_mut().push(bridge);
-                    let mut replaced = 0;
-                    body.basic_blocks_mut()[*source]
-                        .terminator_mut()
-                        .successors_mut(|edge| {
-                            if *edge == target {
-                                *edge = bridge;
-                                replaced += 1;
-                            }
-                        });
-                    if replaced == 0 {
-                        return Err(format!(
-                            "decision {} condition {} {:?} edge from {:?} was not found",
-                            plan.id, condition.index, value, source
-                        ));
+                        if let Some(finish_marker) = finish_marker {
+                            bridge.statements.push(ctfe_marker_statement(
+                                tcx,
+                                marker_local,
+                                finish_marker,
+                                span,
+                            ));
+                        }
+                        let bridge = body.basic_blocks_mut().push(bridge);
+                        let mut replaced = 0;
+                        body.basic_blocks_mut()[*source]
+                            .terminator_mut()
+                            .successors_mut(|edge| {
+                                if *edge == target {
+                                    *edge = bridge;
+                                    replaced += 1;
+                                }
+                            });
+                        if replaced == 0 {
+                            return Err(format!(
+                                "decision {} condition {} {:?} edge from {:?} was not found",
+                                plan.id, condition.index, value, source
+                            ));
+                        }
                     }
                 }
             }
@@ -7695,10 +7688,15 @@ fn ctfe_marker_statement<'tcx>(
 struct RuntimeDecisionCondition {
     index: u64,
     entry_block: BasicBlock,
-    true_sources: Vec<BasicBlock>,
-    false_sources: Vec<BasicBlock>,
-    true_target: BasicBlock,
-    false_target: BasicBlock,
+    /// One `(sources, target)` group per MIR site that evaluates this
+    /// condition. Usually one, but a condition reached by two paths is lowered
+    /// to two switches with their OWN targets — serde_json's
+    /// `deserialize_any` has bb46 -> bb48/bb47 and bb62 -> bb64/bb63 for a
+    /// single authored condition. A single target cannot represent that, and
+    /// probing only one site would report the condition uncovered whenever
+    /// execution took the other.
+    true_edges: Vec<(Vec<BasicBlock>, BasicBlock)>,
+    false_edges: Vec<(Vec<BasicBlock>, BasicBlock)>,
     true_outcome: Option<bool>,
     false_outcome: Option<bool>,
 }
@@ -7760,26 +7758,35 @@ fn verify_decision_bindings(plans: &[RuntimeDecisionPlan], definition: &str) -> 
             plan.id,
             (
                 first.entry_block.as_u32(),
-                first.true_target.as_u32(),
-                first.false_target.as_u32()
+                first.true_edges.first().map(|(_, t)| t.as_u32()),
+                first.false_edges.first().map(|(_, t)| t.as_u32())
             ),
             plan.id,
         ));
     }
     for plan in plans {
         for condition in &plan.conditions {
-            if condition.true_target == condition.false_target {
+            let true_targets = condition
+                .true_edges
+                .iter()
+                .map(|(_, target)| *target)
+                .collect::<BTreeSet<_>>();
+            if condition
+                .false_edges
+                .iter()
+                .any(|(_, target)| true_targets.contains(target))
+            {
                 return Err(format!(
                     "misbind check: {} condition {} in {definition} selects block {:?} for both outcomes",
-                    plan.id, condition.index, condition.true_target
+                    plan.id, condition.index, true_targets
                 ));
             }
             // Two conditions can only share a switch edge if they are the same
             // condition, so a repeat means at least one binding is wrong.
             let edge = (
                 condition.entry_block.as_u32(),
-                condition.true_target.as_u32(),
-                condition.false_target.as_u32(),
+                condition.true_edges.len() as u32,
+                condition.false_edges.len() as u32,
             );
             if let Some((other, other_index)) =
                 claimed.insert(edge, (plan.id.clone(), condition.index))
@@ -8096,294 +8103,299 @@ fn runtime_decision_plans<'tcx>(
             let mapping_index = branch_mappings
                 .iter()
                 .position(|(source, _, _)| source == &condition.branch_source);
-            let (entry_block, true_sources, false_sources, true_target, false_target) =
-                if let Some(mapping_index) = mapping_index {
-                    let (_, true_bcb, false_bcb) = branch_mappings.remove(mapping_index);
-                    let unique_block = |bcb: u32| -> Result<BasicBlock, String> {
-                        let blocks = bcb_blocks.get(&bcb).cloned().unwrap_or_default();
-                        match blocks.as_slice() {
-                            [block] => Ok(*block),
-                            // rustc minimises physical counters: a BCB whose
-                            // count follows arithmetically from other counters
-                            // carries no VirtualCounter statement, so it is
-                            // invisible here. Listing the BCBs that do have
-                            // counters distinguishes that from a removed
-                            // block, which would need the opposite treatment.
-                            _ => Err(format!(
-                                "coverage block {bcb} for {} maps to {} MIR blocks; \
+            let (entry_block, true_edges, false_edges) = if let Some(mapping_index) = mapping_index
+            {
+                let (_, true_bcb, false_bcb) = branch_mappings.remove(mapping_index);
+                let unique_block = |bcb: u32| -> Result<BasicBlock, String> {
+                    let blocks = bcb_blocks.get(&bcb).cloned().unwrap_or_default();
+                    match blocks.as_slice() {
+                        [block] => Ok(*block),
+                        // rustc minimises physical counters: a BCB whose
+                        // count follows arithmetically from other counters
+                        // carries no VirtualCounter statement, so it is
+                        // invisible here. Listing the BCBs that do have
+                        // counters distinguishes that from a removed
+                        // block, which would need the opposite treatment.
+                        _ => Err(format!(
+                            "coverage block {bcb} for {} maps to {} MIR blocks; \
                                  counters present for BCBs {:?} of {} blocks",
-                                decision.identity.id,
-                                blocks.len(),
-                                bcb_blocks.keys().copied().collect::<Vec<_>>(),
-                                body.basic_blocks.len()
-                            )),
-                        }
-                    };
-                    let true_target = unique_block(true_bcb)?;
-                    let false_target = unique_block(false_bcb)?;
-                    if true_target == false_target {
-                        return Err(format!(
-                            "condition {} of {} has one true/false target",
-                            index, decision.identity.id
-                        ));
-                    }
-                    let entry_block =
-                        nearest_common_dominator(&dominators, true_target, false_target)
-                            .ok_or_else(|| {
-                                format!(
-                                    "condition {} of {} has no common MIR dominator",
-                                    index, decision.identity.id
-                                )
-                            })?;
-                    let incoming = |target: BasicBlock| {
-                        body.basic_blocks.predecessors()[target]
-                            .iter()
-                            .copied()
-                            .filter(|source| dominators.dominates(entry_block, *source))
-                            .collect::<Vec<_>>()
-                    };
-                    let true_sources = incoming(true_target);
-                    let false_sources = incoming(false_target);
-                    if true_sources.is_empty() || false_sources.is_empty() {
-                        return Err(format!(
-                            "condition {} of {} has incomplete terminal edges ({}/{})",
-                            index,
                             decision.identity.id,
-                            true_sources.len(),
-                            false_sources.len()
-                        ));
+                            blocks.len(),
+                            bcb_blocks.keys().copied().collect::<Vec<_>>(),
+                            body.basic_blocks.len()
+                        )),
                     }
-                    (
-                        entry_block,
-                        true_sources,
-                        false_sources,
-                        true_target,
-                        false_target,
-                    )
-                } else if tcx.def_span(def_id).from_expansion()
-                    || condition.branch_source != condition.source
-                    || condition.authored_expression
-                {
-                    // Whether any switch carries the condition's exact range.
-                    // Exact matches win outright; containment only applies when
-                    // nothing matches exactly.
-                    let exact_match_exists = body
-                        .basic_blocks
-                        .iter_enumerated()
-                        .filter(|(block, _)| !fallback_blocks.contains(&block.as_u32()))
-                        .any(|(_, data)| {
-                            let TerminatorKind::SwitchInt { .. } = &data.terminator().kind else {
-                                return false;
-                            };
-                            stable_source_range(
-                                tcx,
-                                data.terminator().source_info.span,
-                                &crate_name,
-                            )
+                };
+                let true_target = unique_block(true_bcb)?;
+                let false_target = unique_block(false_bcb)?;
+                if true_target == false_target {
+                    return Err(format!(
+                        "condition {} of {} has one true/false target",
+                        index, decision.identity.id
+                    ));
+                }
+                let entry_block = nearest_common_dominator(&dominators, true_target, false_target)
+                    .ok_or_else(|| {
+                        format!(
+                            "condition {} of {} has no common MIR dominator",
+                            index, decision.identity.id
+                        )
+                    })?;
+                let incoming = |target: BasicBlock| {
+                    body.basic_blocks.predecessors()[target]
+                        .iter()
+                        .copied()
+                        .filter(|source| dominators.dominates(entry_block, *source))
+                        .collect::<Vec<_>>()
+                };
+                let true_sources = incoming(true_target);
+                let false_sources = incoming(false_target);
+                if true_sources.is_empty() || false_sources.is_empty() {
+                    return Err(format!(
+                        "condition {} of {} has incomplete terminal edges ({}/{})",
+                        index,
+                        decision.identity.id,
+                        true_sources.len(),
+                        false_sources.len()
+                    ));
+                }
+                (
+                    entry_block,
+                    vec![(true_sources, true_target)],
+                    vec![(false_sources, false_target)],
+                )
+            } else if tcx.def_span(def_id).from_expansion()
+                || condition.branch_source != condition.source
+                || condition.authored_expression
+            {
+                // Whether any switch carries the condition's exact range.
+                // Exact matches win outright; containment only applies when
+                // nothing matches exactly.
+                let exact_match_exists = body
+                    .basic_blocks
+                    .iter_enumerated()
+                    .filter(|(block, _)| !fallback_blocks.contains(&block.as_u32()))
+                    .any(|(_, data)| {
+                        let TerminatorKind::SwitchInt { .. } = &data.terminator().kind else {
+                            return false;
+                        };
+                        stable_source_range(tcx, data.terminator().source_info.span, &crate_name)
                             .is_ok_and(|source| {
                                 source == condition.branch_source || source == condition.source
                             })
-                        });
-                    let source_blocks = body
+                    });
+                let source_blocks = body
+                    .basic_blocks
+                    .iter_enumerated()
+                    .filter_map(|(block, data)| {
+                        if fallback_blocks.contains(&block.as_u32()) {
+                            return None;
+                        }
+                        let TerminatorKind::SwitchInt { discr, targets } = &data.terminator().kind
+                        else {
+                            return None;
+                        };
+                        // A let condition (`if let Some(x) = ..`) selects
+                        // through a two-way discriminant switch rather than
+                        // a typed Boolean one, exactly as in the structural
+                        // marker path. Its true edge is the one accepting
+                        // the recorded pattern variant.
+                        let is_bool = discr.ty(&body.local_decls, tcx) == tcx.types.bool;
+                        // Two shapes occur: one value edge with an
+                        // `otherwise`, or every variant enumerated with an
+                        // unreachable `otherwise` (Option<T> lowers this
+                        // way). Both are two-way selections.
+                        let pattern_switch = !is_bool
+                            && condition.pattern_variant.is_some()
+                            && matches!(targets.iter().count(), 1 | 2);
+                        if !is_bool && !pattern_switch {
+                            return None;
+                        }
+                        let source = stable_source_range(
+                            tcx,
+                            data.terminator().source_info.span,
+                            &crate_name,
+                        )
+                        .ok()?;
+                        // A condition written inside a macro body keeps
+                        // the body's range, while the lowered switch's
+                        // span can collapse to a point inside it. Exact
+                        // equality is tried first; containment then
+                        // accepts the collapsed form. Ambiguity is still
+                        // caught below, because more than one match fails.
+                        let exact = source == condition.branch_source || source == condition.source;
+                        let contained = [&condition.branch_source, &condition.source]
+                            .into_iter()
+                            .any(|range| {
+                                range.key == source.key
+                                    && range.start <= source.start
+                                    && range.end >= source.end
+                            });
+                        if !(exact || contained) {
+                            return None;
+                        }
+                        // Containment is a fallback for spans that collapse
+                        // to a point, not an equal alternative. Admitting
+                        // both at once lets a nested switch inside the
+                        // condition's range compete with the condition's
+                        // own switch, and the pair then fails as ambiguous.
+                        if !exact && exact_match_exists {
+                            return None;
+                        }
+                        if !pattern_switch {
+                            return Some((
+                                block,
+                                targets.target_for_value(1),
+                                targets.target_for_value(0),
+                            ));
+                        }
+                        let variant_index = condition.pattern_variant?;
+                        let discriminant_local = match discr {
+                            Operand::Copy(place) | Operand::Move(place) => place.as_local(),
+                            _ => None,
+                        }?;
+                        let scrutinee = data.statements.iter().rev().find_map(|statement| {
+                            let StatementKind::Assign(assignment) = &statement.kind else {
+                                return None;
+                            };
+                            let (destination, value) = &**assignment;
+                            let Rvalue::Discriminant(place) = value else {
+                                return None;
+                            };
+                            (destination.as_local() == Some(discriminant_local))
+                                .then(|| place.ty(&body.local_decls, tcx).ty.peel_refs())
+                        })?;
+                        let expected = scrutinee
+                            .ty_adt_def()?
+                            .discriminant_for_variant(
+                                tcx,
+                                rustc_abi::VariantIdx::from_u32(variant_index),
+                            )
+                            .val;
+                        let matched = targets
+                            .iter()
+                            .find(|(value, _)| *value == expected)
+                            .map(|(_, target)| target);
+                        let refuted = targets
+                            .iter()
+                            .filter(|(value, _)| *value != expected)
+                            .map(|(_, target)| target)
+                            .collect::<Vec<_>>();
+                        match (matched, refuted.as_slice()) {
+                            (Some(matched), []) => Some((block, matched, targets.otherwise())),
+                            (Some(matched), [refuted]) => Some((block, matched, *refuted)),
+                            // The pattern's own variant is not tested here;
+                            // binding it would be a guess.
+                            _ => None,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                // A condition reached by two paths is lowered to two
+                // switches, each with its OWN targets. Probing only one
+                // would report the condition uncovered whenever execution
+                // took the other, so bind every site. The misbind
+                // post-condition still guards this: it rejects the binding
+                // if any true target coincides with a false one.
+                if let [_, ..] = source_blocks.as_slice() {
+                    let entry_block = source_blocks
+                        .iter()
+                        .map(|(block, _, _)| *block)
+                        .reduce(|left, right| {
+                            nearest_common_dominator(&dominators, left, right).unwrap_or(left)
+                        })
+                        .expect("non-empty source blocks");
+                    for (block, _, _) in &source_blocks {
+                        fallback_blocks.insert(block.as_u32());
+                    }
+                    (
+                        entry_block,
+                        source_blocks
+                            .iter()
+                            .map(|(block, target, _)| (vec![*block], *target))
+                            .collect::<Vec<_>>(),
+                        source_blocks
+                            .iter()
+                            .map(|(block, _, target)| (vec![*block], *target))
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    let all_bool_switches = body
                         .basic_blocks
                         .iter_enumerated()
                         .filter_map(|(block, data)| {
-                            if fallback_blocks.contains(&block.as_u32()) {
-                                return None;
-                            }
-                            let TerminatorKind::SwitchInt { discr, targets } =
-                                &data.terminator().kind
+                            let TerminatorKind::SwitchInt { discr, .. } = &data.terminator().kind
                             else {
                                 return None;
                             };
-                            // A let condition (`if let Some(x) = ..`) selects
-                            // through a two-way discriminant switch rather than
-                            // a typed Boolean one, exactly as in the structural
-                            // marker path. Its true edge is the one accepting
-                            // the recorded pattern variant.
                             let is_bool = discr.ty(&body.local_decls, tcx) == tcx.types.bool;
-                            // Two shapes occur: one value edge with an
-                            // `otherwise`, or every variant enumerated with an
-                            // unreachable `otherwise` (Option<T> lowers this
-                            // way). Both are two-way selections.
-                            let pattern_switch = !is_bool
-                                && condition.pattern_variant.is_some()
-                                && matches!(targets.iter().count(), 1 | 2);
-                            if !is_bool && !pattern_switch {
-                                return None;
-                            }
-                            let source = stable_source_range(
+                            let range = stable_source_range(
                                 tcx,
                                 data.terminator().source_info.span,
                                 &crate_name,
                             )
-                            .ok()?;
-                            // A condition written inside a macro body keeps
-                            // the body's range, while the lowered switch's
-                            // span can collapse to a point inside it. Exact
-                            // equality is tried first; containment then
-                            // accepts the collapsed form. Ambiguity is still
-                            // caught below, because more than one match fails.
-                            let exact =
-                                source == condition.branch_source || source == condition.source;
-                            let contained = [&condition.branch_source, &condition.source]
-                                .into_iter()
-                                .any(|range| {
-                                    range.key == source.key
-                                        && range.start <= source.start
-                                        && range.end >= source.end
-                                });
-                            if !(exact || contained) {
+                            .map(|range| (range.key, range.start, range.end))
+                            .ok();
+                            let TerminatorKind::SwitchInt { targets, .. } = &data.terminator().kind
+                            else {
                                 return None;
-                            }
-                            // Containment is a fallback for spans that collapse
-                            // to a point, not an equal alternative. Admitting
-                            // both at once lets a nested switch inside the
-                            // condition's range compete with the condition's
-                            // own switch, and the pair then fails as ambiguous.
-                            if !exact && exact_match_exists {
-                                return None;
-                            }
-                            if !pattern_switch {
-                                return Some((
-                                    block,
-                                    targets.target_for_value(1),
-                                    targets.target_for_value(0),
-                                ));
-                            }
-                            let variant_index = condition.pattern_variant?;
-                            let discriminant_local = match discr {
-                                Operand::Copy(place) | Operand::Move(place) => place.as_local(),
-                                _ => None,
-                            }?;
-                            let scrutinee = data.statements.iter().rev().find_map(|statement| {
-                                let StatementKind::Assign(assignment) = &statement.kind else {
-                                    return None;
-                                };
-                                let (destination, value) = &**assignment;
-                                let Rvalue::Discriminant(place) = value else {
-                                    return None;
-                                };
-                                (destination.as_local() == Some(discriminant_local))
-                                    .then(|| place.ty(&body.local_decls, tcx).ty.peel_refs())
-                            })?;
-                            let expected = scrutinee
-                                .ty_adt_def()?
-                                .discriminant_for_variant(
-                                    tcx,
-                                    rustc_abi::VariantIdx::from_u32(variant_index),
-                                )
-                                .val;
-                            let matched = targets
-                                .iter()
-                                .find(|(value, _)| *value == expected)
-                                .map(|(_, target)| target);
-                            let refuted = targets
-                                .iter()
-                                .filter(|(value, _)| *value != expected)
-                                .map(|(_, target)| target)
-                                .collect::<Vec<_>>();
-                            match (matched, refuted.as_slice()) {
-                                (Some(matched), []) => Some((block, matched, targets.otherwise())),
-                                (Some(matched), [refuted]) => Some((block, matched, *refuted)),
-                                // The pattern's own variant is not tested here;
-                                // binding it would be a guess.
-                                _ => None,
-                            }
+                            };
+                            Some((
+                                block,
+                                is_bool,
+                                range,
+                                fallback_blocks.contains(&block.as_u32()),
+                                targets.iter().count(),
+                            ))
                         })
                         .collect::<Vec<_>>();
-                    let [(source_block, true_target, false_target)] = source_blocks.as_slice()
-                    else {
-                        let all_bool_switches = body
-                            .basic_blocks
-                            .iter_enumerated()
-                            .filter_map(|(block, data)| {
-                                let TerminatorKind::SwitchInt { discr, .. } =
-                                    &data.terminator().kind
-                                else {
-                                    return None;
-                                };
-                                let is_bool = discr.ty(&body.local_decls, tcx) == tcx.types.bool;
-                                let range = stable_source_range(
-                                    tcx,
-                                    data.terminator().source_info.span,
-                                    &crate_name,
-                                )
-                                .map(|range| (range.key, range.start, range.end))
-                                .ok();
-                                let TerminatorKind::SwitchInt { targets, .. } =
-                                    &data.terminator().kind
-                                else {
-                                    return None;
-                                };
-                                Some((
-                                    block,
-                                    is_bool,
-                                    range,
-                                    fallback_blocks.contains(&block.as_u32()),
-                                    targets.iter().count(),
-                                ))
-                            })
-                            .collect::<Vec<_>>();
-                        return Err(format!(
-                            "condition branch_source={:?} source={:?} pattern_variant={:?} pattern_adt={:?}; switches (block, is_bool, range, is_fallback, value_targets)={all_bool_switches:?}; ",
-                            (
-                                condition.branch_source.key.as_str(),
-                                condition.branch_source.start,
-                                condition.branch_source.end
-                            ),
-                            (
-                                condition.source.key.as_str(),
-                                condition.source.start,
-                                condition.source.end
-                            ),
-                            condition.pattern_variant,
-                            condition.pattern_adt,
-                        ) + &format!(
-                            "could not bind one expanded boolean MIR branch for {} condition {}; found {}",
-                            decision.identity.id,
-                            index,
-                            source_blocks.len()
-                        ));
-                    };
-                    fallback_blocks.insert(source_block.as_u32());
-                    (
-                        *source_block,
-                        vec![*source_block],
-                        vec![*source_block],
-                        *true_target,
-                        *false_target,
-                    )
-                } else {
                     return Err(format!(
-                        "rustc branch mapping missing for {} condition {} at {}:{}-{}; available: {:?}",
+                        "condition branch_source={:?} source={:?} pattern_variant={:?} pattern_adt={:?}; switches (block, is_bool, range, is_fallback, value_targets)={all_bool_switches:?}; ",
+                        (
+                            condition.branch_source.key.as_str(),
+                            condition.branch_source.start,
+                            condition.branch_source.end
+                        ),
+                        (
+                            condition.source.key.as_str(),
+                            condition.source.start,
+                            condition.source.end
+                        ),
+                        condition.pattern_variant,
+                        condition.pattern_adt,
+                    ) + &format!(
+                        "could not bind one expanded boolean MIR branch for {} condition {}; found {}",
                         decision.identity.id,
                         index,
-                        condition.branch_source.key,
-                        condition.branch_source.start,
-                        condition.branch_source.end,
-                        branch_mappings
-                            .iter()
-                            .map(|(source, _, _)| format!(
-                                "{}:{}-{}:{}",
-                                source.key, source.start, source.end, source.class
-                            ))
-                            .collect::<Vec<_>>(),
+                        source_blocks.len()
                     ));
-                };
-            let (true_sources, false_sources, true_target, false_target) = if condition.invert_value
-            {
-                (false_sources, true_sources, false_target, true_target)
+                }
             } else {
-                (true_sources, false_sources, true_target, false_target)
+                return Err(format!(
+                    "rustc branch mapping missing for {} condition {} at {}:{}-{}; available: {:?}",
+                    decision.identity.id,
+                    index,
+                    condition.branch_source.key,
+                    condition.branch_source.start,
+                    condition.branch_source.end,
+                    branch_mappings
+                        .iter()
+                        .map(|(source, _, _)| format!(
+                            "{}:{}-{}:{}",
+                            source.key, source.start, source.end, source.class
+                        ))
+                        .collect::<Vec<_>>(),
+                ));
+            };
+            let (true_edges, false_edges) = if condition.invert_value {
+                (false_edges, true_edges)
+            } else {
+                (true_edges, false_edges)
             };
             conditions.push(RuntimeDecisionCondition {
                 index: index as u64,
                 entry_block,
-                true_sources,
-                false_sources,
-                true_target,
-                false_target,
+                true_edges,
+                false_edges,
                 true_outcome: condition.true_outcome,
                 false_outcome: condition.false_outcome,
             });
@@ -9936,10 +9948,8 @@ fn runtime_marked_decision_plans<'tcx>(
             conditions.push(RuntimeDecisionCondition {
                 index: marker.condition_index as u64,
                 entry_block: switch_block,
-                true_sources: vec![switch_block],
-                false_sources: vec![switch_block],
-                true_target,
-                false_target,
+                true_edges: vec![(vec![switch_block], true_target)],
+                false_edges: vec![(vec![switch_block], false_target)],
                 true_outcome: condition.true_outcome,
                 false_outcome: condition.false_outcome,
             });
@@ -10659,19 +10669,18 @@ fn instrument_runtime_loop_frames<'tcx>(
         for plan in plans.iter_mut() {
             for condition in &mut plan.conditions {
                 let source_inside_loop = dominators.dominates(header, condition.entry_block);
-                if source_inside_loop && condition.true_target == header {
-                    condition.true_target = condition_block;
-                }
-                if source_inside_loop && condition.false_target == header {
-                    condition.false_target = condition_block;
-                }
-                for source in condition
-                    .true_sources
+                for (sources, target) in condition
+                    .true_edges
                     .iter_mut()
-                    .chain(&mut condition.false_sources)
+                    .chain(&mut condition.false_edges)
                 {
-                    if *source == header {
-                        *source = condition_block;
+                    if source_inside_loop && *target == header {
+                        *target = condition_block;
+                    }
+                    for source in sources.iter_mut() {
+                        if *source == header {
+                            *source = condition_block;
+                        }
                     }
                 }
                 if condition.entry_block == header {
@@ -10731,108 +10740,74 @@ fn instrument_runtime_decisions<'tcx>(
         }
         let token = body.local_decls.push(LocalDecl::new(tcx.types.u64, span));
         for mapped in &plan.conditions {
-            for (value, sources, target, outcome) in [
-                (
-                    true,
-                    mapped.true_sources.as_slice(),
-                    mapped.true_target,
-                    mapped.true_outcome,
-                ),
-                (
-                    false,
-                    mapped.false_sources.as_slice(),
-                    mapped.false_target,
-                    mapped.false_outcome,
-                ),
+            for (value, groups, outcome) in [
+                (true, &mapped.true_edges, mapped.true_outcome),
+                (false, &mapped.false_edges, mapped.false_outcome),
             ] {
-                for source in sources {
-                    // Strictly below the exact rule, and in the order match
-                    // injection applied its two rewrites. Arm bridging ran
-                    // first and is keyed by the block as it was then, so the
-                    // target resolves against the ORIGINAL source; the split
-                    // came after, so the source resolves last. Reversing this
-                    // finds nothing, since the split block no longer carries a
-                    // terminator to match against.
-                    let mut target = target;
-                    for _ in 0..=rewrites.bridges.len() {
-                        match rewrites.bridges.get(&(*source, target)).copied() {
-                            Some(bridge) => target = bridge,
-                            None => break,
+                for (sources, group_target) in groups {
+                    for source in sources {
+                        let target = *group_target;
+                        // Strictly below the exact rule, and in the order match
+                        // injection applied its two rewrites. Arm bridging ran
+                        // first and is keyed by the block as it was then, so the
+                        // target resolves against the ORIGINAL source; the split
+                        // came after, so the source resolves last. Reversing this
+                        // finds nothing, since the split block no longer carries a
+                        // terminator to match against.
+                        let mut target = target;
+                        for _ in 0..=rewrites.bridges.len() {
+                            match rewrites.bridges.get(&(*source, target)).copied() {
+                                Some(bridge) => target = bridge,
+                                None => break,
+                            }
                         }
-                    }
-                    let mut relocated = *source;
-                    for _ in 0..=rewrites.relocations.len() {
-                        if body.basic_blocks[relocated]
-                            .terminator()
-                            .successors()
-                            .any(|edge| edge == target)
-                        {
-                            break;
-                        }
-                        let Some(moved) = rewrites.relocations.get(&relocated).copied() else {
-                            break;
-                        };
-                        relocated = moved;
-                    }
-                    let source = &relocated;
-                    // Strictly below the exact rule: only when the source no
-                    // longer carries the recorded edge does a bridge this call
-                    // spliced stand in for it, and only one registered for
-                    // precisely this pair. Walk the chain, since several plans
-                    // may already have claimed the edge. Bounded by the map
-                    // size so a cycle can never spin.
-                    for _ in 0..=edge_bridges.len() {
-                        if body.basic_blocks[*source]
-                            .terminator()
-                            .successors()
-                            .any(|edge| edge == target)
-                        {
-                            break;
-                        }
-                        let Some(bridged) = edge_bridges.get(&(*source, target)).copied() else {
-                            break;
-                        };
-                        target = bridged;
-                    }
-                    let cleanup = body.basic_blocks[*source].is_cleanup;
-                    let mut continuation = target;
-                    if let Some(outcome) = outcome {
-                        continuation = body.basic_blocks_mut().push(runtime_call_block(
-                            tcx,
-                            runtime.finish,
-                            [
-                                Operand::Copy(Place::from(token)),
-                                Operand::const_from_scalar(
-                                    tcx,
-                                    tcx.types.bool,
-                                    Scalar::from_bool(outcome),
-                                    span,
-                                ),
-                            ]
-                            .into_iter(),
-                            Place::from(runtime.unit),
-                            continuation,
-                            span,
-                            cleanup,
-                        ));
-                        if let (Some(token), Some((zero, entered))) =
-                            (plan.loop_token, plan.loop_alternatives)
-                        {
-                            let Some(branch_hit) = runtime.branch_hit else {
-                                return Err(format!(
-                                    "loop decision {} has no branch-hit runtime",
-                                    plan.id
-                                ));
+                        let mut relocated = *source;
+                        for _ in 0..=rewrites.relocations.len() {
+                            if body.basic_blocks[relocated]
+                                .terminator()
+                                .successors()
+                                .any(|edge| edge == target)
+                            {
+                                break;
+                            }
+                            let Some(moved) = rewrites.relocations.get(&relocated).copied() else {
+                                break;
                             };
+                            relocated = moved;
+                        }
+                        let source = &relocated;
+                        // Strictly below the exact rule: only when the source no
+                        // longer carries the recorded edge does a bridge this call
+                        // spliced stand in for it, and only one registered for
+                        // precisely this pair. Walk the chain, since several plans
+                        // may already have claimed the edge. Bounded by the map
+                        // size so a cycle can never spin.
+                        for _ in 0..=edge_bridges.len() {
+                            if body.basic_blocks[*source]
+                                .terminator()
+                                .successors()
+                                .any(|edge| edge == target)
+                            {
+                                break;
+                            }
+                            let Some(bridged) = edge_bridges.get(&(*source, target)).copied()
+                            else {
+                                break;
+                            };
+                            target = bridged;
+                        }
+                        let cleanup = body.basic_blocks[*source].is_cleanup;
+                        let mut continuation = target;
+                        if let Some(outcome) = outcome {
                             continuation = body.basic_blocks_mut().push(runtime_call_block(
                                 tcx,
-                                branch_hit,
+                                runtime.finish,
                                 [
                                     Operand::Copy(Place::from(token)),
                                     Operand::const_from_scalar(
                                         tcx,
-                                        tcx.types.u64,
-                                        Scalar::from_u64(if outcome { entered } else { zero }),
+                                        tcx.types.bool,
+                                        Scalar::from_bool(outcome),
                                         span,
                                     ),
                                 ]
@@ -10842,110 +10817,141 @@ fn instrument_runtime_decisions<'tcx>(
                                 span,
                                 cleanup,
                             ));
-                        }
-                        continuation = body.basic_blocks_mut().push(runtime_call_block(
-                            tcx,
-                            runtime.ordinal_hit,
-                            std::iter::once(Operand::const_from_scalar(
+                            if let (Some(token), Some((zero, entered))) =
+                                (plan.loop_token, plan.loop_alternatives)
+                            {
+                                let Some(branch_hit) = runtime.branch_hit else {
+                                    return Err(format!(
+                                        "loop decision {} has no branch-hit runtime",
+                                        plan.id
+                                    ));
+                                };
+                                continuation = body.basic_blocks_mut().push(runtime_call_block(
+                                    tcx,
+                                    branch_hit,
+                                    [
+                                        Operand::Copy(Place::from(token)),
+                                        Operand::const_from_scalar(
+                                            tcx,
+                                            tcx.types.u64,
+                                            Scalar::from_u64(if outcome { entered } else { zero }),
+                                            span,
+                                        ),
+                                    ]
+                                    .into_iter(),
+                                    Place::from(runtime.unit),
+                                    continuation,
+                                    span,
+                                    cleanup,
+                                ));
+                            }
+                            continuation = body.basic_blocks_mut().push(runtime_call_block(
                                 tcx,
-                                tcx.types.u64,
-                                Scalar::from_u64(if outcome {
-                                    plan.true_ordinal
-                                } else {
-                                    plan.false_ordinal
-                                }),
+                                runtime.ordinal_hit,
+                                std::iter::once(Operand::const_from_scalar(
+                                    tcx,
+                                    tcx.types.u64,
+                                    Scalar::from_u64(if outcome {
+                                        plan.true_ordinal
+                                    } else {
+                                        plan.false_ordinal
+                                    }),
+                                    span,
+                                )),
+                                Place::from(runtime.unit),
+                                continuation,
                                 span,
-                            )),
+                                cleanup,
+                            ));
+                        }
+                        let bridge = body.basic_blocks_mut().push(runtime_call_block(
+                            tcx,
+                            runtime.condition,
+                            [
+                                Operand::Copy(Place::from(token)),
+                                Operand::const_from_scalar(
+                                    tcx,
+                                    tcx.types.u64,
+                                    Scalar::from_u64(mapped.index),
+                                    span,
+                                ),
+                                Operand::const_from_scalar(
+                                    tcx,
+                                    tcx.types.bool,
+                                    Scalar::from_bool(value),
+                                    span,
+                                ),
+                            ]
+                            .into_iter(),
                             Place::from(runtime.unit),
                             continuation,
                             span,
                             cleanup,
                         ));
-                    }
-                    let bridge = body.basic_blocks_mut().push(runtime_call_block(
-                        tcx,
-                        runtime.condition,
-                        [
-                            Operand::Copy(Place::from(token)),
-                            Operand::const_from_scalar(
-                                tcx,
-                                tcx.types.u64,
-                                Scalar::from_u64(mapped.index),
-                                span,
-                            ),
-                            Operand::const_from_scalar(
-                                tcx,
-                                tcx.types.bool,
-                                Scalar::from_bool(value),
-                                span,
-                            ),
-                        ]
-                        .into_iter(),
-                        Place::from(runtime.unit),
-                        continuation,
-                        span,
-                        cleanup,
-                    ));
-                    let mut replaced = 0;
-                    body.basic_blocks_mut()[*source]
-                        .terminator_mut()
-                        .successors_mut(|edge| {
-                            if *edge == target {
-                                *edge = bridge;
-                                replaced += 1;
-                            }
-                        });
-                    if replaced > 0 {
-                        edge_bridges.insert((*source, target), bridge);
-                    }
-                    if replaced == 0 {
-                        // Name what the block targets now. Decisions are
-                        // injected after match arms and loop frames, and those
-                        // insert bridge blocks by rewriting the very edges the
-                        // decision plan recorded, so a missing edge may mean
-                        // "already redirected through a bridge" rather than
-                        // "never existed". The two need opposite fixes.
-                        let successors = body.basic_blocks[*source]
-                            .terminator()
-                            .successors()
-                            .collect::<Vec<_>>();
-                        return Err(format!(
-                            "decision {} condition {} {:?} edge from {:?} to {:?} was not \
+                        let mut replaced = 0;
+                        body.basic_blocks_mut()[*source]
+                            .terminator_mut()
+                            .successors_mut(|edge| {
+                                if *edge == target {
+                                    *edge = bridge;
+                                    replaced += 1;
+                                }
+                            });
+                        if replaced > 0 {
+                            edge_bridges.insert((*source, target), bridge);
+                        }
+                        if replaced == 0 {
+                            // Name what the block targets now. Decisions are
+                            // injected after match arms and loop frames, and those
+                            // insert bridge blocks by rewriting the very edges the
+                            // decision plan recorded, so a missing edge may mean
+                            // "already redirected through a bridge" rather than
+                            // "never existed". The two need opposite fixes.
+                            let successors = body.basic_blocks[*source]
+                                .terminator()
+                                .successors()
+                                .collect::<Vec<_>>();
+                            return Err(format!(
+                                "decision {} condition {} {:?} edge from {:?} to {:?} was not \
                              found; {:?} targeted {:?} across injection phases; {:?} now \
                              targets {:?}, whose own successors are {:?}, reaching {:?}",
-                            plan.id,
-                            mapped.index,
-                            value,
-                            source,
-                            target,
-                            source,
-                            snapshots
-                                .iter()
-                                .map(|(phase, blocks)| {
-                                    (
-                                        *phase,
-                                        blocks.get(source.as_usize()).cloned().unwrap_or_default(),
-                                    )
-                                })
-                                .collect::<Vec<_>>(),
-                            source,
-                            successors,
-                            successors
-                                .iter()
-                                .collect::<BTreeSet<_>>()
-                                .into_iter()
-                                .map(|successor| {
-                                    (
-                                        *successor,
-                                        body.basic_blocks[*successor]
-                                            .terminator()
-                                            .successors()
-                                            .collect::<Vec<_>>(),
-                                    )
-                                })
-                                .collect::<Vec<_>>(),
-                            target
-                        ));
+                                plan.id,
+                                mapped.index,
+                                value,
+                                source,
+                                target,
+                                source,
+                                snapshots
+                                    .iter()
+                                    .map(|(phase, blocks)| {
+                                        (
+                                            *phase,
+                                            blocks
+                                                .get(source.as_usize())
+                                                .cloned()
+                                                .unwrap_or_default(),
+                                        )
+                                    })
+                                    .collect::<Vec<_>>(),
+                                source,
+                                successors,
+                                successors
+                                    .iter()
+                                    .collect::<BTreeSet<_>>()
+                                    .into_iter()
+                                    .map(|successor| {
+                                        (
+                                            *successor,
+                                            body.basic_blocks[*successor]
+                                                .terminator()
+                                                .successors()
+                                                .collect::<Vec<_>>(),
+                                        )
+                                    })
+                                    .collect::<Vec<_>>(),
+                                target
+                            ));
+                        }
                     }
                 }
             }
