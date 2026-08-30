@@ -1138,10 +1138,23 @@ function obligationFor(manifestRecord, definition) {
   );
 }
 
+// Obligation ranges are Rust BYTE offsets. Slicing a JS string by them silently
+// desynchronises after the first multi-byte character: one em dash is three
+// bytes and one string index, so a file with four of them shifts every later
+// extraction by eight positions. That is not a visible failure — the text comes
+// back sliced mid-token, which can make an assertion pass as easily as fail,
+// and it produced a confident wrong root cause during the maps-to-zero
+// investigation before it was caught. Slice bytes and decode the slice.
+const sourceBytes = new Map();
 function obligationSource(sources, obligation) {
   const source = sources[obligation.sourceKey];
   assert(source, `missing source snapshot ${obligation.sourceKey}`);
-  return source.source.slice(obligation.start, obligation.end);
+  let bytes = sourceBytes.get(source.source);
+  if (!bytes) {
+    bytes = Buffer.from(source.source, 'utf8');
+    sourceBytes.set(source.source, bytes);
+  }
+  return bytes.subarray(obligation.start, obligation.end).toString('utf8');
 }
 
 function decisionFor(manifestRecord, definition) {
