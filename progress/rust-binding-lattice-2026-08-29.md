@@ -2558,3 +2558,56 @@ counters, and binding against its `Code` and `Branch` mappings instead of our ow
 MIR analysis is still worth doing. But its counters genuinely cannot carry the
 two things the north star's MC/DC and per-test claims depend on. The redundancy
 is in the *binding analysis*, not in the probes.
+
+## Research: what LLVM can express, and why our probes stay
+
+Reading upstream rather than inferring from the local toolchain changes two of
+the conclusions above.
+
+**MC/DC is expressible in LLVM, and rustc used to expose it.** `MappingKind`
+carried `MCDCBranch` and `MCDCDecision` until they were removed in
+rust-lang/rust#144999, on the grounds that the MC/DC code was "a major burden on
+overall maintenance of coverage instrumentation, and a major obstacle to other
+planned improvements, such as internal changes needed for proper support of
+macro expansion regions." Re-implementation of both DC and MC/DC is a 2026
+roadmap goal with AdaCore committing to ongoing maintenance. So the capability is
+not impossible — it is *absent from 1.95 and returning later*.
+
+**How LLVM expresses it matters more than the fact that it can.** Each decision
+gets a bitmap of 2^n bits for n conditions. As conditions evaluate, a *local*
+temporary accumulates the condition vector; when the outcome is reached, one bit
+is set in the bitmap at the index that vector encodes. Bitmaps merge by OR, and
+llvm-cov recovers the executed test vectors from the set bits. That is a handful
+of ordinary instructions per decision — no calls.
+
+**Per-thread counters are not available.** The LLVM RFC for putting profiling
+counters in thread-local storage (llvm-project#95494) is explicitly experimental,
+aggregates per-thread values into the globals only *at thread exit*, and says
+nothing about reading them per thread at runtime or about making MC/DC bitmaps
+thread-local. It also only works "when no threads are left running and the main
+thread calls exit". So there is no upstream mechanism today for attributing hits
+to a test under parallel execution.
+
+### What this settles
+
+Our probes stay, and for a sharper reason than before: rustc 1.95 cannot express
+MC/DC *at all* right now, and nothing upstream provides per-test attribution
+under parallelism. Both of the things our 3.2x buys are genuinely unavailable
+from the integrated pipeline.
+
+But the *shape* of LLVM's instrumentation is the target, and it is proven at
+1.04x on the same workload:
+
+| | LLVM | ours today | ours, target |
+| --- | --- | --- | --- |
+| region hit | one `add` in an existing block | `Call` + block split | statement, thread-local base |
+| MC/DC | local temp accumulates vector, one bitmap bit set per decision | `Call` per condition and per decision | local temp + one thread-local bitmap update |
+| attribution | none (global) | thread-local context in runtime | thread-local base *is* the attribution |
+
+The thread-local base is the whole trick: it is what LLVM lacks and what makes
+per-test attribution work without serialising, and it costs the same as LLVM's
+global base because TLS access on both targets is a register-relative load.
+
+Which also means MC/DC gets *cheaper*, not just faster. Today each condition
+costs a call; under the bitmap scheme a decision with n conditions costs n cheap
+accumulations plus one bitmap write, regardless of n.
