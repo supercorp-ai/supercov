@@ -12034,10 +12034,29 @@ fn escape(value: &str) -> String {
     // canonical strings, which are separated by NUL bytes and therefore ALWAYS
     // need escaping. Runs make the common stretch a memcpy and leave only the
     // handful of escapes to handle individually.
+    // A table lookup per byte rather than a match chain, so the common stretch
+    // between escapes is a tight scan and only the table hits branch.
+    const NEEDS_ESCAPE: [bool; 256] = {
+        let mut table = [false; 256];
+        let mut index = 0;
+        while index < 0x20 {
+            table[index] = true;
+            index += 1;
+        }
+        table[b'\\' as usize] = true;
+        table[b'"' as usize] = true;
+        table
+    };
     let bytes = value.as_bytes();
     let mut escaped = String::new();
     let mut copied = 0;
-    for (index, byte) in bytes.iter().enumerate() {
+    let mut index = 0;
+    while index < bytes.len() {
+        if !NEEDS_ESCAPE[bytes[index] as usize] {
+            index += 1;
+            continue;
+        }
+        let byte = &bytes[index];
         let replacement = match byte {
             b'\\' => "\\\\",
             b'"' => "\\\"",
@@ -12056,9 +12075,10 @@ fn escape(value: &str) -> String {
                 escaped.push(char::from(HEX[usize::from(byte >> 4)]));
                 escaped.push(char::from(HEX[usize::from(byte & 0x0f)]));
                 copied = index + 1;
+                index += 1;
                 continue;
             }
-            _ => continue,
+            _ => unreachable!("table only flags escapable bytes"),
         };
         if escaped.is_empty() {
             escaped.reserve(value.len() + 16);
@@ -12066,6 +12086,7 @@ fn escape(value: &str) -> String {
         escaped.push_str(&value[copied..index]);
         escaped.push_str(replacement);
         copied = index + 1;
+        index += 1;
     }
     if copied == 0 {
         return value.to_owned();
