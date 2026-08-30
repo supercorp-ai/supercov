@@ -2254,3 +2254,37 @@ this design removes. Serialising only when per-test attribution is requested is
 very likely cheaper than paying 220% CPU on every build. If it is not, the
 hybrid stays available — rustc's counters for the denominator, probes only where
 per-test data is actually asked for.
+
+### What per-test attribution costs, and why it settles into a default
+
+Counters are one global array, so attributing them per test means serialising.
+Measured on `bytes-1.12.1`'s real suite, warm, under `-C instrument-coverage`:
+
+| run | wall |
+| --- | --- |
+| parallel (default threads) | 38.4s |
+| serial (`--test-threads=1`) | 64.0s |
+
+**1.67x on test wall, against 2.6x on compile wall.** Which of those is the
+better trade depends entirely on the project, and the two cases point opposite
+ways:
+
+- **Compile-dominated** work — most libraries, most CI — wins clearly with the
+  structural design: 1.04x compile, and serialisation only when attribution is
+  actually requested.
+- **Test-dominated** suites like `bytes`, where tests take 38s against a few
+  seconds of compiling, would pay *more* for serialising than our current
+  instrumentation costs them.
+
+So this is a default rather than an algorithm. Whole-run coverage from rustc's
+counters, parallel tests, 1.04x compile — structurally fast, not cached-fast —
+with per-test attribution as an explicit mode that serialises. Users who want
+per-test data pay 1.67x on tests instead of everyone paying 220% CPU on every
+build.
+
+Two things remain unmeasured and both would strengthen the case. The **runtime**
+cost of our probes against LLVM counters has never been timed — the numbers
+above are all `-C instrument-coverage`, and the same suite under supercov's
+probes is unknown. And **one test per process** would give attribution without
+serialising within a process, since counters are per-process; the cost is
+process spawn per test, which for a suite of small tests may beat both options.
