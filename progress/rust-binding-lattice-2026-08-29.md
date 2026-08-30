@@ -605,3 +605,40 @@ The first run of that gate passed for the wrong reason — a stale cargo target
 directory served a cached rlib, so the wrapper never ran and the manifest was
 the previous one. Same false-green mechanism as earlier in this work; a gate
 that cannot recompile must fail loudly rather than read whatever is on disk.
+
+## Why zmij's decisions decline: counters are not the coverage graph
+
+zmij is the worst-exactness real crate at 63.07%, and all seven of its
+decision-bind failures read
+
+    coverage block N for rs:decision:... maps to 0 MIR blocks
+
+The binder indexes coverage basic blocks by scanning the body for
+`CoverageKind::VirtualCounter` statements. Extending the diagnosis to list
+which BCBs *do* carry a counter settled the cause immediately: the missing one
+is always a lone interior gap in an otherwise dense run — bcb 25 missing from
+`[0..24, 26, 27]`, bcb 7 from `[0..6, 8, 9]`, bcb 43 from `[0..36, 50..59]`.
+
+Nothing was optimised away and the mapping logic is sound. rustc minimises
+physical counters: a BCB whose count follows arithmetically from other
+counters carries no counter statement at all. Counter statements are a lossy
+projection of the coverage graph, and the binder was treating them as the
+graph itself. These decisions are compiled and do execute, so this is not the
+unmeasurable class — it is exactness being lost to a wrong assumption.
+
+The obvious repair does not survive contact. Deriving the uncounted side from
+the unique two-way switch that reaches the known target — requiring the
+recovered block to be entered by that edge alone — gains nothing and produces
+wrong bindings: three of the seven then failed the misbind post-condition with
+`condition 1 bound the same switch edge (1, 2, 3) as condition 0`. A
+decision's conditions may legitimately share a target, since `a && b` sends
+both false edges to the same block, so a whole-body search finds a switch
+belonging to a different condition. The post-condition caught it, which is the
+invariant earning its keep, but plausible is not provable and it was reverted.
+
+The first-principles direction is to reconstruct the coverage graph the way
+rustc builds it, from the MIR CFG, rather than infer it from counters. That
+yields every BCB, not just the counted ones, and it comes with its own proof:
+every BCB that does carry a counter must land on that counter's block. Making
+that agreement a hard post-condition — decline the body if the reconstruction
+disagrees anywhere — is what turns the recovery from plausible into provable.

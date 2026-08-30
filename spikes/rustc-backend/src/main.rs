@@ -7838,10 +7838,19 @@ fn runtime_decision_plans<'tcx>(
                         let blocks = bcb_blocks.get(&bcb).cloned().unwrap_or_default();
                         match blocks.as_slice() {
                             [block] => Ok(*block),
+                            // rustc minimises physical counters: a BCB whose
+                            // count follows arithmetically from other counters
+                            // carries no VirtualCounter statement, so it is
+                            // invisible here. Listing the BCBs that do have
+                            // counters distinguishes that from a removed
+                            // block, which would need the opposite treatment.
                             _ => Err(format!(
-                                "coverage block {bcb} for {} maps to {} MIR blocks",
+                                "coverage block {bcb} for {} maps to {} MIR blocks; \
+                                 counters present for BCBs {:?} of {} blocks",
                                 decision.identity.id,
-                                blocks.len()
+                                blocks.len(),
+                                bcb_blocks.keys().copied().collect::<Vec<_>>(),
+                                body.basic_blocks.len()
                             )),
                         }
                     };
