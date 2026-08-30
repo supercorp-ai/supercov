@@ -2168,3 +2168,51 @@ a crate with validated cfg-disabled code should fail outright.
 The corpus chain would probably have caught this at the fixtures. But the
 ratchet is what gates every binder change during development, it runs in two
 minutes against the chain's twenty, and it said *held or improved*.
+
+## The structural cost: two instrumentation systems, one shipped
+
+Measured back to back on a real-crate probe (serde_json + http + dependencies),
+each with a fresh target directory:
+
+| build | wall | CPU |
+| --- | --- | --- |
+| plain | 1.54s | 2.07s |
+| rustc `-C instrument-coverage` | 1.60s | **2.15s — 1.04x** |
+| supercov | 3.93s | **6.62s — 3.2x** |
+
+**rustc's own coverage instrumentation is essentially free.** Four percent of
+CPU. Ours costs another 220% on top of it — and main.rs:2995 sets
+`instrument_coverage = InstrumentCoverage::Yes`, so every supercov build already
+pays rustc's pipeline in full.
+
+We consume half of what we pay for. rustc computes coverage graphs, emits
+`VirtualCounter` statements, builds `function_coverage_info` mappings and links
+LLVM counter arrays. We read the **mappings** — to learn which block group is
+which branch — and discard the **counters**, injecting our own in their place:
+bridge blocks, edge rewrites, `runtime_call_block` calls, and the misbind
+post-conditions and relocation composition that exist to keep those injections
+correct. Much of what this session repaired is machinery guarding a second
+counter system we did not need to build.
+
+The reason it exists is **per-test attribution**. LLVM counters are one global
+array dumped at exit, giving whole-run totals; our probes carry a context id so
+a hit can be traced to the test that caused it. That requirement, not the
+measurement, forced the second pipeline.
+
+Which reframes the performance problem entirely. The question is not "how do we
+make our instrumentation cheaper" — it is **"can per-test attribution be
+obtained from rustc's counters"**. Reset them between tests and read the deltas,
+and the whole injection layer disappears along with its failure modes.
+
+The objection to answer first is parallelism: libtest runs tests in threads
+against one global array, so naive snapshot deltas interleave and attribution
+becomes *wrong* rather than coarse. Three routes, cheapest first — serialise
+only when attribution is requested and measure what that costs; per-context
+counter sections if LLVM's runtime can provide them; or a hybrid using rustc's
+counters for the denominator and probes only where per-test data is actually
+asked for.
+
+Also worth recording: the 3.60s "baseline" quoted earlier in this work was
+measured under contention. The real figure is 1.54s, which makes supercov 2.6x
+wall rather than 1.31x. Every comparison in this section was re-run back to back
+for that reason.
