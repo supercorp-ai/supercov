@@ -621,6 +621,23 @@ pub fn authored(value: bool) -> usize {
     if value { 1 } else { 2 }
 }
 
+/// One cfg!-eliminated statement sharing a body with ordinary ones. The
+/// eliminated statement must be declined as unmeasured while its neighbours
+/// stay instrumented and are reported COVERED -- the defect fixed in 413d2e2
+/// left every other statement in such a body uninstrumented, so they never
+/// fired and were reported uncovered.
+pub fn eliminated_neighbours(value: usize, log: &mut Vec<&'static str>) -> usize {
+    log.push("before-eliminated");
+    let total = if cfg!(target_os = "none") {
+        let eliminated_statement = value + 211;
+        eliminated_statement
+    } else {
+        value + 223
+    };
+    log.push("after-eliminated");
+    total
+}
+
 pub fn statement_paths(value: bool, log: &mut Vec<&'static str>) {
     if value {
         log.push("true-path");
@@ -678,8 +695,8 @@ pub enum SharedBodyChoice {
 }
 
 /// The body fragment is written once and expanded into BOTH arms, so the arms
-/// carry the identical body span. Spans cannot tell them apart — MIR puts the
-/// scrutinee span on the test blocks, not the arm patterns — so binding has to
+/// carry the identical body span. Spans cannot tell them apart -- MIR puts the
+/// scrutinee span on the test blocks, not the arm patterns -- so binding has to
 /// separate them by the discriminant instead.
 macro_rules! shared_arm_body_macro {
     ($value:expr, $pattern:pat => $result:expr) => {
@@ -701,7 +718,7 @@ pub fn negated_chain(first: bool, second: bool) -> usize {
 }
 
 /// The same shape with a compile-time operand. `cfg!` folds away, leaving no
-/// switch for a decomposed condition to bind to, so this one must stay atomic —
+/// switch for a decomposed condition to bind to, so this one must stay atomic --
 /// and must keep its decision rather than dropping out of the denominator.
 pub fn negated_chain_with_cfg(first: bool, second: bool) -> usize {
     // `none` is a known target_os (bare metal), so this is false on every
@@ -1030,6 +1047,9 @@ mod tests {
         let mut paths = Vec::new();
         statement_paths(true, &mut paths);
         assert_eq!(paths, ["true-path", "after-path"]);
+        let mut neighbours = Vec::new();
+        assert_eq!(eliminated_neighbours(2, &mut neighbours), 225);
+        assert_eq!(neighbours, ["before-eliminated", "after-eliminated"]);
         assert_eq!(fallible(2), Ok(3));
         let log = std::cell::RefCell::new(Vec::new());
         assert_eq!(drop_order(&log), 23);

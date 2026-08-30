@@ -6694,6 +6694,53 @@ try {
     'unexecuted false-branch statement was falsely reported as covered',
   );
 
+  // The uncovered-vs-unmeasured defect (fixed in 413d2e2): a body whose first
+  // statement failure was unmeasurable got NO statement probes at all, so every
+  // other statement in it never fired and was reported UNCOVERED. Classification
+  // alone cannot catch that — it needs execution evidence, which is why this
+  // lives here rather than in the build-only lattice gate.
+  const neighbourPoints = runtimeManifest.points.filter(
+    ({kind, definitions}) =>
+      kind === 'statement' && definitions.includes('eliminated_neighbours'),
+  );
+  const neighbourOrdinal = (fragment) => {
+    const matches = neighbourPoints.filter(
+      (point) =>
+        obligationSource(runtimeSources, point).includes(fragment) &&
+        // The enclosing `let total = if cfg!(..)` statement spans the whole
+        // if-else, so its text contains the inner fragments too. Exclude it the
+        // same way the statement_paths assertions exclude their `if`.
+        !obligationSource(runtimeSources, point).includes('cfg!'),
+    );
+    assert.equal(
+      matches.length,
+      1,
+      `expected one eliminated_neighbours statement point for ${fragment}`,
+    );
+    return matches[0];
+  };
+  const neighbourDeclined = new Set(runtimeManifest.unmeasuredObligations ?? []);
+  for (const fragment of ['"before-eliminated"', '"after-eliminated"']) {
+    const point = neighbourOrdinal(fragment);
+    assert(
+      !neighbourDeclined.has(point.id),
+      `${fragment} must stay measured despite sharing a body with an eliminated statement`,
+    );
+    assert(
+      testOrdinals.has(point.probeOrdinal),
+      `${fragment} executed but was not reported covered`,
+    );
+  }
+  const eliminatedPoint = neighbourOrdinal('value + 211');
+  assert(
+    neighbourDeclined.has(eliminatedPoint.id),
+    'the cfg-eliminated statement must be declined as unmeasured',
+  );
+  assert(
+    !testOrdinals.has(eliminatedPoint.probeOrdinal),
+    'the cfg-eliminated statement cannot have executed',
+  );
+
   const concurrentTransport = createTransport('concurrent-tests');
   const concurrentTests = run(
     'cargo',
