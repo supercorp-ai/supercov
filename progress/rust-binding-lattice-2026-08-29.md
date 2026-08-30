@@ -1497,13 +1497,24 @@ This is the condition-level analogue of two shapes already solved: logical
 selection branches mapping to zero regions, and decisions sharing one CFG edge.
 One authored construct, several MIR sites.
 
-The fix is to bind every switch whose range equals the condition's and union
-their outcomes — the condition is exercised if any site is. It is deliberately
-not done blind, because the one-switch rule is *also* what catches genuine
-misbinds. The guard has to be exact range equality plus `is_bool`, never
-overlap or nearest-match, with a post-condition that the union covers the same
-outcome set a single switch would, and a fixture where one condition is reached
-by two paths.
+The obvious fix — bind every switch whose range equals the condition's and
+union their outcomes — turns out to be blocked by the data model, which is
+worth knowing before anyone starts. `RuntimeDecisionCondition` carries
+`true_sources` and `false_sources` as **vectors** but `true_target` and
+`false_target` as **single blocks**. Two switches that branch to different
+targets therefore cannot be represented at all: the vectors express "several
+blocks branch to one target", not "several switches with their own targets".
+
+So the work is one of two things, and which one depends on a fact not yet
+measured: **do bb46 and bb62 share their true/false targets?** If they do, the
+union is expressible today and the change is the guarded relaxation described
+above — exact range equality plus `is_bool`, never overlap or nearest-match,
+with a post-condition that the union covers the same outcome set a single
+switch would. If they do not, `RuntimeDecisionCondition` needs per-source
+targets first, and that is a considerably larger change touching injection.
+
+Measure that first. It is a small instrumented run over serde_json's
+`deserialize_any`, and it decides whether this is a guard or a refactor.
 
 Worth stating plainly what the −0.03 is: serde_json measures 4458 obligations
 against a 3256 baseline, 37% more, while declines rose by 16. That is honest
