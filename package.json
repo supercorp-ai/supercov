@@ -36,6 +36,7 @@
     "build": "cargo build -p supercov",
     "sync:rust-assets": "node scripts/sync-rust-package-assets.mjs",
     "test:rust-assets": "node scripts/sync-rust-package-assets.mjs --check",
+    "check:rustc-backend-spike": "(cd spikes/rustc-backend && RUSTC_BOOTSTRAP=1 RUSTUP_TOOLCHAIN=1.95.0 cargo fmt --check && RUSTC_BOOTSTRAP=1 RUSTUP_TOOLCHAIN=1.95.0 cargo clippy --all-targets -- -D warnings)",
     "test:rustc-backend-spike": "node scripts/rustc-backend-spike.mjs",
     "test:rust-compiler-spikes": "cargo build -p supercov && node scripts/rust-libtest-companion-spike.mjs && node scripts/rust-async-attribution-spike.mjs && node scripts/rust-subprocess-attribution-spike.mjs && node scripts/rust-custom-harness-spike.mjs && node scripts/rust-libtest-builder-lifecycle-spike.mjs",
     "test:rust-cargo-runner": "cargo build -p supercov && node scripts/rust-cargo-runner-integration.mjs",

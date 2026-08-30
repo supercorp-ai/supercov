@@ -2267,6 +2267,10 @@ fn external_macro_condition<'tcx>(
             .is_some_and(|macro_def| macro_def.is_local())
 }
 
+// The binder threads compiler state — tcx, def id, crate name, body,
+// output buffers — and grouping it into a struct is the abstract-CFG
+// extraction tracked separately, not a rename to satisfy a lint.
+#[allow(clippy::too_many_arguments)]
 fn flatten_decision_expression<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: rustc_span::def_id::DefId,
@@ -3589,9 +3593,7 @@ fn recovered_edge_literal<'tcx>(
     let mut bytes = BTreeMap::new();
     let mut length = None;
     for _ in 0..body.basic_blocks.len() {
-        let Some(predecessor) = test_predecessor(current) else {
-            return None;
-        };
+        let predecessor = test_predecessor(current)?;
         let predecessor = &predecessor;
         let terminator = body.basic_blocks[*predecessor].terminator();
         let TerminatorKind::SwitchInt { discr, targets } = &terminator.kind else {
@@ -5039,6 +5041,10 @@ fn assertion_context_marker_tag(decision_id: &str, suspension: usize, kind: &str
     u64::from_be_bytes(hash.finalize()[..8].try_into().expect("SHA-256 prefix"))
 }
 
+// The binder threads compiler state — tcx, def id, crate name, body,
+// output buffers — and grouping it into a struct is the abstract-CFG
+// extraction tracked separately, not a rename to satisfy a lint.
+#[allow(clippy::too_many_arguments)]
 fn assertion_context_marker_block<'tcx>(
     tcx: TyCtxt<'tcx>,
     marker_function: LocalDefId,
@@ -7922,7 +7928,7 @@ thread_local! {
     /// 86% of samples under the pre-optimization phase, with the collector's
     /// `visit_expr` recursion the dominant frame beneath it.
     static BODY_OBLIGATIONS: RefCell<BTreeMap<u32, Option<RuntimeBodyObligations>>> =
-        RefCell::new(BTreeMap::new());
+        const { RefCell::new(BTreeMap::new()) };
 }
 
 fn runtime_body_obligations(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<RuntimeBodyObligations> {
@@ -10238,6 +10244,10 @@ struct MatchRewrites {
     relocations: BTreeMap<BasicBlock, BasicBlock>,
 }
 
+// The binder threads compiler state — tcx, def id, crate name, body,
+// output buffers — and grouping it into a struct is the abstract-CFG
+// extraction tracked separately, not a rename to satisfy a lint.
+#[allow(clippy::too_many_arguments)]
 fn instrument_runtime_matches<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &mut Body<'tcx>,
@@ -10737,7 +10747,6 @@ fn instrument_runtime_decisions<'tcx>(
                     // precisely this pair. Walk the chain, since several plans
                     // may already have claimed the edge. Bounded by the map
                     // size so a cycle can never spin.
-                    let mut target = target;
                     for _ in 0..=edge_bridges.len() {
                         if body.basic_blocks[*source]
                             .terminator()
