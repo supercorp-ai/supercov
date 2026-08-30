@@ -11958,6 +11958,18 @@ fn sanitize(value: &str) -> String {
 }
 
 fn escape(value: &str) -> String {
+    // Almost every string escaped here — obligation ids, source keys,
+    // definition paths, canonical strings — contains nothing that needs
+    // escaping. Walking it a character at a time and pushing each one was the
+    // hottest frame in the wrapper's profile on an obligation-dense crate,
+    // ahead of everything in collection. A byte scan settles the common case,
+    // and the copy is then a single memcpy.
+    if !value
+        .bytes()
+        .any(|byte| matches!(byte, b'\\' | b'"') || byte <= 0x1f)
+    {
+        return value.to_owned();
+    }
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         match character {
