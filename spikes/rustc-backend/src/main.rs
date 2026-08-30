@@ -12028,34 +12028,49 @@ fn sanitize(value: &str) -> String {
 }
 
 fn escape(value: &str) -> String {
-    // Almost every string escaped here — obligation ids, source keys,
-    // definition paths, canonical strings — contains nothing that needs
-    // escaping. Walking it a character at a time and pushing each one was the
-    // hottest frame in the wrapper's profile on an obligation-dense crate,
-    // ahead of everything in collection. A byte scan settles the common case,
-    // and the copy is then a single memcpy.
-    if !value
-        .bytes()
-        .any(|byte| matches!(byte, b'\\' | b'"') || byte <= 0x1f)
-    {
+    // Copy the runs between escapes rather than pushing one character at a
+    // time. This was the hottest frame in the wrapper twice over: first as a
+    // `Chars` loop, then as a byte scan that still fell back to that loop for
+    // canonical strings, which are separated by NUL bytes and therefore ALWAYS
+    // need escaping. Runs make the common stretch a memcpy and leave only the
+    // handful of escapes to handle individually.
+    let bytes = value.as_bytes();
+    let mut escaped = String::new();
+    let mut copied = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        let replacement = match byte {
+            b'\\' => "\\\\",
+            b'"' => "\\\"",
+            b'\n' => "\\n",
+            b'\r' => "\\r",
+            b'\t' => "\\t",
+            0..=0x1f => {
+                if escaped.is_empty() {
+                    escaped.reserve(value.len() + 16);
+                }
+                escaped.push_str(&value[copied..index]);
+                // The only remaining controls are ASCII, so the four hex digits
+                // are two fixed zeros and one byte.
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                escaped.push_str("\\u00");
+                escaped.push(char::from(HEX[usize::from(byte >> 4)]));
+                escaped.push(char::from(HEX[usize::from(byte & 0x0f)]));
+                copied = index + 1;
+                continue;
+            }
+            _ => continue,
+        };
+        if escaped.is_empty() {
+            escaped.reserve(value.len() + 16);
+        }
+        escaped.push_str(&value[copied..index]);
+        escaped.push_str(replacement);
+        copied = index + 1;
+    }
+    if copied == 0 {
         return value.to_owned();
     }
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            character if character <= '\u{001f}' => {
-                use std::fmt::Write as _;
-                write!(&mut escaped, "\\u{:04x}", character as u32)
-                    .expect("writing to a string cannot fail");
-            }
-            character => escaped.push(character),
-        }
-    }
+    escaped.push_str(&value[copied..]);
     escaped
 }
 
