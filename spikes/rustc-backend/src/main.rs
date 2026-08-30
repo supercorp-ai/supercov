@@ -8649,6 +8649,119 @@ fn runtime_logical_selection_plans<'tcx>(
                     (source == mapping_source).then_some((*true_bcb, *false_bcb))
                 })
                 .collect::<Vec<_>>();
+            let build_selection_plan = |true_target: BasicBlock,
+                                        false_target: BasicBlock|
+             -> Result<RuntimeMatchPlan, String> {
+                let start_block = nearest_common_dominator(&dominators, true_target, false_target)
+                    .ok_or_else(|| {
+                        format!(
+                            "logical-selection branch {} has no common MIR dominator",
+                            branch.identity.id
+                        )
+                    })?;
+                let incoming = |target: BasicBlock| {
+                    body.basic_blocks.predecessors()[target]
+                        .iter()
+                        .copied()
+                        .filter(|source| dominators.dominates(start_block, *source))
+                        .collect::<Vec<_>>()
+                };
+                let (evaluated_target, short_target) = match branch.discriminator.as_str() {
+                    "logical-selection:and" => (true_target, false_target),
+                    "logical-selection:or" => (false_target, true_target),
+                    other => {
+                        return Err(format!(
+                            "logical-selection branch {} has unknown discriminator {other}",
+                            branch.identity.id
+                        ));
+                    }
+                };
+                let evaluated_sources = incoming(evaluated_target);
+                let short_sources = incoming(short_target);
+                if evaluated_sources.is_empty() || short_sources.is_empty() {
+                    return Err(format!(
+                        "logical-selection branch {} has incomplete terminal edges ({}/{})",
+                        branch.identity.id,
+                        short_sources.len(),
+                        evaluated_sources.len()
+                    ));
+                }
+                let alternative = |label: &str| {
+                    branch
+                        .alternatives
+                        .iter()
+                        .find(|alternative| alternative.label == label)
+                        .ok_or_else(|| {
+                            format!(
+                                "logical-selection branch {} lacks {label}",
+                                branch.identity.id
+                            )
+                        })
+                };
+                let short = alternative("short-circuited")?;
+                let evaluated = alternative("right operand evaluated")?;
+                Ok(RuntimeMatchPlan {
+                    id: branch.identity.id.clone(),
+                    start_block,
+                    token: None,
+                    arms: vec![
+                        RuntimeMatchArm {
+                            branch_id: short.identity.id.clone(),
+                            entry_block: short_target,
+                            entry_sources: short_sources,
+                            selected_ordinal: short.identity.probe_ordinal,
+                        },
+                        RuntimeMatchArm {
+                            branch_id: evaluated.identity.id.clone(),
+                            entry_block: evaluated_target,
+                            entry_sources: evaluated_sources,
+                            selected_ordinal: evaluated.identity.probe_ordinal,
+                        },
+                    ],
+                })
+            };
+            // rustc emits no branch region for a span inside a macro expansion,
+            // so a body whose branching is entirely macro-generated yields an
+            // EMPTY mapping set — http's `try_append2` and serde_json's
+            // `parse_integer` are the cases in the wild, and the diagnostic
+            // says `available: []` rather than naming a rival range. Decisions
+            // already fall through to finding the switch structurally when the
+            // mapping is absent; selections declined instead. Find the
+            // short-circuit's own switch by its span, which is what the mapping
+            // would have pointed at.
+            if matches.is_empty() {
+                let structural = body
+                    .basic_blocks
+                    .iter_enumerated()
+                    .filter(|(_, data)| {
+                        let TerminatorKind::SwitchInt { discr, .. } = &data.terminator().kind
+                        else {
+                            return false;
+                        };
+                        discr.ty(&body.local_decls, tcx) == tcx.types.bool
+                            && stable_source_range(
+                                tcx,
+                                data.terminator().source_info.span,
+                                &obligations.crate_name,
+                            )
+                            .is_ok_and(|range| &range == mapping_source)
+                    })
+                    .map(|(block, data)| {
+                        let TerminatorKind::SwitchInt { targets, .. } = &data.terminator().kind
+                        else {
+                            unreachable!("filtered to SwitchInt");
+                        };
+                        // MIR encodes a bool switch as [0: false, otherwise:
+                        // true]. Asking for value 1 falls through to the
+                        // otherwise arm, which would make both targets the same
+                        // block and leave the terminal edges empty.
+                        (block, targets.otherwise(), targets.target_for_value(0))
+                    })
+                    .collect::<Vec<_>>();
+                if let [(_, true_target, false_target)] = structural.as_slice() {
+                    return build_selection_plan(*true_target, *false_target);
+                }
+            }
             let [(true_bcb, false_bcb)] = matches.as_slice() else {
                 return Err(format!(
                     "logical-selection branch {} maps to {} rustc branches at {}:{}-{}; available: {:?}",
@@ -8676,75 +8789,7 @@ fn runtime_logical_selection_plans<'tcx>(
                     )),
                 }
             };
-            let true_target = unique_block(*true_bcb)?;
-            let false_target = unique_block(*false_bcb)?;
-            let start_block = nearest_common_dominator(&dominators, true_target, false_target)
-                .ok_or_else(|| {
-                    format!(
-                        "logical-selection branch {} has no common MIR dominator",
-                        branch.identity.id
-                    )
-                })?;
-            let incoming = |target: BasicBlock| {
-                body.basic_blocks.predecessors()[target]
-                    .iter()
-                    .copied()
-                    .filter(|source| dominators.dominates(start_block, *source))
-                    .collect::<Vec<_>>()
-            };
-            let (evaluated_target, short_target) = match branch.discriminator.as_str() {
-                "logical-selection:and" => (true_target, false_target),
-                "logical-selection:or" => (false_target, true_target),
-                other => {
-                    return Err(format!(
-                        "logical-selection branch {} has unknown discriminator {other}",
-                        branch.identity.id
-                    ));
-                }
-            };
-            let evaluated_sources = incoming(evaluated_target);
-            let short_sources = incoming(short_target);
-            if evaluated_sources.is_empty() || short_sources.is_empty() {
-                return Err(format!(
-                    "logical-selection branch {} has incomplete terminal edges ({}/{})",
-                    branch.identity.id,
-                    short_sources.len(),
-                    evaluated_sources.len()
-                ));
-            }
-            let alternative = |label: &str| {
-                branch
-                    .alternatives
-                    .iter()
-                    .find(|alternative| alternative.label == label)
-                    .ok_or_else(|| {
-                        format!(
-                            "logical-selection branch {} lacks {label}",
-                            branch.identity.id
-                        )
-                    })
-            };
-            let short = alternative("short-circuited")?;
-            let evaluated = alternative("right operand evaluated")?;
-            Ok(RuntimeMatchPlan {
-                id: branch.identity.id.clone(),
-                start_block,
-                token: None,
-                arms: vec![
-                    RuntimeMatchArm {
-                        branch_id: short.identity.id.clone(),
-                        entry_block: short_target,
-                        entry_sources: short_sources,
-                        selected_ordinal: short.identity.probe_ordinal,
-                    },
-                    RuntimeMatchArm {
-                        branch_id: evaluated.identity.id.clone(),
-                        entry_block: evaluated_target,
-                        entry_sources: evaluated_sources,
-                        selected_ordinal: evaluated.identity.probe_ordinal,
-                    },
-                ],
-            })
+            build_selection_plan(unique_block(*true_bcb)?, unique_block(*false_bcb)?)
         })();
         match planned {
             Ok(plan) => plans.push(plan),
