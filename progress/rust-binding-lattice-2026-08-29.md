@@ -781,3 +781,56 @@ those counts the exemption compared against zero and was permissive by
 construction; the re-baseline made it real.
 
 When a gate blocks a change, the gate is a hypothesis too.
+
+## One rewrite, two stages, five wrong turns
+
+Logical-selection binding aborted on its first failure, declining every branch
+obligation in the body — 645 across the crate set. The failures themselves are
+correct: `cfg!(feature = "full") && input.peek(..)` has a constant left
+operand, rustc folds it, and no branch region exists. Only the collateral was
+wrong.
+
+Declining per branch instead gained syn and http and collapsed
+build_script_build from 70% to 37.86%, through a single new
+`inject Rust decision probes` limitation — an inject failure returns the
+pristine body, so one limitation cost 45 of 140 obligations.
+
+Finding out why took five attempts, and every wrong turn came from reading
+part of a diagnostic that was complete on the first run:
+
+    condition 0 true edge from bb86 to bb87 was not found;
+    bb86 targeted [("before injection", [bb88, bb87]),
+                   ("after match arms", [bb139]), ...];
+    bb86 now targets [bb139], whose own successors are
+    [(bb139, [bb138, bb137])], reaching bb87
+
+Edge invalidation in general, refuted by inspection. Match bridges, refuted by
+measurement when a cross-phase bridge map changed nothing. The two
+`mem::replace` relocation sites, refuted by checking their enclosing functions
+— one is never called from this path, the other runs after the snapshot that
+already shows the change. Then a relocation map alone, which also changed
+nothing.
+
+`instrument_runtime_matches` applies **two** rewrites, and a recorded edge can
+be subject to both. Arm bridging interposes a block on an edge. The
+selection-start split then takes the whole terminator out of the block and
+pushes it into a fresh one, leaving a call behind. So `bb86 -> bb87` became
+`bb86 -> bb139 -> bb13x -> bb87`: resolving only the relocation stops at
+`bb139` where `bb87` is still not a successor, and resolving only the bridges
+never leaves `bb86`, which no longer holds a switch at all.
+
+The order matters and is not symmetric. Arm bridging runs first, so its keys
+are stated in terms of the block as it was *before* the split — the target
+resolves against the original source. The split runs second, so the source
+resolves last. Reversed, the lookup finds nothing.
+
+| crate | before | after |
+|---|---|---|
+| build_script_build | 70.00% | 71.43% |
+| syn | 97.92% | 98.43% |
+| http | 94.86% | 95.05% |
+
+The trailing `reaching bb87` clause named the second stage from the very first
+run. It was read past three times. The lesson is not about this binder: a
+change that measures neutral on its own may be half of a fix rather than a
+wrong one, and the cross-phase bridge map was exactly that.

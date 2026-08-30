@@ -5433,6 +5433,7 @@ fn mir_built_with_match_markers<'tcx>(
                 })
             };
             let mut instrumented = body.steal();
+            let mut match_rewrites = MatchRewrites::default();
             // Declining after this point cannot hand `body` back: it is stolen, and
             // returning it panics rustc. Keep the uninstrumented copy for that.
             let pristine = instrumented.clone();
@@ -5747,6 +5748,7 @@ fn mir_built_with_match_markers<'tcx>(
             )
         };
         let mut instrumented = body.steal();
+        let mut match_rewrites = MatchRewrites::default();
         let mut local_ordinals = BTreeMap::new();
         for group in &synthetic_groups {
             // A degraded match phase records no assignment for its groups.
@@ -6621,6 +6623,7 @@ fn mir_drops_with_structural_probes<'tcx>(
             ));
         }
         let mut instrumented = body.steal();
+        let mut match_rewrites = MatchRewrites::default();
         // Degrading after the steal cannot hand `body` back — it is already
         // stolen, and returning it panics rustc with "attempt to steal from
         // stolen value". Returning the partially instrumented body would be
@@ -6654,6 +6657,7 @@ fn mir_drops_with_structural_probes<'tcx>(
                 hit,
                 unit,
                 span,
+                &mut match_rewrites,
             )
         {
             degrade_unbound_obligations(
@@ -6712,6 +6716,7 @@ fn mir_drops_with_structural_probes<'tcx>(
                 },
                 span,
                 &[],
+                &match_rewrites,
             )
         {
             degrade_unbound_obligations(
@@ -6760,6 +6765,7 @@ fn mir_drops_with_structural_probes<'tcx>(
                 hit,
                 unit,
                 span,
+                &mut MatchRewrites::default(),
             )
         {
             degrade_unbound_obligations(
@@ -6809,6 +6815,7 @@ fn mir_drops_with_structural_probes<'tcx>(
                 hit,
                 unit,
                 span,
+                &mut MatchRewrites::default(),
             )
         {
             degrade_unbound_obligations(
@@ -6902,6 +6909,7 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
 
     rustc_middle::ty::print::with_no_trimmed_paths!({
         let mut instrumented = body.clone();
+        let mut match_rewrites = MatchRewrites::default();
         let span = tcx.def_span(def_id);
         let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE).to_string();
         let definition = exact_def_path!(tcx, def_id);
@@ -8342,115 +8350,142 @@ fn runtime_logical_selection_plans<'tcx>(
         .collect::<Result<Vec<_>, _>>()?;
     let dominators = body.basic_blocks.dominators().clone();
     let mut plans = Vec::new();
+    let mut failures = Vec::new();
     for branch in branches {
-        let mapping_source = branch.mapping_source.as_ref().ok_or_else(|| {
-            format!(
-                "logical-selection branch {} has no exact left-operand mapping",
-                branch.identity.id
-            )
-        })?;
-        let matches = mappings
-            .iter()
-            .filter_map(|(source, true_bcb, false_bcb)| {
-                (source == mapping_source).then_some((*true_bcb, *false_bcb))
-            })
-            .collect::<Vec<_>>();
-        let [(true_bcb, false_bcb)] = matches.as_slice() else {
-            return Err(format!(
-                "logical-selection branch {} maps to {} rustc branches at {}:{}-{}; available: {:?}",
-                branch.identity.id,
-                matches.len(),
-                mapping_source.key,
-                mapping_source.start,
-                mapping_source.end,
-                mappings
-                    .iter()
-                    .map(|(source, _, _)| format!(
-                        "{}:{}-{}:{}",
-                        source.key, source.start, source.end, source.class
-                    ))
-                    .collect::<Vec<_>>()
-            ));
-        };
-        let unique_block = |bcb: u32| -> Result<BasicBlock, String> {
-            let blocks = bcb_blocks.get(&bcb).cloned().unwrap_or_default();
-            match blocks.as_slice() {
-                [block] => Ok(*block),
-                _ => Err(format!(
-                    "logical-selection coverage block {bcb} maps to {} MIR blocks",
-                    blocks.len()
-                )),
-            }
-        };
-        let true_target = unique_block(*true_bcb)?;
-        let false_target = unique_block(*false_bcb)?;
-        let start_block = nearest_common_dominator(&dominators, true_target, false_target)
-            .ok_or_else(|| {
+        let failed_id = branch.identity.id.clone();
+        let planned = (|| -> Result<RuntimeMatchPlan, String> {
+            let mapping_source = branch.mapping_source.as_ref().ok_or_else(|| {
                 format!(
-                    "logical-selection branch {} has no common MIR dominator",
+                    "logical-selection branch {} has no exact left-operand mapping",
                     branch.identity.id
                 )
             })?;
-        let incoming = |target: BasicBlock| {
-            body.basic_blocks.predecessors()[target]
+            let matches = mappings
                 .iter()
-                .copied()
-                .filter(|source| dominators.dominates(start_block, *source))
-                .collect::<Vec<_>>()
-        };
-        let (evaluated_target, short_target) = match branch.discriminator.as_str() {
-            "logical-selection:and" => (true_target, false_target),
-            "logical-selection:or" => (false_target, true_target),
-            other => {
+                .filter_map(|(source, true_bcb, false_bcb)| {
+                    (source == mapping_source).then_some((*true_bcb, *false_bcb))
+                })
+                .collect::<Vec<_>>();
+            let [(true_bcb, false_bcb)] = matches.as_slice() else {
                 return Err(format!(
-                    "logical-selection branch {} has unknown discriminator {other}",
-                    branch.identity.id
+                    "logical-selection branch {} maps to {} rustc branches at {}:{}-{}; available: {:?}",
+                    branch.identity.id,
+                    matches.len(),
+                    mapping_source.key,
+                    mapping_source.start,
+                    mapping_source.end,
+                    mappings
+                        .iter()
+                        .map(|(source, _, _)| format!(
+                            "{}:{}-{}:{}",
+                            source.key, source.start, source.end, source.class
+                        ))
+                        .collect::<Vec<_>>()
                 ));
-            }
-        };
-        let evaluated_sources = incoming(evaluated_target);
-        let short_sources = incoming(short_target);
-        if evaluated_sources.is_empty() || short_sources.is_empty() {
-            return Err(format!(
-                "logical-selection branch {} has incomplete terminal edges ({}/{})",
-                branch.identity.id,
-                short_sources.len(),
-                evaluated_sources.len()
-            ));
-        }
-        let alternative = |label: &str| {
-            branch
-                .alternatives
-                .iter()
-                .find(|alternative| alternative.label == label)
+            };
+            let unique_block = |bcb: u32| -> Result<BasicBlock, String> {
+                let blocks = bcb_blocks.get(&bcb).cloned().unwrap_or_default();
+                match blocks.as_slice() {
+                    [block] => Ok(*block),
+                    _ => Err(format!(
+                        "logical-selection coverage block {bcb} maps to {} MIR blocks",
+                        blocks.len()
+                    )),
+                }
+            };
+            let true_target = unique_block(*true_bcb)?;
+            let false_target = unique_block(*false_bcb)?;
+            let start_block = nearest_common_dominator(&dominators, true_target, false_target)
                 .ok_or_else(|| {
                     format!(
-                        "logical-selection branch {} lacks {label}",
+                        "logical-selection branch {} has no common MIR dominator",
                         branch.identity.id
                     )
-                })
-        };
-        let short = alternative("short-circuited")?;
-        let evaluated = alternative("right operand evaluated")?;
-        plans.push(RuntimeMatchPlan {
-            id: branch.identity.id.clone(),
-            start_block,
-            token: None,
-            arms: vec![
-                RuntimeMatchArm {
-                    branch_id: short.identity.id.clone(),
-                    entry_block: short_target,
-                    entry_sources: short_sources,
-                    selected_ordinal: short.identity.probe_ordinal,
-                },
-                RuntimeMatchArm {
-                    branch_id: evaluated.identity.id.clone(),
-                    entry_block: evaluated_target,
-                    entry_sources: evaluated_sources,
-                    selected_ordinal: evaluated.identity.probe_ordinal,
-                },
-            ],
-        });
+                })?;
+            let incoming = |target: BasicBlock| {
+                body.basic_blocks.predecessors()[target]
+                    .iter()
+                    .copied()
+                    .filter(|source| dominators.dominates(start_block, *source))
+                    .collect::<Vec<_>>()
+            };
+            let (evaluated_target, short_target) = match branch.discriminator.as_str() {
+                "logical-selection:and" => (true_target, false_target),
+                "logical-selection:or" => (false_target, true_target),
+                other => {
+                    return Err(format!(
+                        "logical-selection branch {} has unknown discriminator {other}",
+                        branch.identity.id
+                    ));
+                }
+            };
+            let evaluated_sources = incoming(evaluated_target);
+            let short_sources = incoming(short_target);
+            if evaluated_sources.is_empty() || short_sources.is_empty() {
+                return Err(format!(
+                    "logical-selection branch {} has incomplete terminal edges ({}/{})",
+                    branch.identity.id,
+                    short_sources.len(),
+                    evaluated_sources.len()
+                ));
+            }
+            let alternative = |label: &str| {
+                branch
+                    .alternatives
+                    .iter()
+                    .find(|alternative| alternative.label == label)
+                    .ok_or_else(|| {
+                        format!(
+                            "logical-selection branch {} lacks {label}",
+                            branch.identity.id
+                        )
+                    })
+            };
+            let short = alternative("short-circuited")?;
+            let evaluated = alternative("right operand evaluated")?;
+            Ok(RuntimeMatchPlan {
+                id: branch.identity.id.clone(),
+                start_block,
+                token: None,
+                arms: vec![
+                    RuntimeMatchArm {
+                        branch_id: short.identity.id.clone(),
+                        entry_block: short_target,
+                        entry_sources: short_sources,
+                        selected_ordinal: short.identity.probe_ordinal,
+                    },
+                    RuntimeMatchArm {
+                        branch_id: evaluated.identity.id.clone(),
+                        entry_block: evaluated_target,
+                        entry_sources: evaluated_sources,
+                        selected_ordinal: evaluated.identity.probe_ordinal,
+                    },
+                ],
+            })
+        })();
+        match planned {
+            Ok(plan) => plans.push(plan),
+            Err(error) => failures.push((failed_id, error)),
+        }
+    }
+    for (id, error) in failures {
+        if env::var_os(STRICT_BINDING).is_some_and(|value| !value.is_empty()) {
+            tcx.dcx().fatal(format!(
+                "Supercov could not bind Rust logical-selection probes in {}: {error}",
+                obligations.definition
+            ));
+        }
+        BINDER_LIMITATIONS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(format!(
+                "RUST_OBLIGATION_UNBOUND: bind Rust logical-selection probes in {}: {error}",
+                obligations.definition
+            ));
+        UNMEASURED_OBLIGATIONS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id);
     }
     Ok(plans)
 }
@@ -9831,6 +9866,20 @@ fn strip_try_operator_markers(
     Ok(())
 }
 
+/// What match injection did to the CFG, so a later phase can find an edge it
+/// recorded beforehand. Two distinct transformations, and a recorded edge can
+/// be subject to both: arm bridging interposes a block on an edge, then the
+/// selection-start split moves the whole terminator into a new block. Resolving
+/// only one leaves the edge unreachable, which is why each half measured as no
+/// improvement on its own.
+#[derive(Default)]
+struct MatchRewrites {
+    /// (source, replaced target) -> the bridge now carrying that edge.
+    bridges: BTreeMap<(BasicBlock, BasicBlock), BasicBlock>,
+    /// block -> the block its terminator moved to when the block was split.
+    relocations: BTreeMap<BasicBlock, BasicBlock>,
+}
+
 fn instrument_runtime_matches<'tcx>(
     tcx: TyCtxt<'tcx>,
     body: &mut Body<'tcx>,
@@ -9839,6 +9888,7 @@ fn instrument_runtime_matches<'tcx>(
     hit: LocalDefId,
     unit: rustc_middle::mir::Local,
     span: rustc_span::Span,
+    rewrites: &mut MatchRewrites,
 ) -> Result<(), String> {
     let mut starts = BTreeSet::new();
     for plan in plans.iter() {
@@ -9893,6 +9943,9 @@ fn instrument_runtime_matches<'tcx>(
                             replaced += 1;
                         }
                     });
+                if replaced > 0 {
+                    rewrites.bridges.insert((*source, arm.entry_block), bridge);
+                }
                 if replaced == 0 {
                     return Err(format!(
                         "match arm {} entry edge from {:?} was not found; entry_block={:?}; entry_sources={:?}; source successors={:?}; plan start={:?}; arms={:?}",
@@ -9941,6 +9994,7 @@ fn instrument_runtime_matches<'tcx>(
             cleanup,
         );
         body.basic_blocks_mut()[source].terminator = call.terminator;
+        rewrites.relocations.insert(source, continuation);
     }
     Ok(())
 }
@@ -10233,6 +10287,7 @@ fn instrument_runtime_decisions<'tcx>(
     runtime: DecisionRuntime,
     span: rustc_span::Span,
     snapshots: &[(&str, Vec<Vec<BasicBlock>>)],
+    rewrites: &MatchRewrites,
 ) -> Result<(), String> {
     // Bridges this call has already spliced, keyed by the exact edge each one
     // replaced. Two decision obligations can legitimately observe the same
@@ -10268,6 +10323,35 @@ fn instrument_runtime_decisions<'tcx>(
                 ),
             ] {
                 for source in sources {
+                    // Strictly below the exact rule, and in the order match
+                    // injection applied its two rewrites. Arm bridging ran
+                    // first and is keyed by the block as it was then, so the
+                    // target resolves against the ORIGINAL source; the split
+                    // came after, so the source resolves last. Reversing this
+                    // finds nothing, since the split block no longer carries a
+                    // terminator to match against.
+                    let mut target = target;
+                    for _ in 0..=rewrites.bridges.len() {
+                        match rewrites.bridges.get(&(*source, target)).copied() {
+                            Some(bridge) => target = bridge,
+                            None => break,
+                        }
+                    }
+                    let mut relocated = *source;
+                    for _ in 0..=rewrites.relocations.len() {
+                        if body.basic_blocks[relocated]
+                            .terminator()
+                            .successors()
+                            .any(|edge| edge == target)
+                        {
+                            break;
+                        }
+                        let Some(moved) = rewrites.relocations.get(&relocated).copied() else {
+                            break;
+                        };
+                        relocated = moved;
+                    }
+                    let source = &relocated;
                     // Strictly below the exact rule: only when the source no
                     // longer carries the recorded edge does a bridge this call
                     // spliced stand in for it, and only one registered for
@@ -10603,6 +10687,7 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
         }
 
         let mut instrumented = body.clone();
+        let mut match_rewrites = MatchRewrites::default();
         strip_native_coverage(&mut instrumented);
         // Every block's successors before this function injects anything.
         // A recorded edge that is already absent here was rewritten by an
@@ -10637,6 +10722,7 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
                 hit,
                 unit,
                 span,
+                &mut match_rewrites,
             )
         {
             degrade_unbound_obligations(
@@ -10686,6 +10772,7 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
                 },
                 span,
                 &snapshots,
+                &match_rewrites,
             )
         {
             degrade_unbound_obligations(
