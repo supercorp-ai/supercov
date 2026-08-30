@@ -1377,3 +1377,57 @@ One correction to the earlier reading of this: the raw unbound count *does*
 overstate real blind spots, but not by the ~200 the span rule suggested — by
 closer to the handful validated above. Ranking work off the unvalidated number
 would have been a mistake.
+
+## Wave: cfg-eliminated obligations, decided in HIR (#39)
+
+tracing's `level_filters::get_max_level_inner` reported eleven statements as
+binder blind spots. The source at those ranges is `LevelFilter::OFF`, the body
+of `} else if cfg!(feature = "max_level_off") {`. The feature is off, the
+branch never lowers, and calling it a binder defect is simply wrong.
+
+The first attempt inferred elimination from span geometry — treat a span that
+strictly *contains* the statement as enclosing scope rather than evidence it
+lowered. It fixed the target case and regressed no crate. It was still wrong,
+and the way it was caught is the point: reading the source at all 284 ranges it
+reclassified showed roughly 209 were **live code** inside `macro_rules!`
+bodies, whose MIR spans point at the wider callsite. http's was sliced
+mid-token, so the "statement" text was literally `"y "`. Since not-compiled
+obligations do not fail strict binding, landing it would have removed ~200
+mostly-live cases from our own gate while every automated check stayed green.
+
+So decide it where rustc already decided it. `cfg!(..)` is a bool literal by
+the time HIR sees it, so the collector walks the live branch normally and the
+dead branch with a depth counter raised, recording those ids in a set the
+binder consults *before* any span comparison. Spans are never involved.
+
+Reclassifies 30 — tracing 11, bytes 8, http 8, tracing_core 2, proc_macro2 1 —
+and correctly excludes every macro-fragment case: syn 165, tracing_attributes
+19, either 2.
+
+A fixture pins it in the lattice gate rather than the fixture crate, for a
+reason worth remembering: **the identity manifests are built without
+`SUPERCOV_RUST_INSTRUMENT_MIR`**, so they carry no `unmeasuredObligations` and
+no binding outcome can be asserted against them at all. The first pin failed
+there — and the same trap had already produced a vacuous assertion in the #28
+fixture, a "did not decline" check that could never fail. Both are fixed.
+
+## Where #22 stands after five gaps closed
+
+| after | regressions | worst |
+| --- | --- | --- |
+| #36 | 6 | either −29.11 |
+| #28 arm/discriminant | 6 | serde_core −3.80 |
+| bridge chaining | 4 | serde_core +0.52 |
+| #39 cfg-elimination | **2** | syn −0.51 |
+
+Eight gains now, against syn −0.51 and serde_json −0.03. The last gap is syn's
+fifteen unbound messages across 19,173 obligations: five logical-selection
+branches mapping to N rustc branches, four with no exact left-operand mapping,
+one BCB block mapping to zero MIR blocks, one condition mismatch. Several
+narrow shapes rather than one family.
+
+Every gap closed so far has converted a #22 regression into a gain, because
+aggregation was crediting one successful binding to many bodies. That is the
+argument for finishing the same way rather than landing on "the remainder is
+only honest exposure" — which is exactly the reasoning the ratchet exists to
+resist, and which has not been needed once.
