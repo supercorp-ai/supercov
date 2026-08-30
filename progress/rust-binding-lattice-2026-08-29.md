@@ -834,3 +834,37 @@ The trailing `reaching bb87` clause named the second stage from the very first
 run. It was read past three times. The lesson is not about this binder: a
 change that measures neutral on its own may be half of a fix rather than a
 wrong one, and the cross-phase bridge map was exactly that.
+
+## FAST, measured for the first time
+
+The north star's third property had no numbers attached to it at any point in
+this work. It does now, and they are a long way from the target.
+
+Cold `cargo build -j 4` of a 13-dependency probe crate (serde_json, serde,
+syn, quote, proc-macro2, tracing, bytes, http, either, once_cell, log, itoa,
+memchr), fresh target directory on both sides:
+
+| wrapper | wall | user | vs baseline |
+|---|---|---|---|
+| none | 4.38s | 8.81s | — |
+| debug build | 28.58s | 68.98s | 6.5x |
+| release build | 21.35s | 52.05s | **4.9x** |
+
+The target is ≤1.10x. Optimising the wrapper moved 6.5x to 4.9x, so the
+unoptimised driver explained part of the gap but nowhere near all of it.
+
+User time grows faster than wall time — 8.81s to 52.05s against 4.38s to
+21.35s — so the cost is CPU spent in the wrapper rather than serialisation.
+Parallelism is not the bottleneck; the per-body analysis is.
+
+What this does **not** measure, and none of it is known: test execution
+overhead with probes firing, the warm content-addressed cache path that the
+north star relies on for "warm runs in seconds", a large workspace, the
+release profile, or the cost of per-test attribution across threads and
+subprocesses. Four separate budgets, one of them now measured.
+
+The honest position is that ≤1.10x cold compile is not close, and it is not
+yet known whether it is reachable or whether the gate wants restating in terms
+the architecture can meet — cold build overhead X, warm build near zero,
+runtime overhead Y. That is a decision to make on evidence once the warm path
+and runtime overhead exist, not before.
