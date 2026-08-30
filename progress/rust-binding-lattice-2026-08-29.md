@@ -1536,3 +1536,41 @@ splitting, not lost capability. It would be easy to land #22 by calling the
 remainder denominator growth — which is true — but closing the gap has worked
 five times running, and each time it converted a regression into a gain rather
 than merely excusing one.
+
+## Ranking what is left (#30)
+
+At 98.62% corpus exactness, 526 declined of 38,155. The split that matters for
+planning: **118 are real binder blind spots, 200 are genuinely unmeasurable
+code**. Roughly 40/60 — so ranking off the raw declined count overstates the
+remaining work by more than half.
+
+| count | family | crates |
+| --- | --- | --- |
+| 24 | statement in `write` | zmij |
+| 23 | condition branch_source | serde_core, syn, http, serde_json |
+| 12 | logical-selection maps to N rustc branches | http, serde_json |
+| 9 | coverage block maps to N MIR blocks | build_script_build, zmij, syn |
+| ~16 | misbind: match arms | serde_core mostly |
+| ~14 | statement in HeaderMap methods | http |
+| 5 | try-operator obligations | either |
+| 4 | logical-selection, no exact left-operand | syn |
+
+Order to work them, and why:
+
+1. **condition branch_source** — not the largest, but the only one blocking
+   #22, a user-decided correctness fix. Now known to need per-source targets.
+2. **statement in `write`** — largest single family, confined to one crate and
+   one function, so likely one shape. zmij is also the worst crate at 77.57%,
+   making this the biggest exactness win available.
+3. **misbind: match arms** — clusters in serde_core's `de::impls` and is
+   probably one shape seen through several definitions. #28 solved the
+   macro-body-fragment case; these arms are derive-generated, so it is a
+   different one.
+4. **logical-selection maps to N** — same underlying shape as #41: one authored
+   construct, several MIR sites.
+5. **coverage block maps to N MIR blocks** — spread across three crates, so
+   probably several shapes. Lowest payoff-to-risk.
+
+Re-rank after each landing. Every wave this session reordered the list, usually
+by converting one family's failures into a different family one stage further
+along.
