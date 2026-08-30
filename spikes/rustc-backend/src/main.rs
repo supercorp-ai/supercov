@@ -6711,6 +6711,7 @@ fn mir_drops_with_structural_probes<'tcx>(
                     unit,
                 },
                 span,
+                &[],
             )
         {
             degrade_unbound_obligations(
@@ -10187,6 +10188,7 @@ fn instrument_runtime_decisions<'tcx>(
     plans: &[RuntimeDecisionPlan],
     runtime: DecisionRuntime,
     span: rustc_span::Span,
+    pre_injection_successors: &[Vec<BasicBlock>],
 ) -> Result<(), String> {
     let mut starts = BTreeSet::new();
     for plan in plans {
@@ -10330,13 +10332,19 @@ fn instrument_runtime_decisions<'tcx>(
                             .collect::<Vec<_>>();
                         return Err(format!(
                             "decision {} condition {} {:?} edge from {:?} to {:?} was not \
-                             found; {:?} now targets {:?}, whose own successors are {:?}, \
+                             found; before this function injected anything {:?} targeted \
+                             {:?}; {:?} now targets {:?}, whose own successors are {:?}, \
                              reaching {:?}",
                             plan.id,
                             mapped.index,
                             value,
                             source,
                             target,
+                            source,
+                            pre_injection_successors
+                                .get(source.as_usize())
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]),
                             source,
                             successors,
                             successors
@@ -10519,6 +10527,16 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
 
         let mut instrumented = body.clone();
         strip_native_coverage(&mut instrumented);
+        // Every block's successors before this function injects anything.
+        // A recorded edge that is already absent here was rewritten by an
+        // earlier compilation phase whose block ids do not correspond to this
+        // body; one that is present here was removed by an injection below.
+        // The two need different fixes, so the failure has to say which.
+        let pre_injection_successors = instrumented
+            .basic_blocks
+            .iter()
+            .map(|data| data.terminator().successors().collect::<Vec<_>>())
+            .collect::<Vec<_>>();
         let span = tcx.def_span(def_id);
         if probe_id.is_none()
             && context_id.is_none()
@@ -10586,6 +10604,7 @@ fn optimized_mir_with_probe<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'tc
                     unit,
                 },
                 span,
+                &pre_injection_successors,
             )
         {
             degrade_unbound_obligations(
