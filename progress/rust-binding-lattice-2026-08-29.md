@@ -1431,3 +1431,48 @@ aggregation was crediting one successful binding to many bodies. That is the
 argument for finishing the same way rather than landing on "the remainder is
 only honest exposure" — which is exactly the reasoning the ratchet exists to
 resist, and which has not been needed once.
+
+## Wave: short-circuits decided by a constant operand
+
+syn's `let unnamed_field = cfg!(feature = "full") && input.peek(Token![_]);`
+recorded a logical-selection branch mapping to zero rustc branches. Not a blind
+spot: a short-circuit whose left operand is a compile-time constant makes no
+run-time decision, so rustc emits no switch for it.
+
+The rule is independent of the constant's **value**, which the first attempt
+got wrong by gating on `And→false` / `Or→true`. That reclassified nothing —
+syn's `full` feature is in fact *enabled* in the probe build. `false && x`
+never evaluates the right operand and `true && x` always does; neither is a
+branch.
+
+Two seams had to close before it took effect, each silent on its own. Detection
+without the bind-site consult put ids into a set nothing read. Then the
+logical-selection failure handler turned out not to check the `UNMEASURABLE`
+marker the way the statement handler does, so strict binding still aborted on a
+non-defect. That handler now classifies failures the same way statements do,
+which is what keeps strict binding failing on real blind spots only.
+
+syn's unbound messages drop 15 → 10, no crate regresses.
+
+### #22 is one regression from landing clean
+
+| after | regressions | worst |
+| --- | --- | --- |
+| #36 | 6 | either −29.11 |
+| #28 arm/discriminant | 6 | serde_core −3.80 |
+| bridge chaining | 4 | serde_core +0.52 |
+| #39 cfg-elimination | 2 | syn −0.51 |
+| constant-operand short-circuits | **1** | serde_json −0.03 |
+
+Eight gains against a single −0.03. serde_json now measures 4458 obligations
+against a 3256 baseline — 37% more — while declines grew by 16, which is the
+honest-splitting signature rather than a capability regression.
+
+The last family is "condition branch_source" mismatches: 16 messages in
+serde_json's `de.rs` (`deserialize_any`, `deserialize_struct`, `parse_decimal`,
+`parse_exponent`) and one in syn, so one fix closes both tails.
+
+The discipline holds: every gap closed has converted a #22 regression into a
+gain, because aggregation was crediting one successful binding to many bodies.
+Landing on "the remainder is only honest exposure" has not been necessary once,
+and is not necessary now.
