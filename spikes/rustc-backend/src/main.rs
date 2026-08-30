@@ -2462,6 +2462,21 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
                 // exposing the macro's internal statements as user source.
                 let span = if assertion_macro_kind(self.tcx, expression.span).is_some() {
                     statement.span.source_callsite()
+                } else if statement.span.from_expansion()
+                    && !statement.span.contains(expression.span)
+                {
+                    // A macro fragment used as a statement -- `$body` in
+                    // http's `insert_phase_one!` -- gives the STATEMENT the
+                    // placeholder's span in the macro definition, while the
+                    // expression keeps the caller's. Recording the placeholder
+                    // names no compiled code, so nothing in MIR carries that
+                    // range and the obligation can never bind. The expression's
+                    // span is where the code actually is.
+                    //
+                    // Containment is the test, not ownership: an earlier
+                    // attempt at this family reused a predicate requiring a
+                    // FOREIGN macro, which never fired on http's local one.
+                    expression.span
                 } else {
                     statement.span
                 };
