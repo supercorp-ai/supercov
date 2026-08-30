@@ -3141,7 +3141,53 @@ impl Callbacks for ProbeCallbacks {
                     .to_owned(),
             ]);
 
+            // Decide crate scope ONCE, before touching `hir_body_owners()`.
+            // Enumerating body owners forces rustc's lazy per-body analysis for
+            // EVERY body, including generics codegen never instantiates. On
+            // realprobe, serde_core spent 10.045s -- 65% of the whole build --
+            // doing that and finished with every accumulator still empty: the
+            // crate is outside the roots, so all of its obligations were
+            // discarded. Collection drops from 8.07x to 1.09x by not starting.
+            //
+            // Doctest crates are ALWAYS in scope. rustdoc compiles each doctest
+            // as its own crate whose files live outside both roots; excluding
+            // them dropped the rustdoc markers and the corpus caught it.
+            //
+            // The path test uses the FIRST BODY's own file rather than any file
+            // the crate touched, because a dependency picks up OUT_DIR artifacts
+            // under TARGET_ROOT and an `any()` over the source map then calls
+            // everything in scope. It is deliberately not keyed on
+            // CARGO_MANIFEST_DIR: supercov's own pipeline compiles a generated
+            // workspace under TARGET_ROOT that must stay in scope.
+            let crate_in_scope = doctest_role.is_some() || {
+                let source_root = normalized_root(SOURCE_ROOT);
+                let target_root = normalized_root(TARGET_ROOT);
+                if source_root.is_none() && target_root.is_none() {
+                    true
+                } else {
+                    tcx.hir_body_owners().next().is_none_or(|owner| {
+                        let span = tcx.def_span(owner.to_def_id());
+                        let file = tcx.sess.source_map().lookup_source_file(span.lo());
+                        let rustc_span::FileName::Real(name) = &file.name else {
+                            return true;
+                        };
+                        let Some(path) = name.local_path() else {
+                            return true;
+                        };
+                        let path = normalized_path(path);
+                        source_root
+                            .as_ref()
+                            .is_some_and(|root| root_relative(&path, root).is_some())
+                            || target_root
+                                .as_ref()
+                                .is_some_and(|root| root_relative(&path, root).is_some())
+                    })
+                }
+            };
             for owner in tcx.hir_body_owners() {
+                if !crate_in_scope {
+                    break;
+                }
                 let def_id = owner.to_def_id();
                 let definition = exact_def_path!(tcx, def_id);
                 // The reserved injected module is transport machinery, never
