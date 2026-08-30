@@ -16,6 +16,7 @@ extern crate rustc_span;
 extern crate tracing_tree;
 
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap},
     env, fmt,
     fs::{self, File, OpenOptions},
@@ -256,7 +257,7 @@ struct StableSourceRange {
     owned: bool,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct PointObligation {
     canonical: String,
     source: StableSourceRange,
@@ -267,13 +268,13 @@ struct PointObligation {
     definitions: Vec<String>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct BranchAlternativeObligation {
     identity: StableObligationIdentity,
     label: &'static str,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct BranchObligation {
     identity: StableObligationIdentity,
     branch_kind: &'static str,
@@ -287,7 +288,7 @@ struct BranchObligation {
     parent_match_arm: Option<(String, usize)>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct MatchArmSelectionObligation {
     branch_id: String,
     body_source: StableSourceRange,
@@ -316,7 +317,7 @@ struct MatchArmSelectionObligation {
     not_selected_ordinal: u64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct MatchSelectionObligation {
     identity: StableObligationIdentity,
     arms: Vec<MatchArmSelectionObligation>,
@@ -331,7 +332,7 @@ struct MatchSelectionObligation {
     pattern_adts: BTreeSet<String>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct DecisionCondition {
     source: StableSourceRange,
     branch_source: StableSourceRange,
@@ -353,13 +354,13 @@ struct DecisionCondition {
     opaque_authored_macro: bool,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct DecisionLogicalSelection {
     branch_id: String,
     right_condition_index: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct DecisionObligation {
     identity: StableObligationIdentity,
     decision_kind: &'static str,
@@ -7604,6 +7605,7 @@ struct RuntimeDecisionPlan {
     loop_token: Option<rustc_middle::mir::Local>,
 }
 
+#[derive(Clone)]
 struct RuntimeBodyObligations {
     definition: String,
     crate_name: String,
@@ -7710,7 +7712,42 @@ fn decision_loop_binding(
     }))
 }
 
+thread_local! {
+    /// One HIR walk per body, not one per caller.
+    ///
+    /// This is a pure function of the body's HIR, and twelve call sites ask
+    /// for it — every plan builder and every degrade path — so the same walk
+    /// was repeated many times per body. Profiling a 400-function crate put
+    /// 86% of samples under the pre-optimization phase, with the collector's
+    /// `visit_expr` recursion the dominant frame beneath it.
+    static BODY_OBLIGATIONS: RefCell<BTreeMap<u32, Option<RuntimeBodyObligations>>> =
+        RefCell::new(BTreeMap::new());
+}
+
 fn runtime_body_obligations(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<RuntimeBodyObligations> {
+    let key = def_id.local_def_index.as_u32();
+    let cached = BODY_OBLIGATIONS.with(|cache| cache.borrow().get(&key).cloned());
+    let mut collected = match cached {
+        Some(hit) => hit,
+        None => {
+            let fresh = collect_body_obligations(tcx, def_id);
+            BODY_OBLIGATIONS.with(|cache| {
+                cache.borrow_mut().insert(key, fresh.clone());
+            });
+            fresh
+        }
+    };
+    // Prune against the CURRENT unreachable set on every call. The walk is
+    // cacheable, this is not: arms become known-unreachable as later bodies
+    // are bound, and a cached pruning would freeze whichever view existed at
+    // the first call.
+    if let Some(obligations) = collected.as_mut() {
+        prune_unreachable_match_arms(&mut obligations.branches, &mut obligations.match_groups);
+    }
+    collected
+}
+
+fn collect_body_obligations(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<RuntimeBodyObligations> {
     let definition = exact_def_path!(tcx, def_id);
     if definition.contains("__supercov_spike_runtime") {
         return None;
@@ -7740,7 +7777,9 @@ fn runtime_body_obligations(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Runti
         match_context: None,
     }
     .visit_body(hir_body);
-    prune_unreachable_match_arms(&mut branches, &mut match_groups);
+    // Pruning is deliberately NOT done here. It reads UNREACHABLE_MATCH_ARMS,
+    // which grows as bodies are bound, so its result is a function of when it
+    // runs. Only the HIR walk is stable enough to cache; the caller prunes.
     Some(RuntimeBodyObligations {
         definition,
         crate_name,

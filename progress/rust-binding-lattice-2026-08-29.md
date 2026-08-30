@@ -977,3 +977,39 @@ linking, which are usually structural — a smaller or dynamically linked
 runtime, and a leaner manifest format — rather than algorithmic work that
 would need the binder rewritten. The 16.6 seconds of analysis is the part that
 would be genuinely hard, and it is the minority.
+
+### One HIR walk per body, not twelve
+
+Profiling the 400-function crate put 86% of samples under the pre-optimization
+phase, with `runtime_body_obligations` -> `HirManifestCollector::visit_expr`
+the dominant frame beneath it. That function re-runs the entire HIR walk on
+every call, and twelve call sites ask for it — every plan builder and every
+degrade path.
+
+Memoising it per body was an immediate 3.5x, and the ratchet rejected it:
+`log` fell 90.24% to 89.16%, with smaller moves in four other crates. Diffing
+`log`'s manifest found `set_logger_racy` gaining `match arm ... has no
+authored MIR`.
+
+The cause was a design flaw the cache merely exposed. `collect_body_obligations`
+ended with `prune_unreachable_match_arms`, which reads `UNREACHABLE_MATCH_ARMS`
+— a set that *grows* as later bodies are bound. So the function was never a
+pure function of the body: it mixed a stable HIR walk with a step whose result
+depends on when it runs. Caching froze whichever view existed at the first
+call.
+
+Separating the two fixes it properly. The walk is cached; pruning happens
+fresh on every call, against the current set. `log` returns to byte-identical
+output — 36 declined, zero limitations added or removed — and the ratchet
+reports exactness held or improved across all 18 crates.
+
+| fns | before | after |
+|---|---|---|
+| 100 | 4.17s | 1.74s |
+| 400 | 24.85s | 7.93s |
+
+With the archive fix, cold overhead on the 400-function crate goes 82x to 26x.
+
+The lesson is not about caching. A function that reads mutable global state is
+not a function of its arguments, and nothing in its signature says so. The
+cache did not introduce the bug; it made an existing ambiguity observable.
