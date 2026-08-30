@@ -79,11 +79,65 @@ fn valid_runtime_path(path: &str) -> bool {
         })
 }
 
+/// Report whether rustc will evaluate this node at compile time.
+///
+/// Runtime probes cannot appear anywhere this is true: `condition`, `decision`
+/// and `hit` are not `const fn`, so emitting a call here is not a bad
+/// measurement but a build failure (E0015). bytes-1.12.1 hit exactly that with
+/// `const ITERS: usize = if cfg!(miri) { 100 } else { 1_000 };`.
+///
+/// `ConstArg` is the shared node for enum discriminants, array lengths, const
+/// generic arguments and const parameter defaults, so matching it covers all
+/// four. The remaining case is an array repeat expression, `[value; count]`,
+/// where only the count after the semicolon is const-evaluated.
 fn in_const_context(node: &ra_ap_syntax::SyntaxNode) -> bool {
+    let start = node.text_range().start();
     node.ancestors().any(|ancestor| {
         ast::Fn::cast(ancestor.clone()).is_some_and(|function| function.const_token().is_some())
-            || ast::BlockExpr::cast(ancestor).is_some_and(|block| block.const_token().is_some())
+            || ast::BlockExpr::cast(ancestor.clone())
+                .is_some_and(|block| block.const_token().is_some())
+            || ast::Const::can_cast(ancestor.kind())
+            || ast::Static::can_cast(ancestor.kind())
+            || ast::ConstArg::can_cast(ancestor.kind())
+            || ast::ArrayExpr::cast(ancestor).is_some_and(|array| {
+                array
+                    .semicolon_token()
+                    .is_some_and(|semicolon| start >= semicolon.text_range().end())
+            })
     })
+}
+
+/// Report whether this node sits inside a `GlobalAlloc` implementation.
+///
+/// The probe runtime allocates, so a probe inside `alloc` calls back into
+/// `alloc`, which probes again, until the stack is gone. bytes-1.12.1's
+/// tests/test_bytes_odd_alloc.rs installs a `#[global_allocator]`, and the
+/// instrumented binary died with SIGSEGV before libtest could even list its
+/// tests -- while the uninstrumented one listed them fine.
+///
+/// The general rule this enforces is that nothing the runtime itself calls can
+/// carry a probe, and `#[global_allocator]` is the one way a user crate gets
+/// onto that path. A `GlobalAlloc` impl is skipped whether or not it is the
+/// registered allocator, because the registering `static` may live in another
+/// file: declining a handful of allocator bodies costs almost no exactness,
+/// while instrumenting the live one costs the whole run.
+fn in_global_allocator(node: &ra_ap_syntax::SyntaxNode) -> bool {
+    node.ancestors().any(|ancestor| {
+        ast::Impl::cast(ancestor).is_some_and(|block| {
+            block.trait_().is_some_and(|implemented| {
+                implemented
+                    .syntax()
+                    .descendants_with_tokens()
+                    .filter_map(|element| element.into_token())
+                    .any(|token| token.kind() == SyntaxKind::IDENT && token.text() == "GlobalAlloc")
+            })
+        })
+    })
+}
+
+/// Report whether a probe placed at this node could not run correctly.
+fn cannot_carry_probe(node: &ra_ap_syntax::SyntaxNode) -> bool {
+    in_const_context(node) || in_global_allocator(node)
 }
 
 fn range_offsets(range: TextRange) -> (usize, usize) {
@@ -582,14 +636,43 @@ impl<'a> RustObligationCollector<'a> {
                 "Declarative and procedural macro expansions are not yet part of the owned source denominator",
             );
         }
+        // An obligation the probes cannot reach stays in the denominator, but the
+        // gap has to be declared rather than left to read as merely uncovered.
+        // Only a context that actually holds an obligation counts:
+        // `const MAX: usize = 10;` costs nothing and must not raise a limitation.
+        let bears_obligation = |node: &ra_ap_syntax::SyntaxNode| {
+            ast::StmtList::cast(node.clone()).is_some_and(|list| {
+                list.statements().next().is_some() || list.tail_expr().is_some()
+            }) || ast::IfExpr::can_cast(node.kind())
+                || ast::WhileExpr::can_cast(node.kind())
+                || ast::MatchGuard::can_cast(node.kind())
+                || ast::ForExpr::can_cast(node.kind())
+                || ast::MatchArm::can_cast(node.kind())
+                || ast::TryExpr::can_cast(node.kind())
+                || ast::ClosureExpr::can_cast(node.kind())
+                || ast::BinExpr::cast(node.clone()).is_some_and(|binary| {
+                    matches!(
+                        binary.op_kind(),
+                        Some(BinaryOp::LogicOp(LogicOp::And | LogicOp::Or))
+                    )
+                })
+        };
         if root
             .descendants()
-            .filter_map(ast::BlockExpr::cast)
-            .any(|block| block.const_token().is_some())
+            .any(|node| bears_obligation(&node) && in_const_context(&node))
         {
             self.limitation(
                 "rust-const-context-not-instrumented",
                 "Runtime probes cannot execute in const fn or compile-time evaluation",
+            );
+        }
+        if root
+            .descendants()
+            .any(|node| bears_obligation(&node) && in_global_allocator(&node))
+        {
+            self.limitation(
+                "rust-global-allocator-not-instrumented",
+                "Probing a GlobalAlloc implementation recurses into itself, because the runtime allocates",
             );
         }
 
@@ -652,7 +735,7 @@ fn instrument_decision(
     kind: &str,
     frame_name: &str,
 ) -> bool {
-    if in_const_context(condition.syntax())
+    if cannot_carry_probe(condition.syntax())
         || condition
             .syntax()
             .descendants()
@@ -717,10 +800,10 @@ pub fn instrument_rust_source(
     for list in root.descendants().filter_map(ast::StmtList::cast) {
         for statement in list.statements() {
             let range = match statement {
-                ast::Stmt::ExprStmt(statement) if !in_const_context(statement.syntax()) => {
+                ast::Stmt::ExprStmt(statement) if !cannot_carry_probe(statement.syntax()) => {
                     statement.syntax().text_range()
                 }
-                ast::Stmt::LetStmt(statement) if !in_const_context(statement.syntax()) => {
+                ast::Stmt::LetStmt(statement) if !cannot_carry_probe(statement.syntax()) => {
                     statement.syntax().text_range()
                 }
                 _ => continue,
@@ -734,7 +817,7 @@ pub fn instrument_rust_source(
         }
         if let Some(tail) = list
             .tail_expr()
-            .filter(|tail| !in_const_context(tail.syntax()))
+            .filter(|tail| !cannot_carry_probe(tail.syntax()))
         {
             let range = tail.syntax().text_range();
             let id = stable_id(file, "statement", range, "");
@@ -747,7 +830,9 @@ pub fn instrument_rust_source(
     }
 
     for function in root.descendants().filter_map(ast::Fn::cast) {
-        if function.const_token().is_some() {
+        // `cannot_carry_probe` covers `const fn` itself, since a node's own
+        // ancestors include the node.
+        if cannot_carry_probe(function.syntax()) {
             continue;
         }
         let Some(body) = function.body() else {
@@ -773,7 +858,7 @@ pub fn instrument_rust_source(
         let Some(body) = closure.body() else {
             continue;
         };
-        if in_const_context(body.syntax()) {
+        if cannot_carry_probe(body.syntax()) {
             continue;
         }
         let id = stable_id(file, "function", closure.syntax().text_range(), "<closure>");
@@ -1101,6 +1186,135 @@ fn classify(value: Option<bool>, fallback: bool) -> bool {
         assert!(ids.contains("rust-const-context-not-instrumented"));
         assert!(ids.contains("rust-let-chain-probes-not-injected"));
         assert!(!transformed.code.contains("condition("));
+    }
+
+    #[test]
+    fn instrumented_const_and_static_initialisers_still_compile() {
+        // Every one of these positions is const-evaluated, so none of them can
+        // hold a call to the runtime -- `condition`, `decision` and `hit` are
+        // not `const fn`. Found on bytes-1.12.1, whose test target has
+        // `const ITERS: usize = if cfg!(miri) { 100 } else { 1_000 };` and
+        // failed to build with E0015.
+        let source = r#"const DIRECT: usize = if cfg!(unix) { 100 } else { 1_000 };
+static WIDTH: usize = if cfg!(unix) { 2 } else { 4 };
+
+enum Mode {
+    Narrow = if cfg!(unix) { 1 } else { 2 },
+}
+
+struct Buffer([u8; if cfg!(unix) { 4 } else { 8 }]);
+
+impl Buffer {
+    const SPAN: usize = if cfg!(unix) { 5 } else { 9 };
+}
+
+fn scaled(flag: bool) -> usize {
+    const LOCAL: usize = if cfg!(unix) { 3 } else { 6 };
+    if flag { LOCAL + Buffer::SPAN } else { DIRECT + WIDTH }
+}
+
+fn main() {
+    let buffer = Buffer([0; if cfg!(unix) { 4 } else { 8 }]);
+    println!(
+        "{} {} {} {}",
+        scaled(true),
+        scaled(false),
+        Mode::Narrow as usize,
+        buffer.0.len()
+    );
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        // The runtime `if` in `scaled` is still instrumented -- declining a
+        // const initialiser must not decline the whole file.
+        assert!(transformed.code.contains("::decision("));
+        let ids = transformed
+            .manifest
+            .limitations
+            .iter()
+            .filter_map(|limitation| limitation.get("id")?.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(ids.contains("rust-const-context-not-instrumented"));
+
+        let original = compile_and_run(source, "const-original");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "const-instrumented",
+        );
+        assert_eq!(instrumented.status, original.status);
+        assert_eq!(instrumented.stdout, original.stdout);
+        assert_eq!(instrumented.stderr, original.stderr);
+    }
+
+    #[test]
+    fn a_probed_global_allocator_would_recurse_into_itself() {
+        // The runtime allocates, so a probe inside `alloc` re-enters `alloc` and
+        // recurses until the stack is gone. bytes-1.12.1's
+        // tests/test_bytes_odd_alloc.rs installs one of these, and the
+        // instrumented binary died with SIGSEGV before libtest could list a
+        // single test, while the uninstrumented binary listed them fine.
+        let source = r#"use std::alloc::{GlobalAlloc, Layout, System};
+
+struct Odd;
+
+unsafe impl GlobalAlloc for Odd {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if layout.align() == 1 && layout.size() > 0 {
+            System.alloc(layout)
+        } else {
+            System.alloc(layout)
+        }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        System.dealloc(pointer, layout);
+    }
+}
+
+#[global_allocator]
+static ODD: Odd = Odd;
+
+fn classify(flag: bool) -> usize {
+    if flag { 1 } else { 2 }
+}
+
+fn main() {
+    let held = std::vec![7u8; 32];
+    println!("{} {}", classify(!held.is_empty()), held.len());
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        // Nothing inside the allocator may carry a probe...
+        let allocator = transformed
+            .code
+            .split("unsafe impl GlobalAlloc for Odd")
+            .nth(1)
+            .and_then(|rest| rest.split("#[global_allocator]").next())
+            .expect("the instrumented source still contains the allocator impl");
+        assert!(
+            !allocator.contains("__supercov_runtime_v1"),
+            "probe injected into a GlobalAlloc impl:\n{allocator}"
+        );
+        // ...while `classify`, right next to it, is still measured.
+        assert!(transformed.code.contains("::decision("));
+        let ids = transformed
+            .manifest
+            .limitations
+            .iter()
+            .filter_map(|limitation| limitation.get("id")?.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(ids.contains("rust-global-allocator-not-instrumented"));
+
+        let original = compile_and_run(source, "alloc-original");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "alloc-instrumented",
+        );
+        assert_eq!(instrumented.status, original.status);
+        assert_eq!(instrumented.stdout, original.stdout);
+        assert_eq!(instrumented.stderr, original.stderr);
     }
 
     #[test]

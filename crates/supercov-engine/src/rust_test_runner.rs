@@ -956,9 +956,23 @@ fn list_tests(artifact: &TestArtifact) -> Result<Vec<String>, RustTestRunnerErro
         .output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !output.status.success() {
-        return Err(RustTestRunnerError::ListFailed(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ));
+        // A libtest binary that dies on a signal writes nothing to stderr, so
+        // reporting stderr alone produces an empty, undiagnosable message.
+        // Name the artifact and how it ended, and fall back to stdout.
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let detail = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            format!("no stderr; stdout was {stdout}")
+        } else {
+            "no output on either stream".to_owned()
+        };
+        return Err(RustTestRunnerError::ListFailed(format!(
+            "{} exited with {} when asked to --list: {detail}",
+            artifact.executable.display(),
+            output.status
+        )));
     }
     let mut tests = String::from_utf8_lossy(&output.stdout)
         .lines()
