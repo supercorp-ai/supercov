@@ -2288,3 +2288,42 @@ above are all `-C instrument-coverage`, and the same suite under supercov's
 probes is unknown. And **one test per process** would give attribution without
 serialising within a process, since counters are per-process; the cost is
 process spawn per test, which for a suite of small tests may beat both options.
+
+### Process-per-test ruled out by measurement
+
+Counters are per-process, so running each test in its own process would give
+attribution *without* serialising — parallelism and per-test data at once. On
+`test_buf`, 875 tests:
+
+| strategy | wall | attribution |
+| --- | --- | --- |
+| one process, parallel threads | 0.01s | no |
+| one process, serial | 0.03s | **yes** |
+| one process per test, 8-way parallel | **0.28s** | yes |
+
+Process spawn costs **28x** for a suite of many small tests, against 3x for
+serialising the same work — and in absolute terms serialising costs 20ms.
+Spawn is a per-test constant, so it dominates precisely when tests are cheap,
+which is the common case. Process-per-test would only pay off for a handful of
+long-running tests, which is the case that least needs the help.
+
+So serialisation is the mechanism, and its cost tracks how much parallelism a
+suite genuinely exploits: 3x on `test_buf`'s trivial tests where threads barely
+help, 1.67x across `bytes`' whole suite where some tests are slow. Both are paid
+only when per-test attribution is requested, against 220% CPU on every compile
+under the current design.
+
+That settles the architecture:
+
+- **Default**: rustc's own counters, whole-run coverage, tests parallel.
+  **1.04x compile**, no test-time penalty, and the entire injection layer —
+  bridges, edge rewrites, misbind post-conditions, relocation composition —
+  stops being needed.
+- **Per-test attribution**: an explicit mode that serialises, using
+  `__llvm_profile_reset_counters` and the begin/end counter symbols proven
+  above. Cost is suite-dependent and bounded by how much the suite parallelises.
+
+One measurement still outstanding, and it can only strengthen the case: the
+runtime cost of our probes against LLVM counters. Every figure here is
+`-C instrument-coverage`; the same suites under supercov's probes have not been
+timed.
