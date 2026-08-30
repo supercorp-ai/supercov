@@ -1013,3 +1013,39 @@ With the archive fix, cold overhead on the 400-function crate goes 82x to 26x.
 The lesson is not about caching. A function that reads mutable global state is
 not a function of its arguments, and nothing in its signature says so. The
 cache did not introduce the bug; it made an existing ambiguity observable.
+
+### The quadratic: a file's identity, verified once per obligation
+
+Profiling the 800-function crate was unambiguous where four rounds of
+reasoning had not been:
+
+    619  stable_source_range
+    177  normalized_path
+    124  ExactSourceSnapshot::eq
+    117  ExactSourceSnapshot::clone
+
+`stable_source_range` runs for every recorded span. On each call it
+materialised the whole file's text, cloned it into an `ExactSourceSnapshot`,
+and compared that snapshot against the stored one — three full passes over the
+source, per obligation. With tens of thousands of obligations against a single
+file that is quadratic in crate size, and it accounted for both the growth in
+user time and a large share of the system time.
+
+A file's identity needs verifying once, not once per span.
+
+| fns | before | after | user before | user after |
+|---|---|---|---|---|
+| 400 | 7.85s | 4.16s | 4.67s | 1.20s |
+| 800 | 23.14s | 7.30s | 17.56s | 2.37s |
+
+The scaling result is the important one. Analysis time now doubles when the
+code doubles — 1.98x from 400 to 800 functions, against 3.9x before — so
+overhead is roughly 13x and *flat* in crate size, where it previously grew
+32x, 53x, 83x. A tool whose overhead grows with the codebase is unusable on
+the codebases that most need it.
+
+Four hypotheses were wrong before this: memory (peak RSS 232 MB, 76 page
+faults), manifest writing (8 MB is milliseconds), the static archive, and a
+clone of the unreachable-arm set (empty in this workload, so it early-returns).
+`sample` found the answer in a single run. On this codebase, measurement has
+beaten reasoning every time they disagreed.

@@ -414,14 +414,34 @@ fn prune_unreachable_match_arms(
     branches: &mut BTreeMap<String, BranchObligation>,
     match_groups: &mut BTreeMap<String, MatchSelectionObligation>,
 ) {
-    let unreachable = UNREACHABLE_MATCH_ARMS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clone();
-    if unreachable.is_empty() {
+    // Take only the ids this body actually mentions. Cloning the whole
+    // unreachable set costs O(set) per call, the set grows with the crate, and
+    // this runs for every caller of every body — which made pruning quadratic
+    // in crate size and dominated the analysis on large crates.
+    let mut removed_branches = BTreeSet::new();
+    {
+        let unreachable = UNREACHABLE_MATCH_ARMS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if unreachable.is_empty() {
+            return;
+        }
+        for group in match_groups.values() {
+            for arm in &group.arms {
+                if unreachable.contains(&arm.branch_id) {
+                    removed_branches.insert(arm.branch_id.clone());
+                }
+            }
+        }
+        for id in branches.keys() {
+            if unreachable.contains(id) {
+                removed_branches.insert(id.clone());
+            }
+        }
+    }
+    if removed_branches.is_empty() {
         return;
     }
-    let mut removed_branches = unreachable;
     match_groups.retain(|_, group| {
         group
             .arms
@@ -981,7 +1001,17 @@ fn stable_source_range(
             false,
         ),
     };
-    if owned {
+    // A file's identity needs verifying once, not once per obligation. This
+    // runs for every recorded span, and below it materialises the whole file
+    // text, clones it into a snapshot, and compares that snapshot against the
+    // stored one — three passes over the source per call. With tens of
+    // thousands of obligations against one file that is quadratic in crate
+    // size, and it was the dominant cost in the profile by a wide margin.
+    let already_verified = SOURCE_SNAPSHOTS
+        .lock()
+        .map_err(|_| "source snapshot lock poisoned".to_owned())?
+        .contains_key(&key);
+    if owned && !already_verified {
         let source = if let Some(source) = &file.src {
             source.to_string()
         } else {
