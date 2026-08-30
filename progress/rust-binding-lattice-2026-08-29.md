@@ -1709,11 +1709,30 @@ Both http sites are inside a `macro_rules!` body:
 let $danger = dist >= FORWARD_SHIFT_THRESHOLD && !$map.danger.is_red();
 ```
 
-and the recorded mapping source is `" >= FORWARD_SHIFT_THRESHOLD && "`. It
-**starts and ends mid-token**. `logical_tail_expression(left).span` for a
-selection whose operands straddle macro fragment boundaries yields the literal
-tokens *between* interpolations, which is no expression at all. rustc emits no
-region because there is nothing there to have one.
+and the recorded mapping source *appeared* to be `" >= FORWARD_SHIFT_THRESHOLD
+&& "` — starting and ending mid-token, which looked like an operand straddling
+macro fragment boundaries.
+
+**That was wrong, and the error was mine.** Read with byte-correct slicing the
+range is `"dist >= FORWARD_SHIFT_THRESHOLD"` — a clean, complete expression.
+`http/src/header/map.rs` contains two non-ASCII characters, four bytes of
+drift, and the diagnostic sliced by JS string index against byte offsets. This
+is precisely the trap recorded as #42, walked into while diagnosing.
+
+So there is no fragment-straddling here and the cause of the maps-to-zero
+family is **still unknown**. What is established: the mapping source is a
+correct, well-formed expression range, and rustc emits no branch region for it
+anyway. The next diagnosis must start from that fact.
+
+Two consequences worth carrying. Every source-text reading in this
+investigation used the broken slicing, so any conclusion that rested on
+*reading* a range — rather than on a measurement — needs redoing with byte
+slicing; that includes the `"y "` observation attributed to http while
+validating #39. The measurement-based conclusions are unaffected, including
+#39's own, which decides elimination from the HIR condition and never consults
+a span. And the fix for #42 is now clearly worth doing for the diagnostics
+themselves, not just the corpus assertions: a silently shifted range produced a
+confident, wrong root cause.
 
 This is a recurring shape rather than a one-off: the same pathology produced
 http's `"y "` slice found while validating #39 — a "statement" whose text was a
