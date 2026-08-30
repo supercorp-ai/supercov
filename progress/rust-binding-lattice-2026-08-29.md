@@ -1049,3 +1049,35 @@ faults), manifest writing (8 MB is milliseconds), the static archive, and a
 clone of the unreachable-arm set (empty in this workload, so it early-returns).
 `sample` found the answer in a single run. On this codebase, measurement has
 beaten reasoning every time they disagreed.
+
+### The number that matters: 1.08x on a real dependency tree
+
+Every figure above came from generated crates: one crate, no dependencies,
+400 or 800 functions each carrying an if/else chain, a loop with a match and a
+guarded match. That is a stress shape, not a workload. Measured on a real tree
+— syn with `full`, serde_json and regex, `cargo build -j 4`, fresh target
+directories both sides:
+
+| | baseline | instrumented | ratio |
+|---|---|---|---|
+| wall | 4.97s | 5.37s | **1.08x** |
+| user | 7.16s | 12.12s | 1.69x |
+| sys | 0.86s | 2.41s | 2.80x |
+
+Wall clock is 1.08x, inside the north star's ≤1.10x gate. The synthetic 13x
+and the real 1.08x are both true and measure different things: a single
+branch-dense crate compiled alone has no parallelism to hide the analysis,
+while a real dependency tree compiles many crates at once and rustc's own work
+dominates the critical path.
+
+Two caveats that must travel with the number. CPU time is 1.81x combined, so a
+machine with no spare cores — a constrained CI runner — would feel closer to
+that than to 1.08x. And this measures compiling *dependencies*, which a user
+pays once; their own crate is nearer the dense case, though real code is far
+less branch-dense than the generator.
+
+The honest summary is three numbers, not one: about 1.08x wall on a realistic
+cold build, about 1.8x CPU, and warm rebuilds free. Publishing a single
+multiplier would repeat exactly the merged-number mistake this project refuses
+everywhere else — and the first figure measured tonight, 4.9x, was already
+misleading for that reason.
