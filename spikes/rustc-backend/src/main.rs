@@ -311,6 +311,10 @@ struct MatchArmSelectionObligation {
     /// Binding-free integer matches lower to one multiway `switchInt` with no
     /// FalseEdges, so arms bind directly to the matching value edges.
     pattern_int: Option<u128>,
+    /// The enum variant this arm's pattern selects. A macro that expands one
+    /// body fragment into several arms gives them all the same body span, so
+    /// spans cannot tell the arms apart; the discriminant can.
+    pattern_variant: Option<u32>,
     guarded: bool,
     guard_decision_id: Option<String>,
     selected_ordinal: u64,
@@ -2087,6 +2091,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     .filter(|source| source.owned),
                 pattern_literal: string_pattern_literal(arm.pat),
                 pattern_int: integer_pattern_literal(arm.pat),
+                pattern_variant: arm_pattern_variant(self.tcx, self.def_id.expect_local(), arm.pat),
                 guarded: arm.guard.is_some(),
                 guard_decision_id: None,
                 selected_ordinal,
@@ -9296,6 +9301,39 @@ fn executable_block_sources(
 /// the arm exactly the external incoming edge the binder needs. Any edge that
 /// targeted the entry is redirected to the continuation so `bb0` keeps one
 /// role: entered once per call.
+/// The enum variant a match-arm pattern selects, when it selects one.
+///
+/// Mirrors the derivation used for `if let` decision conditions, which resolves
+/// the pattern's qpath to a variant and asks the ADT for its index.
+fn arm_pattern_variant<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: LocalDefId,
+    pattern: &'tcx hir::Pat<'tcx>,
+) -> Option<u32> {
+    let typeck = tcx.typeck(def_id);
+    let adt = typeck
+        .node_type_opt(pattern.hir_id)
+        .map(rustc_middle::ty::Ty::peel_refs)
+        .and_then(rustc_middle::ty::Ty::ty_adt_def)?;
+    let qpath = match pattern.kind {
+        hir::PatKind::TupleStruct(ref qpath, ..)
+        | hir::PatKind::Struct(ref qpath, ..)
+        | hir::PatKind::Expr(&hir::PatExpr {
+            kind: hir::PatExprKind::Path(ref qpath),
+            ..
+        }) => qpath,
+        _ => return None,
+    };
+    let variant_definition = match typeck.qpath_res(qpath, pattern.hir_id) {
+        hir::def::Res::Def(DefKind::Ctor(hir::def::CtorOf::Variant, _), constructor) => {
+            tcx.parent(constructor)
+        }
+        hir::def::Res::Def(DefKind::Variant, variant) => variant,
+        _ => return None,
+    };
+    Some(adt.variant_index_with_id(variant_definition).as_u32())
+}
+
 fn split_entry_block(body: &mut rustc_middle::mir::Body<'_>) {
     let start = rustc_middle::mir::START_BLOCK;
     let original = body.basic_blocks[start].clone();
@@ -9383,7 +9421,7 @@ fn runtime_match_plans<'tcx>(
                 .get(&arm.selected_ordinal)
                 .cloned()
                 .unwrap_or_else(|| {
-                    block_sources
+                    let by_body = block_sources
                         .iter()
                         .filter_map(|(block, sources)| {
                             sources
@@ -9395,7 +9433,47 @@ fn runtime_match_plans<'tcx>(
                                 })
                                 .then_some(*block)
                         })
-                        .collect::<BTreeSet<_>>()
+                        .collect::<BTreeSet<_>>();
+                    // A macro that expands one body fragment into several arms
+                    // — either's `for_both!($pattern => $result)` writes
+                    // `$result` into both — gives every arm the identical body
+                    // span, so the filter above hands them all the same blocks
+                    // and the misbind check rightly rejects two arms entering
+                    // one block. Spans cannot separate these arms: MIR carries
+                    // the scrutinee span on the test blocks, not the arm
+                    // patterns. The discriminant can, so keep only the blocks
+                    // this arm's variant target reaches.
+                    let shares_body_span = group.arms.iter().any(|other| {
+                        other.branch_id != arm.branch_id && other.body_source == arm.body_source
+                    });
+                    let Some(variant) = arm.pattern_variant.filter(|_| shares_body_span) else {
+                        return by_body;
+                    };
+                    let refined = body
+                        .basic_blocks
+                        .iter_enumerated()
+                        .filter_map(|(block, data)| match &data.terminator().kind {
+                            TerminatorKind::SwitchInt { targets, .. }
+                                if by_body
+                                    .iter()
+                                    .all(|reached| dominators.dominates(block, *reached)) =>
+                            {
+                                targets
+                                    .iter()
+                                    .find(|(value, _)| *value == u128::from(variant))
+                                    .map(|(_, target)| target)
+                            }
+                            _ => None,
+                        })
+                        .map(|target| {
+                            by_body
+                                .iter()
+                                .copied()
+                                .filter(|reached| dominators.dominates(target, *reached))
+                                .collect::<BTreeSet<_>>()
+                        })
+                        .find(|refined: &BTreeSet<_>| !refined.is_empty());
+                    refined.unwrap_or(by_body)
                 });
             if body_blocks.is_empty() {
                 // An arm whose body type is uninhabited cannot complete, so

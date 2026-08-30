@@ -6,13 +6,6 @@
     "conditions": 31,
     "exact": 71.74
   },
-  "itoa": {
-    "obligations": 186,
-    "declined": 0,
-    "uncompiled": 0,
-    "conditions": 18,
-    "exact": 100
-  },
   "once_cell": {
     "obligations": 493,
     "declined": 5,
@@ -20,19 +13,19 @@
     "conditions": 27,
     "exact": 98.99
   },
+  "itoa": {
+    "obligations": 186,
+    "declined": 0,
+    "uncompiled": 0,
+    "conditions": 18,
+    "exact": 100
+  },
   "serde_core": {
     "obligations": 1787,
     "declined": 44,
     "uncompiled": 10,
     "conditions": 85,
     "exact": 97.54
-  },
-  "tracing_core": {
-    "obligations": 1185,
-    "declined": 2,
-    "uncompiled": 0,
-    "conditions": 51,
-    "exact": 99.83
   },
   "zmij": {
     "obligations": 593,
@@ -48,12 +41,12 @@
     "conditions": 170,
     "exact": 99
   },
-  "bytes": {
-    "obligations": 2199,
-    "declined": 8,
-    "uncompiled": 8,
-    "conditions": 167,
-    "exact": 99.64
+  "tracing_core": {
+    "obligations": 1185,
+    "declined": 2,
+    "uncompiled": 0,
+    "conditions": 51,
+    "exact": 99.83
   },
   "quote": {
     "obligations": 289,
@@ -69,19 +62,26 @@
     "conditions": 328,
     "exact": 100
   },
+  "bytes": {
+    "obligations": 2199,
+    "declined": 8,
+    "uncompiled": 8,
+    "conditions": 167,
+    "exact": 99.64
+  },
   "syn": {
     "obligations": 16154,
-    "declined": 92,
+    "declined": 50,
     "uncompiled": 110,
     "conditions": 1317,
-    "exact": 99.43
+    "exact": 99.69
   },
   "http": {
     "obligations": 3657,
-    "declined": 181,
+    "declined": 99,
     "uncompiled": 10,
     "conditions": 225,
-    "exact": 95.05
+    "exact": 97.29
   },
   "serde": {
     "obligations": 1426,
@@ -106,17 +106,17 @@
   },
   "either": {
     "obligations": 350,
-    "declined": 11,
+    "declined": 6,
     "uncompiled": 2,
     "conditions": 3,
-    "exact": 96.86
+    "exact": 98.29
   },
   "tracing_attributes": {
     "obligations": 883,
-    "declined": 32,
+    "declined": 29,
     "uncompiled": 19,
     "conditions": 90,
-    "exact": 96.38
+    "exact": 96.72
   },
   "tracing": {
     "obligations": 365,

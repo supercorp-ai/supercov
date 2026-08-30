@@ -4451,6 +4451,25 @@ try {
     chainedDecision?.conditions.map(({source}) => source),
     ['let Some(value) = value', 'value', 'enabled'],
   );
+  // Both arms of shared_arm_body come from ONE macro body fragment, so they
+  // share a body span and can only be separated by the discriminant. Two
+  // distinct arm obligations must survive, and neither may be declined —
+  // binding them by span collapses both onto one block and the misbind
+  // post-condition then declines the whole body's match plans.
+  const sharedArms = branchesFor(
+    identityManifestA,
+    'shared_arm_body',
+    'match-arm',
+  );
+  assert.equal(sharedArms.length, 2, 'both shared-body arms must bind');
+  assert.equal(new Set(sharedArms.map(({id}) => id)).size, 2);
+  const declinedIds = new Set(identityManifestA.unmeasuredObligations ?? []);
+  for (const arm of sharedArms) {
+    assert.ok(
+      !declinedIds.has(arm.id),
+      `shared-body arm ${arm.id} must bind, not decline`,
+    );
+  }
   // A negated chain decomposes: `!(first || second)` has two conditions and one
   // short-circuit selection, not the single merged condition it was recorded as
   // before. Values are read from the fixture source, not from observed output.

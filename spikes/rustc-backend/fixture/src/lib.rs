@@ -672,6 +672,28 @@ pub fn mixed(first: bool, second: bool, third: bool) -> usize {
     if (first || second) && third { 53 } else { 59 }
 }
 
+pub enum SharedBodyChoice {
+    First(usize),
+    Second(usize),
+}
+
+/// The body fragment is written once and expanded into BOTH arms, so the arms
+/// carry the identical body span. Spans cannot tell them apart — MIR puts the
+/// scrutinee span on the test blocks, not the arm patterns — so binding has to
+/// separate them by the discriminant instead.
+macro_rules! shared_arm_body_macro {
+    ($value:expr, $pattern:pat => $result:expr) => {
+        match $value {
+            SharedBodyChoice::First($pattern) => $result,
+            SharedBodyChoice::Second($pattern) => $result,
+        }
+    };
+}
+
+pub fn shared_arm_body(choice: &SharedBodyChoice) -> usize {
+    shared_arm_body_macro!(*choice, ref inner => *inner + 103)
+}
+
 /// A negated chain is two conditions, not one. Recorded atomically it reports a
 /// merged MC/DC number for a decision that genuinely has two operands.
 pub fn negated_chain(first: bool, second: bool) -> usize {
