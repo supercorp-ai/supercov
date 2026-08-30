@@ -120,6 +120,15 @@ function measure() {
     const uncompiled = (manifest.limitations ?? []).filter((limitation) =>
       limitation.startsWith('RUST_OBLIGATION_NOT_COMPILED'),
     ).length;
+    // Total conditions across all decisions. Decomposing one recorded
+    // condition into the several it always was raises this without adding
+    // obligations, and can lower the exact fraction when the new conditions
+    // cannot yet bind. That is a merged number being replaced by an honest
+    // decline, which the ratchet must not read as the binder getting worse.
+    const conditions = manifest.decisions.reduce(
+      (total, decision) => total + (decision.conditions ?? []).length,
+      0,
+    );
     const previous = fractions[manifest.crate];
     // A crate can be compiled more than once (lib and test targets); keep the
     // largest obligation count so the comparison is stable.
@@ -128,6 +137,7 @@ function measure() {
       obligations: total,
       declined,
       uncompiled,
+      conditions,
       exact: Number((((total - declined) / total) * 100).toFixed(2)),
     };
   }
@@ -261,7 +271,15 @@ for (const name of names) {
   }
   const delta = Number((measured[name].exact - before.exact).toFixed(2));
   const newlyUncompiled = (measured[name].uncompiled ?? 0) - (before.uncompiled ?? 0);
-  if (delta < 0 && newlyUncompiled > 0) {
+  const newlyDecomposed = (measured[name].conditions ?? 0) - (before.conditions ?? 0);
+  if (delta < 0 && newlyDecomposed > 0 && measured[name].obligations === before.obligations) {
+    // Same obligations, more conditions: a decision that was reported as one
+    // condition is now reported as the several it always had.
+    console.log(
+      `  decomposed: ${name} ${before.exact}% -> ${measured[name].exact}% (${delta}), ` +
+        `+${newlyDecomposed} conditions recorded`,
+    );
+  } else if (delta < 0 && newlyUncompiled > 0) {
     // Honesty gained, not exactness lost: the drop is accounted for by
     // constructs newly recognised as absent from this build.
     console.log(
