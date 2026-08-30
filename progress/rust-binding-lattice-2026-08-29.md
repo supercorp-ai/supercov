@@ -2113,3 +2113,58 @@ code-mapped BCBs ran 0–21, 23, 24, 26. And skipping such mappings so the
 condition falls through to the structural switch search works, but only
 relabels: nine "maps to 0" became seven "condition branch_source", with corpus
 unbound unchanged at 72.
+
+## Performance, and a hole in the guard that found itself
+
+Remeasuring #16's numbers first, because they were an order of magnitude stale:
+scale-400 (3,600 lines, deliberately branch-dense) runs **8.1x**, not the 82x
+recorded — 0.55s baseline against 4.46s instrumented. The improvement came from
+work landed for other reasons: deferring the archive to the final link,
+memoising the HIR walk, verifying file identity once.
+
+Two of the three original leads are now ruled out by measurement rather than
+argument. **Disk I/O is not the cost** — `time -l` reports *zero* block input
+and output operations, so the 2.6s of sys time is allocation churn from rustc's
+MIR pipeline, not the filesystem. **The manifest is not the cost** either: 8.1 MB
+for 3,600 lines looks wasteful and never reaches disk in the measured window.
+And the **diagnostic trace is not the cost**: gating its per-body span
+formatting measured 4.46/4.49 with against 4.49/4.46 without, so the gate was
+reverted rather than shipped as a knob that buys nothing.
+
+`sample` puts 924 of 1635 samples in `after_analysis` → `optimized_mir`, and
+removing the forcing outright takes 5.32s → 2.30s. So the forcing is 57% of the
+cost, matching the profile. It is also load-bearing: the comment at main.rs:3286
+records that forcing per body is what ensures every degradation is recorded
+before the manifest is written.
+
+### The ratchet rewarded breaking that
+
+Forcing the *earliest* hooked query instead of the last looked principled — the
+binder consumes pre-optimization MIR in most paths — and the ratchet called it a
+large win:
+
+```
+build_script_build 71.74% -> 100%  (+28.26)
+zmij               78.63% -> 100%  (+21.37)
+exactness held or improved across 18 crates
+```
+
+It was catastrophically wrong. Obligation counts were **identical** while
+declines went 133 → 0 and 39 → 0 and every limitation vanished, `uncompiled`
+included — those cfg-eliminated statements certainly still exist. Binding
+simply stopped running, so nothing could fail, and the manifest claimed 100%.
+
+The gap is structural: exactness is `(measurable − unbound) / measurable`, and
+**both halves fall when checking stops**. A change that binds nothing scores
+perfectly. Our primary guard against wrong numbers rewards the worst wrong
+number the tool can produce.
+
+What the manifest is missing is a count of bindings *attempted*. Obligations
+collected come from HIR and stayed constant, which is exactly why nothing
+looked wrong. Recorded as its own task, with two cheaper cross-checks: a large
+fall in limitations should read as suspicious, and `uncompiled` reaching zero in
+a crate with validated cfg-disabled code should fail outright.
+
+The corpus chain would probably have caught this at the fixtures. But the
+ratchet is what gates every binder change during development, it runs in two
+minutes against the chain's twenty, and it said *held or improved*.
