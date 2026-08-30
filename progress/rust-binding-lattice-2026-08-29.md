@@ -642,3 +642,54 @@ yields every BCB, not just the counted ones, and it comes with its own proof:
 every BCB that does carry a counter must land on that counter's block. Making
 that agreement a hard post-condition — decline the body if the reconstruction
 disagrees anywhere — is what turns the recovery from plausible into provable.
+
+## Cost, not frequency, decides what to fix next
+
+Two waves in a row ranked work by how often a limitation fires and were wrong
+both times. The `either` shape — `match arm entry bbN has no external incoming
+edge` — fires 66 times and looks like the largest remaining blind spot, but it
+costs 11 obligations: the generic `AsMut<Target>` impl is instantiated for many
+targets that share one authored source, so all 66 failures collapse onto a
+handful of obligation identities.
+
+Attributing declined obligations to limitations by definition name gives the
+ranking that matters. Cost first, occurrences second:
+
+| cost | count | family |
+|---|---|---|
+| 1107 | 114 | bind pre-optimization match probes |
+| 1010 | 40 | bind Rust decision probes |
+| 673 | 15 | bind Rust statement probes |
+| 645 | 18 | bind Rust logical-selection probes |
+| 587 | 108 | NOT_COMPILED statements (legitimately unmeasurable) |
+| 368 | 49 | inject pre-optimization match probes |
+| 259 | 3 | inject Rust decision probes |
+
+Three `inject Rust decision probes` failures cost more than the entire either
+family, because an inject failure returns the pristine body and declines
+everything in it.
+
+## Injection phases rewrite the edges later phases recorded
+
+Those three failures are one shape, and it is not a binding defect.
+`Punct::new` matches a 22-alternative or-pattern arm, and its decision plan
+recorded the true edge `bb0 -> bb2`. By the time decisions are injected:
+
+    bb0 now targets [bb8 x22, bb1], whose own successors are
+    [(bb1, [bb4]), (bb8, [bb7])], reaching bb2
+
+Twenty-two identical targets is a match-arm bridge — match injection correctly
+installs one block recording "this arm was taken" for all 22 entry edges — and
+the original target now sits behind a chain of our own bridges. Decisions are
+injected after match arms and loop frames, so the phase looks for an edge that
+an earlier phase already rewrote, and gives up.
+
+The first hypothesis, a single intervening block, was tested and refuted: the
+one-hop reachability set came back empty. The diagnosis was extended a second
+time rather than a fix guessed at, which is what turned "edge was not found"
+into a cause.
+
+The repair needs no heuristic, because we create every bridge ourselves: keep a
+map from each inserted bridge to the edge it replaced, and have later
+injections resolve recorded edges through it, requiring the resolved chain to
+consist only of blocks we inserted and to terminate at the recorded target.

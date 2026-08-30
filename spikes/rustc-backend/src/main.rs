@@ -10318,9 +10318,42 @@ fn instrument_runtime_decisions<'tcx>(
                             }
                         });
                     if replaced == 0 {
+                        // Name what the block targets now. Decisions are
+                        // injected after match arms and loop frames, and those
+                        // insert bridge blocks by rewriting the very edges the
+                        // decision plan recorded, so a missing edge may mean
+                        // "already redirected through a bridge" rather than
+                        // "never existed". The two need opposite fixes.
+                        let successors = body.basic_blocks[*source]
+                            .terminator()
+                            .successors()
+                            .collect::<Vec<_>>();
                         return Err(format!(
-                            "decision {} condition {} {:?} edge from {:?} was not found",
-                            plan.id, mapped.index, value, source
+                            "decision {} condition {} {:?} edge from {:?} to {:?} was not \
+                             found; {:?} now targets {:?}, whose own successors are {:?}, \
+                             reaching {:?}",
+                            plan.id,
+                            mapped.index,
+                            value,
+                            source,
+                            target,
+                            source,
+                            successors,
+                            successors
+                                .iter()
+                                .collect::<BTreeSet<_>>()
+                                .into_iter()
+                                .map(|successor| {
+                                    (
+                                        *successor,
+                                        body.basic_blocks[*successor]
+                                            .terminator()
+                                            .successors()
+                                            .collect::<Vec<_>>(),
+                                    )
+                                })
+                                .collect::<Vec<_>>(),
+                            target
                         ));
                     }
                 }
