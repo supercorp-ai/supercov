@@ -215,6 +215,17 @@ static UNREACHABLE_MATCH_ARMS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::ne
 /// uncovered or unbound.
 static CFG_ELIMINATED_POINTS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static SOURCE_SNAPSHOTS: Mutex<BTreeMap<String, ExactSourceSnapshot>> = Mutex::new(BTreeMap::new());
+
+thread_local! {
+    /// Source identity resolved once per file per thread.
+    ///
+    /// Only populated after the file's bytes have been verified against the
+    /// global snapshot, so a cache hit means both the identity and the
+    /// verification are already done.
+    static FILE_IDENTITY: RefCell<
+        BTreeMap<rustc_span::StableSourceFileId, (String, &'static str, bool)>,
+    > = const { RefCell::new(BTreeMap::new()) };
+}
 static DOCTEST_ROLE: OnceLock<&'static str> = OnceLock::new();
 static COMPILATION_SUCCEEDED: AtomicBool = AtomicBool::new(false);
 /// Binding passes actually run, not obligations merely collected.
@@ -976,6 +987,22 @@ fn stable_source_range(
             owned: true,
         });
     }
+    // Identity is a property of the FILE, not of each obligation in it.
+    // Recomputing it per obligation clones the FileName, formats it to a string
+    // and normalises the path every time, then takes the global snapshot lock
+    // just to ask whether the file was already verified. With tens of thousands
+    // of obligations against a handful of files that is all repeated work, and
+    // it dominates collection.
+    let cached_identity = FILE_IDENTITY.with(|cache| cache.borrow().get(&file.stable_id).cloned());
+    if let Some((key, class, owned)) = cached_identity {
+        return Ok(StableSourceRange {
+            key,
+            start: span.lo().0.saturating_sub(file.start_pos.0),
+            end: span.hi().0.saturating_sub(file.start_pos.0),
+            class,
+            owned,
+        });
+    }
     let (key, class, owned) = match &file.name {
         FileName::Real(name) => {
             let local_name = FileName::Real(name.clone())
@@ -1065,6 +1092,13 @@ fn stable_source_range(
             return Err(format!("source identity {key} resolved to different bytes"));
         }
     }
+    // Cached only after the bytes have been verified, so a later hit stands for
+    // both the identity and the verification.
+    FILE_IDENTITY.with(|cache| {
+        cache
+            .borrow_mut()
+            .insert(file.stable_id, (key.clone(), class, owned));
+    });
     Ok(StableSourceRange {
         key,
         start,
