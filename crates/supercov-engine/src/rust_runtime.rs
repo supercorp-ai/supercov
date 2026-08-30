@@ -84,9 +84,18 @@ pub fn render_rust_runtime(module_name: &str, crate_key: &str) -> Result<String,
 #[doc(hidden)]
 #[allow(dead_code)]
 mod {module_name} {{
+    // The host crate may be `#![no_std]` -- `bytes` is, and so is much of the
+    // ecosystem's foundation. Nothing here can rely on the std prelude being in
+    // scope, so std is brought in explicitly and every prelude item below is
+    // written out in full. Without this the module does not compile and the
+    // whole build fails, which is a hard failure rather than a degradation.
+    extern crate std;
     use std::fs::{{File, OpenOptions}};
     use std::io::Write as _;
+    use std::option::Option::{{self, None, Some}};
+    use std::string::String;
     use std::sync::{{Mutex, OnceLock}};
+    use std::vec::Vec;
 
     const MAGIC: &[u8] = b"{RUST_PROBE_MAGIC}\n";
     const CRATE_KEY: &str = "{crate_key}";
@@ -97,7 +106,8 @@ mod {module_name} {{
             let directory = std::env::var_os("SUPERCOV_RUST_EVIDENCE_DIR")?;
             let directory = std::path::PathBuf::from(directory);
             std::fs::create_dir_all(&directory).ok()?;
-            let path = directory.join(format!("{{CRATE_KEY}}-{{}}.events", std::process::id()));
+            let path =
+                directory.join(std::format!("{{CRATE_KEY}}-{{}}.events", std::process::id()));
             let empty = std::fs::metadata(&path).map_or(true, |metadata| metadata.len() == 0);
             let mut file = OpenOptions::new().create(true).append(true).open(path).ok()?;
             if empty {{
@@ -120,7 +130,7 @@ mod {module_name} {{
 
     impl DecisionFrame {{
         pub fn new(id: &'static str, conditions: usize) -> Self {{
-            Self {{ id, values: vec![0; conditions] }}
+            Self {{ id, values: std::vec![0; conditions] }}
         }}
     }}
 
