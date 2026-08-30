@@ -134,6 +134,97 @@ function measure() {
   return fractions;
 }
 
+// Which phase owns an obligation, so a declined one is attributed to the
+// failure that actually cost it. DeclineScope is already per-kind, so this
+// mirrors how the binder decides what to give up.
+const OWNING_PHASE = [
+  ['point', 'statement'],
+  ['decision', 'decision'],
+  ['group', 'match'],
+  ['branch-logical-selection', 'logical-selection'],
+  ['branch-match-arm', 'match'],
+  ['branch-decision-outcome', 'decision'],
+  ['branch-loop-entry', 'loop'],
+  ['branch-try-operator', 'try'],
+];
+
+// Rank families by the obligations they actually cost.
+//
+// The first version of this attributed a definition's whole declined set to
+// every limitation naming that definition, so a body with several failures
+// counted its obligations once per failure and the columns summed to seven
+// times the corpus total. Each obligation is now attributed once, to the
+// phase that owns its kind, and the total is asserted against the crate's
+// declined count so the arithmetic cannot drift again.
+function families(measured) {
+  const totals = {};
+  let attributed = 0;
+  let declinedTotal = 0;
+  for (const name of readdirSync(join(work, 'out'))) {
+    if (!name.startsWith('manifest-') || !name.endsWith('.json')) continue;
+    let manifest;
+    try {
+      manifest = JSON.parse(readFileSync(join(work, 'out', name), 'utf8'));
+    } catch {
+      continue;
+    }
+    const size =
+      manifest.points.length + manifest.branches.length + manifest.decisions.length;
+    if (size < 100) continue;
+    const declined = new Set(manifest.unmeasuredObligations ?? []);
+    if (declined.size === 0) continue;
+    if (measured[manifest.crate]?.obligations !== size) continue;
+    declinedTotal += declined.size;
+    const kindOf = new Map();
+    for (const point of manifest.points) kindOf.set(point.id, 'point');
+    for (const decision of manifest.decisions) kindOf.set(decision.id, 'decision');
+    for (const group of manifest.selectionGroups ?? []) kindOf.set(group.id, 'group');
+    for (const branch of manifest.branches) kindOf.set(branch.id, `branch-${branch.kind}`);
+    const definitionsOf = new Map();
+    for (const obligation of [
+      ...manifest.points,
+      ...manifest.branches,
+      ...manifest.decisions,
+      ...(manifest.selectionGroups ?? []),
+    ]) {
+      definitionsOf.set(obligation.id, obligation.definitions ?? []);
+    }
+    const limitations = (manifest.limitations ?? [])
+      .filter((limitation) => !limitation.startsWith('RUST_FRONTEND_PRIVATE'))
+      .map((limitation) => {
+        const parsed = limitation.match(/^([A-Z_]+): (.*?) in (.*?): /);
+        return parsed
+          ? {kind: parsed[1], phase: parsed[2], definition: parsed[3]}
+          : null;
+      })
+      .filter(Boolean);
+    for (const id of declined) {
+      const kind = kindOf.get(id) ?? '';
+      const owner = OWNING_PHASE.find(([prefix]) => kind === prefix)?.[1];
+      const candidates = (definitionsOf.get(id) ?? []).flatMap((definition) =>
+        limitations.filter((limitation) => limitation.definition === definition),
+      );
+      const matched =
+        candidates.find((limitation) => owner && limitation.phase.includes(owner)) ??
+        candidates[0];
+      const key = matched
+        ? `${matched.kind.replace('RUST_OBLIGATION_', '')} :: ${matched.phase}`
+        : `UNATTRIBUTED :: ${kind || 'unknown'}`;
+      totals[key] = (totals[key] ?? 0) + 1;
+      attributed += 1;
+    }
+  }
+  console.log(`cost  family   (${attributed} attributed of ${declinedTotal} declined)`);
+  for (const [key, cost] of Object.entries(totals).sort((a, b) => b[1] - a[1])) {
+    console.log(String(cost).padStart(5), ' ', key.slice(0, 72));
+  }
+  assert.equal(
+    attributed,
+    declinedTotal,
+    'every declined obligation must be attributed exactly once',
+  );
+}
+
 const mode = process.argv[2] ?? 'measure';
 const measured = measure();
 const names = Object.keys(measured).sort();
@@ -141,6 +232,11 @@ assert(
   names.length >= 8,
   `only ${names.length} crates measured; the probe build did not run — a partial set silently reads as "no regressions"`,
 );
+
+if (mode === 'families') {
+  families(measured);
+  process.exit(0);
+}
 
 if (mode === 'baseline') {
   writeFileSync(baselinePath, `${JSON.stringify(measured, null, 2)}\n`);
