@@ -818,6 +818,24 @@ fn package_identity(crate_name: &str) -> (String, bool) {
     (format!("package:{package}"), true)
 }
 
+/// Append a `u32` in decimal without going through the formatting machinery.
+fn push_u32(target: &mut String, value: u32) {
+    let mut digits = [0_u8; 10];
+    let mut written = 0;
+    let mut remaining = value;
+    loop {
+        digits[written] = b'0' + u8::try_from(remaining % 10).expect("single digit");
+        written += 1;
+        remaining /= 10;
+        if remaining == 0 {
+            break;
+        }
+    }
+    for digit in digits[..written].iter().rev() {
+        target.push(char::from(*digit));
+    }
+}
+
 fn stable_source_range(
     tcx: TyCtxt<'_>,
     span: rustc_span::Span,
@@ -1220,10 +1238,23 @@ fn obligation_identity(
             exact_def_path!(tcx, def_id),
         )
     } else {
-        format!(
-            "rust-source-v1\0{}\0{}\0{}\0{}\0{}\0",
-            obligation_kind, source.key, source.start, source.end, discriminator,
-        )
+        // The overwhelmingly common shape, and `format!` here showed up as
+        // `alloc::fmt::format` high in the profile. Same bytes, built directly.
+        let mut canonical = String::with_capacity(
+            48 + obligation_kind.len() + source.key.len() + discriminator.len(),
+        );
+        canonical.push_str("rust-source-v1\0");
+        canonical.push_str(obligation_kind);
+        canonical.push('\0');
+        canonical.push_str(&source.key);
+        canonical.push('\0');
+        push_u32(&mut canonical, source.start);
+        canonical.push('\0');
+        push_u32(&mut canonical, source.end);
+        canonical.push('\0');
+        canonical.push_str(discriminator);
+        canonical.push('\0');
+        canonical
     };
     let mut hash = Sha256::new();
     hash.update(canonical.as_bytes());
@@ -1231,10 +1262,16 @@ fn obligation_identity(
     let encoded = if env::var_os(FORCE_ID_COLLISION).is_some() {
         "000000000000000000000000".into()
     } else {
-        digest[..12]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
+        // A `format!` per byte is twelve calls into the formatting machinery
+        // for every obligation. The digest is fixed width, so a table lookup
+        // does the same job.
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut encoded = String::with_capacity(24);
+        for byte in &digest[..12] {
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        encoded
     };
     let probe_ordinal = u64::from_be_bytes(digest[..8].try_into().expect("SHA-256 prefix"));
     Ok(StableObligationIdentity {
