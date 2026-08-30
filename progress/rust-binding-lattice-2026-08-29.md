@@ -1476,3 +1476,38 @@ The discipline holds: every gap closed has converted a #22 regression into a
 gain, because aggregation was crediting one successful binding to many bodies.
 Landing on "the remainder is only honest exposure" has not been necessary once,
 and is not necessary now.
+
+## The last gap before #22: one condition, two switches
+
+The single remaining #22 regression is serde_json −0.03, and the diagnostic
+names its own cause:
+
+```
+could not bind one expanded boolean MIR branch for
+rs:decision:da295abecf594e31da26713a condition 0; found 2
+```
+
+The condition at `de.rs:46089-46115` maps to **two** boolean switches — bb46
+and bb62 both carry `is_bool=true` with exactly that range — and the binder
+requires exactly one. Five messages in serde_json (`deserialize_any`,
+`deserialize_struct`, `parse_decimal`, `parse_exponent`) and one in syn, so a
+single fix closes both crates' tails.
+
+This is the condition-level analogue of two shapes already solved: logical
+selection branches mapping to zero regions, and decisions sharing one CFG edge.
+One authored construct, several MIR sites.
+
+The fix is to bind every switch whose range equals the condition's and union
+their outcomes — the condition is exercised if any site is. It is deliberately
+not done blind, because the one-switch rule is *also* what catches genuine
+misbinds. The guard has to be exact range equality plus `is_bool`, never
+overlap or nearest-match, with a post-condition that the union covers the same
+outcome set a single switch would, and a fixture where one condition is reached
+by two paths.
+
+Worth stating plainly what the −0.03 is: serde_json measures 4458 obligations
+against a 3256 baseline, 37% more, while declines rose by 16. That is honest
+splitting, not lost capability. It would be easy to land #22 by calling the
+remainder denominator growth — which is true — but closing the gap has worked
+five times running, and each time it converted a regression into a gain rather
+than merely excusing one.
