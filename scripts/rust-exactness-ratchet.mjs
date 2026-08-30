@@ -120,6 +120,27 @@ function measure() {
     const uncompiled = (manifest.limitations ?? []).filter((limitation) =>
       limitation.startsWith('RUST_OBLIGATION_NOT_COMPILED'),
     ).length;
+    // Which DECLINED obligations are uncompiled, as opposed to how many
+    // not-compiled MESSAGES there are. The two are different populations —
+    // several messages can name one obligation, and one message can accompany
+    // a scope decline covering many — and only the per-obligation count can
+    // be removed from the fraction. The wrapper embeds the obligation id in
+    // the marker as `UNMEASURABLE<id>|<reason>`.
+    const declinedIds = new Set(manifest.unmeasuredObligations ?? []);
+    const uncompiledDeclined = new Set();
+    for (const limitation of manifest.limitations ?? []) {
+      if (!limitation.startsWith('RUST_OBLIGATION_NOT_COMPILED')) continue;
+      const marked = limitation.match(/UNMEASURABLE([^|]+)\|/);
+      if (marked && declinedIds.has(marked[1])) uncompiledDeclined.add(marked[1]);
+    }
+    // Exactness measures BINDING, so code this build never compiled belongs in
+    // neither half of the fraction. Counting it as a failure meant a change
+    // that merely recognised more absent code read as the binder getting
+    // worse — and per-definition obligation identity, which counts each
+    // expansion of eliminated code separately, could never converge because of
+    // it: tracing regressed 0.65 with zero unbound messages.
+    const measurable = total - uncompiledDeclined.size;
+    const unbound = declined - uncompiledDeclined.size;
     // Total conditions across all decisions. Decomposing one recorded
     // condition into the several it always was raises this without adding
     // obligations, and can lower the exact fraction when the new conditions
@@ -138,7 +159,11 @@ function measure() {
       declined,
       uncompiled,
       conditions,
-      exact: Number((((total - declined) / total) * 100).toFixed(2)),
+      measurable,
+      exact:
+        measurable > 0
+          ? Number((((measurable - unbound) / measurable) * 100).toFixed(2))
+          : 100,
     };
   }
   return fractions;
