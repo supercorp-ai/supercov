@@ -11481,7 +11481,13 @@ fn main() {
         args.push("--check-cfg=cfg(supercov_spike_instrumented)".into());
         if let Some(directory) = env::var_os(STATIC_RUNTIME_DIRECTORY) {
             args.push(format!("-Lnative={}", PathBuf::from(directory).display()));
-            args.push("-lstatic=supercov_runtime".into());
+            // `-l static=name` BUNDLES the archive into every rlib, so each
+            // instrumented crate carries its own copy of the runtime — 17 MB
+            // apiece, paid again per workspace member, and it dominated the
+            // link time. The `-bundle` modifier records the dependency and
+            // defers the actual archive to the final link, where one copy is
+            // all that was ever needed.
+            args.push("-lstatic:-bundle=supercov_runtime".into());
         }
     }
     let early_dcx = EarlyDiagCtxt::new(ErrorOutputType::default());
