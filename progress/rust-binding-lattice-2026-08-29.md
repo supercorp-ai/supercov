@@ -2216,3 +2216,41 @@ Also worth recording: the 3.60s "baseline" quoted earlier in this work was
 measured under contention. The real figure is 1.54s, which makes supercov 2.6x
 wall rather than 1.31x. Every comparison in this section was re-run back to back
 for that reason.
+
+### Per-test attribution without probes: proven
+
+The requirement that forced the second pipeline is per-test attribution — LLVM
+counters are one global array dumped at exit, so they give whole-run totals,
+while our probes carry a context id. That turns out not to need probes at all.
+
+`scratchpad/llvmcov`, an ordinary crate built with `-C instrument-coverage`,
+declares three symbols from the profiling runtime rustc already links:
+
+```rust
+fn __llvm_profile_reset_counters();
+fn __llvm_profile_begin_counters() -> *const u8;
+fn __llvm_profile_end_counters() -> *const u8;
+```
+
+Reset before a test, read the array after, and the result is exactly what that
+test touched:
+
+```
+only_alpha  ->  counters [0, 3, 4, 5]
+only_beta   ->  counters [0, 1, 2, 5]
+```
+
+Distinct per test; the shared indices are the harness itself. No custom runtime,
+no injected probes, no bridge blocks.
+
+So the performance question resolves into a much smaller one. Not "how do we
+make our instrumentation cheaper", but **what does parallel test execution cost
+us** — libtest runs tests in threads against one global array, so concurrent
+reset-and-read interleaves and attribution becomes *wrong* rather than coarse.
+
+That is a measurement, not a design puzzle: compare `cargo test` serial against
+parallel on a real suite, and weigh that delta against the 3.2x compile cost
+this design removes. Serialising only when per-test attribution is requested is
+very likely cheaper than paying 220% CPU on every build. If it is not, the
+hybrid stays available — rustc's counters for the denominator, probes only where
+per-test data is actually asked for.
