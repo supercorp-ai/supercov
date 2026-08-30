@@ -2420,3 +2420,47 @@ walk, which is what makes the numbers *mean* something, and is the cheap half.
 
 Cost of the whole thing: 1.04x compile, no per-binary toll, full per-test
 attribution. Against today's 3.2x CPU and 0.7s per test binary.
+
+### Correction: sharding breaks arbitrary test commands
+
+Sharding requires supercov to enumerate tests and re-invoke the binary with
+`--exact` filters — that is, to **rewrite the user's command**. It breaks
+`cargo nextest run`, custom test scripts, and anything with its own arguments.
+The JS frontend never does this: it instruments and lets the command run
+untouched, and the Rust frontend today matches that — per-test attribution comes
+from libtest *context* inside the process, not from how the command is invoked.
+
+So sharding is available as an opt-in for users who accept a managed command,
+but it cannot be the default without giving up UNIVERSAL, which outranks FAST.
+
+That constraint is worth stating precisely, because it is fundamental rather
+than an implementation gap: **with parallel tests and one global counter array,
+exact per-test attribution is impossible.** Concurrent reset-and-read
+interleaves, so a test gets credited with work another thread did — a wrong
+number, not a coarse one. Attribution under parallelism needs per-context
+counters, which is exactly what our injected probes provide and what LLVM's
+runtime does not.
+
+### What survives, and it is most of the win
+
+The expensive part of our pipeline was never the probes themselves. It is
+forcing `optimized_mir` for every body — 57% of cost — and that exists only
+because the manifest is written in `after_analysis`, before codegen, so every
+degradation has to be recorded by then.
+
+Two changes remove it without touching attribution:
+
+1. **Bind against rustc's coverage mappings** rather than our own MIR analysis.
+   rustc computes `function_coverage_info` during the coverage pass it already
+   runs, and we already parse it. Binding an obligation to a mapping needs no
+   forced pipeline.
+2. **Move the manifest past codegen** (#49). `main()` already writes CTFE
+   outputs after `run_compiler` returns. Injection then happens naturally as
+   codegen lowers each body — no forcing, and bodies codegen never lowers are
+   honestly NOT_COMPILED rather than expensively "measured".
+
+That keeps injected probes, so per-test attribution and arbitrary test commands
+both survive, while removing the forcing that dominates compile cost. The
+sharding experiment is not wasted: it stays the opt-in path for anyone who wants
+attribution *and* wants it free, and it proved that rustc's counters can carry
+per-test data at all.
