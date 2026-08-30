@@ -1962,12 +1962,26 @@ nearest common **dominator** of an arm's body blocks, and two arms with
 disjoint block sets can still reduce to the same dominator. Set overlap misses
 exactly the colliding cases.
 
-So the third attempt needs a pre-pass — compute every arm's blocks and its
-dominator-reduced entry block first, group by that entry block, and refine only
-arms that actually share one. The current code decides per arm inside the loop
-and structurally cannot see the collision it is trying to resolve. That same
-pre-pass is what would keep the refinement narrow enough to avoid the first
-attempt's regression.
+The pre-pass was built — compute every arm's dominator-reduced entry block,
+group by it, refine only genuine collisions — and it produced a result
+**identical** to attempt one: syn +0.03, serde_core −0.06. Adding a further
+guard excluding *guarded* arms changed nothing either.
+
+Identical results across three different triggers is itself the finding: **the
+trigger was never the problem.** And attempt four's measurement finally showed
+what is: serde_core's misbind messages fall 13 → 11, so the refinement really
+does fix two of them, while a new failure appears —
+
+```
+for branch <id> maps to N exact Option switches
+```
+
+A `for` loop desugars to a match on `Option`, and refining those arms by
+variant disturbs the loop's own branch binding. The refinement is correct for
+ordinary arms and wrong for for-loop desugaring; #28's span-equality guard had
+been excluding that case by accident, which is why it never surfaced. The next
+guard should name `ForLoopDesugar` directly, and the expected result is net
+positive rather than a wash.
 
 One procedural note earned twice over: **measure a candidate alone before
 measuring it stacked on the change it is meant to unblock.** The combined
