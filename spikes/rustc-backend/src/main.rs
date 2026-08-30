@@ -9623,10 +9623,18 @@ fn runtime_match_plans<'tcx>(
                     // the scrutinee span on the test blocks, not the arm
                     // patterns. The discriminant can, so keep only the blocks
                     // this arm's variant target reaches.
-                    let shares_body_span = group.arms.iter().any(|other| {
-                        other.branch_id != arm.branch_id && other.body_source == arm.body_source
-                    });
-                    let Some(variant) = arm.pattern_variant.filter(|_| shares_body_span) else {
+                    // Never refine arms of an Option match. A `for` loop
+                    // desugars to a match on the Option that `next()` yields,
+                    // and the for-loop binder rebinds against that same switch
+                    // afterwards -- narrowing the arms to their variant targets
+                    // leaves it "maps to 0 exact Option switches". #28's
+                    // span-equality trigger had been excluding this case by
+                    // accident, which is why widening the trigger surfaced it.
+                    let option_match = group
+                        .pattern_adts
+                        .iter()
+                        .any(|adt| adt.ends_with("option::Option") || adt == "Option");
+                    let Some(variant) = arm.pattern_variant.filter(|_| !option_match) else {
                         return by_body;
                     };
                     let refined = body

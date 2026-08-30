@@ -31,12 +31,12 @@
     "measurable": 1777,
     "exact": 98.82
   },
-  "tracing_core": {
-    "obligations": 1185,
-    "declined": 2,
-    "uncompiled": 2,
-    "conditions": 51,
-    "measurable": 1183,
+  "proc_macro2": {
+    "obligations": 2103,
+    "declined": 1,
+    "uncompiled": 1,
+    "conditions": 170,
+    "measurable": 2102,
     "exact": 100
   },
   "zmij": {
@@ -47,13 +47,29 @@
     "measurable": 585,
     "exact": 78.63
   },
-  "proc_macro2": {
-    "obligations": 2103,
-    "declined": 1,
-    "uncompiled": 1,
-    "conditions": 170,
-    "measurable": 2102,
+  "quote": {
+    "obligations": 289,
+    "declined": 0,
+    "uncompiled": 0,
+    "conditions": 5,
+    "measurable": 289,
     "exact": 100
+  },
+  "tracing_core": {
+    "obligations": 1185,
+    "declined": 2,
+    "uncompiled": 2,
+    "conditions": 51,
+    "measurable": 1183,
+    "exact": 100
+  },
+  "syn": {
+    "obligations": 16169,
+    "declined": 43,
+    "uncompiled": 113,
+    "conditions": 1317,
+    "measurable": 16156,
+    "exact": 99.81
   },
   "bytes": {
     "obligations": 2197,
@@ -63,14 +79,6 @@
     "measurable": 2189,
     "exact": 100
   },
-  "quote": {
-    "obligations": 289,
-    "declined": 0,
-    "uncompiled": 0,
-    "conditions": 5,
-    "measurable": 289,
-    "exact": 100
-  },
   "memchr": {
     "obligations": 2717,
     "declined": 0,
@@ -78,14 +86,6 @@
     "conditions": 328,
     "measurable": 2717,
     "exact": 100
-  },
-  "syn": {
-    "obligations": 16169,
-    "declined": 49,
-    "uncompiled": 113,
-    "conditions": 1317,
-    "measurable": 16156,
-    "exact": 99.78
   },
   "http": {
     "obligations": 3660,
@@ -111,14 +111,6 @@
     "measurable": 3256,
     "exact": 99.39
   },
-  "log": {
-    "obligations": 369,
-    "declined": 36,
-    "uncompiled": 0,
-    "conditions": 16,
-    "measurable": 369,
-    "exact": 90.24
-  },
   "either": {
     "obligations": 350,
     "declined": 6,
@@ -126,6 +118,14 @@
     "conditions": 3,
     "measurable": 349,
     "exact": 98.57
+  },
+  "log": {
+    "obligations": 369,
+    "declined": 36,
+    "uncompiled": 0,
+    "conditions": 16,
+    "measurable": 369,
+    "exact": 90.24
   },
   "tracing_attributes": {
     "obligations": 883,
