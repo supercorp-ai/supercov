@@ -7,14 +7,6 @@
     "measurable": 138,
     "exact": 71.74
   },
-  "once_cell": {
-    "obligations": 493,
-    "declined": 5,
-    "uncompiled": 5,
-    "conditions": 27,
-    "measurable": 488,
-    "exact": 100
-  },
   "itoa": {
     "obligations": 186,
     "declined": 0,
@@ -23,21 +15,21 @@
     "measurable": 186,
     "exact": 100
   },
+  "once_cell": {
+    "obligations": 493,
+    "declined": 5,
+    "uncompiled": 5,
+    "conditions": 27,
+    "measurable": 488,
+    "exact": 100
+  },
   "serde_core": {
     "obligations": 1787,
-    "declined": 31,
+    "declined": 27,
     "uncompiled": 10,
     "conditions": 85,
     "measurable": 1777,
-    "exact": 98.82
-  },
-  "proc_macro2": {
-    "obligations": 2103,
-    "declined": 1,
-    "uncompiled": 1,
-    "conditions": 170,
-    "measurable": 2102,
-    "exact": 100
+    "exact": 99.04
   },
   "zmij": {
     "obligations": 593,
@@ -47,14 +39,6 @@
     "measurable": 585,
     "exact": 78.63
   },
-  "quote": {
-    "obligations": 289,
-    "declined": 0,
-    "uncompiled": 0,
-    "conditions": 5,
-    "measurable": 289,
-    "exact": 100
-  },
   "tracing_core": {
     "obligations": 1185,
     "declined": 2,
@@ -63,20 +47,12 @@
     "measurable": 1183,
     "exact": 100
   },
-  "syn": {
-    "obligations": 16169,
-    "declined": 43,
-    "uncompiled": 113,
-    "conditions": 1317,
-    "measurable": 16156,
-    "exact": 99.81
-  },
-  "bytes": {
-    "obligations": 2197,
-    "declined": 8,
-    "uncompiled": 8,
-    "conditions": 167,
-    "measurable": 2189,
+  "proc_macro2": {
+    "obligations": 2103,
+    "declined": 1,
+    "uncompiled": 1,
+    "conditions": 170,
+    "measurable": 2102,
     "exact": 100
   },
   "memchr": {
@@ -87,13 +63,37 @@
     "measurable": 2717,
     "exact": 100
   },
+  "quote": {
+    "obligations": 289,
+    "declined": 0,
+    "uncompiled": 0,
+    "conditions": 5,
+    "measurable": 289,
+    "exact": 100
+  },
+  "bytes": {
+    "obligations": 2197,
+    "declined": 8,
+    "uncompiled": 8,
+    "conditions": 167,
+    "measurable": 2189,
+    "exact": 100
+  },
+  "syn": {
+    "obligations": 16169,
+    "declined": 43,
+    "uncompiled": 113,
+    "conditions": 1317,
+    "measurable": 16156,
+    "exact": 99.81
+  },
   "http": {
     "obligations": 3660,
-    "declined": 95,
+    "declined": 31,
     "uncompiled": 14,
     "conditions": 225,
     "measurable": 3650,
-    "exact": 97.67
+    "exact": 99.42
   },
   "serde": {
     "obligations": 1426,

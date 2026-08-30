@@ -2104,7 +2104,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     .ok()
                     .filter(|source| source.owned),
                 pattern_literal: string_pattern_literal(arm.pat),
-                pattern_int: integer_pattern_literal(arm.pat),
+                pattern_int: integer_pattern_literal(self.tcx, self.def_id.expect_local(), arm.pat),
                 pattern_variant: arm_pattern_variant(self.tcx, self.def_id.expect_local(), arm.pat),
                 guarded: arm.guard.is_some(),
                 guard_decision_id: None,
@@ -4050,19 +4050,36 @@ fn string_pattern_literal(pattern: &rustc_hir::Pat<'_>) -> Option<Vec<u8>> {
 }
 
 /// The exact unsigned integer an integer-literal pattern accepts.
-fn integer_pattern_literal(pattern: &rustc_hir::Pat<'_>) -> Option<u128> {
+fn integer_pattern_literal<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    def_id: LocalDefId,
+    pattern: &'tcx rustc_hir::Pat<'tcx>,
+) -> Option<u128> {
     let rustc_hir::PatKind::Expr(expression) = pattern.kind else {
         return None;
     };
-    let rustc_hir::PatExprKind::Lit {
-        lit,
-        negated: false,
-    } = expression.kind
-    else {
-        return None;
-    };
-    match lit.node {
-        rustc_ast::LitKind::Int(value, _) => Some(value.get()),
+    match expression.kind {
+        rustc_hir::PatExprKind::Lit {
+            lit,
+            negated: false,
+        } => match lit.node {
+            rustc_ast::LitKind::Int(value, _) => Some(value.get()),
+            _ => None,
+        },
+        // A named constant carries the same switch value as the literal it
+        // stands for -- serde_json matches `self::BB`, `self::TT` and friends
+        // rather than bare integers -- and without evaluating it the arm has
+        // neither a variant nor a value to bind its switch target by.
+        rustc_hir::PatExprKind::Path(ref qpath) => {
+            let typeck = tcx.typeck(def_id);
+            let rustc_hir::def::Res::Def(DefKind::Const, constant) =
+                typeck.qpath_res(qpath, expression.hir_id)
+            else {
+                return None;
+            };
+            let value = tcx.const_eval_poly(constant).ok()?.try_to_scalar_int()?;
+            value.try_to_bits(value.size()).ok()
+        }
         _ => None,
     }
 }
@@ -9634,7 +9651,16 @@ fn runtime_match_plans<'tcx>(
                         .pattern_adts
                         .iter()
                         .any(|adt| adt.ends_with("option::Option") || adt == "Option");
-                    let Some(variant) = arm.pattern_variant.filter(|_| !option_match) else {
+                    // A constant-pattern arm carries its switch value in
+                    // `pattern_int` rather than a variant index --
+                    // serde_json's escape table matches named `u8` consts --
+                    // and the switch lookup is identical either way.
+                    let switch_value = arm
+                        .pattern_variant
+                        .map(u128::from)
+                        .or(arm.pattern_int)
+                        .filter(|_| !option_match);
+                    let Some(switch_value) = switch_value else {
                         return by_body;
                     };
                     let refined = body
@@ -9648,7 +9674,7 @@ fn runtime_match_plans<'tcx>(
                             {
                                 targets
                                     .iter()
-                                    .find(|(value, _)| *value == u128::from(variant))
+                                    .find(|(value, _)| *value == switch_value)
                                     .map(|(_, target)| target)
                             }
                             _ => None,
