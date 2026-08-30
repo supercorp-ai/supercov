@@ -2464,3 +2464,44 @@ both survive, while removing the forcing that dominates compile cost. The
 sharding experiment is not wasted: it stays the opt-in path for anyone who wants
 attribution *and* wants it free, and it proved that rustc's counters can carry
 per-test data at all.
+
+## Decomposing the 3.2x: injection is only half of it
+
+Before converting probes from calls to statements, the cost was decomposed by
+running the wrapper with MIR instrumentation disabled — which keeps the HIR
+obligation walk and the manifest but emits no probes. Real-crate probe, fresh
+target dir each:
+
+| build | wall | CPU |
+| --- | --- | --- |
+| no wrapper | 2.35s | 2.06s |
+| wrapper, HIR walk + manifest, **no injection** | 2.61s | **3.60s — 1.75x** |
+| wrapper, full | 4.32s | **6.53s — 3.2x** |
+
+So the overhead splits nearly evenly: **+1.54s before any probe is emitted**,
+and +2.93s for MIR binding and injection. The assumption that injection
+dominated was wrong; it is about 55%.
+
+That matters for the target. Converting probes to thread-local statement form
+addresses the injection half — CFG inflation is real, since a
+`TerminatorKind::Call` splits a block per obligation where LLVM emits a single
+`add` — but even a *free* injection leaves 1.75x from collecting obligations and
+serialising the manifest. Reaching 1.1x means cutting roughly 99% of the current
+overhead, which no single change delivers.
+
+The honest levers, each now sized:
+
+1. **Statement-form probes** (#51). Removes CFG inflation and everything rustc
+   pays downstream for carrying it. Bounded above by the 55% injection share.
+2. **The manifest.** 8.1 MB per crate built by ~10,800 `format!` calls and a
+   join. It never touches disk in the measured window, so this is pure CPU in
+   string construction — and 33% of its bytes are `canonical` strings, whose
+   digest is already the obligation id.
+3. **The HIR walk**, already memoised, and the part that makes the numbers mean
+   anything. Least negotiable.
+
+Which reframes the target honestly. 1.1x cold, with per-obligation instrumentation
+*and* per-test attribution *and* the full obligation model, is not reachable by
+tuning these three. What looks reachable is materially better than 3.2x — plausibly
+under 2x — and the remaining gap is a design question about how much is measured
+per obligation, not an optimisation question.
