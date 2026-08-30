@@ -1995,3 +1995,60 @@ signal about which to trust.
 One procedural note earned twice over: **measure a candidate alone before
 measuring it stacked on the change it is meant to unblock.** The combined
 reading hid a regression that the isolated reading exposed on the first try.
+
+## Wave: refine by discriminant except in Option matches (#45)
+
+The misbind-arm family took six attempts, and the one that worked came from
+diffing two runs rather than reasoning about them.
+
+#28 refines an arm's MIR blocks through its variant's switch target when two
+arms share a body *span* — a macro expanding one fragment into several arms.
+Arms with distinct spans collide too, so the trigger wanted widening. Widening
+it regressed serde_core, and five theories about why were wrong: variant
+availability, block-set overlap, a dominator-collision pre-pass, guarded arms,
+and for-loop desugaring were each proposed and each eliminated.
+
+The diff answered it in one step. serde_core's misbind messages fell 13 → 11,
+so the refinement *was* fixing two, while `VecInPlaceVisitor::visit_seq` gained
+
+```
+for branch <id> maps to 0 exact Option switches
+```
+
+That body is `for i in 0..self.0.len()`. A `for` loop desugars to a match on the
+`Option` that `next()` yields, and the for-loop binder **rebinds against that
+same switch afterwards** — narrowing those arms to their variant targets
+consumes it. #28's span-equality trigger had been excluding Option matches by
+accident, which is exactly why widening the trigger is what exposed it.
+
+So the guard is now named rather than incidental: never refine arms of an Option
+match; refine everywhere else a variant is known. syn 99.78% → 99.81%, no
+regressions, misbind messages 22 → 20, and the for-branch failure stays at its
+pre-existing count of one.
+
+This is the second time in this work that a guard turned out to be protecting
+against something its author never named — `authored_opaque_macro_condition`'s
+foreign-macro requirement had silently shielded local macros in the same way.
+Both surfaced only when the surrounding condition widened, which is an argument
+for widening deliberately and measuring, rather than leaving narrow conditions
+unexamined because they happen to pass.
+
+### What still blocks #22, and it is one shape
+
+Seven gains against serde_json −0.04. Four of its five messages are misbind
+arms, and #45 cannot reach them: `format_escaped_str_contents` matches **named
+constants**, not variants —
+
+```rust
+match escape {
+    self::BB => CharEscape::Backspace,
+    self::TT => CharEscape::Tab,
+```
+
+`self::BB` is a `const`, so `arm_pattern_variant` returns None and the
+refinement never fires. That is also why #45 gained syn and left serde_json
+untouched. The arm already carries `pattern_int` for literal patterns, so the
+same switch-target lookup would work — provided `integer_pattern_literal`
+resolves a named const rather than only bare literals. That question decides
+whether the extension is small or needs const evaluation, and it should be
+answered before the work is estimated.
