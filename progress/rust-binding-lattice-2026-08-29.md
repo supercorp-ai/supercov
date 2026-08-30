@@ -1719,10 +1719,39 @@ range is `"dist >= FORWARD_SHIFT_THRESHOLD"` — a clean, complete expression.
 drift, and the diagnostic sliced by JS string index against byte offsets. This
 is precisely the trap recorded as #42, walked into while diagnosing.
 
-So there is no fragment-straddling here and the cause of the maps-to-zero
-family is **still unknown**. What is established: the mapping source is a
-correct, well-formed expression range, and rustc emits no branch region for it
-anyway. The next diagnosis must start from that fact.
+So there is no fragment-straddling here. Starting again from the corrected
+reading, the message itself carries the answer, in a part none of the earlier
+theories had looked at:
+
+```
+maps to 0 rustc branches at ...:15715-15746; available: []
+```
+
+**`available` is empty.** rustc emitted no branch mappings for the enclosing
+body at all — our range never failed to match, there was nothing to match
+against. Every earlier theory had assumed a mismatch between our range and
+rustc's, and that framing was wrong from the start.
+
+The affected bodies are `HeaderMap::<T>::try_append2`, `try_entry2`,
+`try_insert2` in http and `Deserializer::<R>::parse_integer` in serde_json, and
+they share the trait that explains it: their branching originates *inside macro
+expansions* — `insert_phase_one!` in http, `tri!` and friends in serde_json.
+rustc does not emit branch regions for macro-expanded spans, so a body whose
+branching is entirely macro-generated yields an empty mapping set. That is
+compiler behaviour, not something to work around by loosening our matching.
+
+Six of http's twenty-one unbound messages report `available: []` — exactly its
+maps-to-zero count — and http's *statement* failures sit in the same three
+functions, so one body-level cause plausibly explains both families there.
+
+The fix already exists for a sibling obligation kind. Decisions do not depend on
+rustc's branch regions alone: when the mapping is absent they fall through to
+the expanded-boolean MIR path that finds the switch structurally — the same
+path #41 extended to several sites. Logical selections have no such fallback and
+simply decline. Giving them one is the work, and the selection's own
+discriminator (`logical-selection:and` / `:or`) already says which target is
+evaluated and which is short-circuited, which is exactly what a structural
+search needs.
 
 Two consequences worth carrying. Every source-text reading in this
 investigation used the broken slicing, so any conclusion that rested on
