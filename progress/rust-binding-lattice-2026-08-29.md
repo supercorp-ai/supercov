@@ -1757,7 +1757,9 @@ Two consequences worth carrying. Every source-text reading in this
 investigation used the broken slicing, so any conclusion that rested on
 *reading* a range — rather than on a measurement — needs redoing with byte
 slicing; that includes the `"y "` observation attributed to http while
-validating #39. The measurement-based conclusions are unaffected, including
+validating #39. **That one has since been rechecked**: byte-correct, the range
+is `"$body"` — a macro fragment placeholder. The classification was right, only
+the quoted text was wrong, so #39's validation conclusion stands. The measurement-based conclusions are unaffected, including
 #39's own, which decides elimination from the HIR condition and never consults
 a span. And the fix for #42 is now clearly worth doing for the diagnostics
 themselves, not just the corpus assertions: a silently shifted range produced a
@@ -1850,3 +1852,32 @@ unbound, so that delta mixes real binder failures with uncompiled statements
 splitting per definition. Separate the two before chasing either; if uncompiled
 declines are not being excluded there, that is a metric bug rather than a
 binder one.
+
+
+## The shape behind http's last statements: obligations at a fragment placeholder
+
+With byte-correct reading available, http's remaining statement failures are
+legible for the first time. One sits at `map.rs:13426..13431`, and that range is
+
+```
+"$body"
+```
+
+a macro **fragment placeholder** in the macro definition, five bytes long. The
+statement obligation was recorded against the placeholder rather than against
+the code the caller interpolated there, so nothing in MIR carries that range
+and the statement cannot bind.
+
+This is the same family that produced the earlier `"y "` misreading — the range
+was always `$body`; the byte bug simply rendered it as a slice of neighbouring
+text. It is worth stating as its own shape because it recurs: **an obligation
+whose source range is a fragment placeholder names no compiled code**, and any
+binder step keyed on that range fails no matter how the step is written.
+
+The fix is the same *question* posed earlier for selections and answered wrongly
+there: resolve to the call site, or decline as a source-identity limitation.
+What makes it different this time is the trigger. The earlier attempt reused
+`authored_opaque_macro_condition`, which requires a FOREIGN macro and therefore
+never fired on http's local one. The trigger here is structural and
+ownership-independent: the span is a fragment placeholder, which is a property
+of the expansion, not of who defined the macro.
