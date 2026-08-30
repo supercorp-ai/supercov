@@ -1574,3 +1574,63 @@ Order to work them, and why:
 Re-rank after each landing. Every wave this session reordered the list, usually
 by converting one family's failures into a different family one stage further
 along.
+
+## Wave: one condition, several MIR sites (#41)
+
+A condition reached by two paths is lowered to two switches with their *own*
+targets — serde_json's `deserialize_any` has bb46 → bb48/bb47 and bb62 →
+bb64/bb63 for a single authored condition. `RuntimeDecisionCondition` held one
+`true_target`/`false_target` pair, so two sites with distinct targets were not
+representable, and the binder declined rather than misbind.
+
+That made it a data-model change, not a relaxed guard. Probing only one site
+would report the condition uncovered whenever execution took the other, which
+is a wrong number rather than a missing one.
+
+Each outcome now carries `Vec<(sources, target)>`, one group per evaluating
+site. Landed in two stages deliberately: a pure structural refactor wrapping
+the existing single group, confirmed by the ratchet as an exact no-op, then
+multi-group construction on top — so if the second stage moved numbers, the
+plumbing was already ruled out. The misbind guard was strengthened rather than
+relaxed: it now rejects a binding if *any* true target coincides with *any*
+false target, which is the property that makes several sites safe. The
+one-switch rule had been doing that job incidentally.
+
+serde_json 98.77% → 99.32%, serde_core +0.12, no regressions. Corpus
+obligation-weighted exactness **98.67%**, declined 506.
+
+## Why #22 stopped converging, and what it actually needs
+
+After five gaps closed, per-definition identity still showed four regressions —
+and they kept *moving* rather than shrinking. The reason is now clear, and it
+is not a binder gap.
+
+**tracing regresses −0.65 with zero unbound messages.** All sixteen of its
+declines are NOT_COMPILED: cfg-eliminated code. Obligations go 365 → 380 and
+declines 13 → 16, because per-definition identity counts each expansion of
+*unmeasurable* code separately. There is nothing to bind, so no binder work can
+close it. Part of the remaining regression is irreducible under the metric as
+defined.
+
+That also explains the movement: each binder fix changes which obligations
+bind, and per-definition identity re-partitions whatever is left.
+
+So the blocker is the metric, not the binder. The exact fraction currently
+conflates *we failed to bind this* with *this code was never compiled*. It
+should measure binding success over measurable obligations:
+
+```
+exact = (obligations - declined) / (obligations - uncompiled_obligations)
+```
+
+The baseline already carries an `uncompiled` field, but it counts NOT_COMPILED
+*messages* rather than the declined obligations that are uncompiled — tracing
+shows declined=13 against uncompiled=16, so they are different populations. The
+manifest knows each obligation's decline reason at classification time, so the
+per-obligation count is available.
+
+Fix the metric, re-baseline once and say so, then re-measure #22. The
+irreducible part vanishes by construction and what remains is real binder work:
+syn's four no-exact-left-operand selections and http's six logical-selection
+maps-to-N. Landing #22 by arguing the regressions away would leave the ratchet
+measuring the wrong thing, which is worse than the regression.
