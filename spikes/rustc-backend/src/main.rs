@@ -6614,14 +6614,30 @@ fn mir_drops_with_structural_probes<'tcx>(
             .get(&def_id)
             .cloned()
             .unwrap_or_default();
+        // Only split when this body actually needs it. The entry block is load
+        // bearing elsewhere — observation kind is keyed off it — so bodies that
+        // already bind are left exactly as rustc lowered them. Plan against a
+        // split clone and apply the same split to the stolen body below;
+        // `split_entry_block` appends exactly one block, so both agree on
+        // numbering.
+        let entry_split_needed = matches!(
+            runtime_match_plans(tcx, def_id, &body.borrow()),
+            Err(ref error) if error.contains("has no external incoming edge")
+        );
+        let split_for_planning = entry_split_needed.then(|| {
+            let mut clone = body.borrow().clone();
+            split_entry_block(&mut clone);
+            clone
+        });
         let (match_plans, for_plans, guard_plans, let_else_plans, try_plans) = {
             let borrowed = body.borrow();
+            let planned: &Body<'tcx> = split_for_planning.as_ref().unwrap_or(&borrowed);
             (
-                runtime_match_plans(tcx, def_id, &borrowed),
-                runtime_for_loop_plans(tcx, def_id, &borrowed),
-                runtime_marked_decision_plans(tcx, def_id, &borrowed),
-                runtime_marked_let_else_plans(tcx, def_id, &borrowed),
-                runtime_marked_try_operator_plans(tcx, def_id, &borrowed),
+                runtime_match_plans(tcx, def_id, planned),
+                runtime_for_loop_plans(tcx, def_id, planned),
+                runtime_marked_decision_plans(tcx, def_id, planned),
+                runtime_marked_let_else_plans(tcx, def_id, planned),
+                runtime_marked_try_operator_plans(tcx, def_id, planned),
             )
         };
         let match_plans = match_plans.unwrap_or_else(|error| {
@@ -6750,6 +6766,9 @@ fn mir_drops_with_structural_probes<'tcx>(
             ));
         }
         let mut instrumented = body.steal();
+        if entry_split_needed {
+            split_entry_block(&mut instrumented);
+        }
         let mut match_rewrites = MatchRewrites::default();
         // Degrading after the steal cannot hand `body` back — it is already
         // stolen, and returning it panics rustc with "attempt to steal from
@@ -9266,6 +9285,34 @@ fn executable_block_sources(
             (block, sources)
         })
         .collect()
+}
+
+/// Give the entry block a predecessor by moving its contents into a successor.
+///
+/// A match arm entered unconditionally on function entry has its body dominated
+/// by `bb0`, and `bb0` has no incoming edge to hang a probe on, so the arm
+/// bound nowhere and the whole body's match plans were declined. Splitting the
+/// entry leaves `bb0` as a bare `goto` into the original contents, which gives
+/// the arm exactly the external incoming edge the binder needs. Any edge that
+/// targeted the entry is redirected to the continuation so `bb0` keeps one
+/// role: entered once per call.
+fn split_entry_block(body: &mut rustc_middle::mir::Body<'_>) {
+    let start = rustc_middle::mir::START_BLOCK;
+    let original = body.basic_blocks[start].clone();
+    let continuation = body.basic_blocks_mut().push(original);
+    for block in body.basic_blocks_mut().iter_mut() {
+        block.terminator_mut().successors_mut(|successor| {
+            if *successor == start {
+                *successor = continuation;
+            }
+        });
+    }
+    let blocks = body.basic_blocks_mut();
+    blocks[start].statements.clear();
+    blocks[start].is_cleanup = false;
+    blocks[start].terminator_mut().kind = rustc_middle::mir::TerminatorKind::Goto {
+        target: continuation,
+    };
 }
 
 fn runtime_match_plans<'tcx>(
