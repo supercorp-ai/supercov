@@ -5565,7 +5565,6 @@ fn mir_built_with_match_markers<'tcx>(
                 })
             };
             let mut instrumented = body.steal();
-            let mut match_rewrites = MatchRewrites::default();
             // Declining after this point cannot hand `body` back: it is stolen, and
             // returning it panics rustc. Keep the uninstrumented copy for that.
             let pristine = instrumented.clone();
@@ -5880,7 +5879,6 @@ fn mir_built_with_match_markers<'tcx>(
             )
         };
         let mut instrumented = body.steal();
-        let mut match_rewrites = MatchRewrites::default();
         let mut local_ordinals = BTreeMap::new();
         for group in &synthetic_groups {
             // A degraded match phase records no assignment for its groups.
@@ -7060,7 +7058,6 @@ fn mir_for_ctfe_with_markers<'tcx>(tcx: TyCtxt<'tcx>, def_id: LocalDefId) -> &'t
 
     rustc_middle::ty::print::with_no_trimmed_paths!({
         let mut instrumented = body.clone();
-        let mut match_rewrites = MatchRewrites::default();
         let span = tcx.def_span(def_id);
         let crate_name = tcx.crate_name(rustc_span::def_id::LOCAL_CRATE).to_string();
         let definition = exact_def_path!(tcx, def_id);
