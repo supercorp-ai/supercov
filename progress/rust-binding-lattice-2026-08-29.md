@@ -1686,3 +1686,49 @@ as decisions were before #41. Recorded as its own task, with the note that
 emitting one arm per site (sharing `branch_id` and ordinal) may achieve the
 union semantics with no data-model change, provided the misbind guard is
 checked for whether it rejects two arms with equal ids.
+
+## The last #22 blocker: spans that are not expressions
+
+Two wrong turns before the cause, both worth recording.
+
+First I read the family name — "logical-selection branch maps to N rustc
+branches" — as the #41 shape, one selection lowered to several MIR sites, and
+implemented multi-site binding for it. It built, regressed nothing, and changed
+nothing. The message had said `maps to 0` all along. Generalising from a family
+name instead of reading the count cost a full implementation, which was
+reverted as dead code in the injection path. *Regresses nothing* is not
+evidence that something belongs.
+
+Second, with zero mappings established, the natural theory is that rustc omits
+a branch region for this construct. It does — but not for the reason that
+suggests.
+
+Both http sites are inside a `macro_rules!` body:
+
+```rust
+let $danger = dist >= FORWARD_SHIFT_THRESHOLD && !$map.danger.is_red();
+```
+
+and the recorded mapping source is `" >= FORWARD_SHIFT_THRESHOLD && "`. It
+**starts and ends mid-token**. `logical_tail_expression(left).span` for a
+selection whose operands straddle macro fragment boundaries yields the literal
+tokens *between* interpolations, which is no expression at all. rustc emits no
+region because there is nothing there to have one.
+
+This is a recurring shape rather than a one-off: the same pathology produced
+http's `"y "` slice found while validating #39 — a "statement" whose text was a
+fragment cut mid-token. Any binder step keyed on such a range fails, and it
+will keep surfacing under different family names.
+
+So the fix is a decision, not a mechanism. A range that is not an expression
+cannot bind by range, so either the selection resolves to
+`span.source_callsite()` — naming the invocation instead of the interpolation
+gap — or it is recognised as unresolvable and declined as a source-identity
+limitation, which is closer to what it is than "the binder has a blind spot".
+The second is more honest if the construct cannot be attributed to authored
+source at all; the first is better if the callsite names the real expression.
+That is settled by looking at what the callsite range actually covers.
+
+#42 is the same byte-range fragility on the reporting side, which suggests
+treating fragment-straddling ranges as a first-class concept rather than
+handling each symptom where it surfaces.
