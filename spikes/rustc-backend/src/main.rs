@@ -10236,6 +10236,27 @@ fn instrument_runtime_matches<'tcx>(
                 if replaced > 0 {
                     rewrites.bridges.insert((*source, arm.entry_block), bridge);
                 }
+                if replaced == 0
+                    && let Some(existing) =
+                        rewrites.bridges.get(&(*source, arm.entry_block)).copied()
+                {
+                    // Nested matches share this edge by design — an outer arm
+                    // commits on the edge entering the inner match's frame — so
+                    // an earlier plan already redirected source -> entry_block
+                    // through its own bridge and the raw edge is gone. Both
+                    // arms still have to commit, so chain this bridge onto that
+                    // one rather than declaring the edge missing. The map stays
+                    // keyed to the first bridge, which remains the block the
+                    // edge from `source` actually enters.
+                    body.basic_blocks_mut()[existing]
+                        .terminator_mut()
+                        .successors_mut(|target| {
+                            if *target == arm.entry_block {
+                                *target = bridge;
+                                replaced += 1;
+                            }
+                        });
+                }
                 if replaced == 0 {
                     return Err(format!(
                         "match arm {} entry edge from {:?} was not found; entry_block={:?}; entry_sources={:?}; source successors={:?}; plan start={:?}; arms={:?}",
