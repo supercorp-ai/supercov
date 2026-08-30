@@ -7630,6 +7630,17 @@ try {
       'pub fn neighbor(flag: bool) -> usize {\n' +
       '    if flag { 3 } else { 4 }\n' +
       '}\n' +
+      // `cfg!(target_os = "none")` is a bool literal by the time HIR sees it,
+      // so the taken branch is decided at compile time and the other never
+      // lowers. Its statement is unmeasurable in this configuration.
+      'pub fn cfg_eliminated(value: usize) -> usize {\n' +
+      '    if cfg!(target_os = "none") {\n' +
+      '        let eliminated = value + 107;\n' +
+      '        eliminated\n' +
+      '    } else {\n' +
+      '        value + 109\n' +
+      '    }\n' +
+      '}\n' +
       'pub fn paired(first: bool, second: bool) -> usize {\n' +
       '    if first && second { 5 } else { 6 }\n' +
       '}\n' +
@@ -7695,6 +7706,39 @@ try {
       .filter((obligation) => obligation.definitions.includes(definition))
       .map(({id}) => id)
       .sort();
+  // A branch a constant condition eliminates must reach the manifest as
+  // NOT_COMPILED, never UNBOUND and never silently absent. Reporting it
+  // uncovered would claim a coverage gap in code this build did not compile;
+  // reporting it unbound would claim a binder defect that does not exist. The
+  // deepEqual on unboundLimitations above is the other half of this: it fails
+  // if such a statement ever lands in the unbound bucket instead.
+  const eliminatedLimitations = latticeManifest.limitations.filter(
+    (limitation) =>
+      limitation.startsWith('RUST_OBLIGATION_NOT_COMPILED:') &&
+      limitation.includes('cfg_eliminated'),
+  );
+  assert(
+    eliminatedLimitations.length > 0,
+    'a cfg-eliminated statement must record a not-compiled limitation',
+  );
+  assert(
+    eliminatedLimitations.every((limitation) =>
+      limitation.includes('a constant condition eliminates'),
+    ),
+    'the not-compiled reason must name the constant condition',
+  );
+  const eliminatedObligations = [
+    ...latticeManifest.points,
+    ...latticeManifest.branches,
+  ]
+    .filter((obligation) => obligation.definitions.includes('cfg_eliminated'))
+    .map(({id}) => id);
+  assert(
+    eliminatedObligations.some((id) =>
+      latticeManifest.unmeasuredObligations.includes(id),
+    ),
+    'the eliminated branch must be explicitly unmeasured, not uncovered',
+  );
   const declined = [...latticeManifest.unmeasuredObligations].sort();
   const unbindableObligations = obligationsOf('unbindable');
   assert(
