@@ -18,8 +18,10 @@ Everything after `--` is your command, executed exactly as written.
 | Project | JavaScript or TypeScript, with a runnable test command |
 | Disk | A `.supercov/` directory in the project root, which Supercov creates |
 
-Nothing else is required. Supercov never contacts a network service, and no
-part of your source or evidence leaves the machine.
+No Supercov account or hosted service is required. During a coverage run, the
+Supercov CLI does not contact a Supercov service and no part of your source or
+evidence leaves the machine. Package tools such as `npx` may still contact the
+npm registry to resolve or download Supercov when it is not already cached.
 
 ## Your first run
 

@@ -11,22 +11,27 @@ comparisons are derived from those files on demand.
   run.json          fingerprints, phase timings, schema version, integrity state
 ```
 
-Two files. No HTML, no derived report, no query cache. Loose evidence written
-during the run is removed only after the whole run directory is atomically
-visible, so a run is either complete or absent.
+Two durable source-of-truth files. No HTML or derived report is stored in the
+published run. Loose evidence written during the run is removed only after the
+whole run directory is atomically visible, so a run is either complete or
+absent.
 
 Run ids are UTC timestamps, which makes them sort chronologically and makes
 retention deterministic.
 
-## Derived, never stored
+## Derived views and their disposable cache
 
 Every coverage view — the summary, per-file rankings, gap lists, decision
 detail, per-test contribution, the minimizer, and the passed and failed filters
-— is reconstructed from the archive when you ask for it. Nothing is written back.
+— is derived from the archive. The first query may write a disposable,
+integrity-bound query index beside the two durable files; later queries reuse
+it while the run identity remains valid. Delete that index at any time and
+Supercov reconstructs it from `evidence.raw.gz` without losing coverage data.
 
 This is why `--filter passed` and `--filter all` can never contradict each
 other, and why a query added in a future version can answer questions about a
-run recorded today: the stored schema is the raw evidence, not a rendering of it.
+run recorded today: raw evidence remains the source of truth, while the query
+index is only a rebuildable acceleration structure.
 
 Fresh-process summary, files and gaps queries take roughly two tenths of a
 second on the reference run described in [Performance](/docs/performance).
