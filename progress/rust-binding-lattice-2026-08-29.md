@@ -1634,3 +1634,55 @@ irreducible part vanishes by construction and what remains is real binder work:
 syn's four no-exact-left-operand selections and http's six logical-selection
 maps-to-N. Landing #22 by arguing the regressions away would leave the ratchet
 measuring the wrong thing, which is worse than the regression.
+
+## The metric was measuring the wrong thing
+
+The exact fraction conflated two failures: *the binder could not bind this* and
+*this code was never compiled*. Only the first is a defect, and counting the
+second against it meant the ratchet vetoed changes that made the report more
+honest.
+
+There was already an honesty exemption, but it keyed off the NOT_COMPILED
+**message** count, which is the wrong population — several messages can name
+one obligation, and one message can accompany a scope decline covering many.
+tracing exposed the gap exactly: under per-definition identity it regressed
+0.65 with **zero** unbound messages, because its declines are all cfg-eliminated
+code and per-definition identity counts each expansion separately. Its message
+count never moved, so the exemption never fired, and no binder work could ever
+have closed it.
+
+Exactness now measures binding over **measurable** obligations:
+
+```
+exact = (measurable - unbound) / measurable
+measurable = obligations - uncompiled_declined
+```
+
+The per-obligation count comes from the marker the wrapper already embeds,
+`UNMEASURABLE<id>|<reason>`, intersected with `unmeasuredObligations` — no
+wrapper change needed. Every number shifts once, deliberately: tracing 96.44% →
+100%, and bytes, once_cell, proc_macro2 and tracing_core likewise, because
+their remaining declines were all code absent from this build. Crates with real
+gaps keep them — zmij 78.63%, build_script_build 71.74%, http 97.56%. Both
+readings stay recoverable, since obligations, declined and measurable are all
+recorded per crate.
+
+### What it did for #22
+
+| | regressions | worst |
+| --- | --- | --- |
+| before the metric fix | 4 | tracing −0.65 |
+| after | **2** | http −0.17 |
+
+tracing and syn stopped regressing entirely — they *were* the irreducible part.
+What remains is genuine binder work, and both crates show the same dominant
+family, six messages each: `logical-selection branch maps to N rustc branches`.
+
+That is the #41 shape one obligation kind further along. A `&&`/`||` reached by
+two paths is lowered several times, each site with its own BCB pair, and the
+binder requires exactly one. Selections bind through `RuntimeMatchArm`, which
+carries a single `entry_block`, so several sites are not representable — just
+as decisions were before #41. Recorded as its own task, with the note that
+emitting one arm per site (sharing `branch_id` and ordinal) may achieve the
+union semantics with no data-model change, provided the misbind guard is
+checked for whether it rejects two arms with equal ids.
