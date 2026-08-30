@@ -2505,3 +2505,56 @@ Which reframes the target honestly. 1.1x cold, with per-obligation instrumentati
 tuning these three. What looks reachable is materially better than 3.2x — plausibly
 under 2x — and the remaining gap is a design question about how much is measured
 per obligation, not an optimisation question.
+
+## What rustc's integrated instrumentation can and cannot give us
+
+The 1.04x figure is real, but it was quoted before checking what it buys.
+rustc 1.95 accepts `-Zcoverage-options=block | branch | condition` (the older
+`mcdc` spelling is gone), and all three compile. The ceiling is set by the
+mapping model in `rustc_middle/src/mir/coverage.rs:133`:
+
+```rust
+pub enum MappingKind {
+    /// Associates a normal region of code with a counter/expression/zero.
+    Code { bcb: BasicCoverageBlock },
+    /// Associates a branch region with separate counters for true and false.
+    Branch { true_bcb: BasicCoverageBlock, false_bcb: BasicCoverageBlock },
+}
+```
+
+**Two variants. There is no condition or decision mapping kind at all.**
+`CoverageLevel::Condition` is documented as "same as branch coverage, but also
+adds branch instrumentation for certain boolean expressions that are not
+directly used for branching" — it emits *more Branch mappings*, one per operand,
+so each condition gets its own true/false counters.
+
+That is **condition coverage**, and it is not MC/DC. Per-condition totals say
+each operand took both values across the whole run; MC/DC requires knowing which
+*combination* occurred on each evaluation, so that a condition can be shown to
+have independently affected the outcome. Counters cannot express a vector — two
+conditions each hitting true and false separately is indistinguishable from the
+pairs that actually occurred together.
+
+So the honest accounting of what our 3.2x buys over rustc's 1.04x is exactly two
+things:
+
+| capability | rustc integrated | ours |
+| --- | --- | --- |
+| line / region coverage | yes | yes |
+| branch coverage | yes | yes |
+| condition coverage | yes (`condition` level) | yes |
+| **MC/DC decision vectors** | **no — not expressible** | yes |
+| **per-test attribution** | **no — counters are global** | yes |
+| obligation identity, exact-or-declined | derivable from mappings | yes |
+
+Both gaps are structural rather than missing features. MC/DC needs correlated
+observations, which a counter array cannot hold; per-test attribution needs
+per-context recording at the hit, which a global array cannot do under parallel
+tests.
+
+Which means the earlier framing — "we run two instrumentation systems and use
+half of one" — was too strong. We do run rustc's pipeline and discard its
+counters, and binding against its `Code` and `Branch` mappings instead of our own
+MIR analysis is still worth doing. But its counters genuinely cannot carry the
+two things the north star's MC/DC and per-test claims depend on. The redundancy
+is in the *binding analysis*, not in the probes.
