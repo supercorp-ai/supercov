@@ -744,3 +744,40 @@ ratchet as its guard rather than a dedicated fixture: which source construct
 makes two decision plans share an edge is not yet established, and encoding
 that guess as an assertion would be worse than recording the gap. Task #32
 carries the method for establishing it.
+
+## A regression that was the report becoming honest
+
+Statement-probe binding aborted on its first failure. That looked like a
+tidiness question and was a wrong-number defect: when the first failing
+statement was unmeasurable, `runtime_statement_plans` returned `Err`, so the
+caller emptied the plan list and *no* statement probe was injected anywhere in
+that body, while `degrade_unbound_obligations` saw the UNMEASURABLE marker,
+declined only the obligation it named, and returned before applying
+`DeclineScope::Statements`. Every other statement in the body was therefore
+uninstrumented, never fired, and was reported as **uncovered**. Live
+behaviour: tracing_attributes carried 19 such statements, serde_core 10,
+bytes 8.
+
+Binding every statement that can be bound and declining only the failures
+repairs it, and is worth a great deal besides — zmij 63.07% to 77.57%,
+build_script_build 50.71% to 70%, http, tracing_core, tracing and three more.
+
+The defect was found only because the fix was reverted first. The ratchet
+reported bytes, serde_core and tracing_attributes going backwards, and the
+change was withdrawn on that signal. Diffing the limitation families showed
+every added decline was `RUST_OBLIGATION_NOT_COMPILED`: aborting on the first
+failure meant only the *first* uncompiled statement per body was ever
+discovered, so the exact fraction fell precisely because the report had become
+more honest. All three crates carry zero `UNBOUND` statement declines, so no
+part of those decreases can be a binder failure.
+
+The lesson is about the gate, not the binder. The ratchet exists to enforce
+the north star's first property, and it could not distinguish *losing
+exactness* from *gaining honesty* — so it vetoed a correctness fix and would
+have vetoed the next one. It now records per-crate uncompiled counts and
+permits a decrease only when newly declared uncompiled constructs account for
+it, reporting `honesty:` rather than `REGRESSION:`. Until the baseline stored
+those counts the exemption compared against zero and was permissive by
+construction; the re-baseline made it real.
+
+When a gate blocks a change, the gate is a hypothesis too.
