@@ -868,3 +868,26 @@ yet known whether it is reachable or whether the gate wants restating in terms
 the architecture can meet — cold build overhead X, warm build near zero,
 runtime overhead Y. That is a decision to make on evidence once the warm path
 and runtime overhead exist, not before.
+
+### Warm and incremental
+
+| scenario | baseline | instrumented | overhead |
+|---|---|---|---|
+| cold, everything from scratch | 4.38s | 21.35s | **4.9x** |
+| warm, no-op rebuild | 0.05s | 0.04s | none |
+| incremental, local crate edited | 0.06s | 0.08s | *not measured* |
+
+The no-op result matters: cargo's own caching means an unchanged rebuild pays
+nothing, so 4.9x is a once-per-clean-build cost rather than a per-invocation
+tax. That is a materially different thing from a 4.9x tool.
+
+The incremental row is honest about being empty. The probe crate's `lib.rs` is
+a one-line stub, so editing it recompiles almost nothing and instruments
+almost nothing — the numbers are real and mean nothing. What a developer
+actually feels is recompiling *their own substantial crate* while its
+dependencies stay cached, and that measurement does not exist yet. It is the
+one that decides whether the overhead is tolerable in practice, and it needs a
+crate with real code in it.
+
+Nor does any of this cover test execution with probes firing, which is a
+separate budget again.
