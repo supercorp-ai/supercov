@@ -2611,3 +2611,59 @@ global base because TLS access on both targets is a register-relative load.
 Which also means MC/DC gets *cheaper*, not just faster. Today each condition
 costs a call; under the bitmap scheme a decision with n conditions costs n cheap
 accumulations plus one bitmap write, regardless of n.
+
+## Building the LLVM-shaped instrumentation
+
+### Stage 1, landed: publish a hit once per context, not once per execution
+
+`ordinal_hit` reserved a crash-visible descriptor and payload in the mmap on
+*every* hit, so a loop running a million times published a million records where
+LLVM increments one counter. Coverage asks whether an obligation ran, never how
+often.
+
+The first attempt buffered hits and flushed at context boundaries, and the gate
+caught it immediately: 817 records against 818. Not deduplication — the fixture
+calls `ordinal_hit(7)` exactly once, as the last statement before `main`
+returns, and the buffered hit was **lost**, because Rust does not reliably run
+thread-local destructors for the main thread. Adding an `atexit` hook did not
+help either; the buffer is already torn down by then.
+
+Publishing the first sighting immediately and skipping repeats removes the
+failure mode rather than patching around it. Nothing is ever buffered, so
+nothing can be lost at thread or process exit, and the flush machinery, the
+destructor guard and the `atexit` hook all disappeared with it. One asymmetry is
+deliberate: during thread-local teardown the dedup set may be gone, and there the
+fallback is to **publish**, because a duplicate record reads as one observation
+while a missing one reads as uncovered code.
+
+`test_buf`'s 875 tests now run in **0.01s warm, matching `-C instrument-coverage`
+on the same binary**, from 0.70s.
+
+### Stage 2, the compile half: scoped, and the main risk retired
+
+The cost is precise: `instrument_runtime_points` clones each plan's block,
+pushes it as a continuation, and replaces the original with a call block — **+1
+block and +1 call per statement obligation**. scale-400 gains ~2,800 blocks that
+rustc then optimises and codegens.
+
+**Coalescing probes per block was measured and rejected.** Statements mostly get
+their own block: 2,800 plans across 2,400 blocks on scale-400 (1.17x), 11,369
+across 8,980 on real crates (1.27x). Worth ~21% at best, so probe *count* is not
+the lever — cost *per* probe is.
+
+**The main risk is retired.** `scratchpad/tlspike` proves a `#[thread_local]`
+static array in an rlib built with `RUSTC_BOOTSTRAP` is readable and writable
+from a consumer crate compiled *without* bootstrap. Since user crates are never
+bootstrap, that was the question that could have killed the approach.
+
+What remains is delivery, not language. The wrapper resolves runtime symbols via
+`find_runtime_function`, which scans foreign items from the injected
+`RUNTIME_ABI_DECLARATIONS` block, and the runtime ships as a **staticlib** —
+which carries no metadata, so there is no `DefId` for a static the way an rlib
+would provide. Three routes, with route 2 the most self-contained: declare the
+array crate-locally in the injected module and have each crate register its base
+pointer with the runtime once, sidestepping staticlib metadata entirely.
+
+Stage 2 also needs dense per-crate indices, since probe ordinals are sparse u64
+hashes that cannot index an array. Mechanical, but it changes the evidence format
+and must go through the corpus.
