@@ -2667,3 +2667,50 @@ pointer with the runtime once, sidestepping staticlib metadata entirely.
 Stage 2 also needs dense per-crate indices, since probe ordinals are sparse u64
 hashes that cannot index an array. Mechanical, but it changes the evidence format
 and must go through the corpus.
+
+## M1/M2/M3: decomposing the overhead, and one fix that moved both halves
+
+**M2's premise was wrong, and measuring it first is what caught that.** The plan
+was to delete the manifest's `canonical` strings — a third of its 8.1 MB — as a
+large, safe win. Timing the parts:
+
+| component | cost | share of collection |
+| --- | --- | --- |
+| HIR walk itself | 1.09s | **91%** |
+| identity hashing (SHA-256) | 0.072s | 6% |
+| source-range resolution | 0.034s | 3% |
+| manifest construction | 0.16s | — |
+
+Manifest construction is 0.16s in total, so deleting *all* of it is worth about
+1% of overhead. The cost is the HIR walk over every body — precisely what
+rustc's own coverage avoids by working on MIR, only for bodies being codegened.
+
+**The fix that did land came from the same measurement.** `stable_source_range`
+runs for every recorded span and, for a real file, cloned the `FileName`,
+formatted it to a string, normalised the path, then took the global snapshot
+mutex just to ask whether the file was already verified. That is a property of
+the *file*, not the obligation. Memoised per file per thread, populated only
+after the bytes are verified so a hit stands for both identity and verification.
+
+The result was much larger than the collection measurement predicted, because
+`stable_source_range` is called throughout **binding** as well:
+
+| | session start | after |
+| --- | --- | --- |
+| full instrumentation | 6.53s CPU — **3.2x** | **4.63s CPU — 2.28x** |
+| collection only | 3.60s — 1.75x | 3.33s — 1.64x |
+
+Reproducible across runs (4.63, 4.62 against a 2.03 baseline). **Total overhead
+fell 30% from one change**, and the two halves are now even: ~1.30s collection,
+~1.30s injection, where injection was 2.93s.
+
+That puts **M1's ≤2.0x target within reach of a single further step**, and it
+was reached from the M2 direction rather than the M1 one — the lesson being that
+the profile, not the plan, decides where the cost is.
+
+What remains for each milestone is now sharp. M1 targets the 1.30s of injection,
+where CFG inflation is the mechanism: a `TerminatorKind::Call` splits a block per
+obligation where LLVM emits one `add`. M2 targets the 1.30s of collection, which
+is the HIR walk itself and not the manifest. M3 needs both to land near zero,
+and on current evidence the honest expectation is closer to 1.3x than 1.1x
+unless what is measured per obligation changes.
