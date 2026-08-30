@@ -1152,3 +1152,64 @@ while dying at stage four: zsh treats an unmatched glob as a fatal error, so
 `rm -f target/debug/*.libtest.json` aborted the script when no bundle was
 present. Only the `CHAIN COMPLETE` check caught it — the exit code was from the
 backgrounding wrapper, not the chain. Replaced with `find -delete`.
+
+## Wave: match arms entered at function entry (bb0)
+
+A match arm entered unconditionally on function entry has its body dominated by
+`bb0`, the MIR entry block, which has no incoming edge. The binder places arm
+probes on the edge *into* the arm, found none, and returned `Err` for the whole
+body — declining every match obligation in it, not just that arm. It was the
+largest family of unbound diagnostics: 98 of 295 across the 18-crate set,
+concentrated in `either` (66) and `syn` (21).
+
+The instrumenter already knew the move. Its function-entry probe clones `bb0`
+into a fresh block and replaces `bb0` with a call targeting it — but at the
+injection stage, long after planning has failed. Doing the same split *before*
+planning gives the arm exactly the external incoming edge the binder wants.
+Only bodies that need it are split: the entry block is load bearing elsewhere,
+since observation kind is keyed off whether a block is `bb0`.
+
+Family eliminated, 98 → 0, no crate regressing. Worth stating plainly:
+**declined counts did not move**, because the affected bodies also fail for
+other reasons that remain. This retires a false failure and makes the surviving
+diagnostics legible; it is not an exactness win on its own.
+
+## Investigation: per-invocation obligation identity (#22, not landed)
+
+The defect is real. `scratchpad/twice` invokes one `macro_rules` body three
+times; at HEAD that is a single obligation with `defs=[first,second,third]`, so
+exercising `first` alone credits `second` and `third` — coverage reported for
+code that never ran.
+
+Three identities were measured, each against two repros and the 18-crate
+ratchet. The second repro mattered most: `scratchpad/inbody` expands one macro
+*twice inside a single body*.
+
+| identity | twice | inbody | serde_json |
+| --- | --- | --- | --- |
+| full expansion chain | 3/3 bound | 2 obligations, both declined | 61.09% |
+| def path + owner ordinal | 3/3 bound | still split | — |
+| **def path only** | 3/3 bound | merges, matches HEAD | 98.74% |
+
+The first variant failed for a reason worth recording: **the binder matches
+obligations to MIR constructs by source range**, and two expansions inside one
+body share that range exactly. Handed two indistinguishable obligations it
+fails, and scope degradation then declines the body's *whole* scope — which is
+why 755 `authored-source` obligations declined in serde_json, obligations the
+change never touches. That also explains the arithmetic that first looked
+impossible: declines grew more than obligations did (+1763 vs +1378). Pure
+splitting cannot do that; collateral scope damage can.
+
+Def-path identity is the correct one, and it still cannot land: `either` goes
+96.86% → 67.75%. That regression is honest exposure, and the signature proves
+it — obligations 350 → 645 (+295) against declines 11 → 208 (+197). Declines
+growing *less* than obligations is what real splitting looks like, the exact
+inverse of variant one. 136 of the declines are `authored-expansion` and only 5
+`authored-source`, so it is not scope collateral.
+
+What blocks it: 67 of `either`'s 72 unbound messages are "bind pre-optimization
+Rust match probes". Macro-expanded match arms bind when one obligation stands
+for every invocation and fail when each body must bind its own. Fix that first,
+then land def-path identity — the same sequencing that worked for bb0. Then
+honesty improves *and* the exact fraction does not regress, instead of trading
+one for the other.
