@@ -1,7 +1,8 @@
 #[doc(hidden)]
 #[allow(dead_code)]
 mod __SUPERCOV_MODULE__ {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
+    use std::collections::BTreeSet;
     use std::fs::OpenOptions;
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -32,6 +33,20 @@ mod __SUPERCOV_MODULE__ {
 
     std::thread_local! {
         static CONTEXT_OVERRIDE: Cell<Option<u64>> = const { Cell::new(None) };
+        /// Ordinals already published by this thread under the current
+        /// context.
+        ///
+        /// Coverage asks whether an obligation ran, never how often, so a loop
+        /// running a million times carries the same information as one pass.
+        /// Publishing per hit reserved a crash-visible descriptor and payload
+        /// every time, making a hot loop cost proportional to its trip count.
+        ///
+        /// The first sighting is published immediately, so nothing is ever
+        /// buffered and nothing can be lost at thread or process exit; later
+        /// sightings are skipped. Cleared when the context changes, because the
+        /// same obligation under a different context is a different observation.
+        static PUBLISHED_HITS: RefCell<(u64, BTreeSet<u64>)> =
+            RefCell::new((0, BTreeSet::new()));
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1270,8 +1285,31 @@ mod __SUPERCOV_MODULE__ {
 
     #[inline]
     pub fn ordinal_hit(ordinal: u64) {
-        if let Some(transport) = transport() {
-            transport.record(KIND_ORDINAL_HIT, 0, "", &ordinal.to_le_bytes());
+        let Some(transport) = transport() else {
+            return;
+        };
+        let context = transport.active_context();
+        let novel = PUBLISHED_HITS
+            .try_with(|published| {
+                let mut published = published.borrow_mut();
+                if published.0 != context {
+                    published.0 = context;
+                    published.1.clear();
+                }
+                published.1.insert(ordinal)
+            })
+            // During thread-local teardown the set is gone; publishing is always
+            // the safe answer, since a duplicate record reads as one observation
+            // while a missing one reads as uncovered code.
+            .unwrap_or(true);
+        if novel {
+            transport.record_in_context(
+                KIND_ORDINAL_HIT,
+                0,
+                "",
+                &ordinal.to_le_bytes(),
+                context,
+            );
         }
     }
 
