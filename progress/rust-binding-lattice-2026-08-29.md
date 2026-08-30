@@ -2371,3 +2371,52 @@ relocation composition, and the misbind post-conditions that exist to keep those
 correct — most of what this session spent its time repairing. The HIR obligation
 walk stays, because that is what makes the numbers *mean* something, and it is
 the cheap half.
+
+## Perfect coverage at 1.04x: shard the tests
+
+The apparent trade — per-test attribution *or* parallelism — was false. It came
+from assuming the only two options were one process (serialise) or one process
+per test (spawn cost). The middle is sharding, and libtest supports it directly:
+multiple `--exact` filters in one invocation select an arbitrary subset
+(`running 3 tests … 872 filtered out`).
+
+So: N processes in parallel, each running its shard's tests **serially** with
+reset-and-read between them. Counters are per-process, so each shard owns its
+array; serial within a shard makes attribution exact; N processes instead of one
+per test makes spawn negligible. Measured on `test_buf`, 875 tests, warm:
+
+| strategy | wall | attribution | parallel |
+| --- | --- | --- | --- |
+| parallel threads | 0.01s | no | yes |
+| serial, one process | 0.03s | yes | no |
+| process per test | 0.28s | yes | yes |
+| **8 shards, serial within each** | **0.01s** | **yes** | **yes** |
+| supercov probes today | 0.70s | yes | yes |
+
+Sharding matches uninstrumented parallel speed while giving exact per-test data.
+
+### The whole design, then
+
+| stage | mechanism | cost |
+| --- | --- | --- |
+| compile | rustc `-C instrument-coverage` (already enabled) | **1.04x** |
+| obligations | our HIR walk — identity, denominator, honesty | cheap, unchanged |
+| binding | match obligations against rustc's coverage mappings | no MIR forcing |
+| hits | rustc's LLVM counters | free |
+| per-test | shard tests, reset-and-read within each shard | ~0 |
+
+The honesty guarantee survives intact, which is the part worth being careful
+about. "Exact or declined" does not depend on *our* MIR analysis — it depends on
+whether an obligation can be tied to something that counts. Today we bind to our
+own injected probes; in this design we bind to rustc's coverage mappings, which
+it computes anyway and which we already parse. An obligation with no mapping
+declines exactly as it does now. The lattice is unchanged; only the thing it
+binds against gets cheaper.
+
+What this retires: probe injection, bridge blocks, edge rewriting, relocation
+composition, and the misbind post-conditions that keep those correct — most of
+what this session spent its time repairing. What it keeps is the HIR obligation
+walk, which is what makes the numbers *mean* something, and is the cheap half.
+
+Cost of the whole thing: 1.04x compile, no per-binary toll, full per-test
+attribution. Against today's 3.2x CPU and 0.7s per test binary.
