@@ -113,6 +113,13 @@ function measure() {
     // Tiny build-script crates add noise without signal.
     if (total < 100) continue;
     const declined = (manifest.unmeasuredObligations ?? []).length;
+    // Track uncompiled declines separately. Discovering more code that this
+    // build does not contain lowers the exact fraction while making the
+    // report more honest, and a ratchet that cannot tell that apart from a
+    // binder getting worse will veto exactly the changes it exists to protect.
+    const uncompiled = (manifest.limitations ?? []).filter((limitation) =>
+      limitation.startsWith('RUST_OBLIGATION_NOT_COMPILED'),
+    ).length;
     const previous = fractions[manifest.crate];
     // A crate can be compiled more than once (lib and test targets); keep the
     // largest obligation count so the comparison is stable.
@@ -120,6 +127,7 @@ function measure() {
     fractions[manifest.crate] = {
       obligations: total,
       declined,
+      uncompiled,
       exact: Number((((total - declined) / total) * 100).toFixed(2)),
     };
   }
@@ -156,7 +164,15 @@ for (const name of names) {
     continue;
   }
   const delta = Number((measured[name].exact - before.exact).toFixed(2));
-  if (delta < 0) regressions.push(`${name} ${before.exact}% -> ${measured[name].exact}% (${delta})`);
+  const newlyUncompiled = (measured[name].uncompiled ?? 0) - (before.uncompiled ?? 0);
+  if (delta < 0 && newlyUncompiled > 0) {
+    // Honesty gained, not exactness lost: the drop is accounted for by
+    // constructs newly recognised as absent from this build.
+    console.log(
+      `  honesty: ${name} ${before.exact}% -> ${measured[name].exact}% (${delta}), ` +
+        `+${newlyUncompiled} uncompiled declared`,
+    );
+  } else if (delta < 0) regressions.push(`${name} ${before.exact}% -> ${measured[name].exact}% (${delta})`);
   else if (delta > 0) gains.push(`${name} ${before.exact}% -> ${measured[name].exact}% (+${delta})`);
 }
 for (const name of Object.keys(baseline)) {

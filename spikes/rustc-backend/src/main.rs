@@ -8520,21 +8520,29 @@ fn runtime_statement_plans<'tcx>(
         .collect::<Vec<_>>();
     let dominators = body.basic_blocks.dominators().clone();
     let mut plans = Vec::with_capacity(statements.len());
+    // Bind every statement that can be bound and record the ones that cannot.
+    //
+    // Aborting on the first failure left the body with no statement probes at
+    // all, while the unmeasurable path declined only the one obligation it
+    // named — so every other statement in that body was uninstrumented, never
+    // fired, and was reported as uncovered. That is a measurement gap
+    // reported as a coverage gap, which this design exists to prevent.
+    let mut failures = Vec::new();
     for (id, point) in statements {
-        let mut candidates = code_mappings
-            .iter()
-            .filter(|(source, _)| {
-                source.key == point.source.key
-                    && source.start >= point.source.start
-                    && source.end <= point.source.end
-            })
-            .flat_map(|(_, bcb)| bcb_blocks.get(bcb).into_iter().flatten().copied())
-            .collect::<BTreeSet<_>>();
-        if candidates.is_empty() {
-            candidates.extend(
-                body.basic_blocks
-                    .iter_enumerated()
-                    .filter_map(|(block, data)| {
+        let failed_id = id.clone();
+        let planned = (|| -> Result<RuntimePointPlan, String> {
+            let mut candidates = code_mappings
+                .iter()
+                .filter(|(source, _)| {
+                    source.key == point.source.key
+                        && source.start >= point.source.start
+                        && source.end <= point.source.end
+                })
+                .flat_map(|(_, bcb)| bcb_blocks.get(bcb).into_iter().flatten().copied())
+                .collect::<BTreeSet<_>>();
+            if candidates.is_empty() {
+                candidates.extend(body.basic_blocks.iter_enumerated().filter_map(
+                    |(block, data)| {
                         data.statements
                             .iter()
                             .map(|statement| statement.source_info.span)
@@ -8556,89 +8564,125 @@ fn runtime_statement_plans<'tcx>(
                                     && source.end <= point.source.end
                             })
                             .then_some(block)
-                    }),
-            );
-        }
-        let mut candidates = candidates.into_iter();
-        let Some(mut block) = candidates.next() else {
-            let mut mapped = body
-                .basic_blocks
-                .iter()
-                .flat_map(|data| {
-                    data.statements
-                        .iter()
-                        .map(|statement| statement.source_info.span)
-                        .chain(std::iter::once(data.terminator().source_info.span))
-                })
-                .filter_map(|span| {
-                    stable_source_range(tcx, span, &crate_name)
-                        .or_else(|_| stable_source_range(tcx, span.source_callsite(), &crate_name))
-                        .ok()
-                })
-                .filter(|source| source.key == point.source.key)
-                .map(|source| format!("{}..{}", source.start, source.end))
-                .collect::<Vec<_>>();
-            mapped.sort();
-            mapped.dedup();
-            // Distinguish "not compiled here" from "we could not bind it".
-            // A statement inside a branch rustc proved dead — `cfg!` on this
-            // target being the common case — has no MIR anywhere: no span in
-            // the body overlaps its range. That is not a binder blind spot and
-            // must not read as one, and reporting it as uncovered would claim
-            // the user has untested code that this build does not contain.
-            let overlaps_any_mir = body
-                .basic_blocks
-                .iter()
-                .flat_map(|data| {
-                    data.statements
-                        .iter()
-                        .map(|statement| statement.source_info.span)
-                        .chain(std::iter::once(data.terminator().source_info.span))
-                })
-                .filter_map(|span| {
-                    stable_source_range(tcx, span, &crate_name)
-                        .or_else(|_| stable_source_range(tcx, span.source_callsite(), &crate_name))
-                        .ok()
-                })
-                .any(|source| {
-                    source.key == point.source.key
-                        && source.start < point.source.end
-                        && source.end > point.source.start
-                });
-            if !overlaps_any_mir {
+                    },
+                ));
+            }
+            let mut candidates = candidates.into_iter();
+            let Some(mut block) = candidates.next() else {
+                let mut mapped = body
+                    .basic_blocks
+                    .iter()
+                    .flat_map(|data| {
+                        data.statements
+                            .iter()
+                            .map(|statement| statement.source_info.span)
+                            .chain(std::iter::once(data.terminator().source_info.span))
+                    })
+                    .filter_map(|span| {
+                        stable_source_range(tcx, span, &crate_name)
+                            .or_else(|_| {
+                                stable_source_range(tcx, span.source_callsite(), &crate_name)
+                            })
+                            .ok()
+                    })
+                    .filter(|source| source.key == point.source.key)
+                    .map(|source| format!("{}..{}", source.start, source.end))
+                    .collect::<Vec<_>>();
+                mapped.sort();
+                mapped.dedup();
+                // Distinguish "not compiled here" from "we could not bind it".
+                // A statement inside a branch rustc proved dead — `cfg!` on this
+                // target being the common case — has no MIR anywhere: no span in
+                // the body overlaps its range. That is not a binder blind spot and
+                // must not read as one, and reporting it as uncovered would claim
+                // the user has untested code that this build does not contain.
+                let overlaps_any_mir = body
+                    .basic_blocks
+                    .iter()
+                    .flat_map(|data| {
+                        data.statements
+                            .iter()
+                            .map(|statement| statement.source_info.span)
+                            .chain(std::iter::once(data.terminator().source_info.span))
+                    })
+                    .filter_map(|span| {
+                        stable_source_range(tcx, span, &crate_name)
+                            .or_else(|_| {
+                                stable_source_range(tcx, span.source_callsite(), &crate_name)
+                            })
+                            .ok()
+                    })
+                    .any(|source| {
+                        source.key == point.source.key
+                            && source.start < point.source.end
+                            && source.end > point.source.start
+                    });
+                if !overlaps_any_mir {
+                    return Err(format!(
+                        "statement {id} in {definition} at {}:{}..{} {}",
+                        point.source.key,
+                        point.source.start,
+                        point.source.end,
+                        unmeasurable(
+                            &id,
+                            &format!(
+                                "not compiled in this configuration: no MIR span overlaps it, so the enclosing branch was eliminated before lowering; mapped ranges: {}",
+                                mapped.join(", ")
+                            )
+                        )
+                    ));
+                }
                 return Err(format!(
-                    "statement {id} in {definition} at {}:{}..{} {}",
+                    "statement {id} in {definition} at {}:{}..{} has no exact MIR entry mapping; mapped ranges: {}",
                     point.source.key,
                     point.source.start,
                     point.source.end,
-                    unmeasurable(
-                        &id,
-                        &format!(
-                            "not compiled in this configuration: no MIR span overlaps it, so the enclosing branch was eliminated before lowering; mapped ranges: {}",
-                            mapped.join(", ")
-                        )
-                    )
+                    mapped.join(", ")
                 ));
+            };
+            for candidate in candidates {
+                block =
+                    nearest_common_dominator(&dominators, block, candidate).ok_or_else(|| {
+                        format!("statement {id} in {definition} has disconnected MIR mappings")
+                    })?;
             }
-            return Err(format!(
-                "statement {id} in {definition} at {}:{}..{} has no exact MIR entry mapping; mapped ranges: {}",
-                point.source.key,
-                point.source.start,
-                point.source.end,
-                mapped.join(", ")
-            ));
-        };
-        for candidate in candidates {
-            block = nearest_common_dominator(&dominators, block, candidate).ok_or_else(|| {
-                format!("statement {id} in {definition} has disconnected MIR mappings")
-            })?;
+            Ok(RuntimePointPlan {
+                id,
+                ordinal: point.probe_ordinal,
+                block,
+                source_start: point.source.start,
+            })
+        })();
+        match planned {
+            Ok(plan) => plans.push(plan),
+            Err(error) => failures.push((failed_id, error)),
         }
-        plans.push(RuntimePointPlan {
-            id,
-            ordinal: point.probe_ordinal,
-            block,
-            source_start: point.source.start,
-        });
+    }
+    for (id, error) in failures {
+        // An uncompiled construct is not a binder defect and never fails
+        // strict binding; an unbound one still does, so our own gates keep
+        // catching real blind spots.
+        let unmeasurable = error.contains(UNMEASURABLE);
+        if !unmeasurable && env::var_os(STRICT_BINDING).is_some_and(|value| !value.is_empty()) {
+            tcx.dcx().fatal(format!(
+                "Supercov could not bind Rust statement probes in {definition}: {error}"
+            ));
+        }
+        let kind = if unmeasurable {
+            "RUST_OBLIGATION_NOT_COMPILED"
+        } else {
+            "RUST_OBLIGATION_UNBOUND"
+        };
+        BINDER_LIMITATIONS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(format!(
+                "{kind}: bind Rust statement probes in {definition}: {error}"
+            ));
+        UNMEASURED_OBLIGATIONS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id);
     }
     // Replacing a block prepends a probe. Visit coalesced source statements in
     // reverse source order so the resulting call chain executes in authored
