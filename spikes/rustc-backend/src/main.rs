@@ -208,6 +208,12 @@ static TRY_OPERATOR_MARKERS: LazyLock<Mutex<HashMap<LocalDefId, Vec<StructuralBr
 static ASSERTION_PHASE_MARKERS: LazyLock<Mutex<HashMap<LocalDefId, Vec<AssertionPhaseMarker>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static UNREACHABLE_MATCH_ARMS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+/// Obligations inside a branch a constant condition eliminates. `cfg!(..)`
+/// expands to a bool literal, so `if cfg!(feature = "x")` with the feature off
+/// never lowers its body. Such an obligation is unmeasurable in this
+/// configuration, not a binder blind spot, and must not be reported as either
+/// uncovered or unbound.
+static CFG_ELIMINATED_POINTS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 static SOURCE_SNAPSHOTS: Mutex<BTreeMap<String, ExactSourceSnapshot>> = Mutex::new(BTreeMap::new());
 static DOCTEST_ROLE: OnceLock<&'static str> = OnceLock::new();
 static COMPILATION_SUCCEEDED: AtomicBool = AtomicBool::new(false);
@@ -1246,6 +1252,8 @@ struct HirManifestCollector<'a, 'tcx> {
     match_groups: &'a mut BTreeMap<String, MatchSelectionObligation>,
     limitations: &'a mut BTreeSet<String>,
     control_overrides: BTreeMap<u32, &'static str>,
+    /// Non-zero while walking a branch a constant condition eliminates.
+    eliminated_depth: usize,
     loop_branch_overrides: BTreeMap<u32, String>,
     decision_logical_expressions: BTreeSet<u32>,
     match_context: Option<(String, &'static str, Option<usize>)>,
@@ -1301,6 +1309,12 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
         let Some(identity) = self.identity(point_kind, span, discriminator) else {
             return;
         };
+        if self.eliminated_depth > 0 {
+            CFG_ELIMINATED_POINTS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(identity.id.clone());
+        }
         match self.points.get_mut(&identity.id) {
             Some(existing) if existing.canonical != identity.canonical => self.tcx.dcx().fatal(
                 format!("Supercov Rust obligation ID collision for {}", identity.id),
@@ -2609,14 +2623,53 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
                 }
                 _ => {}
             }
-        } else if let hir::ExprKind::If(condition, _, _) = expression.kind {
+        } else if let hir::ExprKind::If(condition, then_branch, else_branch) = expression.kind {
             let control_kind = self
                 .control_overrides
                 .remove(&expression.hir_id.local_id.as_u32())
                 .unwrap_or("if");
             let _ = self.record_control_decision(expression, condition, control_kind, false);
+            // `cfg!(..)` expands to a bool literal, so a condition that is one
+            // decides the branch at compile time and the other branch never
+            // lowers. Walking it with the counter raised marks its obligations
+            // unmeasurable in this configuration rather than leaving them to be
+            // reported as unbound. Deciding this from the HIR condition is what
+            // makes it exact: inferring it from span geometry instead
+            // misclassifies live code in `macro_rules!` bodies, whose MIR spans
+            // point at the wider callsite.
+            if let Some(taken) = constant_condition(condition) {
+                self.visit_expr(condition);
+                let (live, dead) = if taken {
+                    (Some(then_branch), else_branch)
+                } else {
+                    (else_branch, Some(then_branch))
+                };
+                if let Some(live) = live {
+                    self.visit_expr(live);
+                }
+                if let Some(dead) = dead {
+                    self.eliminated_depth += 1;
+                    self.visit_expr(dead);
+                    self.eliminated_depth -= 1;
+                }
+                return;
+            }
         }
         intravisit::walk_expr(self, expression);
+    }
+}
+
+/// The value of a condition rustc already decided, if it decided one.
+///
+/// `cfg!(..)` expands to a `true`/`false` literal, which is the shape that
+/// matters here: the branch it rules out never reaches MIR.
+fn constant_condition(condition: &hir::Expr<'_>) -> Option<bool> {
+    match condition.kind {
+        hir::ExprKind::Lit(literal) => match literal.node {
+            rustc_ast::LitKind::Bool(value) => Some(value),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -3106,6 +3159,7 @@ impl Callbacks for ProbeCallbacks {
                         match_groups: &mut match_groups,
                         limitations: &mut manifest_limitations,
                         control_overrides: BTreeMap::new(),
+                        eliminated_depth: 0,
                         loop_branch_overrides: BTreeMap::new(),
                         decision_logical_expressions: BTreeSet::new(),
                         match_context: None,
@@ -7919,6 +7973,7 @@ fn collect_body_obligations(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Runti
         match_groups: &mut match_groups,
         limitations: &mut limitations,
         control_overrides: BTreeMap::new(),
+        eliminated_depth: 0,
         loop_branch_overrides: BTreeMap::new(),
         decision_logical_expressions: BTreeSet::new(),
         match_context: None,
@@ -8838,6 +8893,22 @@ fn runtime_statement_plans<'tcx>(
                             && source.start < point.source.end
                             && source.end > point.source.start
                     });
+                if CFG_ELIMINATED_POINTS
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .contains(&id)
+                {
+                    return Err(format!(
+                        "statement {id} in {definition} at {}:{}..{} {}",
+                        point.source.key,
+                        point.source.start,
+                        point.source.end,
+                        unmeasurable(
+                            &id,
+                            "not compiled in this configuration: a constant condition eliminates the enclosing branch, so it never reached MIR",
+                        )
+                    ));
+                }
                 if !overlaps_any_mir {
                     return Err(format!(
                         "statement {id} in {definition} at {}:{}..{} {}",

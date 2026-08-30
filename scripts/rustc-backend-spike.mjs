@@ -4463,13 +4463,12 @@ try {
   );
   assert.equal(sharedArms.length, 2, 'both shared-body arms must bind');
   assert.equal(new Set(sharedArms.map(({id}) => id)).size, 2);
-  const declinedIds = new Set(identityManifestA.unmeasuredObligations ?? []);
-  for (const arm of sharedArms) {
-    assert.ok(
-      !declinedIds.has(arm.id),
-      `shared-body arm ${arm.id} must bind, not decline`,
-    );
-  }
+  // Binding is deliberately NOT asserted here: the identity manifests are
+  // built without SUPERCOV_RUST_INSTRUMENT_MIR, so they carry no
+  // unmeasuredObligations and any "did not decline" check against them passes
+  // vacuously. Two distinct arm obligations surviving is the part this
+  // manifest can actually prove; the binding itself is covered by the
+  // corpus crates, where the shape appears throughout either and http.
   // A negated chain decomposes: `!(first || second)` has two conditions and one
   // short-circuit selection, not the single merged condition it was recorded as
   // before. Values are read from the fixture source, not from observed output.
