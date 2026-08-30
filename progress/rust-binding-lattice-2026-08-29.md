@@ -1881,3 +1881,52 @@ What makes it different this time is the trigger. The earlier attempt reused
 never fired on http's local one. The trigger here is structural and
 ownership-independent: the span is a fragment placeholder, which is a property
 of the expansion, not of who defined the macro.
+
+## Wave: fragment-placeholder statements (#44), and #22 down to one regression
+
+http's remaining statement failures sat at ranges like `map.rs:13426..13431`,
+which byte-correctly reads:
+
+```
+"$body"
+```
+
+A macro **fragment placeholder**, five bytes. A fragment used as a statement
+gives the *statement* the placeholder's span in the macro definition while the
+*expression* keeps the caller's, so the obligation named no compiled code and
+nothing in MIR could ever carry that range.
+
+The test is **containment**, not ownership: a statement whose span does not
+contain its own expression's span is a placeholder wrapper. That distinction is
+the whole point — an earlier attempt at this family reused a predicate
+requiring a *foreign* macro, which never fired on http's local one. And it is
+deliberately not a text test for a leading `$`; the previous two heuristics on
+source text both produced wrong diagnoses.
+
+http 97.61% → 97.67%, no regressions, http's unbound messages 15 → 7, crate-set
+total 78.
+
+### #22 after every blocker
+
+| after | regressions | worst |
+| --- | --- | --- |
+| #36 | 6 | either −29.11 |
+| bridge chaining | 4 | serde_core **+0.52** |
+| metric fix | 2 | tracing, syn drop out |
+| #43 | 2 | http −0.07 |
+| #44 | **1** | serde_json **−0.04** |
+
+Six gains against a single −0.04. What remains is four misbind-arm messages in
+serde_json plus one statement — #28's family reached through a different door:
+those arms have *distinct* body spans and still resolve to one block, because
+`format_escaped_str_contents` matches eight constants whose bodies are single
+unit-variant assignments.
+
+One attempt is recorded as failed. Dropping #28's `shares_body_span` guard, so
+the discriminant refinement applies whenever the arm's variant is known, looked
+good measured *with* #22 — serde_core +0.43, syn +0.06 — and **regressed
+serde_core −0.06 measured alone**. The code comment I wrote claimed the
+refinement "cannot widen a binding that already works"; the measurement refutes
+it. The lesson is procedural as much as technical: measure a candidate on its
+own before measuring it stacked on the change it is meant to unblock, because
+the combined reading hid a regression the isolated one showed immediately.
