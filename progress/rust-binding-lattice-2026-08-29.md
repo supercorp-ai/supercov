@@ -1308,3 +1308,46 @@ regression into a gain, because aggregation had been crediting one successful
 binding to many bodies. Closing the last two tails should let per-definition
 identity land at zero regression, so HONEST and the exactness ratchet agree
 instead of being traded against each other.
+
+## Finding: much of the "binder blind spot" count is cfg-disabled code (#39)
+
+tracing's `level_filters::get_max_level_inner` produced eleven "statement has
+no exact MIR entry mapping" diagnostics. Reading the source at the reported
+range settles what they are: the statement is `LevelFilter::OFF`, the body of
+
+```rust
+} else if cfg!(feature = "max_level_off") {
+    LevelFilter::OFF
+```
+
+That feature is off, so the branch is constant-folded and never lowered. Not a
+binder blind spot — code this configuration did not compile, reported as a
+binder defect.
+
+The existing not-compiled path misses it for a precise reason. It asks whether
+*any* MIR span overlaps the statement, and one does: the else-chain's own wide
+span, `3751..4222`, overlaps the dead statement at `3796..3812`. The mapped
+ranges show the truth plainly — `3754..3785`, then `3824..3860`, with the
+statement sitting in the gap between them. An enclosing scope span is not
+evidence that the statement lowered.
+
+Excluding spans that strictly contain the statement fixes the target case
+exactly (tracing UNBOUND 11 → 0) and regresses nothing. It was still reverted,
+because corpus-wide it moves UNBOUND 295 → 93 and reclassifies roughly two
+hundred diagnostics — and **not-compiled obligations do not fail strict
+binding**. Reclassifying at that scale removes them from our own gate, and the
+misclassification mode is plausible: a macro-expanded statement whose only MIR
+evidence is a wider callsite span would be swept up by the same rule. Exactness
+holding proves nothing about the labelling, since both classes count as
+declined.
+
+So it needs validation before it can land — read the source at a sample of the
+reclassified ranges across several crates and confirm each really is
+eliminated. If any is live code, decide it in HIR instead: mark statements
+under a constant-false condition at collection time, which is exact and cannot
+mistake a macro's callsite span for a dead branch.
+
+The finding stands regardless of how it is fixed: **the true remaining
+blind-spot count is far smaller than the raw unbound number suggests**, because
+a large share of it is cfg-disabled code. That matters for ranking the
+remaining work honestly.
