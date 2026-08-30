@@ -1976,12 +1976,21 @@ does fix two of them, while a new failure appears —
 for branch <id> maps to N exact Option switches
 ```
 
-A `for` loop desugars to a match on `Option`, and refining those arms by
-variant disturbs the loop's own branch binding. The refinement is correct for
-ordinary arms and wrong for for-loop desugaring; #28's span-equality guard had
-been excluding that case by accident, which is why it never surfaced. The next
-guard should name `ForLoopDesugar` directly, and the expected result is net
-positive rather than a wash.
+serde_core gains that failure — it goes 0 → 1 — though the failure is not new
+to the codebase, since syn carries one at HEAD.
+
+The obvious explanation, that the refinement is mangling for-loop arms, is
+**ruled out**: match groups are only recorded for `MatchSource::Normal |
+Postfix` (main.rs:2601), so for-loop desugaring never becomes a match group and
+the refinement cannot touch those arms directly. It is reaching for-branch
+binding *indirectly* — most likely a `Normal` match over `Option` variants
+whose arms get re-scoped, leaving the separate for-branch binder ambiguous.
+
+That is where the next attempt starts, and it should start with a diff rather
+than a theory: identify which serde_core body gains the failure and compare its
+arm block assignments across the two runs. Five theories have been wrong in this
+family and five measurements have each been informative, which is a clear enough
+signal about which to trust.
 
 One procedural note earned twice over: **measure a candidate alone before
 measuring it stacked on the change it is meant to unblock.** The combined
