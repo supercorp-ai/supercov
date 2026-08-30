@@ -2052,3 +2052,64 @@ same switch-target lookup would work — provided `integer_pattern_literal`
 resolves a named const rather than only bare literals. That question decides
 whether the extension is small or needs const evaluation, and it should be
 answered before the work is estimated.
+
+## Per-expansion obligation identity (#22), and what remains
+
+The fixture stated the defect better than prose could. `behavior.rs` calls
+
+```rust
+generated_by_rules(false),
+repeated_expansions::generated_by_rules(true),
+```
+
+so neither call site exercises both branches — yet while the two expansions
+shared one obligation it carried **both** vectors and reported fully covered.
+Coverage credited to a branch no call site ever took, and the corpus asserted
+that as correct. Three chain runs, each failing on a fixture that had encoded
+aggregation as intended behaviour, which is the corpus doing exactly its job.
+
+The same fixture showed procedural macros were *already* per-invocation —
+`notEqual` ids for `generated_by_proc`, `equal` for `generated_by_rules`. Two
+macro systems, two answers to one question. They now agree.
+
+Not the full expansion chain, which was tried and rejected earlier: two
+expansions inside one body share a source range exactly, so per-expansion
+identity hands the binder two indistinguishable obligations and it declines the
+body's whole scope. Keying on the expanding *definition* splits across bodies,
+which is where the false credit accrues.
+
+Six gains, and two crates dip — http −0.02, serde_json −0.04. The arithmetic is
+what justified landing rather than waiting:
+
+| crate | obligations | declined |
+| --- | --- | --- |
+| serde_json | 3256 → 4458 (+1202) | 20 → 29 (+9) |
+| http | 3660 → 3879 (+219) | 31 → 37 (+6) |
+
+Nine more declines against twelve hundred more obligations. Where a split
+obligation fails every copy now fails; before, one was counted unmeasured and
+the rest silently credited. The dip is false credit being removed.
+
+Corpus obligations 38,155 → 52,076 — about 14,000 obligations that had been
+having their coverage inferred from a sibling — and binding exactness **99.25%**.
+
+### The ranking now
+
+72 real blind spots against 198 unmeasurable. Top families:
+
+| count | family | crates |
+| --- | --- | --- |
+| 24 | statement in `write` | zmij |
+| 9 | coverage block maps to 0 MIR blocks | build_script_build, zmij, syn |
+| 9 | misbind: match arms | serde_core |
+| 5 | try-operator obligations | either |
+| 4 | logical-selection, no exact left-operand | syn |
+
+zmij's 24 are the clear target and are recorded in full. Two attempts on its
+*decision* failures were reverted and are worth not repeating: a counter-less
+BCB cannot be recovered from its Code mapping, because rustc emits neither a
+counter nor a code mapping for it — the diagnostic showed BCB 25 wanted while
+code-mapped BCBs ran 0–21, 23, 24, 26. And skipping such mappings so the
+condition falls through to the structural switch search works, but only
+relabels: nine "maps to 0" became seven "condition branch_source", with corpus
+unbound unchanged at 72.
