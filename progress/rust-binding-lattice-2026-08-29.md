@@ -891,3 +891,35 @@ crate with real code in it.
 
 Nor does any of this cover test execution with probes firing, which is a
 separate budget again.
+
+### Own-code cost: the number that matters, and it is bad
+
+The 4.9x cold figure was measured on a crate whose own source is a one-line
+stub, so it is dominated by dependency compilation. A developer feels the cost
+of instrumenting *their own* code. Measured on a generated crate of 3,600
+lines — 400 functions, each with an if/else chain, a loop with a match, and a
+guarded match — single crate, no dependencies:
+
+| | baseline | instrumented | overhead |
+|---|---|---|---|
+| wall | 0.46s | 37.75s | **82x** |
+| user | 0.41s | 22.23s | |
+| sys | 0.05s | 15.50s | |
+
+Two things stand out. The overhead scales with obligation density, not with
+line count, so the dependency-heavy measurement understated it badly. And 15.5
+seconds of *system* time against 22.2 of user time points at per-body I/O
+rather than analysis alone — something is hitting the filesystem far more than
+the work requires.
+
+The generated code is deliberately branch-dense and real code will be less so,
+so 82x is an upper bound rather than a typical figure. But the earlier 4.9x
+was a lower bound for the same reason, and the truth for a normal crate sits
+between them, unmeasured. What is now clear is that the cost is not a fixed
+per-crate constant: it is proportional to how much there is to measure, which
+is exactly the code a user cares about.
+
+This reframes FAST from "document the cold cost" to a genuine engineering
+problem. The sys-time share is the first thing to look at, because I/O per
+body is the kind of overhead that is usually structural rather than
+algorithmic.
