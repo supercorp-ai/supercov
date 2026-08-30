@@ -2327,3 +2327,47 @@ One measurement still outstanding, and it can only strengthen the case: the
 runtime cost of our probes against LLVM counters. Every figure here is
 `-C instrument-coverage`; the same suites under supercov's probes have not been
 timed.
+
+### The runtime side, and the case closes
+
+The last outstanding comparison: our probes against LLVM counters *at test time*.
+Same `test_buf` binary, same 875 tests:
+
+| build | wall | user |
+| --- | --- | --- |
+| `-C instrument-coverage` | 0.01s | 0.01s |
+| supercov probes | **0.70s** | 0.02s |
+
+User time is nearly identical, so this is not per-probe execution cost — it is
+roughly **0.7s of fixed startup and teardown per test binary**. `bytes` ships 14
+of them, so that is about ten seconds of pure overhead on a suite whose actual
+instrumented work is milliseconds.
+
+So the second pipeline costs on both sides: 220% CPU at compile, and a fixed
+per-binary toll at test time that LLVM counters do not pay.
+
+**The full picture:**
+
+| | compile | test-time | attribution |
+| --- | --- | --- | --- |
+| rustc counters, parallel | **1.04x** | ~0 | whole-run |
+| rustc counters, serial | 1.04x | 1.67x worst observed | **per-test** |
+| supercov probes today | **3.2x** | ~0.7s per binary | per-test |
+
+Which makes the design decision straightforward, and it is a default rather than
+an algorithm. Ship rustc's counters with whole-run coverage and parallel tests —
+1.04x compile, no per-binary toll, structurally fast rather than cached-fast.
+Offer per-test attribution as an explicit mode that serialises, using
+`__llvm_profile_reset_counters` and the begin/end symbols proven above, paying a
+suite-dependent cost bounded by how much that suite actually parallelises.
+
+Process-per-test was the appealing third option — counters are per-process, so
+it would give attribution without serialising — and it is ruled out: 28x on 875
+small tests, because spawn is a per-test constant that dominates exactly when
+tests are cheap.
+
+What this retires, if adopted: probe injection, bridge blocks, edge rewriting,
+relocation composition, and the misbind post-conditions that exist to keep those
+correct — most of what this session spent its time repairing. The HIR obligation
+walk stays, because that is what makes the numbers *mean* something, and it is
+the cheap half.
