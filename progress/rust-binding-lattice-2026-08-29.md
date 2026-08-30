@@ -1720,6 +1720,21 @@ http's `"y "` slice found while validating #39 — a "statement" whose text was 
 fragment cut mid-token. Any binder step keyed on such a range fails, and it
 will keep surfacing under different family names.
 
+A third hypothesis followed naturally and also failed, which is the most useful
+result of the three. The branch span already resolves opaque macro operands to
+their call site, while `mapping_source` uses the raw span — a real asymmetry.
+Applying the same correction left http and serde_json unchanged at six messages
+each and pushed syn from zero to four, converting its "no exact left-operand
+mapping" cases into maps-to-zero. It moved the failure rather than fixing it.
+
+The reason is the constraint any fix has to respect:
+`authored_opaque_macro_condition` requires the expanded span to be **unowned**,
+that is, a *foreign* macro, with an owned call site. http's macro is defined
+inside http, so its expanded span is owned, the predicate never fires, and the
+correction never reaches the case that needs it. The property that matters is
+not "foreign macro" but "this range straddles fragment boundaries", and no
+existing predicate expresses that.
+
 So the fix is a decision, not a mechanism. A range that is not an expression
 cannot bind by range, so either the selection resolves to
 `span.source_callsite()` — naming the invocation instead of the interpolation
