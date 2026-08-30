@@ -1505,16 +1505,30 @@ worth knowing before anyone starts. `RuntimeDecisionCondition` carries
 targets therefore cannot be represented at all: the vectors express "several
 blocks branch to one target", not "several switches with their own targets".
 
-So the work is one of two things, and which one depends on a fact not yet
-measured: **do bb46 and bb62 share their true/false targets?** If they do, the
-union is expressible today and the change is the guarded relaxation described
-above — exact range equality plus `is_bool`, never overlap or nearest-match,
-with a post-condition that the union covers the same outcome set a single
-switch would. If they do not, `RuntimeDecisionCondition` needs per-source
-targets first, and that is a considerably larger change touching injection.
+That left one question deciding whether this is a guard or a refactor: **do the
+two switches share their true/false targets?** Measured, by dumping the actual
+targets rather than their counts:
 
-Measure that first. It is a small instrumented run over serde_json's
-`deserialize_any`, and it decides whether this is a guard or a refactor.
+```
+bb46: [(0, bb48)] otherwise bb47
+bb62: [(0, bb64)] otherwise bb63
+```
+
+They do not. All four target blocks are distinct, so the two sites cannot be
+collapsed onto one `true_target`/`false_target` pair and the union is not
+expressible in today's model.
+
+**This is therefore a data-model change, not a guarded relaxation.**
+`RuntimeDecisionCondition` needs per-source targets — each source block paired
+with the targets it actually branches to — and the injection path that consumes
+`true_sources`/`false_sources` has to place a probe per pair rather than one
+per condition. The guard still matters when it is built (exact range equality
+plus `is_bool`, never overlap or nearest-match, since the one-switch rule is
+also what catches genuine misbinds), but it is no longer the whole job.
+
+That is worth knowing before starting: the earlier estimate of this as a small
+guarded relaxation was wrong, and the measurement that corrected it cost one
+instrumented build.
 
 Worth stating plainly what the −0.03 is: serde_json measures 4458 obligations
 against a 3256 baseline, 37% more, while declines rose by 16. That is honest
