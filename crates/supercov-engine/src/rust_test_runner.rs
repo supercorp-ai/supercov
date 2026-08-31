@@ -1143,7 +1143,15 @@ pub fn run_prepared_rust_tests(
                     let index = next.fetch_add(1, Ordering::Relaxed);
                     let Some(task) = tasks.get(index) else { break };
                     let result = Command::new(&task.artifact.executable)
-                        .args(["--exact", &task.test, "--nocapture"])
+                        // No --nocapture: libtest's in-memory capture is what
+                        // plain `cargo test` gives users, and it re-emits a
+                        // failing test's output, which `.output()` still
+                        // receives. Streaming instead turns every print in a
+                        // hot loop into an unbuffered stderr syscall: bytes'
+                        // advance_bytes_mut_remaining_capacity prints per
+                        // iteration, and --nocapture alone cost 6.9s of its
+                        // 14.4s (baseline 8.0s streamed vs 1.0s captured).
+                        .args(["--exact", &task.test])
                         .current_dir(&project.workspace_root)
                         .env("SUPERCOV_RUST_EVIDENCE_DIR", &task.directory)
                         .env(

@@ -90,6 +90,24 @@ fn valid_runtime_path(path: &str) -> bool {
 /// generic arguments and const parameter defaults, so matching it covers all
 /// four. The remaining case is an array repeat expression, `[value; count]`,
 /// where only the count after the semicolon is const-evaluated.
+/// Report whether the source's doc comments contain a fenced code block.
+///
+/// rustdoc turns fenced blocks in `///`, `//!` and `#[doc]` text into doctest
+/// crates. The scan is line-based and deliberately coarse: a fence inside a
+/// doc comment declares the limitation even when the fence is `ignore`d, which
+/// over-declares the unmeasured surface rather than ever under-declaring it.
+fn source_has_doctest_fences(source: &str) -> bool {
+    source.lines().any(|line| {
+        let line = line.trim_start();
+        let documentation = line
+            .strip_prefix("///")
+            .or_else(|| line.strip_prefix("//!"))
+            .or_else(|| line.strip_prefix("#![doc"))
+            .or_else(|| line.strip_prefix("#[doc"));
+        documentation.is_some_and(|text| text.contains("```"))
+    })
+}
+
 fn in_const_context(node: &ra_ap_syntax::SyntaxNode) -> bool {
     let start = node.text_range().start();
     node.ancestors().any(|ancestor| {
@@ -634,6 +652,21 @@ impl<'a> RustObligationCollector<'a> {
             self.limitation(
                 "rust-macro-expansion-not-instrumented",
                 "Declarative and procedural macro expansions are not yet part of the owned source denominator",
+            );
+        }
+
+        // Doctests are compiled and run by rustdoc as separate crates that the
+        // libtest runner never sees, so nothing in them is measured. Under the
+        // honesty rule an unmeasured surface must be declared, not silently
+        // omitted: bytes-1.12.1 has 248 doctests, and a report that says
+        // nothing about them overstates what was checked. Detection scans doc
+        // comments for a code fence, which rustdoc's test collector also keys
+        // on; fences marked `ignore`/`text`/`no_run` still declare, which can
+        // only over-declare the unmeasured surface, never under-declare it.
+        if source_has_doctest_fences(&root.text().to_string()) {
+            self.limitation(
+                "rust-doctests-not-measured",
+                "Doctests are compiled by rustdoc as separate crates and are not yet measured",
             );
         }
         // An obligation the probes cannot reach stays in the denominator, but the
@@ -1315,6 +1348,39 @@ fn main() {
         assert_eq!(instrumented.status, original.status);
         assert_eq!(instrumented.stdout, original.stdout);
         assert_eq!(instrumented.stderr, original.stderr);
+    }
+
+    #[test]
+    fn doctest_fences_declare_an_unmeasured_surface() {
+        // rustdoc compiles fenced doc blocks as separate test crates that the
+        // libtest runner never sees. bytes-1.12.1 has 248 of them; a report
+        // that says nothing about doctests overstates what was checked.
+        let with_doctest = r#"/// Doubles a value.
+///
+/// ```
+/// assert_eq!(demo::double(2), 4);
+/// ```
+pub fn double(value: usize) -> usize {
+    value * 2
+}
+"#;
+        let manifest = build_rust_manifest("src/lib.rs", with_doctest).unwrap();
+        assert!(manifest.limitations.iter().any(|limitation| {
+            limitation.get("id").and_then(|id| id.as_str()) == Some("rust-doctests-not-measured")
+        }));
+
+        // Doc comments without fences, and fences outside doc comments, are
+        // not doctests and must not raise the limitation.
+        let without_doctest = r#"/// Doubles a value, documented without examples.
+pub fn double(value: usize) -> usize {
+    // a stray fence in a plain comment: ```
+    value * 2
+}
+"#;
+        let manifest = build_rust_manifest("src/lib.rs", without_doctest).unwrap();
+        assert!(!manifest.limitations.iter().any(|limitation| {
+            limitation.get("id").and_then(|id| id.as_str()) == Some("rust-doctests-not-measured")
+        }));
     }
 
     #[test]
