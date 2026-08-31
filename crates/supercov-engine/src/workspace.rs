@@ -1266,6 +1266,19 @@ fn prepare_cached_workspace_with_operations<Operations: WorkspaceOperations>(
         for requested in reuse_paths {
             let from = checked_reuse_path(&workspace, requested)?;
             let to = staging.join(requested);
+            // Output directories are excluded from the mirror only at the
+            // root, so the staging tree may already hold a stale source copy
+            // of a nested artifact. The cached artifact is the exact
+            // post-build state and replaces it wholesale.
+            match fs::symlink_metadata(&to) {
+                Ok(existing) if existing.file_type().is_dir() => {
+                    fs::remove_dir_all(&to).map_err(|error| io_error(&to, error))?;
+                }
+                Ok(_) => {
+                    fs::remove_file(&to).map_err(|error| io_error(&to, error))?;
+                }
+                Err(_) => {}
+            }
             let metadata = fs::symlink_metadata(&from).map_err(|error| io_error(&from, error))?;
             if metadata.file_type().is_dir() {
                 let canonical_workspace =
@@ -1728,6 +1741,26 @@ mod tests {
             "instrumented"
         );
         assert!(!second.join("stale.txt").exists());
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reused_artifact_replaces_the_mirrored_stale_copy_wholesale() {
+        let root = project();
+        fs::create_dir_all(root.join("packages/app/dist")).unwrap();
+        fs::write(root.join("packages/app/dist/stale.js"), "uninstrumented").unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let first = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+        fs::remove_file(first.join("packages/app/dist/stale.js")).unwrap();
+        fs::write(first.join("packages/app/dist/built.js"), "instrumented").unwrap();
+        let second =
+            prepare_cached_workspace(&root, &lock, &[PathBuf::from("packages/app/dist")]).unwrap();
+        assert_eq!(
+            fs::read_to_string(second.join("packages/app/dist/built.js")).unwrap(),
+            "instrumented"
+        );
+        assert!(!second.join("packages/app/dist/stale.js").exists());
         lock.release().unwrap();
         fs::remove_dir_all(root).unwrap();
     }

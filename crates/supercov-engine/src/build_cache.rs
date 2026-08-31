@@ -14,6 +14,8 @@ use crate::{lifecycle::atomic_write, project_discovery::CoverageProject, run_sto
 
 pub const BUILD_CACHE_SCHEMA_VERSION: u32 = 1;
 const OUTPUT_CANDIDATES: &[&str] = &["build", "dist", ".next", ".nuxt", ".output"];
+const SCAN_EXCLUSIONS: &[&str] = &[".git", ".supercov", "node_modules"];
+const SCAN_DEPTH_LIMIT: usize = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -117,6 +119,39 @@ struct DeclaredOutputs {
     paths: Vec<String>,
 }
 
+/// Monorepo build outputs live at package roots (`packages/*/dist`), not the
+/// workspace root, so candidates come from a depth-limited scan of the whole
+/// mirror rather than a root-only check.
+fn workspace_output_directories(workspace: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut pending = vec![(workspace.to_owned(), 0usize)];
+    while let Some((directory, depth)) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if SCAN_EXCLUSIONS.contains(&name) {
+                continue;
+            }
+            if OUTPUT_CANDIDATES.contains(&name) {
+                if let Ok(relative) = entry.path().strip_prefix(workspace) {
+                    found.push(relative.to_string_lossy().into_owned());
+                }
+            } else if depth < SCAN_DEPTH_LIMIT {
+                pending.push((entry.path(), depth + 1));
+            }
+        }
+    }
+    found
+}
+
 pub fn write_build_cache(
     project_root: &Path,
     workspace: &Path,
@@ -127,9 +162,8 @@ pub fn write_build_cache(
         .ok()
         .and_then(|bytes| serde_json::from_slice::<DeclaredOutputs>(&bytes).ok())
         .unwrap_or_default();
-    let mut candidates = OUTPUT_CANDIDATES
-        .iter()
-        .map(|path| (*path).to_owned())
+    let mut candidates = workspace_output_directories(workspace)
+        .into_iter()
         .chain(
             declared
                 .paths
@@ -213,6 +247,32 @@ mod tests {
         );
         fs::remove_dir_all(workspace.join("dist")).unwrap();
         assert_eq!(read_build_cache(&workspace, "key"), None);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn records_package_level_outputs_and_skips_dependency_trees() {
+        let root = temporary();
+        let workspace = root.join(".supercov/cache/workspace/project");
+        fs::create_dir_all(workspace.join(".supercov")).unwrap();
+        fs::write(workspace.join(".supercov/manifest.json"), "{}").unwrap();
+        fs::create_dir_all(workspace.join("packages/app/dist/assets")).unwrap();
+        fs::write(workspace.join("packages/app/dist/app.js"), "built").unwrap();
+        fs::create_dir_all(workspace.join("packages/site/.next")).unwrap();
+        fs::create_dir_all(workspace.join("node_modules/library/dist")).unwrap();
+        fs::create_dir_all(workspace.join("packages/app/node_modules/local/dist")).unwrap();
+        let written = write_build_cache(&root, &workspace, "key", "time")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            written.artifact_paths,
+            [
+                "packages/app/dist",
+                "packages/site/.next",
+                ".supercov/manifest.json"
+            ]
+        );
+        assert_eq!(read_build_cache(&workspace, "key"), Some(written));
         fs::remove_dir_all(root).unwrap();
     }
 }
