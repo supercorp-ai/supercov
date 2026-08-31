@@ -5056,7 +5056,7 @@ try {
     baselineBehavior.stdout,
     /expanded=\[5, 3, 191, 181, 197, 193, 19, 17, 9\]/,
   );
-  assert.match(baselineBehavior.stdout, /conditions=\[29, 31, 31, 1, 37, 41, 43, 43\]/);
+  assert.match(baselineBehavior.stdout, /conditions=\[29, 31, 31, 4, 6, 1, 37, 41, 43, 43\]/);
   assert.match(baselineBehavior.stdout, /or-mixed=\[47, 47, 49, 53, 59, 53, 59\]/);
   assert.match(baselineBehavior.stdout, /nested=\[79, 71, 73, 73\]/);
   assert.match(baselineBehavior.stdout, /nested-expression=\[89, 83, 89, 83, 89\]/);
@@ -6783,6 +6783,32 @@ try {
   // literal above (const_eliminated_neighbours), and when the arm the
   // constant selects ends in a tail `return`, everything after that `if` in
   // the block never lowers either (const_diverging_neighbours).
+  // #32: two decisions meeting on one CFG edge keep exact, independent
+  // vectors -- neither is declined, and neither absorbs the other's outcomes.
+  const sharedEdgeFirst = decisionForConditions(
+    runtimeManifest,
+    'shared_edge_decisions',
+    ['first'],
+  );
+  const sharedEdgeSecond = decisionForConditions(
+    runtimeManifest,
+    'shared_edge_decisions',
+    ['second'],
+  );
+  assert.deepEqual(vectorsForDecision(sharedEdgeFirst), [
+    JSON.stringify({values: [false], outcome: false}),
+    JSON.stringify({values: [true], outcome: true}),
+  ].sort());
+  assert.deepEqual(vectorsForDecision(sharedEdgeSecond), [
+    JSON.stringify({values: [false], outcome: false}),
+    JSON.stringify({values: [true], outcome: true}),
+  ].sort());
+  for (const decision of [sharedEdgeFirst, sharedEdgeSecond]) {
+    assert(
+      !neighbourDeclined.has(decision.id),
+      'a decision sharing a CFG edge must stay measured',
+    );
+  }
   const constFamilyOrdinal = (definition, fragment, exclude) => {
     const matches = runtimeManifest.points.filter(
       (point) =>

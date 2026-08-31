@@ -693,6 +693,21 @@ pub fn const_operand_neighbours(limit: usize, log: &mut Vec<&'static str>) -> us
     index
 }
 
+/// Two decisions whose CFG blocks meet on one edge: the first `if`'s merge
+/// block is the second `if`'s entry. Probes for the first decision's outcome
+/// and the second's entry attach around the same edge, and each decision
+/// must keep exact, independent vectors (#32).
+pub fn shared_edge_decisions(first: bool, second: bool) -> usize {
+    let mut total = 1;
+    if first {
+        total += 3;
+    }
+    if second {
+        total += 5;
+    }
+    total
+}
+
 pub fn statement_paths(value: bool, log: &mut Vec<&'static str>) {
     if value {
         log.push("true-path");
@@ -1120,6 +1135,8 @@ mod tests {
         let mut const_operand = Vec::new();
         assert_eq!(const_operand_neighbours(3, &mut const_operand), 3);
         assert_eq!(const_operand, ["after-const-operand"]);
+        assert_eq!(shared_edge_decisions(true, false), 4);
+        assert_eq!(shared_edge_decisions(false, true), 6);
         assert_eq!(fallible(2), Ok(3));
         let log = std::cell::RefCell::new(Vec::new());
         assert_eq!(drop_order(&log), 23);
