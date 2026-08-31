@@ -7,7 +7,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.0.18"
+version = "0.0.19"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -43,8 +43,8 @@ oxc_traverse = "0.133.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 sha2 = "0.10"
-supercov-contracts = { version = "=0.0.18", path = "crates/supercov-contracts" }
-supercov-engine = { version = "=0.0.18", path = "crates/supercov-engine" }
+supercov-contracts = { version = "=0.0.19", path = "crates/supercov-contracts" }
+supercov-engine = { version = "=0.0.19", path = "crates/supercov-engine" }
 sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
 toml = "1.1.4"
