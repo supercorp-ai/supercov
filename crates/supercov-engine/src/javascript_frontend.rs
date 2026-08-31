@@ -31,6 +31,7 @@ const FRONTEND_CACHE_FILE: &str = ".supercov/frontend-cache.json";
 const FRONTEND_CACHE_DIRECTORY: &str = ".supercov/frontend-cache-artifacts";
 const RUNTIME_FILES: &[&str] = &[
     "atomic.js",
+    "capability.js",
     "launchSupervisor.js",
     "nodeAssert.js",
     "nodeAssertAdapter.js",
@@ -343,6 +344,7 @@ struct ViteTransform {
 fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
     match name {
         "atomic.js" => Some(include_bytes!("../../../runtime/javascript/atomic.js")),
+        "capability.js" => Some(include_bytes!("../../../runtime/javascript/capability.js")),
         "launchSupervisor.js" => Some(include_bytes!(
             "../../../runtime/javascript/launchSupervisor.js"
         )),
@@ -1012,7 +1014,7 @@ pub fn prepare_javascript_frontend(
     for file in &project.source_files {
         let path = checked_source_path(workspace, file)?;
         let source = fs::read_to_string(&path).map_err(|source| io_error(&path, source))?;
-        let capability_wrapper = runtime_specifier(file, "launchSupervisor.js")?;
+        let capability_wrapper = runtime_specifier(file, "capability.js")?;
         let mut output = match project.build_adapter {
             BuildAdapter::Vite | BuildAdapter::Generic => {
                 instrument_candidate_with_runtime_hooks(&source, file, &capability_wrapper)
@@ -1092,7 +1094,7 @@ pub fn prepare_javascript_frontend(
             continue;
         };
         let capability_wrapper = (!project.source_files.contains(&entry.file))
-            .then(|| runtime_specifier(&entry.file, "launchSupervisor.js"))
+            .then(|| runtime_specifier(&entry.file, "capability.js"))
             .transpose()?;
         let assertion_runtime = runtime_specifier(&entry.file, "runtime.js")?;
         let output = crate::js_instrumenter::instrument_node_assertion_phases_with_runtime_imports(

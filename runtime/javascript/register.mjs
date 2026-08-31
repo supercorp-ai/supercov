@@ -9,8 +9,12 @@ var __rewriteRelativeImportExtension = (this && this.__rewriteRelativeImportExte
 import Module, { register, syncBuiltinESMExports } from "node:module";
 import { closeSync, openSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
-import { installLaunchSupervisor } from "./launchSupervisor.js";
+import { installLaunchSupervisor, wrapImportedCapability } from "./launchSupervisor.js";
+import { __supercovBindCapabilityWrapper } from "./capability.js";
 installLaunchSupervisor();
+// Instrumented sources import the browser-safe capability seam; bind the
+// real supervisor implementation before any user module evaluates.
+__supercovBindCapabilityWrapper(wrapImportedCapability);
 // Long-running commands are diagnosed without changing their runner's exit
 // semantics. The first preloaded Node process atomically elects itself for the
 // run and periodically reports public active-resource types. This deliberately
