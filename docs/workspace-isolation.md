@@ -1,120 +1,72 @@
 # Workspace isolation
 
-Supercov writes generated and temporary files only under the project's
-`.supercov/` directory. Application source and ordinary build artifacts are
-not write targets, and cleanup does not depend on a signal handler.
+Supercov measures an instrumented copy of the project. It does not rewrite the
+source tree you edit or the ordinary build output your project already owns.
 
-## Owned paths
+## What Supercov may write
 
-For `supercov -- <command>`, every Supercov-created persistent or temporary path
-is below the project's `.supercov/` directory:
-
-| Path | Lifetime |
+| Location | Purpose |
 | --- | --- |
-| `locks/active.json` | Exclusive run or cleanup transaction; removed by its owner, stale owners are recovered. |
-| `work/<run>/state.json` | In-flight lifecycle record; removed after atomic run publication. |
-| `work/<run>/run-publication/` | Incomplete run staging; atomically renamed or removed on recovery. |
-| `evidence/<run>/` | Loose in-flight evidence; packed and removed after publication. |
-| `runs/<run>/` | Immutable `evidence.raw.gz` (manifest plus raw execution evidence) and `run.json`; retained until explicit `clean`. Derived query views are cached only after their first query. |
-| `supercov/workspace/<project>/` | Stable physical fallback and provider snapshot cache. The non-dotted ancestor keeps Express/`send` and similar static-file stacks semantically unchanged. |
-| `supercov/workspace/.<project>.staging-*` | Unpublished cache transaction; removed on error or recovery. |
-| `supercov/workspace/.<project>.previous-*` | Last complete cache generation during publication; restored or removed on recovery. |
-| `supercov/workspace/<project>/.supercov/server-evidence/<run>/` | Server/background transport shared with local or mounted guest processes; archived and removed after publication, interruption, refresh, or cleanup. |
+| `.supercov/runs/<run-id>/` | Immutable completed runs |
+| `.supercov/work/` | In-progress state and evidence staging |
+| `.supercov/locks/` | Prevents overlapping run and cleanup operations |
+| `supercov/workspace/<project>/` | Marker-protected isolated source and build cache |
 
-The lower-level runtime retains `/tmp/supercov-server-evidence` only as a
-fallback when it is embedded without the Supercov CLI and no owned transport
-root is configured. Normal CLI runs always inject an owned root, and VM path
-translation maps that same root into the guest mount.
+Supercov owns these locations only when its exact marker is present. If the
+project already contains a user-created `supercov/` directory, Supercov does
+not adopt or delete it; it chooses a deterministic fallback location instead.
 
-## Current physical fallback
+The managed directories contain their own gitignore rules so run evidence and
+instrumented builds do not become normal repository changes.
 
-Builds and opaque VM/container mounts currently use a stable physical namespace
-at `supercov/workspace/<project>`. The `supercov/` container is owned only when
-its exact marker is present; if a project already owns that name, Supercov uses
-a deterministic non-dotted fallback and copies the user's directory as ordinary
-source rather than adopting or excluding it. Refresh has four states:
+## What remains untouched
 
-1. The last complete source generation remains live while a sibling `staging`
-   tree is prepared.
-2. The live generation is renamed to a uniquely named `previous` tree.
-3. The complete `staging` tree is renamed to the stable name.
-4. The obsolete `previous` tree is removed.
+Supercov does not intentionally edit:
 
-All publication renames stay on one filesystem and their parent directory is
-fsynced. Recovery treats `staging` as never published. If the stable name is
-missing, recovery restores the newest `previous` generation; if the stable name
-exists, all `previous` generations are obsolete. This covers a normal error,
-SIGKILL, power loss, and host restart at every boundary without trusting a path
-read from a state file.
+- application source or tests;
+- imports or dependency declarations;
+- test-runner configuration or reporter lists;
+- the project's ordinary build output; or
+- files outside its marker-owned storage.
 
-Source files request Node's
-[`COPYFILE_FICLONE`](https://nodejs.org/api/fs.html#fspromisescopyfilesrc-dest-mode)
-mode. On filesystems such as APFS that support reflinks, file contents are
-copy-on-write. Node explicitly falls back to a real copy on unsupported
-filesystems, however, and directory entries must always be recreated. This is
-why the transaction rules remain necessary.
+The wrapped test command can still create anything it normally creates. The
+isolation guarantee applies to Supercov's additional instrumentation, evidence,
+and build work—not to side effects authored into the command itself.
 
-An exact fingerprint over application source, dependencies, configuration,
-build mode, instrumenter runtime, build command, Node, OS, and architecture
-allows a complete instrumented output and its manifest to survive a source
-snapshot refresh. Test-only edits do not invalidate it. A missing artifact or
-any key change forces a new build.
+## Repeated runs
 
-The stable physical path is not accidental. Some VM/container systems include
-the host mount path in a snapshot identity. A fresh random path per run would
-avoid retention but force a cold machine snapshot every time.
+When source, configuration, dependencies, toolchain, and build mode match,
+Supercov can reuse the isolated instrumented build. Test-only changes do not
+force an unrelated application rebuild.
 
-## Why FUSE is not the default
+Workspace updates are prepared separately and published only when complete, so
+a failed refresh does not replace the last complete cache with a partial one.
 
-A FUSE overlay could present transformed bytes at the original relative paths,
-but it adds a kernel/system extension or privileged mount dependency on common
-developer platforms. Mount teardown also becomes another failure boundary. A
-zero-install `npx supercov` command cannot assume that dependency, so FUSE may
-become an opt-in adapter but is not a safe portable baseline.
+## Crashes and concurrent commands
 
-## Copy-free target architecture
+One project can have one coverage or cleanup transaction at a time. A second
+operation fails clearly instead of racing the first.
 
-The intended architecture is capability-based rather than one mechanism for
-every runner:
+In-progress state records allow the next command to recover after interruption,
+forced termination, or host restart. Unpublished staging data is discarded;
+completed runs are published atomically and remain immutable.
 
-- Node [module customization hooks](https://nodejs.org/api/module.html#customization-hooks)
-  can return transformed source for ESM and CommonJS without changing files.
-  This is appropriate only when the observed loader chain preserves source
-  identity and source maps.
-- Vite/Rollup-compatible tools should transform modules in their native plugin
-  graph and relocate every Supercov-added cache/output into `.supercov/`.
-- A Node coordinator that later exposes an opaque VM/container mount can lazily
-  materialize the transactional physical fallback and replace only that mount.
-- Native/non-Node compilers and remote control planes that never expose reads or
-  mounts need explicit adapters or the physical fallback. Supercov must report
-  this boundary instead of silently claiming coverage.
+## Cleanup
 
-The command itself may create files that the same test command normally creates.
-Supercov is responsible for ensuring that instrumentation, generated config,
-manifests, evidence, and additional builds do not add writes outside
-`.supercov/`.
+Preview cleanup before deleting local Supercov data:
 
-## Release blockers for a copy-free mode
+```sh
+npx supercov clean --dry-run
+npx supercov clean --keep 20
+npx supercov clean
+```
 
-A copy-free path is not eligible as the default until its regression suite
-proves all of the following:
+Cleanup follows marker ownership and refuses to race an active run. It does not
+scan for similarly named directories or delete paths supplied by run metadata.
 
-- original and transformed programs remain semantically equivalent;
-- ESM, CommonJS, TypeScript/transpiler, worker, and child-process loader chains
-  preserve exact source attribution;
-- test/build configuration and source fingerprints refer to the original tree;
-- output relocation cannot escape `.supercov/`, including plugin-defined
-  outputs;
-- an opaque remote mount either receives a complete materialized fallback or is
-  rejected clearly;
-- SIGINT, SIGTERM, SIGKILL simulation, concurrent `clean`, ENOSPC, and failed
-  rename/copy injection leave no source changes and recover deterministically;
-- retained bytes and startup time are measurably lower than the transactional
-  reflink fallback.
+## Containers and remote workspaces
 
-Until those gates pass, the transactional physical namespace is the conservative
-fallback rather than a temporary-directory mount whose cleanup must succeed.
-
-The filesystem gate runs the transaction suite on Linux, macOS, and Windows,
-including reflink/ordinary-copy behavior, internal links or junctions, ENOSPC,
-failed renames, and forced-process-termination recovery.
+When a suite launches a container or VM from a mounted workspace, Supercov uses
+the isolated workspace as the source presented to that environment. If an
+executor hides its launch or mount boundary, Supercov reports the limitation
+instead of claiming that unseen code was measured.

@@ -1,102 +1,68 @@
 # Verification
 
-Supercov instruments source before the test command runs. Seven release gates
-check that the instrumented program matches the original program and that
-coverage calculations are correct. Any failed gate blocks publication.
+Coverage is useful only if instrumentation preserves program behavior and the
+reported obligations match what actually executed. Supercov fails closed when
+it cannot establish either condition.
 
-## 1. Semantic differential execution
+## What release checks cover
 
-Original and instrumented programs are executed in isolated scopes and compared
-on three axes: return values, thrown errors, and the observable order of side
-effects.
+Every release is checked for:
 
-The fixtures deliberately target the places where a naive transform breaks:
-getters, proxies, optional calls and `this` binding, computed logical
-assignments, parameter defaults, `try`/`catch`/`finally`, iterator closing,
-switch fallthrough, labelled loops, async functions and generators.
+- identical return values, thrown errors, and side-effect order before and
+  after instrumentation;
+- short-circuiting, getters, proxies, optional calls, `this` binding, defaults,
+  exceptions, loops, async functions, and generators;
+- exact line, branch, decision-vector, and MC/DC results;
+- JavaScript behavior across a pinned TC39 Test262 corpus;
+- supported JavaScript, TypeScript, and Rust runner contracts;
+- Chromium, Firefox, and WebKit browser execution;
+- source isolation, interrupted-run recovery, and atomic publication; and
+- package installation and execution from a clean project.
 
-## 2. Deterministic generated corpus
+MC/DC cases are also compared with an independent LLVM implementation so a
+self-consistent error in Supercov's own calculation does not pass unnoticed.
 
-A generated corpus exercises 160 nested combinations of short-circuiting,
-ternaries, coercion and thrown expressions on every run. It is deterministic, so
-a regression reproduces exactly rather than appearing once in CI and never
-again.
+## What happens when code cannot be measured safely
 
-## 3. Property testing
+Supercov does not force a transform through code that observes its own source
+text or creates source dynamically without a stable denominator. It leaves the
+affected behavior uninstrumented and records a completeness blocker with the
+reason and location.
 
-Seeded `fast-check` properties generate a further 500 nested expressions and 300
-control-flow executions per run, with shrinking and a reproducible seed printed
-on failure.
+Similarly, evidence from an unsupported runner or hidden remote boundary is
+reported as aggregate, unattributed, or missing. It is not assigned to a test
+that may not have caused it.
 
-## 4. Coverage oracles
-
-Behaviour equivalence is not enough — the numbers have to be right too. Separate
-oracles assert exact decision vectors, MC/DC witnesses and branch alternatives
-independently of what the program does.
-
-## 5. An independent MC/DC implementation
-
-The same three-condition masking-MC/DC golden cases must produce identical
-verdicts under Supercov and under Clang/LLVM source-based MC/DC: 100% for a
-complete witness set and 33.33% for an incomplete one.
-
-This is the gate that matters most. MC/DC has enough subtlety — masking versus
-unique-cause, short-circuit evaluation, compound conditions — that agreement
-with an independently implemented, widely audited toolchain is far stronger
-evidence than any self-consistent test suite.
-
-## 6. TC39 Test262
-
-Release CI shards the pinned Test262 corpus across 16 workers, runs the official
-harness against original and instrumented sources, and rejects any scenario that
-passes originally but fails after transformation.
-
-Some categories are excluded by construction, with reason counts printed for
-every shard:
-
-| Excluded | Why |
-| --- | --- |
-| Module, async and raw tests | Not comparable under the source-rewrite harness |
-| Parse and resolution negatives | The transform never runs on unparseable input |
-| Annex B sloppy-script extensions | Does not apply to the application modules Supercov instruments |
-| `Function.prototype.toString` and function-source coercion | Exact source reflection necessarily observes a source transform |
-
-The last category is handled in the product, not hidden: when application code
-directly coerces or observes a function's source, Supercov leaves that body
-uninstrumented and records a visible `semantic-safety` completeness blocker.
-Dedicated differential fixtures cover the async and generator cases that Test262
-cannot compare.
-
-## 7. Performance budgets
-
-Transform latency, transactional workspace preparation, output expansion and
-runtime probe overhead are each checked against explicit budgets. A change that
-makes instrumentation correct but unusably slow fails the same way a wrong
-answer does.
-
-## Cross-platform and compatibility gates
-
-Alongside the seven correctness gates, the compatibility workflow runs Node 22,
-24 and 25, Playwright 1.55 and current, Vite 5 and current, Vitest 2 and
-current, Chromium, Firefox and WebKit, and modern JavaScript, JSX, TypeScript
-and TSX syntax fixtures.
-
-Filesystem publication, symlink handling, copy fallback, `ENOSPC`, failed
-rename and forced-termination recovery are all exercised on Ubuntu, macOS and
-Windows.
-
-A clean-room gate packs the npm tarball, invokes it through `npx` in a project
-with no build step, and asserts that not a single source or configuration file
-changed.
-
-## Running the gates yourself
+Inspect these states with:
 
 ```sh
-npm test
-npm run test:clang-mcdc
-npm run benchmark:check
-TEST262_DIR=/path/to/test262 npm run test:test262
+npx supercov runs latest
+npx supercov runs latest scope
+npx supercov runs latest gaps
 ```
 
-The Clang/LLVM oracle requires `clang` and `llvm` to be installed. The Test262
-gate requires a checkout of the pinned corpus.
+## How to review a coverage change
+
+For a test added by a coding agent, check three things:
+
+1. The wrapped test command still passes.
+2. `diff` shows the expected obligations gained and no unexplained loss.
+3. The test contains meaningful assertions and does not weaken application
+   behavior merely to improve a percentage.
+
+```sh
+npx supercov diff <baseline-run> <new-run>
+npx supercov runs <new-run> test "new test name"
+```
+
+Store the compared run ids in the review or agent summary when the evidence
+needs to be reproducible later.
+
+## Integrity of stored runs
+
+Completed runs are immutable and integrity-bound to their evidence,
+fingerprints, and schema. A run whose bytes are missing, corrupt, stale, or
+incompatible is surfaced as such instead of being opened as a plausible report.
+
+See [Evidence and runs](/docs/evidence) for retention, comparison, and shard
+merging.

@@ -1,134 +1,84 @@
 # Coverage model
 
-Supercov derives coverage obligations from code structure. It reports which
-obligations ran and the quality of the available evidence, including line,
-branch, value-path, control-flow, and MC/DC coverage.
+Supercov turns source structure into a fixed set of obligations before the test
+run. Tests can cover those obligations, but they cannot silently change what
+100% means.
 
-## Obligations
+## What Supercov measures
 
-An obligation is one thing the code structure requires a test to demonstrate.
-The denominator is fixed before the run from the source itself, so a percentage
-cannot drift when tests are added or removed.
-
-| Family | Obligation |
+| Obligation | Question |
 | --- | --- |
-| Lines | Each executable line executes |
-| Statements | Each statement executes |
-| Functions | Each function is entered |
-| Branches | Each alternative is taken: `true`, `false`, switch fallthrough, and the implicit no-match arm |
-| MC/DC | Each atomic condition is shown to independently determine its decision |
-| Value selection | Optional-chain short-circuits, logical assignments, and parameter or destructuring defaults each resolve both ways |
-| Control flow | `try` versus `catch`, and zero-iteration versus entered `for-in` / `for-of` |
+| Line | Did execution reach this source line? |
+| Statement | Did this executable statement run? |
+| Function | Was this function entered? |
+| Branch | Did each alternative execute? |
+| Decision vector | Which combinations of conditions were observed? |
+| MC/DC witness | Was each condition shown to affect its decision independently? |
+| Value path | Did language constructs such as defaults, optional chains, and logical assignments take each meaningful path? |
 
-The value-selection and control-flow families are the ones most tools omit.
-`a?.b`, `x ??= y` and `function f(a = 1)` each hide a decision that never
-appears as a branch in a conventional report, and a `for-of` that never runs
-with an empty collection is an untested path even though every line inside it
-is green.
+The exact obligations depend on the language and source construct. Query one
+file or decision to see the concrete missing behavior:
 
-## MC/DC in one example
+```sh
+npx supercov runs latest file app/checkout/session.ts
+npx supercov runs latest decision app/checkout/session.ts:64
+```
 
-Modified condition/decision coverage asks more than "was this condition true and
-false at some point". It asks whether each condition was shown to *independently
-change the outcome*, which requires a pair of executions differing in that one
-condition and producing different decisions.
+## Why a line percentage is not enough
 
-For `isAdmin || (total > limit && !locked)`:
+A line can execute while an important outcome remains untested. For example,
+this decision has two conditions:
 
-| Vector | `isAdmin` | `total > limit` | `!locked` | Decision |
-| --- | --- | --- | --- | --- |
-| v1 | F | T | T | true |
-| v2 | F | F | T | false |
-| v3 | F | T | F | false |
-| v4 | T | F | T | true |
+```js
+if (user.isAdmin || user.ownsDocument) allowEdit();
+```
 
-- v1 and v2 differ only in `total > limit` and disagree, so that condition is
-  proven.
-- v1 and v3 do the same for `!locked`.
-- v4 and v2 do the same for `isAdmin`.
+Executing the line proves very little by itself. Useful tests should show the
+admin condition matters, the ownership condition matters, and the denied path
+still works. Decision-vector and MC/DC queries expose the missing cases directly.
 
-Remove v2 and two of the three proofs collapse, even though every condition has
-still been observed both true and false, and every line is still green. That is
-the gap MC/DC exists to catch, and it is why the criterion is required for the
-highest software assurance levels in avionics.
+The same principle applies to Rust boolean expressions and control flow.
 
-Supercov stores **vector-level provenance**: which test produced each observed
-vector, not just which tests touched the decision. A filtered query therefore
-recomputes valid witness pairs for the tests it selected, rather than filtering
-a percentage computed for a different set. A witness assembled from one unit
-vector and one end-to-end vector counts for the combined suite and for neither
-level alone — and Supercov reports it that way.
+## Evidence confidence
 
-## Quality of evidence
+Where the runner exposes exact test boundaries, Supercov can show which test and
+attempt covered an obligation. Where it does not, execution is recorded as
+aggregate background evidence rather than assigned to a guessed test.
 
-Not all coverage is equally convincing. Each line, branch alternative, vector
-and condition records how it was reached:
+Use attempt filters to choose the evidence included in a view:
 
-| Level | Meaning |
-| --- | --- |
-| Unexecuted | No evidence |
-| Executed | Reached during a test, with no explicit causal link |
-| Action-linked | Reached inside a recognised browser action such as `locator.click()` |
-| Assertion-linked | Reached inside an `expect()` matcher, or in the code path an assertion depends on |
+```sh
+npx supercov runs latest --filter all
+npx supercov runs latest --filter passed
+npx supercov runs latest --filter failed
+```
 
-Only an explicit browser or server event can raise confidence to
-assertion-linked. Where Supercov has to fall back on timing correlation — an
-early cross-origin iframe probe, for example — the evidence stays
-execution-only and is labelled as such. Code reached outside a recognised
-action, such as setup work or a helper making its own HTTP requests, still has
-exact test attribution but may carry no action phase at all.
+Use `--kind` when the project distinguishes test levels:
 
-In Playwright, the phase travels with the request: an action opened in the
-browser is still the active phase inside the server route it triggers, so a
-chain of `click → application decision → visible assertion` is queryable.
+```sh
+npx supercov runs latest gaps --kind e2e
+```
 
-## Provenance
+A filtered view recomputes obligations from the selected evidence. It does not
+filter a percentage that was already calculated from something else.
 
-Every test carries two independent labels.
+## Complete, uncovered, and blocked
 
-**Runner** is the process that executed it — `playwright`, `vitest`, `jest`,
-`node`.
+An ordinary uncovered obligation can be closed by a test. A completeness
+blocker means Supercov cannot honestly claim the source was fully measured.
+Common blockers are:
 
-**Kind** is its semantic level — `e2e`, `integration`, `component`, `unit`.
-Kind is resolved in descending confidence from an explicit `SUPERCOV_TEST_KIND`,
-then the Playwright project name, then the test path, then the runner default
-(Playwright is end-to-end, Vitest is unit). Queries preserve how the label was
-established, so an inferred kind is never presented as a declared one.
+- ambiguous first-party source scope;
+- source that must remain uninstrumented because code observes its own text;
+- dynamically created source without a stable pre-run denominator; and
+- execution that crossed an unsupported or unattributed runner boundary.
 
-Vitest module-import and setup execution is retained as a separate setup scope
-rather than being attributed to whichever test happened to run first.
+Inspect source scope with:
 
-## Attempts and filters
+```sh
+npx supercov runs latest scope
+```
 
-Evidence records attempt status, so a test is classified as passed, failed,
-flaky, skipped, timed out, interrupted, unknown, or selected but unstarted
-after fail-fast. `--filter` selects which attempts contribute to a view:
-
-- `all` — every executed attempt, including attempts that later failed. This is
-  the default and matches conventional coverage tools.
-- `passed` — successful attempts of tests that ultimately passed.
-- `failed` — failed attempts only, including failed retries of a flaky test.
-
-Passed and failed views are derived from the same immutable archive rather than
-duplicated into separate report files, so they cannot disagree.
-
-## When completeness is blocked
-
-A verdict is only useful if it refuses to be complete when it cannot be:
-
-- **Ambiguous scope.** Every candidate source file is retained as included,
-  excluded, or ambiguous. Ambiguity blocks a complete verdict and is
-  inspectable with `coverage scope`. Set `SUPERCOV_SOURCE_ROOTS` to declare the
-  authoritative scope.
-- **Semantic-safety blockers.** When application code coerces or observes a
-  function's own source, Supercov leaves that body uninstrumented and records
-  the blocker rather than transforming code whose text is being read.
-- **Unknowable denominators.** Direct `eval` and `Function` source cannot
-  receive a stable pre-run denominator. Their exact locations are recorded as
-  completeness blockers instead of being silently excluded.
-- **Unattributed evidence.** Execution that arrives without a carrier is stored
-  under a first-class background scope, visible in the all-attempt view and
-  excluded from per-test passed-only coverage.
-
-None of these are rounded away. A blocked verdict is more useful than a
-comfortable 100%.
+If automatic scope is ambiguous, declare the authoritative roots with
+`SUPERCOV_SOURCE_ROOTS`. Other blockers remain visible with their location and
+reason. Supercov does not round them away to produce a comfortable 100%.

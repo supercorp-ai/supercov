@@ -1,147 +1,121 @@
 # Getting started
 
-Supercov measures coverage for JavaScript, TypeScript, and Rust test suites.
-Prefix the command you already run; no config file, import, or reporter is
-required.
+Supercov gives a coding agent the next test to write. Run the test command you
+already use, ask which useful paths remain uncovered, add a focused test, and
+repeat.
 
 ```sh
 npx supercov -- npm test
 ```
 
-Everything after `--` is your command, executed exactly as written.
+No account, config file, import, custom reporter, or hosted service is required.
+
+## Language support
+
+| Language | Status | Start with |
+| --- | --- | --- |
+| JavaScript | Available | `npx supercov -- npm test` |
+| TypeScript | Available | `npx supercov -- npm test` |
+| Rust | Available | `npx supercov -- cargo test` |
+| Python | Coming soon | — |
+| Zig | Coming soon | — |
+| PHP | Coming soon | — |
+| C | Coming soon | — |
+
+More languages are planned. See [Supported suites](/docs/supported-suites) for
+the runners and attribution available today.
 
 ## Requirements
 
-| Requirement | Detail |
-| --- | --- |
-| Node.js | 22 or newer |
-| Project | JavaScript or TypeScript, with a runnable test command |
-| Disk | A `.supercov/` directory in the project root, which Supercov creates |
+- Node.js 22 or newer. The current CLI is distributed through npm, including
+  when it measures a Rust project.
+- A working test command for the project.
+- For Rust, the Rust 1.95 toolchain. `cargo test` is supported directly;
+  `cargo nextest run` is supported with cargo-nextest 0.9.138 or 0.9.140.
 
-No Supercov account or hosted service is required. During a coverage run, the
-Supercov CLI does not contact a Supercov service and no part of your source or
-evidence leaves the machine. Package tools such as `npx` may still contact the
-npm registry to resolve or download Supercov when it is not already cached.
+Package tools such as `npx` may contact the npm registry to download Supercov
+when it is not cached. The Supercov CLI does not contact a Supercov service
+during a coverage run, and your source and evidence stay on your machine.
 
-## Your first run
+## Run the complete suite
 
-From the project root:
+Everything after `--` is your test command. Use the same command you trust
+before merging or deploying:
 
 ```sh
+# JavaScript or TypeScript
 npx supercov -- npm test
-```
-
-The run prints its phases as it goes — initialization, workspace preparation,
-adapter setup, the instrumented build, your unchanged test command, and
-evidence publication — and finishes by publishing one immutable run under
-`.supercov/runs/<run-id>/`. The run id is a UTC timestamp, so run ids sort
-chronologically.
-
-If the command you normally use is not `npm test`, use that instead:
-
-```sh
 npx supercov -- npx playwright test
 npx supercov -- pnpm test:e2e
-npx supercov -- npm run test:unit && npx supercov -- npm run test:e2e
+
+# Rust
+npx supercov -- cargo test
+npx supercov -- cargo nextest run
 ```
 
-A single Supercov run can collect several runners. Coverage from a command that
-launches Vitest and Playwright ends up in one run, with each test labelled by
-the runner that executed it.
+If one command launches several supported runners, Supercov combines their
+evidence into one run.
 
-## Read the result
+## Find the next test
 
-Start with the summary, then narrow. Every query names one run; `latest`
-selects the newest local run.
+Start broad, then open one useful target:
 
 ```sh
-# What runs exist?
-npx supercov runs --limit 5
-
-# How complete is the newest one?
 npx supercov runs latest
-
-# Which files hold the most open obligations?
 npx supercov runs latest gaps --limit 10
-
-# What exactly is open in one file?
 npx supercov runs latest file app/checkout/session.ts
+npx supercov runs latest decision app/checkout/session.ts:64
 ```
 
-Output is written for an agent reading a terminal: short, paginated, and
-carrying a copyable next-page command. Add `--json` to any query for the stable
-machine format.
+The output is short and paginated so a coding agent can use it directly. Add
+`--json` only when a tool specifically needs machine-readable output.
 
-## Add a test and prove it landed
+## Add a test and prove the gain
 
-Write a test the normal way, then re-run and compare:
+Write one focused test, rerun the same complete command, and compare the two
+runs:
 
 ```sh
 npx supercov -- npm test
 npx supercov diff <previous-run-id> latest
 ```
 
-`diff` reports what the newer run covers that the older one did not. To check
-one specific test's contribution rather than the whole run:
+For Rust, rerun the same `cargo test` or `cargo nextest run` command you used
+for the baseline.
 
-```sh
-npx supercov runs latest test "rejects a locked order"
-```
+## Give the loop to an agent
 
-## What Supercov writes
-
-Supercov owns two marker-protected locations inside your project:
+Paste this into any coding agent that can run terminal commands:
 
 ```text
-.supercov/
-  runs/<run-id>/evidence.raw.gz   exact denominator manifest + raw evidence
-  runs/<run-id>/run.json          fingerprints, phase timings, integrity
-supercov/
-  workspace/<project>/            isolated build namespace, reused between runs
+Use `npx supercov` to improve coverage. Only write tests. Keep going while
+useful gaps remain.
+
+Run the repository's complete test command through Supercov. Use
+`npx supercov runs latest gaps --limit 5` to choose one useful target. Write
+one focused test, rerun the complete suite, and verify the gain with
+`npx supercov diff <previous-run-id> latest`.
+
+Never weaken assertions or change application code to make coverage easier.
+Stop when no useful gaps remain.
 ```
 
-Your source files, test files, runner configuration and ordinary build output
-are never modified, overwritten or rebuilt. Both owned locations carry their
-own gitignore; an existing user `supercov/` directory is never adopted.
+## Local files and cleanup
 
-Storage is bounded by you, not by a background process:
+Completed runs live under `.supercov/runs/`. Supercov also maintains a
+marker-protected isolated workspace for instrumented builds. It does not rewrite
+your source, tests, imports, runner configuration, dependency tree, or ordinary
+build output.
 
 ```sh
-npx supercov clean                      # remove every stored run and build cache
-npx supercov clean --keep 20            # retain the 20 newest runs
-npx supercov clean --keep 20 --dry-run  # show what would be removed
+npx supercov clean --dry-run   # preview a full cleanup
+npx supercov clean --keep 20   # retain the 20 newest runs
+npx supercov clean             # remove all runs and the build cache
 ```
 
-## Choosing what counts
+## Next
 
-Two options change the meaning of a number rather than its presentation, so
-they are worth knowing early.
-
-`--filter` selects which attempts contribute:
-
-- `all` (default) counts every executed attempt, including attempts that later
-  failed. This matches what conventional coverage tools report.
-- `passed` counts only successful attempts of tests that ultimately passed —
-  verified coverage.
-- `failed` counts only failed attempts, which is useful when diagnosing a flaky
-  test's real execution path.
-
-`--kind` selects a semantic test level such as `e2e`, `integration`,
-`component` or `unit`. Kind is resolved from an explicit `SUPERCOV_TEST_KIND`,
-then the Playwright project name, then the test path, then the runner default.
-Queries record how the label was established, so an inferred kind is never
-presented as one you declared.
-
-Filtered queries recompute every obligation from the selected tests instead of
-filtering an already-computed percentage. This matters most for MC/DC, where a
-witness pair assembled from one unit vector and one end-to-end vector counts for
-the combined suite but not for either level alone.
-
-## Where to go next
-
-- [Agent loop](/docs/agent-loop) — the unattended workflow this is designed for.
-- [CLI reference](/docs/cli) — every command and flag.
-- [Coverage model](/docs/coverage-model) — what an obligation is, and why the
-  denominator is larger than lines and branches.
-- [Supported suites](/docs/supported-suites) — where attribution is exact and
-  where it is aggregate.
+- [Agent loop](/docs/agent-loop) — a repeatable coverage workflow for coding agents.
+- [CLI reference](/docs/cli) — commands and filters.
+- [Coverage model](/docs/coverage-model) — what Supercov measures.
+- [Supported suites](/docs/supported-suites) — languages, runners, and current limits.

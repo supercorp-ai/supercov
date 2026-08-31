@@ -1,127 +1,96 @@
 # Evidence and runs
 
-Each run stores one evidence artifact and its metadata. Reports, queries, and
-comparisons are derived from those files on demand.
+Every completed Supercov run is an immutable local record of what the suite
+executed. Queries, comparisons, and filtered views are derived from that record.
 
-## What a run is
+## What a run contains
 
-```text
-.supercov/runs/2026-08-24T01-25-11Z/
-  evidence.raw.gz   exact denominator manifest + raw per-worker and background evidence
-  run.json          fingerprints, phase timings, schema version, integrity state
+A run records:
+
+- the fixed coverage denominator for the measured source;
+- observed lines, statements, functions, branches, and decision vectors;
+- test, attempt, runner, outcome, and phase identity where the runner exposes it;
+- source, test, dependency, configuration, toolchain, and schema fingerprints;
+- completeness blockers and unattributed background execution; and
+- phase timings and integrity information.
+
+Completed runs live under `.supercov/runs/<run-id>/`. The original evidence is
+not rewritten when you query it. Supercov may build a disposable local index to
+answer later queries faster; that index is derived data and can always be
+recreated from the immutable run.
+
+## Read a run
+
+```sh
+npx supercov runs --limit 10
+npx supercov runs latest
+npx supercov runs latest gaps --limit 10
+npx supercov runs latest file app/checkout/session.ts
 ```
 
-Two durable source-of-truth files. No HTML or derived report is stored in the
-published run. Loose evidence written during the run is removed only after the
-whole run directory is atomically visible, so a run is either complete or
-absent.
+Use `latest` while working interactively. Use the run id printed by `runs` for
+automation, review notes, and work that spans sessions.
 
-Run ids are UTC timestamps, which makes them sort chronologically and makes
-retention deterministic.
+Queries compare the stored fingerprint with the current workspace. A stale run
+remains valid history, but it is no longer presented as a description of the
+current source.
 
-## Derived views and their disposable cache
+## Filter attempts
 
-Every coverage view — the summary, per-file rankings, gap lists, decision
-detail, per-test contribution, the minimizer, and the passed and failed filters
-— is derived from the archive. The first query may write a disposable,
-integrity-bound query index beside the two durable files; later queries reuse
-it while the run identity remains valid. Delete that index at any time and
-Supercov reconstructs it from `evidence.raw.gz` without losing coverage data.
+The same run can answer different questions without rerunning the suite:
 
-This is why `--filter passed` and `--filter all` can never contradict each
-other, and why a query added in a future version can answer questions about a
-run recorded today: raw evidence remains the source of truth, while the query
-index is only a rebuildable acceleration structure.
+```sh
+npx supercov runs latest --filter all
+npx supercov runs latest --filter passed
+npx supercov runs latest --filter failed
+```
 
-Fresh-process summary, files and gaps queries take roughly two tenths of a
-second on the reference run described in [Performance](/docs/performance).
+- `all` includes every executed attempt and matches conventional coverage tools.
+- `passed` includes successful attempts of tests that ultimately passed.
+- `failed` isolates failed attempts, including failed retries of flaky tests.
 
-## Integrity and staleness
+Filtered views are recomputed from the stored evidence. They are not separate
+report files that can drift apart.
 
-Each run stores SHA-256 fingerprints for:
-
-- first-party source
-- test files
-- dependency lockfiles
-- test and build configuration
-- the instrumenter itself
-
-plus the evidence schema version and the Git revision and dirty state at the
-time of the run.
-
-Queries compare the stored fingerprint against the current workspace and
-visibly mark a stale run. Evidence carrying a different run scope is rejected
-outright rather than merged in.
-
-## Comparing two runs
+## Compare two runs
 
 ```sh
 npx supercov diff <older-run> <newer-run>
-npx supercov diff <older-run> <newer-run> --json
 ```
 
-`diff` reports what the newer run covers that the older one did not, and what
-it lost. Both inputs are immutable and untouched, which is what makes the
-comparison meaningful: neither side can have been rewritten by the act of
-comparing them.
+The diff shows newly covered and newly uncovered obligations. It is the easiest
+way to prove that a focused test changed coverage without losing behavior
+elsewhere.
 
-## Merging shards
+## Combine shards
 
 ```sh
-npx supercov merge <first-run-id> <second-run-id> [...]
+npx supercov merge <shard-a> <shard-b> [...]
 ```
 
-`merge` accepts only runs whose source, test, dependency, configuration,
-instrumenter, schema and denominator fingerprints are identical. It rewrites
-the run scope inside every evidence record, namespaces shard paths, and
-publishes a new immutable run atomically. Input runs are never modified or
-deleted.
+Merge creates a new immutable run. Shards must have matching source,
+configuration, toolchain, schema, and denominator fingerprints. Input runs are
+never changed.
 
-This is the distributed and multi-host primitive. Incompatible shards fail with
-the exact differing fingerprint domains rather than producing a plausible but
-invalid aggregate — two shards built from different source trees do not have a
-common denominator, and no amount of arithmetic creates one.
+## Integrity and incomplete evidence
 
-## Durability
+Supercov validates evidence before publishing a run. Corrupt, truncated,
+duplicated, or contradictory input is rejected or surfaced as an explicit
+measurement limit. It is never silently converted into a clean percentage.
 
-Everything that can be interrupted is written to survive it.
-
-- Evidence archive, metadata and state writes use sibling temporary files,
-  `fsync`, and atomic rename.
-- Lock acquisition uses exclusive creation followed by `fsync`.
-- Run state is written durably through the preparing, building, testing and
-  publishing phases.
-- `SIGINT`, `SIGTERM` and `SIGHUP` are forwarded to the entire child process
-  group.
-- If the process is killed without a cleanup opportunity, the next invocation
-  marks the dead PID's run abandoned and refreshes the isolated namespace
-  before reusing it.
-
-The published `run.json` is the durable terminal record, so terminal work state
-is not retained after publication.
+Likewise, ambiguous source scope, uninstrumented code, and execution without a
+reliable test identity remain visible. See [Coverage model](/docs/coverage-model)
+for how these states affect completeness.
 
 ## Retention
 
+Runs remain until you remove them:
+
 ```sh
-npx supercov clean
-npx supercov clean --keep 20 --dry-run
+npx supercov clean --dry-run
 npx supercov clean --keep 20
+npx supercov clean
 ```
 
-Cleanup never runs automatically. `clean` removes explicit history, orphaned
-and terminal transient data, and the marker-owned build workspace; `--keep N`
-preserves the N newest runs. It acquires the same lock as a coverage run,
-refuses to race an active run, and never touches unowned paths.
-
-## Phase timings
-
-Every run records monotonic durations for initialization, workspace
-preparation, adapter setup, the instrumented build, your unchanged test command,
-and evidence publication. They are stored in `run.json` and returned by
-`supercov runs --json`.
-
-These are timings, not an overhead claim. A test script that performs its own
-build may overlap work with the instrumented-build phase, and true end-to-end
-overhead requires an explicit control run — which Supercov never performs
-automatically, because an arbitrary test command can write data or cost money.
-[Performance](/docs/performance) documents the comparison methodology.
+Cleanup takes the same project lock as a coverage run and removes only
+marker-owned Supercov data.

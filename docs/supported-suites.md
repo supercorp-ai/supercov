@@ -1,119 +1,98 @@
 # Supported suites
 
-Supercov wraps a test command and instruments the processes it launches.
-Runner support differs by attribution level: exact per-test attribution or
-aggregate coverage.
+Supercov supports JavaScript, TypeScript, and Rust today. Support is exact when
+Supercov can identify individual test attempts; otherwise it reports aggregate
+coverage without guessing which test caused a hit.
 
-## Attribution by runner
+## Languages
 
-| Runner | Attribution | Notes |
+| Language | Status | Supported commands |
 | --- | --- | --- |
-| Playwright | Exact per test | Test, worker, retry and outcome scopes. ESM and CommonJS specs in arbitrary directories, plus project-owned fixture packages. |
-| Vitest | Exact per test | Module-import and setup execution is kept as a separate setup scope. |
-| Jest | Exact per test | Including concurrent and parameterized tests. |
-| `node:test` | Exact per test | Through the generated adapter. |
-| AVA, Mocha, other runners | Aggregate only | First-party structural coverage through inherited process instrumentation. Hits are recorded as background rather than guessed onto tests. |
-| Browser component runners without an adapter | Aggregate only | Same boundary, made explicit in the report. |
+| JavaScript | Available | Existing Node-based test commands |
+| TypeScript | Available | Existing Node-based test commands and build pipelines |
+| Rust | Available | `cargo test`, `cargo nextest run` |
+| Python | Coming soon | — |
+| Zig | Coming soon | — |
+| PHP | Coming soon | — |
+| C | Coming soon | — |
 
-Adapters are generated into the isolated workspace. Your test imports, reporter
-list and runner configuration are not modified.
+More languages will follow. The current npm-distributed CLI requires Node.js 22
+or newer for every language.
 
-A single command may collect several runners into one run. Each test is then
-labelled with the runner that executed it and the semantic kind it belongs to.
+## JavaScript and TypeScript runners
 
-## Builds
-
-| Project shape | How instrumentation is applied |
+| Runner | Attribution |
 | --- | --- |
-| Vite or Vitest | Through the existing Vite graph |
-| Next, Turbopack, Webpack, esbuild, SWC, other build commands | Applied to the disposable source copy, then your unchanged build command runs against it |
-| No build step (ESM or CommonJS) | Direct instrumentation of the disposable source copy |
+| Playwright | Exact per test, worker, retry, outcome, action, and assertion phase |
+| Vitest | Exact per test, with setup execution kept separate |
+| Jest | Exact per test, including concurrent and parameterized tests |
+| `node:test` | Exact per test |
+| AVA, Mocha, and other Node runners | Aggregate structural coverage |
+| Browser component runners without an adapter | Aggregate structural coverage |
 
-The ordinary application build is never read as an input, overwritten, or
-rebuilt afterwards.
+Aggregate evidence is still included in the full-run view. It is labelled as
+background rather than being assigned to a test that may not have caused it.
 
-When the complete source, configuration and toolchain fingerprint is unchanged
-between runs, the previous instrumented output and manifest are carried into the
-refreshed workspace and the build is skipped entirely.
+A single command may launch several runners. Supercov combines their evidence
+into one run and keeps the runner identity where exact attribution is available.
 
-### Build-only environment flags
+## Rust runners
 
-Before the isolated build, Supercov compares the invoked npm, pnpm, yarn or bun
-script with explicit string-valued `process.env` checks in the project's build
-configuration. A semantic match — a `test:preview` script and a
-`process.env.TEST_PREVIEW === "true"` check, for example — activates that
-build-only flag, and the decision is printed before the build. Values are never
-guessed for unrelated environment variables.
+| Runner | Attribution | Current boundary |
+| --- | --- | --- |
+| Cargo's standard libtest runner | Exact test and attempt identity | Run with `npx supercov -- cargo test` |
+| cargo-nextest | Exact test, attempt, retry, and binary identity | Run with cargo-nextest 0.9.138 or 0.9.140 |
+
+Rust support currently follows the Rust 1.95 toolchain and preserves Cargo's
+test selection, scheduling, fail-fast behavior, environment, and exit status.
+`cross` is not supported yet. Unsupported command shapes fail clearly rather
+than falling back to plausible but inaccurate attribution.
+
+## Builds and source formats
+
+JavaScript and TypeScript projects can use Vite, Vitest, Next, Turbopack,
+Webpack, esbuild, SWC, `tsc`, or no build step. ESM and CommonJS are supported,
+along with modern JavaScript, JSX, TypeScript, and TSX syntax.
+
+Supercov instruments an isolated workspace. It does not add imports, reporters,
+or plugins to the authored project, and it does not overwrite the project's
+ordinary build output.
 
 ## Browsers
 
-The compatibility workflow exercises Chromium, Firefox and WebKit, along with
-Node 22, 24 and 25, Playwright 1.55 and current, Vite 5 and current, Vitest 2
-and current, and modern JavaScript, JSX, TypeScript and TSX syntax fixtures.
+Playwright coverage supports Chromium, Firefox, and WebKit. It follows pages,
+frames, popups, workers, request contexts, WebSockets, and test-spawned child
+processes where the runner exposes the required identity.
 
-The Playwright adapter covers the `page` and `request` fixtures, API request
-contexts, user-created browser contexts and pages, popups and all of their
-frames, dedicated and service workers, WebSocket handshake headers, and
-test-spawned child processes.
+## Background processes and servers
 
-For Chromium documents exposed through the page target, a pre-document probe
-installs the action phase before application JavaScript starts. A newly created
-cross-origin iframe may run in a separate target that cannot be safely paused
-during navigation; its earliest probes use a timing fallback until the frame is
-live. This affects action-level causal precision only — never structural
-coverage or test attribution.
+Node child processes inherit coverage automatically. Long-running servers are
+given a short drain window after the test command finishes so buffered evidence
+can arrive before the run is published.
 
-## Servers, background work and child processes
+If work arrives without a reliable test identity, Supercov records it as
+background evidence. The default whole-run view includes it; passed-only and
+per-test views do not pretend it belongs to a particular test.
 
-Server-side coverage is safe when Playwright runs multiple workers against one
-application server. Every routed request carries a run, worker, test and retry
-scope; Node async context retains that scope and its current phase across
-awaited work; and each worker writes to a distinct attempt path that only its
-own collecting fixture will accept.
+## Containers, VMs, and remote execution
 
-Detached work is never dropped silently or guessed onto whichever test is
-active:
+Supercov can collect from supported processes launched through a container, VM,
+or remote executor when the command exposes a discoverable launch boundary and
+the Supercov runtime can be carried into that environment. Mounted workspaces
+and local child-process launchers are the most direct path.
 
-- HTTP callbacks inherit the carrier automatically.
-- Child processes inherit it through their environment.
-- Exported queue helpers cover BullMQ, Bee-Queue, pg-boss, Agenda and
-  in-process schedulers.
-- Anything that still arrives without a carrier is persisted under the
-  background scope.
+If the remote boundary hides how code is launched or cannot return evidence,
+Supercov reports the missing coverage boundary. It does not silently treat
+remote execution as measured.
 
-## Remote and containerised execution
+## Distributed suites
 
-Discovery is structural rather than provider-specific. The preload and a
-narrowly gated ESM transform look for a static `build(options)` capability,
-activate only when those options contain a host-to-guest mount that includes the
-isolated project, scope any existing cache or snapshot identity to the run's
-source fingerprint, and follow the returned object graph. A method whose options
-contain `argv`, `cmd` or `command` receives guest-translated Supercov paths and
-a guest-valid Node preload.
+Run shards separately, then merge compatible run ids:
 
-The execution log records this process and capability graph, but hashes long or
-multiline arguments so embedded shell bodies and credentials are never
-persisted.
+```sh
+npx supercov merge <shard-a> <shard-b> <shard-c>
+```
 
-The boundary is explicit: Supercov follows Node child processes, not arbitrary
-non-Node supervisors, and not a remote control plane that never exposes its
-launches to the local process. CommonJS and pure-ESM executor SDKs,
-object-shaped and positional execution APIs, and opaque returned object graphs
-are all covered when a discoverable build capability exposes the workspace mount
-and an execution capability accepts an environment. Anything that hides all
-launch state behind an out-of-process RPC needs a dedicated adapter, and
-Supercov reports missing evidence rather than claiming those paths are covered.
-
-The public regression suite includes provider-neutral CommonJS and pure-ESM
-opaque executors. CI requires Supercov to discover that structure, scope the
-cache identity, translate paths and the Node preload into the guest, run nested
-Vitest and Playwright commands, parse every concurrent trace shard, and produce
-100% fixture coverage.
-
-## Distributed runs
-
-Each shard produces its own immutable run. `supercov merge` combines runs whose
-source, test, dependency, configuration, instrumenter, schema and denominator
-fingerprints match exactly, publishes a new immutable run atomically, and leaves
-every input untouched. Incompatible shards fail with a clear reason instead of
-being averaged together.
+All shards must describe the same source, configuration, toolchain, schema, and
+coverage denominator. Incompatible shards are rejected with the mismatched
+domains listed.
