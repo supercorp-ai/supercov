@@ -1412,22 +1412,26 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
         }
     }
 
-    fn point(&mut self, span: rustc_span::Span, point_kind: &'static str, discriminator: &str) {
+    fn point(
+        &mut self,
+        span: rustc_span::Span,
+        point_kind: &'static str,
+        discriminator: &str,
+    ) -> Option<String> {
         if span.desugaring_kind().is_some() {
             // Compiler lowering scaffolding is not authored executable source.
             // The enclosing control construct records its explicit obligations
             // from the source callsite instead.
-            return;
+            return None;
         }
-        let Some(identity) = self.identity(point_kind, span, discriminator) else {
-            return;
-        };
+        let identity = self.identity(point_kind, span, discriminator)?;
         if self.eliminated_depth > 0 {
             CFG_ELIMINATED_POINTS
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .insert(identity.id.clone());
         }
+        let id = identity.id.clone();
         match self.points.get_mut(&identity.id) {
             Some(existing) if existing.canonical != identity.canonical => self.tcx.dcx().fatal(
                 format!("Supercov Rust obligation ID collision for {}", identity.id),
@@ -1452,6 +1456,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 );
             }
         }
+        Some(id)
     }
 
     fn record_control_decision(
@@ -1486,6 +1491,7 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                 condition,
                 Some(true),
                 Some(false),
+                control_kind != "assertion",
                 &mut atomic,
                 &mut logical,
                 &mut subsumed,
@@ -2415,6 +2421,10 @@ fn flatten_decision_expression<'tcx>(
     expression: &'tcx hir::Expr<'tcx>,
     true_outcome: Option<bool>,
     false_outcome: Option<bool>,
+    // Control decisions collapse `a && true` to `a`: rustc emits no branch
+    // for the constant. Assertion decisions measure conditions through CTFE
+    // markers, where a constant operand is observable, so they keep it.
+    collapse_constants: bool,
     output: &mut Vec<AtomicDecisionExpression<'tcx>>,
     logical: &mut Vec<LogicalDecisionExpression<'tcx>>,
     subsumed: &mut Vec<u32>,
@@ -2468,6 +2478,7 @@ fn flatten_decision_expression<'tcx>(
                 inner,
                 false_outcome,
                 true_outcome,
+                collapse_constants,
                 &mut inner_output,
                 &mut inner_logical,
                 subsumed,
@@ -2505,6 +2516,44 @@ fn flatten_decision_expression<'tcx>(
         }
         hir::ExprKind::Binary(operator, left, right) => match operator.node {
             rustc_ast::BinOpKind::And => {
+                // A monomorphic constant operand that is the operator's
+                // identity is not a run-time condition: `a && true` decides
+                // on `a` alone and rustc emits no branch or switch for the
+                // constant (zmij's `while i < n && Self::ENABLE`). Collapse
+                // to the live operand and claim the operator so the
+                // standalone selection visitor cannot resurrect it.
+                if collapse_constants && constant_condition(tcx, def_id, right) == Some(true) {
+                    subsumed.push(expression.hir_id.local_id.as_u32());
+                    flatten_decision_expression(
+                        tcx,
+                        def_id,
+                        crate_name,
+                        left,
+                        true_outcome,
+                        false_outcome,
+                        collapse_constants,
+                        output,
+                        logical,
+                        subsumed,
+                    );
+                    return;
+                }
+                if collapse_constants && constant_condition(tcx, def_id, left) == Some(true) {
+                    subsumed.push(expression.hir_id.local_id.as_u32());
+                    flatten_decision_expression(
+                        tcx,
+                        def_id,
+                        crate_name,
+                        right,
+                        true_outcome,
+                        false_outcome,
+                        collapse_constants,
+                        output,
+                        logical,
+                        subsumed,
+                    );
+                    return;
+                }
                 flatten_decision_expression(
                     tcx,
                     def_id,
@@ -2512,6 +2561,7 @@ fn flatten_decision_expression<'tcx>(
                     left,
                     None,
                     false_outcome,
+                    collapse_constants,
                     output,
                     logical,
                     subsumed,
@@ -2528,12 +2578,46 @@ fn flatten_decision_expression<'tcx>(
                     right,
                     true_outcome,
                     false_outcome,
+                    collapse_constants,
                     output,
                     logical,
                     subsumed,
                 );
             }
             rustc_ast::BinOpKind::Or => {
+                // `a || false` decides on `a` alone; see the `&&` arm.
+                if collapse_constants && constant_condition(tcx, def_id, right) == Some(false) {
+                    subsumed.push(expression.hir_id.local_id.as_u32());
+                    flatten_decision_expression(
+                        tcx,
+                        def_id,
+                        crate_name,
+                        left,
+                        true_outcome,
+                        false_outcome,
+                        collapse_constants,
+                        output,
+                        logical,
+                        subsumed,
+                    );
+                    return;
+                }
+                if collapse_constants && constant_condition(tcx, def_id, left) == Some(false) {
+                    subsumed.push(expression.hir_id.local_id.as_u32());
+                    flatten_decision_expression(
+                        tcx,
+                        def_id,
+                        crate_name,
+                        right,
+                        true_outcome,
+                        false_outcome,
+                        collapse_constants,
+                        output,
+                        logical,
+                        subsumed,
+                    );
+                    return;
+                }
                 flatten_decision_expression(
                     tcx,
                     def_id,
@@ -2541,6 +2625,7 @@ fn flatten_decision_expression<'tcx>(
                     left,
                     true_outcome,
                     None,
+                    collapse_constants,
                     output,
                     logical,
                     subsumed,
@@ -2557,6 +2642,7 @@ fn flatten_decision_expression<'tcx>(
                     right,
                     true_outcome,
                     false_outcome,
+                    collapse_constants,
                     output,
                     logical,
                     subsumed,
@@ -2582,7 +2668,7 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
     fn visit_stmt(&mut self, statement: &'tcx hir::Stmt<'tcx>) {
         match statement.kind {
             hir::StmtKind::Let(local) if local.init.is_some() => {
-                self.point(statement.span, "statement", "let");
+                let _ = self.point(statement.span, "statement", "let");
                 if local.els.is_some() {
                     let _ = self.record_branch(
                         local.pat.span,
@@ -2617,7 +2703,7 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
                 } else {
                     statement.span
                 };
-                self.point(span, "statement", "expression")
+                let _ = self.point(span, "statement", "expression");
             }
             hir::StmtKind::Let(_) | hir::StmtKind::Item(_) => {}
         }
@@ -2625,6 +2711,9 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
     }
 
     fn visit_block(&mut self, block: &'tcx hir::Block<'tcx>) {
+        // The tail-expression point is minted before the statements so probe
+        // ordinals keep visitation order, which downstream joins rely on.
+        let mut tail_point = None;
         if let Some(tail) = block.expr {
             let assertion = assertion_macro_kind(self.tcx, tail.span).is_some();
             let span = if assertion {
@@ -2644,7 +2733,7 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
                     })
                 });
             if !duplicate_assertion_statement {
-                self.point(span, "statement", "tail-expression");
+                tail_point = self.point(span, "statement", "tail-expression");
             }
         }
         // Manual traversal so a constant condition that took a diverging arm
@@ -2659,6 +2748,14 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
             }
         }
         if let Some(tail) = block.expr {
+            if raised && let Some(id) = &tail_point {
+                // The tail was minted live above; it turned out to sit after
+                // a constant-selected diverging arm, so it never lowers.
+                CFG_ELIMINATED_POINTS
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(id.clone());
+            }
             self.visit_expr(tail);
         }
         self.const_unreachable_after = false;
@@ -2913,6 +3010,10 @@ fn constant_condition(
             rustc_ast::LitKind::Bool(value) => Some(value),
             _ => None,
         },
+        // `!Self::COMPRESS` folds exactly as its operand does.
+        hir::ExprKind::Unary(hir::UnOp::Not, inner) => {
+            constant_condition(tcx, body_owner, inner).map(|value| !value)
+        }
         hir::ExprKind::Path(hir::QPath::Resolved(None, path)) => {
             let hir::def::Res::Def(
                 hir::def::DefKind::Const | hir::def::DefKind::AssocConst,

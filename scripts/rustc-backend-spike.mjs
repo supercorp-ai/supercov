@@ -6868,6 +6868,50 @@ try {
     neighbourDeclined.has(deadTailDecision.id),
     'a decision inside the dead tail must be declined as unmeasured, not unbound',
   );
+  // A constant operand is not a run-time condition: the while decision keeps
+  // only its live condition and stays measured, and a negated constant folds
+  // exactly as its operand does.
+  const constOperandWhile = runtimeManifest.decisions.find(
+    (decision) =>
+      decision.definitions.includes('const_operand_neighbours') &&
+      obligationSource(runtimeSources, decision).includes('index < limit'),
+  );
+  assert(constOperandWhile, 'the const-operand while decision must exist');
+  assert.equal(
+    constOperandWhile.conditions.length,
+    1,
+    'the constant operand must leave the while decision, keeping the live condition',
+  );
+  assert(
+    !neighbourDeclined.has(constOperandWhile.id),
+    'the while decision must stay measured through its live condition',
+  );
+  const negatedDead = constFamilyOrdinal(
+    'const_operand_neighbours',
+    '"negated-const-dead"',
+    'ConstEliminationTable',
+  );
+  assert(
+    neighbourDeclined.has(negatedDead.id),
+    'the negated-constant arm statement must be declined as unmeasured',
+  );
+  assert(
+    !testOrdinals.has(negatedDead.probeOrdinal),
+    'the negated-constant arm statement cannot have executed',
+  );
+  const afterConstOperand = constFamilyOrdinal(
+    'const_operand_neighbours',
+    '"after-const-operand"',
+    undefined,
+  );
+  assert(
+    !neighbourDeclined.has(afterConstOperand.id),
+    'the statement after the negated-constant if must stay measured',
+  );
+  assert(
+    testOrdinals.has(afterConstOperand.probeOrdinal),
+    'the statement after the negated-constant if executed but was not reported covered',
+  );
 
   const concurrentTransport = createTransport('concurrent-tests');
   const concurrentTests = run(

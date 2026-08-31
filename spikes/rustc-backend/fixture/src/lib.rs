@@ -678,6 +678,21 @@ pub fn const_diverging_neighbours(value: usize, log: &mut Vec<&'static str>) -> 
     const_diverging_dead
 }
 
+/// The follow-on shapes: a constant operand inside a multi-condition
+/// decision is not a run-time condition (`while i < limit && ENABLE`), and a
+/// negated constant folds exactly as its operand does.
+pub fn const_operand_neighbours(limit: usize, log: &mut Vec<&'static str>) -> usize {
+    let mut index = 0;
+    while index < limit && ConstEliminationTable::ENABLE {
+        index += 1;
+    }
+    if !ConstEliminationTable::ENABLE {
+        log.push("negated-const-dead");
+    }
+    log.push("after-const-operand");
+    index
+}
+
 pub fn statement_paths(value: bool, log: &mut Vec<&'static str>) {
     if value {
         log.push("true-path");
@@ -1102,6 +1117,9 @@ mod tests {
             const_diverging,
             ["before-const-diverging", "const-diverging-live"]
         );
+        let mut const_operand = Vec::new();
+        assert_eq!(const_operand_neighbours(3, &mut const_operand), 3);
+        assert_eq!(const_operand, ["after-const-operand"]);
         assert_eq!(fallible(2), Ok(3));
         let log = std::cell::RefCell::new(Vec::new());
         assert_eq!(drop_order(&log), 23);
