@@ -6779,6 +6779,96 @@ try {
     'the cfg-eliminated statement cannot have executed',
   );
 
+  // The zmij family: a monomorphic `const` condition folds like the cfg!
+  // literal above (const_eliminated_neighbours), and when the arm the
+  // constant selects ends in a tail `return`, everything after that `if` in
+  // the block never lowers either (const_diverging_neighbours).
+  const constFamilyOrdinal = (definition, fragment, exclude) => {
+    const matches = runtimeManifest.points.filter(
+      (point) =>
+        point.kind === 'statement' &&
+        point.definitions.includes(definition) &&
+        obligationSource(runtimeSources, point).includes(fragment) &&
+        (!exclude || !obligationSource(runtimeSources, point).includes(exclude)),
+    );
+    assert.equal(
+      matches.length,
+      1,
+      `expected one ${definition} statement point for ${fragment}`,
+    );
+    return matches[0];
+  };
+  for (const [fragment, exclude] of [
+    ['"before-const-eliminated"', undefined],
+    ['"after-const-eliminated"', undefined],
+    ['value + 331', 'CONST_ELIMINATION_WIDE'],
+  ]) {
+    const point = constFamilyOrdinal('const_eliminated_neighbours', fragment, exclude);
+    assert(
+      !neighbourDeclined.has(point.id),
+      `${fragment} must stay measured beside a const-eliminated arm`,
+    );
+    assert(
+      testOrdinals.has(point.probeOrdinal),
+      `${fragment} executed but was not reported covered`,
+    );
+  }
+  const constEliminated = constFamilyOrdinal(
+    'const_eliminated_neighbours',
+    'value + 337',
+    'CONST_ELIMINATION_WIDE',
+  );
+  assert(
+    neighbourDeclined.has(constEliminated.id),
+    'the const-eliminated arm statement must be declined as unmeasured',
+  );
+  assert(
+    !testOrdinals.has(constEliminated.probeOrdinal),
+    'the const-eliminated arm statement cannot have executed',
+  );
+  for (const [fragment, liveExclude] of [
+    ['"before-const-diverging"', undefined],
+    ['"const-diverging-live"', 'ConstEliminationTable'],
+  ]) {
+    const point = constFamilyOrdinal(
+      'const_diverging_neighbours',
+      fragment,
+      liveExclude,
+    );
+    assert(
+      !neighbourDeclined.has(point.id),
+      `${fragment} must stay measured before a const-selected diverging arm`,
+    );
+    assert(
+      testOrdinals.has(point.probeOrdinal),
+      `${fragment} executed but was not reported covered`,
+    );
+  }
+  for (const [fragment, exclude] of [
+    ['value + 409', 'if value >= 7'],
+    ['"after-const-diverging"', undefined],
+  ]) {
+    const point = constFamilyOrdinal('const_diverging_neighbours', fragment, exclude);
+    assert(
+      neighbourDeclined.has(point.id),
+      `${fragment} sits after a const-selected diverging arm and must be declined`,
+    );
+    assert(
+      !testOrdinals.has(point.probeOrdinal),
+      `${fragment} cannot have executed`,
+    );
+  }
+  const deadTailDecision = runtimeManifest.decisions.find(
+    (decision) =>
+      decision.definitions.includes('const_diverging_neighbours') &&
+      obligationSource(runtimeSources, decision).includes('value >= 7'),
+  );
+  assert(deadTailDecision, 'the dead-tail decision must stay in the denominator');
+  assert(
+    neighbourDeclined.has(deadTailDecision.id),
+    'a decision inside the dead tail must be declined as unmeasured, not unbound',
+  );
+
   const concurrentTransport = createTransport('concurrent-tests');
   const concurrentTests = run(
     'cargo',

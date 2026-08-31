@@ -1364,6 +1364,9 @@ struct HirManifestCollector<'a, 'tcx> {
     control_overrides: BTreeMap<u32, &'static str>,
     /// Non-zero while walking a branch a constant condition eliminates.
     eliminated_depth: usize,
+    /// Set when a constant condition just took a diverging arm: everything
+    /// after that `if` in the enclosing block never lowers.
+    const_unreachable_after: bool,
     loop_branch_overrides: BTreeMap<u32, String>,
     decision_logical_expressions: BTreeSet<u32>,
     match_context: Option<(String, &'static str, Option<usize>)>,
@@ -1733,6 +1736,12 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     .then(|| index.map(|index| (group.clone(), index)))
                     .flatten()
             });
+        if self.eliminated_depth > 0 {
+            CFG_ELIMINATED_POINTS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(decision.id.clone());
+        }
         match self.decisions.get_mut(&decision.id) {
             Some(existing) if existing.identity.canonical != decision.canonical => {
                 self.tcx.dcx().fatal(format!(
@@ -1875,6 +1884,12 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     .then(|| index.map(|index| (group.clone(), index)))
                     .flatten()
             });
+        if self.eliminated_depth > 0 {
+            CFG_ELIMINATED_POINTS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(decision.id.clone());
+        }
         match self.decisions.get_mut(&decision.id) {
             Some(existing) if existing.identity.canonical != decision.canonical => {
                 self.tcx.dcx().fatal(format!(
@@ -1972,6 +1987,12 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
                     .then(|| index.map(|index| (group.clone(), index)))
                     .flatten()
             });
+        if self.eliminated_depth > 0 {
+            CFG_ELIMINATED_POINTS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(branch.id.clone());
+        }
         match self.branches.get_mut(&branch.id) {
             Some(existing) if existing.identity.canonical != branch.canonical => {
                 self.tcx.dcx().fatal(format!(
@@ -2250,6 +2271,12 @@ impl<'a, 'tcx> HirManifestCollector<'a, 'tcx> {
             }
             adts
         };
+        if self.eliminated_depth > 0 {
+            CFG_ELIMINATED_POINTS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(group.id.clone());
+        }
         match self.match_groups.get_mut(&group.id) {
             Some(existing) if existing.identity.canonical != group.canonical => {
                 self.tcx.dcx().fatal(format!(
@@ -2620,7 +2647,24 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
                 self.point(span, "statement", "tail-expression");
             }
         }
-        intravisit::walk_block(self, block);
+        // Manual traversal so a constant condition that took a diverging arm
+        // can mark the rest of its own block eliminated (zmij's tail family:
+        // `if TABLE::ENABLE { ... return ...; }` followed by the fallback).
+        let mut raised = false;
+        for statement in block.stmts {
+            self.visit_stmt(statement);
+            if !raised && std::mem::take(&mut self.const_unreachable_after) {
+                self.eliminated_depth += 1;
+                raised = true;
+            }
+        }
+        if let Some(tail) = block.expr {
+            self.visit_expr(tail);
+        }
+        self.const_unreachable_after = false;
+        if raised {
+            self.eliminated_depth -= 1;
+        }
     }
 
     fn visit_expr(&mut self, expression: &'tcx hir::Expr<'tcx>) {
@@ -2663,7 +2707,7 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
             let branch_id = self.record_logical_branch(expression, true);
             if let Some(branch_id) = branch_id
                 && let hir::ExprKind::Binary(_, left, _) = expression.kind
-                && constant_condition(left).is_some()
+                && constant_condition(self.tcx, self.def_id, left).is_some()
             {
                 CFG_ELIMINATED_POINTS
                     .lock()
@@ -2766,16 +2810,26 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
                 .control_overrides
                 .remove(&expression.hir_id.local_id.as_u32())
                 .unwrap_or("if");
-            let _ = self.record_control_decision(expression, condition, control_kind, false);
-            // `cfg!(..)` expands to a bool literal, so a condition that is one
-            // decides the branch at compile time and the other branch never
-            // lowers. Walking it with the counter raised marks its obligations
+            let decision_id =
+                self.record_control_decision(expression, condition, control_kind, false);
+            // `cfg!(..)` expands to a bool literal, and a monomorphic bool
+            // `const` folds the same way, so such a condition decides the
+            // branch at compile time and the other branch never lowers.
+            // Walking it with the counter raised marks its obligations
             // unmeasurable in this configuration rather than leaving them to be
             // reported as unbound. Deciding this from the HIR condition is what
             // makes it exact: inferring it from span geometry instead
             // misclassifies live code in `macro_rules!` bodies, whose MIR spans
             // point at the wider callsite.
-            if let Some(taken) = constant_condition(condition) {
+            if let Some(taken) = constant_condition(self.tcx, self.def_id, condition) {
+                // rustc emits no branch mapping for the folded condition, so
+                // the decision itself is unmeasurable here, not unbound.
+                if let Some(decision_id) = decision_id {
+                    CFG_ELIMINATED_POINTS
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(decision_id);
+                }
                 self.visit_expr(condition);
                 let (live, dead) = if taken {
                     (Some(then_branch), else_branch)
@@ -2784,6 +2838,13 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
                 };
                 if let Some(live) = live {
                     self.visit_expr(live);
+                    // zmij's tail family: when the arm the constant selects
+                    // diverges (typeck gives it `!`), everything after this
+                    // `if` in the enclosing block never lowers either. The
+                    // enclosing visit_block consumes the signal.
+                    if diverges_via_return(live) {
+                        self.const_unreachable_after = true;
+                    }
                 }
                 if let Some(dead) = dead {
                     self.eliminated_depth += 1;
@@ -2799,14 +2860,82 @@ impl<'tcx> Visitor<'tcx> for HirManifestCollector<'_, 'tcx> {
 
 /// The value of a condition rustc already decided, if it decided one.
 ///
-/// `cfg!(..)` expands to a `true`/`false` literal, which is the shape that
-/// matters here: the branch it rules out never reaches MIR.
-fn constant_condition(condition: &hir::Expr<'_>) -> Option<bool> {
+/// `cfg!(..)` expands to a `true`/`false` literal, and a path to a
+/// monomorphic `const` of type `bool` folds during MIR building exactly the
+/// same way (zmij's `if USE_UMUL128_HI64` is the field case): the branch the
+/// value rules out never reaches MIR. An associated const of a generic
+/// parameter stays a live branch in polymorphic MIR and is deliberately not
+/// matched here.
+/// True when the expression is a `return` in tail position, walking through
+/// nested and `unsafe` blocks. Typeck cannot answer this: an arm that
+/// diverges inside `if`-without-`else` is recorded with its coerced `()`
+/// type, never `!`. A tail `return` always diverges, so this stays exact.
+fn diverges_via_return(expression: &hir::Expr<'_>) -> bool {
+    match expression.kind {
+        hir::ExprKind::Ret(..) => true,
+        hir::ExprKind::Block(block, _) => {
+            if let Some(tail) = block.expr {
+                diverges_via_return(tail)
+            } else {
+                block
+                    .stmts
+                    .last()
+                    .is_some_and(|statement| match statement.kind {
+                        hir::StmtKind::Semi(expression) | hir::StmtKind::Expr(expression) => {
+                            diverges_via_return(expression)
+                        }
+                        _ => false,
+                    })
+            }
+        }
+        _ => false,
+    }
+}
+
+fn constant_condition(
+    tcx: TyCtxt<'_>,
+    body_owner: rustc_span::def_id::DefId,
+    condition: &hir::Expr<'_>,
+) -> Option<bool> {
+    let const_path = |def_id: rustc_span::def_id::DefId| {
+        if tcx.generics_of(def_id).count() != 0 {
+            return None;
+        }
+        // The expression typechecks as an `if` condition, so the const's
+        // type is `bool`; const evaluation is exact, never a heuristic.
+        tcx.const_eval_poly(def_id)
+            .ok()
+            .and_then(|value| value.try_to_scalar_int())
+            .and_then(|scalar| scalar.try_to_bool().ok())
+    };
     match condition.kind {
         hir::ExprKind::Lit(literal) => match literal.node {
             rustc_ast::LitKind::Bool(value) => Some(value),
             _ => None,
         },
+        hir::ExprKind::Path(hir::QPath::Resolved(None, path)) => {
+            let hir::def::Res::Def(
+                hir::def::DefKind::Const | hir::def::DefKind::AssocConst,
+                def_id,
+            ) = path.res
+            else {
+                return None;
+            };
+            const_path(def_id)
+        }
+        // zmij's `if ExpStringTable::ENABLE`: an associated const of a
+        // concrete type resolves through typeck rather than the path itself.
+        hir::ExprKind::Path(ref qpath @ hir::QPath::TypeRelative(..)) => {
+            let typeck = tcx.typeck(body_owner.as_local()?);
+            let hir::def::Res::Def(
+                hir::def::DefKind::Const | hir::def::DefKind::AssocConst,
+                def_id,
+            ) = typeck.qpath_res(qpath, condition.hir_id)
+            else {
+                return None;
+            };
+            const_path(def_id)
+        }
         _ => None,
     }
 }
@@ -3345,6 +3474,7 @@ impl Callbacks for ProbeCallbacks {
                         limitations: &mut manifest_limitations,
                         control_overrides: BTreeMap::new(),
                         eliminated_depth: 0,
+                        const_unreachable_after: false,
                         loop_branch_overrides: BTreeMap::new(),
                         decision_logical_expressions: BTreeSet::new(),
                         match_context: None,
@@ -8205,6 +8335,7 @@ fn collect_body_obligations(tcx: TyCtxt<'_>, def_id: LocalDefId) -> Option<Runti
         limitations: &mut limitations,
         control_overrides: BTreeMap::new(),
         eliminated_depth: 0,
+        const_unreachable_after: false,
         loop_branch_overrides: BTreeMap::new(),
         decision_logical_expressions: BTreeSet::new(),
         match_context: None,
@@ -8297,6 +8428,42 @@ fn runtime_decision_plans<'tcx>(
     let mut plans = Vec::new();
     let mut fallback_blocks = BTreeSet::new();
     for decision in decisions {
+        if CFG_ELIMINATED_POINTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(&decision.identity.id)
+        {
+            // A constant condition decides this branch at compile time, so
+            // rustc emits no branch mapping for it: the decision and the
+            // outcome branches it owns are unmeasurable in this
+            // configuration, never binder defects. Declining them here keeps
+            // the body's other decisions planned and measured.
+            let mut owned = vec![
+                decision.identity.id.clone(),
+                decision.outcome_branch_id.clone(),
+            ];
+            owned.extend(decision.loop_branch_id.clone());
+            owned.extend(
+                decision
+                    .logical_selections
+                    .iter()
+                    .map(|selection| selection.branch_id.clone()),
+            );
+            for id in owned {
+                degrade_unbound_obligations(
+                    DeclineScope::Decisions,
+                    tcx,
+                    def_id,
+                    "bind Rust decision probes",
+                    &definition,
+                    &unmeasurable(
+                        &id,
+                        "not compiled in this configuration: a constant condition decides the branch at compile time, so rustc emitted no branch mapping",
+                    ),
+                );
+            }
+            continue;
+        }
         let digest = decision
             .identity
             .id

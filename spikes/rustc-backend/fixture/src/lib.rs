@@ -638,6 +638,46 @@ pub fn eliminated_neighbours(value: usize, log: &mut Vec<&'static str>) -> usize
     total
 }
 
+/// zmij's shape: a branch on a monomorphic `const` folds at compile time
+/// exactly like the literal `cfg!` expands to, so the ruled-out arm never
+/// reaches MIR. Its statements and the decision itself are unmeasurable in
+/// this configuration, never binder blind spots — and the surviving arm plus
+/// both neighbours must stay measured.
+pub const CONST_ELIMINATION_WIDE: bool = usize::BITS >= 32;
+
+pub fn const_eliminated_neighbours(value: usize, log: &mut Vec<&'static str>) -> usize {
+    log.push("before-const-eliminated");
+    let total = if CONST_ELIMINATION_WIDE {
+        value + 331
+    } else {
+        let const_eliminated_statement = value + 337;
+        const_eliminated_statement
+    };
+    log.push("after-const-eliminated");
+    total
+}
+
+pub struct ConstEliminationTable;
+
+impl ConstEliminationTable {
+    pub const ENABLE: bool = usize::BITS >= 32;
+}
+
+/// zmij's tail family: the constant-selected arm ends in a tail `return`,
+/// so the fallback after the `if` never lowers — its statements and its own
+/// decisions are unmeasurable in this configuration, and the code before the
+/// `if` plus the live arm must stay measured.
+pub fn const_diverging_neighbours(value: usize, log: &mut Vec<&'static str>) -> usize {
+    log.push("before-const-diverging");
+    if ConstEliminationTable::ENABLE {
+        log.push("const-diverging-live");
+        return value + 401;
+    }
+    let const_diverging_dead = if value >= 7 { value + 409 } else { value + 419 };
+    log.push("after-const-diverging");
+    const_diverging_dead
+}
+
 pub fn statement_paths(value: bool, log: &mut Vec<&'static str>) {
     if value {
         log.push("true-path");
@@ -1050,6 +1090,18 @@ mod tests {
         let mut neighbours = Vec::new();
         assert_eq!(eliminated_neighbours(2, &mut neighbours), 225);
         assert_eq!(neighbours, ["before-eliminated", "after-eliminated"]);
+        let mut const_neighbours = Vec::new();
+        assert_eq!(const_eliminated_neighbours(2, &mut const_neighbours), 333);
+        assert_eq!(
+            const_neighbours,
+            ["before-const-eliminated", "after-const-eliminated"]
+        );
+        let mut const_diverging = Vec::new();
+        assert_eq!(const_diverging_neighbours(2, &mut const_diverging), 403);
+        assert_eq!(
+            const_diverging,
+            ["before-const-diverging", "const-diverging-live"]
+        );
         assert_eq!(fallible(2), Ok(3));
         let log = std::cell::RefCell::new(Vec::new());
         assert_eq!(drop_order(&log), 23);
