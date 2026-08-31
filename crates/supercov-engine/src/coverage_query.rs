@@ -334,8 +334,6 @@ pub struct CoverageSummaryData {
     pub complete: bool,
     pub coverage: CoverageSummary,
     pub measurement: IndexedMeasurement,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub waivers: Option<crate::coverage_waivers::CoverageWaiverSummary>,
     pub coverage_by_kind: Vec<IndexedDimensionCoverage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub e2e_gap_context: Option<CoverageKindGapContext>,
@@ -1238,10 +1236,6 @@ pub struct CoverageDecisionCondition {
     pub witness: Option<[crate::coverage_analysis::McdcVector; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub witness_tests: Option<[Vec<String>; 2]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub waived: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub waiver_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1376,8 +1370,7 @@ fn selected_decision(
 }
 
 /// Reconstruct the exact decision view used by provenance-filtered queries.
-/// Mutable project policy such as reviewed waivers can then be evaluated
-/// without contaminating the immutable query index.
+/// Project filters are applied against the immutable query index.
 pub fn filtered_decisions(
     index: &CoverageIndex<'_>,
     view: CoverageViewId,
@@ -1391,59 +1384,6 @@ pub fn filtered_decisions(
         .into_iter()
         .map(|decision| Ok(selected_decision(decision, selected.as_ref())))
         .collect()
-}
-
-/// Evaluate project policy against the exact query projection. This keeps the
-/// immutable measured index authoritative while allowing a separately named,
-/// reviewed-policy view for obligations proven unreachable by the project.
-pub fn evaluate_indexed_coverage_waivers(
-    index: &CoverageIndex<'_>,
-    view: CoverageViewId,
-    kind: Option<&str>,
-    runner: Option<&str>,
-    source: &crate::coverage_waivers::CoverageWaiverSource,
-) -> Result<crate::coverage_waivers::CoverageWaiverEvaluation, QueryError> {
-    let tests = index.test_summaries(view)?;
-    let selected = selected_test_ids(&tests, kind, runner)?;
-    let selected_includes = |tests: &[String]| {
-        selected.as_ref().map_or(!tests.is_empty(), |selected| {
-            tests.iter().any(|test| selected.contains(test))
-        })
-    };
-    let decisions = index
-        .decision_details(view)?
-        .into_iter()
-        .map(|decision| selected_decision(decision, selected.as_ref()))
-        .collect::<Vec<_>>();
-    let mut evaluation = crate::coverage_waivers::evaluate_coverage_waivers(&decisions, source);
-    let mut obligations = index
-        .lines(view)?
-        .into_iter()
-        .map(|line| crate::coverage_waivers::CoverageWaiverObligation {
-            id: format!("line:{}:{}", line.file, line.line),
-            kind: "line".into(),
-            file: line.file,
-            line: line.line,
-            column: 0,
-            source: String::new(),
-            alternative: None,
-            covered: selected_includes(&line.tests),
-        })
-        .collect::<Vec<_>>();
-    obligations.extend(index.hit_metadata(view)?.into_iter().map(|hit| {
-        crate::coverage_waivers::CoverageWaiverObligation {
-            id: hit.id,
-            kind: hit.obligation,
-            file: hit.file,
-            line: hit.line,
-            column: hit.column,
-            source: hit.label.unwrap_or(hit.source),
-            alternative: hit.alternative,
-            covered: selected_includes(&hit.tests),
-        }
-    }));
-    crate::coverage_waivers::evaluate_obligation_waivers(&mut evaluation, &obligations);
-    Ok(evaluation)
 }
 
 pub fn coverage_decision_query(
@@ -1533,8 +1473,6 @@ pub fn coverage_decision_query(
             assertion_covered: selected.is_none().then_some(condition.assertion_covered),
             witness: condition.witness.clone(),
             witness_tests: condition.witness_tests.clone(),
-            waived: None,
-            waiver_reason: None,
         })
         .collect::<Vec<_>>();
     let tests = filtered
@@ -1592,10 +1530,6 @@ pub struct CoverageLineObligation {
     pub kind: String,
     pub id: String,
     pub line: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub waived: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub waiver_reason: Option<String>,
     pub other_coverage: CoverageOtherCoverage,
 }
 
@@ -1607,10 +1541,6 @@ pub struct CoveragePointObligation {
     pub line: usize,
     pub column: usize,
     pub source: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub waived: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub waiver_reason: Option<String>,
     pub other_coverage: CoverageOtherCoverage,
 }
 
@@ -1623,10 +1553,6 @@ pub struct CoverageBranchObligation {
     pub column: usize,
     pub source: String,
     pub missing: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub waived: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub waiver_reason: Option<String>,
     pub other_coverage: CoverageOtherCoverage,
 }
 
@@ -1641,10 +1567,6 @@ pub struct CoverageMcdcObligation {
     pub missing_condition: String,
     #[serde(skip)]
     pub condition_index: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub waived: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub waiver_reason: Option<String>,
     pub observed_vectors: Vec<String>,
     pub other_coverage: CoverageOtherCoverage,
 }
@@ -1706,8 +1628,6 @@ pub struct CoverageFileCounts {
     pub uncovered_functions: usize,
     pub missing_branches: usize,
     pub missing_mcdc_conditions: usize,
-    pub waived_mcdc_conditions: usize,
-    pub waived_obligations: usize,
     pub measurement_limitations: usize,
 }
 
@@ -1893,8 +1813,6 @@ pub fn coverage_file_detail_query(
                 kind: "line".into(),
                 id: format!("line:{}:{}", line.file, line.line),
                 line: line.line,
-                waived: None,
-                waiver_reason: None,
                 other_coverage: other_coverage(&line.tests, selected.as_ref(), &tests_by_id),
             })
         })
@@ -1914,8 +1832,6 @@ pub fn coverage_file_detail_query(
                 line: point.line,
                 column: point.column,
                 source: point.label.clone().unwrap_or_else(|| point.source.clone()),
-                waived: None,
-                waiver_reason: None,
                 other_coverage: other_coverage(&point.tests, selected.as_ref(), &tests_by_id),
             })
         })
@@ -1932,8 +1848,6 @@ pub fn coverage_file_detail_query(
                 line: point.line,
                 column: point.column,
                 source: point.label.clone().unwrap_or_else(|| point.source.clone()),
-                waived: None,
-                waiver_reason: None,
                 other_coverage: other_coverage(&point.tests, selected.as_ref(), &tests_by_id),
             })
         })
@@ -1953,8 +1867,6 @@ pub fn coverage_file_detail_query(
                 column: branch.column,
                 source: branch.source.clone(),
                 missing: branch.alternative.clone().unwrap_or_default(),
-                waived: None,
-                waiver_reason: None,
                 other_coverage: other_coverage(&branch.tests, selected.as_ref(), &tests_by_id),
             })
         })
@@ -1986,8 +1898,6 @@ pub fn coverage_file_detail_query(
                 decision: original.meta.source.clone(),
                 missing_condition: condition.source.clone(),
                 condition_index: condition.index,
-                waived: None,
-                waiver_reason: None,
                 observed_vectors: filtered
                     .vector_observations
                     .iter()
@@ -2105,8 +2015,6 @@ pub fn coverage_file_detail_query(
                 uncovered_functions: functions.len(),
                 missing_branches: branches.len(),
                 missing_mcdc_conditions: mcdc.len(),
-                waived_mcdc_conditions: 0,
-                waived_obligations: 0,
                 measurement_limitations: total_limitations,
             },
             total_tests,
@@ -2550,7 +2458,6 @@ pub fn coverage_summary_query(
         complete,
         coverage: projection.summary,
         measurement,
-        waivers: None,
         coverage_by_kind,
         e2e_gap_context,
         coverage_by_runner,
@@ -2601,7 +2508,6 @@ pub struct DecisionGapTotals {
     pub decisions_with_missing_conditions: usize,
     pub conditions: usize,
     pub missing_conditions: usize,
-    pub waived_conditions: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -2623,8 +2529,6 @@ pub struct CoverageFileDecisionsOptions<'a> {
     pub kind: Option<&'a str>,
     pub runner: Option<&'a str>,
     pub file: &'a str,
-    pub waived_by_decision:
-        Option<&'a BTreeMap<String, BTreeMap<usize, crate::coverage_waivers::CoverageWaiver>>>,
     pub sort: DecisionSort,
     pub offset: usize,
     pub limit: usize,
@@ -2721,12 +2625,7 @@ pub fn coverage_file_decisions_query(
     if options.limit == 0 {
         return Err(QueryError::InvalidPagination);
     }
-    let mut all = index.decision_gaps(options.view, options.kind, options.runner, options.file)?;
-    if let Some(waived) = options.waived_by_decision {
-        for decision in &mut all {
-            decision.waived_conditions = waived.get(&decision.id).map_or(0, BTreeMap::len);
-        }
-    }
+    let all = index.decision_gaps(options.view, options.kind, options.runner, options.file)?;
     if (options.kind.is_some() || options.runner.is_some()) && all.is_empty() {
         // A file with no decisions is valid, so consult the file projection to
         // distinguish it from a nonexistent test provenance projection.
@@ -2748,7 +2647,6 @@ pub fn coverage_file_decisions_query(
             .count(),
         conditions: all.iter().map(|decision| decision.conditions).sum(),
         missing_conditions: all.iter().map(|decision| decision.missing_conditions).sum(),
-        waived_conditions: all.iter().map(|decision| decision.waived_conditions).sum(),
     };
     let mut missing = all
         .into_iter()
@@ -2757,13 +2655,7 @@ pub fn coverage_file_decisions_query(
     missing.sort_by(|left, right| match options.sort {
         DecisionSort::Missing => right
             .missing_conditions
-            .saturating_sub(right.waived_conditions)
-            .cmp(
-                &left
-                    .missing_conditions
-                    .saturating_sub(left.waived_conditions),
-            )
-            .then_with(|| right.missing_conditions.cmp(&left.missing_conditions))
+            .cmp(&left.missing_conditions)
             .then_with(|| left.line.cmp(&right.line))
             .then_with(|| left.column.cmp(&right.column)),
         DecisionSort::Location => left
@@ -3335,8 +3227,6 @@ mod tests {
                 mcdc_conditions: 0,
             },
             score: 0,
-            waived_mcdc_conditions: None,
-            waived_obligations: None,
         };
         assert!(has_gap_for_metric(&gap, MinimizeMetric::All));
         assert!(has_gap_for_metric(&gap, MinimizeMetric::Statements));

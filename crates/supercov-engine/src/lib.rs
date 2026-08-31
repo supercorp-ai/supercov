@@ -8,7 +8,6 @@ pub mod coverage_analysis;
 pub mod coverage_index;
 pub mod coverage_query;
 pub mod coverage_report;
-pub mod coverage_waivers;
 pub mod evidence_archive;
 pub mod frontend_detection;
 pub mod frontend_protocol;

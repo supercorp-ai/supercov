@@ -12,7 +12,10 @@
     "schemaVersion": 1,
     "store": ".supercov",
     "workspaceStore": "supercov",
-    "publishedRunFiles": ["run.json", "evidence.raw.gz"]
+    "publishedRunFiles": [
+      "run.json",
+      "evidence.raw.gz"
+    ]
   },
   "agentJson": {
     "schemaVersion": 1,
@@ -36,10 +39,6 @@
       "UNATTRIBUTED_EVIDENCE",
       "UNKNOWN_COMMAND"
     ]
-  },
-  "waivers": {
-    "schemaVersion": 1,
-    "file": "supercov.waivers.json"
   },
   "processSupervision": {
     "schemaVersion": 1,

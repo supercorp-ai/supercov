@@ -64,9 +64,6 @@ try {
   const chooseLine = authoredPermissionSource
     .slice(0, authoredPermissionSource.indexOf('export function choose'))
     .split('\n').length;
-  const unreachableLine = authoredPermissionSource
-    .slice(0, authoredPermissionSource.indexOf("throw new Error('syntactically unreachable fixture')"))
-    .split('\n').length;
 
   const missing = run(['--']);
   assert.equal(missing.status, 2);
@@ -113,23 +110,6 @@ try {
     /Complete for the measured command and coverage model/u,
   );
   assert.match(successfulSummary.stdout, /does not prove every project test suite was run/u);
-  writeFileSync(
-    resolve(project, 'supercov.waivers.json'),
-    JSON.stringify({
-      version: 1,
-      waivers: [{
-        kind: 'line',
-        file: 'src/permission.mjs',
-        line: unreachableLine,
-        reason: 'the enclosing condition is the literal false',
-      }],
-    }),
-  );
-  const reviewedSummary = run(['runs', successfulId]);
-  assert.match(reviewedSummary.stdout, /Reviewed exceptions  1 applied, 0 contradicted, 0 unmatched/u);
-  assert.match(reviewedSummary.stdout, /Policy-adjusted/u);
-  const reviewedFile = run(['runs', successfulId, 'file', 'src/permission.mjs']);
-  assert.match(reviewedFile.stdout, /Reviewed exception: the enclosing condition is the literal false/u);
   const filesView = run(['runs', successfulId, 'files']);
   const gapsView = run(['runs', successfulId, 'gaps']);
   assert.match(filesView.stdout, /Coverage files — every included source file/u);

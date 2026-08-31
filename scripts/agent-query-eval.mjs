@@ -233,11 +233,8 @@ const sortedGrouped = query(
 for (let index = 1; index < sortedGrouped.decisions.length; index += 1) {
   const previous = sortedGrouped.decisions[index - 1];
   const current = sortedGrouped.decisions[index];
-  if (
-    previous.missingConditions - previous.waivedConditions <
-    current.missingConditions - current.waivedConditions
-  ) {
-    throw new Error("--sort missing did not order decisions by unwaived missing count");
+  if (previous.missingConditions < current.missingConditions) {
+    throw new Error("--sort missing did not order decisions by missing count");
   }
 }
 
@@ -261,77 +258,6 @@ if (
   !malformedEnvelope.error.message.includes("Unknown run query: coverage")
 ) {
   throw new Error("malformed runs query did not return a structured usage error");
-}
-
-const waiversPath = resolve(fixture, "supercov.waivers.json");
-const waivedObligation = mcdcObligations[0];
-try {
-  writeFileSync(
-    waiversPath,
-    JSON.stringify({
-      version: 1,
-      waivers: [
-        {
-          file: mcdcGaps.gaps[0].file,
-          decision: waivedObligation.id,
-          condition: waivedObligation.missingCondition,
-          reason: "agent-query-eval fixture waiver",
-        },
-        {
-          file: "src/never-existed.ts",
-          condition: "impossible",
-          reason: "must surface as unmatched",
-        },
-      ],
-    }),
-  );
-  const waivedSummary = query(partial.id);
-  if (
-    waivedSummary.waivers?.applied !== 1 ||
-    waivedSummary.waivers.unmatched.length !== 1 ||
-    waivedSummary.waivers.unmatched[0].file !== "src/never-existed.ts" ||
-    waivedSummary.waivers.contradicted.length !== 0 ||
-    waivedSummary.waivers.mcdcExcludingWaived.total !==
-      waivedSummary.coverage.conditions - 1
-  ) {
-    throw new Error("summary did not report applied and unmatched waivers as facts");
-  }
-  const waivedDetail = query(
-    partial.id,
-    "file",
-    mcdcGaps.gaps[0].file,
-    "--metric",
-    "mcdc",
-  );
-  const annotated = waivedDetail.gapLines
-    .flatMap((gap) => gap.obligations)
-    .find(
-      (obligation) =>
-        obligation.id === waivedObligation.id &&
-        obligation.missingCondition === waivedObligation.missingCondition,
-    );
-  if (
-    !annotated?.waived ||
-    annotated.waiverReason !== "agent-query-eval fixture waiver" ||
-    waivedDetail.counts.waivedMcdcConditions < 1
-  ) {
-    throw new Error("file query did not annotate the waived condition");
-  }
-  const waivedGrouped = query(
-    partial.id,
-    "file",
-    mcdcGaps.gaps[0].file,
-    "--group",
-    "decision",
-  );
-  const waivedRow = waivedGrouped.decisions.find(
-    (row) => row.id === waivedObligation.id,
-  );
-  if (!waivedRow || waivedRow.waivedConditions < 1) {
-    throw new Error("grouped view did not count the waived condition");
-  }
-} finally {
-  rmSync(waiversPath, { force: true });
 }
 
 const decisionId = grouped.decisions[0]?.id;

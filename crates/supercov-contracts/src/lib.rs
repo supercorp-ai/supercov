@@ -19,7 +19,6 @@ pub const COVERAGE_MODEL_MAX_SURFACES_PER_LIST: usize = 256;
 pub const AGENT_JSON_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_JSON_MAX_BYTES: usize = 65_536;
 pub const DEFAULT_PAGE_SIZE: usize = 20;
-pub const WAIVERS_SCHEMA_VERSION: u32 = 1;
 pub const PROCESS_SUPERVISION_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_DIAGNOSTIC_INTERVAL_MS: u64 = 60_000;
 pub const COMMAND_TIMEOUT_EXIT_CODE: i32 = 124;
@@ -72,7 +71,6 @@ pub struct ContractRegistry {
     pub evidence_archive: EvidenceArchiveContract,
     pub run_store: RunStoreContract,
     pub agent_json: AgentJsonContract,
-    pub waivers: WaiverContract,
     pub process_supervision: ProcessSupervisionContract,
 }
 
@@ -101,13 +99,6 @@ pub struct AgentJsonContract {
     pub max_bytes: usize,
     pub default_page_size: usize,
     pub error_codes: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WaiverContract {
-    pub schema_version: u32,
-    pub file: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1112,7 +1103,6 @@ mod tests {
         assert_eq!(contract.agent_json.max_bytes, AGENT_JSON_MAX_BYTES);
         assert_eq!(contract.agent_json.default_page_size, DEFAULT_PAGE_SIZE);
         assert_eq!(contract.agent_json.error_codes, ERROR_CODES);
-        assert_eq!(contract.waivers.schema_version, WAIVERS_SCHEMA_VERSION);
         assert_eq!(
             contract.process_supervision.schema_version,
             PROCESS_SUPERVISION_SCHEMA_VERSION

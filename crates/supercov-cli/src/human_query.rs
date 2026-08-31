@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use supercov_contracts::AgentPagination;
 use supercov_engine::{
     coverage_analysis::{CoverageSummary, McdcVector},
@@ -213,15 +211,12 @@ fn render_files(
                 "covered in this projection".into()
             } else {
                 format!(
-                    "uncovered: lines {}  statements {}  functions {}  branch outcomes {}  MC/DC conditions {}{}",
+                    "uncovered: lines {}  statements {}  functions {}  branch outcomes {}  MC/DC conditions {}",
                     gap.uncovered_lines,
                     gap.uncovered_statements,
                     gap.uncovered_functions,
                     gap.missing_branches,
                     gap.missing_mcdc_conditions,
-                    gap.waived_obligations
-                        .filter(|count| *count > 0)
-                        .map_or_else(String::new, |count| format!(" ({count} reviewed exceptions)")),
                 )
             };
             let limitations = if gap.measurement_limitations == 0 {
@@ -346,43 +341,20 @@ fn branch_need(value: &str) -> String {
 }
 
 fn render_needed_obligation(obligation: &CoverageFileObligation) -> String {
-    let (mut text, waiver) = match obligation {
-        CoverageFileObligation::Line(item) => {
-            ("line not executed".into(), item.waiver_reason.as_ref())
-        }
+    match obligation {
+        CoverageFileObligation::Line(_) => "line not executed".into(),
         CoverageFileObligation::Point(item) if item.kind == "statement" => {
-            ("statement not executed".into(), item.waiver_reason.as_ref())
+            "statement not executed".into()
         }
         CoverageFileObligation::Point(item) if item.kind == "function" => {
-            ("function not called".into(), item.waiver_reason.as_ref())
+            "function not called".into()
         }
-        CoverageFileObligation::Point(item) => (
-            format!("{} not covered", item.kind),
-            item.waiver_reason.as_ref(),
+        CoverageFileObligation::Point(item) => format!("{} not covered", item.kind),
+        CoverageFileObligation::Branch(item) => branch_need(&item.missing),
+        CoverageFileObligation::Mcdc(item) => format!(
+            "no witness pair shows `{}` independently changing the decision result",
+            item.missing_condition
         ),
-        CoverageFileObligation::Branch(item) => {
-            (branch_need(&item.missing), item.waiver_reason.as_ref())
-        }
-        CoverageFileObligation::Mcdc(item) => (
-            format!(
-                "no witness pair shows `{}` independently changing the decision result",
-                item.missing_condition
-            ),
-            item.waiver_reason.as_ref(),
-        ),
-    };
-    if let Some(reason) = waiver {
-        text.push_str(&format!(" [reviewed exception: {reason}]"));
-    }
-    text
-}
-
-fn obligation_waiver_reason(obligation: &CoverageFileObligation) -> Option<&str> {
-    match obligation {
-        CoverageFileObligation::Line(item) => item.waiver_reason.as_deref(),
-        CoverageFileObligation::Point(item) => item.waiver_reason.as_deref(),
-        CoverageFileObligation::Branch(item) => item.waiver_reason.as_deref(),
-        CoverageFileObligation::Mcdc(item) => item.waiver_reason.as_deref(),
     }
 }
 
@@ -597,55 +569,6 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             if let Some(workspace) = &data.workspace {
                 lines.push(format!("  Command outputs  {workspace}"));
             }
-            if let Some(waivers) = &data.waivers {
-                lines.push(format!(
-                    "Reviewed exceptions  {} applied, {} contradicted, {} unmatched",
-                    waivers.applied,
-                    waivers.contradicted.len(),
-                    waivers.unmatched.len(),
-                ));
-                let adjusted = &waivers.coverage_excluding_waived;
-                lines.push(format!(
-                    "  Policy status    {}",
-                    if waivers.complete {
-                        "complete"
-                    } else {
-                        "incomplete"
-                    }
-                ));
-                lines.push(format!(
-                    "  Policy-adjusted  lines {}  statements {}  functions {}  branches {}  MC/DC {}",
-                    percentage(adjusted.lines.percentage),
-                    percentage(adjusted.statements.percentage),
-                    percentage(adjusted.functions.percentage),
-                    percentage(adjusted.branches.percentage),
-                    percentage(adjusted.mcdc.percentage),
-                ));
-                for contradiction in &waivers.contradicted {
-                    lines.push(format!(
-                        "  contradicted (obligation is covered): {} {}:{} {}",
-                        contradiction.kind,
-                        contradiction.file,
-                        contradiction.line,
-                        contradiction.obligation
-                    ));
-                }
-                for waiver in &waivers.unmatched {
-                    lines.push(format!(
-                        "  unmatched (no such obligation): {} {}{}{}",
-                        waiver.kind,
-                        waiver.file,
-                        waiver
-                            .line
-                            .map_or_else(String::new, |line| format!(":{line}")),
-                        if waiver.condition.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" {}", waiver.condition)
-                        }
-                    ));
-                }
-            }
             lines.extend([String::new(), "Tests".into()]);
             lines.push(format!("  Total       {}", count(data.tests)));
             lines.extend(outcome_lines(&data.test_outcomes));
@@ -664,11 +587,6 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     count(data.files_with_measurement_limitations)
                 ),
             ]);
-            if !data.coverage.coverage_complete {
-                lines.push(
-                    "  Provably unreachable obligations can be recorded as reviewed exceptions in supercov.waivers.json; `supercov docs coverage-model` explains the policy.".into(),
-                );
-            }
             if let Some(confidence) = &data.confidence {
                 lines.extend([
                     String::new(),
@@ -811,16 +729,11 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             let mut lines = vec![
                 format!("{}  MC/DC by decision", data.file),
                 format!(
-                    "decisions {}, with missing conditions {}; conditions missing {}/{}{}",
+                    "decisions {}, with missing conditions {}; conditions missing {}/{}",
                     data.totals.decisions,
                     data.totals.decisions_with_missing_conditions,
                     data.totals.missing_conditions,
                     data.totals.conditions,
-                    if data.totals.waived_conditions == 0 {
-                        String::new()
-                    } else {
-                        format!(", waived {}", data.totals.waived_conditions)
-                    }
                 ),
             ];
             lines.extend(data.decisions.iter().map(|row| {
@@ -831,17 +744,8 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     compact
                 };
                 format!(
-                    "{}:{}  [{}]  missing {}/{}{}  {snippet}",
-                    row.line,
-                    row.column,
-                    row.id,
-                    row.missing_conditions,
-                    row.conditions,
-                    if row.waived_conditions == 0 {
-                        String::new()
-                    } else {
-                        format!(" ({} waived)", row.waived_conditions)
-                    }
+                    "{}:{}  [{}]  missing {}/{}  {snippet}",
+                    row.line, row.column, row.id, row.missing_conditions, row.conditions,
                 )
             }));
             if data.decisions.is_empty() {
@@ -891,10 +795,6 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                     count(data.counts.missing_mcdc_conditions)
                 ),
                 format!(
-                    "  Reviewed exceptions             {}",
-                    count(data.counts.waived_obligations)
-                ),
-                format!(
                     "  Measurement limitations         {}",
                     count(data.counts.measurement_limitations)
                 ),
@@ -918,14 +818,6 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 let needs = file_gap_needs(&gap.state, &gap.obligations);
                 for need in needs {
                     lines.push(format!("       Unobserved: {need}"));
-                }
-                let reviewed = gap
-                    .obligations
-                    .iter()
-                    .filter_map(obligation_waiver_reason)
-                    .collect::<BTreeSet<_>>();
-                for reason in reviewed {
-                    lines.push(format!("       Reviewed exception: {reason}"));
                 }
                 for limitation in &gap.limitations {
                     lines.push(format!("       Cannot measure: {}", limitation.reason));
@@ -994,12 +886,10 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                         ];
                         lines.extend(decision.conditions.iter().map(|condition| {
                             format!(
-                                "C{} {}{}: {}{}",
+                                "C{} {}{}: {}",
                                 condition.index + 1,
                                 if condition.covered {
                                     "covered"
-                                } else if condition.waived == Some(true) {
-                                    "MISSING (waived)"
                                 } else {
                                     "MISSING"
                                 },
@@ -1009,12 +899,6 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                                     ""
                                 },
                                 condition.source,
-                                condition
-                                    .waiver_reason
-                                    .as_ref()
-                                    .map_or_else(String::new, |reason| format!(
-                                        "\n   waived: {reason}"
-                                    ))
                             )
                         }));
                         lines.push(format!(

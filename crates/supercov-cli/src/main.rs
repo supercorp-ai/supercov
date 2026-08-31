@@ -32,8 +32,7 @@ use supercov_engine::{
         EvidenceArchiveEntry, EvidenceArchiveSource, collect_sources, write_archive,
     },
     indexed_query::{
-        IndexedQueryOutput, IndexedQueryRequest, NewerQuery, execute_indexed_query_with_waivers,
-        query_indexed_with_waivers,
+        IndexedQueryOutput, IndexedQueryRequest, NewerQuery, execute_indexed_query, query_indexed,
     },
     js_instrumenter::instrument_candidate,
     query_index::{QueryIndex, QueryIndexIdentity, write_query_index},
@@ -1673,13 +1672,6 @@ fn current_integrity_for_run(
     }
 }
 
-fn javascript_run(run: &StoredRun) -> bool {
-    !run.metadata
-        .integrity
-        .instrumenter_version
-        .starts_with("supercov-rust-")
-}
-
 fn selected_package_script(command: &[String]) -> Option<&str> {
     let program = command
         .first()
@@ -1865,34 +1857,6 @@ fn execute_public_query(
                     internal_agent_error(format!("Failed to read coverage index: {error}"))
                 })?;
                 drop(progress);
-                let waiver_source = if javascript_run(run) {
-                    supercov_engine::coverage_waivers::read_coverage_waivers(root).map_err(
-                        |error| {
-                            internal_agent_error(format!(
-                                "Failed to read coverage waivers: {error}"
-                            ))
-                        },
-                    )?
-                } else {
-                    None
-                };
-                let waiver_evaluation = if let Some(source) = waiver_source.as_ref() {
-                    Some(
-                        supercov_engine::coverage_query::evaluate_indexed_coverage_waivers(
-                            &index,
-                            request.view().map_err(|error| error.agent_error())?,
-                            request.kind.as_deref(),
-                            request.runner.as_deref(),
-                            source,
-                        )
-                        .map_err(|error| {
-                            supercov_engine::indexed_query::IndexedQueryError::Query(error)
-                                .agent_error()
-                        })?,
-                    )
-                } else {
-                    None
-                };
                 let report = if request.command == "minimize" {
                     Some(
                         analyze_stored_run(run)
@@ -1941,14 +1905,8 @@ fn execute_public_query(
                 } else {
                     None
                 };
-                query_indexed_with_waivers(
-                    &index,
-                    report.as_ref(),
-                    &request,
-                    newer_query,
-                    waiver_evaluation.as_ref(),
-                )
-                .map_err(|error| error.agent_error())
+                query_indexed(&index, report.as_ref(), &request, newer_query)
+                    .map_err(|error| error.agent_error())
             })();
             result
                 .map(|mut output| {
@@ -2430,22 +2388,6 @@ fn query_stored_run() -> ExitCode {
             .get_or_insert(run.metadata.test_exit_code == Some(0));
         let container = open_or_rebuild_query_index(run).map_err(|error| error.to_string())?;
         let index = CoverageIndex::new(&container).map_err(|error| error.to_string())?;
-        let waiver_source = supercov_engine::coverage_waivers::read_coverage_waivers(&request.root)
-            .map_err(|error| error.to_string())?;
-        let waiver_evaluation = if let Some(source) = waiver_source.as_ref() {
-            Some(
-                supercov_engine::coverage_query::evaluate_indexed_coverage_waivers(
-                    &index,
-                    request.query.view().map_err(|error| error.to_string())?,
-                    request.query.kind.as_deref(),
-                    request.query.runner.as_deref(),
-                    source,
-                )
-                .map_err(|error| format!("{error:?}"))?,
-            )
-        } else {
-            None
-        };
         let report = if request.query.command == "minimize" {
             Some(analyze_stored_run(run)?)
         } else {
@@ -2472,14 +2414,8 @@ fn query_stored_run() -> ExitCode {
         } else {
             None
         };
-        execute_indexed_query_with_waivers(
-            &index,
-            report.as_ref(),
-            &request.query,
-            newer_query,
-            waiver_evaluation.as_ref(),
-        )
-        .map_err(|error| error.to_string())
+        execute_indexed_query(&index, report.as_ref(), &request.query, newer_query)
+            .map_err(|error| error.to_string())
     })();
     match result {
         Ok(output) => {
@@ -2929,7 +2865,6 @@ fn query_index_files() -> ExitCode {
                     kind: request.kind.as_deref(),
                     runner: request.runner.as_deref(),
                     file,
-                    waived_by_decision: None,
                     sort: request.sort.unwrap_or(DecisionSort::Location),
                     offset: request.offset,
                     limit: request.limit,

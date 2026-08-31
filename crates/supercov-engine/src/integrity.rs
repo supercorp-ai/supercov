@@ -331,7 +331,6 @@ fn configuration_file(path: &Path) -> bool {
         .unwrap_or("")
         .to_ascii_lowercase();
     name == ".npmrc"
-        || name == "supercov.waivers.json"
         || (name.starts_with("tsconfig") && name.ends_with(".json"))
         || name.contains(".config.")
         || name.starts_with(".babelrc.")
