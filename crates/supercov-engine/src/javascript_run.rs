@@ -539,8 +539,10 @@ pub fn run_direct_javascript(
     let initialization_ms = elapsed_ms(initialization_started);
 
     let workspace_started = Instant::now();
+    let workspace_progress = crate::progress::ProgressLine::start("preparing isolated workspace");
     let workspace = prepare_cached_workspace(&root, cleanup.lock(), &cached_paths)
         .map_err(|error| error.to_string())?;
+    drop(workspace_progress);
     cleanup.set_workspace(workspace.clone());
     let workspace_preparation_ms = elapsed_ms(workspace_started);
     writeln!(
@@ -567,6 +569,7 @@ pub fn run_direct_javascript(
     .map_err(|error| error.to_string())?;
 
     let adapter_started = Instant::now();
+    let instrumentation_progress = crate::progress::ProgressLine::start("instrumenting sources");
     let collector_id = format!("collector-{}", integrity.fingerprint.execution);
     let frontend = if let Some(cache) = &reusable_frontend {
         load_cached_javascript_frontend(&workspace, cache)
@@ -574,6 +577,7 @@ pub fn run_direct_javascript(
         prepare_javascript_frontend(&workspace, &project, &collector_id, &frontend_cache_key)
     }
     .map_err(|error| error.to_string())?;
+    drop(instrumentation_progress);
     let adapter_setup_ms = elapsed_ms(adapter_started);
 
     let evidence_relative = format!(".supercov/evidence/{run_id}");

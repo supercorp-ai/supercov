@@ -21,6 +21,7 @@ pub mod lifecycle;
 pub mod orchestration;
 pub mod probe_v2;
 pub mod process_supervision;
+pub mod progress;
 pub mod project_discovery;
 #[cfg(any(test, feature = "oracle-harnesses"))]
 pub mod python_frontend;
