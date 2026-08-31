@@ -1,4 +1,6 @@
 import * as native from "node:test";
+import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 import { beginBufferedServerEvidence, flushBufferedServerEvidence, takeNodeAssertionPhases, withCoverageCarrier, } from "./runtime.js";
 import { callerLocation, runnerExecutionScope, writeRunnerEvidence, } from "./runnerEvidence.js";
 function callbackIndex(args) {
@@ -13,6 +15,35 @@ function testName(args, callback) {
 function testOptions(args, index) {
     const candidate = args.slice(0, index).find((value) => value && typeof value === "object" && !Array.isArray(value));
     return candidate;
+}
+// node:test derives a test's reported location from the direct caller of the
+// registration call, and the adapter is that caller: every failing test
+// reported "test at .../nodeTest.js". A compiled trampoline carrying the
+// user's call site as its script origin registers the test instead, so the
+// runner sees the location a direct call would have produced. The padded
+// second line puts the call expression at the user's exact line and column.
+const registrationSites = new Map();
+function registrationAt(location) {
+    if (!location.file ||
+        location.line === undefined ||
+        location.column === undefined ||
+        location.line < 2)
+        return undefined;
+    const key = `${location.file}:${location.line}:${location.column}`;
+    let site = registrationSites.get(key);
+    if (site === undefined) {
+        try {
+            const filename = location.file.startsWith("file://")
+                ? fileURLToPath(location.file)
+                : location.file;
+            site = vm.compileFunction(`return (\n${" ".repeat(Math.max(0, location.column - 1))}original(...args));`, ["original", "args"], { filename, lineOffset: location.line - 2 });
+        }
+        catch {
+            site = null;
+        }
+        registrationSites.set(key, site);
+    }
+    return site ?? undefined;
 }
 // A failing test's stack was captured while Supercov's wrappers were on the
 // call path and while the code ran inside the mirrored workspace. Neither is
@@ -150,6 +181,9 @@ function wrappedRegistration(original) {
             : function supercovNodeTestCallback(context) {
                 return execute(this, context);
             };
+        const registration = registrationAt(location);
+        if (registration)
+            return registration(this === undefined ? original : original.bind(this), next);
         return Reflect.apply(original, this, next);
     };
     for (const property of ["skip", "todo", "only"]) {
