@@ -14,6 +14,47 @@ function testOptions(args, index) {
     const candidate = args.slice(0, index).find((value) => value && typeof value === "object" && !Array.isArray(value));
     return candidate;
 }
+// A failing test's stack was captured while Supercov's wrappers were on the
+// call path and while the code ran inside the mirrored workspace. Neither is
+// part of the user's program: drop adapter frames and map workspace paths
+// back to the source project so the report matches an uninstrumented run.
+const restoredErrors = new WeakSet();
+function restoreUserError(error, depth = 0) {
+    if (depth > 4 ||
+        !error ||
+        typeof error !== "object" ||
+        restoredErrors.has(error))
+        return error;
+    restoredErrors.add(error);
+    const workspaceRoot = process.env["SUPERCOV_PROJECT_ROOT"];
+    const sourceRoot = process.env["SUPERCOV_SOURCE_PROJECT_ROOT"];
+    const remap = (text) => workspaceRoot && sourceRoot && workspaceRoot !== sourceRoot
+        ? text.split(workspaceRoot).join(sourceRoot)
+        : text;
+    try {
+        if (typeof error.stack === "string")
+            error.stack = remap(error.stack
+                .split("\n")
+                .filter((line) => !(line.trimStart().startsWith("at ") &&
+                line.includes("/.supercov/")))
+                .join("\n"));
+        if (typeof error.message === "string")
+            error.message = remap(error.message);
+    }
+    catch {
+        // Frozen or accessor-backed errors keep their original form.
+    }
+    try {
+        restoreUserError(error.cause, depth + 1);
+        if (Array.isArray(error.errors))
+            for (const aggregated of error.errors)
+                restoreUserError(aggregated, depth + 1);
+    }
+    catch {
+        // A throwing accessor never replaces the user's error.
+    }
+    return error;
+}
 function wrappedRegistration(original) {
     const wrapped = function supercovNodeTest(...args) {
         const index = callbackIndex(args);
@@ -72,8 +113,10 @@ function wrappedRegistration(original) {
             try {
                 if (callback.length >= 2) {
                     const callbackDone = (error) => {
-                        if (error)
+                        if (error) {
                             status = "failed";
+                            restoreUserError(error);
+                        }
                         emit();
                         done?.(error);
                     };
@@ -87,7 +130,7 @@ function wrappedRegistration(original) {
                     }, (error) => {
                         status = "failed";
                         emit();
-                        throw error;
+                        throw restoreUserError(error);
                     });
                 emit();
                 return result;
@@ -95,7 +138,7 @@ function wrappedRegistration(original) {
             catch (error) {
                 status = "failed";
                 emit();
-                throw error;
+                throw restoreUserError(error);
             }
         };
         // node:test uses callback arity to distinguish promise/synchronous tests
