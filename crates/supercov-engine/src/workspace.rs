@@ -44,7 +44,6 @@ static UNIQUE: AtomicU64 = AtomicU64::new(0);
 pub enum WorkspaceError {
     Io { path: PathBuf, source: io::Error },
     UnsafePath(PathBuf),
-    EscapingLink { path: PathBuf, target: PathBuf },
     UnsupportedEntry(PathBuf),
     MissingLock,
     Lifecycle(LifecycleError),
@@ -59,12 +58,6 @@ impl std::fmt::Display for WorkspaceError {
             Self::UnsafePath(path) => {
                 write!(formatter, "unsafe workspace path: {}", path.display())
             }
-            Self::EscapingLink { path, target } => write!(
-                formatter,
-                "refusing to preserve symlink outside the isolated project: {} -> {}",
-                path.display(),
-                target.display()
-            ),
             Self::UnsupportedEntry(path) => {
                 write!(
                     formatter,
@@ -93,6 +86,18 @@ impl From<LifecycleError> for WorkspaceError {
     fn from(value: LifecycleError) -> Self {
         Self::Lifecycle(value)
     }
+}
+
+/// Leftover tool state -- a Chrome test profile linking into /tmp was the
+/// field case -- must not abort measurement. The mirror omits the entry:
+/// nothing outside the project is ever followed, and a test that truly needs
+/// the link fails visibly inside the workspace with this line as the cause.
+fn omit_escaping_link(path: &Path, target: &Path) {
+    eprintln!(
+        "[supercov] omitting symlink outside the isolated project: {} -> {}",
+        path.display(),
+        target.display()
+    );
 }
 
 fn io_error(path: &Path, source: io::Error) -> WorkspaceError {
@@ -683,12 +688,10 @@ fn copy_tree<Operations: WorkspaceOperations>(
             } else {
                 from.parent().expect("entry parent").join(&link)
             };
-            let lexical_target = lexical_normalize(&unresolved_target).ok_or_else(|| {
-                WorkspaceError::EscapingLink {
-                    path: from.clone(),
-                    target: link.clone(),
-                }
-            })?;
+            let Some(lexical_target) = lexical_normalize(&unresolved_target) else {
+                omit_escaping_link(&from, &link);
+                continue;
+            };
             // A dangling symlink is a fact of the user's tree that their own
             // tooling tolerates: npm and pnpm workspaces routinely leave links
             // to packages that are not installed, and plain `npm test` never
@@ -706,10 +709,8 @@ fn copy_tree<Operations: WorkspaceOperations>(
                     .as_deref()
                     .is_some_and(|target| !inside(roots.canonical_source, target));
             if escapes {
-                return Err(WorkspaceError::EscapingLink {
-                    path: from,
-                    target: link,
-                });
+                omit_escaping_link(&from, &link);
+                continue;
             }
             let local_target = lexical_target
                 .strip_prefix(roots.source)
@@ -1508,18 +1509,21 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn dangling_symlink_escaping_the_project_is_refused() {
+    fn symlink_escaping_the_project_is_omitted_from_the_mirror() {
         // The escape check guards the MIRRORED source tree. node_modules (root
         // and nested) are referenced by entry links to the user's originals
         // instead, so the escaping fixture lives outside node_modules here.
+        // Leftover tool state (a Chrome test profile linking into /tmp) must
+        // not abort measurement: the entry is omitted and the run proceeds.
         let root = project();
         let nested = root.join("examples/app/lib");
         fs::create_dir_all(&nested).unwrap();
         std::os::unix::fs::symlink("../../../../../outside-the-project/pkg", nested.join("pkg"))
             .unwrap();
         let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
-        let result = prepare_isolated_workspace(&root, "run", &lock);
-        assert!(matches!(result, Err(WorkspaceError::EscapingLink { .. })));
+        let workspace = prepare_isolated_workspace(&root, "run", &lock).unwrap();
+        assert!(fs::symlink_metadata(workspace.join("examples/app/lib/pkg")).is_err());
+        assert!(workspace.join("src/index.js").exists());
         lock.release().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
@@ -1898,10 +1902,8 @@ mod tests {
             "inside"
         );
         symlink(external.join("outside"), root.join("src/external-link")).unwrap();
-        assert!(matches!(
-            prepare_cached_workspace(&root, &lock, &[]),
-            Err(WorkspaceError::EscapingLink { .. })
-        ));
+        let refreshed = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+        assert!(fs::symlink_metadata(refreshed.join("src/external-link")).is_err());
         assert_eq!(
             fs::read_to_string(workspace.join("src/index.js")).unwrap(),
             "one"
