@@ -167,10 +167,13 @@ try {
   assert.equal(failedMetadata.testExitCode, 1);
   const failedSummary = run(['runs', failedId]);
   assert.equal(failedSummary.status, 0, failedSummary.stderr);
-  assert.match(failedSummary.stdout, /\[INVALID: wrapped command exited 1\]/u);
   assert.match(
     failedSummary.stdout,
-    /Coverage \(diagnostic only — the wrapped command did not pass\)/u,
+    /status: wrapped command exited 1 — coverage below is diagnostic and cannot gate/u,
+  );
+  assert.match(
+    failedSummary.stdout,
+    /Coverage \(diagnostic — the wrapped command did not pass\)/u,
   );
   const failedProjection = run(['runs', failedId, '--filter', 'failed']);
   assert.match(

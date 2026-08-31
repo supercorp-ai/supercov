@@ -47,6 +47,57 @@ use time::{OffsetDateTime, macros::format_description};
 
 mod human_query;
 mod public_query;
+
+/// A spinner on stderr while a query loads run evidence. Silent unless stderr
+/// is an interactive terminal, and for the first moments of fast queries, so
+/// agents and pipes never see it and quick lookups stay clean.
+struct ProgressLine {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ProgressLine {
+    fn start(message: &'static str) -> Option<Self> {
+        use std::io::{IsTerminal, Write};
+        if !std::io::stderr().is_terminal() {
+            return None;
+        }
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let mut drawn = false;
+            let mut frame = 0_usize;
+            while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(120));
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                eprint!("\r{} {message}", FRAMES[frame % FRAMES.len()]);
+                let _ = std::io::stderr().flush();
+                drawn = true;
+                frame += 1;
+            }
+            if drawn {
+                eprint!("\r{}\r", " ".repeat(message.len() + 2));
+                let _ = std::io::stderr().flush();
+            }
+        });
+        Some(Self {
+            stop,
+            handle: Some(handle),
+        })
+    }
+}
+
+impl Drop for ProgressLine {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 use human_query::render_human;
 use public_query::{PublicQueryInvocation, help_for, parse_public_query};
 
@@ -1842,6 +1893,7 @@ fn execute_public_query(
                 }
             }
             let result = (|| -> Result<IndexedQueryOutput, agent_json::AgentError> {
+                let progress = ProgressLine::start("loading run evidence");
                 let container = open_or_rebuild_query_index(run).map_err(|error| {
                     let message = if matches!(
                         error,
@@ -1935,6 +1987,7 @@ fn execute_public_query(
                 } else {
                     None
                 };
+                drop(progress);
                 query_indexed_with_waivers(
                     &index,
                     report.as_ref(),

@@ -584,7 +584,13 @@ pub fn run_direct_javascript(
         ("NODE_OPTIONS".into(), node_options(&frontend.preload_path)),
         ("SUPERCOV_CJS_INTERCEPT".into(), "1".into()),
         ("SUPERCOV_DIRECT_INSTRUMENTATION".into(), "1".into()),
-        ("SUPERCOV_EVIDENCE_DIR".into(), evidence_relative.clone()),
+        // Must be absolute: monorepo runners spawn test processes with a
+        // package directory as cwd, and a relative evidence directory made
+        // every per-test record land beside the package, never collected.
+        (
+            "SUPERCOV_EVIDENCE_DIR".into(),
+            evidence_directory.display().to_string(),
+        ),
         (
             "SUPERCOV_DIAGNOSTIC_OWNER_FILE".into(),
             diagnostic_owner.display().to_string(),

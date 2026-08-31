@@ -42,6 +42,7 @@ run(["--prefix", "tests/fixtures/generic-playwright", "run", "test:coverage"]);
 for (const script of [
   "opaque-runner-integration.mjs",
   "opaque-esm-integration.mjs",
+  "workspaces-attribution-integration.mjs",
   "node-test-integration.mjs",
   "generic-build-integration.mjs",
   "next-integration.mjs",

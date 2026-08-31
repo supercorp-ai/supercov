@@ -487,13 +487,6 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             if !label.is_empty() {
                 first.push_str(&format!(" ({label})"));
             }
-            if !data.valid {
-                if let Some(code) = data.test_exit_code {
-                    first.push_str(&format!(" [INVALID: wrapped command exited {code}]"));
-                } else {
-                    first.push_str(" [INVALID: wrapped command exit status unavailable]");
-                }
-            }
             if data.stale {
                 first.push_str(&format!(" [STALE: {}]", data.stale_reasons.join(", ")));
             }
@@ -515,11 +508,21 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             let coverage_heading = if data.valid {
                 "Coverage"
             } else {
-                "Coverage (diagnostic only — the wrapped command did not pass)"
+                "Coverage (diagnostic — the wrapped command did not pass)"
             };
             let mut lines = vec![first];
             if !data.command.is_empty() {
                 lines.push(format!("command: {}", data.command.join(" ")));
+            }
+            if !data.valid {
+                // Calm but unmissable: the run itself is fine, the wrapped
+                // command failed, so the numbers below cannot gate anything.
+                lines.push(match data.test_exit_code {
+                    Some(code) => format!(
+                        "status: wrapped command exited {code} — coverage below is diagnostic and cannot gate"
+                    ),
+                    None => "status: wrapped command exit status unavailable — coverage below is diagnostic and cannot gate".into(),
+                });
             }
             lines.extend([
                 String::new(),

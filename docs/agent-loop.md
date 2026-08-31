@@ -67,7 +67,9 @@ is met, or you run out of time:
    If the diff shows no gain, revert the test rather than keeping it.
 
 Rules:
-- Never modify application source to make coverage easier.
+- Never contort live application source to make coverage easier. Deleting
+  provably dead code is the opposite case: coverage found real cruft, and
+  removing it (with the project owner's normal review) is the improvement.
 - Never weaken or delete an existing assertion.
 - If a decision cannot be reached from any public entry point, say so and move
   on instead of exporting internals to reach it.
@@ -76,7 +78,10 @@ Rules:
 
 The last rule matters more than it looks. An unattended agent that cannot reach
 a branch will otherwise start reshaping the code so it can, which is exactly
-the failure mode that gives coverage targets a bad name.
+the failure mode that gives coverage targets a bad name. The first rule cuts
+the other way just as deliberately: when an obligation is unreachable because
+the code is dead, the honest fix is deletion, not an exclusion that leaves the
+cruft sitting behind a clean number.
 
 ## Budgeting an overnight session
 

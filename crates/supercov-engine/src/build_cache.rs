@@ -212,13 +212,17 @@ mod tests {
     use super::*;
 
     fn temporary() -> PathBuf {
+        // Two tests starting on the same nanosecond drew the same directory
+        // and polluted each other's artifact scans; the counter breaks ties.
+        static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "supercov-build-cache-{}-{nonce}",
-            std::process::id()
+            "supercov-build-cache-{}-{nonce}-{}",
+            std::process::id(),
+            UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         root
