@@ -184,7 +184,11 @@ fn imported_test_apis(path: &Path, source: &str) -> Vec<TestApiCandidate> {
     let Some(program) = parse_program(&allocator, path, source) else {
         return Vec::new();
     };
-    let mut candidates = Vec::new();
+    // Aggregate per module across the whole file: a facade's helpers are
+    // often imported in their own statement (`import { createTestProduct }
+    // from "@acme/fixtures"`), and those names must reach the generated shim
+    // even though that statement alone carries no test-API signal.
+    let mut by_module = BTreeMap::<String, TestApiCandidate>::new();
     for statement in &program.body {
         let Statement::ImportDeclaration(declaration) = statement else {
             continue;
@@ -193,9 +197,14 @@ fn imported_test_apis(path: &Path, source: &str) -> Vec<TestApiCandidate> {
             continue;
         }
         let module = declaration.source.value.to_string();
-        let mut score = 0;
-        let mut test_export = None;
-        let mut exports = Vec::new();
+        let candidate = by_module
+            .entry(module.clone())
+            .or_insert_with(|| TestApiCandidate {
+                module,
+                score: 0,
+                test_export: None,
+                exports: Vec::new(),
+            });
         for specifier in declaration.specifiers.iter().flatten() {
             let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
                 continue;
@@ -205,32 +214,30 @@ fn imported_test_apis(path: &Path, source: &str) -> Vec<TestApiCandidate> {
             }
             let imported = specifier.imported.name().to_string();
             let local = specifier.local.name.as_str();
-            exports.push(imported.clone());
+            candidate.exports.push(imported.clone());
             if local == "test" {
-                score += 20;
-                test_export = Some(imported.clone());
+                candidate.score += 20;
+                candidate.test_export = Some(imported.clone());
             } else if imported.to_ascii_lowercase().ends_with("test") {
-                score += 8;
+                candidate.score += 8;
             }
             if local == "expect" || imported == "expect" {
-                score += 10;
+                candidate.score += 10;
             }
-        }
-        if score > 0 {
-            if module == "@playwright/test" {
-                score += 100;
-            } else if module.to_ascii_lowercase().contains("playwright") {
-                score += 5;
-            }
-            candidates.push(TestApiCandidate {
-                module,
-                score,
-                test_export,
-                exports,
-            });
         }
     }
-    candidates
+    by_module
+        .into_values()
+        .filter(|candidate| candidate.score > 0)
+        .map(|mut candidate| {
+            if candidate.module == "@playwright/test" {
+                candidate.score += 100;
+            } else if candidate.module.to_ascii_lowercase().contains("playwright") {
+                candidate.score += 5;
+            }
+            candidate
+        })
+        .collect()
 }
 
 fn test_api_candidates(directory: &Path, output: &mut Vec<TestApiCandidate>) {
@@ -868,7 +875,8 @@ mod tests {
                 ),
                 (
                     "tests/example.spec.ts",
-                    "import { type Ignored, browserTest as test, expect, fixtureValue } from '@acme/browser-fixtures'",
+                    "import { type Ignored, browserTest as test, expect, fixtureValue } from '@acme/browser-fixtures'\n\
+                     import { createFixtureProduct } from '@acme/browser-fixtures'",
                 ),
             ],
         );
@@ -879,9 +887,17 @@ mod tests {
         );
         assert_eq!(discovered.playwright_module, "@acme/browser-fixtures");
         assert_eq!(discovered.playwright_test_export, "browserTest");
+        // The helper imported in its own statement must reach the shim: a
+        // facade's non-test exports vanish otherwise, and every spec importing
+        // one fails to link.
         assert_eq!(
             discovered.playwright_exports,
-            ["browserTest", "expect", "fixtureValue"]
+            [
+                "browserTest",
+                "createFixtureProduct",
+                "expect",
+                "fixtureValue"
+            ]
         );
         fs::remove_dir_all(root).unwrap();
     }

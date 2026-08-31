@@ -788,6 +788,20 @@ fn configure_playwright_runtime(
             "__SUPERCOV_PLAYWRIGHT_TEST_EXPORT__",
             &project.playwright_test_export,
         );
+    if project.playwright_module != "@playwright/test" {
+        // A facade module exports the project's whole test API, not just the
+        // Playwright surface: its full export set must flow through the shim,
+        // with only the interception points (`test`, `expect`, the discovered
+        // test export) shadowed by the shim's own declarations. The discovered
+        // per-name re-exports below stay as a fallback for CommonJS facades,
+        // where `export *` only forwards statically detectable names.
+        let facade = serde_json::to_string(&project.playwright_module)
+            .expect("serializing a module specifier cannot fail");
+        adapter = adapter.replace(
+            "export * from \"@playwright/test\";",
+            &format!("export * from {facade};"),
+        );
+    }
     let mut exports = Vec::new();
     if project.playwright_test_export != "test" {
         exports.push(format!(
