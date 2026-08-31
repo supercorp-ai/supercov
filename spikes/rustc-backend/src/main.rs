@@ -12228,6 +12228,30 @@ fn main() {
         }
     }
     if env::var_os(INSTRUMENT_MIR).is_some() {
+        // Instrumented builds must not run incrementally. The wrapper forces
+        // `optimized_mir` for every body so no obligation reaches the manifest
+        // unchecked, and cargo's incremental mode then serialises that far
+        // larger dep graph and result cache for every unit: on bytes this was
+        // the ENTIRE remaining overhead -- 1.19x with incremental, 1.06x
+        // without, against an isolated-unit cost of ~1.01x. The cache also buys
+        // nothing here, because Supercov compiles an ephemeral workspace that
+        // never reuses it. Stripping the flag at the wrapper makes every
+        // driver benefit without configuration.
+        let mut index = 0;
+        while index < args.len() {
+            let strip = args[index] == "-C"
+                && args
+                    .get(index + 1)
+                    .is_some_and(|value| value.starts_with("incremental="));
+            let strip_joined = args[index].starts_with("-Cincremental=");
+            if strip {
+                args.drain(index..index + 2);
+            } else if strip_joined {
+                args.remove(index);
+            } else {
+                index += 1;
+            }
+        }
         // Ask the exact rustc companion to retain its THIR-to-MIR branch
         // regions. optimized_mir_with_probe translates those regions into
         // Supercov probes and removes every native coverage artifact before
