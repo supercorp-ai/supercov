@@ -22,8 +22,10 @@ OpaqueImageBuilder.build = async function build(options) {
                   `Expected translated project root ${mount.target}, received ${request.env.SUPERCOV_PROJECT_ROOT}`,
                 );
               }
-              if (!request.env.NODE_OPTIONS?.includes(`${mount.target}/.supercov/register.mjs`)) {
-                throw new Error("Remote launch did not receive the guest Supercov preload");
+              if (!request.env.NODE_OPTIONS?.includes(`${mount.target}/.supercov/node_modules/register.mjs`)) {
+                throw new Error(
+                  `Remote launch did not receive the guest Supercov preload: NODE_OPTIONS=${request.env.NODE_OPTIONS}`,
+                );
               }
               return new Promise((resolve, reject) => {
                 const child = spawn(request.argv[0], request.argv.slice(1), {

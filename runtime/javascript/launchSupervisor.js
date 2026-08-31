@@ -195,7 +195,7 @@ export function guestCoverageEnvironment(mapping, coverageEnvironment = process.
         key,
         value === undefined ? value : replaceRoot(value, mapping),
     ]));
-    const registerUrl = pathToFileURL(resolve(mapping.guestRoot, ".supercov/register.mjs")).href;
+    const registerUrl = pathToFileURL(resolve(mapping.guestRoot, ".supercov/node_modules/register.mjs")).href;
     return {
         ...existingEnvironment,
         ...translated,

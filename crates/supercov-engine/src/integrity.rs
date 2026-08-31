@@ -402,14 +402,33 @@ pub fn create_run_integrity(
     if !valid_sha256(&frontend.engine_execution_sha256) {
         return Err(IntegrityError::InvalidEngineDigest("execution engine"));
     }
+    let tests = test_files(root)?;
+    let dependencies = dependency_files(root)?;
+    let configuration = configuration_files(root, project)?;
+    // Scope entries outside the instrumented set still execute in the run,
+    // and ones that carry assertions or capability imports are rewritten and
+    // cached. Everything the frontend may cache must feed the fingerprint,
+    // or an edit to such a file would be overwritten by a stale cached copy.
+    // Entries that another domain already digests stay out of the source
+    // domain so each stale reason keeps naming exactly one kind of change.
+    let covered_elsewhere = tests
+        .iter()
+        .chain(dependencies.iter())
+        .chain(configuration.iter())
+        .collect::<std::collections::BTreeSet<_>>();
     let source_paths = project
         .source_files
         .iter()
         .map(|path| root.join(path))
+        .chain(
+            project
+                .source_scope
+                .entries
+                .iter()
+                .map(|entry| root.join(&entry.file))
+                .filter(|path| !covered_elsewhere.contains(path)),
+        )
         .collect::<Vec<_>>();
-    let tests = test_files(root)?;
-    let dependencies = dependency_files(root)?;
-    let configuration = configuration_files(root, project)?;
     let source = digest_files(root, source_paths)?;
     let tests_digest = digest_files(root, tests.iter().cloned())?;
     let dependency_digest = digest_files(root, dependencies)?;

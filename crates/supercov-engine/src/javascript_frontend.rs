@@ -239,7 +239,7 @@ pub fn load_cached_javascript_frontend(
     Ok(PreparedJavascriptFrontend {
         manifest,
         manifest_path,
-        preload_path: generated.join("register.mjs"),
+        preload_path: generated.join("node_modules/register.mjs"),
         playwright_config_path: generated.join("playwright.config.mjs"),
         vite_config_path: generated.join("vite.config.mjs"),
         vitest_config_path: generated.join("vitest.config.mjs"),
@@ -249,9 +249,9 @@ pub fn load_cached_javascript_frontend(
 
 fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<String> {
     let mut artifacts = vec![
-        ".supercov/package.json".to_owned(),
-        ".supercov/applicationRuntime.js".to_owned(),
-        ".supercov/runtime.d.ts".to_owned(),
+        ".supercov/node_modules/package.json".to_owned(),
+        ".supercov/node_modules/applicationRuntime.js".to_owned(),
+        ".supercov/node_modules/runtime.d.ts".to_owned(),
         ".supercov/playwright.config.mjs".to_owned(),
         ".supercov/vite.config.mjs".to_owned(),
         ".supercov/vitest.config.mjs".to_owned(),
@@ -260,7 +260,15 @@ fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<S
         ".supercov/manifest.json".to_owned(),
         ".supercov/instrumentation-complete".to_owned(),
     ];
-    artifacts.extend(RUNTIME_FILES.iter().map(|name| format!(".supercov/{name}")));
+    artifacts.extend(
+        RUNTIME_FILES
+            .iter()
+            .map(|name| format!(".supercov/node_modules/{name}")),
+    );
+    // Scope entries outside the instrumented set may still be rewritten
+    // (assertion attribution, capability imports), so they are cached like
+    // instrumented sources. Both populations feed the cache key through the
+    // source digest -- nothing cached here escapes the fingerprint.
     artifacts.extend(project.source_files.iter().cloned());
     artifacts.extend(
         project
@@ -275,8 +283,8 @@ fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<S
         } else {
             Path::new(root)
         };
-        for name in ["runtime.js", "runtime.d.ts"] {
-            let path = host.join(".supercov").join(name);
+        for name in ["package.json", "runtime.js", "runtime.d.ts"] {
+            let path = host.join(".supercov/node_modules").join(name);
             if let Some(path) = path.to_str() {
                 artifacts.push(path.replace('\\', "/"));
             }
@@ -467,9 +475,9 @@ fn runtime_specifier(file: &str, name: &str) -> Result<String, JavascriptFronten
         .parent()
         .map_or(0, |parent| parent.components().count());
     Ok(if depth == 0 {
-        format!("./.supercov/{name}")
+        format!("./.supercov/node_modules/{name}")
     } else {
-        format!("{}.supercov/{name}", "../".repeat(depth))
+        format!("{}.supercov/node_modules/{name}", "../".repeat(depth))
     })
 }
 
@@ -656,11 +664,17 @@ fn generic_runtime_binding(
         .into_iter()
         .next()
         .unwrap_or_else(|| workspace.to_owned());
-    let runtime_directory = host.join(".supercov");
+    let runtime_directory = host.join(".supercov/node_modules");
     fs::create_dir_all(&runtime_directory)
         .map_err(|source| io_error(&runtime_directory, source))?;
+    // A bundler may externalize the node_modules import instead of compiling
+    // it, leaving Node to interpret the .js file at run time.
+    atomic_write(
+        &runtime_directory.join("package.json"),
+        b"{\"private\":true,\"type\":\"module\"}\n",
+    )?;
     for name in ["runtime.js", "runtime.d.ts"] {
-        let source = generated.join(name);
+        let source = generated.join("node_modules").join(name);
         let destination = runtime_directory.join(name);
         let contents = fs::read(&source).map_err(|error| io_error(&source, error))?;
         atomic_write(&destination, &contents)?;
@@ -673,9 +687,9 @@ fn generic_runtime_binding(
     })?;
     let depth = local.components().count();
     Ok(if depth == 0 {
-        "./.supercov/runtime.js".into()
+        "./.supercov/node_modules/runtime.js".into()
     } else {
-        format!("{}.supercov/runtime.js", "../".repeat(depth))
+        format!("{}.supercov/node_modules/runtime.js", "../".repeat(depth))
     })
 }
 
@@ -734,7 +748,7 @@ fn write_vitest_config(
          }};\n\
          const viteNamespace = await supercovLoadVite();\n\
          import {{ resolve }} from 'node:path';\n\
-         import SupercovVitestReporter from './vitestReporter.js';\n\
+         import SupercovVitestReporter from './node_modules/vitestReporter.js';\n\
          import {{ supercovViteInstrumentation }} from './viteInstrumentation.mjs';\n\
          const vite = viteNamespace.default ?? viteNamespace;\n\
          const {{ loadConfigFromFile, mergeConfig }} = vite;\n\
@@ -745,7 +759,7 @@ fn write_vitest_config(
            const config = mergeConfig(loaded?.config ?? {{}}, {{\n\
              cacheDir: resolve(process.cwd(), '.supercov/vitest-cache'),\n\
              plugins: [supercovViteInstrumentation(process.cwd())],\n\
-             test: {{ setupFiles: [resolve(process.cwd(), '.supercov/vitest.js')], maxConcurrency: 1 }},\n\
+             test: {{ setupFiles: [resolve(process.cwd(), '.supercov/node_modules/vitest.js')], maxConcurrency: 1 }},\n\
            }});\n\
            const configuredReporters = loaded?.config?.test?.reporters;\n\
            config.test ??= {{}};\n\
@@ -824,7 +838,7 @@ fn write_playwright_config(
         "const original = {};\n".into()
     };
     let source = format!(
-        "import './register.mjs';\n\
+        "import './node_modules/register.mjs';\n\
          import {{ dirname, isAbsolute, relative, resolve }} from 'node:path';\n\
          import {{ fileURLToPath }} from 'node:url';\n\
          {original_import}\
@@ -856,7 +870,7 @@ fn write_playwright_config(
          const reporters = configuredReporters\n\
            ? (typeof configuredReporters === 'string' ? [[configuredReporters]] : (Array.isArray(configuredReporters[0]) ? configuredReporters : [configuredReporters]))\n\
            : [['list']];\n\
-         const coverageReporter = resolve(runtimeProjectRoot, '.supercov/playwrightReporter.js');\n\
+         const coverageReporter = resolve(runtimeProjectRoot, '.supercov/node_modules/playwrightReporter.js');\n\
          export default {{ ...normalized, reporter: [...reporters, [coverageReporter]] }};\n",
         serde_json::to_string(
             &original
@@ -943,7 +957,7 @@ import { relative, resolve, sep } from 'node:path';\n\
 const transforms = JSON.parse(readFileSync(new URL('./vite-transforms.json', import.meta.url), 'utf8'));\n\
 const sha256 = value => createHash('sha256').update(value).digest('hex');\n\
 export function supercovViteInstrumentation(root) {\n\
-  const runtimePath = resolve(root, '.supercov/applicationRuntime.js');\n\
+  const runtimePath = resolve(root, '.supercov/node_modules/applicationRuntime.js');\n\
   return {\n\
     name: 'supercov-rust-instrumentation',\n\
     enforce: 'pre',\n\
@@ -974,8 +988,14 @@ pub fn prepare_javascript_frontend(
     cache_key: &str,
 ) -> Result<PreparedJavascriptFrontend, JavascriptFrontendError> {
     let generated = workspace.join(".supercov");
-    copy_runtime(&generated, collector_id)?;
-    configure_playwright_runtime(&generated, project)?;
+    // Runtime code files live under a node_modules segment: Node attributes
+    // stack frames from node_modules paths to dependency infrastructure, so
+    // deprecation warnings the user's own run would suppress (Node's
+    // isInsideNodeModules check) stay suppressed when Supercov's module
+    // hooks are on the call path.
+    let runtime_directory = generated.join("node_modules");
+    copy_runtime(&runtime_directory, collector_id)?;
+    configure_playwright_runtime(&runtime_directory, project)?;
     let playwright_config_path = write_playwright_config(workspace, project, &generated)?;
     let vite_config_path = write_vite_config(workspace, &generated)?;
     let vitest_config_path = write_vitest_config(workspace, project, &generated)?;
@@ -1148,7 +1168,7 @@ pub fn prepare_javascript_frontend(
     Ok(PreparedJavascriptFrontend {
         manifest,
         manifest_path,
-        preload_path: generated.join("register.mjs"),
+        preload_path: generated.join("node_modules/register.mjs"),
         playwright_config_path,
         vite_config_path,
         vitest_config_path,

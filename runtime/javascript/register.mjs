@@ -82,7 +82,7 @@ if (process.env.SUPERCOV_DURABLE_EVIDENCE_EACH_TEST === "1") {
 const workerThreads = Module._load("node:worker_threads", undefined, false);
 const NativeWorker = workerThreads.Worker;
 const registerArgument = `--import=${new URL("./register.mjs", import.meta.url).href}`;
-const appendRegister = values => values.some(value => value === registerArgument || value.includes("/.supercov/register.mjs"))
+const appendRegister = values => values.some(value => value === registerArgument || value.includes("/.supercov/node_modules/register.mjs"))
     ? values
     : [...values, registerArgument];
 workerThreads.Worker = class SupercovWorker extends NativeWorker {

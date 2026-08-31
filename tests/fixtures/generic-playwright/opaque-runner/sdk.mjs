@@ -18,7 +18,7 @@ OpaqueImageBuilder.build = async function build(options) {
             execute(argv, options) {
               if (options.environment.SUPERCOV_PROJECT_ROOT !== mount.target)
                 throw new Error("Pure ESM positional launch did not receive the translated root");
-              if (!options.environment.NODE_OPTIONS?.includes(`${mount.target}/.supercov/register.mjs`))
+              if (!options.environment.NODE_OPTIONS?.includes(`${mount.target}/.supercov/node_modules/register.mjs`))
                 throw new Error("Pure ESM positional launch did not receive the preload");
               return new Promise((resolve, reject) => {
                 const child = spawn(argv[0], argv.slice(1), {

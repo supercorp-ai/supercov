@@ -81,7 +81,10 @@ test("remote launch mapping is provider-neutral and scopes reusable snapshots", 
   });
   assert.equal(environment.SUPERCOV_PROJECT_ROOT, "/guest/workspace");
   assert.equal(environment.SUPERCOV_DURABLE_EVIDENCE_EACH_TEST, "1");
-  assert.match(environment.NODE_OPTIONS, /\/guest\/workspace\/\.supercov\/register\.mjs/);
+  assert.match(
+    environment.NODE_OPTIONS,
+    /\/guest\/workspace\/\.supercov\/node_modules\/register\.mjs/,
+  );
 });
 
 test("capability proxies preserve frozen constructor and export properties", () => {

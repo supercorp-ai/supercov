@@ -639,7 +639,7 @@ pub fn run_direct_javascript(
     );
     overrides.insert(
         "SUPERCOV_PLAYWRIGHT_WRAPPER".into(),
-        "./.supercov/playwright.js".into(),
+        "./.supercov/node_modules/playwright.js".into(),
     );
     if let Some(original) = project
         .playwright_config
