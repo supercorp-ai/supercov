@@ -652,6 +652,29 @@ fn copy_tree<Operations: WorkspaceOperations>(
         }
         let to = destination.join(&name);
         if metadata.file_type().is_dir() {
+            // Nested node_modules are entry-linked exactly like the root one:
+            // one symlink per package pointing at the original tree, instead of
+            // deep-copying tens of thousands of dependency files. On a real
+            // monorepo (many packages and examples, each with node_modules)
+            // the deep copy was 43-52 seconds of every run's startup.
+            // Dependencies are never instrumented, and the directory itself is
+            // real, so tools creating NEW entries (vite's .cache) write into
+            // the workspace -- the same semantics the root already has.
+            #[cfg(unix)]
+            if name_text == "node_modules" && !root_level {
+                fs::create_dir_all(&to).map_err(|error| io_error(&to, error))?;
+                let mut packages = fs::read_dir(&from)
+                    .map_err(|error| io_error(&from, error))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| io_error(&from, error))?;
+                packages.sort_by_key(fs::DirEntry::file_name);
+                for package in packages {
+                    let link_destination = to.join(package.file_name());
+                    create_link(&package.path(), &link_destination, false)
+                        .map_err(|error| io_error(&link_destination, error))?;
+                }
+                continue;
+            }
             copy_tree(&from, &to, roots, false, operations)?;
         } else if metadata.file_type().is_symlink() {
             let link = fs::read_link(&from).map_err(|error| io_error(&from, error))?;
@@ -1473,8 +1496,11 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn dangling_symlink_escaping_the_project_is_refused() {
+        // The escape check guards the MIRRORED source tree. node_modules (root
+        // and nested) are referenced by entry links to the user's originals
+        // instead, so the escaping fixture lives outside node_modules here.
         let root = project();
-        let nested = root.join("examples/app/node_modules");
+        let nested = root.join("examples/app/lib");
         fs::create_dir_all(&nested).unwrap();
         std::os::unix::fs::symlink("../../../../../outside-the-project/pkg", nested.join("pkg"))
             .unwrap();
