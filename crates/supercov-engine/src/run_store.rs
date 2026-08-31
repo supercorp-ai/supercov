@@ -589,6 +589,10 @@ pub fn compare_run_integrity(
             reasons: vec!["run predates integrity fingerprints".into()],
         };
     };
+    if std::env::var_os("SUPERCOV_DEBUG_INTEGRITY").is_some() {
+        eprintln!("[integrity] stored : {stored:?}");
+        eprintln!("[integrity] current: {current:?}");
+    }
     let mut reasons = Vec::new();
     if stored.schema_version != current.schema_version {
         reasons.push("coverage schema changed".into());

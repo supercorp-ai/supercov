@@ -764,9 +764,25 @@ fn link_node_modules<Operations: WorkspaceOperations>(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(io_error(&source, error)),
     };
-    if !source_metadata.file_type().is_dir() {
+    // pnpm setups routinely make the root node_modules itself a symlink into a
+    // store elsewhere. The mirror links each entry to its absolute target
+    // anyway, so following the root link loses no isolation -- refusing it
+    // forced one user to materialise a 3.7 GB tree by hand.
+    let source = if source_metadata.file_type().is_symlink() {
+        let resolved = fs::canonicalize(&source).map_err(|error| io_error(&source, error))?;
+        if !fs::symlink_metadata(&resolved)
+            .map_err(|error| io_error(&resolved, error))?
+            .file_type()
+            .is_dir()
+        {
+            return Err(WorkspaceError::UnsafePath(source));
+        }
+        resolved
+    } else if source_metadata.file_type().is_dir() {
+        source
+    } else {
         return Err(WorkspaceError::UnsafePath(source));
-    }
+    };
     let destination = workspace.join("node_modules");
     fs::create_dir_all(&destination).map_err(|error| io_error(&destination, error))?;
     let mut entries = fs::read_dir(&source)
@@ -1397,6 +1413,31 @@ mod tests {
         fs::write(root.join("src/index.js"), "one").unwrap();
         fs::write(root.join("package.json"), "{}").unwrap();
         root
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn root_node_modules_symlink_is_followed() {
+        // pnpm layouts often make the project's node_modules a symlink into an
+        // external store. Refusing it forced a 3.7 GB manual materialisation;
+        // entries are linked to absolute targets regardless, so following the
+        // root link is isolation-neutral.
+        let root = project();
+        let store = std::env::temp_dir().join(format!("supercov-store-{}", unique()));
+        fs::create_dir_all(store.join("left-pad")).unwrap();
+        fs::write(store.join("left-pad/package.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(&store, root.join("node_modules")).unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_isolated_workspace(&root, "run", &lock).unwrap();
+        assert!(
+            fs::symlink_metadata(workspace.join("node_modules/left-pad"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(store).unwrap();
     }
 
     #[test]
