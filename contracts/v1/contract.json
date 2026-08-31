@@ -37,10 +37,6 @@
       "UNKNOWN_COMMAND"
     ]
   },
-  "waivers": {
-    "schemaVersion": 1,
-    "file": "supercov.waivers.json"
-  },
   "processSupervision": {
     "schemaVersion": 1,
     "diagnosticIntervalMs": 60000,

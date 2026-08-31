@@ -12,10 +12,7 @@
     "schemaVersion": 1,
     "store": ".supercov",
     "workspaceStore": "supercov",
-    "publishedRunFiles": [
-      "run.json",
-      "evidence.raw.gz"
-    ]
+    "publishedRunFiles": ["run.json", "evidence.raw.gz"]
   },
   "agentJson": {
     "schemaVersion": 1,

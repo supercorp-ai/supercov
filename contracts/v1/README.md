@@ -12,13 +12,12 @@ behavior semantically authoritative: a conflict with ECMAScript semantics, an
 independent coverage oracle, or the stated coverage model is a bug to correct
 and version—not behavior Rust must preserve forever.
 
-The five normative surfaces are:
+The four normative surfaces are:
 
 1. [Evidence archive](evidence-archive.md)
 2. [Run store and lifecycle](run-store.md)
 3. [CLI and agent JSON](cli-json.md)
-4. [Reviewed waivers](waivers.md)
-5. [Process supervision](process-supervision.md)
+4. [Process supervision](process-supervision.md)
 
 `contract.json` is the machine-readable version registry. Markdown in this
 directory is normative where the registry does not express an invariant.
