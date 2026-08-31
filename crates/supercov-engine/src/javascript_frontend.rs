@@ -474,6 +474,11 @@ fn runtime_specifier(file: &str, name: &str) -> Result<String, JavascriptFronten
 }
 
 fn isolate_runtime(source: &str, collector_id: &str) -> Result<String, JavascriptFrontendError> {
+    // Generated runtime files sit inside the lint graph of bundlers that lint
+    // whatever they compile (Next.js does), so they must disarm host lint
+    // policy the same way the Rust runtime does with #[allow(warnings)].
+    let source = format!("/* eslint-disable */\n{source}");
+    let source = source.as_str();
     let double = format!("runtimeInstanceToken = \"{RUNTIME_INSTANCE_MARKER}\"");
     let single = format!("runtimeInstanceToken = '{RUNTIME_INSTANCE_MARKER}'");
     if let Some(index) = source.find(&double) {
@@ -548,7 +553,13 @@ fn copy_runtime(generated: &Path, collector_id: &str) -> Result<(), JavascriptFr
     }
     atomic_write(
         &generated.join("runtime.d.ts"),
-        b"export declare function coverageHit(...args: any[]): any;\n\
+        // Generated files must be immune to the HOST project's lint policy --
+        // the same rule the Rust runtime enforces with #[allow(warnings)].
+        // Next.js runs the project's eslint over the build graph, and
+        // @typescript-eslint/no-explicit-any turned every `any` below into a
+        // hard "Failed to compile" for a real monorepo.
+        b"/* eslint-disable */\n\
+export declare function coverageHit(...args: any[]): any;\n\
 export declare function selectionBegin(...args: any[]): any;\n\
 export declare function selectionRight(...args: any[]): any;\n\
 export declare function selectionEnd(...args: any[]): any;\n\
@@ -655,7 +666,28 @@ fn write_vitest_config(
         .map(|path| path.display().to_string());
     let original = serde_json::to_string(&original).map_err(JavascriptFrontendError::Serialize)?;
     let source = format!(
-        "import * as viteNamespace from 'vite';\n\
+        "import {{ createRequire }} from 'node:module';\n\
+         import {{ pathToFileURL }} from 'node:url';\n\
+         // pnpm's strict layout does not hoist vite to the project root: it\n\
+         // lives inside vitest's virtual store, so a bare 'vite' specifier\n\
+         // resolved from this generated file fails. Vitest depends on vite, so\n\
+         // fall back to resolving it through vitest's own tree rather than\n\
+         // requiring the project to hoist anything.\n\
+         const supercovRequire = createRequire(import.meta.url);\n\
+         const supercovLoadVite = async () => {{\n\
+           try {{\n\
+             return await import('vite');\n\
+           }} catch (error) {{\n\
+             let entry;\n\
+             try {{\n\
+               entry = createRequire(supercovRequire.resolve('vitest')).resolve('vite');\n\
+             }} catch {{\n\
+               throw error;\n\
+             }}\n\
+             return await import(pathToFileURL(entry).href);\n\
+           }}\n\
+         }};\n\
+         const viteNamespace = await supercovLoadVite();\n\
          import {{ resolve }} from 'node:path';\n\
          import SupercovVitestReporter from './vitestReporter.js';\n\
          import {{ supercovViteInstrumentation }} from './viteInstrumentation.mjs';\n\
@@ -803,7 +835,28 @@ fn write_vite_config(
     let workspace = serde_json::to_string(&workspace.display().to_string())
         .map_err(JavascriptFrontendError::Serialize)?;
     let source = format!(
-        "import * as viteNamespace from 'vite';\n\
+        "import {{ createRequire }} from 'node:module';\n\
+         import {{ pathToFileURL }} from 'node:url';\n\
+         // pnpm's strict layout does not hoist vite to the project root: it\n\
+         // lives inside vitest's virtual store, so a bare 'vite' specifier\n\
+         // resolved from this generated file fails. Vitest depends on vite, so\n\
+         // fall back to resolving it through vitest's own tree rather than\n\
+         // requiring the project to hoist anything.\n\
+         const supercovRequire = createRequire(import.meta.url);\n\
+         const supercovLoadVite = async () => {{\n\
+           try {{\n\
+             return await import('vite');\n\
+           }} catch (error) {{\n\
+             let entry;\n\
+             try {{\n\
+               entry = createRequire(supercovRequire.resolve('vitest')).resolve('vite');\n\
+             }} catch {{\n\
+               throw error;\n\
+             }}\n\
+             return await import(pathToFileURL(entry).href);\n\
+           }}\n\
+         }};\n\
+         const viteNamespace = await supercovLoadVite();\n\
          import {{ isAbsolute, relative, resolve }} from 'node:path';\n\
          import {{ supercovViteInstrumentation }} from './viteInstrumentation.mjs';\n\
          const vite = viteNamespace.default ?? viteNamespace;\n\
@@ -914,8 +967,13 @@ pub fn prepare_javascript_frontend(
                 path.extension().and_then(|value| value.to_str()),
                 Some("ts" | "tsx" | "mts" | "cts")
             ) {
+                // The disable line comes FIRST so the host's own
+                // ban-ts-comment rule cannot reject the @ts-nocheck below it:
+                // Next.js lints instrumented sources during `next build`, and a
+                // real monorepo failed on every route file. Generated and
+                // instrumented code is immune to host lint policy as a class.
                 output.code = format!(
-                    "// @ts-nocheck -- generated coverage workspace only\n{}",
+                    "/* eslint-disable */\n// @ts-nocheck -- generated coverage workspace only\n{}",
                     output.code
                 );
             }

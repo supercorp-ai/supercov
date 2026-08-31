@@ -430,6 +430,12 @@ fn environment_with(values: BTreeMap<String, String>) -> Vec<(OsString, OsString
 }
 
 fn node_options(preload: &Path) -> String {
+    // The register import must be ABSOLUTE: node resolves a relative
+    // `--import` against each child process's OWN working directory, and
+    // monorepo runners spawn tasks inside package directories. turbo running
+    // `packages/react#build` resolved `.supercov/register.mjs` against
+    // `packages/react/` and aborted every task with ERR_MODULE_NOT_FOUND.
+    let preload = std::path::absolute(preload).unwrap_or_else(|_| preload.to_path_buf());
     [
         std::env::var("NODE_OPTIONS").ok(),
         Some("--enable-source-maps".into()),

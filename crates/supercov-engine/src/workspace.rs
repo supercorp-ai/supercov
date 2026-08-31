@@ -666,11 +666,23 @@ fn copy_tree<Operations: WorkspaceOperations>(
                     target: link.clone(),
                 }
             })?;
-            let canonical_target =
-                fs::canonicalize(&from).map_err(|error| io_error(&from, error))?;
-            if !inside(roots.source, &lexical_target)
-                || !inside(roots.canonical_source, &canonical_target)
-            {
+            // A dangling symlink is a fact of the user's tree that their own
+            // tooling tolerates: npm and pnpm workspaces routinely leave links
+            // to packages that are not installed, and plain `npm test` never
+            // resolves them. Refusing to mirror the project over one broke a
+            // real monorepo on first touch. It resolves to nothing, so it can
+            // leak nothing; the LEXICAL containment check still applies, and
+            // the link is preserved as-is so the workspace matches the source.
+            let canonical_target = match fs::canonicalize(&from) {
+                Ok(target) => Some(target),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => return Err(io_error(&from, error)),
+            };
+            let escapes = !inside(roots.source, &lexical_target)
+                || canonical_target
+                    .as_deref()
+                    .is_some_and(|target| !inside(roots.canonical_source, target));
+            if escapes {
                 return Err(WorkspaceError::EscapingLink {
                     path: from,
                     target: link,
@@ -680,6 +692,21 @@ fn copy_tree<Operations: WorkspaceOperations>(
                 .strip_prefix(roots.source)
                 .map_err(|_| WorkspaceError::UnsafePath(lexical_target.clone()))?;
             let relocated = roots.destination.join(local_target);
+            let Some(canonical_target) = canonical_target else {
+                if cfg!(windows) {
+                    // Windows link creation needs the target's type, which a
+                    // dangling link cannot provide; the entry resolves to
+                    // nothing either way.
+                    continue;
+                }
+                let isolated_link = if link.is_absolute() {
+                    pathdiff(&to, &relocated)?
+                } else {
+                    link
+                };
+                create_link(&isolated_link, &to, false).map_err(|error| io_error(&to, error))?;
+                continue;
+            };
             let target_metadata = fs::metadata(&canonical_target)
                 .map_err(|error| io_error(&canonical_target, error))?;
             let isolated_link = if cfg!(windows) && target_metadata.is_dir() {
@@ -1370,6 +1397,51 @@ mod tests {
         fs::write(root.join("src/index.js"), "one").unwrap();
         fs::write(root.join("package.json"), "{}").unwrap();
         root
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dangling_symlinks_are_preserved_and_escaping_ones_still_refused() {
+        // npm and pnpm workspaces routinely leave symlinks to packages that
+        // are not installed. superinterface's examples/*/node_modules carried
+        // one, plain `npm test` never resolves it, and the mirror died on
+        // `canonicalize` with ENOENT before any test ran. A dangling link
+        // resolves to nothing, so it can leak nothing: it is preserved as-is,
+        // while the lexical containment check still applies.
+        let root = project();
+        let nested = root.join("examples/app/node_modules/@scope");
+        fs::create_dir_all(&nested).unwrap();
+        std::os::unix::fs::symlink(
+            "../../../../packages/react/node_modules/@scope/pkg",
+            nested.join("pkg"),
+        )
+        .unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_isolated_workspace(&root, "run", &lock).unwrap();
+        let mirrored = workspace.join("examples/app/node_modules/@scope/pkg");
+        let metadata = fs::symlink_metadata(&mirrored).unwrap();
+        assert!(metadata.file_type().is_symlink());
+        assert_eq!(
+            fs::read_link(&mirrored).unwrap(),
+            PathBuf::from("../../../../packages/react/node_modules/@scope/pkg")
+        );
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn dangling_symlink_escaping_the_project_is_refused() {
+        let root = project();
+        let nested = root.join("examples/app/node_modules");
+        fs::create_dir_all(&nested).unwrap();
+        std::os::unix::fs::symlink("../../../../../outside-the-project/pkg", nested.join("pkg"))
+            .unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let result = prepare_isolated_workspace(&root, "run", &lock);
+        assert!(matches!(result, Err(WorkspaceError::EscapingLink { .. })));
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

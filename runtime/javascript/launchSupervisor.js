@@ -546,7 +546,14 @@ function injectChildEnvironment(method, args) {
     const environment = existingEnvironment
         ? { ...existingEnvironment, ...inherited }
         : { ...process.env, ...inherited };
-    environment.NODE_OPTIONS = appendNodeImport(existingEnvironment?.NODE_OPTIONS ?? process.env.NODE_OPTIONS, pathToFileURL(resolve(process.env["SUPERCOV_PROJECT_ROOT"] ?? process.cwd(), ".supercov/register.mjs")).href);
+    // The register path must come from THIS module's own location, never from
+    // the environment or the working directory. Monorepo runners both defeat
+    // the old derivation at once: turbo's strict env strips SUPERCOV_PROJECT_ROOT
+    // from task children, and it runs each task with cwd inside the package --
+    // so the fallback fabricated packages/<name>/.supercov/register.mjs and
+    // every task aborted with ERR_MODULE_NOT_FOUND. launchSupervisor.js is
+    // generated into the same .supercov directory as register.mjs.
+    environment.NODE_OPTIONS = appendNodeImport(existingEnvironment?.NODE_OPTIONS ?? process.env.NODE_OPTIONS, new URL("./register.mjs", import.meta.url).href);
     next[index] = { ...options, env: environment };
     if (typeof original === "function")
         next.splice(index + 1, 0, original);
