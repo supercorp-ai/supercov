@@ -82,7 +82,10 @@ pub fn render_rust_runtime(module_name: &str, crate_key: &str) -> Result<String,
     Ok(format!(
         r#"
 #[doc(hidden)]
-#[allow(dead_code)]
+// Injected code must be immune to the HOST crate's lint configuration: serde
+// builds with `#![deny(warnings)]`, so this module's fully-qualified imports
+// (required for no_std hosts) became hard errors as "unused imports".
+#[allow(warnings)]
 mod {module_name} {{
     // The host crate may be `#![no_std]` -- `bytes` is, and so is much of the
     // ecosystem's foundation. Nothing here can rely on the std prelude being in
@@ -777,6 +780,51 @@ fn main() {
             [(vec![Some(false)], false), (vec![Some(true)], true)],
             "both distinct vectors must survive, and neither may repeat"
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn generated_runtime_survives_a_deny_warnings_host() {
+        // serde builds with `#![deny(warnings)]`; the injected module's
+        // fully-qualified imports (required for no_std hosts) read as unused
+        // imports and became hard errors. Injected code must be immune to the
+        // host's lint policy.
+        let source = r#"#![deny(warnings)]
+
+fn choose(first: bool, second: bool) -> i32 {
+    if first && second { 7 } else { 3 }
+}
+
+fn main() {
+    println!("{} {}", choose(false, true), choose(true, true));
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        let runtime =
+            render_rust_runtime("__supercov_runtime_v1", "0123456789abcdef01234567").unwrap();
+        let directory = temporary_directory("deny-warnings");
+        let input = directory.join("main.rs");
+        let binary = directory.join("program");
+        fs::write(&input, format!("{}\n{runtime}", transformed.code)).unwrap();
+        // --cap-lints=warn mirrors what the runner passes for the instrumented
+        // workspace: the host policy must not reject generated code, including
+        // the `if ({{ frame ... }})` decision wrapping that trips unused_parens.
+        let compile = Command::new("rustc")
+            .arg("--edition=2024")
+            .arg("--cap-lints=warn")
+            .arg(&input)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compile.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let output = Command::new(&binary).output().unwrap();
+        assert_eq!(output.stdout, b"3 7\n");
         fs::remove_dir_all(directory).unwrap();
     }
 

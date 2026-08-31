@@ -830,22 +830,68 @@ pub fn instrument_rust_source(
         .map(|token| token.text().to_string())
         .collect::<BTreeSet<_>>();
 
+    let mut skipped_attributed_statement = false;
+    // A probe must never be PREPENDED to a statement that carries outer
+    // attributes. `#[cfg]` selects among adjacent statements, and a bare
+    // `hit(...)` inserted between them survives the strip and changes which
+    // expression is the block's tail: memchr's `is_available` returns bool
+    // from one of two cfg-gated blocks, and the stray probe turned the kept
+    // block into a statement and the probe itself into a `()` tail -- 32
+    // E0308s across the crate. An attributed BLOCK takes the probe inside its
+    // braces, where the same cfg governs both; any other attributed statement
+    // is skipped and declared, mirroring the let-chain limitation.
+    let attributed_probe = |insertions: &mut Vec<Insertion>,
+                            skipped: &mut bool,
+                            expression: Option<ast::Expr>,
+                            has_attrs: bool,
+                            range: TextRange,
+                            id: String| {
+        if !has_attrs {
+            push_direct(
+                insertions,
+                usize::from(range.start()),
+                format!("{runtime_path}::hit({id:?});"),
+            );
+            return;
+        }
+        if let Some(ast::Expr::BlockExpr(block)) = expression
+            && let Some(offset) = block_entry_offset(&block)
+        {
+            push_direct(
+                insertions,
+                offset,
+                format!("\n{runtime_path}::hit({id:?});"),
+            );
+            return;
+        }
+        *skipped = true;
+    };
     for list in root.descendants().filter_map(ast::StmtList::cast) {
         for statement in list.statements() {
-            let range = match statement {
+            let (range, expression, has_attrs) = match statement {
                 ast::Stmt::ExprStmt(statement) if !cannot_carry_probe(statement.syntax()) => {
-                    statement.syntax().text_range()
+                    let expression = statement.expr();
+                    // Outer attributes on an expression statement attach to
+                    // the inner expression in this grammar.
+                    let has_attrs = expression
+                        .as_ref()
+                        .is_some_and(|expression| expression.attrs().next().is_some());
+                    (statement.syntax().text_range(), expression, has_attrs)
                 }
                 ast::Stmt::LetStmt(statement) if !cannot_carry_probe(statement.syntax()) => {
-                    statement.syntax().text_range()
+                    let has_attrs = statement.attrs().next().is_some();
+                    (statement.syntax().text_range(), None, has_attrs)
                 }
                 _ => continue,
             };
             let id = stable_id(file, "statement", range, "");
-            push_direct(
+            attributed_probe(
                 &mut insertions,
-                usize::from(range.start()),
-                format!("{runtime_path}::hit({id:?});"),
+                &mut skipped_attributed_statement,
+                expression,
+                has_attrs,
+                range,
+                id,
             );
         }
         if let Some(tail) = list
@@ -854,10 +900,14 @@ pub fn instrument_rust_source(
         {
             let range = tail.syntax().text_range();
             let id = stable_id(file, "statement", range, "");
-            push_direct(
+            let has_attrs = tail.attrs().next().is_some();
+            attributed_probe(
                 &mut insertions,
-                usize::from(range.start()),
-                format!("{runtime_path}::hit({id:?});"),
+                &mut skipped_attributed_statement,
+                Some(tail),
+                has_attrs,
+                range,
+                id,
             );
         }
     }
@@ -969,6 +1019,14 @@ pub fn instrument_rust_source(
         }
     }
 
+    if skipped_attributed_statement {
+        add_manifest_limitation(
+            &mut manifest,
+            file,
+            "rust-attributed-statement-probes-not-injected",
+            "Statements carrying outer attributes cannot take an adjacent probe without changing cfg selection",
+        );
+    }
     if skipped_let_condition {
         add_manifest_limitation(
             &mut manifest,
@@ -1381,6 +1439,77 @@ pub fn double(value: usize) -> usize {
         assert!(!manifest.limitations.iter().any(|limitation| {
             limitation.get("id").and_then(|id| id.as_str()) == Some("rust-doctests-not-measured")
         }));
+    }
+
+    #[test]
+    fn cfg_gated_sibling_blocks_keep_their_tail_position() {
+        // memchr's is_available returns bool from one of two cfg-gated blocks.
+        // A probe PREPENDED to the second block sits between the siblings,
+        // survives the cfg strip, and becomes the new `()` tail -- 32 E0308s
+        // across the crate. Attributed blocks take the probe inside their
+        // braces instead, where the same cfg governs both.
+        let source = r#"pub fn is_available() -> bool {
+    #[cfg(target_endian = "little")]
+    {
+        true
+    }
+    #[cfg(not(target_endian = "little"))]
+    {
+        false
+    }
+}
+
+fn main() {
+    println!("{}", is_available());
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        let original = compile_and_run(source, "cfg-original");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "cfg-instrumented",
+        );
+        assert_eq!(instrumented.status, original.status);
+        assert_eq!(instrumented.stdout, original.stdout);
+        // The kept block is still probed -- inside its braces.
+        assert!(
+            transformed
+                .code
+                .contains("{\n\ncrate::__supercov_runtime_v1::hit(")
+                || transformed
+                    .code
+                    .contains("{\ncrate::__supercov_runtime_v1::hit(")
+        );
+
+        // An attributed non-block statement is skipped and declared.
+        let attributed_let = r#"fn main() {
+    #[cfg(target_endian = "little")]
+    let value = 1;
+    #[cfg(not(target_endian = "little"))]
+    let value = 2;
+    println!("{value}");
+}
+"#;
+        let transformed = instrument_rust_source(
+            "src/main.rs",
+            attributed_let,
+            "crate::__supercov_runtime_v1",
+        )
+        .unwrap();
+        let ids = transformed
+            .manifest
+            .limitations
+            .iter()
+            .filter_map(|limitation| limitation.get("id")?.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(ids.contains("rust-attributed-statement-probes-not-injected"));
+        let original = compile_and_run(attributed_let, "cfg-let-original");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "cfg-let-instrumented",
+        );
+        assert_eq!(instrumented.stdout, original.stdout);
     }
 
     #[test]

@@ -889,10 +889,22 @@ fn build_test_artifacts(
     invocation
         .arguments
         .extend(["--no-run".into(), "--message-format=json".into()]);
+    // The instrumented workspace is ephemeral and its sources are generated,
+    // so the HOST crate's lint policy must not reject them: serde builds with
+    // `#![deny(warnings)]`, and http's `if ({ frame ... })` decision wrapping
+    // trips `unused_parens` into a hard error under it. Capping lints to warn
+    // changes nothing about the user's own `cargo test` runs. The user's
+    // RUSTFLAGS are preserved ahead of the cap.
+    let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
+    if !rustflags.is_empty() {
+        rustflags.push(' ');
+    }
+    rustflags.push_str("--cap-lints=warn");
     let output = Command::new(&invocation.program)
         .args(invocation.arguments)
         .current_dir(&project.workspace_root)
         .env("CARGO_TARGET_DIR", &project.target_directory)
+        .env("RUSTFLAGS", rustflags)
         .output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !output.status.success() {
