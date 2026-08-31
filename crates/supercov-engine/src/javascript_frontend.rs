@@ -500,6 +500,51 @@ fn isolate_runtime(source: &str, collector_id: &str) -> Result<String, Javascrip
     Err(JavascriptFrontendError::MissingRuntimeMarker)
 }
 
+/// Inline `map` into `code` as a data-URL source map whose single source is the
+/// ORIGINAL project file, with the original text embedded.
+///
+/// The instrumented file may have banner lines prepended AFTER the map was
+/// computed (`/* eslint-disable */` and `@ts-nocheck`); VLQ mappings are
+/// generated-line-relative with one `;` per line, so the map is shifted by
+/// prefixing one semicolon per banner line rather than re-encoding tokens.
+fn inline_instrumentation_map(
+    code: &str,
+    map: Option<&serde_json::Value>,
+    original_path: &Path,
+    original_source: &str,
+) -> Option<String> {
+    let map = map?.clone();
+    let mut map = map;
+    let object = map.as_object_mut()?;
+    let banner_lines = code
+        .lines()
+        .take_while(|line| {
+            line.starts_with("/* eslint-disable */") || line.starts_with("// @ts-nocheck")
+        })
+        .count();
+    if banner_lines > 0 {
+        let mappings = object.get("mappings")?.as_str()?.to_owned();
+        object.insert(
+            "mappings".into(),
+            serde_json::Value::String(format!("{}{}", ";".repeat(banner_lines), mappings)),
+        );
+    }
+    object.insert(
+        "sources".into(),
+        serde_json::json!([original_path.display().to_string()]),
+    );
+    object.insert(
+        "sourcesContent".into(),
+        serde_json::json!([original_source]),
+    );
+    let payload = serde_json::to_string(&map).ok()?;
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
+    Some(format!(
+        "{code}\n//# sourceMappingURL=data:application/json;base64,{encoded}\n"
+    ))
+}
+
 /// Target-language shims are embedded in the Rust engine. Keeping a trailing
 /// source-map directive would make Node and browser tooling look for source
 /// maps that intentionally are not part of the runtime distribution.
@@ -988,7 +1033,22 @@ pub fn prepare_javascript_frontend(
                 },
             );
         } else {
-            atomic_write(&path, output.code.as_bytes())?;
+            // Attach the instrumentation source map inline, pointed at the
+            // ORIGINAL project file with the original text embedded. Node runs
+            // with --enable-source-maps, and tsx/esbuild chain input maps, so
+            // stack traces show the user's real path and line numbers instead
+            // of instrumented workspace positions -- Supercov stays invisible
+            // in errors. Without this the map was generated and then dropped.
+            let code = match inline_instrumentation_map(
+                &output.code,
+                output.map.as_ref(),
+                &project.root.join(file),
+                &source,
+            ) {
+                Some(code) => code,
+                None => output.code.clone(),
+            };
+            atomic_write(&path, code.as_bytes())?;
         }
         for value in output.decisions {
             decisions.insert(value.id.clone(), value);
