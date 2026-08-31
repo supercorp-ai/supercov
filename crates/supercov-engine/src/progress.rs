@@ -1,9 +1,10 @@
-//! A branded spinner on stderr while a long, otherwise-silent step runs.
+//! A single branded status line on stderr while a long, otherwise-silent
+//! step runs.
 //!
-//! The frames grow from a dot into the Supercov mark and back (the "bloom").
-//! It is silent unless stderr is an interactive terminal, and for the first
-//! frame interval of fast steps, so agents, pipes, and quick commands never
-//! see it. The owner must drop it before writing any other output.
+//! After one short delay the line `❋ message…` appears once — no animation,
+//! no redrawing — so agents, CI logs, and quick commands never see churn,
+//! and fast steps see nothing at all. It only appears when stderr is an
+//! interactive terminal. The owner must drop it before writing other output.
 
 use std::{
     io::{IsTerminal, Write},
@@ -15,30 +16,19 @@ use std::{
     time::Duration,
 };
 
-const FRAMES: [&str; 6] = ["·", "✻", "✽", "❋", "✽", "✻"];
-const FRAME_INTERVAL: Duration = Duration::from_millis(120);
+/// How long a step must run before the status line appears.
+const QUIET_PERIOD: Duration = Duration::from_millis(120);
 
-/// Carriage-return animation is only safe on a terminal a person is watching.
-/// CI systems and dumb terminals record every write, turning each frame into
-/// its own log line, so there the spinner degrades to one stable, newline-
-/// terminated line that still names what is happening.
-enum Mode {
-    Animated,
-    StaticLine,
-}
-
-fn mode() -> Option<Mode> {
-    if !std::io::stderr().is_terminal() {
-        return None;
-    }
-    let term = std::env::var("TERM").unwrap_or_default();
-    let ci = std::env::var("CI").is_ok_and(|value| {
-        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-    });
-    if ci || term.is_empty() || term == "dumb" {
-        return Some(Mode::StaticLine);
-    }
-    Some(Mode::Animated)
+/// The run holds std's locked stderr as its diagnostics writer, so this
+/// thread must never take that lock: an `eprintln!` here deadlocks against
+/// it, and joining the thread then hangs the run — the field case was a real
+/// project's first slow workspace phase on a TTY. The line goes straight to
+/// a duplicate of the descriptor instead.
+#[cfg(unix)]
+fn status_output() -> Option<std::fs::File> {
+    use std::os::fd::FromRawFd;
+    let descriptor = unsafe { libc::dup(2) };
+    (descriptor >= 0).then(|| unsafe { std::fs::File::from_raw_fd(descriptor) })
 }
 
 pub struct ProgressLine {
@@ -48,39 +38,35 @@ pub struct ProgressLine {
 
 impl ProgressLine {
     pub fn start(message: &'static str) -> Option<Self> {
-        let mode = mode()?;
+        if cfg!(not(unix)) || !std::io::stderr().is_terminal() {
+            return None;
+        }
+        Self::start_on_terminal(message)
+    }
+
+    #[cfg(unix)]
+    fn start_on_terminal(message: &'static str) -> Option<Self> {
+        let mut output = status_output()?;
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
-            // Nothing is shown for the first interval, so fast steps stay
-            // clean in every mode.
-            std::thread::sleep(FRAME_INTERVAL);
+            std::thread::sleep(QUIET_PERIOD);
             if flag.load(Ordering::Relaxed) {
                 return;
             }
-            if matches!(mode, Mode::StaticLine) {
-                eprintln!("❋ {message}");
-                return;
-            }
-            let mut frame = 0_usize;
-            loop {
-                eprint!("\r{} {message}", FRAMES[frame % FRAMES.len()]);
-                let _ = std::io::stderr().flush();
-                frame += 1;
-                std::thread::sleep(FRAME_INTERVAL);
-                if flag.load(Ordering::Relaxed) {
-                    break;
-                }
-            }
-            // The widest frame is three bytes but one column; clearing by
-            // character count over-clears harmlessly.
-            eprint!("\r{}\r", " ".repeat(message.len() + 2));
-            let _ = std::io::stderr().flush();
+            let _ = writeln!(output, "❋ {message}…");
         });
         Some(Self {
             stop,
             handle: Some(handle),
         })
+    }
+
+    #[cfg(not(unix))]
+    fn start_on_terminal(_message: &'static str) -> Option<Self> {
+        // Only unix has the lock-free descriptor path; other platforms stay
+        // silent rather than risk the diagnostics writer's stderr lock.
+        None
     }
 }
 
@@ -90,5 +76,33 @@ impl Drop for ProgressLine {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// The regression that shipped in 0.0.22: the run holds std's stderr
+    /// lock as its diagnostics writer for the whole run, the status thread
+    /// blocked on that lock via `eprint!`, and `Drop`'s join then hung the
+    /// process. The status line must start, write, and drop to completion
+    /// while the calling thread holds std's stderr lock.
+    #[test]
+    fn status_line_never_needs_stds_stderr_lock() {
+        let diagnostics = std::io::stderr().lock();
+        let line = ProgressLine::start_on_terminal("proving the status line stays lock-free");
+        std::thread::sleep(QUIET_PERIOD * 2);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            drop(line);
+            let _ = sender.send(());
+        });
+        let dropped = receiver.recv_timeout(Duration::from_secs(10));
+        drop(diagnostics);
+        assert!(
+            dropped.is_ok(),
+            "dropping the status line deadlocked against std's stderr lock"
+        );
     }
 }
