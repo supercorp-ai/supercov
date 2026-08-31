@@ -5431,6 +5431,113 @@ try {
   const observedOrdinals = new Set(
     behaviorEvidence.ordinals.map(({ordinal}) => ordinal),
   );
+
+  // #24 execution differential: rustc's own LLVM counters are an independent
+  // whole-run oracle for the same behavior binary. Any line supercov reports
+  // covered that the oracle reports unexecuted is a misbind -- confident
+  // wrong numbers, the failure mode the structural post-conditions guard.
+  // The oracle's executed-line set is derived generously (whole segment
+  // spans), so it can only weaken the check, never false-positive it.
+  const llvmDirectory = join(scratch, 'misbind-differential');
+  mkdirSync(llvmDirectory, {recursive: true});
+  const llvmProfile = join(llvmDirectory, 'behavior.profraw');
+  run('cargo', ['run', '--quiet', '--manifest-path', fixture, '--bin', 'behavior'], {
+    env: {
+      ...process.env,
+      RUSTFLAGS: '-C instrument-coverage',
+      LLVM_PROFILE_FILE: llvmProfile,
+      CARGO_TARGET_DIR: join(llvmDirectory, 'target'),
+    },
+  });
+  const oracleRustc = run('rustup', ['which', 'rustc']).stdout.trim();
+  const oracleSysroot = run(oracleRustc, ['--print', 'sysroot']).stdout.trim();
+  const llvmToolDirectories = readdirSync(join(oracleSysroot, 'lib/rustlib'))
+    .map((entry) => join(oracleSysroot, 'lib/rustlib', entry, 'bin'))
+    .filter((directory) => existsSync(join(directory, 'llvm-profdata')));
+  assert.equal(llvmToolDirectories.length, 1, 'expected one llvm-tools directory');
+  const [llvmBin] = llvmToolDirectories;
+  const llvmProfdata = join(llvmDirectory, 'behavior.profdata');
+  run(join(llvmBin, 'llvm-profdata'), ['merge', '-sparse', llvmProfile, '-o', llvmProfdata]);
+  const llvmExport = JSON.parse(
+    run(join(llvmBin, 'llvm-cov'), [
+      'export',
+      '--instr-profile',
+      llvmProfdata,
+      join(llvmDirectory, 'target/debug/behavior'),
+      '-format=text',
+    ]).stdout,
+  );
+  const oracleFile = llvmExport.data[0].files.find((file) =>
+    file.filename.endsWith('/fixture/src/lib.rs'),
+  );
+  assert(oracleFile, 'oracle export is missing the fixture library');
+  // A line the oracle never mapped is oracle silence, not disagreement:
+  // rustc's coverage pass skips whole functions (`#[automatically_derived]`
+  // impls, for one), leaving their lines without any counted segment. The
+  // differential's valid claim is only where both models speak: a fired
+  // obligation on a line the oracle mapped must be executed there too.
+  const oracleExecuted = new Set();
+  const oracleMapped = new Set();
+  const {segments} = oracleFile;
+  for (let index = 0; index + 1 < segments.length; index += 1) {
+    const [line, , count, hasCount] = segments[index];
+    const [nextLine] = segments[index + 1];
+    if (!hasCount) continue;
+    for (let mapped = line; mapped <= nextLine; mapped += 1) {
+      oracleMapped.add(mapped);
+      if (count > 0) oracleExecuted.add(mapped);
+    }
+  }
+  const differentialLineStarts = new Map();
+  const lineOfOffset = (sourceKey, offset) => {
+    let starts = differentialLineStarts.get(sourceKey);
+    if (!starts) {
+      const source = runtimeSources[sourceKey];
+      assert(source, `missing source snapshot ${sourceKey}`);
+      const bytes = Buffer.from(source.source, 'utf8');
+      starts = [0];
+      for (let index = 0; index < bytes.length; index += 1) {
+        if (bytes[index] === 10) starts.push(index + 1);
+      }
+      differentialLineStarts.set(sourceKey, starts);
+    }
+    let low = 0;
+    let high = starts.length - 1;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (starts[mid] <= offset) low = mid;
+      else high = mid - 1;
+    }
+    return low + 1;
+  };
+  let differentialChecked = 0;
+  for (const obligation of [
+    ...runtimeManifest.points,
+    ...runtimeManifest.branches,
+    ...runtimeManifest.decisions,
+  ]) {
+    if (obligation.sourceKey !== 'source:src/lib.rs') continue;
+    // Macro-expanded obligations are attributed to the authored callsite by
+    // design (#22); llvm-cov leaves generated bodies unattributed, so the two
+    // models legitimately diverge there. The oracle applies to source-exact
+    // obligations only.
+    if (obligation.provenance !== 'authored-source') continue;
+    if (!observedOrdinals.has(obligation.probeOrdinal)) continue;
+    const line = lineOfOffset(obligation.sourceKey, obligation.start);
+    if (!oracleMapped.has(line)) continue;
+    assert(
+      oracleExecuted.has(line),
+      `misbind differential: supercov reports ${obligation.id} covered at src/lib.rs:${line}, but the LLVM oracle reports the line unexecuted`,
+    );
+    differentialChecked += 1;
+  }
+  assert(
+    differentialChecked > 100,
+    `misbind differential compared only ${differentialChecked} fired obligations; the oracle join is broken`,
+  );
+  console.log(
+    `[rustc-backend-spike] misbind differential: ${differentialChecked} fired obligations agree with the LLVM oracle`,
+  );
   const previouslyProvenOrdinals = new Set([
       authoredProbe,
       fallibleProbe,
