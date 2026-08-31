@@ -874,38 +874,12 @@ fn write_playwright_config(
            }}\n\
            throw new Error('Supercov refuses a Playwright output/cwd outside the isolated project: ' + absolute);\n\
          }};\n\
-         // Instrumented code runs slower, and latency-sensitive suites fail\n\
-         // falsely when an unchanged app misses an unchanged deadline only\n\
-         // because measurement is present. Scale the suite's declared time\n\
-         // budgets (including Playwright's implicit defaults) so a timeout\n\
-         // still means the app is stuck, not that coverage is on. Per-call\n\
-         // timeouts written inside a test cannot be reached from here.\n\
-         const timeoutScale = (() => {{\n\
-           const raw = Number(process.env.SUPERCOV_PLAYWRIGHT_TIMEOUT_SCALE ?? '3');\n\
-           return Number.isFinite(raw) && raw > 0 ? raw : 3;\n\
-         }})();\n\
-         if (timeoutScale !== 1 && !process.env.SUPERCOV_TIMEOUT_SCALE_ANNOUNCED) {{\n\
-           process.env.SUPERCOV_TIMEOUT_SCALE_ANNOUNCED = '1';\n\
-           console.error(`[supercov] Playwright time budgets scaled ×${{timeoutScale}} for instrumented execution (SUPERCOV_PLAYWRIGHT_TIMEOUT_SCALE=1 disables)`);\n\
-         }}\n\
-         const scaleTimeout = (value, fallback) => {{\n\
-           const base = value ?? fallback;\n\
-           return typeof base === 'number' && base > 0 ? Math.round(base * timeoutScale) : base;\n\
-         }};\n\
-         const scaleUse = use => use\n\
-           ? {{ ...use,\n\
-               ...(use.actionTimeout ? {{ actionTimeout: scaleTimeout(use.actionTimeout) }} : {{}}),\n\
-               ...(use.navigationTimeout ? {{ navigationTimeout: scaleTimeout(use.navigationTimeout) }} : {{}}) }}\n\
-           : use;\n\
-         const normalizeWebServer = server => server ? ({{ ...server, cwd: runtimePath(server.cwd ?? originalDirectory), timeout: scaleTimeout(server.timeout, 60000) }}) : server;\n\
+         const normalizeWebServer = server => server ? ({{ ...server, cwd: runtimePath(server.cwd ?? originalDirectory) }}) : server;\n\
          const normalized = {{ ...resolved,\n\
            testDir: runtimePath(resolved.testDir),\n\
            outputDir: runtimePath(resolved.outputDir),\n\
            snapshotDir: runtimePath(resolved.snapshotDir),\n\
-           timeout: scaleTimeout(resolved.timeout, 30000),\n\
-           expect: {{ ...(resolved.expect ?? {{}}), timeout: scaleTimeout(resolved.expect?.timeout, 5000) }},\n\
-           use: scaleUse(resolved.use),\n\
-           projects: resolved.projects?.map(project => ({{ ...project, testDir: runtimePath(project.testDir), outputDir: runtimePath(project.outputDir), snapshotDir: runtimePath(project.snapshotDir), timeout: scaleTimeout(project.timeout), expect: project.expect ? {{ ...project.expect, timeout: scaleTimeout(project.expect.timeout) }} : project.expect, use: scaleUse(project.use) }})),\n\
+           projects: resolved.projects?.map(project => ({{ ...project, testDir: runtimePath(project.testDir), outputDir: runtimePath(project.outputDir), snapshotDir: runtimePath(project.snapshotDir) }})),\n\
            webServer: Array.isArray(resolved.webServer) ? resolved.webServer.map(normalizeWebServer) : normalizeWebServer(resolved.webServer),\n\
          }};\n\
          const configuredReporters = normalized.reporter;\n\
