@@ -163,14 +163,51 @@ function wrappedRegistration(original) {
     }
     return wrapped;
 }
+// Hooks carry no coverage evidence, but an error thrown inside one still
+// reaches the report with the adapter's execution context in its stack.
+// Restore it at the same boundary the test wrapper uses.
+function restoringHook(original) {
+    return function supercovNodeTestHook(...args) {
+        const index = callbackIndex(args);
+        if (index < 0)
+            return Reflect.apply(original, this, args);
+        const callback = args[index];
+        const next = [...args];
+        // node:test uses callback arity to distinguish promise/synchronous
+        // hooks from the legacy done-callback form. Preserve it exactly.
+        next[index] = callback.length >= 2
+            ? function supercovNodeTestHookDoneCallback(context, done) {
+                const restoringDone = (error) => {
+                    if (error)
+                        restoreUserError(error);
+                    done?.(error);
+                };
+                return callback.call(this, context, restoringDone);
+            }
+            : function supercovNodeTestHookCallback(context) {
+                try {
+                    const result = callback.call(this, context);
+                    if (result && typeof result.then === "function")
+                        return Promise.resolve(result).then(undefined, (error) => {
+                            throw restoreUserError(error);
+                        });
+                    return result;
+                }
+                catch (error) {
+                    throw restoreUserError(error);
+                }
+            };
+        return Reflect.apply(original, this, next);
+    };
+}
 export const test = wrappedRegistration(native.test);
 export const it = wrappedRegistration(native.it);
 export const suite = native.suite;
 export const describe = native.describe;
-export const before = native.before;
-export const after = native.after;
-export const beforeEach = native.beforeEach;
-export const afterEach = native.afterEach;
+export const before = restoringHook(native.before);
+export const after = restoringHook(native.after);
+export const beforeEach = restoringHook(native.beforeEach);
+export const afterEach = restoringHook(native.afterEach);
 export const mock = native.mock;
 export const snapshot = native.snapshot;
 export const run = native.run;
