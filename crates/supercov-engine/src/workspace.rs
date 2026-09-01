@@ -125,36 +125,27 @@ fn project_name(root: &Path) -> Result<&std::ffi::OsStr, WorkspaceError> {
 }
 
 pub fn workspace_container(root: &Path) -> PathBuf {
-    // Hidden: Supercov's contract is that users interact with their real
-    // files and the CLI; command outputs sync back after every run, so
-    // nothing in the container is ever theirs to fetch.
-    let preferred = root.join(".supercov-workspace");
-    if fs::symlink_metadata(&preferred).is_err() {
-        // Migrate the pre-0.0.27 visible container so its instrumented-build
-        // cache survives the rename. A failed rename simply means a cold
-        // cache; the legacy directory stays subject to its normal cleanup.
-        let legacy = root.join("supercov");
-        if owned_workspace_path(&legacy) {
-            let _ = fs::rename(&legacy, &preferred);
-        }
-        return preferred;
-    }
-    if owned_workspace_path(&preferred) {
+    // Everything Supercov keeps in a project lives under .supercov: one
+    // directory to gitignore, one directory to delete. Users interact with
+    // their real files and the CLI; command outputs sync back after every
+    // run, so nothing in the container is ever theirs to fetch.
+    let preferred = root.join(".supercov/workspaces");
+    if fs::symlink_metadata(&preferred).is_err() || owned_workspace_path(&preferred) {
         return preferred;
     }
     let digest = format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()));
     for sequence in 0..1_024usize {
         let name = if sequence == 0 {
-            format!(".supercov-workspace-{}", &digest[..16])
+            format!(".supercov/workspaces-{}", &digest[..16])
         } else {
-            format!(".supercov-workspace-{}-{sequence}", &digest[..16])
+            format!(".supercov/workspaces-{}-{sequence}", &digest[..16])
         };
         let candidate = root.join(name);
         if fs::symlink_metadata(&candidate).is_err() || owned_workspace_path(&candidate) {
             return candidate;
         }
     }
-    root.join(format!(".supercov-workspace-{}-overflow", &digest[..16]))
+    root.join(format!(".supercov/workspaces-{}-overflow", &digest[..16]))
 }
 
 pub fn cached_workspace_path(root: &Path) -> Result<PathBuf, WorkspaceError> {
@@ -490,7 +481,13 @@ fn ensure_container(root: &Path) -> Result<PathBuf, WorkspaceError> {
         }
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir(&container).map_err(|source| io_error(&container, source))?;
+            fs::create_dir_all(&container).map_err(|source| io_error(&container, source))?;
+            // One directory covers everything Supercov writes; make Git
+            // ignore it without the user touching their own .gitignore.
+            let store_ignore = root.join(".supercov/.gitignore");
+            if fs::symlink_metadata(&store_ignore).is_err() {
+                let _ = fs::write(&store_ignore, b"*\n");
+            }
             created = true;
         }
         Err(source) => return Err(io_error(&container, source)),
@@ -1783,41 +1780,36 @@ mod tests {
     }
 
     #[test]
-    fn legacy_visible_container_migrates_to_the_hidden_name() {
+    fn everything_supercov_writes_lives_under_the_store() {
         let root = project();
-        let legacy = root.join("supercov");
-        fs::create_dir_all(legacy.join("workspace/project/dist")).unwrap();
-        fs::write(legacy.join(WORKSPACE_MARKER), WORKSPACE_MARKER_CONTENTS).unwrap();
-        fs::write(legacy.join("workspace/project/dist/cached.js"), "cached\n").unwrap();
-        let container = workspace_container(&root);
-        assert_eq!(container, root.join(".supercov-workspace"));
-        assert!(fs::symlink_metadata(&legacy).is_err());
         assert_eq!(
-            fs::read_to_string(container.join("workspace/project/dist/cached.js")).unwrap(),
-            "cached\n"
+            workspace_container(&root),
+            root.join(".supercov/workspaces")
         );
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_cached_workspace(&root, &lock, &[]).unwrap();
+        assert!(workspace.starts_with(root.join(".supercov")));
+        assert_eq!(
+            fs::read_to_string(root.join(".supercov/.gitignore")).unwrap(),
+            "*\n"
+        );
+        lock.release().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn an_unowned_hidden_container_gets_a_deterministic_fallback() {
+    fn an_unowned_container_gets_a_deterministic_fallback() {
         let root = project();
-        fs::create_dir(root.join(".supercov-workspace")).unwrap();
-        fs::write(root.join(".supercov-workspace/user-file"), "mine\n").unwrap();
+        fs::create_dir_all(root.join(".supercov/workspaces")).unwrap();
+        fs::write(root.join(".supercov/workspaces/user-file"), "mine\n").unwrap();
         let container = workspace_container(&root);
-        assert_ne!(container, root.join(".supercov-workspace"));
+        assert_ne!(container, root.join(".supercov/workspaces"));
         let name = container
             .file_name()
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        assert!(name.starts_with(".supercov-workspace-"));
-        assert!(
-            !root
-                .join(".supercov-workspace")
-                .join(WORKSPACE_MARKER)
-                .exists()
-        );
+        assert!(name.starts_with("workspaces-"));
         fs::remove_dir_all(root).unwrap();
     }
 

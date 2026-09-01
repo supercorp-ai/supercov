@@ -12,8 +12,6 @@ import { coverageQuery, localRustEnvironment } from "./coverage-test-helpers.mjs
 
 const fixture = resolve("tests/fixtures/generic-workspaces");
 rmSync(resolve(fixture, ".supercov"), { recursive: true, force: true });
-rmSync(resolve(fixture, "supercov"), { recursive: true, force: true });
-rmSync(resolve(fixture, ".supercov-workspace"), { recursive: true, force: true });
 
 const result = spawnSync(
   process.execPath,

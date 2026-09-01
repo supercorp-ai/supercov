@@ -10,8 +10,6 @@ import {
 for (const adapter of ["esbuild", "webpack", "swc"]) {
   const root = resolve(`tests/fixtures/generic-${adapter}`);
   rmSync(resolve(root, ".supercov"), { recursive: true, force: true });
-  rmSync(resolve(root, "supercov"), { recursive: true, force: true });
-  rmSync(resolve(root, ".supercov-workspace"), { recursive: true, force: true });
   for (const attempt of ["fresh", "reused"]) {
     requireSupercov(root, ["--", "npm", "test"], {
       stdio: "inherit",

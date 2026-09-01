@@ -48,7 +48,7 @@ function execute(cwd, args) {
 
 function projectFiles(root, directory = root) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    if ([".supercov", ".supercov-workspace", "supercov", "node_modules"].includes(entry.name)) return [];
+    if ([".supercov", "node_modules"].includes(entry.name)) return [];
     const path = resolve(directory, entry.name);
     return entry.isDirectory() ? projectFiles(root, path) : [path];
   });
@@ -84,9 +84,7 @@ try {
     filter: (path) =>
       !relative(fixture, path)
         .split(/[\\/]/)
-        .some((segment) =>
-          [".supercov", ".supercov-workspace", "supercov"].includes(segment),
-        ),
+        .some((segment) => segment === ".supercov"),
   });
   const before = sourceFingerprint(project);
   const help = execute(project, ["--help"]);

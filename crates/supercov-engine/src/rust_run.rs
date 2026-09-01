@@ -238,13 +238,6 @@ pub fn run_direct_rust(
             )
             .map_err(|error| error.to_string())?;
         }
-        let legacy_workspace = root.join("supercov");
-        if fs::symlink_metadata(legacy_workspace.join(".supercov-workspace-store"))
-            .is_ok_and(|metadata| metadata.file_type().is_file())
-        {
-            remove_stored_tree_deferred(&root, &legacy_workspace)
-                .map_err(|error| error.to_string())?;
-        }
 
         let adapter_started = Instant::now();
         let integrity_inputs = collect_integrity_inputs(&root, &request.command)?;

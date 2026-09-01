@@ -36,10 +36,9 @@ function snapshot(directory) {
     for (const entry of readdirSync(path, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const absolute = resolve(path, entry.name);
       const name = relativePath ? `${relativePath}/${entry.name}` : entry.name;
-      // Supercov owns the run store and the hidden workspace container; the
-      // legacy visible container stays listed for pre-0.0.27 leftovers.
+      // Supercov owns exactly one store; node_modules is linked, not copied.
       if (
-        [".supercov", ".supercov-workspace", "supercov", "node_modules"].some(
+        [".supercov", "node_modules"].some(
           (owned) => name === owned || name.startsWith(`${owned}/`),
         )
       )
@@ -106,21 +105,21 @@ async function verifyUncatchableCacheRecovery() {
     );
     const padding = resolve(crashRoot, "padding");
     mkdirSync(padding);
-    for (let index = 0; index < 1_000; index += 1)
+    for (let index = 0; index < 5_000; index += 1)
       writeFileSync(resolve(padding, `${index}.txt`), `${index}\n`);
 
     const projectBefore = snapshot(crashRoot);
     const expectedCache = resolve(
       crashRoot,
-      ".supercov-workspace/workspace",
+      ".supercov/workspaces/workspace",
       basename(crashRoot),
     );
-    mkdirSync(resolve(crashRoot, ".supercov-workspace"));
+    mkdirSync(resolve(crashRoot, ".supercov/workspaces"), { recursive: true });
     writeFileSync(
-      resolve(crashRoot, ".supercov-workspace/.supercov-workspace-store"),
+      resolve(crashRoot, ".supercov/workspaces/.supercov-workspace-store"),
       "Supercov instrumented workspace. Safe to delete.\n",
     );
-    writeFileSync(resolve(crashRoot, ".supercov-workspace/.gitignore"), "*\n");
+    writeFileSync(resolve(crashRoot, ".supercov/workspaces/.gitignore"), "*\n");
     const cacheParent = resolve(expectedCache, "..");
     const stagingPrefix = `.${basename(crashRoot)}.staging-`;
     mkdirSync(expectedCache, { recursive: true });
@@ -146,15 +145,22 @@ async function verifyUncatchableCacheRecovery() {
         killed.kill("SIGKILL");
         reject(new Error(`cache preparation was not observable:\n${killedOutput}`));
       }, 20_000);
+      const pollDebug = { ticks: 0, seen: [], sawLock: false };
+      const transactionParents = [cacheParent, resolve(cacheParent, "..")];
       const poll = setInterval(() => {
-        const staging = existsSync(cacheParent)
-          ? readdirSync(cacheParent).some((entry) =>
-              entry.startsWith(stagingPrefix),
-            )
-          : false;
+        pollDebug.ticks += 1;
+        const staging = transactionParents.some((parent) => {
+          if (!existsSync(parent)) return false;
+          const listed = readdirSync(parent);
+          for (const entry of listed)
+            if (entry.startsWith(".") && !pollDebug.seen.includes(entry) && pollDebug.seen.length < 8)
+              pollDebug.seen.push(entry);
+          return listed.some((entry) => entry.startsWith(stagingPrefix));
+        });
         const ownsLock = existsSync(
           resolve(crashRoot, ".supercov/locks/active.json"),
         );
+        pollDebug.sawLock ||= ownsLock;
         if (!staging || !ownsLock) return;
         clearInterval(poll);
         clearTimeout(timeout);
@@ -167,7 +173,7 @@ async function verifyUncatchableCacheRecovery() {
         clearTimeout(timeout);
         reject(
           new Error(
-            `preparation process exited before SIGKILL (${code ?? signal}):\n${killedOutput}`,
+            `preparation process exited before SIGKILL (${code ?? signal}); poll=${JSON.stringify(pollDebug)}:\n${killedOutput}`,
           ),
         );
       });
@@ -306,7 +312,7 @@ const workRoot = resolve(root, ".supercov/work");
 const runsBefore = new Set(existsSync(workRoot) ? readdirSync(workRoot) : []);
 const expectedCache = resolve(
   root,
-  ".supercov-workspace/workspace/generic-playwright",
+  ".supercov/workspaces/workspace/generic-playwright",
 );
 
 const child = spawn(

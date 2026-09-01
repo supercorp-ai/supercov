@@ -20,9 +20,7 @@ cpSync(fixtureTemplate, fixture, {
   filter: (path) =>
     !relative(fixtureTemplate, path)
       .split(/[\\/]/)
-      .some((part) =>
-        [".supercov", ".supercov-workspace", "supercov"].includes(part),
-      ),
+      .some((part) => part === ".supercov"),
 });
 process.once("exit", () => rmSync(temporary, { recursive: true, force: true }));
 const cli = resolve("bin/supercov.js");

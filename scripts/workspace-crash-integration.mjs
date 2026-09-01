@@ -43,7 +43,7 @@ function snapshot(root) {
       const separator = process.platform === "win32" ? "\\" : "/";
       // Supercov owns the dotted store and the non-dotted workspace container.
       if (
-        [".supercov", ".supercov-workspace", "supercov"].some(
+        [".supercov"].some(
           (owned) => local === owned || local.startsWith(`${owned}${separator}`),
         )
       )
@@ -107,15 +107,15 @@ try {
   const before = snapshot(root);
   const workspace = resolve(
     root,
-    ".supercov-workspace/workspace",
+    ".supercov/workspaces/workspace",
     basename(root),
   );
-  mkdirSync(resolve(root, ".supercov-workspace"));
+  mkdirSync(resolve(root, ".supercov/workspaces"), { recursive: true });
   writeFileSync(
-    resolve(root, ".supercov-workspace/.supercov-workspace-store"),
+    resolve(root, ".supercov/workspaces/.supercov-workspace-store"),
     "Supercov instrumented workspace. Safe to delete.\n",
   );
-  writeFileSync(resolve(root, ".supercov-workspace/.gitignore"), "*\n");
+  writeFileSync(resolve(root, ".supercov/workspaces/.gitignore"), "*\n");
   const cacheParent = resolve(workspace, "..");
   const stagingPrefix = `.${basename(root)}.staging-`;
   mkdirSync(workspace, { recursive: true });

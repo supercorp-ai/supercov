@@ -1139,7 +1139,7 @@ mod tests {
     #[test]
     fn cleanup_is_project_locked_and_clean_alone_removes_owned_caches() {
         let root = project();
-        let container = root.join("supercov");
+        let container = root.join(".supercov/workspaces");
         fs::create_dir_all(container.join("workspace/project")).unwrap();
         fs::write(
             container.join(".supercov-workspace-store"),
