@@ -65,22 +65,17 @@ fn regular_file(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
-pub fn detect_frontends(root: &Path, command: &[String]) -> FrontendDetection {
-    let expanded = expanded_command(root, command);
-    let command_tokens = tokens(&expanded);
-    let mut selected = BTreeSet::new();
-    let mut evidence = Vec::new();
-
-    let rust_command = has_sequence(&command_tokens, &["cargo", "test"])
-        || has_sequence(&command_tokens, &["cargo", "nextest"])
-        || has_sequence(&command_tokens, &["cargo-nextest", "run"])
-        || has_sequence(&command_tokens, &["cross", "test"]);
+fn supported_by_command(command_tokens: &[String]) -> Vec<(FrontendLanguage, &'static str)> {
+    let mut launched = Vec::new();
+    let rust_command = has_sequence(command_tokens, &["cargo", "test"])
+        || has_sequence(command_tokens, &["cargo", "nextest"])
+        || has_sequence(command_tokens, &["cargo-nextest", "run"])
+        || has_sequence(command_tokens, &["cross", "test"]);
     if rust_command {
-        selected.insert(FrontendLanguage::Rust);
-        evidence.push(FrontendEvidence {
-            language: FrontendLanguage::Rust,
-            reason: "the expanded test command launches Cargo's test pipeline".into(),
-        });
+        launched.push((
+            FrontendLanguage::Rust,
+            "the expanded test command launches Cargo's test pipeline",
+        ));
     }
 
     let python_command = command_tokens.iter().any(|token| {
@@ -90,11 +85,10 @@ pub fn detect_frontends(root: &Path, command: &[String]) -> FrontendDetection {
         )
     });
     if python_command {
-        selected.insert(FrontendLanguage::Python);
-        evidence.push(FrontendEvidence {
-            language: FrontendLanguage::Python,
-            reason: "the expanded test command launches a Python test runner".into(),
-        });
+        launched.push((
+            FrontendLanguage::Python,
+            "the expanded test command launches a Python test runner",
+        ));
     }
 
     let javascript_command = command_tokens.iter().any(|token| {
@@ -106,10 +100,25 @@ pub fn detect_frontends(root: &Path, command: &[String]) -> FrontendDetection {
         .iter()
         .any(|token| token.starts_with("playwright-"));
     if javascript_command {
-        selected.insert(FrontendLanguage::JavaScript);
+        launched.push((
+            FrontendLanguage::JavaScript,
+            "the expanded test command launches a JavaScript test/runtime process",
+        ));
+    }
+    launched
+}
+
+pub fn detect_frontends(root: &Path, command: &[String]) -> FrontendDetection {
+    let expanded = expanded_command(root, command);
+    let command_tokens = tokens(&expanded);
+    let mut selected = BTreeSet::new();
+    let mut evidence = Vec::new();
+
+    for (language, reason) in supported_by_command(&command_tokens) {
+        selected.insert(language);
         evidence.push(FrontendEvidence {
-            language: FrontendLanguage::JavaScript,
-            reason: "the expanded test command launches a JavaScript test/runtime process".into(),
+            language,
+            reason: reason.into(),
         });
     }
 
@@ -152,6 +161,94 @@ pub fn detect_frontends(root: &Path, command: &[String]) -> FrontendDetection {
         frontends: selected.into_iter().collect(),
         evidence,
     }
+}
+
+/// A language Supercov recognizes but cannot measure yet. Naming it turns
+/// "could not determine a supported test language" into an answer the user
+/// can act on: what was detected, from which signal, and where to ask for
+/// (or contribute) support.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedEcosystem {
+    pub language: &'static str,
+    pub evidence: String,
+    /// True when the test command itself launches the unsupported runner.
+    /// Command intent is authoritative: `supercov -- go test` deserves the
+    /// Go answer even in a repository that also carries a package.json,
+    /// because the manifest fallback exists only for opaque commands.
+    pub from_command: bool,
+}
+
+/// Whether the expanded test command itself launches a runner Supercov
+/// supports. Used to keep command-authoritative unsupported detection from
+/// shadowing genuinely mixed commands like `sh -c "go test && vitest run"`.
+pub fn command_launches_supported_frontend(root: &Path, command: &[String]) -> bool {
+    let expanded = expanded_command(root, command);
+    let command_tokens = tokens(&expanded);
+    supported_by_command(&command_tokens)
+        .into_iter()
+        .next()
+        .is_some()
+}
+
+pub fn detect_unsupported_ecosystem(
+    root: &Path,
+    command: &[String],
+) -> Option<UnsupportedEcosystem> {
+    let expanded = expanded_command(root, command);
+    let command_tokens = tokens(&expanded);
+    let by_command: &[(&str, &[&str])] = &[
+        ("Go", &["go"]),
+        ("Ruby", &["rspec", "minitest"]),
+        ("Java/Kotlin", &["mvn", "maven", "gradle", "gradlew"]),
+        ("PHP", &["phpunit", "pest"]),
+        (".NET", &["dotnet"]),
+        ("Elixir", &["mix"]),
+        ("Swift", &["swift"]),
+        ("Dart/Flutter", &["flutter", "dart"]),
+    ];
+    for (language, runners) in by_command {
+        for runner in *runners {
+            // `go test`, `swift test`, `mix test`, `dotnet test`, `gradle
+            // test`: the runner word alone is too common in shell text, so
+            // require the test-launch shape for single-word runners.
+            let launches = if matches!(*runner, "go" | "swift" | "mix" | "dotnet") {
+                has_sequence(&command_tokens, &[runner, "test"])
+            } else {
+                command_tokens.iter().any(|token| token == runner)
+            };
+            if launches {
+                return Some(UnsupportedEcosystem {
+                    language,
+                    evidence: format!("the test command runs `{runner}`"),
+                    from_command: true,
+                });
+            }
+        }
+    }
+    let by_manifest: &[(&str, &[&str])] = &[
+        ("Go", &["go.mod"]),
+        ("Ruby", &["Gemfile"]),
+        (
+            "Java/Kotlin",
+            &["pom.xml", "build.gradle", "build.gradle.kts"],
+        ),
+        ("PHP", &["composer.json"]),
+        ("Elixir", &["mix.exs"]),
+        ("Swift", &["Package.swift"]),
+        ("Dart/Flutter", &["pubspec.yaml"]),
+    ];
+    for (language, manifests) in by_manifest {
+        for manifest in *manifests {
+            if regular_file(&root.join(manifest)) {
+                return Some(UnsupportedEcosystem {
+                    language,
+                    evidence: format!("{manifest} is present"),
+                    from_command: false,
+                });
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -216,6 +313,63 @@ mod tests {
         assert_eq!(
             detected.frontends,
             [FrontendLanguage::JavaScript, FrontendLanguage::Rust]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_known_unsupported_runner_is_named_from_the_command() {
+        let root = fixture("go-command");
+        let detected = detect_frontends(&root, &["go".into(), "test".into(), "./...".into()]);
+        assert_eq!(detected.frontends, []);
+        let ecosystem =
+            detect_unsupported_ecosystem(&root, &["go".into(), "test".into(), "./...".into()])
+                .unwrap();
+        assert_eq!(ecosystem.language, "Go");
+        assert_eq!(ecosystem.evidence, "the test command runs `go`");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_known_unsupported_manifest_is_named_when_the_command_is_opaque() {
+        let root = fixture("gemfile");
+        fs::write(root.join("Gemfile"), "source 'https://rubygems.org'\n").unwrap();
+        let detected = detect_frontends(&root, &["make".into(), "test".into()]);
+        assert_eq!(detected.frontends, []);
+        let ecosystem =
+            detect_unsupported_ecosystem(&root, &["make".into(), "test".into()]).unwrap();
+        assert_eq!(ecosystem.language, "Ruby");
+        assert_eq!(ecosystem.evidence, "Gemfile is present");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_explicit_unsupported_command_is_authoritative_over_manifests() {
+        let root = fixture("go-with-package-json");
+        fs::write(root.join("package.json"), "{}").unwrap();
+        fs::write(root.join("go.mod"), "module example.com/x\n").unwrap();
+        let command = vec!["go".into(), "test".into(), "./...".into()];
+        let ecosystem = detect_unsupported_ecosystem(&root, &command).unwrap();
+        assert!(ecosystem.from_command);
+        assert_eq!(ecosystem.language, "Go");
+        assert!(!command_launches_supported_frontend(&root, &command));
+        // A genuinely mixed command that also launches a supported runner
+        // must keep running.
+        let mixed = vec!["sh".into(), "-c".into(), "go test && npx vitest run".into()];
+        assert!(command_launches_supported_frontend(&root, &mixed));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn supported_and_unknown_projects_stay_unnamed() {
+        let root = fixture("unknown");
+        assert_eq!(
+            detect_unsupported_ecosystem(&root, &["cargo".into(), "test".into()]),
+            None
+        );
+        assert_eq!(
+            detect_unsupported_ecosystem(&root, &["./scripts/test".into()]),
+            None
         );
         fs::remove_dir_all(root).unwrap();
     }

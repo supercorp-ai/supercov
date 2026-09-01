@@ -1422,10 +1422,50 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
     };
     spawn_trash_sweeper(&root);
     let detection = supercov_engine::frontend_detection::detect_frontends(&root, &command);
-    if detection.frontends.is_empty() {
+    let unsupported =
+        supercov_engine::frontend_detection::detect_unsupported_ecosystem(&root, &command);
+    // The test command is authoritative: `supercov -- go test` deserves the
+    // Go answer even when a package.json would otherwise route the run to the
+    // JavaScript frontend, which could only produce an empty, misleading run.
+    // A genuinely mixed command that also launches a supported runner still
+    // proceeds.
+    if let Some(ecosystem) = unsupported.as_ref().filter(|ecosystem| {
+        ecosystem.from_command
+            && !supercov_engine::frontend_detection::command_launches_supported_frontend(
+                &root, &command,
+            )
+    }) {
         eprintln!(
-            "[supercov] could not determine a supported test language from the command or project manifests"
+            "[supercov] This looks like a {} test run ({}), and Supercov does not support {} yet.",
+            ecosystem.language, ecosystem.evidence, ecosystem.language
         );
+        eprintln!(
+            "[supercov] Supercov currently measures JavaScript/TypeScript test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
+            ecosystem.language
+        );
+        return ExitCode::from(2);
+    }
+    if detection.frontends.is_empty() {
+        match unsupported {
+            Some(ecosystem) => {
+                eprintln!(
+                    "[supercov] This looks like a {} project ({}), and Supercov does not support {} yet.",
+                    ecosystem.language, ecosystem.evidence, ecosystem.language
+                );
+                eprintln!(
+                    "[supercov] Supercov currently measures JavaScript/TypeScript test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
+                    ecosystem.language
+                );
+            }
+            None => {
+                eprintln!(
+                    "[supercov] Supercov could not recognize this project's language or test framework: no supported test files or manifests were found, and the command does not launch a runner Supercov knows."
+                );
+                eprintln!(
+                    "[supercov] Supercov currently measures JavaScript/TypeScript test runs. Alternatively, Supercov may simply not support your test suite yet — if so, please open an issue or PR: https://github.com/supercorp-ai/supercov"
+                );
+            }
+        }
         return ExitCode::from(2);
     }
     if detection.frontends.len() > 1 {
@@ -1476,7 +1516,10 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
     }
     if detection.frontends == [supercov_engine::frontend_detection::FrontendLanguage::Python] {
         eprintln!(
-            "[supercov] Python was detected, but the owned Python user-run frontend is not enabled yet"
+            "[supercov] This looks like a Python test run, and Supercov does not support Python yet."
+        );
+        eprintln!(
+            "[supercov] Supercov currently measures JavaScript/TypeScript test runs. If you'd like Python support, please open an issue or PR: https://github.com/supercorp-ai/supercov"
         );
         return ExitCode::from(2);
     }

@@ -107,7 +107,7 @@ impl std::fmt::Display for ProjectDiscoveryError {
             Self::Io { path, source } => write!(formatter, "{}: {source}", path.display()),
             Self::NoSourceFiles => write!(
                 formatter,
-                "No application source files were discovered. Set SUPERCOV_SOURCE_ROOTS=src,app."
+                "No application source files were discovered. If your sources live somewhere unusual, set SUPERCOV_SOURCE_ROOTS=src,app. Alternatively, Supercov may not support your project layout or test framework yet — if so, please open an issue or PR: https://github.com/supercorp-ai/supercov"
             ),
         }
     }
