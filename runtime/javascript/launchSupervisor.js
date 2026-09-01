@@ -1,6 +1,6 @@
 import childProcess from "node:child_process";
-import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { appendFileSync, mkdirSync, statSync } from "node:fs";
 import Module, { syncBuiltinESMExports } from "node:module";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -30,9 +30,26 @@ function isClassConstructor(value) {
         return false;
     }
 }
-function executionLogPath(path) {
+// A pid is not an identity: pool VMs restored from one snapshot run clones
+// of this very process with the same pid, and their appends to one file over
+// a shared mount tear each other's lines. The log name carries a token, and
+// an append that finds the file a different size than this writer left it
+// has met a clone and rotates to a fresh file. The token mixes time in as
+// well as randomness because clones may also share their entropy state.
+function writerToken() {
+    let random = "";
+    try {
+        random = randomBytes(3).toString("hex");
+    }
+    catch {
+        random = Math.floor(Math.random() * 16777215).toString(16);
+    }
+    return `${random}${process.hrtime.bigint().toString(36).slice(-5)}`;
+}
+let executionLog = { token: writerToken(), path: undefined, size: 0 };
+function executionLogPath(path, token = executionLog.token) {
     const shard = (process.env["SUPERCOV_EXECUTION_LOG_SHARD"] ?? "host").replace(/[^A-Za-z0-9_.-]/g, "_");
-    const suffix = `.${shard}.${process.pid}.jsonl`;
+    const suffix = `.${shard}.${process.pid}-${token}.jsonl`;
     return path.endsWith(".jsonl")
         ? `${path.slice(0, -".jsonl".length)}${suffix}`
         : `${path}${suffix}`;
@@ -41,15 +58,30 @@ function record(value) {
     const configuredPath = process.env["SUPERCOV_EXECUTION_LOG"];
     if (!configuredPath)
         return;
-    const path = executionLogPath(configuredPath);
     try {
-        mkdirSync(dirname(path), { recursive: true });
-        appendFileSync(path, `${JSON.stringify({
+        let path = executionLogPath(configuredPath);
+        if (executionLog.path === path) {
+            let currentSize = 0;
+            try {
+                currentSize = statSync(path).size;
+            }
+            catch {
+                currentSize = 0;
+            }
+            if (currentSize !== executionLog.size) {
+                executionLog = { token: writerToken(), path: undefined, size: 0 };
+                path = executionLogPath(configuredPath);
+            }
+        }
+        const line = `${JSON.stringify({
             at: new Date().toISOString(),
             pid: process.pid,
             ppid: process.ppid,
             ...value,
-        })}\n`);
+        })}\n`;
+        mkdirSync(dirname(path), { recursive: true });
+        appendFileSync(path, line);
+        executionLog = { token: executionLog.token, path, size: executionLog.size + Buffer.byteLength(line) };
     }
     catch {
         // Process tracing is diagnostic and must never change test behavior.

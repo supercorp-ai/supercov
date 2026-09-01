@@ -120,6 +120,93 @@ test("capability proxies preserve frozen constructor and export properties", () 
   assert.equal(wrappedCapability.fixed, fixed);
 });
 
+test("an execution-trace writer that meets a clone of itself rotates its log", {
+  skip: process.platform === "win32",
+}, () => {
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-execution-clone-"));
+  try {
+    const supervisor = pathToFileURL(resolve("runtime/javascript/launchSupervisor.js")).href;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `import { readdirSync, appendFileSync } from "node:fs";
+         import { spawnSync } from "node:child_process";
+         const { installLaunchSupervisor } = await import(${JSON.stringify(supervisor)});
+         installLaunchSupervisor();
+         spawnSync(process.execPath, ["-e", "0"]);
+         const directory = ${JSON.stringify(root)};
+         const [log] = readdirSync(directory).filter((name) => name.startsWith("execution."));
+         appendFileSync(directory + "/" + log, JSON.stringify({ event: "from-a-clone" }) + String.fromCharCode(10));
+         spawnSync(process.execPath, ["-e", "0"]);
+         process.stdout.write(String(process.pid));`,
+      ],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, SUPERCOV_EXECUTION_LOG: resolve(root, "execution.jsonl") },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(child.status, 0, child.stderr);
+    // Spawned children record their own logs; only the parent's must rotate.
+    const parentPid = child.stdout.trim();
+    const logs = readdirSync(root)
+      .filter((name) => name.startsWith(`execution.host.${parentPid}-`))
+      .sort();
+    assert.equal(logs.length, 2, `expected a rotated execution log after the clone, saw ${logs}`);
+    for (const log of logs)
+      for (const line of readFileSync(resolve(root, log), "utf8").trim().split("\n"))
+        JSON.parse(line);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a background writer that meets a clone of itself moves to a fresh shard", {
+  skip: process.platform === "win32",
+}, () => {
+  // Pool VMs restored from one snapshot run clones of the same process with
+  // the same pid and the same cached shard path; their appends tear each
+  // other's lines. Simulate the clone by appending foreign bytes to the shard
+  // between two records: the second record must land in a new shard, and the
+  // first shard must keep only what this writer wrote before the clone.
+  const root = mkdtempSync(resolve(tmpdir(), "supercov-background-clone-"));
+  try {
+    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.js")).href;
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `import { readdirSync, appendFileSync } from "node:fs";
+         const runtime = await import(${JSON.stringify(runtime)});
+         runtime.coverageHit("before-clone");
+         const directory = ${JSON.stringify(resolve(root, "run-clone", "background"))};
+         const [shard] = readdirSync(directory);
+         appendFileSync(directory + "/" + shard, JSON.stringify({ type: "hit", id: "from-a-clone" }) + String.fromCharCode(10));
+         runtime.coverageHit("after-clone");`,
+      ],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, SUPERCOV_RUN_ID: "run-clone", SUPERCOV_SERVER_EVIDENCE_ROOT: root },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(child.status, 0, child.stderr);
+    const directory = resolve(root, "run-clone", "background");
+    const files = readdirSync(directory).sort();
+    assert.equal(files.length, 2, `expected a second shard after the clone, saw ${files}`);
+    const ids = files.map((file) =>
+      readFileSync(resolve(directory, file), "utf8").trim().split("\n").map((line) => JSON.parse(line).id),
+    );
+    assert.deepEqual(ids.flat().sort(), ["after-clone", "before-clone", "from-a-clone"]);
+    assert.ok(ids.some((shard) => shard.length === 1 && shard[0] === "after-clone"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("background evidence is durable before an uncatchable process death", {
   skip: process.platform === "win32",
 }, () => {

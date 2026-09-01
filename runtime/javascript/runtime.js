@@ -150,6 +150,7 @@ function createState() {
     persistedServerRecords: /* @__PURE__ */ new Set(),
     backgroundBuffers: /* @__PURE__ */ new Map(),
     backgroundWriters: /* @__PURE__ */ new Map(),
+    backgroundShardSizes: /* @__PURE__ */ new Map(),
     backgroundSequence: 0,
     runtimeSnapshots: false,
     assertionPhases: /* @__PURE__ */ new Map(),
@@ -427,6 +428,16 @@ function writeExclusiveBackgroundRecord(fs, runId, writer, initialSequence, payl
   }
   throw Object.assign(new Error("Could not allocate a collision-free Supercov background evidence record"), { code: "SUPERCOV_BACKGROUND_COLLISION_LIMIT" });
 }
+function backgroundWriterToken() {
+  try {
+    const getBuiltinModule = process.getBuiltinModule;
+    const crypto = getBuiltinModule == null ? void 0 : getBuiltinModule("node:crypto");
+    if (crypto)
+      return crypto.randomBytes(4).toString("hex");
+  } catch (e) {
+  }
+  return Math.floor(Math.random() * 4294967295).toString(16);
+}
 function appendDurableBackgroundRecord(fs, runId, record) {
   var _a8;
   const records = state.backgroundBuffers.get(runId) != null ? state.backgroundBuffers.get(runId) : /* @__PURE__ */ new Map();
@@ -437,15 +448,32 @@ function appendDurableBackgroundRecord(fs, runId, record) {
   const payload = JSON.stringify(record) + "\n";
   fs.mkdirSync(directory, { recursive: true });
   let path = state.backgroundWriters.get(runId);
+  // A pid is not an identity: pool VMs restored from one snapshot run clones
+  // of this very process, same pid and same cached shard path, and their
+  // appends over a shared mount tear each other's lines. The shard name gets
+  // a fresh random token, and an append that finds the file a different size
+  // than this writer left it has met a clone: it moves to a new shard.
+  if (path) {
+    let currentSize = -1;
+    try {
+      currentSize = fs.statSync(path).size;
+    } catch (e) {
+    }
+    if (currentSize !== (state.backgroundShardSizes.get(path) ?? -1)) {
+      path = void 0;
+    }
+  }
   if (!path) {
     const shard = (_a8 = process.env["SUPERCOV_EXECUTION_LOG_SHARD"]) != null ? _a8 : "process";
-    const writer = `${shard}-${process.pid}`;
+    const writer = `${shard}-${process.pid}-${backgroundWriterToken()}`;
     const nextSequence = writeExclusiveBackgroundRecord(fs, runId, writer, state.backgroundSequence, payload);
     state.backgroundSequence = nextSequence;
     path = backgroundEvidencePath(runId, `${writer}-${nextSequence - 1}`);
     state.backgroundWriters.set(runId, path);
+    state.backgroundShardSizes.set(path, Buffer.byteLength(payload));
   } else {
     fs.appendFileSync(path, payload);
+    state.backgroundShardSizes.set(path, (state.backgroundShardSizes.get(path) ?? 0) + Buffer.byteLength(payload));
   }
   records.set(key, record);
   state.backgroundBuffers.set(runId, records);

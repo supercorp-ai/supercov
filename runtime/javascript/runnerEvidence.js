@@ -1,10 +1,25 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { atomicWriteFileSync } from "./atomic.js";
 import { inferTestProvenance } from "./provenance.js";
 import { serverEvidencePath } from "./transport.js";
+
+let cachedProcessInstanceToken;
+function processInstanceToken() {
+    if (cachedProcessInstanceToken)
+        return cachedProcessInstanceToken;
+    let random = "";
+    try {
+        random = randomBytes(3).toString("hex");
+    }
+    catch {
+        random = Math.floor(Math.random() * 16777215).toString(16);
+    }
+    cachedProcessInstanceToken = `${random}${process.hrtime.bigint().toString(36).slice(-5)}`;
+    return cachedProcessInstanceToken;
+}
 function localFile(file) {
     if (!file)
         return undefined;
@@ -24,7 +39,9 @@ export function runnerTestId(identity) {
 export function runnerExecutionScope(identity) {
     const testId = runnerTestId(identity);
     const retry = identity.retry ?? 0;
-    const workerId = `${identity.runner}-${process.env["JEST_WORKER_ID"] ?? process.pid}`;
+    // Same hazard as the Playwright shim: a pooled runner's fresh workers can
+    // share a pid, so the worker identity carries a per-process token.
+    const workerId = `${identity.runner}-${process.env["JEST_WORKER_ID"] ?? process.pid}-${processInstanceToken()}`;
     const testKey = createHash("sha256").update(testId).digest("hex").slice(0, 24);
     return {
         version: 1,

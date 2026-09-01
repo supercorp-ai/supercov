@@ -2044,6 +2044,44 @@ fn parse_json_lines<'a, T: for<'de> Deserialize<'de>>(
     Ok(records)
 }
 
+/// Server evidence is appended by application processes Supercov does not
+/// control — including pool VMs restored from one snapshot, whose clones can
+/// tear a shared shard. A torn line is one lost record, not a lost run: it is
+/// skipped and counted, and the report says so through the existing
+/// CORRUPT_EVIDENCE_RECORDS diagnostic and the blocking-limitation total.
+struct TolerantJsonLines<T> {
+    records: Vec<T>,
+    corrupt_records: usize,
+    corrupt_files: usize,
+}
+
+fn parse_server_json_lines<'a, T: for<'de> Deserialize<'de>>(
+    entries: impl Iterator<Item = &'a EvidenceArchiveEntry>,
+) -> TolerantJsonLines<T> {
+    let mut parsed = TolerantJsonLines {
+        records: Vec::new(),
+        corrupt_records: 0,
+        corrupt_files: 0,
+    };
+    for entry in entries {
+        let mut corrupt_here = 0;
+        for line in entry.contents.split(|byte| *byte == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_slice(line) {
+                Ok(record) => parsed.records.push(record),
+                Err(_) => corrupt_here += 1,
+            }
+        }
+        if corrupt_here > 0 {
+            parsed.corrupt_records += corrupt_here;
+            parsed.corrupt_files += 1;
+        }
+    }
+    parsed
+}
+
 fn is_mcdc_result(path: &str) -> bool {
     path == "mcdc.json" || path.ends_with("/mcdc.json")
 }
@@ -2134,11 +2172,12 @@ pub fn analyze_coverage_archive(
     )?;
     raw_results.extend(journal_results);
 
-    let scoped_records = parse_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
+    let scoped = parse_server_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
         entry.path.starts_with("server/")
             && !entry.path.starts_with("server/background/")
             && entry.path.ends_with(".jsonl")
-    }))?;
+    }));
+    let scoped_records = scoped.records;
     for record in &scoped_records {
         let Some(scope) = &record.scope else { continue };
         let Some(raw) = raw_results
@@ -2152,9 +2191,10 @@ pub fn analyze_coverage_archive(
         }
     }
 
-    let background_records = parse_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
+    let background = parse_server_json_lines::<ServerRecord>(entries.iter().filter(|entry| {
         entry.path.starts_with("server/background/") && entry.path.ends_with(".jsonl")
-    }))?;
+    }));
+    let background_records = background.records;
     if !background_records.is_empty() {
         raw_results.push(RawTestResult {
             test_id: Some(format!("background:{}", request.run_id)),
@@ -2180,10 +2220,13 @@ pub fn analyze_coverage_archive(
         });
     }
 
-    let execution_events =
-        parse_json_lines::<ExecutionTraceEvent>(entries.iter().filter(|entry| {
+    // Execution traces are appended by the launch observer inside application
+    // processes, so they share the clone hazard of server evidence.
+    let execution =
+        parse_server_json_lines::<ExecutionTraceEvent>(entries.iter().filter(|entry| {
             entry.path.starts_with("execution.") && entry.path.ends_with(".jsonl")
-        }))?;
+        }));
+    let execution_events = execution.records;
     let count_event = |name: &str| {
         execution_events
             .iter()
@@ -2197,8 +2240,10 @@ pub fn analyze_coverage_archive(
         workspace_capabilities: count_event("workspace-capability"),
         scoped_server_records: scoped_records.len(),
         background_server_records: background_records.len(),
-        corrupt_records: 0,
-        corrupt_files: 0,
+        corrupt_records: scoped.corrupt_records
+            + background.corrupt_records
+            + execution.corrupt_records,
+        corrupt_files: scoped.corrupt_files + background.corrupt_files + execution.corrupt_files,
     };
     let frontend = entries
         .iter()
@@ -2685,10 +2730,58 @@ mod tests {
             limitations: vec![],
             scope: None,
         };
+        // Declare exactly the observed runners: the journal's node:test and the
+        // synthesized background runner, shaped as the JavaScript run declares it.
+        let unattributed = |axis: &str| {
+            serde_json::json!({
+                "id": format!("background-no-{axis}"),
+                "scopes": [axis],
+                "reason": format!("Runner background did not expose exact {axis} identity for every result")
+            })
+        };
+        let frontend = serde_json::json!({
+            "protocolVersion": 2,
+            "frontendId": "javascript",
+            "frontendVersion": "fixture-v1",
+            "language": "javascript",
+            "structuralSource": "owned-probes",
+            "runners": [
+                {
+                    "runner": "node:test",
+                    "executionModel": "serial-in-process",
+                    "attribution": {
+                        "run": "exact", "worker": "unavailable", "test": "exact", "retry": "exact",
+                        "phase": "exact", "action": "exact", "assertion": "exact"
+                    },
+                    "limitations": [{
+                        "id": "fixture-worker-unavailable",
+                        "scopes": ["worker"],
+                        "reason": "The fixture does not require worker identity"
+                    }]
+                },
+                {
+                    "runner": "background",
+                    "executionModel": "parallel-unattributed",
+                    "attribution": {
+                        "run": "exact", "worker": "unavailable", "test": "unavailable", "retry": "unavailable",
+                        "phase": "unavailable", "action": "unavailable", "assertion": "unavailable"
+                    },
+                    "limitations": [
+                        unattributed("worker"), unattributed("test"), unattributed("retry"),
+                        unattributed("phase"), unattributed("action"), unattributed("assertion")
+                    ]
+                }
+            ],
+            "structuralLimitations": []
+        });
         let path = archive(vec![
             EvidenceArchiveEntry {
                 path: "manifest.json".into(),
                 contents: serde_json::to_vec(&manifest).unwrap(),
+            },
+            EvidenceArchiveEntry {
+                path: "frontend.json".into(),
+                contents: serde_json::to_vec(&frontend).unwrap(),
             },
             EvidenceArchiveEntry {
                 path: "playwright-worker-1.mcdc.jsonl".into(),
@@ -2717,6 +2810,113 @@ mod tests {
             Err(ReportError::InvalidJson { path, .. })
                 if path == "playwright-worker-1.mcdc.jsonl"
         ));
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_torn_background_record_is_counted_not_fatal() {
+        // Pool VMs restored from one snapshot are clones with the same pid and
+        // cached shard path; their appends over a shared mount tear lines. One
+        // torn line is one lost record: the report must still build, count it,
+        // and surface it through the corrupt-evidence accounting.
+        let manifest = CoverageManifest {
+            unmeasured: Vec::new(),
+            decisions: vec![],
+            points: vec![],
+            branches: vec![],
+            limitations: vec![],
+            scope: None,
+        };
+        // Declare exactly the observed runners: the journal's node:test and the
+        // synthesized background runner, shaped as the JavaScript run declares it.
+        let unattributed = |axis: &str| {
+            serde_json::json!({
+                "id": format!("background-no-{axis}"),
+                "scopes": [axis],
+                "reason": format!("Runner background did not expose exact {axis} identity for every result")
+            })
+        };
+        let frontend = serde_json::json!({
+            "protocolVersion": 2,
+            "frontendId": "javascript",
+            "frontendVersion": "fixture-v1",
+            "language": "javascript",
+            "structuralSource": "owned-probes",
+            "runners": [
+                {
+                    "runner": "node:test",
+                    "executionModel": "serial-in-process",
+                    "attribution": {
+                        "run": "exact", "worker": "unavailable", "test": "exact", "retry": "exact",
+                        "phase": "exact", "action": "exact", "assertion": "exact"
+                    },
+                    "limitations": [{
+                        "id": "fixture-worker-unavailable",
+                        "scopes": ["worker"],
+                        "reason": "The fixture does not require worker identity"
+                    }]
+                },
+                {
+                    "runner": "background",
+                    "executionModel": "parallel-unattributed",
+                    "attribution": {
+                        "run": "exact", "worker": "unavailable", "test": "unavailable", "retry": "unavailable",
+                        "phase": "unavailable", "action": "unavailable", "assertion": "unavailable"
+                    },
+                    "limitations": [
+                        unattributed("worker"), unattributed("test"), unattributed("retry"),
+                        unattributed("phase"), unattributed("action"), unattributed("assertion")
+                    ]
+                }
+            ],
+            "structuralLimitations": []
+        });
+        let path = archive(vec![
+            EvidenceArchiveEntry {
+                path: "manifest.json".into(),
+                contents: serde_json::to_vec(&manifest).unwrap(),
+            },
+            EvidenceArchiveEntry {
+                path: "frontend.json".into(),
+                contents: serde_json::to_vec(&frontend).unwrap(),
+            },
+            EvidenceArchiveEntry {
+                path: "playwright-worker-1.mcdc.jsonl".into(),
+                contents: {
+                    let mut contents =
+                        serde_json::to_vec(&raw("journal-test", 0, "passed", &["test-hit"]))
+                            .unwrap();
+                    contents.push(b'\n');
+                    contents
+                },
+            },
+            EvidenceArchiveEntry {
+                path: "execution.37360-1.168.jsonl".into(),
+                contents: b"418836ceb3ac9b6277f\"}}\n".to_vec(),
+            },
+            EvidenceArchiveEntry {
+                path: "server/background/process-5118-a1b2c3d4-0.jsonl".into(),
+                contents: concat!(
+                    "{\"type\":\"hit\",\"id\":\"background-hit\"}\n",
+                    "{\"type\":\"decision\",\"meta\":{\"id\":\"torn\",\"file\":\"app/rou{\"type\":\"hit\",\"id\":\"other-clone\"}\n",
+                    "{\"type\":\"hit\",\"id\":\"after-tear\"}\n",
+                )
+                .as_bytes()
+                .to_vec(),
+            },
+        ]);
+        let report = analyze_coverage_archive(&ArchiveReportRequest {
+            archive_path: path.clone(),
+            run_id: "run".into(),
+            generated_at: "time".into(),
+            integrity: None,
+            test_exit_code: ExitCodeInput::Missing,
+        })
+        .expect("a torn evidence line must not fail the whole run");
+        let transport = report.view.transport.expect("transport stats");
+        assert_eq!(transport.corrupt_records, 2);
+        assert_eq!(transport.corrupt_files, 2);
+        assert_eq!(transport.background_server_records, 2);
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

@@ -141,3 +141,15 @@ with:
 
 Do not include secrets, private source, or raw evidence from a repository you
 cannot share.
+
+## "malformed evidence record(s) ... were excluded"
+
+Application processes append coverage evidence themselves. When two of them
+share one file — pool runners that restore several VMs from a single snapshot
+run clones of the same server process, with the same process id — an append
+can tear another's line. Supercov skips the unreadable line, counts it under
+`CORRUPT_EVIDENCE_RECORDS`, and treats it as a blocking limitation so the run
+never looks complete. Since 0.0.29 the background and execution-trace writers also detect a
+clone sharing their file and move to a fresh one, so this should be rare; if it
+persists, check whether something outside Supercov appends to
+`.supercov/…/server/background/`.

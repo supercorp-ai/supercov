@@ -6,7 +6,7 @@ var __rewriteRelativeImportExtension = (this && this.__rewriteRelativeImportExte
     }
     return path;
 };
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import childProcess from "node:child_process";
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
@@ -33,7 +33,22 @@ const adapter = (targetModule === "@playwright/test"
 const base = (adapter[targetTestExport] ?? adapter.test);
 const baseExpect = adapter.expect;
 const GENERATED_EVIDENCE_DIRECTORY = "__SUPERCOV_EVIDENCE_DIRECTORY__";
-const evidenceWriterIdentity = () => (process.env.SUPERCOV_EXECUTION_LOG_SHARD ?? `pid-${process.pid}`)
+// A pid is not an identity. Pool runners restore several VMs from one
+// snapshot and re-execute tests in fresh workers that all carry the same
+// pid; without a per-process token their attempts hash to one identity and
+// their journals land in one file. The token mixes time with randomness
+// because restored clones may also share entropy state.
+const processInstanceToken = (() => {
+    let random = "";
+    try {
+        random = randomBytes(3).toString("hex");
+    }
+    catch {
+        random = Math.floor(Math.random() * 16777215).toString(16);
+    }
+    return `${random}${process.hrtime.bigint().toString(36).slice(-5)}`;
+})();
+const evidenceWriterIdentity = () => (process.env.SUPERCOV_EXECUTION_LOG_SHARD ?? `pid-${process.pid}-${processInstanceToken}`)
     .replace(/[^A-Za-z0-9_-]/g, "_");
 const GENERATED_RUN_ID = "__SUPERCOV_RUN_ID__";
 const PHASE_STORAGE_KEY = "__supercov_phase";
@@ -755,7 +770,7 @@ function currentRunId() {
 }
 function executionScope(testInfo) {
     const runId = currentRunId();
-    const workerId = `pid-${process.pid}-worker-${testInfo.workerIndex}`;
+    const workerId = `pid-${process.pid}-${processInstanceToken}-worker-${testInfo.workerIndex}`;
     const testKey = createHash("sha256")
         .update(testInfo.testId)
         .digest("hex")
