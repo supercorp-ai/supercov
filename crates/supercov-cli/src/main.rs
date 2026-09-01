@@ -1543,10 +1543,6 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                 "[coverage] evidence: {}",
                 result.run_directory.join("evidence.raw.gz").display()
             );
-            eprintln!(
-                "[supercov] outputs created by the wrapped command remain under {}",
-                result.workspace.display()
-            );
             if let Some(timings) = &result.metadata.timings {
                 eprintln!(
                     "[supercov] timings {}",

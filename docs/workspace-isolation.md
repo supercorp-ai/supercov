@@ -27,6 +27,13 @@ snapshots, calls a service, or changes a database, wrapping it does not remove
 that behavior. The isolation guarantee applies to Supercov's instrumentation
 and evidence work.
 
+Files the wrapped command creates or changes inside the isolated workspace are
+synced back to the project after the run, so `supercov -- npm test -- -u`
+updates snapshots in the repository exactly as `npm test -- -u` would. Two
+exceptions are reported instead of applied: changes the command makes to
+instrumented source files (the instrumented copies must never overwrite your
+sources) and deletions (never propagated automatically).
+
 ## Files Supercov creates
 
 | Location | What it is for |
@@ -34,7 +41,7 @@ and evidence work.
 | `.supercov/runs/<run-id>/` | Completed immutable runs |
 | `.supercov/work/` | Temporary state while a run is being prepared |
 | `.supercov/locks/` | Prevents two operations from racing |
-| `supercov/workspace/<project>/` | Isolated source and reusable instrumented build cache |
+| `.supercov-workspace/workspace/<project>/` | Isolated source and reusable instrumented build cache (safe to delete) |
 
 Managed directories include Git ignore rules so run evidence and instrumented
 builds do not become ordinary repository changes.

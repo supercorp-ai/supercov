@@ -36,9 +36,10 @@ function snapshot(directory) {
     for (const entry of readdirSync(path, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const absolute = resolve(path, entry.name);
       const name = relativePath ? `${relativePath}/${entry.name}` : entry.name;
-      // Supercov owns the dotted store and the non-dotted workspace container.
+      // Supercov owns the run store and the hidden workspace container; the
+      // legacy visible container stays listed for pre-0.0.27 leftovers.
       if (
-        [".supercov", "supercov", "node_modules"].some(
+        [".supercov", ".supercov-workspace", "supercov", "node_modules"].some(
           (owned) => name === owned || name.startsWith(`${owned}/`),
         )
       )
@@ -111,15 +112,15 @@ async function verifyUncatchableCacheRecovery() {
     const projectBefore = snapshot(crashRoot);
     const expectedCache = resolve(
       crashRoot,
-      "supercov/workspace",
+      ".supercov-workspace/workspace",
       basename(crashRoot),
     );
-    mkdirSync(resolve(crashRoot, "supercov"));
+    mkdirSync(resolve(crashRoot, ".supercov-workspace"));
     writeFileSync(
-      resolve(crashRoot, "supercov/.supercov-workspace-store"),
+      resolve(crashRoot, ".supercov-workspace/.supercov-workspace-store"),
       "Supercov instrumented workspace. Safe to delete.\n",
     );
-    writeFileSync(resolve(crashRoot, "supercov/.gitignore"), "*\n");
+    writeFileSync(resolve(crashRoot, ".supercov-workspace/.gitignore"), "*\n");
     const cacheParent = resolve(expectedCache, "..");
     const stagingPrefix = `.${basename(crashRoot)}.staging-`;
     mkdirSync(expectedCache, { recursive: true });
@@ -305,7 +306,7 @@ const workRoot = resolve(root, ".supercov/work");
 const runsBefore = new Set(existsSync(workRoot) ? readdirSync(workRoot) : []);
 const expectedCache = resolve(
   root,
-  "supercov/workspace/generic-playwright",
+  ".supercov-workspace/workspace/generic-playwright",
 );
 
 const child = spawn(
@@ -417,9 +418,35 @@ if (existsSync(resolve(root, ".supercov/work", publishedRuns[0])))
   throw new Error("terminal per-run work state survived atomic publication");
 if (existsSync(resolve(root, ".supercov/evidence", publishedRuns[0])))
   throw new Error("loose evidence survived atomic publication");
+// The invisibility contract: after a run, the project looks exactly as the
+// plain command would have left it. The wrapped command's own outputs (here
+// Playwright's test-results/ and playwright-report/) are synced back by
+// design; anything else changing is Supercov leaking into the project.
+const commandOutput = (name) =>
+  name === "test-results" ||
+  name.startsWith("test-results/") ||
+  name === "playwright-report" ||
+  name.startsWith("playwright-report/");
 const projectAfterSuccess = snapshot(root);
-if (JSON.stringify(projectAfterSuccess) !== JSON.stringify(projectBefore))
-  throw new Error("a project file outside the Supercov store changed during a successful coverage run");
+{
+  const before = new Map(projectBefore.map((entry) => [entry.name ?? entry, JSON.stringify(entry)]));
+  const after = new Map(projectAfterSuccess.map((entry) => [entry.name ?? entry, JSON.stringify(entry)]));
+  const changed = [
+    ...[...after.keys()].filter((name) => before.get(name) !== after.get(name)),
+    ...[...before.keys()].filter((name) => !after.has(name)).map((name) => `${name} (deleted)`),
+  ].filter((name) => !commandOutput(name.replace(" (deleted)", "")));
+  if (changed.length > 0)
+    throw new Error(
+      `a file the wrapped command does not produce changed during a successful coverage run: ${changed.slice(0, 10).join(", ")}`,
+    );
+  const syncedOutputs = [...after.keys()].filter(
+    (name) => commandOutput(name) && before.get(name) !== after.get(name),
+  );
+  if (syncedOutputs.length === 0)
+    throw new Error(
+      "the wrapped command's own outputs were not synced back to the project",
+    );
+}
 
 const cleaned = spawnSync(
   process.execPath,
@@ -432,5 +459,5 @@ if (existsSync(expectedCache))
   throw new Error("supercov clean left the isolated build cache behind");
 
 console.log(
-  `[isolation] SIGKILL preserved the prior cache generation, killed the complete active JavaScript test tree, and recovered both abandoned transactions; unchanged source reused its instrumented build, SIGTERM remained cooperative, clean removed all cache data, and no project file outside the Supercov store changed`,
+  `[isolation] SIGKILL preserved the prior cache generation, killed the complete active JavaScript test tree, and recovered both abandoned transactions; unchanged source reused its instrumented build, SIGTERM remained cooperative, clean removed all cache data, and only the wrapped command's own outputs reached the project`,
 );

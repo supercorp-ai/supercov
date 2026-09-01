@@ -74,7 +74,7 @@ try {
   assert.match(help.stdout, /npx supercov -- npm test/u);
   const agentGuide = run(['docs', 'agent-loop']);
   assert.equal(agentGuide.status, 0, agentGuide.stderr);
-  assert.match(agentGuide.stdout, /# Agent loop/u);
+  assert.match(agentGuide.stdout, /# Agent workflow/u);
 
   const successful = run(['--', process.execPath, '--test', '--test-concurrency=2']);
   assert.equal(successful.status, 0, successful.stderr || successful.stdout);
@@ -86,9 +86,11 @@ try {
   assert.match(successful.stderr, /\[supercov\] instrumenting isolated workspace /);
   assert.match(successful.stderr, /\[supercov\] attributed \d+ native node:assert call\(s\)/);
   assert.match(successful.stderr, /\[supercov\] running in isolated workspace: .* --test/);
-  assert.match(
+  // Command outputs sync back to the project now; the run must not point
+  // users into the workspace cache.
+  assert.doesNotMatch(
     successful.stderr,
-    /\[supercov\] outputs created by the wrapped command remain under .*\/supercov\/workspace\/project/,
+    /outputs created by the wrapped command remain under/,
   );
   assert.match(
     successful.stderr,

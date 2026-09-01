@@ -41,7 +41,10 @@ use crate::{
     run_store::{
         InstrumentedBuildCache, RawEvidenceMetadata, RunIntegrity, RunMetadata, RunTimings,
     },
-    workspace::{cached_workspace_path, prepare_cached_workspace, prune_cached_workspace_sources},
+    workspace::{
+        cached_workspace_path, prepare_cached_workspace, prune_cached_workspace_sources,
+        sync_command_outputs, workspace_output_baseline,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -729,6 +732,7 @@ pub fn run_direct_javascript(
     })?;
     let supervisor = ProcessSupervisor::new_crash_safe(watchdog_program)
         .map_err(|error| DirectJavascriptRunError::Failed(error.to_string()))?;
+    let output_baseline = std::cell::RefCell::new(None);
     let execution = match execute_plan_with_supervisor(
         &supervisor,
         &plan,
@@ -736,6 +740,16 @@ pub fn run_direct_javascript(
         diagnostics,
         |phase, diagnostics| {
             let status = if phase.kind == PhaseKind::Test {
+                // The snapshot boundary sits after Supercov's own build phase
+                // and before the user's command, so only the command's own
+                // effects flow back to the real project afterwards.
+                *output_baseline.borrow_mut() =
+                    Some(workspace_output_baseline(&workspace).map_err(|error| {
+                        OrchestrationError::PhaseSetup {
+                            phase: phase.name.clone(),
+                            reason: error.to_string(),
+                        }
+                    })?);
                 if frontend.assertion_calls > 0 {
                     writeln!(
                         diagnostics,
@@ -822,6 +836,47 @@ pub fn run_direct_javascript(
             },
             total_ms: rounded_millisecond(elapsed_ms(total_started)),
         });
+    }
+    // Leave the real working tree as the command alone would have: updated
+    // snapshots, generated fixtures, and reports belong in the repository,
+    // not in the cache. Deletions and instrumented-source rewrites are
+    // reported, never propagated.
+    if let Some(baseline) = output_baseline.borrow().as_ref() {
+        let protected = project
+            .source_files
+            .iter()
+            .map(PathBuf::from)
+            .collect::<std::collections::BTreeSet<_>>();
+        let outputs = sync_command_outputs(&root, &workspace, baseline, &protected)
+            .map_err(|error| error.to_string())?;
+        if outputs.synced > 0 {
+            let _ = writeln!(
+                diagnostics,
+                "[supercov] synced {} file(s) the command created or changed back to the project",
+                outputs.synced
+            );
+        }
+        if !outputs.skipped_instrumented.is_empty() {
+            let _ = writeln!(
+                diagnostics,
+                "[supercov] the command modified {} instrumented source file(s); those changes stay in the isolated workspace because the instrumented copies must not overwrite your sources: {}",
+                outputs.skipped_instrumented.len(),
+                outputs
+                    .skipped_instrumented
+                    .iter()
+                    .take(3)
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if !outputs.deleted_in_workspace.is_empty() {
+            let _ = writeln!(
+                diagnostics,
+                "[supercov] the command deleted {} file(s) in the isolated workspace; deletions are not propagated to the project",
+                outputs.deleted_in_workspace.len()
+            );
+        }
     }
     update_run_state(
         &root,

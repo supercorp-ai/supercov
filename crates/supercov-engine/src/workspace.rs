@@ -1,7 +1,7 @@
 //! Isolated project snapshots and crash-recoverable stable build cache.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Component, Path, PathBuf},
@@ -125,23 +125,36 @@ fn project_name(root: &Path) -> Result<&std::ffi::OsStr, WorkspaceError> {
 }
 
 pub fn workspace_container(root: &Path) -> PathBuf {
-    let preferred = root.join("supercov");
-    if fs::symlink_metadata(&preferred).is_err() || owned_workspace_path(&preferred) {
+    // Hidden: Supercov's contract is that users interact with their real
+    // files and the CLI; command outputs sync back after every run, so
+    // nothing in the container is ever theirs to fetch.
+    let preferred = root.join(".supercov-workspace");
+    if fs::symlink_metadata(&preferred).is_err() {
+        // Migrate the pre-0.0.27 visible container so its instrumented-build
+        // cache survives the rename. A failed rename simply means a cold
+        // cache; the legacy directory stays subject to its normal cleanup.
+        let legacy = root.join("supercov");
+        if owned_workspace_path(&legacy) {
+            let _ = fs::rename(&legacy, &preferred);
+        }
+        return preferred;
+    }
+    if owned_workspace_path(&preferred) {
         return preferred;
     }
     let digest = format!("{:x}", Sha256::digest(root.as_os_str().as_encoded_bytes()));
     for sequence in 0..1_024usize {
         let name = if sequence == 0 {
-            format!("supercov-workspace-{}", &digest[..16])
+            format!(".supercov-workspace-{}", &digest[..16])
         } else {
-            format!("supercov-workspace-{}-{sequence}", &digest[..16])
+            format!(".supercov-workspace-{}-{sequence}", &digest[..16])
         };
         let candidate = root.join(name);
         if fs::symlink_metadata(&candidate).is_err() || owned_workspace_path(&candidate) {
             return candidate;
         }
     }
-    root.join(format!("supercov-workspace-{}-overflow", &digest[..16]))
+    root.join(format!(".supercov-workspace-{}-overflow", &digest[..16]))
 }
 
 pub fn cached_workspace_path(root: &Path) -> Result<PathBuf, WorkspaceError> {
@@ -454,8 +467,8 @@ pub fn isolated_workspace_path(root: &Path, run_id: &str) -> Result<PathBuf, Wor
     {
         return Err(WorkspaceError::UnsafePath(PathBuf::from(run_id)));
     }
-    Ok(root
-        .join("supercov/work")
+    Ok(workspace_container(root)
+        .join("work")
         .join(run_id)
         .join(project_name(root)?))
 }
@@ -1351,6 +1364,143 @@ fn retain_cached_artifact_roots(
     }
 }
 
+/// The state of every regular file in the mirror the moment before the
+/// wrapped command starts: relative path to (length, modified time). Cheap to
+/// take (stat only) and precise enough to attribute changes to the command.
+pub struct WorkspaceOutputBaseline {
+    entries: BTreeMap<PathBuf, (u64, SystemTime)>,
+}
+
+/// What flowed back to the real project after the wrapped command finished.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CommandOutputSync {
+    pub synced: usize,
+    /// Source files the command modified inside the workspace. Their mirror
+    /// copies are instrumented, so copying them back would inject probes into
+    /// the user's repository; they are reported instead.
+    pub skipped_instrumented: Vec<PathBuf>,
+    /// Files the command deleted inside the workspace. Deletions are reported
+    /// rather than propagated: a defect here would destroy user data.
+    pub deleted_in_workspace: Vec<PathBuf>,
+}
+
+fn walk_output_files(
+    workspace: &Path,
+    directory: &Path,
+    entries: &mut BTreeMap<PathBuf, (u64, SystemTime)>,
+) -> Result<(), WorkspaceError> {
+    for entry in fs::read_dir(directory)
+        .map_err(|error| io_error(directory, error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| io_error(directory, error))?
+    {
+        let path = entry.path();
+        let name = entry.file_name();
+        let relative = path
+            .strip_prefix(workspace)
+            .map_err(|_| WorkspaceError::UnsafePath(path.clone()))?
+            .to_owned();
+        // Supercov's generated state never flows back, `.git` is not a
+        // command output, and symlinks (the node_modules link above all) point
+        // at the real project already.
+        if relative.components().count() == 1
+            && matches!(name.to_str(), Some(".supercov") | Some(".git"))
+        {
+            continue;
+        }
+        let metadata = entry.metadata().map_err(|error| io_error(&path, error))?;
+        if fs::symlink_metadata(&path)
+            .map_err(|error| io_error(&path, error))?
+            .file_type()
+            .is_symlink()
+        {
+            continue;
+        }
+        if metadata.is_dir() {
+            walk_output_files(workspace, &path, entries)?;
+        } else if metadata.is_file() {
+            let modified = metadata
+                .modified()
+                .map_err(|error| io_error(&path, error))?;
+            entries.insert(relative, (metadata.len(), modified));
+        }
+    }
+    Ok(())
+}
+
+pub fn workspace_output_baseline(
+    workspace: &Path,
+) -> Result<WorkspaceOutputBaseline, WorkspaceError> {
+    let mut entries = BTreeMap::new();
+    walk_output_files(workspace, workspace, &mut entries)?;
+    Ok(WorkspaceOutputBaseline { entries })
+}
+
+/// Refuse to copy through any pre-existing symlink component under the
+/// project root, so a command output can never be redirected outside it.
+fn validate_writeback_destination(root: &Path, relative: &Path) -> Result<(), WorkspaceError> {
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(WorkspaceError::UnsafePath(relative.into()));
+    }
+    let mut current = root.to_owned();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(WorkspaceError::UnsafePath(current));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(io_error(&current, error)),
+        }
+    }
+    Ok(())
+}
+
+/// Copy files the wrapped command created or changed in the mirror back to
+/// the real project, so `supercov -- <command>` leaves the working tree in
+/// the same state `<command>` alone would have: updated snapshots, generated
+/// fixtures, and reports land in the repository, not in a cache directory.
+/// `protected` names relative paths whose mirror copies are instrumented and
+/// must never flow back.
+pub fn sync_command_outputs(
+    root: &Path,
+    workspace: &Path,
+    baseline: &WorkspaceOutputBaseline,
+    protected: &BTreeSet<PathBuf>,
+) -> Result<CommandOutputSync, WorkspaceError> {
+    let mut current = BTreeMap::new();
+    walk_output_files(workspace, workspace, &mut current)?;
+    let mut sync = CommandOutputSync::default();
+    for (relative, state) in &current {
+        if baseline.entries.get(relative) == Some(state) {
+            continue;
+        }
+        if protected.contains(relative) {
+            sync.skipped_instrumented.push(relative.clone());
+            continue;
+        }
+        validate_writeback_destination(root, relative)?;
+        let from = workspace.join(relative);
+        let to = root.join(relative);
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
+        }
+        fs::copy(&from, &to).map_err(|error| io_error(&to, error))?;
+        sync.synced += 1;
+    }
+    for relative in baseline.entries.keys() {
+        if !current.contains_key(relative) {
+            sync.deleted_in_workspace.push(relative.clone());
+        }
+    }
+    Ok(sync)
+}
+
 pub fn prune_cached_workspace_sources(
     root: &Path,
     lock: &ProjectLock,
@@ -1387,6 +1537,92 @@ pub fn prune_cached_workspace_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn writeback_fixture(name: &str) -> (PathBuf, PathBuf) {
+        let base =
+            std::env::temp_dir().join(format!("supercov-writeback-{}-{name}", std::process::id()));
+        if base.exists() {
+            fs::remove_dir_all(&base).unwrap();
+        }
+        let root = base.join("project");
+        let workspace = base.join("workspace");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::create_dir_all(workspace.join(".supercov")).unwrap();
+        fs::write(root.join("src/app.ts"), "original\n").unwrap();
+        fs::write(workspace.join("src/app.ts"), "instrumented\n").unwrap();
+        fs::write(workspace.join(".supercov/state.json"), "{}").unwrap();
+        (root, workspace)
+    }
+
+    #[test]
+    fn command_outputs_flow_back_to_the_project() {
+        let (root, workspace) = writeback_fixture("outputs");
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        fs::create_dir_all(workspace.join("src/__snapshots__")).unwrap();
+        fs::write(
+            workspace.join("src/__snapshots__/app.snap"),
+            "updated snapshot\n",
+        )
+        .unwrap();
+        fs::write(workspace.join(".supercov/state.json"), "{\"changed\":1}").unwrap();
+        let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
+        assert_eq!(sync.synced, 1);
+        assert_eq!(
+            fs::read_to_string(root.join("src/__snapshots__/app.snap")).unwrap(),
+            "updated snapshot\n"
+        );
+        assert!(!root.join(".supercov/state.json").exists());
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn instrumented_sources_never_flow_back() {
+        let (root, workspace) = writeback_fixture("protected");
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        // A formatter run by the command rewrites the instrumented copy; the
+        // real source must keep its original bytes.
+        fs::write(workspace.join("src/app.ts"), "instrumented, reformatted\n").unwrap();
+        let protected = BTreeSet::from([PathBuf::from("src/app.ts")]);
+        let sync = sync_command_outputs(&root, &workspace, &baseline, &protected).unwrap();
+        assert_eq!(sync.synced, 0);
+        assert_eq!(sync.skipped_instrumented, [PathBuf::from("src/app.ts")]);
+        assert_eq!(
+            fs::read_to_string(root.join("src/app.ts")).unwrap(),
+            "original\n"
+        );
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn workspace_deletions_are_reported_but_never_propagated() {
+        let (root, workspace) = writeback_fixture("deletions");
+        fs::write(workspace.join("stale.txt"), "old\n").unwrap();
+        fs::write(root.join("stale.txt"), "old\n").unwrap();
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        fs::remove_file(workspace.join("stale.txt")).unwrap();
+        let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
+        assert_eq!(sync.deleted_in_workspace, [PathBuf::from("stale.txt")]);
+        assert!(root.join("stale.txt").exists());
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writeback_refuses_a_symlinked_destination() {
+        let (root, workspace) = writeback_fixture("symlink");
+        let outside = root.parent().unwrap().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("reports")).unwrap();
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        fs::create_dir_all(workspace.join("reports")).unwrap();
+        fs::write(workspace.join("reports/result.txt"), "output\n").unwrap();
+        let error =
+            sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap_err();
+        assert!(matches!(error, WorkspaceError::UnsafePath(_)));
+        assert!(!outside.join("result.txt").exists());
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
 
     struct OrdinaryCopyOperations;
 
@@ -1543,6 +1779,45 @@ mod tests {
             prepare_isolated_workspace(&root, "other", &lock),
             Err(WorkspaceError::MissingLock)
         ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_visible_container_migrates_to_the_hidden_name() {
+        let root = project();
+        let legacy = root.join("supercov");
+        fs::create_dir_all(legacy.join("workspace/project/dist")).unwrap();
+        fs::write(legacy.join(WORKSPACE_MARKER), WORKSPACE_MARKER_CONTENTS).unwrap();
+        fs::write(legacy.join("workspace/project/dist/cached.js"), "cached\n").unwrap();
+        let container = workspace_container(&root);
+        assert_eq!(container, root.join(".supercov-workspace"));
+        assert!(fs::symlink_metadata(&legacy).is_err());
+        assert_eq!(
+            fs::read_to_string(container.join("workspace/project/dist/cached.js")).unwrap(),
+            "cached\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_unowned_hidden_container_gets_a_deterministic_fallback() {
+        let root = project();
+        fs::create_dir(root.join(".supercov-workspace")).unwrap();
+        fs::write(root.join(".supercov-workspace/user-file"), "mine\n").unwrap();
+        let container = workspace_container(&root);
+        assert_ne!(container, root.join(".supercov-workspace"));
+        let name = container
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(name.starts_with(".supercov-workspace-"));
+        assert!(
+            !root
+                .join(".supercov-workspace")
+                .join(WORKSPACE_MARKER)
+                .exists()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
