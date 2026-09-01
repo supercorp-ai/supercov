@@ -18,7 +18,7 @@ function filesUnder(root, directory = root) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     // Supercov owns the dotted store and the non-dotted workspace container.
     if (
-      [".supercov", "supercov", "node_modules"].includes(entry.name)
+      [".supercov", ".supercov-workspace", "supercov", "node_modules"].includes(entry.name)
     )
       return [];
     const path = resolve(directory, entry.name);
@@ -70,7 +70,9 @@ try {
     filter: (path) =>
       !relative(resolve("tests/fixtures/no-build-node"), path)
         .split(/[\\/]/)
-        .some((segment) => segment === ".supercov" || segment === "supercov"),
+        .some((segment) =>
+          [".supercov", ".supercov-workspace", "supercov"].includes(segment),
+        ),
   });
   const before = snapshot(project);
   const executed = spawnSync(
