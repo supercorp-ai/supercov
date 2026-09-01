@@ -41,7 +41,7 @@ sources) and deletions (never propagated automatically).
 | `.supercov/runs/<run-id>/` | Completed immutable runs |
 | `.supercov/work/` | Temporary state while a run is being prepared |
 | `.supercov/locks/` | Prevents two operations from racing |
-| `.supercov-workspace/workspace/<project>/` | Isolated source and reusable instrumented build cache (safe to delete) |
+| `.supercov/workspaces/` | Isolated source mirror and reusable instrumented build cache (safe to delete) |
 
 Managed directories include Git ignore rules so run evidence and instrumented
 builds do not become ordinary repository changes.

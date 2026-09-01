@@ -154,7 +154,7 @@ Collections accept `--limit` and `--offset` and print a copyable next-page comma
 
 ## Local, private, and zero-edit
 
-Run evidence stays under `.supercov/runs/<run-id>/`. Supercov also maintains a marker-protected isolated build cache under `supercov/workspace/`.
+Everything Supercov writes lives under one hidden `.supercov/` directory: run evidence in `.supercov/runs/<run-id>/` and the isolated build cache in `.supercov/workspaces/`. It ignores itself in Git, so there is nothing to add to your `.gitignore`.
 
 The Supercov CLI does not contact a Supercov service during a coverage run. Package tools such as `npx` may contact the npm registry to download Supercov when it is not already cached.
 

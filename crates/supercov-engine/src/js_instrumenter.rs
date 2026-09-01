@@ -1598,6 +1598,16 @@ impl<'s> SafetyScanner<'s> {
         span: Span,
         context: &TraverseCtx<'_, State>,
     ) {
+        // A function handed to a compile-time style macro never runs: the
+        // bundler's plugin evaluates it while building and replaces the whole
+        // call. Probing its body has nothing to measure and breaks the build
+        // (StyleX rejects a block-bodied dynamic style). Leave it as source,
+        // with no limitation: there is no runtime behavior to lose.
+        if compile_time_macro_argument(context) {
+            self.source_sensitive_functions.insert(span_key(span));
+            self.unsafe_function_depth += 1;
+            return;
+        }
         let sensitive = observes_function_source(span, context);
         if sensitive {
             self.source_sensitive_functions.insert(span_key(span));
@@ -1803,6 +1813,37 @@ impl<'a> VisitMut<'a> for AssignmentNameSafetyTransformer<'a> {
             false,
         );
     }
+}
+
+/// Compile-time style macros whose arguments the bundler consumes at build
+/// time. Only the namespaced form (`stylex.create(...)`) is recognized: it is
+/// how the StyleX documentation and its Vite/Babel plugins expect the API to
+/// be used, and it needs no binding resolution here.
+const COMPILE_TIME_STYLE_MACROS: &[&str] = &[
+    "create",
+    "createTheme",
+    "defineConsts",
+    "defineVars",
+    "firstThatWorks",
+    "keyframes",
+    "positionTry",
+    "viewTransitionClass",
+];
+
+fn compile_time_macro_argument<State>(context: &TraverseCtx<'_, State>) -> bool {
+    context.ancestors().any(|ancestor| {
+        let Ancestor::CallExpressionArguments(parent) = ancestor else {
+            return false;
+        };
+        let Expression::StaticMemberExpression(member) = parent.callee() else {
+            return false;
+        };
+        let Expression::Identifier(object) = &member.object else {
+            return false;
+        };
+        object.name == "stylex"
+            && COMPILE_TIME_STYLE_MACROS.contains(&member.property.name.as_str())
+    })
 }
 
 fn observes_function_source<State>(span: Span, context: &TraverseCtx<'_, State>) -> bool {
@@ -7200,6 +7241,56 @@ mod tests {
         let instrumented = instrument_direct_candidate(source, "src/constants.js").unwrap();
         assert_eq!(instrumented.decisions.len(), 1);
         assert_eq!(instrumented.decisions[0].source, "value");
+    }
+
+    #[test]
+    fn leaves_compile_time_style_macro_arguments_as_source() {
+        // StyleX evaluates these at build time and rejects a block-bodied
+        // dynamic style; probing them broke a real project's Vite build.
+        let source = concat!(
+            "import * as stylex from '@stylexjs/stylex';\n",
+            "const styles = stylex.create({\n",
+            "  container: { display: 'flex' },\n",
+            "  paddingTop: (spacing: number) => ({ paddingTop: `${spacing}px` }),\n",
+            "  tone: (dark: boolean) => ({ color: dark ? 'white' : 'black' }),\n",
+            "});\n",
+            "export function render(spacing: number) {\n",
+            "  return stylex.props(styles.container, styles.paddingTop(spacing));\n",
+            "}\n",
+        );
+        let output = instrument_direct_candidate(source, "src/styles.tsx").unwrap();
+        assert!(
+            output.code.contains("=> ({ paddingTop: `${spacing}px` })")
+                || output
+                    .code
+                    .contains("=> ({\n\t\tpaddingTop: `${spacing}px`\n\t})"),
+            "dynamic style arrow must stay an expression body:\n{}",
+            output.code
+        );
+        assert!(
+            !output
+                .decisions
+                .iter()
+                .any(|decision| decision.source.contains("dark")),
+            "no decision may be collected inside the macro argument"
+        );
+        let function_points = output
+            .points
+            .iter()
+            .filter(|point| point.kind == "function")
+            .map(|point| point.source.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            function_points
+                .iter()
+                .all(|source| source.contains("render")),
+            "only the real function may carry a function point: {function_points:?}"
+        );
+        assert!(
+            output.limitations.is_empty(),
+            "compiled-away code is not a limitation: {:?}",
+            output.limitations
+        );
     }
 
     #[test]

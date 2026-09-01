@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 
 const GENERATED_DIRECTORIES: &[&str] = &[
     ".cache",
+    "generated",
     ".git",
     ".mcdc-pool",
     ".next",
@@ -214,6 +215,58 @@ fn owned_workspace_store(path: &Path) -> bool {
     crate::workspace::owned_workspace_path(path)
 }
 
+/// A directory carrying its own `.git` entry is another checkout — a nested
+/// clone, a submodule, or an agent worktree such as `.claude/worktrees/*` —
+/// not this project's source. Treating its files as ambiguous first-party
+/// code turned one real project's report into 1,032 blocking limitations.
+fn nested_checkout(path: &Path) -> bool {
+    fs::symlink_metadata(path.join(".git")).is_ok()
+}
+
+/// A hidden directory at the project root is tool state (.shopify, .vercel,
+/// .idea, .claude, ...) by convention, never application source. Nested
+/// hidden directories keep their normal treatment so a source tree that
+/// happens to contain one is not silently truncated.
+/// A hashed bundle (`app-embed-Be-aUw9g.js`) inside an assets/static/public
+/// directory is a bundler's output, not source: a theme extension's `assets/`
+/// receives its Vite build, and every such bundle was an ambiguous blocker.
+fn built_asset(file: &str) -> bool {
+    let mut segments = file.rsplit('/');
+    let Some(name) = segments.next() else {
+        return false;
+    };
+    let in_asset_directory =
+        segments.any(|segment| matches!(segment, "assets" | "static" | "public"));
+    let Some(stem) = name
+        .strip_suffix(".js")
+        .or_else(|| name.strip_suffix(".mjs"))
+        .or_else(|| name.strip_suffix(".cjs"))
+    else {
+        return false;
+    };
+    // Bundler hashes are eight base64url characters, which may themselves
+    // contain '-', so take the suffix by length rather than splitting on it.
+    if stem.len() < 10 || stem.as_bytes()[stem.len() - 9] != b'-' {
+        return false;
+    }
+    let hash = &stem[stem.len() - 8..];
+    let looks_hashed = hash
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        && (hash.bytes().any(|byte| byte.is_ascii_digit())
+            || (hash.bytes().any(|byte| byte.is_ascii_uppercase())
+                && hash.bytes().any(|byte| byte.is_ascii_lowercase())));
+    in_asset_directory && looks_hashed
+}
+
+fn root_tool_directory(root: &Path, path: &Path) -> bool {
+    path.parent() == Some(root)
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with('.'))
+}
+
 fn source_file(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     [
@@ -274,7 +327,11 @@ fn read_directory(path: &Path) -> Result<Vec<fs::DirEntry>, SourceDiscoveryError
     Ok(entries)
 }
 
-fn files_under(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), SourceDiscoveryError> {
+fn files_under(
+    root: &Path,
+    directory: &Path,
+    output: &mut Vec<PathBuf>,
+) -> Result<(), SourceDiscoveryError> {
     let metadata = fs::symlink_metadata(directory).map_err(|error| io_error(directory, error))?;
     if !metadata.file_type().is_dir() {
         return Err(SourceDiscoveryError::InvalidRoot(directory.to_owned()));
@@ -290,8 +347,12 @@ fn files_under(directory: &Path, output: &mut Vec<PathBuf>) -> Result<(), Source
             continue;
         }
         if file_type.is_dir() {
-            if !generated_directory(&name) && !owned_workspace_store(&path) {
-                files_under(&path, output)?;
+            if !generated_directory(&name)
+                && !owned_workspace_store(&path)
+                && !nested_checkout(&path)
+                && !root_tool_directory(root, &path)
+            {
+                files_under(root, &path, output)?;
             }
         } else if file_type.is_file() && source_file(&name) {
             output.push(path);
@@ -325,6 +386,8 @@ fn package_directories(root: &Path) -> Result<Vec<PathBuf>, SourceDiscoveryError
                 || file_type.is_symlink()
                 || generated_directory(&name)
                 || owned_workspace_store(&path)
+                || nested_checkout(&path)
+                || root_tool_directory(root, &path)
             {
                 continue;
             }
@@ -342,7 +405,88 @@ fn package_directories(root: &Path) -> Result<Vec<PathBuf>, SourceDiscoveryError
 
     let mut found = BTreeSet::from([root.to_owned()]);
     visit(root, root, 0, &mut found)?;
+    for directory in declared_workspace_packages(root)? {
+        found.insert(directory);
+    }
     Ok(found.into_iter().collect())
+}
+
+/// Packages the project itself declares: `workspaces` in the root
+/// package.json (array or `{ "packages": [...] }`) and `packages:` in
+/// pnpm-workspace.yaml. The manifest is the most authoritative statement of
+/// where packages live, and it routinely names directories outside the
+/// conventional parents (a real project keeps its Shopify extensions under
+/// `app_extensions/*`; every file there was an ambiguous blocker).
+fn declared_workspace_packages(root: &Path) -> Result<Vec<PathBuf>, SourceDiscoveryError> {
+    let mut patterns = Vec::new();
+    let manifest = read_json(&root.join("package.json")).unwrap_or(Value::Null);
+    let declared = match manifest.get("workspaces") {
+        Some(Value::Array(items)) => Some(items),
+        Some(Value::Object(object)) => object.get("packages").and_then(Value::as_array),
+        _ => None,
+    };
+    if let Some(items) = declared {
+        patterns.extend(items.iter().filter_map(Value::as_str).map(str::to_owned));
+    }
+    if let Ok(pnpm) = fs::read_to_string(root.join("pnpm-workspace.yaml")) {
+        let mut in_packages = false;
+        for line in pnpm.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("packages:") {
+                in_packages = true;
+                continue;
+            }
+            if in_packages {
+                if let Some(item) = trimmed.strip_prefix("- ") {
+                    patterns.push(item.trim_matches(|c| c == '"' || c == '\'').to_owned());
+                } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                    in_packages = false;
+                }
+            }
+        }
+    }
+    let mut found = Vec::new();
+    for pattern in patterns {
+        let pattern = pattern.trim_start_matches("./").trim_end_matches('/');
+        if pattern.starts_with('!') || pattern.contains("**") {
+            continue;
+        }
+        let (parent, wildcard) = match pattern.strip_suffix("/*") {
+            Some(parent) => (parent, true),
+            None => (pattern, false),
+        };
+        if parent.is_empty()
+            || parent
+                .split('/')
+                .any(|segment| segment.is_empty() || segment == ".." || segment.contains('*'))
+        {
+            continue;
+        }
+        let base = root.join(parent);
+        let candidates: Vec<PathBuf> = if wildcard {
+            match fs::read_dir(&base) {
+                Ok(entries) => entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .collect(),
+                Err(_) => Vec::new(),
+            }
+        } else {
+            vec![base]
+        };
+        for candidate in candidates {
+            let is_dir = fs::symlink_metadata(&candidate)
+                .is_ok_and(|metadata| metadata.file_type().is_dir());
+            if is_dir
+                && candidate.join("package.json").is_file()
+                && !nested_checkout(&candidate)
+                && !owned_workspace_store(&candidate)
+            {
+                found.push(candidate);
+            }
+        }
+    }
+    Ok(found)
 }
 
 fn string_targets(value: &Value, depth: usize, output: &mut Vec<String>) {
@@ -549,12 +693,25 @@ pub fn discover_source_scope(
             .iter()
             .flat_map(|directory| {
                 let manifest = read_json(&directory.join("package.json")).unwrap_or(Value::Null);
-                SOURCE_DIRECTORIES
+                let candidates = SOURCE_DIRECTORIES
                     .iter()
                     .map(|name| directory.join(name))
                     .chain(entry_targets(directory, &manifest))
                     .chain(tsconfig_roots(directory))
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                // A declared package that keeps its code somewhere
+                // unconventional (a Shopify theme extension's `frontend/` and
+                // `blocks/`, say) is still first-party source. Its own
+                // directory becomes the root; generated subtrees stay excluded
+                // by the walker as everywhere else.
+                if directory != &root
+                    && !candidates
+                        .iter()
+                        .any(|candidate| fs::symlink_metadata(candidate).is_ok())
+                {
+                    return vec![directory.clone()];
+                }
+                candidates
             })
             .collect()
     };
@@ -571,7 +728,7 @@ pub fn discover_source_scope(
     }
     let existing_roots = existing_roots.into_iter().collect::<Vec<_>>();
     let mut all_files = Vec::new();
-    files_under(&root, &mut all_files)?;
+    files_under(&root, &root, &mut all_files)?;
     all_files.sort();
 
     let mut entries = Vec::new();
@@ -603,6 +760,8 @@ pub fn discover_source_scope(
                 SourceScopeStatus::Excluded,
                 "build/test/tool configuration",
             ));
+        } else if built_asset(&file) {
+            entries.push(entry(SourceScopeStatus::Excluded, "built asset"));
         } else if existing_roots.iter().any(|directory| {
             fs::symlink_metadata(directory)
                 .map(|metadata| {
@@ -750,6 +909,147 @@ mod tests {
                 .entries
                 .iter()
                 .all(|entry| !entry.file.contains(".cache"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn declared_workspaces_outside_conventional_parents_are_package_roots() {
+        let root = repository(
+            "declared-workspaces",
+            &[
+                ("package.json", r#"{"workspaces":["app_extensions/*"]}"#),
+                ("app/main.ts", "product"),
+                ("app_extensions/discounts/package.json", "{}"),
+                ("app_extensions/discounts/src/index.ts", "extension"),
+                // No conventional source directory at all: the package itself
+                // is the root, so its frontend code is still first-party.
+                ("app_extensions/upsells/package.json", "{}"),
+                ("app_extensions/upsells/frontend/embed.ts", "embed"),
+                ("app_extensions/upsells/dist/embed.js", "built"),
+            ],
+        );
+        let discovered = discover_source_scope(&root, None).unwrap();
+        assert_eq!(
+            discovered.source_files,
+            [
+                "app/main.ts",
+                "app_extensions/discounts/src/index.ts",
+                "app_extensions/upsells/frontend/embed.ts",
+            ]
+        );
+        assert!(
+            discovered.limitations.is_empty(),
+            "declared packages must not be blockers: {:?}",
+            discovered.limitations
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hashed_bundles_in_asset_directories_are_built_assets() {
+        let root = repository(
+            "built-assets",
+            &[
+                ("package.json", r#"{"workspaces":["app_extensions/*"]}"#),
+                ("app/main.ts", "product"),
+                ("app_extensions/upsells/package.json", "{}"),
+                ("app_extensions/upsells/frontend/embed.ts", "source"),
+                (
+                    "app_extensions/upsells/assets/app-embed-Be-aUw9g.js",
+                    "bundle",
+                ),
+                ("app_extensions/upsells/assets/stylex-DAnmLURx.js", "bundle"),
+                // A hand-written helper in assets keeps its ordinary treatment.
+                (
+                    "app_extensions/upsells/assets/theme-helper.js",
+                    "hand written",
+                ),
+            ],
+        );
+        let discovered = discover_source_scope(&root, None).unwrap();
+        assert!(
+            !discovered
+                .source_files
+                .iter()
+                .any(|file| file.contains("-Be-aUw9g.js") || file.contains("-DAnmLURx.js"))
+        );
+        assert_eq!(
+            entry(
+                &discovered,
+                "app_extensions/upsells/assets/app-embed-Be-aUw9g.js"
+            )
+            .reason,
+            "built asset"
+        );
+        assert!(
+            discovered.limitations.is_empty(),
+            "bundles are not blockers: {:?}",
+            discovered.limitations
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn root_level_hidden_directories_are_tooling_not_source() {
+        let root = repository(
+            "root-hidden",
+            &[
+                ("package.json", "{}"),
+                ("app/main.ts", "product"),
+                (".shopify/bundle/upsells/frontend/embed.js", "cli bundle"),
+                (".vercel/output/functions/index.js", "deploy output"),
+                // A nested hidden directory inside a source root keeps its
+                // ordinary treatment.
+                ("app/.generated/schema.ts", "generated types"),
+            ],
+        );
+        let discovered = discover_source_scope(&root, None).unwrap();
+        assert_eq!(
+            discovered.source_files,
+            ["app/.generated/schema.ts", "app/main.ts"]
+        );
+        assert!(
+            discovered.limitations.is_empty(),
+            "{:?}",
+            discovered.limitations
+        );
+        assert!(discovered.scope.entries.iter().all(
+            |entry| !entry.file.starts_with(".shopify/") && !entry.file.starts_with(".vercel/")
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_checkouts_are_neither_source_nor_limitations() {
+        let root = repository(
+            "nested-checkout",
+            &[
+                ("package.json", "{}"),
+                ("app/main.ts", "product"),
+                // An agent worktree: a full copy of the project carrying its own
+                // `.git` file. Real project, 1,032 of these turned into blockers.
+                (".claude/worktrees/agent-1/.git", "gitdir: /elsewhere"),
+                (".claude/worktrees/agent-1/app/main.ts", "copy"),
+                ("vendor-fork/.git/HEAD", "ref: refs/heads/main"),
+                ("vendor-fork/src/index.ts", "clone"),
+            ],
+        );
+        let discovered = discover_source_scope(&root, None).unwrap();
+        assert_eq!(discovered.source_files, ["app/main.ts"]);
+        assert!(
+            discovered.limitations.is_empty(),
+            "nested checkouts must not be blocking limitations: {:?}",
+            discovered.limitations
+        );
+        assert!(
+            discovered
+                .scope
+                .entries
+                .iter()
+                .all(|entry| !entry.file.starts_with(".claude/")
+                    && !entry.file.starts_with("vendor-fork/")),
+            "nested checkout files must not appear in scope at all"
         );
         fs::remove_dir_all(root).unwrap();
     }

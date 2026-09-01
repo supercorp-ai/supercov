@@ -124,5 +124,16 @@ When first-party source lives in unusual directories, declare it explicitly:
 SUPERCOV_SOURCE_ROOTS=src,app npx supercov -- npm test
 ```
 
+Supercov never treats these as project source, so they are neither measured
+nor reported as limitations: another checkout nested in the tree (a directory
+with its own `.git`, such as an agent worktree or a vendored clone), hidden
+directories at the project root (`.shopify/`, `.vercel/`, `.idea/`), directories
+named `generated`, and hashed bundler output inside `assets/`, `static/`, or
+`public/`. Packages the root manifest declares in `workspaces` (or
+`pnpm-workspace.yaml`) are discovered wherever they live; a declared package
+without a conventional source directory is measured as a whole. Functions passed
+to compile-time style macros (`stylex.create(...)`) are left as written because
+the bundler consumes them at build time; nothing about them runs.
+
 Choose roots that describe code the repository owns. Do not include dependencies
 or generated output merely to make a warning disappear.

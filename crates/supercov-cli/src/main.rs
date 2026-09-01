@@ -1441,7 +1441,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
             ecosystem.language, ecosystem.evidence, ecosystem.language
         );
         eprintln!(
-            "[supercov] Supercov currently measures JavaScript/TypeScript test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
+            "[supercov] Supercov currently measures JavaScript, TypeScript, and Rust test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
             ecosystem.language
         );
         return ExitCode::from(2);
@@ -1454,7 +1454,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                     ecosystem.language, ecosystem.evidence, ecosystem.language
                 );
                 eprintln!(
-                    "[supercov] Supercov currently measures JavaScript/TypeScript test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
+                    "[supercov] Supercov currently measures JavaScript, TypeScript, and Rust test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
                     ecosystem.language
                 );
             }
@@ -1463,7 +1463,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                     "[supercov] Supercov could not recognize this project's language or test framework: no supported test files or manifests were found, and the command does not launch a runner Supercov knows."
                 );
                 eprintln!(
-                    "[supercov] Supercov currently measures JavaScript/TypeScript test runs. Alternatively, Supercov may simply not support your test suite yet — if so, please open an issue or PR: https://github.com/supercorp-ai/supercov"
+                    "[supercov] Supercov currently measures JavaScript, TypeScript, and Rust test runs. Alternatively, Supercov may simply not support your test suite yet — if so, please open an issue or PR: https://github.com/supercorp-ai/supercov"
                 );
             }
         }
@@ -1520,7 +1520,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
             "[supercov] This looks like a Python test run, and Supercov does not support Python yet."
         );
         eprintln!(
-            "[supercov] Supercov currently measures JavaScript/TypeScript test runs. If you'd like Python support, please open an issue or PR: https://github.com/supercorp-ai/supercov"
+            "[supercov] Supercov currently measures JavaScript, TypeScript, and Rust test runs. If you'd like Python support, please open an issue or PR: https://github.com/supercorp-ai/supercov"
         );
         return ExitCode::from(2);
     }
