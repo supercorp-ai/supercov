@@ -157,7 +157,12 @@ function createState() {
     probeV2Clock: { epoch: Number.NaN, fast: false },
     probeV2ContextEpochs: /* @__PURE__ */ new Map(),
     probeV2NextEpoch: 1,
-    probeV2HookInstalled: false
+    probeV2HookInstalled: false,
+    pendingServerAppends: /* @__PURE__ */ new Map(),
+    createdEvidenceDirectories: /* @__PURE__ */ new Set(),
+    serverFlushScheduled: false,
+    serverExitHookInstalled: false,
+    serverTransportFailure: void 0
   };
   if (!isBrowser)
     return state2;
@@ -313,13 +318,41 @@ function resetCoverage(testId2) {
 runtimeGlobal.__SUPERCOV_MCDC_SNAPSHOT__ = decisionSnapshot;
 runtimeGlobal.__SUPERCOV_COVERAGE_SNAPSHOT__ = coverageSnapshot;
 runtimeGlobal.__SUPERCOV_RESET__ = resetCoverage;
-function persistBrowser() {
+var persistBrowserScheduled = false;
+var persistBrowserListenersInstalled = false;
+function persistBrowserNow() {
   if (!isBrowser)
     return;
   try {
     localStorage.setItem(storageKey, JSON.stringify(coverageSnapshot()));
   } catch (e) {
   }
+}
+function persistBrowser() {
+  if (!isBrowser)
+    return;
+  // Persistence exists so evidence survives navigation, not to mirror every
+  // event: serializing the whole snapshot per event is quadratic in a
+  // render burst. Coalesce to one write per macrotask and flush when the
+  // page is actually leaving.
+  if (!persistBrowserListenersInstalled) {
+    persistBrowserListenersInstalled = true;
+    try {
+      addEventListener("pagehide", persistBrowserNow);
+      addEventListener("visibilitychange", () => {
+        if (typeof document !== "undefined" && document.visibilityState === "hidden")
+          persistBrowserNow();
+      });
+    } catch (e) {
+    }
+  }
+  if (persistBrowserScheduled)
+    return;
+  persistBrowserScheduled = true;
+  setTimeout(() => {
+    persistBrowserScheduled = false;
+    persistBrowserNow();
+  }, 0);
 }
 function attemptKey(scope) {
   return `${scope.runId}\0${scope.workerId}\0${scope.attemptId}`;
@@ -432,6 +465,66 @@ if (!isBrowser) {
     runtimeGlobal.__SUPERCOV_BUFFER_EXIT_INSTALLED__ = true;
   }
 }
+function serverTransportError(runId, cause) {
+  const detail = cause instanceof Error ? cause.message : String(cause);
+  const failure = new Error(`Supercov could not persist coverage evidence for run ${runId}: ${detail}`);
+  failure.code = "SUPERCOV_EVIDENCE_TRANSPORT_FAILED";
+  failure.cause = cause;
+  return failure;
+}
+function flushServerAppends() {
+  const pending = state.pendingServerAppends;
+  if (pending.size === 0)
+    return;
+  const fs = getFs();
+  for (const [path, entry] of pending) {
+    pending.delete(path);
+    try {
+      if (!fs)
+        throw new Error("node:fs is unavailable");
+      if (!state.createdEvidenceDirectories.has(entry.directory)) {
+        fs.mkdirSync(entry.directory, { recursive: true });
+        state.createdEvidenceDirectories.add(entry.directory);
+      }
+      fs.appendFileSync(path, entry.lines.join(""));
+    } catch (cause) {
+      const failure = serverTransportError(entry.runId, cause);
+      state.serverTransportFailure = failure;
+      throw failure;
+    }
+  }
+}
+function enqueueServerAppend(directory, path, line, runId) {
+  // Fail closed with the original context: after one transport failure the
+  // very next probe re-raises it synchronously.
+  if (state.serverTransportFailure)
+    throw state.serverTransportFailure;
+  const entry = state.pendingServerAppends.get(path);
+  if (entry) {
+    entry.lines.push(line);
+    if (entry.lines.length >= 2048)
+      flushServerAppends();
+  } else {
+    state.pendingServerAppends.set(path, { directory, runId, lines: [line] });
+  }
+  if (!state.serverExitHookInstalled && typeof process !== "undefined") {
+    state.serverExitHookInstalled = true;
+    try {
+      process.on("exit", flushServerAppends);
+    } catch (e) {
+    }
+  }
+  // One synchronous write per event-loop turn instead of one per probe: a
+  // request handler's burst of first-touch records becomes a single append
+  // that is still on disk before the process yields past this turn.
+  if (!state.serverFlushScheduled) {
+    state.serverFlushScheduled = true;
+    queueMicrotask(() => {
+      state.serverFlushScheduled = false;
+      flushServerAppends();
+    });
+  }
+}
 function appendServer(record) {
   var _a8, _b, _c, _d;
   if (state.runtimeSnapshots) {
@@ -487,16 +580,13 @@ function appendServer(record) {
       appendDurableBackgroundRecord(fs, runId, serialized);
       return;
     }
-    fs.mkdirSync(directory, { recursive: true });
-    fs.appendFileSync(path, JSON.stringify(serialized) + "\n");
+    enqueueServerAppend(directory, path, JSON.stringify(serialized) + "\n", runId);
     if (deduplicationKey)
       state.persistedServerRecords.add(deduplicationKey);
   } catch (cause) {
-    const detail = cause instanceof Error ? cause.message : String(cause);
-    const failure = new Error(`Supercov could not persist coverage evidence for run ${runId}: ${detail}`);
-    failure.code = "SUPERCOV_EVIDENCE_TRANSPORT_FAILED";
-    failure.cause = cause;
-    throw failure;
+    if (cause instanceof Error && cause.code === "SUPERCOV_EVIDENCE_TRANSPORT_FAILED")
+      throw cause;
+    throw serverTransportError(runId, cause);
   }
 }
 function environmentRequestContext() {
