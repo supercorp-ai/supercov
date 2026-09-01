@@ -37,6 +37,50 @@ const evidenceWriterIdentity = () => (process.env.SUPERCOV_EXECUTION_LOG_SHARD ?
     .replace(/[^A-Za-z0-9_-]/g, "_");
 const GENERATED_RUN_ID = "__SUPERCOV_RUN_ID__";
 const PHASE_STORAGE_KEY = "__supercov_phase";
+// Wall-clock accounting for every browser round-trip this shim performs,
+// enabled by SUPERCOV_PHASE_TIMING=1. One summary line per test on stderr;
+// a single boolean check when disabled.
+const generatedPhaseTiming = "__SUPERCOV_PHASE_TIMING__";
+const PHASE_TIMING = process.env["SUPERCOV_PHASE_TIMING"] === "1" || generatedPhaseTiming === "1";
+const timingBuckets = PHASE_TIMING ? new Map() : undefined;
+function timingCount(bucket, milliseconds = 0) {
+    if (!timingBuckets)
+        return;
+    const entry = timingBuckets.get(bucket) ?? { calls: 0, ms: 0 };
+    entry.calls += 1;
+    entry.ms += milliseconds;
+    timingBuckets.set(bucket, entry);
+}
+async function timed(bucket, work) {
+    if (!timingBuckets)
+        return work();
+    const started = performance.now();
+    try {
+        return await work();
+    }
+    finally {
+        timingCount(bucket, performance.now() - started);
+    }
+}
+function timingReport(label) {
+    if (!timingBuckets)
+        return;
+    const summary = Object.fromEntries([...timingBuckets.entries()].map(([bucket, entry]) => [bucket, { calls: entry.calls, ms: Math.round(entry.ms) }]));
+    const line = JSON.stringify({ label, summary });
+    console.error(`[supercov-timing] ${line}`);
+    // Pooled runners swallow worker stderr for passing tests, so the report
+    // also lands as a file beside the evidence, which rides the workspace
+    // mount back to the host.
+    try {
+        const resolved = resolve(process.cwd(), ".supercov/phase-timing");
+        mkdirSync(resolved, { recursive: true });
+        appendJsonLineSync(resolve(resolved, `phase-timing-${process.pid}.jsonl`), `${line}\n`);
+    }
+    catch {
+        // Timing must never affect the run.
+    }
+    timingBuckets.clear();
+}
 const ACTION_METHODS = new Set([
     "blur",
     "check",
@@ -125,6 +169,7 @@ class CoveragePhaseController {
     async collectRuntimeSnapshots() {
         if (this.runtimeSnapshots)
             return this.runtimeSnapshots;
+        timingCount("collectRuntimeSnapshots.cold");
         const snapshots = [];
         for (const page of this.allPages()) {
             for (const frame of page.frames()) {
@@ -160,6 +205,7 @@ class CoveragePhaseController {
     async registerPage(page) {
         if (this.pages.has(page))
             return;
+        timingCount("registerPage");
         this.pages.add(page);
         await this.registerContext(page.context());
         const cdp = await page.context().newCDPSession(page).catch(() => undefined);
@@ -251,19 +297,21 @@ class CoveragePhaseController {
             .catch(() => undefined);
     }
     async beginAction(operation) {
+        timingCount("beginAction");
         const phase = this.createPhase("action", operation);
         this.lastActionId = phase.id;
         this.activePhaseId = phase.id;
-        await this.activateInBrowser(phase.id);
+        await timed("action.activateInBrowser", () => this.activateInBrowser(phase.id));
         return phase;
     }
     beginAssertion(operation, source = callerSource()) {
+        timingCount("beginAssertion");
         const phase = this.createPhase("assertion", operation, this.lastActionId, source);
         this.activePhaseId = phase.id;
         // Playwright queues browser protocol commands in order. Starting this
         // evaluation before an async locator assertion is sufficient to tag its
         // polling work without turning synchronous expect matchers into promises.
-        void this.activateInBrowser(phase.id);
+        void timed("assertion.activateInBrowser", () => this.activateInBrowser(phase.id));
         return phase;
     }
     requestPhaseId() {
@@ -409,8 +457,8 @@ class CoveragePhaseController {
         return scoped;
     }
     async activateInBrowser(phaseId) {
-        await Promise.all([...this.contexts].map((context) => this.updateContextHeaders(context, phaseId)));
-        await Promise.all([...this.pages].flatMap((page) => page.frames()).map((frame) => frame
+        await timed("activate.contextHeaders", () => Promise.all([...this.contexts].map((context) => this.updateContextHeaders(context, phaseId))));
+        await timed("activate.frameEvaluate", () => Promise.all([...this.pages].flatMap((page) => page.frames()).map((frame) => frame
             .evaluate(({ id, storageKey, scopeCookie, scopeValue, phaseCookie }) => {
             globalThis.__SUPERCOV_PHASE_ID__ = id;
             const coverageGlobal = globalThis;
@@ -430,15 +478,15 @@ class CoveragePhaseController {
             scopeValue: encodeCoverageScope(this.scope),
             phaseCookie: COVERAGE_PHASE_COOKIE,
         })
-            .catch(() => undefined)));
-        await Promise.all([...this.workers].map((worker) => worker
+            .catch(() => undefined))));
+        await timed("activate.workerEvaluate", () => Promise.all([...this.workers].map((worker) => worker
             .evaluate((id) => {
             const coverageGlobal = globalThis;
             coverageGlobal.__SUPERCOV_PHASE_ID__ = id;
             coverageGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ ?? "unscoped", id);
         }, phaseId)
-            .catch(() => undefined)));
-        await Promise.all([...this.pages].map((page) => this.activatePage(page, phaseId)));
+            .catch(() => undefined))));
+        await timed("activate.pageScript", () => Promise.all([...this.pages].map((page) => this.activatePage(page, phaseId))));
     }
     async updateContextHeaders(context, phaseId) {
         await context
@@ -877,7 +925,8 @@ const instrumentedTest = base.extend({
                     }
                 }
                 finally {
-                    await controller.dispose();
+                    await timed("controller.dispose", () => controller.dispose());
+                    timingReport(testInfo.title);
                     directRuntime()?.activateCoverageScope();
                     if (activeController === controller)
                         activeController = undefined;

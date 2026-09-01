@@ -787,6 +787,17 @@ fn configure_playwright_runtime(
         .replace(
             "__SUPERCOV_PLAYWRIGHT_TEST_EXPORT__",
             &project.playwright_test_export,
+        )
+        // Baked in rather than read from the environment alone: pooled
+        // runners execute Playwright inside VMs whose environment the host
+        // cannot reach, while the generated file rides the workspace mount.
+        .replace(
+            "__SUPERCOV_PHASE_TIMING__",
+            if std::env::var("SUPERCOV_PHASE_TIMING").as_deref() == Ok("1") {
+                "1"
+            } else {
+                "0"
+            },
         );
     if project.playwright_module != "@playwright/test" {
         // A facade module exports the project's whole test API, not just the
