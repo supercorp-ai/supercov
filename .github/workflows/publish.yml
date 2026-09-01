@@ -16,7 +16,7 @@ on:
 
 permissions:
   actions: read
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
@@ -59,3 +59,14 @@ jobs:
           node scripts/publish-native-release.mjs native-release
       - name: Publish the primary package only after every native package exists
         run: npm publish --ignore-scripts --access public
+      # The release commit's body is the changelog: it is written and
+      # gate-verified locally before tagging, so the GitHub release simply
+      # publishes it alongside the tag.
+      - name: Create the GitHub release from the release commit message
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          TITLE="$(git log -1 --format=%s "$RELEASE_TAG")"
+          git log -1 --format=%b "$RELEASE_TAG" | sed '/^Co-Authored-By:/d' > /tmp/release-notes.md
+          gh release create "$RELEASE_TAG" --verify-tag --title "$TITLE" --notes-file /tmp/release-notes.md
