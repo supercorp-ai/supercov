@@ -158,14 +158,15 @@ npx supercov clean             # remove all runs and the build cache
 ## Documentation
 
 - [Getting started](https://supercov.com/docs/getting-started)
-- [Agent loop](https://supercov.com/docs/agent-loop)
+- [Agent workflow](https://supercov.com/docs/agent-loop)
+- [Troubleshooting](https://supercov.com/docs/troubleshooting)
 - [CLI reference](https://supercov.com/docs/cli)
-- [Coverage model](https://supercov.com/docs/coverage-model)
-- [Supported suites](https://supercov.com/docs/supported-suites)
-- [Evidence and runs](https://supercov.com/docs/evidence)
-- [Verification](https://supercov.com/docs/verification)
-- [Workspace isolation](https://supercov.com/docs/workspace-isolation)
-- [Performance and storage](https://supercov.com/docs/performance)
+- [Understanding coverage](https://supercov.com/docs/coverage-model)
+- [Supported languages and test suites](https://supercov.com/docs/supported-suites)
+- [Runs and evidence](https://supercov.com/docs/evidence)
+- [Trusting a result](https://supercov.com/docs/verification)
+- [Files, privacy, and cleanup](https://supercov.com/docs/workspace-isolation)
+- [Speed and storage](https://supercov.com/docs/performance)
 
 ## Free and open source
 

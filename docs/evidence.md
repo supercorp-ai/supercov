@@ -1,43 +1,49 @@
-# Evidence and runs
+# Runs and evidence
 
-Every completed Supercov run is an immutable local record of what the suite
-executed. Queries, comparisons, and filtered views are derived from that record.
+Every completed Supercov run is a local snapshot of what the suite executed.
+You can return to it, ask different questions, or compare it with a later run
+without rerunning the tests.
 
-## What a run contains
-
-A run records:
-
-- the fixed coverage denominator for the measured source;
-- observed lines, statements, functions, branches, and decision vectors;
-- test, attempt, runner, outcome, and phase identity where the runner exposes it;
-- source, test, dependency, configuration, toolchain, and schema fingerprints;
-- completeness blockers and unattributed background execution; and
-- phase timings and integrity information.
-
-Completed runs live under `.supercov/runs/<run-id>/`. The original evidence is
-not rewritten when you query it. Supercov may build a disposable local index to
-answer later queries faster; that index is derived data and can always be
-recreated from the immutable run.
-
-## Read a run
+## Find the run you want
 
 ```sh
+npx supercov runs
 npx supercov runs --limit 10
 npx supercov runs latest
-npx supercov runs latest gaps --limit 10
-npx supercov runs latest file app/checkout/session.ts
 ```
 
-Use `latest` while working interactively. Use the run id printed by `runs` for
-automation, review notes, and work that spans sessions.
+Use `latest` during an interactive loop. Use the printed run id when:
 
-Queries compare the stored fingerprint with the current workspace. A stale run
-remains valid history, but it is no longer presented as a description of the
-current source.
+- a task spans more than one session;
+- an automated worker must not race a newer run;
+- you are recording evidence in a pull request; or
+- you need a reproducible comparison later.
 
-## Filter attempts
+A run id is immutable. `latest` is only a convenient selector.
 
-The same run can answer different questions without rerunning the suite:
+## Ask the same run different questions
+
+```sh
+npx supercov runs latest gaps --limit 10
+npx supercov runs latest file app/checkout/session.ts
+npx supercov runs latest line app/checkout/session.ts:64
+```
+
+These queries read stored evidence. They do not run the test suite again or
+rewrite the original run. Supercov may create a disposable local index to make
+later queries faster; it can rebuild that index from the run.
+
+## Understand stale runs
+
+Supercov compares a stored run with the current workspace. If relevant source,
+tests, dependencies, configuration, or toolchain inputs changed, the run is
+marked stale.
+
+A stale run is still valid history. It simply should not be presented as the
+current state of the repository. Run the complete suite again before choosing
+new work from it.
+
+## Focus on passed or failed attempts
 
 ```sh
 npx supercov runs latest --filter all
@@ -45,46 +51,54 @@ npx supercov runs latest --filter passed
 npx supercov runs latest --filter failed
 ```
 
-- `all` includes every executed attempt and matches conventional coverage tools.
-- `passed` includes successful attempts of tests that ultimately passed.
+- `all` includes every executed attempt and matches the normal whole-run view.
+- `passed` uses successful attempts from tests that ultimately passed.
 - `failed` isolates failed attempts, including failed retries of flaky tests.
 
-Filtered views are recomputed from the stored evidence. They are not separate
-report files that can drift apart.
+The views are recalculated from the same stored evidence. They are not separate
+reports that can drift apart.
 
-## Compare two runs
+## Compare before and after
 
 ```sh
 npx supercov diff <older-run> <newer-run>
 ```
 
-The diff shows newly covered and newly uncovered obligations. It is the easiest
-way to prove that a focused test changed coverage without losing behavior
-elsewhere.
+The diff shows both newly covered and newly uncovered obligations. Use it after
+a focused test to answer:
 
-## Combine shards
+1. Did the expected behavior become covered?
+2. Did anything unexpectedly become uncovered?
+3. Did the source boundary or measurement completeness change?
+
+Keep the compared run ids in the agent summary or pull request when someone may
+need to reproduce the result.
+
+## Combine distributed shards
 
 ```sh
-npx supercov merge <shard-a> <shard-b> [...]
+npx supercov merge <shard-a> <shard-b> <shard-c>
 ```
 
-Merge creates a new immutable run. Shards must have matching source,
-configuration, toolchain, schema, and denominator fingerprints. Input runs are
-never changed.
+Merge creates a new run and leaves the inputs unchanged. Shards must describe
+the same source, configuration, toolchain, schema, and coverage denominator.
+Supercov rejects incompatible inputs rather than producing a misleading total.
 
-## Integrity and incomplete evidence
+## What a run remembers
 
-Supercov validates evidence before publishing a run. Corrupt, truncated,
-duplicated, or contradictory input is rejected or surfaced as an explicit
-measurement limit. It is never silently converted into a clean percentage.
+A run contains the coverage denominator, observed obligations, test and runner
+identity where available, test outcomes and attempts, source and configuration
+identity, measurement limits, and phase timings.
 
-Likewise, ambiguous source scope, uninstrumented code, and execution without a
-reliable test identity remain visible. See [Coverage model](/docs/coverage-model)
-for how these states affect completeness.
+That is enough to answer later queries while keeping the original evidence
+immutable. Corrupt, truncated, stale, or incompatible data is surfaced as such;
+it is not opened as a plausible clean report.
 
-## Retention
+## Storage and retention
 
-Runs remain until you remove them:
+Completed runs live under `.supercov/runs/<run-id>/`. The isolated workspace and
+instrumented build cache may use more space than the compressed run itself.
+Nothing is pruned in the background.
 
 ```sh
 npx supercov clean --dry-run
@@ -92,5 +106,6 @@ npx supercov clean --keep 20
 npx supercov clean
 ```
 
-Cleanup takes the same project lock as a coverage run and removes only
+Preview cleanup first. The final command removes all runs and the isolated build
+cache; `--keep 20` preserves the 20 newest runs. Cleanup removes only
 marker-owned Supercov data.

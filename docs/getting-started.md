@@ -1,46 +1,32 @@
 # Getting started
 
-Supercov gives a coding agent the next test to write. Run the test command you
-already use, ask which useful paths remain uncovered, add a focused test, and
-repeat.
+Supercov turns the test suite you already have into a list of useful tests to
+write next. Run the suite once, inspect a coverage gap, add a focused test, and
+compare the result.
 
 ```sh
 npx supercov -- npm test
 ```
 
 No account, config file, import, custom reporter, or hosted service is required.
+Supercov supports JavaScript, TypeScript, and Rust today.
 
-## Language support
+## Before you start
 
-| Language | Status | Start with |
-| --- | --- | --- |
-| JavaScript | Available | `npx supercov -- npm test` |
-| TypeScript | Available | `npx supercov -- npm test` |
-| Rust | Available | `npx supercov -- cargo test` |
-| Python | Coming soon | — |
-| Zig | Coming soon | — |
-| PHP | Coming soon | — |
-| C | Coming soon | — |
+You need:
 
-More languages are planned. See [Supported suites](/docs/supported-suites) for
-the runners and attribution available today.
+- Node.js 22 or newer;
+- a test command that already works in the repository; and
+- for Rust, the Rust 1.95 toolchain.
 
-## Requirements
+The CLI is distributed through npm, even for Rust projects. The first `npx`
+invocation may download Supercov from the npm registry. Supercov itself does not
+upload your source or coverage evidence to a Supercov service.
 
-- Node.js 22 or newer. The current CLI is distributed through npm, including
-  when it measures a Rust project.
-- A working test command for the project.
-- For Rust, the Rust 1.95 toolchain. `cargo test` is supported directly;
-  `cargo nextest run` is supported with cargo-nextest 0.9.138 or 0.9.140.
+## 1. Run your real test command
 
-Package tools such as `npx` may contact the npm registry to download Supercov
-when it is not cached. The Supercov CLI does not contact a Supercov service
-during a coverage run, and your source and evidence stay on your machine.
-
-## Run the complete suite
-
-Everything after `--` is your test command. Use the same command you trust
-before merging or deploying:
+Everything after `--` is the command Supercov measures. Start with the same
+complete command you trust before merging or deploying:
 
 ```sh
 # JavaScript or TypeScript
@@ -53,37 +39,64 @@ npx supercov -- cargo test
 npx supercov -- cargo nextest run
 ```
 
-If one command launches several supported runners, Supercov combines their
-evidence into one run.
+Supercov runs that command in an isolated, instrumented copy of the project.
+The command keeps its normal arguments, environment, output, and exit status.
+If one command launches several supported runners, their evidence lands in one
+run.
 
-## Find the next test
+## 2. Read the first result
 
-Start broad, then open one useful target:
+Open the newest run:
 
 ```sh
 npx supercov runs latest
-npx supercov runs latest gaps --limit 10
-npx supercov runs latest file app/checkout/session.ts
-npx supercov runs latest decision app/checkout/session.ts:64
 ```
 
-The output is short and paginated so a coding agent can use it directly. Add
-`--json` only when a tool specifically needs machine-readable output.
+The summary answers three practical questions:
 
-## Add a test and prove the gain
+1. Did the test command pass?
+2. How much behavior did the suite cover?
+3. Is anything genuinely uncovered, or was some code impossible to measure?
 
-Write one focused test, rerun the same complete command, and compare the two
-runs:
+An uncovered gap is a candidate for a test. A measurement limit is different:
+it means Supercov cannot honestly account for that code yet. Do not try to test
+away a measurement limit.
+
+## 3. Choose one useful gap
+
+Ask for a short list, then inspect one file:
+
+```sh
+npx supercov runs latest gaps --limit 10
+npx supercov runs latest file app/checkout/session.ts
+```
+
+Use the more specific queries when you need them:
+
+```sh
+npx supercov runs latest decision app/checkout/session.ts:64
+npx supercov runs latest line app/checkout/session.ts:64
+```
+
+`file` is usually the best place to start. `decision` explains missing boolean
+outcomes and MC/DC witnesses. `line` shows the obligations and tests associated
+with one source line.
+
+## 4. Add a test and prove the gain
+
+Write one focused test with a meaningful assertion. Then rerun the same complete
+command and compare the two runs:
 
 ```sh
 npx supercov -- npm test
 npx supercov diff <previous-run-id> latest
 ```
 
-For Rust, rerun the same `cargo test` or `cargo nextest run` command you used
-for the baseline.
+For Rust, rerun the same `cargo test` or `cargo nextest run` command used for the
+baseline. A useful change leaves the suite passing and shows the expected gain
+without an unexplained loss elsewhere.
 
-## Give the loop to an agent
+## Give the loop to a coding agent
 
 Paste this into any coding agent that can run terminal commands:
 
@@ -92,30 +105,37 @@ Use `npx supercov` to improve coverage. Only write tests. Keep going while
 useful gaps remain.
 
 Run the repository's complete test command through Supercov. Use
-`npx supercov runs latest gaps --limit 5` to choose one useful target. Write
-one focused test, rerun the complete suite, and verify the gain with
+`npx supercov runs latest gaps --limit 5` to choose one useful target. Inspect
+the target, write one focused test with meaningful assertions, rerun the same
+complete suite, and verify the gain with
 `npx supercov diff <previous-run-id> latest`.
 
 Never weaken assertions or change application code to make coverage easier.
-Stop when no useful gaps remain.
+Stop when no useful gap remains or Supercov reports a measurement limit instead
+of an ordinary gap.
 ```
 
-## Local files and cleanup
+Replace `npm test` with the repository's real complete test command when needed.
 
-Completed runs live under `.supercov/runs/`. Supercov also maintains a
-marker-protected isolated workspace for instrumented builds. It does not rewrite
-your source, tests, imports, runner configuration, dependency tree, or ordinary
-build output.
+## Files and cleanup
+
+Completed runs live under `.supercov/runs/`. Supercov also keeps an isolated
+workspace for instrumented builds. These files are local and ignored by Git.
+Supercov does not rewrite your source, tests, imports, runner configuration,
+dependencies, or ordinary build output.
 
 ```sh
-npx supercov clean --dry-run   # preview a full cleanup
-npx supercov clean --keep 20   # retain the 20 newest runs
+npx supercov clean --dry-run   # preview what would be removed
+npx supercov clean --keep 20   # keep the 20 newest runs
 npx supercov clean             # remove all runs and the build cache
 ```
 
+If the first run does not look right, go to [Troubleshooting](troubleshooting.md)
+before changing the project.
+
 ## Next
 
-- [Agent loop](/docs/agent-loop) — a repeatable coverage workflow for coding agents.
-- [CLI reference](/docs/cli) — commands and filters.
-- [Coverage model](/docs/coverage-model) — what Supercov measures.
-- [Supported suites](/docs/supported-suites) — languages, runners, and current limits.
+- [Agent workflow](agent-loop.md) — run a safe, repeatable coverage loop.
+- [Supported suites](supported-suites.md) — check languages, runners, and limits.
+- [Coverage model](coverage-model.md) — understand gaps, metrics, and measurement limits.
+- [CLI reference](cli.md) — find every command and filter.

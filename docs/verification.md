@@ -1,39 +1,38 @@
-# Verification
+# Trusting a result
 
-Coverage is useful only if instrumentation preserves program behavior and the
-reported obligations match what actually executed. Supercov fails closed when
-it cannot establish either condition.
+Coverage is useful only when the test command still behaves normally and the
+report distinguishes what was covered from what could not be measured.
+Supercov is designed to fail clearly rather than turn uncertainty into a clean
+percentage.
 
-## What release checks cover
+## Review a test written by an agent
 
-Every release is checked for:
+Before merging, check three things:
 
-- identical return values, thrown errors, and side-effect order before and
-  after instrumentation;
-- short-circuiting, getters, proxies, optional calls, `this` binding, defaults,
-  exceptions, loops, async functions, and generators;
-- exact line, branch, decision-vector, and MC/DC results;
-- JavaScript behavior across a pinned TC39 Test262 corpus;
-- supported JavaScript, TypeScript, and Rust runner contracts;
-- Chromium, Firefox, and WebKit browser execution;
-- source isolation, interrupted-run recovery, and atomic publication; and
-- package installation and execution from a clean project.
+1. **The complete wrapped test command passes.** A focused test command is useful
+   during iteration, but it is not the final gate.
+2. **The diff shows the expected gain.** Look for unexplained coverage losses or
+   a changed source boundary.
+3. **The test protects behavior.** It should make a meaningful assertion without
+   weakening existing assertions or changing application code for the metric.
 
-MC/DC cases are also compared with an independent LLVM implementation so a
-self-consistent error in Supercov's own calculation does not pass unnoticed.
+```sh
+npx supercov diff <baseline-run> <new-run>
+npx supercov runs <new-run> test "new test name"
+```
 
-## What happens when code cannot be measured safely
+Keep the compared run ids in the pull request or agent summary when the result
+needs to be reviewed later.
 
-Supercov does not force a transform through code that observes its own source
-text or creates source dynamically without a stable denominator. It leaves the
-affected behavior uninstrumented and records a completeness blocker with the
-reason and location.
+## Read the status honestly
 
-Similarly, evidence from an unsupported runner or hidden remote boundary is
-reported as aggregate, unattributed, or missing. It is not assigned to a test
-that may not have caused it.
+Supercov separates four states:
 
-Inspect these states with:
+- **covered** — the obligation was measured and observed;
+- **uncovered** — it was measured but not observed, so a test may close it;
+- **measurement limit** — Supercov could not establish a complete boundary;
+- **stale** — the run is valid history but no longer describes the current
+  workspace.
 
 ```sh
 npx supercov runs latest
@@ -41,28 +40,43 @@ npx supercov runs latest scope
 npx supercov runs latest gaps
 ```
 
-## How to review a coverage change
+Do not treat a measurement limit as a test-writing task. Read its reason, fix
+source scope or configuration when possible, and otherwise report the boundary.
 
-For a test added by a coding agent, check three things:
+## How Supercov avoids false confidence
 
-1. The wrapped test command still passes.
-2. `diff` shows the expected obligations gained and no unexplained loss.
-3. The test contains meaningful assertions and does not weaken application
-   behavior merely to improve a percentage.
+- The coverage denominator is derived before the suite runs, so adding tests
+  cannot silently redefine 100%.
+- Instrumentation runs in an isolated copy instead of rewriting your source.
+- Evidence is attributed to a test only when the runner exposes a reliable
+  identity; everything else remains aggregate or background evidence.
+- Completed runs are immutable and checked against the current workspace.
+- Missing, corrupt, contradictory, or unsupported evidence is surfaced as a
+  limitation instead of being guessed or discarded.
 
-```sh
-npx supercov diff <baseline-run> <new-run>
-npx supercov runs <new-run> test "new test name"
-```
+## What happens when code cannot be measured safely
 
-Store the compared run ids in the review or agent summary when the evidence
-needs to be reproducible later.
+Some code observes its own source text, creates source dynamically, or executes
+behind a launcher Supercov cannot see. Forcing ordinary instrumentation through
+those boundaries could change behavior or invent a denominator.
 
-## Integrity of stored runs
+Supercov leaves the affected behavior uninstrumented and reports the location
+and reason. Likewise, coverage from a runner without exact test identity stays
+aggregate instead of being assigned to whichever test happened to be nearby.
 
-Completed runs are immutable and integrity-bound to their evidence,
-fingerprints, and schema. A run whose bytes are missing, corrupt, stale, or
-incompatible is surfaced as such instead of being opened as a plausible report.
+## How releases are checked
 
-See [Evidence and runs](/docs/evidence) for retention, comparison, and shard
-merging.
+Release checks cover program behavior before and after instrumentation, line and
+branch results, decision vectors and MC/DC, supported JavaScript, TypeScript,
+and Rust runner contracts, Chromium, Firefox, and WebKit execution, clean
+installation, interrupted-run recovery, and isolated publication.
+
+JavaScript behavior is exercised against a pinned TC39 Test262 corpus. MC/DC
+cases are also compared with an independent LLVM implementation so a
+self-consistent calculation error does not pass unnoticed.
+
+These checks reduce risk; they do not replace reviewing the assertions and
+behavior protected by a new test.
+
+See [Runs and evidence](evidence.md) for immutable run ids, comparisons, and
+retention.

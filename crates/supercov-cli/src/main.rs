@@ -81,6 +81,7 @@ Guides:
 const DOC_TOPICS: &[&str] = &[
     "getting-started",
     "agent-loop",
+    "troubleshooting",
     "cli",
     "coverage-model",
     "evidence",

@@ -1,7 +1,7 @@
-# Agent loop
+# Agent workflow
 
-Use Supercov in a simple loop: run the suite, choose one useful gap, write one
-test, rerun, and prove what improved.
+Supercov works best as a small, repeatable loop: run the suite, choose one useful
+gap, write one test, rerun, and prove what improved.
 
 ```text
 run the suite  →  choose a gap  →  write one test  →  rerun  →  compare
@@ -9,33 +9,57 @@ run the suite  →  choose a gap  →  write one test  →  rerun  →  compare
       └────────────────────────────────────────────────────────────┘
 ```
 
-## One pass
+Supercov supplies the coverage signal and evidence. Your coding agent writes
+the tests.
+
+## Choose the job
+
+For one careful first pass, ask:
+
+```text
+Measure code coverage with `npx supercov` and write the first useful test based
+on coverage. Only edit tests. Rerun the complete suite and report what improved.
+```
+
+For an overnight run or leftover token budget, ask:
+
+```text
+Use `npx supercov` to improve coverage. Only write tests. Keep going while
+useful gaps remain. Never weaken assertions or change application code to make
+coverage easier. Stop at a measurement limit, unreachable behavior, or the end
+of the available time budget. Report the run ids compared and what improved.
+```
+
+The second prompt is intentionally open-ended, but 100% is a direction rather
+than permission to write meaningless tests or reshape application code.
+
+## One safe pass
 
 ```sh
 # 1. Establish a baseline.
 npx supercov -- npm test
 
-# 2. Choose a useful target without loading a large report.
+# 2. Ask for a short list of useful targets.
 npx supercov runs latest gaps --limit 5
 
-# 3. Understand the target and what already reaches it.
+# 3. Inspect one target.
 npx supercov runs latest file app/checkout/session.ts
 npx supercov runs latest decision app/checkout/session.ts:64
 npx supercov runs latest line app/checkout/session.ts:64
 
-# 4. Write one focused test, then rerun and prove the gain.
+# 4. Write one focused test, rerun, and prove the gain.
 npx supercov -- npm test
 npx supercov diff <previous-run-id> latest
 ```
 
-For Rust, replace `npm test` with `cargo test` or `cargo nextest run` in both
-runs. Keep the command identical between the baseline and comparison.
+For Rust, use `cargo test` or `cargo nextest run` in both runs. Keep the baseline
+and verification commands identical.
 
-The `line` query is useful before writing a test: it shows what already
-executes that line, which can reveal an existing test to extend instead of a
-duplicate to add.
+The `line` query is useful before writing a test because it shows which tests
+already reach that line. Extending a nearby test is often better than adding a
+duplicate.
 
-## Prompt for a coding agent
+## A complete prompt for longer runs
 
 ```text
 Use `npx supercov` to improve coverage. Only write tests. Keep going while
@@ -49,26 +73,29 @@ Run the repository's complete test command through Supercov. Then repeat:
 5. Rerun the same complete suite through Supercov.
 6. Run `npx supercov diff <previous-run-id> latest` to prove the gain.
 
-Only edit tests. Never weaken assertions or change application code to make
-coverage easier. Stop when no useful gaps remain, a gap is not reachable
-through a public behavior, or the time budget is exhausted. Report the run ids
-you compared and what improved.
+Only edit tests. Never weaken assertions, delete tests, or change application
+code to make coverage easier. Stop when no useful gap remains, a path is not
+reachable through public behavior, Supercov reports a measurement limit, or
+the time budget is exhausted. Report the run ids compared and what improved.
 ```
 
-## Choose valuable gaps
+## Choose value, not just percentage
 
-`gaps` ranks unresolved obligations, but coverage count is not the same as
-product value. Prefer code that protects user-facing behavior, permissions,
-payments, state transitions, error recovery, and other high-consequence paths.
+`gaps` ranks unresolved obligations, but the largest number is not always the
+most valuable test. Prefer behavior around:
 
-Useful checks before writing a test:
+- permissions and access control;
+- payments and state transitions;
+- retries, failures, and recovery;
+- user-visible outcomes; and
+- public APIs with consequential edge cases.
 
-- Is this behavior reachable through a public API or user action?
-- Does an existing test almost cover it?
-- Can the test make a meaningful assertion rather than merely execute a line?
-- Is the path actually dead code that should be reported for human review?
+Before writing a test, ask whether the behavior is reachable, whether an
+existing test almost covers it, and whether the new test can make a meaningful
+assertion. Dead code is usually something to report for human review, not a
+reason to manufacture a test.
 
-If the project separates test levels, focus the view:
+If the repository separates test levels, narrow the view:
 
 ```sh
 npx supercov runs latest gaps --kind e2e --limit 10
@@ -77,23 +104,35 @@ npx supercov runs latest gaps --kind e2e --limit 10
 ## Keep the loop efficient
 
 - Begin and end with the complete test command.
-- While iterating, a narrower test command is fine if its smaller denominator
-  is understood.
-- Write one related test at a time, then rerun. Large batches make failures and
-  coverage gains harder to attribute.
-- Use immutable run ids when work spans several sessions. `latest` is a
-  convenience for interactive use.
-- Treat a stale run as history when the source has changed since it was made.
+- A focused command is fine during iteration, but finish against the full
+  denominator before reporting success.
+- Write one related test at a time. Large batches make failures and gains hard
+  to explain.
+- Use immutable run ids when work spans sessions. Use `latest` for an
+  interactive loop.
+- Treat a run as history after the source or relevant configuration changes.
+
+## Use Supercov in a software factory
+
+Your factory schedules agents; Supercov gives each pass a bounded coverage task
+and a durable result. A worker can run the suite, choose a gap, write one test,
+and return the before-and-after run ids. The next worker can inspect that result
+without relying on a dashboard or the previous agent's memory.
+
+Keep the same safety contract in unattended work: tests only, meaningful
+assertions, full-suite verification, and an explicit stop when the remaining
+items are measurement limits rather than testable gaps.
 
 ## Know when to stop
 
 Stop instead of grinding when:
 
 - no useful uncovered behavior remains;
-- the open path cannot be reached through a supported public behavior;
+- the path cannot be reached through supported public behavior;
 - source scope is ambiguous and needs `SUPERCOV_SOURCE_ROOTS`;
-- execution belongs to an unsupported or unattributed runner; or
-- Supercov reports a completeness blocker rather than an ordinary test gap.
+- the runner can provide only aggregate evidence for the question being asked;
+- Supercov reports a measurement limit rather than an ordinary gap; or
+- the next test would exist only to move a number.
 
-These states are reported explicitly so an agent does not reshape application
-code merely to reach a number.
+See [Troubleshooting](troubleshooting.md) when a run appears incomplete or
+unexpected.

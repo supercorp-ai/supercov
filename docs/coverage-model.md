@@ -1,51 +1,95 @@
-# Coverage model
+# Understanding coverage
 
-Supercov turns source structure into a fixed set of obligations before the test
-run. Tests can cover those obligations, but they cannot silently change what
-100% means.
+Supercov answers a more useful question than “which lines ran?” It shows which
+behaviors were exercised, which paths still need a test, and where measurement
+was incomplete.
+
+## Gaps and measurement limits are different
+
+An **uncovered gap** is behavior Supercov measured but did not observe. A test
+may be able to close it.
+
+A **measurement limit** means Supercov could not establish a complete boundary
+for some code or execution. Common causes include ambiguous source scope,
+dynamically created source, self-inspecting code, and an unsupported process or
+runner boundary.
+
+Supercov keeps those states separate. It does not turn “unknown” into
+“uncovered,” and it does not round either one away to produce a reassuring 100%.
+
+```sh
+npx supercov runs latest
+npx supercov runs latest gaps
+npx supercov runs latest scope
+```
 
 ## What Supercov measures
 
-| Obligation | Question |
+| Metric | The question it answers |
 | --- | --- |
 | Line | Did execution reach this source line? |
 | Statement | Did this executable statement run? |
 | Function | Was this function entered? |
 | Branch | Did each alternative execute? |
-| Decision vector | Which combinations of conditions were observed? |
-| MC/DC witness | Was each condition shown to affect its decision independently? |
-| Value path | Did language constructs such as defaults, optional chains, and logical assignments take each meaningful path? |
+| Decision vector | Which combinations of boolean conditions occurred? |
+| MC/DC witness | Was each condition shown to affect the decision independently? |
+| Value path | Did defaults, optional chains, logical assignments, and similar constructs take each meaningful path? |
 
-The exact obligations depend on the language and source construct. Query one
-file or decision to see the concrete missing behavior:
+The exact obligations depend on the language and source construct. You do not
+need to reason about all of them at once. Start with a file, then open a decision
+or line only when the missing behavior needs explanation:
 
 ```sh
 npx supercov runs latest file app/checkout/session.ts
 npx supercov runs latest decision app/checkout/session.ts:64
+npx supercov runs latest line app/checkout/session.ts:64
 ```
 
-## Why a line percentage is not enough
+## Why line coverage is not enough
 
-A line can execute while an important outcome remains untested. For example,
-this decision has two conditions:
+Consider:
 
 ```js
 if (user.isAdmin || user.ownsDocument) allowEdit();
 ```
 
-Executing the line proves very little by itself. Useful tests should show the
-admin condition matters, the ownership condition matters, and the denied path
-still works. Decision-vector and MC/DC queries expose the missing cases directly.
+The line can run even if the suite never proves that administrators are allowed,
+owners are allowed, and everyone else is denied. Branches, decision vectors, and
+MC/DC expose those missing cases instead of treating one executed line as proof
+that the decision is safe.
 
 The same principle applies to Rust boolean expressions and control flow.
 
-## Evidence confidence
+## What 100% means
 
-Where the runner exposes exact test boundaries, Supercov can show which test and
-attempt covered an obligation. Where it does not, execution is recorded as
-aggregate background evidence rather than assigned to a guessed test.
+Supercov derives the coverage denominator from source structure before the test
+run. Adding or removing tests cannot silently change the definition of 100%.
 
-Use attempt filters to choose the evidence included in a view:
+A complete result means every declared obligation was measured and covered. It
+does not mean the product has no bugs, the assertions are meaningful, or every
+possible input was tested. Review test quality and user-visible behavior, not
+only the percentage.
+
+If source cannot be measured safely, Supercov reports a measurement limit
+instead of claiming completeness.
+
+## Exact and aggregate evidence
+
+When a runner exposes test and attempt boundaries, Supercov can show which test
+covered an obligation. When it cannot, Supercov records aggregate background
+coverage without guessing which test caused it.
+
+Both are useful:
+
+- exact evidence helps you inspect or minimize individual tests;
+- aggregate evidence still shows whether the whole suite reached the source.
+
+See [Supported suites](supported-suites.md) for the attribution available from
+each runner.
+
+## Recalculate a view from selected tests
+
+The same stored run can answer different questions:
 
 ```sh
 npx supercov runs latest --filter all
@@ -53,32 +97,32 @@ npx supercov runs latest --filter passed
 npx supercov runs latest --filter failed
 ```
 
-Use `--kind` when the project distinguishes test levels:
+`all` matches the usual whole-run view. `passed` shows evidence from successful
+attempts. `failed` isolates failed attempts, including failed retries.
+
+You can also focus on a test level or runner:
 
 ```sh
 npx supercov runs latest gaps --kind e2e
+npx supercov runs latest gaps --runner playwright
 ```
 
-A filtered view recomputes obligations from the selected evidence. It does not
-filter a percentage that was already calculated from something else.
+These views are recalculated from stored evidence. Supercov is not filtering a
+percentage that was computed from a different set of tests.
 
-## Complete, uncovered, and blocked
+## Fix source scope before chasing gaps
 
-An ordinary uncovered obligation can be closed by a test. A completeness
-blocker means Supercov cannot honestly claim the source was fully measured.
-Common blockers are:
-
-- ambiguous first-party source scope;
-- source that must remain uninstrumented because code observes its own text;
-- dynamically created source without a stable pre-run denominator; and
-- execution that crossed an unsupported or unattributed runner boundary.
-
-Inspect source scope with:
+If the summary reports ambiguous source scope, inspect it:
 
 ```sh
 npx supercov runs latest scope
 ```
 
-If automatic scope is ambiguous, declare the authoritative roots with
-`SUPERCOV_SOURCE_ROOTS`. Other blockers remain visible with their location and
-reason. Supercov does not round them away to produce a comfortable 100%.
+When first-party source lives in unusual directories, declare it explicitly:
+
+```sh
+SUPERCOV_SOURCE_ROOTS=src,app npx supercov -- npm test
+```
+
+Choose roots that describe code the repository owns. Do not include dependencies
+or generated output merely to make a warning disappear.
