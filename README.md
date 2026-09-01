@@ -78,6 +78,12 @@ Supercov supplies the coverage signal and evidence. It does not host, schedule, 
 
 Before a reset—or overnight—turn idle agent time into coverage that stays with the repository. Every pass should close a small number of useful gaps and finish with evidence that the tests still pass and coverage improved.
 
+## For software factories
+
+Add Supercov as a repeatable coverage loop in an automated software factory. Every pass runs the real suite, chooses a useful uncovered path, writes one focused test, reruns, and proves the gain. Fresh, executable evidence lets agents keep iterating around the clock while failed tests and regressions stop the loop before they ship.
+
+Your factory schedules the work; Supercov gives each agent a bounded next task and a durable record of what improved.
+
 ## Read the result
 
 Start with the summary, then narrow to one useful target:
