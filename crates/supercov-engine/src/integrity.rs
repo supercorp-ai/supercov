@@ -410,6 +410,12 @@ pub fn create_run_integrity(
     // or an edit to such a file would be overwritten by a stale cached copy.
     // Entries that another domain already digests stay out of the source
     // domain so each stale reason keeps naming exactly one kind of change.
+    //
+    // Generated outputs stay out too. A theme extension's hashed bundles are
+    // rebuilt by the wrapped command and synced back into the project, with a
+    // new name every build, so digesting them marked every run stale with
+    // "instrumented source changed" the moment it finished -- while nothing
+    // instrumented had changed at all.
     let covered_elsewhere = tests
         .iter()
         .chain(dependencies.iter())
@@ -424,6 +430,7 @@ pub fn create_run_integrity(
                 .source_scope
                 .entries
                 .iter()
+                .filter(|entry| !entry.is_generated_output())
                 .map(|entry| root.join(&entry.file))
                 .filter(|path| !covered_elsewhere.contains(path)),
         )
@@ -670,6 +677,47 @@ mod tests {
     fn integrity(root: &Path, shim: &Path, environment: &BTreeMap<String, String>) -> RunIntegrity {
         let project = discover_coverage_project(root, environment, &[]).unwrap();
         create_run_integrity(root, &project, &frontend(shim)).unwrap()
+    }
+
+    #[test]
+    fn built_assets_the_command_regenerates_do_not_move_the_source_fingerprint() {
+        // A theme extension's Vite build lands hashed bundles in `assets/`
+        // and the run syncs them back into the project. They are excluded
+        // from instrumentation, so a rebuild must not read as a source change.
+        let (root, shim) = fixture();
+        write(
+            &root,
+            "package.json",
+            r#"{"workspaces":["app_extensions/*"],"scripts":{"test":"node --test"}}"#,
+        );
+        write(&root, "app_extensions/upsells/package.json", "{}");
+        write(&root, "app_extensions/upsells/frontend/embed.ts", "source");
+        write(
+            &root,
+            "app_extensions/upsells/assets/app-embed-Be-aUw9g.js",
+            "bundle one",
+        );
+        let first = integrity(&root, &shim, &BTreeMap::new());
+
+        fs::remove_file(root.join("app_extensions/upsells/assets/app-embed-Be-aUw9g.js")).unwrap();
+        write(
+            &root,
+            "app_extensions/upsells/assets/app-embed-CygpnWPQ.js",
+            "bundle two",
+        );
+        let rebuilt = integrity(&root, &shim, &BTreeMap::new());
+        assert_eq!(rebuilt.fingerprint.source, first.fingerprint.source);
+        assert!(!compare_run_integrity(Some(&first), &rebuilt).stale);
+
+        write(
+            &root,
+            "app_extensions/upsells/frontend/embed.ts",
+            "edited source",
+        );
+        let edited = integrity(&root, &shim, &BTreeMap::new());
+        assert_ne!(edited.fingerprint.source, first.fingerprint.source);
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(shim).unwrap();
     }
 
     #[test]

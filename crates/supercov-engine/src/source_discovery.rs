@@ -76,6 +76,9 @@ pub enum SourceScopeStatus {
     Ambiguous,
 }
 
+/// Scope reason for a bundler's output found in the tree (see `built_asset`).
+pub const BUILT_ASSET_REASON: &str = "built asset";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceScopeEntry {
@@ -84,6 +87,15 @@ pub struct SourceScopeEntry {
     pub reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub package_root: Option<String>,
+}
+
+impl SourceScopeEntry {
+    /// A file the wrapped command generates rather than one anyone edits: it
+    /// is never instrumented or cached, and a bundler renames it on every
+    /// build, so it must not feed the source fingerprint.
+    pub fn is_generated_output(&self) -> bool {
+        self.status == SourceScopeStatus::Excluded && self.reason == BUILT_ASSET_REASON
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -761,7 +773,7 @@ pub fn discover_source_scope(
                 "build/test/tool configuration",
             ));
         } else if built_asset(&file) {
-            entries.push(entry(SourceScopeStatus::Excluded, "built asset"));
+            entries.push(entry(SourceScopeStatus::Excluded, BUILT_ASSET_REASON));
         } else if existing_roots.iter().any(|directory| {
             fs::symlink_metadata(directory)
                 .map(|metadata| {
