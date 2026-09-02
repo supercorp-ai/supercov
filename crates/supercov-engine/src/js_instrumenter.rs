@@ -19,15 +19,15 @@ use oxc_ast::{
     ast::{
         Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
         AssignmentPattern, AssignmentTarget, BindingPattern, CallExpression, CatchClause,
-        ChainElement, ChainExpression, Class, ComputedMemberExpression, ConditionalExpression,
-        Declaration, DoWhileStatement, ExportDefaultDeclarationKind, Expression, ForInStatement,
-        ForOfStatement, ForStatement, ForStatementLeft, FormalParameter, FormalParameterKind,
-        FormalParameters, Function, FunctionBody, IfStatement, ImportDeclarationSpecifier,
-        ImportOrExportKind, LogicalExpression, NewExpression, ObjectPropertyKind,
-        PrivateFieldExpression, Program, PropertyKey, PropertyKind, Statement,
-        StaticMemberExpression, SwitchStatement, TSGlobalDeclaration, TSModuleDeclaration,
-        TryStatement, VariableDeclaration, VariableDeclarationKind, VariableDeclarator,
-        WhileStatement, WithStatement,
+        ChainElement, ChainExpression, Class, Comment, ComputedMemberExpression,
+        ConditionalExpression, Declaration, DoWhileStatement, ExportDefaultDeclarationKind,
+        Expression, ForInStatement, ForOfStatement, ForStatement, ForStatementLeft,
+        FormalParameter, FormalParameterKind, FormalParameters, Function, FunctionBody,
+        IfStatement, ImportDeclarationSpecifier, ImportOrExportKind, LogicalExpression,
+        NewExpression, ObjectPropertyKind, PrivateFieldExpression, Program, PropertyKey,
+        PropertyKind, Statement, StaticMemberExpression, SwitchStatement, TSGlobalDeclaration,
+        TSModuleDeclaration, TryStatement, VariableDeclaration, VariableDeclarationKind,
+        VariableDeclarator, WhileStatement, WithStatement,
     },
 };
 use oxc_ast_visit::{Visit, VisitMut, walk, walk_mut};
@@ -171,6 +171,7 @@ fn restore_comment_text(
         })
         .collect::<Vec<_>>();
     mappings.sort_unstable_by_key(|(source, destination)| (*source, *destination));
+    let statements = statement_spans(&reparsed.program);
     for (index, original) in program.comments.iter().enumerate() {
         if matched[index] {
             continue;
@@ -181,21 +182,16 @@ fn restore_comment_text(
             original.span.end as usize
         };
         let mapping_index = mappings.partition_point(|(source, _)| *source < anchor);
-        let destination = mappings
+        let mapped = mappings
             .get(mapping_index)
             .map_or(generated.len(), |(_, destination)| *destination);
-        let mut text = String::new();
-        text.push(if original.preceded_by_newline() {
-            '\n'
-        } else {
-            ' '
-        });
-        text.push_str(original.span.source_text(program.source_text));
-        text.push(if original.is_line() || original.followed_by_newline() {
-            '\n'
-        } else {
-            ' '
-        });
+        let (destination, text) = place_restored_comment(
+            generated,
+            &statements,
+            mapped,
+            original,
+            original.span.source_text(program.source_text),
+        );
         edits.push((destination, destination, text));
     }
     edits.sort_by_key(|(start, end, _)| (*start, *end));
@@ -220,6 +216,84 @@ fn restore_comment_text(
     restored.push_str(&generated[cursor..]);
     let map = shift_source_map(map, generated, &restored, &edits);
     Ok((restored, map))
+}
+
+/// Every statement span in a program, so a restored comment can be anchored
+/// to a statement boundary.
+fn statement_spans(program: &Program<'_>) -> Vec<Span> {
+    struct Spans(Vec<Span>);
+    impl<'a> Visit<'a> for Spans {
+        fn visit_statement(&mut self, statement: &Statement<'a>) {
+            self.0.push(statement.span());
+            walk::walk_statement(self, statement);
+        }
+    }
+    let mut spans = Spans(Vec::new());
+    spans.visit_program(program);
+    spans.0
+}
+
+/// Where a comment the generator dropped goes back in, and with what
+/// whitespace around it.
+///
+/// The mapped position is only a hint: it is where the node the comment was
+/// attached to landed, and that can be mid-line. A comment that carries a
+/// line break must not be dropped there. After `return`, `throw`, `break`,
+/// `continue` or `yield` the break lets automatic semicolon insertion end the
+/// statement early -- `return` + newline + JSX parsed as `return;` with the
+/// JSX unreachable, and the bundler then removed the whole tree, so a React
+/// component rendered nothing under measurement while passing plainly. A `//`
+/// comment inserted before more code on the same line comments that code out.
+/// Such a comment moves to the start of the innermost statement containing
+/// the position, where a line break is always inert. A single-line block
+/// comment is inert wherever it sits, so mid-line it stays inline.
+fn place_restored_comment(
+    generated: &str,
+    statements: &[Span],
+    mapped: usize,
+    comment: &Comment,
+    text: &str,
+) -> (usize, String) {
+    let line_prefix = |offset: usize| generated[..offset].rsplit('\n').next().unwrap_or("");
+    let at_line_start = line_prefix(mapped)
+        .chars()
+        .all(|character| character == ' ' || character == '\t');
+    if at_line_start {
+        let mut placed = String::new();
+        placed.push(if comment.preceded_by_newline() {
+            '\n'
+        } else {
+            ' '
+        });
+        placed.push_str(text);
+        placed.push(if comment.is_line() || comment.followed_by_newline() {
+            '\n'
+        } else {
+            ' '
+        });
+        return (mapped, placed);
+    }
+    if !comment.is_line() && !text.contains('\n') {
+        let leading = if generated[..mapped].ends_with([' ', '\t']) {
+            ""
+        } else {
+            " "
+        };
+        return (mapped, format!("{leading}{text} "));
+    }
+    let Some(statement) = statements
+        .iter()
+        .filter(|span| span.start as usize <= mapped && mapped < span.end as usize)
+        .max_by_key(|span| span.start)
+    else {
+        return (mapped, format!("\n{text}\n"));
+    };
+    let start = statement.start as usize;
+    let indentation: String = line_prefix(start)
+        .chars()
+        .take_while(|character| *character == ' ' || *character == '\t')
+        .collect();
+    (start, format!("{text}\n{indentation}"))
 }
 
 fn equal_ignoring_whitespace(left: &str, right: &str) -> bool {
@@ -7203,6 +7277,97 @@ mod tests {
         assert!(
             output.code[offset..].starts_with("return"),
             "{}",
+            output.code
+        );
+    }
+
+    #[test]
+    fn restored_comments_never_split_a_keyword_from_its_argument() {
+        // oxc drops the comment that led a parenthesised return argument; the
+        // restore used to put it back right after `return`, on its own line,
+        // and automatic semicolon insertion turned the statement into `return;`
+        // with the JSX unreachable. Vite then removed the unreachable tree and
+        // every declaration only it used, so a component rendered nothing under
+        // measurement while passing plainly. Expression-bodied arrows are hit
+        // too, since instrumentation rewrites them into `return` blocks.
+        let source = concat!(
+            "export const A = ({ open }) => {\n",
+            "  return (\n",
+            "    // leading comment before JSX\n",
+            "    <div aria-expanded={open}>a</div>\n",
+            "  )\n",
+            "}\n",
+            "export const B = ({ open }) => (\n",
+            "  // comment in an expression body\n",
+            "  <div aria-expanded={open}>b</div>\n",
+            ")\n",
+            "export function C(x) {\n",
+            "  return ( // inline line comment\n",
+            "    x + 1\n",
+            "  )\n",
+            "}\n",
+            "export function D(x) {\n",
+            "  throw (\n",
+            "    /* block\n       comment */\n",
+            "    new Error(String(x))\n",
+            "  )\n",
+            "}\n",
+            "export function E(x) {\n",
+            "  return ( /* inline block */ x + 2 )\n",
+            "}\n",
+        );
+        let output = instrument_direct_candidate(source, "app/components/List.tsx").unwrap();
+        for keyword in ["return ", "throw "] {
+            for (index, _) in output.code.match_indices(keyword) {
+                let rest = output.code[index + keyword.len()..].trim_start_matches([' ', '\t']);
+                let block_with_line_break = rest.starts_with("/*")
+                    && rest[..rest.find("*/").unwrap_or(rest.len())].contains('\n');
+                assert!(
+                    !rest.starts_with('\n') && !rest.starts_with("//") && !block_with_line_break,
+                    "`{keyword}` is separated from its argument:\n{}",
+                    output.code
+                );
+            }
+        }
+        for comment in [
+            "// leading comment before JSX",
+            "// comment in an expression body",
+            "// inline line comment",
+            "/* block\n       comment */",
+            "/* inline block */",
+        ] {
+            assert!(
+                output.code.contains(comment),
+                "{comment} was lost:\n{}",
+                output.code
+            );
+        }
+        assert!(
+            output
+                .code
+                .contains("return <div aria-expanded={open}>a</div>"),
+            "{}",
+            output.code
+        );
+        assert!(
+            output
+                .code
+                .contains("return <div aria-expanded={open}>b</div>"),
+            "{}",
+            output.code
+        );
+        // The restored output must still parse to the same program shape.
+        let allocator = Allocator::default();
+        let reparsed = Parser::new(
+            &allocator,
+            &output.code,
+            SourceType::from_path("app/components/List.tsx").unwrap(),
+        )
+        .parse();
+        assert!(
+            reparsed.errors.is_empty(),
+            "{:?}\n{}",
+            reparsed.errors,
             output.code
         );
     }
