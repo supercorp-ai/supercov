@@ -168,6 +168,20 @@ class CoveragePhaseController {
     scriptUpdate = Promise.resolve();
     proxyCache = new WeakMap();
     runtimeSnapshots;
+    // Contexts this controller found rather than created: it does not know
+    // what `extraHTTPHeaders` their owner configured, so it must not rewrite
+    // them (the scope cookie and the fetch patch still carry attribution).
+    adoptedContexts = new Set();
+    // Listeners installed on contexts that outlive this test, removed on
+    // dispose so a worker-scoped context does not keep registering pages with
+    // controllers of tests that already finished.
+    contextListeners = new Map();
+    // Snapshots read from pages the suite closed before teardown. A `page`
+    // fixture override tears down before the collector's own fixture, and a
+    // closed page cannot be evaluated, so the evidence is taken on the way out.
+    earlySnapshots = [];
+    snapshottedPages = new WeakSet();
+    disposed = false;
     // Parameter properties are stateful despite the base ESLint rule treating
     // this as an empty constructor.
     // eslint-disable-next-line no-useless-constructor
@@ -185,21 +199,15 @@ class CoveragePhaseController {
         if (this.runtimeSnapshots)
             return this.runtimeSnapshots;
         timingCount("collectRuntimeSnapshots.cold");
-        const snapshots = [];
+        // Contexts the suite created without going through any fixture the
+        // collector wraps (a raw `browser.newContext()` mid-test) are found
+        // through their browser now, so their still-open pages are read too.
+        await this.adoptTrackedContexts().catch(() => undefined);
+        const snapshots = [...this.earlySnapshots];
         for (const page of this.allPages()) {
-            for (const frame of page.frames()) {
-                const snapshot = await frame
-                    .evaluate(() => {
-                    const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;
-                    return getSnapshot?.() ?? { decisions: [], hits: [], events: [] };
-                })
-                    .catch(() => ({
-                    decisions: [],
-                    hits: [],
-                    events: [],
-                }));
-                snapshots.push(snapshot);
-            }
+            if (this.snapshottedPages.has(page))
+                continue;
+            snapshots.push(...(await this.snapshotPage(page)));
         }
         for (const worker of this.allWorkers()) {
             const snapshot = await worker
@@ -217,12 +225,50 @@ class CoveragePhaseController {
         this.runtimeSnapshots = snapshots;
         return snapshots;
     }
+    async snapshotPage(page) {
+        const snapshots = [];
+        for (const frame of page.frames()) {
+            snapshots.push(await frame
+                .evaluate(() => {
+                const getSnapshot = globalThis.__SUPERCOV_COVERAGE_SNAPSHOT__;
+                return getSnapshot?.() ?? { decisions: [], hits: [], events: [] };
+            })
+                .catch(() => ({
+                decisions: [],
+                hits: [],
+                events: [],
+            })));
+        }
+        return snapshots;
+    }
+    /** Read a registered page's evidence while it can still be evaluated. */
+    async snapshotBeforeClose(page) {
+        if (!this.pages.has(page) || this.snapshottedPages.has(page) || this.runtimeSnapshots)
+            return;
+        this.snapshottedPages.add(page);
+        this.earlySnapshots.push(...(await this.snapshotPage(page)));
+    }
+    /**
+     * Register every live context the process created outside the wrapped
+     * fixtures: contexts launched directly (`launchPersistentContext`) and
+     * every context of every browser launched or connected directly.
+     */
+    async adoptTrackedContexts() {
+        if (this.disposed)
+            return;
+        for (const context of liveTrackedContexts()) {
+            if (!this.contexts.has(context))
+                await this.registerContext(context, this.configuredHeaders, { adopted: true }).catch(() => undefined);
+        }
+    }
     async registerPage(page) {
-        if (this.pages.has(page))
+        if (this.pages.has(page) || this.disposed)
             return;
         timingCount("registerPage");
         this.pages.add(page);
-        await this.registerContext(page.context());
+        await this.registerContext(page.context(), this.configuredHeaders, {
+            adopted: !this.contexts.has(page.context()) && liveTrackedContexts().has(page.context()),
+        });
         const cdp = await page.context().newCDPSession(page).catch(() => undefined);
         if (cdp)
             this.cdpSessions.set(page, cdp);
@@ -235,26 +281,40 @@ class CoveragePhaseController {
         for (const worker of page.workers())
             void this.registerWorker(worker);
     }
-    async registerContext(context, configuredHeaders = this.configuredHeaders) {
-        if (this.contexts.has(context))
+    async registerContext(context, configuredHeaders = this.configuredHeaders, { adopted = false } = {}) {
+        if (this.contexts.has(context) || this.disposed)
             return;
         this.contexts.add(context);
         this.contextConfiguredHeaders.set(context, configuredHeaders);
+        if (adopted)
+            this.adoptedContexts.add(context);
+        // A context that outlives its test (a worker-scoped browser fixture)
+        // is registered again by every later test, so this script accumulates
+        // on it and each new document runs every copy in registration order.
+        // That is made harmless rather than avoided: every copy publishes its
+        // own attempt, so the newest wins; the fetch patch is installed once
+        // and reads the attempt at call time, so a stale copy can never pin an
+        // old scope onto a request the way nested wrappers would.
         await context.addInitScript(({ attemptId, scopeHeader, scopeValue, scopeCookie }) => {
-            globalThis.__SUPERCOV_MCDC_TEST_ID__ = attemptId;
+            const coverageGlobal = globalThis;
+            coverageGlobal.__SUPERCOV_ATTEMPT__ = { attemptId, scopeValue };
+            coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ = attemptId;
             try {
                 document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=Lax`;
-                const originalFetch = globalThis.fetch?.bind(globalThis);
-                if (originalFetch) {
-                    globalThis.fetch = ((input, init) => {
-                        const headers = new Headers(init?.headers ??
-                            (input instanceof Request ? input.headers : undefined));
-                        headers.set(scopeHeader, scopeValue);
-                        const phase = globalThis.__SUPERCOV_PHASE_ID__;
-                        if (phase)
-                            headers.set("x-supercov-phase", phase);
-                        return originalFetch(input, { ...init, headers });
-                    });
+                if (!coverageGlobal.__SUPERCOV_BROWSER_FETCH_PATCHED__) {
+                    const originalFetch = globalThis.fetch?.bind(globalThis);
+                    if (originalFetch) {
+                        coverageGlobal.__SUPERCOV_BROWSER_FETCH_PATCHED__ = true;
+                        globalThis.fetch = ((input, init) => {
+                            const headers = new Headers(init?.headers ??
+                                (input instanceof Request ? input.headers : undefined));
+                            headers.set(scopeHeader, coverageGlobal.__SUPERCOV_ATTEMPT__?.scopeValue ?? scopeValue);
+                            const phase = coverageGlobal.__SUPERCOV_PHASE_ID__;
+                            if (phase)
+                                headers.set("x-supercov-phase", phase);
+                            return originalFetch(input, { ...init, headers });
+                        });
+                    }
                 }
             }
             catch {
@@ -265,18 +325,21 @@ class CoveragePhaseController {
             scopeHeader: COVERAGE_SCOPE_HEADER,
             scopeValue: encodeCoverageScope(this.scope),
             scopeCookie: COVERAGE_SCOPE_COOKIE,
-        });
+        }).catch(() => undefined);
         const register = (page) => {
             const pending = this.registerPage(page).finally(() => this.pendingRegistrations.delete(pending));
             this.pendingRegistrations.add(pending);
         };
-        context.on("page", register);
-        context.on("serviceworker", (worker) => {
+        const registerServiceWorker = (worker) => {
             void this.registerWorker(worker);
-        });
+        };
+        context.on("page", register);
+        context.on("serviceworker", registerServiceWorker);
+        this.contextListeners.set(context, [["page", register], ["serviceworker", registerServiceWorker]]);
         for (const worker of context.serviceWorkers())
             void this.registerWorker(worker);
-        await this.updateContextHeaders(context, this.requestPhaseId());
+        if (!adopted)
+            await this.updateContextHeaders(context, this.requestPhaseId());
         for (const page of context.pages())
             register(page);
     }
@@ -333,8 +396,14 @@ class CoveragePhaseController {
         return this.activePhaseId;
     }
     async dispose() {
+        this.disposed = true;
         await Promise.all([...this.pendingRegistrations]);
         await this.scriptUpdate;
+        for (const [context, listeners] of this.contextListeners) {
+            for (const [event, listener] of listeners)
+                context.off?.(event, listener);
+        }
+        this.contextListeners.clear();
         for (const [page, cdp] of this.cdpSessions) {
             const identifier = this.newDocumentScriptIds.get(page);
             if (identifier)
@@ -431,10 +500,15 @@ class CoveragePhaseController {
             ArrayBuffer.isView(result))
             return result;
         const candidate = result;
+        if (typeof candidate["contexts"] === "function" &&
+            typeof candidate["newContext"] === "function")
+            trackBrowser(result);
         if (typeof candidate["pages"] === "function" &&
-            typeof candidate["route"] === "function")
+            typeof candidate["route"] === "function") {
+            trackContext(result);
             await this.registerContext(result, (sourceArgs?.[0]
                 ?.extraHTTPHeaders ?? this.configuredHeaders));
+        }
         if (typeof candidate["frames"] === "function" &&
             typeof candidate["context"] === "function")
             await this.registerPage(result);
@@ -472,12 +546,18 @@ class CoveragePhaseController {
         return scoped;
     }
     async activateInBrowser(phaseId) {
-        await timed("activate.contextHeaders", () => Promise.all([...this.contexts].map((context) => this.updateContextHeaders(context, phaseId))));
+        await timed("activate.contextHeaders", () => Promise.all([...this.contexts]
+            .filter((context) => !this.adoptedContexts.has(context))
+            .map((context) => this.updateContextHeaders(context, phaseId))));
         await timed("activate.frameEvaluate", () => Promise.all([...this.pages].flatMap((page) => page.frames()).map((frame) => frame
-            .evaluate(({ id, storageKey, scopeCookie, scopeValue, phaseCookie }) => {
+            .evaluate(({ id, attemptId, storageKey, scopeCookie, scopeValue, phaseCookie }) => {
             globalThis.__SUPERCOV_PHASE_ID__ = id;
             const coverageGlobal = globalThis;
-            coverageGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ ?? "unscoped", id);
+            // A document that loaded under an earlier test's attempt (a page
+            // adopted mid-life from a shared context) follows the current one.
+            coverageGlobal.__SUPERCOV_ATTEMPT__ = { attemptId, scopeValue };
+            coverageGlobal.__SUPERCOV_MCDC_TEST_ID__ = attemptId;
+            coverageGlobal.__SUPERCOV_ACTIVATE_PROBE_CONTEXT__?.(attemptId, id);
             try {
                 localStorage.setItem(storageKey, id);
                 document.cookie = `${scopeCookie}=${encodeURIComponent(scopeValue)}; Path=/; SameSite=Lax`;
@@ -488,6 +568,7 @@ class CoveragePhaseController {
             }
         }, {
             id: phaseId,
+            attemptId: this.scope.attemptId,
             storageKey: PHASE_STORAGE_KEY,
             scopeCookie: COVERAGE_SCOPE_COOKIE,
             scopeValue: encodeCoverageScope(this.scope),
@@ -538,6 +619,129 @@ class CoveragePhaseController {
 let activeController;
 let bridgedAssertionDepth = 0;
 const controllers = new Map();
+// Browsers and contexts the process created without any fixture the collector
+// wraps. Test harnesses routinely launch their own browser in a worker-scoped
+// fixture (`chromium.launchPersistentContext` for a shared profile,
+// `chromium.launch`/`connect` plus `browser.newContext()` per test) and
+// override `page` on top; those objects never pass through the `browser`/`page`
+// fixtures, and imports made from inside node_modules are never redirected to
+// this shim, so wrapping exports would not see them either. Every page they
+// opened ran unmeasured. The Playwright classes are patched below so such
+// launches are recorded here, and each test's controller adopts what is live.
+const trackedBrowsers = new Set();
+const trackedContexts = new Set();
+const patchedPrototypes = new WeakSet();
+function trackBrowser(browser) {
+    if (!browser || typeof browser !== "object" || trackedBrowsers.has(browser))
+        return;
+    trackedBrowsers.add(browser);
+    browser.once?.("disconnected", () => trackedBrowsers.delete(browser));
+    patchBrowserPrototype(browser);
+}
+function trackContext(context) {
+    if (!context || typeof context !== "object" || trackedContexts.has(context))
+        return;
+    trackedContexts.add(context);
+    context.once?.("close", () => trackedContexts.delete(context));
+    patchContextPrototype(context);
+}
+function liveTrackedContexts() {
+    const contexts = new Set(trackedContexts);
+    for (const browser of trackedBrowsers) {
+        try {
+            for (const context of browser.contexts())
+                contexts.add(context);
+        }
+        catch {
+            // A browser that disconnected between the event and this sweep.
+        }
+    }
+    return contexts;
+}
+/** The controller that registered `page`, whichever test it belongs to. */
+function controllerOwning(page) {
+    if (activeController?.pages.has(page))
+        return activeController;
+    for (const controller of controllers.values())
+        if (controller.pages.has(page))
+            return controller;
+    return undefined;
+}
+function patchOnce(target, method, replace) {
+    const prototype = target && Object.getPrototypeOf(target);
+    if (!prototype || typeof prototype[method] !== "function")
+        return;
+    const marker = `__SUPERCOV_PATCHED_${method}__`;
+    if (prototype[marker])
+        return;
+    Object.defineProperty(prototype, marker, { value: true });
+    prototype[method] = replace(prototype[method]);
+}
+/** Record every context a directly launched or connected browser creates. */
+function patchBrowserPrototype(browser) {
+    const prototype = Object.getPrototypeOf(browser);
+    if (!prototype || patchedPrototypes.has(prototype))
+        return;
+    patchedPrototypes.add(prototype);
+    patchOnce(browser, "newContext", (original) => async function (...args) {
+        const context = await original.apply(this, args);
+        trackContext(context);
+        const controller = activeController;
+        if (controller && !controller.contexts.has(context))
+            await controller.registerContext(context, args[0]?.extraHTTPHeaders ?? controller.configuredHeaders, { adopted: true }).catch(() => undefined);
+        return context;
+    });
+}
+/**
+ * Read a page's evidence before the suite closes it. A `page` fixture defined
+ * downstream of this shim tears down before the collector's own fixture, and
+ * a customer context opened mid-test is usually closed in a `finally`; either
+ * way the page is gone by the time the test's snapshots are collected.
+ */
+function patchContextPrototype(context) {
+    patchOnce(context, "close", (original) => async function (...args) {
+        for (const page of this.pages()) {
+            await controllerOwning(page)?.snapshotBeforeClose(page).catch(() => undefined);
+        }
+        return original.apply(this, args);
+    });
+    for (const page of context.pages())
+        patchPagePrototype(page);
+    context.on?.("page", patchPagePrototype);
+}
+function patchPagePrototype(page) {
+    patchOnce(page, "close", (original) => async function (...args) {
+        await controllerOwning(this)?.snapshotBeforeClose(this).catch(() => undefined);
+        return original.apply(this, args);
+    });
+}
+/**
+ * Patch the browser types' launch and connect paths on their shared prototype
+ * so every browser or context the process creates is tracked, whichever module
+ * path imported them. When a test is running its controller registers the new
+ * object at once; otherwise the next controller adopts it.
+ */
+function installBrowserLaunchTracking() {
+    const browserType = standardPlaywright.chromium ?? standardPlaywright.firefox ?? standardPlaywright.webkit;
+    if (!browserType)
+        return;
+    for (const method of ["launch", "connect", "connectOverCDP"]) {
+        patchOnce(browserType, method, (original) => async function (...args) {
+            const browser = await original.apply(this, args);
+            trackBrowser(browser);
+            return browser;
+        });
+    }
+    patchOnce(browserType, "launchPersistentContext", (original) => async function (...args) {
+        const context = await original.apply(this, args);
+        trackContext(context);
+        const controller = activeController;
+        if (controller)
+            await controller.registerContext(context, args[1]?.extraHTTPHeaders ?? controller.configuredHeaders, { adopted: true }).catch(() => undefined);
+        return context;
+    });
+}
+installBrowserLaunchTracking();
 const directRuntime = () => globalThis.__SUPERCOV_DIRECT_RUNTIME__ ?? coverageRuntime;
 globalThis.__SUPERCOV_ASSERTION_PHASE_BRIDGE__ = (operation, source, callback) => {
     const controller = activeController;
@@ -839,7 +1043,7 @@ function mergeCollectedPhases(controllerPhases, fallbackPhases) {
     });
     return [...controllerPhases, ...remaining];
 }
-const instrumentedTest = base.extend({
+const instrumentedFixtures = {
     page: async ({ page }, use, testInfo) => {
         const scope = executionScope(testInfo);
         const controller = controllers.get(scope.attemptId);
@@ -887,6 +1091,7 @@ const instrumentedTest = base.extend({
             controllers.set(scope.attemptId, controller);
             activeController = controller;
             directRuntime()?.activateCoverageScope(scope);
+            await controller.adoptTrackedContexts().catch(() => undefined);
             const serverOutput = serverEvidencePath(scope);
             mkdirSync(serverEvidenceDirectory(scope), { recursive: true });
             rmSync(serverOutput, { force: true });
@@ -951,6 +1156,31 @@ const instrumentedTest = base.extend({
         },
         { auto: true },
     ],
-});
+};
+const instrumentedTest = base.extend(instrumentedFixtures);
 export const test = instrumentedTest;
+/**
+ * A Playwright `test` object: callable, and carrying the API a spec drives.
+ * Facades export several -- one per fixture set -- and every one of them must
+ * collect. Instrumenting only the discovered export left a real suite's
+ * storefront fixture entirely unmeasured: its 20 tests ran with no controller,
+ * so nothing they executed was ever read back.
+ */
+function isPlaywrightTest(value) {
+    return typeof value === "function" &&
+        typeof value.extend === "function" &&
+        typeof value.describe === "function" &&
+        typeof value.use === "function";
+}
+/**
+ * Re-export one of the facade's values. A test object is extended with the
+ * collector's fixtures; the overrides compose with the facade's own (`page`
+ * receives the facade's page and wraps it), so a custom browser fixture keeps
+ * working and is measured. Anything else passes through untouched.
+ */
+export function __supercovAdapterExport(value) {
+    if (!isPlaywrightTest(value))
+        return value;
+    return value === base ? instrumentedTest : value.extend(instrumentedFixtures);
+}
 /*__SUPERCOV_ADAPTER_EXPORTS__*/

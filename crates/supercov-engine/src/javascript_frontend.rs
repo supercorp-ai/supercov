@@ -832,7 +832,7 @@ fn configure_playwright_runtime(
             .map(|name| {
                 let encoded = serde_json::to_string(name)
                     .expect("serializing a JavaScript export name cannot fail");
-                format!("export const {name} = adapter[{encoded}];")
+                format!("export const {name} = __supercovAdapterExport(adapter[{encoded}]);")
             }),
     );
     adapter = adapter.replace("/*__SUPERCOV_ADAPTER_EXPORTS__*/", &exports.join("\n"));

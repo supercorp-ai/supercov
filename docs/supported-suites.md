@@ -67,6 +67,14 @@ Playwright support includes Chromium, Firefox, and WebKit, along with pages,
 frames, popups, workers, request contexts, WebSockets, and test-launched child
 processes where the runner exposes their identity.
 
+Browsers a suite launches itself are covered too. A fixture that calls
+`chromium.launchPersistentContext`, or `launch`/`connect` and hands out its own
+contexts and pages in place of Playwright's `page` fixture, is adopted by each
+test's collector: its pages are read before the fixture closes them, and a
+context kept for the whole worker follows the current test's identity. Actions
+on such pages are not recorded as separate phases, so their evidence is
+attributed to the test and its assertions rather than to individual clicks.
+
 Node child processes inherit coverage automatically. Long-running servers get
 a short drain window after the test command finishes so buffered evidence can
 arrive. Work without a reliable test identity is kept as background coverage
