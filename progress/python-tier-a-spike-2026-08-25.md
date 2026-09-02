@@ -1,5 +1,10 @@
 # Python coverage.py development-oracle spike
 
+> Superseded for the product path on 2026-09-02: the owned frontend measures
+> through `sys.monitoring` without a transform or workspace copy. See
+> `python-sys-monitoring-spike-2026-09-02.md`. The oracle harness below remains
+> the development differential.
+
 Status: development-only correctness oracle. This does not enable Python in
 the public CLI, does not change evidence archive v2, and is forbidden from the
 eventual user execution path.

@@ -9,7 +9,7 @@ npx supercov -- npm test
 ```
 
 No account, config file, import, custom reporter, or hosted service is required.
-Supercov supports JavaScript, TypeScript, and Rust today.
+Supercov supports JavaScript, TypeScript, Rust, and Python today.
 
 ## Before you start
 
@@ -17,7 +17,8 @@ You need:
 
 - Node.js 22 or newer;
 - a test command that already works in the repository; and
-- for Rust, the Rust 1.95 toolchain.
+- for Rust, the Rust 1.95 toolchain;
+- for Python, CPython 3.12 or newer with pytest or unittest.
 
 The CLI is distributed through npm, even for Rust projects. The first `npx`
 invocation may download Supercov from the npm registry. Supercov itself does not
@@ -37,6 +38,9 @@ npx supercov -- pnpm test:e2e
 # Rust
 npx supercov -- cargo test
 npx supercov -- cargo nextest run
+
+# Python
+npx supercov -- pytest
 ```
 
 Supercov runs that command in an isolated, instrumented copy of the project.

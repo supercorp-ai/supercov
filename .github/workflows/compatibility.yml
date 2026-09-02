@@ -95,3 +95,35 @@ jobs:
       - run: npm ci
       - run: npm run test:filesystem
       - run: npm run test:rust-platform
+
+  python:
+    name: CPython ${{ matrix.python }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: ubuntu-latest
+            python: "3.13"
+          - os: ubuntu-latest
+            python: "3.14"
+          - os: macos-latest
+            python: "3.14"
+          - os: windows-latest
+            python: "3.14"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run test:python-monitoring
+        env:
+          SUPERCOV_PYTHON: python

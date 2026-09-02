@@ -53,9 +53,11 @@ fn main() {
         PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
     let repository_root = crate_root.join("../..");
     let runtime_root = repository_root.join("runtime/javascript");
+    let python_runtime_root = repository_root.join("runtime/python");
     let mut files = Vec::new();
     collect_files(&crate_root.join("src"), &mut files);
     collect_files(&runtime_root, &mut files);
+    collect_files(&python_runtime_root, &mut files);
     files.extend([crate_root.join("build.rs"), crate_root.join("Cargo.toml")]);
     files.sort();
     files.dedup();
@@ -79,5 +81,18 @@ fn main() {
     println!(
         "cargo:rustc-env=SUPERCOV_JS_FRONTEND_SOURCE_SHA256={}",
         digest_files(&javascript_frontend, &repository_root)
+    );
+    let mut python_frontend = vec![
+        crate_root.join("src/python_instrumenter.rs"),
+        crate_root.join("src/python_evidence.rs"),
+        crate_root.join("src/python_project.rs"),
+        crate_root.join("Cargo.toml"),
+    ];
+    collect_files(&python_runtime_root, &mut python_frontend);
+    python_frontend.sort();
+    python_frontend.dedup();
+    println!(
+        "cargo:rustc-env=SUPERCOV_PYTHON_FRONTEND_SOURCE_SHA256={}",
+        digest_files(&python_frontend, &repository_root)
     );
 }

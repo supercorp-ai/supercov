@@ -22,9 +22,12 @@ pub mod probe_v2;
 pub mod process_supervision;
 pub mod progress;
 pub mod project_discovery;
+pub mod python_evidence;
 #[cfg(any(test, feature = "oracle-harnesses"))]
 pub mod python_frontend;
 pub mod python_instrumenter;
+pub mod python_project;
+pub mod python_run;
 pub mod query_index;
 pub mod run_merge;
 pub mod run_query;

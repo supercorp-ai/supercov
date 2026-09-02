@@ -1,7 +1,7 @@
 {
   "name": "supercov",
-  "version": "0.0.30",
-  "description": "Zero-edit, runner-aware coverage completeness for JavaScript test suites",
+  "version": "0.0.31",
+  "description": "Zero-edit, runner-aware coverage completeness for JavaScript, TypeScript, Rust, and Python test suites",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -62,18 +62,20 @@
     "test:clang-mcdc": "node scripts/clang-mcdc-oracle.mjs",
     "test:test262": "cargo build --release -p supercov && node scripts/test262-equivalence.mjs",
     "benchmark:check": "cargo build --release -p supercov && node scripts/rust-transform-benchmark.mjs",
+    "benchmark:python-monitoring": "cargo build -p supercov && node scripts/python-monitoring-benchmark.mjs",
     "check": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && npm run test && npm run test:runtime && npm run test:rust-assets && node scripts/package-preflight.mjs",
-    "release:check": "npm run check && npm run test:engine && npm run test:fixture && npm run test:watchdog && npm run test:engine-contract && npm run test:agent && npm run test:packed-npx && npm run test:clang-mcdc && npm run benchmark:check",
+    "release:check": "npm run check && npm run test:engine && npm run test:fixture && npm run test:watchdog && npm run test:engine-contract && npm run test:agent && npm run test:python-monitoring && npm run test:packed-npx && npm run test:clang-mcdc && npm run benchmark:check",
     "prepack": "node scripts/package-preflight.mjs",
-    "prepublishOnly": "npm run release:check"
+    "prepublishOnly": "npm run release:check",
+    "test:python-monitoring": "cargo build -p supercov && node scripts/python-monitoring-integration.mjs"
   },
   "optionalDependencies": {
-    "@supercov/cli-darwin-arm64": "0.0.30",
-    "@supercov/cli-darwin-x64": "0.0.30",
-    "@supercov/cli-linux-arm64-gnu": "0.0.30",
-    "@supercov/cli-linux-arm64-musl": "0.0.30",
-    "@supercov/cli-linux-x64-gnu": "0.0.30",
-    "@supercov/cli-linux-x64-musl": "0.0.30"
+    "@supercov/cli-darwin-arm64": "0.0.31",
+    "@supercov/cli-darwin-x64": "0.0.31",
+    "@supercov/cli-linux-arm64-gnu": "0.0.31",
+    "@supercov/cli-linux-arm64-musl": "0.0.31",
+    "@supercov/cli-linux-x64-gnu": "0.0.31",
+    "@supercov/cli-linux-x64-musl": "0.0.31"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.55.0",

@@ -1441,7 +1441,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
             ecosystem.language, ecosystem.evidence, ecosystem.language
         );
         eprintln!(
-            "[supercov] Supercov currently measures JavaScript, TypeScript, and Rust test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
+            "[supercov] Supercov currently measures JavaScript, TypeScript, Rust, and Python test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
             ecosystem.language
         );
         return ExitCode::from(2);
@@ -1454,7 +1454,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                     ecosystem.language, ecosystem.evidence, ecosystem.language
                 );
                 eprintln!(
-                    "[supercov] Supercov currently measures JavaScript, TypeScript, and Rust test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
+                    "[supercov] Supercov currently measures JavaScript, TypeScript, Rust, and Python test runs. If you'd like {} support, please open an issue or PR: https://github.com/supercorp-ai/supercov",
                     ecosystem.language
                 );
             }
@@ -1463,7 +1463,7 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
                     "[supercov] Supercov could not recognize this project's language or test framework: no supported test files or manifests were found, and the command does not launch a runner Supercov knows."
                 );
                 eprintln!(
-                    "[supercov] Supercov currently measures JavaScript, TypeScript, and Rust test runs. Alternatively, Supercov may simply not support your test suite yet — if so, please open an issue or PR: https://github.com/supercorp-ai/supercov"
+                    "[supercov] Supercov currently measures JavaScript, TypeScript, Rust, and Python test runs. Alternatively, Supercov may simply not support your test suite yet — if so, please open an issue or PR: https://github.com/supercorp-ai/supercov"
                 );
             }
         }
@@ -1516,13 +1516,41 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
         };
     }
     if detection.frontends == [supercov_engine::frontend_detection::FrontendLanguage::Python] {
-        eprintln!(
-            "[supercov] This looks like a Python test run, and Supercov does not support Python yet."
-        );
-        eprintln!(
-            "[supercov] Supercov currently measures JavaScript, TypeScript, and Rust test runs. If you'd like Python support, please open an issue or PR: https://github.com/supercorp-ai/supercov"
-        );
-        return ExitCode::from(2);
+        let request = supercov_engine::python_run::DirectPythonRunRequest {
+            root: root.clone(),
+            command,
+            run_id,
+            started_at,
+        };
+        let mut diagnostics = std::io::stderr().lock();
+        let result = supercov_engine::python_run::run_direct_python(&request, &mut diagnostics);
+        spawn_trash_sweeper(&root);
+        return match result {
+            Ok(result) => {
+                println!(
+                    "[coverage] evidence: {}",
+                    result.run_directory.join("evidence.raw.gz").display()
+                );
+                eprintln!(
+                    "[supercov] Python coverage: {} test(s) across {} source file(s), {} interpreter process(es) on Python {}",
+                    result.tests,
+                    result.source_files,
+                    result.interpreters,
+                    result.python_versions.join(", ")
+                );
+                if let Some(timings) = &result.metadata.timings {
+                    eprintln!(
+                        "[supercov] timings {}",
+                        format_run_timings(timings, result.metadata.duration_ms)
+                    );
+                }
+                process_exit_code(result.exit_code)
+            }
+            Err(error) => {
+                eprintln!("[supercov] {error}");
+                ExitCode::from(1)
+            }
+        };
     }
     let watchdog_program = std::env::current_exe()
         .ok()

@@ -1,13 +1,14 @@
 # Supported languages and test suites
 
-Supercov supports JavaScript, TypeScript, and Rust today. Start with the same
-test command the repository already uses; Supercov detects supported runners
-inside that command.
+Supercov supports JavaScript, TypeScript, Rust, and Python today. Start with
+the same test command the repository already uses; Supercov detects supported
+runners inside that command.
 
 ```sh
 npx supercov -- npm test
 npx supercov -- npx playwright test
 npx supercov -- cargo test
+npx supercov -- pytest
 ```
 
 ## Language support
@@ -17,7 +18,7 @@ npx supercov -- cargo test
 | JavaScript | Available | `npx supercov -- npm test` |
 | TypeScript | Available | `npx supercov -- npm test` |
 | Rust | Available | `npx supercov -- cargo test` |
-| Python | Coming soon | — |
+| Python | Available | `npx supercov -- pytest` |
 | Zig | Coming soon | — |
 | PHP | Coming soon | — |
 | C | Coming soon | — |
@@ -90,6 +91,43 @@ npx supercov -- cargo nextest run --workspace
 `cross` is not supported yet. Unsupported command shapes fail with an
 explanation instead of silently falling back to plausible but inaccurate
 attribution.
+
+## Python
+
+| Runner | Attribution | Current requirement |
+| --- | --- | --- |
+| pytest | Exact test, worker, retry, and setup/call/teardown phase identity | CPython 3.12 or newer; run with `npx supercov -- pytest` or `python -m pytest` |
+| pytest-xdist | Exact per worker | Workers inherit the run through the environment |
+| pytest-rerunfailures | Exact per attempt; flaky tests are reported as such | |
+| `python -m unittest` | Exact test and setUp/test/tearDown phase identity | Serial in-process; skips and expected failures are recorded; subtest failures roll up to the parent test |
+
+Supercov measures Python through CPython's own monitoring interface. Nothing is
+copied, rewritten, or compiled differently: the project runs in place with its
+own interpreter and virtual environment, and Supercov only adds a start-up hook
+through `PYTHONPATH`, a pytest plugin through `PYTEST_PLUGINS`, and a few
+`SUPERCOV_*` variables. Child interpreters started with `subprocess` or
+`multiprocessing` inherit the exact test identity; threads and thread pools
+carry it through `contextvars`.
+
+Each interpreter writes commit-framed evidence to a process-owned mmap. A hard
+kill preserves completed observations and an incomplete tail is ignored; an
+exhausted transport or corrupt committed frame fails the run closed.
+
+Measured obligations are statements (including several on one line), function
+entry, boolean decisions with MC/DC vectors, `for` and comprehension iteration,
+`and`/`or` short-circuiting, `match` case selection, and `try` completion,
+handler selection and exception propagation, all derived from CPython's own
+instruction positions rather than from exception hooks.
+
+Interpreters launched with `-I`, `-E`, or `-S` ignore `PYTHONPATH` and are not
+measured. Code compiled from strings at runtime has no source obligations.
+
+```sh
+npx supercov -- pytest
+npx supercov -- python -m pytest -n 4
+npx supercov -- uv run pytest
+npx supercov -- python -m unittest
+```
 
 ## Containers, VMs, and remote execution
 

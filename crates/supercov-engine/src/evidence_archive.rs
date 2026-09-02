@@ -484,7 +484,7 @@ fn write_archive_version(
         let gzip = GzBuilder::new()
             .mtime(0)
             .operating_system(255)
-            .write(buffered, Compression::best());
+            .write(buffered, Compression::default());
         let (gzip, uncompressed_bytes) = write_framed_with_magic(&entries, gzip, magic)?;
         let buffered = gzip.finish()?;
         let faulting = buffered
@@ -897,7 +897,7 @@ mod tests {
             let encoder = GzBuilder::new()
                 .mtime(0)
                 .operating_system(255)
-                .write(destination, Compression::best());
+                .write(destination, Compression::default());
             let (encoder, _) = write_framed_with_magic(
                 &[entry("manifest.json", b"{}")],
                 encoder,

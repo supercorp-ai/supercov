@@ -38,6 +38,8 @@ npx supercov -- npx playwright test
 npx supercov -- pnpm test:e2e
 npx supercov -- cargo test
 npx supercov -- cargo nextest run
+npx supercov -- pytest
+npx supercov -- python -m unittest
 ```
 
 ## Give Supercov a job
@@ -106,12 +108,12 @@ The denominator comes from source structure before the run, so adding or removin
 | JavaScript | Available | `npx supercov -- npm test` |
 | TypeScript | Available | `npx supercov -- npm test` |
 | Rust | Available | `npx supercov -- cargo test` |
-| Python | Coming soon | — |
+| Python | Available | `npx supercov -- pytest` |
 | Zig | Coming soon | — |
 | PHP | Coming soon | — |
 | C | Coming soon | — |
 
-Supercov requires Node.js 22 or newer. Rust support currently uses Rust 1.95; cargo-nextest 0.9.138 and 0.9.140 are supported.
+Supercov requires Node.js 22 or newer. Rust support currently uses Rust 1.95; cargo-nextest 0.9.138 and 0.9.140 are supported. Python support requires CPython 3.12 or newer and measures pytest and unittest runs.
 
 ## Supported test suites
 
