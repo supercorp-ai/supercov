@@ -808,14 +808,28 @@ function installServerChildPropagation() {
   runtimeGlobal.__SUPERCOV_CHILD_PATCHED__ = true;
 }
 installServerChildPropagation();
+/**
+ * Phase ids are minted as `<attemptId>:phase:<n>`, so a phase can be checked
+ * against the attempt it claims to belong to without a lookup.
+ */
+function phaseBelongsToAttempt(phaseId, attemptId) {
+  return typeof phaseId === "string" && typeof attemptId === "string" && attemptId.length > 0 && phaseId.startsWith(`${attemptId}:phase:`);
+}
 function currentPhaseId() {
   if (runtimeGlobal.__SUPERCOV_PHASE_ID__)
     return runtimeGlobal.__SUPERCOV_PHASE_ID__;
   if (!isBrowser)
     return currentRequestContext().phaseId;
   try {
+    // The stored phase is per origin, so in a browser context that outlives
+    // its test (a persistent profile shared by a whole worker) it still holds
+    // the previous test's last phase when the next test's document loads. A
+    // phase from another attempt would tag this test's evidence with a phase
+    // it never reported, which the archive rightly rejects; only a phase of
+    // the current attempt is honoured.
     const local = localStorage.getItem(phaseStorageKey);
-    if (local)
+    const attemptId = runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__ != null ? runtimeGlobal.__SUPERCOV_MCDC_TEST_ID__ : testId;
+    if (local && phaseBelongsToAttempt(local, attemptId))
       return local;
     return void 0;
   } catch (e) {
@@ -870,7 +884,10 @@ function requestCoverageContext(value) {
   const encodedScope = (_a8 = headers.get(COVERAGE_SCOPE_HEADER)) != null ? _a8 : cookies.get(COVERAGE_SCOPE_COOKIE);
   const rawPhaseId = (_b = headers.get(COVERAGE_PHASE_HEADER)) != null ? _b : cookies.get(COVERAGE_PHASE_COOKIE);
   const scope = decodeCoverageScope(typeof encodedScope === "string" ? encodedScope : void 0);
-  const phaseId = typeof rawPhaseId === "string" && rawPhaseId.length > 0 ? rawPhaseId : void 0;
+  // The phase cookie outlives a test in a shared browser context just like
+  // the stored phase does (see currentPhaseId); a request carrying a scope
+  // and a phase from different attempts keeps the scope and drops the phase.
+  const phaseId = typeof rawPhaseId === "string" && rawPhaseId.length > 0 && (!scope || phaseBelongsToAttempt(rawPhaseId, scope.attemptId)) ? rawPhaseId : void 0;
   return __spreadValues(__spreadValues({}, scope ? { scope } : {}), phaseId ? { phaseId } : {});
 }
 function withRequestPhase(handler) {
@@ -1186,6 +1203,7 @@ const directRuntimeApi = {
   optionalCallReached,
   optionalSelect,
   parenthesizedAssignmentValue,
+  phaseBelongsToAttempt,
   registerProbeV2,
   resetCoverage,
   selectionBegin,
@@ -1233,6 +1251,7 @@ export {
   optionalCallReached,
   optionalSelect,
   parenthesizedAssignmentValue,
+  phaseBelongsToAttempt,
   registerProbeV2,
   resetCoverage,
   selectionBegin,

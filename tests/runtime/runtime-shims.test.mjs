@@ -19,6 +19,18 @@ import {
   wrapImportedCapability,
 } from "../../runtime/javascript/launchSupervisor.js";
 
+test("a phase is only honoured for the attempt that minted it", async () => {
+  // A browser context shared by a whole worker keeps the previous test's last
+  // phase in storage and in its cookie; tagging the next test's evidence with
+  // it produced archives the engine rejected as referencing an unknown phase.
+  const runtime = await import(pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/runtime.js")).href);
+  assert.equal(runtime.phaseBelongsToAttempt("attempt-a:phase:2", "attempt-a"), true);
+  assert.equal(runtime.phaseBelongsToAttempt("attempt-a:phase:2", "attempt-b"), false);
+  assert.equal(runtime.phaseBelongsToAttempt("attempt-a:phase:2", "attempt"), false);
+  assert.equal(runtime.phaseBelongsToAttempt(undefined, "attempt-a"), false);
+  assert.equal(runtime.phaseBelongsToAttempt("attempt-a:phase:2", ""), false);
+});
+
 test("coverage scopes round-trip without losing worker, retry, or phase identity", () => {
   const scope = {
     version: 1,
