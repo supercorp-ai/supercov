@@ -629,6 +629,78 @@ fn create_link(target: &Path, destination: &Path, directory: bool) -> io::Result
     }
 }
 
+/// Clone a directory copy-on-write. `false` means the platform or filesystem
+/// cannot (Linux has no directory reflink; APFS refuses across volumes and for
+/// trees holding entries a clone cannot carry), and the caller falls back to
+/// entry links. Any partial destination is removed first so the fallback
+/// starts from a clean slate.
+#[cfg(target_os = "macos")]
+fn clone_directory(source: &Path, destination: &Path) -> bool {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+    let (Ok(source_c), Ok(destination_c)) = (
+        CString::new(source.as_os_str().as_bytes()),
+        CString::new(destination.as_os_str().as_bytes()),
+    ) else {
+        return false;
+    };
+    // SAFETY: both arguments are valid NUL-terminated paths that outlive the
+    // call, and clonefile touches nothing else.
+    let status = unsafe { libc::clonefile(source_c.as_ptr(), destination_c.as_ptr(), 0) };
+    if status == 0 {
+        return true;
+    }
+    let _ = fs::remove_dir_all(destination);
+    false
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn clone_directory(_source: &Path, _destination: &Path) -> bool {
+    false
+}
+
+/// Materialise `source` at `destination` without copying bytes: real
+/// directories, one hard link per file, symlinks recreated verbatim. This is
+/// the mount-safe form where a directory cannot be cloned (Linux has no
+/// directory reflink): a container or VM that mounts the workspace sees real
+/// dependency files where entry links would dangle. Hard links share inodes
+/// with the originals, so an in-place write still reaches the user's tree --
+/// the caveat entry links already carry -- but replacing an entry, which is
+/// what npm does, only unlinks the workspace's name. `false` means the tree
+/// could not be linked (another volume, protected files, an entry that is
+/// neither file, directory nor symlink) and the caller falls back to entry
+/// links after the partial destination is removed.
+#[cfg(unix)]
+fn hard_link_tree(source: &Path, destination: &Path) -> bool {
+    fn link(source: &Path, destination: &Path) -> io::Result<()> {
+        fs::create_dir(destination)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let from = entry.path();
+            let to = destination.join(entry.file_name());
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                link(&from, &to)?;
+            } else if file_type.is_symlink() {
+                std::os::unix::fs::symlink(fs::read_link(&from)?, &to)?;
+            } else if file_type.is_file() {
+                fs::hard_link(&from, &to)?;
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "entry is neither a file, a directory nor a symlink",
+                ));
+            }
+        }
+        Ok(())
+    }
+    if link(source, destination).is_ok() {
+        return true;
+    }
+    let _ = fs::remove_dir_all(destination);
+    false
+}
+
 #[derive(Clone, Copy)]
 struct CopyRoots<'a> {
     source: &'a Path,
@@ -667,16 +739,33 @@ fn copy_tree<Operations: WorkspaceOperations>(
         }
         let to = destination.join(&name);
         if metadata.file_type().is_dir() {
-            // Nested node_modules are entry-linked exactly like the root one:
-            // one symlink per package pointing at the original tree, instead of
-            // deep-copying tens of thousands of dependency files. On a real
-            // monorepo (many packages and examples, each with node_modules)
-            // the deep copy was 43-52 seconds of every run's startup.
-            // Dependencies are never instrumented, and the directory itself is
-            // real, so tools creating NEW entries (vite's .cache) write into
-            // the workspace -- the same semantics the root already has.
+            // Nested node_modules are never instrumented, so they are not
+            // mirrored file by file: on a real monorepo (many packages and
+            // examples, each with node_modules) the deep copy was 43-52
+            // seconds of every run's startup.
+            //
+            // Preferred: a copy-on-write clone of the whole directory. It is
+            // one call on APFS (85k files in ~1.2s, no bytes duplicated until
+            // written) and leaves the workspace self-contained -- a suite that
+            // mounts the workspace into a VM or container sees real dependency
+            // trees, and writes stay in the workspace instead of passing
+            // through to the user's tree.
+            //
+            // Next best, where directories cannot be cloned (Linux): the same
+            // tree as hard links -- real directories inside a mount, no bytes
+            // copied, one link call per file.
+            //
+            // Last resort: one symlink per package pointing at the original
+            // tree, the same semantics the root has. The directory itself is
+            // real, so tools creating NEW entries (vite's .cache) still write
+            // into the workspace, but the links dangle wherever the original
+            // path is not visible (a mounted VM), and npm then treats them as
+            // broken installs and fails to re-link them across the mount.
             #[cfg(unix)]
             if name_text == "node_modules" && !root_level {
+                if clone_directory(&from, &to) || hard_link_tree(&from, &to) {
+                    continue;
+                }
                 fs::create_dir_all(&to).map_err(|error| io_error(&to, error))?;
                 let mut packages = fs::read_dir(&from)
                     .map_err(|error| io_error(&from, error))?
@@ -1406,6 +1495,12 @@ fn walk_output_files(
             continue;
         }
         let metadata = entry.metadata().map_err(|error| io_error(&path, error))?;
+        // Dependencies are never command outputs. Nested node_modules may be
+        // materialised clones (see copy_tree), and a tool's cache inside any
+        // node_modules must not flow back into the project's dependency tree.
+        if metadata.is_dir() && name.to_str() == Some("node_modules") {
+            continue;
+        }
         if fs::symlink_metadata(&path)
             .map_err(|error| io_error(&path, error))?
             .file_type()
@@ -1550,6 +1645,28 @@ mod tests {
         fs::write(workspace.join("src/app.ts"), "instrumented\n").unwrap();
         fs::write(workspace.join(".supercov/state.json"), "{}").unwrap();
         (root, workspace)
+    }
+
+    #[test]
+    fn dependency_trees_never_flow_back() {
+        // Nested node_modules may be materialised clones, and any node_modules
+        // can hold a tool's cache: neither is a command output.
+        let (root, workspace) = writeback_fixture("dependencies");
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        fs::create_dir_all(workspace.join("node_modules/.vite")).unwrap();
+        fs::write(workspace.join("node_modules/.vite/deps.json"), "{}").unwrap();
+        fs::create_dir_all(workspace.join("packages/app/node_modules/dep")).unwrap();
+        fs::write(
+            workspace.join("packages/app/node_modules/dep/index.js"),
+            "dep",
+        )
+        .unwrap();
+        let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
+        assert_eq!(sync.synced, 0);
+        assert!(sync.deleted_in_workspace.is_empty());
+        assert!(!root.join("node_modules").exists());
+        assert!(!root.join("packages").exists());
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -1741,11 +1858,87 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
+    fn nested_node_modules_are_cloned_not_linked() {
+        // A suite that mounts the workspace into a VM sees no host paths, so
+        // entry links into the original tree dangle there and npm fails to
+        // re-link them across the mount. APFS clones the directory instead:
+        // real files, relative links inside kept verbatim, and writes staying
+        // in the workspace.
+        let root = project();
+        let nested = root.join("packages/app/node_modules");
+        fs::create_dir_all(nested.join("dep")).unwrap();
+        fs::create_dir_all(nested.join(".bin")).unwrap();
+        fs::write(nested.join("dep/index.js"), "dep").unwrap();
+        std::os::unix::fs::symlink("../dep/index.js", nested.join(".bin/dep")).unwrap();
+        let mut lock = ProjectLock::acquire(&root, "run", "now").unwrap();
+        let workspace = prepare_isolated_workspace(&root, "run", &lock).unwrap();
+        let mirrored = workspace.join("packages/app/node_modules");
+        assert!(
+            fs::symlink_metadata(mirrored.join("dep"))
+                .unwrap()
+                .file_type()
+                .is_dir()
+        );
+        assert_eq!(
+            fs::read_to_string(mirrored.join("dep/index.js")).unwrap(),
+            "dep"
+        );
+        assert_eq!(
+            fs::read_link(mirrored.join(".bin/dep")).unwrap(),
+            PathBuf::from("../dep/index.js")
+        );
+        fs::write(mirrored.join("dep/index.js"), "changed in the workspace").unwrap();
+        assert_eq!(
+            fs::read_to_string(nested.join("dep/index.js")).unwrap(),
+            "dep"
+        );
+        lock.release().unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn hard_linked_dependency_tree_is_real_and_replaceable() {
+        // The Linux materialisation: files share inodes with the originals,
+        // symlinks are carried verbatim, and replacing an entry in the
+        // workspace (npm's reify) leaves the user's tree untouched.
+        use std::os::unix::fs::MetadataExt;
+        let base = std::env::temp_dir().join(format!("supercov-hardlink-{}", unique()));
+        let source = base.join("node_modules");
+        fs::create_dir_all(source.join("dep")).unwrap();
+        fs::create_dir_all(source.join(".bin")).unwrap();
+        fs::write(source.join("dep/index.js"), "dep").unwrap();
+        std::os::unix::fs::symlink("../dep/index.js", source.join(".bin/dep")).unwrap();
+        let destination = base.join("workspace/node_modules");
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        assert!(hard_link_tree(&source, &destination));
+        assert_eq!(
+            fs::metadata(destination.join("dep/index.js"))
+                .unwrap()
+                .ino(),
+            fs::metadata(source.join("dep/index.js")).unwrap().ino()
+        );
+        assert_eq!(
+            fs::read_link(destination.join(".bin/dep")).unwrap(),
+            PathBuf::from("../dep/index.js")
+        );
+        fs::remove_dir_all(destination.join("dep")).unwrap();
+        fs::create_dir_all(destination.join("dep")).unwrap();
+        fs::write(destination.join("dep/index.js"), "replaced").unwrap();
+        assert_eq!(
+            fs::read_to_string(source.join("dep/index.js")).unwrap(),
+            "dep"
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     #[cfg(unix)]
     fn symlink_escaping_the_project_is_omitted_from_the_mirror() {
         // The escape check guards the MIRRORED source tree. node_modules (root
-        // and nested) are referenced by entry links to the user's originals
-        // instead, so the escaping fixture lives outside node_modules here.
+        // and nested) are linked or cloned from the user's originals instead,
+        // so the escaping fixture lives outside node_modules here.
         // Leftover tool state (a Chrome test profile linking into /tmp) must
         // not abort measurement: the entry is omitted and the run proceeds.
         let root = project();

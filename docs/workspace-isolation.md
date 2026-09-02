@@ -32,7 +32,9 @@ synced back to the project after the run, so `supercov -- npm test -- -u`
 updates snapshots in the repository exactly as `npm test -- -u` would. Two
 exceptions are reported instead of applied: changes the command makes to
 instrumented source files (the instrumented copies must never overwrite your
-sources) and deletions (never propagated automatically).
+sources) and deletions (never propagated automatically). Changes inside any
+`node_modules` directory are neither applied nor reported: dependency trees are
+not command outputs.
 
 ## Files Supercov creates
 
@@ -87,6 +89,15 @@ project lock, and does not scan for similarly named directories.
 When a suite launches a container or VM from a mounted workspace, Supercov uses
 the isolated workspace as the source presented to that environment. The runtime
 must be able to cross the launch boundary and return evidence.
+
+Dependencies stay out of the instrumented copy. The root `node_modules` is
+linked entry by entry to the project's own, so an environment that mounts the
+workspace must bring its own root dependencies (the supported launchers do).
+Nested `node_modules` inside packages and extensions are materialised as real
+directories: cloned copy-on-write where the filesystem allows it (APFS), and
+hard-linked file by file elsewhere on Unix, so they resolve inside the mount
+either way. Only when neither is possible, such as a dependency tree on another
+volume, are they linked entry by entry like the root.
 
 If a remote executor hides the launch or mount boundary, Supercov reports the
 limitation instead of claiming unseen code was measured. See
