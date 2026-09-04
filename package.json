@@ -1,6 +1,6 @@
 {
   "name": "supercov",
-  "version": "0.0.34",
+  "version": "0.0.35",
   "description": "Zero-edit, runner-aware coverage completeness for JavaScript, TypeScript, Rust, and Python test suites",
   "license": "MIT",
   "repository": {
@@ -73,12 +73,12 @@
     "test:ruby-coverage": "cargo build -p supercov && node scripts/ruby-coverage-integration.mjs"
   },
   "optionalDependencies": {
-    "@supercov/cli-darwin-arm64": "0.0.34",
-    "@supercov/cli-darwin-x64": "0.0.34",
-    "@supercov/cli-linux-arm64-gnu": "0.0.34",
-    "@supercov/cli-linux-arm64-musl": "0.0.34",
-    "@supercov/cli-linux-x64-gnu": "0.0.34",
-    "@supercov/cli-linux-x64-musl": "0.0.34"
+    "@supercov/cli-darwin-arm64": "0.0.35",
+    "@supercov/cli-darwin-x64": "0.0.35",
+    "@supercov/cli-linux-arm64-gnu": "0.0.35",
+    "@supercov/cli-linux-arm64-musl": "0.0.35",
+    "@supercov/cli-linux-x64-gnu": "0.0.35",
+    "@supercov/cli-linux-x64-musl": "0.0.35"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.55.0",
