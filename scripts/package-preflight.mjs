@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { releaseNotes } from "./release-notes.mjs";
 
 const repository = resolve(import.meta.dirname, "..");
 const manifest = JSON.parse(readFileSync(resolve(repository, "package.json"), "utf8"));
@@ -95,6 +96,21 @@ for (const [subpath, path] of Object.entries(manifest.exports)) {
 for (const [name, version] of Object.entries(manifest.optionalDependencies ?? {})) {
   assert.match(name, /^@supercov\/cli-/);
   assert.equal(version, manifest.version);
+}
+
+// The release publishes this section verbatim, so a version cannot be tagged
+// without notes, and the notes stay short enough for a reader to scan.
+const notes = releaseNotes(manifest.version);
+assert(notes !== null, `CHANGELOG.md has no "## ${manifest.version}" section`);
+assert(
+  notes.split(/\s+/).length <= 200,
+  `the ${manifest.version} changelog section is ${notes.split(/\s+/).length} words; release notes are bullets, not prose`,
+);
+for (const line of notes.split("\n")) {
+  assert(
+    line === "" || line.startsWith("- ") || /^\*\*[A-Z][a-z]+\*\*$/.test(line) || line.startsWith("  "),
+    `unexpected changelog line for ${manifest.version}: ${JSON.stringify(line)}`,
+  );
 }
 
 console.log(
