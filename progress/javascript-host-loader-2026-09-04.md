@@ -61,9 +61,20 @@ copy links even with no `package.json` present.
 exactly that property, which reproduces ts-node without depending on its
 version. Putting one module back to `.js` fails it.
 
-## Still open from the same report
+## The rest of that report
 
-Child-process attribution through an SDK's stdio transport. It could not be
-judged while the suite died at link time; the suite now runs, so it can be
-measured. Their own suite hangs in a gateway test, which their report also
+Child-process attribution was the other open question, and it is not a defect.
+Coverage from a child keeps its test through a direct spawn, a dependency
+spawning on the test's behalf, a spawner that curates the child's environment,
+an npm script in between, and a gateway over stdio through each teardown,
+including the one where the child exits after the test body returned and
+writes its last evidence with no test running. `scripts/
+rust-child-attribution-integration.mjs` holds all of it. A child launched in a
+hook and shared across tests still belongs to the run, which is the honest
+answer rather than a bug.
+
+Their suite hangs on its own. A child left running holds the test runner's
+pipes open, and the same fixture hangs under plain `npm test` with no coverage
+involved, timing out with "Promise resolution is still pending but the event
+loop has already resolved". That is the hanging after-hook their report
 describes.
