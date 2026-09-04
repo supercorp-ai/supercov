@@ -1728,13 +1728,11 @@ fn current_integrity_for_run(
     root: &Path,
     run: &StoredRun,
 ) -> Option<supercov_engine::run_store::RunIntegrity> {
-    if run
-        .metadata
-        .integrity
-        .instrumenter_version
-        .starts_with("supercov-rust-")
-    {
+    let version = run.metadata.integrity.instrumenter_version.as_str();
+    if version.starts_with("supercov-rust-") {
         supercov_engine::rust_run::current_rust_integrity(root, &run.metadata.command).ok()
+    } else if version.starts_with("supercov-python-") {
+        supercov_engine::python_run::current_python_integrity(root, &run.metadata.command).ok()
     } else {
         current_javascript_integrity(root, &run.metadata.command)
     }

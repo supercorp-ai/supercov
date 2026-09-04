@@ -167,6 +167,22 @@ fn environment(
     variables
 }
 
+/// The fingerprint a later query compares against the stored run: the same
+/// discovery and inputs the run used, without preparing a plan.
+pub fn current_python_integrity(
+    root: &Path,
+    command: &[String],
+) -> Result<crate::run_store::RunIntegrity, String> {
+    let root = fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let files = crate::python_project::discover_python_files(&root)?;
+    create_explicit_run_integrity(
+        &root,
+        &python_integrity_inputs(&files, command),
+        &FrontendIntegrityInputs::embedded_python(),
+    )
+    .map_err(|error| error.to_string())
+}
+
 pub fn run_direct_python(
     request: &DirectPythonRunRequest,
     diagnostics: &mut dyn Write,
