@@ -15,15 +15,19 @@ Supercov supports JavaScript, TypeScript, Rust, Python, and Ruby today.
 
 You need:
 
+- macOS (arm64 or x64) or Linux (arm64 or x64, glibc or musl); Windows is not
+  yet available;
 - Node.js 22 or newer;
 - a test command that already works in the repository; and
 - for Rust, the Rust 1.95 toolchain;
 - for Python, CPython 3.12 or newer with pytest or unittest;
 - for Ruby, Ruby 3.4 or newer with RSpec, Minitest, test-unit or Cucumber (3.3 measures lines, methods and simple branches only).
 
-The CLI is distributed through npm, even for Rust projects. The first `npx`
-invocation may download Supercov from the npm registry. Supercov itself does not
-upload your source or coverage evidence to a Supercov service.
+The CLI is a native binary distributed through npm, even for Rust, Python, and
+Ruby projects: `npx supercov` picks the build for your operating system and
+architecture, and nothing is compiled on install. The first `npx` invocation may
+download Supercov from the npm registry. Supercov itself does not upload your
+source or coverage evidence to a Supercov service.
 
 ## 1. Run your real test command
 

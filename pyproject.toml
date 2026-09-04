@@ -7,19 +7,22 @@ name = "supercov-cli"
 dynamic = ["version"]
 description = "Zero-configuration, runner-aware structural and MC/DC coverage"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 license = "MIT"
 keywords = ["coverage", "testing", "mcdc", "cli"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
   "Environment :: Console",
   "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Programming Language :: Rust",
   "Topic :: Software Development :: Testing",
 ]
 
 [project.urls]
-Homepage = "https://github.com/supercorp-ai/supercov"
+Homepage = "https://supercov.com"
 Repository = "https://github.com/supercorp-ai/supercov"
 Issues = "https://github.com/supercorp-ai/supercov/issues"
 

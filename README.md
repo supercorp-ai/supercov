@@ -117,6 +117,18 @@ The denominator comes from source structure before the run, so adding or removin
 
 Supercov requires Node.js 22 or newer. Rust support currently uses Rust 1.95; cargo-nextest 0.9.138 and 0.9.140 are supported. Python support requires CPython 3.12 or newer and measures pytest and unittest runs. Ruby support requires Ruby 3.3 or newer (3.4 or newer for full measurement) and measures RSpec, Minitest, test-unit and Cucumber runs.
 
+## Supported operating systems and architectures
+
+The CLI is a single native binary. `npx supercov` selects the build for the machine it runs on; nothing is compiled during installation.
+
+| Operating system | Architectures | Notes |
+| --- | --- | --- |
+| macOS | arm64 (Apple silicon), x64 (Intel) | macOS 11 or newer |
+| Linux | arm64, x64 | glibc and musl (Alpine) builds, chosen automatically |
+| Windows | — | Not yet available; in progress |
+
+Containers, VMs, and remote executors run the same Linux builds. The npm package is the current release channel for every language, including Rust, Python, and Ruby projects. A PyPI package (`supercov-cli`), a RubyGems gem (`supercov`), and a crate (`supercov`) exist for macOS arm64 at an earlier version and are being brought up to date with each release.
+
 ## Supported test suites
 
 Supercov uses exact per-test attribution where an adapter is available. For other supported runners, it reports aggregate structural coverage instead of guessing which test covered a path.
