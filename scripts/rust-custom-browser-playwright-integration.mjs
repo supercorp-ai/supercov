@@ -133,6 +133,7 @@ try {
     [
       "import { test as base, chromium, expect } from '@playwright/test';",
       "import { mkdtempSync } from 'node:fs';",
+      "import { createServer } from 'node:http';",
       "import { tmpdir } from 'node:os';",
       "import { join } from 'node:path';",
       '',
@@ -150,6 +151,30 @@ try {
       '    await use(page);',
       '    await page.close();',
       '  },',
+      '});',
+      '',
+      'export const persistentNavigationTest = persistentTest.extend({',
+      '  scopeServerUrl: [',
+      '    async ({}, use) => {',
+      '      const server = createServer((request, response) => {',
+      "        response.setHeader('content-type', 'text/html');",
+      "        if (request.url === '/outer') {",
+      '          const address = server.address();',
+      "          response.end(`<iframe id=inner src=\"http://localhost:${address.port}/inner\"></iframe>`);",
+      '          return;',
+      '        }',
+      "        const scope = request.headers['x-supercov-scope'] ? 'scoped' : 'background';",
+      "        response.end(`<p id=scope>${scope}</p><a id=again href=\"/inner-again\">again</a>`);",
+      '      });',
+      "      await new Promise((resolveListen) => server.listen(0, '0.0.0.0', resolveListen));",
+      '      const address = server.address();',
+      "      await use(`http://127.0.0.1:${address.port}`);",
+      '      await new Promise((resolveClose, rejectClose) =>',
+      '        server.close((error) => error ? rejectClose(error) : resolveClose()),',
+      '      );',
+      '    },',
+      "    { scope: 'worker' },",
+      '  ],',
       '});',
       '',
       'export const remoteTest = base.extend({',
@@ -185,6 +210,21 @@ try {
       '}',
       '',
       'export { expect };',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    resolve(project, 'tests/persistent-navigation.spec.js'),
+    [
+      "import { persistentNavigationTest as test, expect } from '@acme/browser-fixtures';",
+      '',
+      "test('persistent cross-site iframe navigation', async ({ page, scopeServerUrl }) => {",
+      "  await page.goto(`${scopeServerUrl}/outer`);",
+      "  const inner = page.frameLocator('#inner');",
+      "  await expect(inner.locator('#scope')).toHaveText('scoped');",
+      "  await inner.locator('#again').click();",
+      "  await expect(inner.locator('#scope')).toHaveText('scoped');",
+      '});',
       '',
     ].join('\n'),
   );
@@ -266,7 +306,7 @@ try {
   });
   assert.equal(summary.data.valid, true, summary.diagnosticOutput);
   assert.equal(summary.data.complete, true);
-  assert.equal(summary.data.tests, 12);
+  assert.equal(summary.data.tests, 13);
   // The decisive assertion: every line of the browser application ran, and
   // the collector saw it, even though no page came from Playwright's fixtures.
   assert.equal(

@@ -168,9 +168,11 @@ class CoveragePhaseController {
     scriptUpdate = Promise.resolve();
     proxyCache = new WeakMap();
     runtimeSnapshots;
-    // Contexts this controller found rather than created: it does not know
+    // Contexts whose creation the collector did not observe: it does not know
     // what `extraHTTPHeaders` their owner configured, so it must not rewrite
     // them (the scope cookie and the fetch patch still carry attribution).
+    // A worker-scoped context launched through a patched BrowserType is found
+    // later but is not opaque: its original headers were captured at launch.
     adoptedContexts = new Set();
     // Listeners installed on contexts that outlive this test, removed on
     // dispose so a worker-scoped context does not keep registering pages with
@@ -257,8 +259,10 @@ class CoveragePhaseController {
         if (this.disposed)
             return;
         for (const context of liveTrackedContexts()) {
-            if (!this.contexts.has(context))
-                await this.registerContext(context, this.configuredHeaders, { adopted: true }).catch(() => undefined);
+            if (!this.contexts.has(context)) {
+                const headersKnown = trackedContextConfiguredHeaders.has(context);
+                await this.registerContext(context, trackedContextConfiguredHeaders.get(context) ?? this.configuredHeaders, { adopted: !headersKnown }).catch(() => undefined);
+            }
         }
     }
     async registerPage(page) {
@@ -266,8 +270,11 @@ class CoveragePhaseController {
             return;
         timingCount("registerPage");
         this.pages.add(page);
-        await this.registerContext(page.context(), this.configuredHeaders, {
-            adopted: !this.contexts.has(page.context()) && liveTrackedContexts().has(page.context()),
+        const context = page.context();
+        const tracked = liveTrackedContexts().has(context);
+        const headersKnown = trackedContextConfiguredHeaders.has(context);
+        await this.registerContext(context, trackedContextConfiguredHeaders.get(context) ?? this.configuredHeaders, {
+            adopted: !this.contexts.has(context) && tracked && !headersKnown,
         });
         const cdp = await page.context().newCDPSession(page).catch(() => undefined);
         if (cdp)
@@ -399,6 +406,14 @@ class CoveragePhaseController {
         this.disposed = true;
         await Promise.all([...this.pendingRegistrations]);
         await this.scriptUpdate;
+        // A worker-scoped context survives this test. Remove its test scope
+        // while preserving the exact headers supplied by the suite so work
+        // between tests cannot be charged to the attempt that just ended.
+        await Promise.all([...this.contexts]
+            .filter((context) => !this.adoptedContexts.has(context))
+            .map((context) => context
+            .setExtraHTTPHeaders(this.contextConfiguredHeaders.get(context) ?? {})
+            .catch(() => undefined)));
         for (const [context, listeners] of this.contextListeners) {
             for (const [event, listener] of listeners)
                 context.off?.(event, listener);
@@ -505,9 +520,10 @@ class CoveragePhaseController {
             trackBrowser(result);
         if (typeof candidate["pages"] === "function" &&
             typeof candidate["route"] === "function") {
-            trackContext(result);
-            await this.registerContext(result, (sourceArgs?.[0]
-                ?.extraHTTPHeaders ?? this.configuredHeaders));
+            const configuredHeaders = sourceArgs?.[0]
+                ?.extraHTTPHeaders ?? this.configuredHeaders;
+            trackContext(result, configuredHeaders);
+            await this.registerContext(result, configuredHeaders);
         }
         if (typeof candidate["frames"] === "function" &&
             typeof candidate["context"] === "function")
@@ -630,6 +646,10 @@ const controllers = new Map();
 // launches are recorded here, and each test's controller adopts what is live.
 const trackedBrowsers = new Set();
 const trackedContexts = new Set();
+// Creation-time headers for contexts launched through patched Playwright
+// methods. Capturing an explicit empty object matters: it proves replacing
+// the headers later is safe, unlike a context discovered only by enumeration.
+const trackedContextConfiguredHeaders = new WeakMap();
 const patchedPrototypes = new WeakSet();
 function trackBrowser(browser) {
     if (!browser || typeof browser !== "object" || trackedBrowsers.has(browser))
@@ -638,8 +658,12 @@ function trackBrowser(browser) {
     browser.once?.("disconnected", () => trackedBrowsers.delete(browser));
     patchBrowserPrototype(browser);
 }
-function trackContext(context) {
-    if (!context || typeof context !== "object" || trackedContexts.has(context))
+function trackContext(context, configuredHeaders) {
+    if (!context || typeof context !== "object")
+        return;
+    if (configuredHeaders !== undefined)
+        trackedContextConfiguredHeaders.set(context, configuredHeaders);
+    if (trackedContexts.has(context))
         return;
     trackedContexts.add(context);
     context.once?.("close", () => trackedContexts.delete(context));
@@ -685,10 +709,11 @@ function patchBrowserPrototype(browser) {
     patchedPrototypes.add(prototype);
     patchOnce(browser, "newContext", (original) => async function (...args) {
         const context = await original.apply(this, args);
-        trackContext(context);
+        const configuredHeaders = args[0]?.extraHTTPHeaders ?? {};
+        trackContext(context, configuredHeaders);
         const controller = activeController;
         if (controller && !controller.contexts.has(context))
-            await controller.registerContext(context, args[0]?.extraHTTPHeaders ?? controller.configuredHeaders, { adopted: true }).catch(() => undefined);
+            await controller.registerContext(context, configuredHeaders).catch(() => undefined);
         return context;
     });
 }
@@ -734,10 +759,11 @@ function installBrowserLaunchTracking() {
     }
     patchOnce(browserType, "launchPersistentContext", (original) => async function (...args) {
         const context = await original.apply(this, args);
-        trackContext(context);
+        const configuredHeaders = args[1]?.extraHTTPHeaders ?? {};
+        trackContext(context, configuredHeaders);
         const controller = activeController;
         if (controller)
-            await controller.registerContext(context, args[1]?.extraHTTPHeaders ?? controller.configuredHeaders, { adopted: true }).catch(() => undefined);
+            await controller.registerContext(context, configuredHeaders).catch(() => undefined);
         return context;
     });
 }
