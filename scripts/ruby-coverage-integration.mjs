@@ -63,10 +63,9 @@ function assertStdlibOnlyTotals(summary) {
   assert.equal(summary.model.variant, 'ruby-owned-coverage');
   // `case ... in`, `x = begin`, `kind = case`, `detail = {`, bare `begin` and
   // `if false` lines carry no line event on 3.3, so their statements are
-  // declared unmeasured and the lines stay uncovered; on 3.4+ the runtime
-  // probes them instead. Declared obligations leave the obligation totals but
-  // not yet the line totals, which is how every frontend behaves today.
-  assert.deepEqual([summary.coverage.lines.covered, summary.coverage.lines.total], [77, 88], JSON.stringify(summary.coverage));
+  // declared unmeasured and leave the line total with them; on 3.4+ the
+  // runtime probes them instead.
+  assert.deepEqual([summary.coverage.lines.covered, summary.coverage.lines.total], [77, 82], JSON.stringify(summary.coverage));
   assert.equal(summary.testExitCode, 0);
 }
 
@@ -139,7 +138,7 @@ try {
     const stdlibOnly = query(['runs', 'latest'], environment);
     assert.deepEqual(
       [stdlibOnly.coverage.lines.covered, stdlibOnly.coverage.lines.total],
-      [80, 88],
+      [80, 83],
       JSON.stringify(stdlibOnly.coverage),
     );
     assert.deepEqual(

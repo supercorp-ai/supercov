@@ -488,6 +488,10 @@ pub struct IndexedLine {
     pub file: String,
     pub line: usize,
     pub covered: bool,
+    /// False when every obligation on the line was declined: the line stays
+    /// addressable and carries its limitation, but it is neither covered nor
+    /// uncovered.
+    pub measured: bool,
     pub tests: Vec<String>,
     pub phases: Vec<String>,
     pub confidence: crate::coverage_report::CoverageConfidence,
@@ -1408,6 +1412,9 @@ fn line_record(
     let mut record = [0_u8; LINE_RECORD_SIZE];
     record[0] = view_id as u8;
     record[1] = u8::from(line.covered);
+    // Inverted: a line every frontend declined is the exception, and a zeroed
+    // byte then still reads as measured.
+    record[2] = u8::from(!line.measured);
     put_u32(&mut record, 4, strings.intern(&line.file)?);
     put_u64(&mut record, 8, usize_u64(line.line)?);
     let (tests_offset, tests_count) = relations.push(line.tests.clone(), strings)?;
@@ -3023,9 +3030,7 @@ impl<'a> CoverageIndex<'a> {
             if CoverageViewId::try_from(record[0])? != view {
                 continue;
             }
-            if record[2..4].iter().any(|byte| *byte != 0)
-                || record[56..].iter().any(|byte| *byte != 0)
-            {
+            if record[3] != 0 || record[56..].iter().any(|byte| *byte != 0) {
                 return Err(CoverageIndexError::InvalidRecord("line record"));
             }
             let record_file = self.string(get_u32(record, 4)?)?;
@@ -3041,6 +3046,7 @@ impl<'a> CoverageIndex<'a> {
                 file: record_file,
                 line: record_line,
                 covered: bool_field(record[1])?,
+                measured: !bool_field(record[2])?,
                 tests: self.relation_strings(get_u64(record, 16)?, get_u64(record, 24)?)?,
                 phases: self.relation_strings(get_u64(record, 32)?, get_u64(record, 40)?)?,
                 confidence: self.confidence(get_u64(record, 48)?)?,
@@ -3057,9 +3063,7 @@ impl<'a> CoverageIndex<'a> {
             if CoverageViewId::try_from(record[0])? != view {
                 continue;
             }
-            if record[2..4].iter().any(|byte| *byte != 0)
-                || record[56..].iter().any(|byte| *byte != 0)
-            {
+            if record[3] != 0 || record[56..].iter().any(|byte| *byte != 0) {
                 return Err(CoverageIndexError::InvalidRecord("line record"));
             }
             lines.push(IndexedLine {
@@ -3067,6 +3071,7 @@ impl<'a> CoverageIndex<'a> {
                 line: usize::try_from(get_u64(record, 8)?)
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
                 covered: bool_field(record[1])?,
+                measured: !bool_field(record[2])?,
                 tests: self.relation_strings(get_u64(record, 16)?, get_u64(record, 24)?)?,
                 phases: self.relation_strings(get_u64(record, 32)?, get_u64(record, 40)?)?,
                 confidence: self.confidence(get_u64(record, 48)?)?,

@@ -201,11 +201,6 @@ probe would have proven are declared for that file. Setting
 chosen files on that same path deliberately, which is the escape hatch if
 instrumentation ever disagrees with one of yours.
 
-An obligation Supercov declares unmeasured leaves the obligation totals and is
-reported as a measurement limit rather than a gap. Its line still counts in
-the line total, as it does for every other language, so a file with declared
-obligations reads slightly pessimistically on lines.
-
 Ruby 3.3 does not apply its `Coverage` module to code compiled by a load hook,
 so on 3.3 Supercov measures through `Coverage` alone: lines, methods and the
 branches Ruby reports itself. Everything that needs a probe (multi-condition

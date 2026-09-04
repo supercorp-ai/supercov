@@ -317,12 +317,28 @@ pub struct SourceLine {
     pub line: usize,
 }
 
+/// One line's share of the points that sit on it, while the view is built.
+#[derive(Debug, Default)]
+struct LineAggregate {
+    covered: bool,
+    measured: bool,
+    tests: BTreeSet<String>,
+    phases: BTreeSet<String>,
+    explicit_phases: BTreeSet<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LineResult {
     pub file: String,
     pub line: usize,
     pub covered: bool,
+    /// False when every obligation on this line was declined, which keeps the
+    /// line addressable while leaving it out of the covered/total counts. Not
+    /// serialized: it decides a total, it is not a fact about the line worth
+    /// publishing, and the limitation records already say why.
+    #[serde(skip)]
+    pub measured: bool,
     pub tests: Vec<String>,
     pub runners: Vec<String>,
     pub kinds: Vec<String>,
@@ -1013,8 +1029,11 @@ fn summary_for_results(
                     .collect(),
             })
             .collect(),
+        // A line every frontend declined carries no coverage question, so it
+        // is absent from the total rather than counted as uncovered.
         lines: lines
             .iter()
+            .filter(|line| line.measured)
             .map(|line| includes(&line.tests, line.covered))
             .collect(),
     };
@@ -1644,8 +1663,18 @@ fn create_coverage_view_with_model(
         })
         .collect::<Vec<_>>();
 
-    let mut line_aggregates =
-        BTreeMap::<SourceLine, (bool, BTreeSet<String>, BTreeSet<String>, BTreeSet<String>)>::new();
+    // Obligations the frontend declined to measure leave the covered/uncovered
+    // denominator entirely. Counting them as uncovered would report a
+    // measurement gap as a coverage gap — a wrong number, and wrong numbers get
+    // trusted. They are reported separately instead, alongside the share of
+    // obligations that were measured exactly.
+    let declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
+
+    // Lines are folded from every point, declined ones included, so a file
+    // Supercov could not measure still has addressable lines to report a
+    // limitation against. Only what was measured decides the line's state and
+    // whether it counts.
+    let mut line_aggregates = BTreeMap::<SourceLine, LineAggregate>::new();
     for point in &points {
         let aggregate = line_aggregates
             .entry(SourceLine {
@@ -1653,10 +1682,14 @@ fn create_coverage_view_with_model(
                 line: point.meta.line,
             })
             .or_default();
-        aggregate.0 |= point.covered;
-        aggregate.1.extend(point.tests.clone());
-        aggregate.2.extend(point.phases.clone());
-        aggregate.3.extend(
+        if declined.contains(&point.meta.id) {
+            continue;
+        }
+        aggregate.measured = true;
+        aggregate.covered |= point.covered;
+        aggregate.tests.extend(point.tests.clone());
+        aggregate.phases.extend(point.phases.clone());
+        aggregate.explicit_phases.extend(
             explicit_phases_by_hit
                 .get(&point.meta.id)
                 .into_iter()
@@ -1666,7 +1699,14 @@ fn create_coverage_view_with_model(
     }
     let lines = line_aggregates
         .into_iter()
-        .map(|(location, (covered, test_ids, phase_ids, explicit_ids))| {
+        .map(|(location, aggregate)| {
+            let LineAggregate {
+                covered,
+                measured,
+                tests: test_ids,
+                phases: phase_ids,
+                explicit_phases: explicit_ids,
+            } = aggregate;
             let provenances = test_ids
                 .iter()
                 .filter_map(|id| tests_by_id.get(id).map(|test| &test.provenance))
@@ -1683,6 +1723,7 @@ fn create_coverage_view_with_model(
                 file: location.file,
                 line: location.line,
                 covered,
+                measured,
                 tests: sorted(&test_ids),
                 runners: sorted(&runners),
                 exclusive_kind: (kinds.len() == 1).then(|| kinds.first().unwrap().clone()),
@@ -1820,12 +1861,6 @@ fn create_coverage_view_with_model(
         })
         .collect::<Vec<_>>();
 
-    // Obligations the frontend declined to measure leave the covered/uncovered
-    // denominator entirely. Counting them as uncovered would report a
-    // measurement gap as a coverage gap — a wrong number, and wrong numbers get
-    // trusted. They are reported separately instead, alongside the share of
-    // obligations that were measured exactly.
-    let declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
     let total_obligations = decisions.len() + points.len() + branches.len();
     let (decisions, points, branches) = if declined.is_empty() {
         (decisions, points, branches)
@@ -2387,6 +2422,21 @@ mod tests {
         assert_eq!(view.summary.unmeasured_obligations, Some(1));
         assert_eq!(view.summary.exact_fraction_pct, Some(50.0));
 
+        // Its line leaves the line total too, but not the report: the line is
+        // still there to hang a limitation on, and it is neither covered nor
+        // uncovered.
+        assert_eq!(
+            view.summary.lines.total, baseline.summary.lines.total,
+            "a declined obligation kept its line in the line denominator"
+        );
+        let declined_line = view
+            .lines
+            .iter()
+            .find(|line| line.line == 2)
+            .expect("the declined line stays addressable");
+        assert!(!declined_line.measured);
+        assert!(!declined_line.covered);
+
         // A fully measured run keeps its previous output exactly: the new
         // fields are absent, not zero, so existing consumers see no change.
         assert_eq!(baseline.summary.unmeasured_obligations, None);
@@ -2396,6 +2446,42 @@ mod tests {
             !encoded.contains("unmeasured") && !encoded.contains("exactFraction"),
             "a fully measured summary must serialize unchanged: {encoded}"
         );
+    }
+
+    #[test]
+    fn a_declined_line_that_executed_is_neither_covered_nor_uncovered() {
+        // The subtle case: the statement ran, but Supercov could not measure
+        // it, so its line has no coverage question to answer. Counting it as
+        // covered would inflate the ratio with a line nothing verified.
+        let point = |id: &str| PointMeta {
+            id: id.into(),
+            kind: PointKind::Statement,
+            file: "src/app.js".into(),
+            line: 1,
+            column: 0,
+            source: "work();".into(),
+            label: None,
+        };
+        let manifest = CoverageManifest {
+            decisions: vec![],
+            points: vec![point("declined")],
+            branches: vec![],
+            limitations: vec![],
+            unmeasured: vec!["declined".into()],
+            scope: None,
+        };
+        let view = create_coverage_view(
+            &manifest,
+            &[raw("test", 0, "passed", &["declined"])],
+            "time",
+        )
+        .unwrap();
+
+        assert_eq!(view.summary.lines.total, 0);
+        assert_eq!(view.summary.lines.covered, 0);
+        let line = view.lines.first().expect("the line stays addressable");
+        assert!(!line.measured);
+        assert!(!line.covered, "an unmeasured line is not covered either");
     }
 
     #[test]

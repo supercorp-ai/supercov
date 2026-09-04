@@ -161,7 +161,7 @@ in` line on 3.3) is declared unmeasured instead of reported as a gap.
   only the obligations a probe would have proven are declared for it. Ruby's
   Coverage still measures its lines, methods and own branches, so the file
   keeps its place in the total. Verified by injecting a compile failure into
-  the fixture: the suite still passed, and the file reported 80/88 lines,
+  the fixture: the suite still passed, and the file reported 80/83 lines,
   53/60 branches and 18/18 methods with two declared limitations and no false
   gaps.
 
@@ -209,17 +209,26 @@ in` line on 3.3) is declared unmeasured instead of reported as a gap.
   every file that needs a load-time probe, so the same fix removes that cost
   from real runs.
 
+## Follow-up (2026-09-04, after 0.0.33)
+
+- Declared obligations now leave the line total too, for every frontend. The
+  line list does two jobs: it is the address space the file and line queries
+  resolve against, and it is a denominator. Dropping declared lines to fix the
+  denominator broke the address space, which is what the Python gate caught
+  before the release. Lines are now folded from every point, declared ones
+  included, and each carries whether anything on it could be measured. Only
+  measured lines reach the counts, and a line nothing could measure is not an
+  uncovered line in the gap projection either.
+- The flag rides in the spare byte of the index line record, inverted so a
+  zeroed byte still reads as measured. No record grew, no format version
+  moved, and the JSON keeps its shape: the flag decides a total, it is not a
+  fact about the line worth publishing, and the limitation records already say
+  why the line could not be measured.
+- The case that made this subtle: a line that executed but whose obligation
+  was declined. It used to count as covered, which quietly inflated the line
+  ratio. It is now neither covered nor uncovered.
+
 ## Open
 
-- Engine, not Ruby: an obligation the frontend declares unmeasured leaves the
-  obligation totals but not the line totals, so a declared statement still
-  counts as an uncovered line. Filtering those lines out is a two-line change
-  in `coverage_report.rs`, but it also drops a file whose obligations are all
-  declared out of the line index, and the Python gate rightly expects such a
-  line to stay queryable and report nothing remaining. Doing it properly means
-  carrying a per-line "measured" flag through the report, the binary index and
-  the query layer. It affects Python and Ruby equally and deserves its own
-  change.
-
-- Nothing else tracked. The frontend is feature-complete for RSpec, Minitest,
+- Nothing tracked. The frontend is feature-complete for RSpec, Minitest,
   test-unit and Cucumber on Ruby 3.3 through 4.0, and uncommitted.

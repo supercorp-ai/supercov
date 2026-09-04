@@ -1807,7 +1807,7 @@ pub fn coverage_file_detail_query(
     };
     let uncovered_lines = lines
         .iter()
-        .filter(|line| line.file == file && !selected_includes(&line.tests))
+        .filter(|line| line.measured && line.file == file && !selected_includes(&line.tests))
         .map(|line| {
             CoverageFileObligation::Line(CoverageLineObligation {
                 kind: "line".into(),
