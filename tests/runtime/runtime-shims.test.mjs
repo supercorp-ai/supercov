@@ -9,21 +9,21 @@ import test from "node:test";
 import {
   decodeCoverageScope,
   encodeCoverageScope,
-} from "../../runtime/javascript/transport.js";
-import { inferTestProvenance } from "../../runtime/javascript/provenance.js";
+} from "../../runtime/javascript/transport.mjs";
+import { inferTestProvenance } from "../../runtime/javascript/provenance.mjs";
 import {
   discoverWorkspaceMapping,
   guestCoverageEnvironment,
   scopeCapabilityCache,
   wrapCapabilityObject,
   wrapImportedCapability,
-} from "../../runtime/javascript/launchSupervisor.js";
+} from "../../runtime/javascript/launchSupervisor.mjs";
 
 test("a phase is only honoured for the attempt that minted it", async () => {
   // A browser context shared by a whole worker keeps the previous test's last
   // phase in storage and in its cookie; tagging the next test's evidence with
   // it produced archives the engine rejected as referencing an unknown phase.
-  const runtime = await import(pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/runtime.js")).href);
+  const runtime = await import(pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/runtime.mjs")).href);
   assert.equal(runtime.phaseBelongsToAttempt("attempt-a:phase:2", "attempt-a"), true);
   assert.equal(runtime.phaseBelongsToAttempt("attempt-a:phase:2", "attempt-b"), false);
   assert.equal(runtime.phaseBelongsToAttempt("attempt-a:phase:2", "attempt"), false);
@@ -137,7 +137,7 @@ test("an execution-trace writer that meets a clone of itself rotates its log", {
 }, () => {
   const root = mkdtempSync(resolve(tmpdir(), "supercov-execution-clone-"));
   try {
-    const supervisor = pathToFileURL(resolve("runtime/javascript/launchSupervisor.js")).href;
+    const supervisor = pathToFileURL(resolve("runtime/javascript/launchSupervisor.mjs")).href;
     const child = spawnSync(
       process.execPath,
       [
@@ -185,7 +185,7 @@ test("a background writer that meets a clone of itself moves to a fresh shard", 
   // first shard must keep only what this writer wrote before the clone.
   const root = mkdtempSync(resolve(tmpdir(), "supercov-background-clone-"));
   try {
-    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.js")).href;
+    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.mjs")).href;
     const child = spawnSync(
       process.execPath,
       [
@@ -225,7 +225,7 @@ test("background evidence is durable before an uncatchable process death", {
   const root = mkdtempSync(resolve(tmpdir(), "supercov-background-kill-"));
   try {
     const runtime = pathToFileURL(
-      resolve("runtime/javascript/runtime.js"),
+      resolve("runtime/javascript/runtime.mjs"),
     ).href;
     const child = spawnSync(
       process.execPath,
@@ -262,7 +262,7 @@ test("background evidence is durable before an uncatchable process death", {
 test("a loopback request that loses its carrier is retained as background evidence", () => {
   const root = mkdtempSync(resolve(tmpdir(), "supercov-loopback-background-"));
   try {
-    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.js")).href;
+    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.mjs")).href;
     const child = spawnSync(
       process.execPath,
       [
@@ -349,7 +349,7 @@ test("a loopback request that loses its carrier is retained as background eviden
 });
 
 test("instrumentation stack cleanup keeps the user's first frame", async () => {
-  const runtime = await import("../../runtime/javascript/runtime.js");
+  const runtime = await import("../../runtime/javascript/runtime.mjs");
   const error = new Error("assertion failed");
   error.stack = [
     "Error: assertion failed",
@@ -376,7 +376,7 @@ test("server evidence transport failure is explicit and fail-closed", () => {
   try {
     const blocked = resolve(root, "not-a-directory");
     writeFileSync(blocked, "file blocks evidence directory creation");
-    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.js")).href;
+    const runtime = pathToFileURL(resolve("runtime/javascript/runtime.mjs")).href;
     const child = spawnSync(
       process.execPath,
       [

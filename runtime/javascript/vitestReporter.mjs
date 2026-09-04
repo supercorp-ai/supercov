@@ -1,8 +1,8 @@
 import { mkdirSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { inferTestProvenance } from "./provenance.js";
-import { atomicWriteFileSync } from "./atomic.js";
+import { inferTestProvenance } from "./provenance.mjs";
+import { atomicWriteFileSync } from "./atomic.mjs";
 function sourcePath(moduleId) {
     const absolute = moduleId.startsWith("file:")
         ? fileURLToPath(moduleId)

@@ -82,7 +82,7 @@ const sourceReflectionTests = new Map([
     "asserts exact Function.prototype.toString source text",
   ],
   [
-    "staging/sm/generators/runtime.js",
+    "staging/sm/generators/runtime.mjs",
     "asserts exact generator Function.prototype.toString source text",
   ],
 ]);

@@ -6991,7 +6991,7 @@ mod tests {
             source,
             "tests/runner.mjs",
             &[],
-            Some("../.supercov/launchSupervisor.js"),
+            Some("../.supercov/launchSupervisor.mjs"),
         )
         .unwrap();
         assert_eq!(output.assertions, 0);
@@ -7000,7 +7000,7 @@ mod tests {
         assert!(output.code.contains("__supercovRawImageBuilder"));
         assert!(output.code.contains("const ImageBuilder"));
         assert!(!output.code.contains("__supercovRawordinaryHelper"));
-        assert!(output.code.contains("../.supercov/launchSupervisor.js"));
+        assert!(output.code.contains("../.supercov/launchSupervisor.mjs"));
     }
 
     #[test]
@@ -7015,7 +7015,7 @@ mod tests {
             source,
             "tests/runner.mjs",
             &[],
-            Some("../.supercov/launchSupervisor.js"),
+            Some("../.supercov/launchSupervisor.mjs"),
         )
         .unwrap();
         assert_eq!(output.capability_imports, 1);
@@ -7035,7 +7035,7 @@ mod tests {
             source,
             "tests/runner.mjs",
             &[],
-            Some("../.supercov/launchSupervisor.js"),
+            Some("../.supercov/launchSupervisor.mjs"),
         )
         .unwrap();
         assert_eq!(output.capability_imports, 1);
@@ -7050,7 +7050,7 @@ mod tests {
             source,
             "src/main.mjs",
             &[],
-            Some("../.supercov/launchSupervisor.js"),
+            Some("../.supercov/launchSupervisor.mjs"),
         )
         .unwrap();
         assert_eq!(output.code, source);
@@ -7067,7 +7067,7 @@ mod tests {
             source,
             "tests/component.test.tsx",
             &[],
-            Some("../.supercov/launchSupervisor.js"),
+            Some("../.supercov/launchSupervisor.mjs"),
         )
         .unwrap();
         assert_eq!(output.capability_imports, 0);
@@ -7086,7 +7086,7 @@ mod tests {
             source,
             "tests/visual.spec.ts",
             &[],
-            Some("../.supercov/launchSupervisor.js"),
+            Some("../.supercov/launchSupervisor.mjs"),
         )
         .unwrap();
         assert_eq!(output.capability_imports, 0);
@@ -7098,14 +7098,14 @@ mod tests {
         let source = concat!(
             "import type { Machine } from './types.ts';\n",
             "import { test } from 'node:test';\n",
-            "import { runtime } from '../.supercov/runtime.js';\n",
+            "import { runtime } from '../.supercov/runtime.mjs';\n",
             "console.log({ machine: true, test, runtime });\n",
         );
         let output = instrument_node_assertion_phases_with_runtime_hooks(
             source,
             "tests/runner.ts",
             &[],
-            Some("../.supercov/launchSupervisor.js"),
+            Some("../.supercov/launchSupervisor.mjs"),
         )
         .unwrap();
         assert_eq!(output.code, source);
@@ -7134,12 +7134,12 @@ mod tests {
             "tests/value.test.mjs",
             &[],
             None,
-            Some("../.supercov/runtime.js"),
+            Some("../.supercov/runtime.mjs"),
         )
         .unwrap();
         assert_eq!(output.assertions, 1);
         assert!(output.code.contains("withNodeAssertionPhase"));
-        assert!(output.code.contains("import \"../.supercov/runtime.js\";"));
+        assert!(output.code.contains("import \"../.supercov/runtime.mjs\";"));
     }
 
     #[test]

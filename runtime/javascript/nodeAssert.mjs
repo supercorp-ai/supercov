@@ -1,5 +1,5 @@
 import nativeAssert from "node:assert";
-import { createNodeAssertAdapter, setStrictAssertAdapter } from "./nodeAssertAdapter.js";
+import { createNodeAssertAdapter, setStrictAssertAdapter } from "./nodeAssertAdapter.mjs";
 const adapter = createNodeAssertAdapter(nativeAssert, "node:assert");
 const strictAdapter = createNodeAssertAdapter(nativeAssert.strict, "node:assert/strict");
 setStrictAssertAdapter(adapter, strictAdapter);

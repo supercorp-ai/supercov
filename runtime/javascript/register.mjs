@@ -9,8 +9,8 @@ var __rewriteRelativeImportExtension = (this && this.__rewriteRelativeImportExte
 import Module, { register, syncBuiltinESMExports } from "node:module";
 import { closeSync, openSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
-import { installLaunchSupervisor, wrapImportedCapability } from "./launchSupervisor.js";
-import { __supercovBindCapabilityWrapper } from "./capability.js";
+import { installLaunchSupervisor, wrapImportedCapability } from "./launchSupervisor.mjs";
+import { __supercovBindCapabilityWrapper } from "./capability.mjs";
 installLaunchSupervisor();
 // Instrumented sources import the browser-safe capability seam; bind the
 // real supervisor implementation before any user module evaluates.
@@ -77,7 +77,7 @@ if (process.env.SUPERCOV_DURABLE_EVIDENCE_EACH_TEST === "1") {
     // test through an opaque runner that bypasses the ordinary Playwright or
     // node:test import boundary. The remote-launch adapter marks that process;
     // initialize the runtime before its transformed module can evaluate.
-    globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.js");
+    globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.mjs");
     process.__SUPERCOV_DIRECT_RUNTIME__ ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__;
 }
 // Workers are independent Node processes and an explicit `execArgv: []`
@@ -119,9 +119,9 @@ const generatedJestConfig = process.env.SUPERCOV_GENERATED_JEST_CONFIG;
 const entrypoint = process.argv[1]?.replaceAll("\\", "/") ?? "";
 const playwrightTarget = process.env.SUPERCOV_PLAYWRIGHT_MODULE;
 const projectRoot = process.env.SUPERCOV_PROJECT_ROOT?.replaceAll("\\", "/").replace(/\/$/, "");
-const nodeTestWrapper = new URL("./nodeTest.js", import.meta.url).href;
-const nodeAssertWrapper = new URL("./nodeAssert.js", import.meta.url).href;
-const nodeAssertStrictWrapper = new URL("./nodeAssertStrict.js", import.meta.url).href;
+const nodeTestWrapper = new URL("./nodeTest.mjs", import.meta.url).href;
+const nodeAssertWrapper = new URL("./nodeAssert.mjs", import.meta.url).href;
+const nodeAssertStrictWrapper = new URL("./nodeAssertStrict.mjs", import.meta.url).href;
 const isPlaywrightEntrypoint = /\/(?:node_modules\/\.bin\/playwright|node_modules\/(?:@playwright\/test|playwright)\/(?:cli\.js|.*\/program\.js))$/.test(entrypoint);
 const isJestEntrypoint = /\/node_modules\/(?:\.bin\/jest|(?:jest|jest-cli)\/bin\/jest\.js)$/.test(entrypoint);
 if (generatedPlaywrightConfig && isPlaywrightEntrypoint)
@@ -209,7 +209,7 @@ if (process.env.SUPERCOV_CJS_INTERCEPT === "1" &&
     const projectRoot = process.env.SUPERCOV_PROJECT_ROOT;
     const originalPlaywrightConfig = process.env.SUPERCOV_ORIGINAL_PLAYWRIGHT_CONFIG
         ?.replaceAll("\\", "/");
-    const wrapper = await import(__rewriteRelativeImportExtension(new URL("./playwright.js", import.meta.url)));
+    const wrapper = await import(__rewriteRelativeImportExtension(new URL("./playwright.mjs", import.meta.url)));
     const originalLoad = Module._load;
     Module._load = function supercovLoad(request, parent, isMain) {
         const parentFile = parent?.filename?.replaceAll("\\", "/");

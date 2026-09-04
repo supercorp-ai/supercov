@@ -2,9 +2,9 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { atomicWriteFileSync } from "./atomic.js";
-import { inferTestProvenance } from "./provenance.js";
-import { serverEvidencePath } from "./transport.js";
+import { atomicWriteFileSync } from "./atomic.mjs";
+import { inferTestProvenance } from "./provenance.mjs";
+import { serverEvidencePath } from "./transport.mjs";
 
 let cachedProcessInstanceToken;
 function processInstanceToken() {

@@ -1,8 +1,8 @@
 import * as native from "node:test";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
-import { beginBufferedServerEvidence, flushBufferedServerEvidence, takeNodeAssertionPhases, withCoverageCarrier, } from "./runtime.js";
-import { callerLocation, runnerExecutionScope, writeRunnerEvidence, } from "./runnerEvidence.js";
+import { beginBufferedServerEvidence, flushBufferedServerEvidence, takeNodeAssertionPhases, withCoverageCarrier, } from "./runtime.mjs";
+import { callerLocation, runnerExecutionScope, writeRunnerEvidence, } from "./runnerEvidence.mjs";
 function callbackIndex(args) {
     for (let index = args.length - 1; index >= 0; index -= 1)
         if (typeof args[index] === "function")
@@ -18,7 +18,7 @@ function testOptions(args, index) {
 }
 // node:test derives a test's reported location from the direct caller of the
 // registration call, and the adapter is that caller: every failing test
-// reported "test at .../nodeTest.js". A compiled trampoline carrying the
+// reported "test at .../nodeTest.mjs". A compiled trampoline carrying the
 // user's call site as its script origin registers the test instead, so the
 // runner sees the location a direct call would have produced. The padded
 // second line puts the call expression at the user's exact line and column.

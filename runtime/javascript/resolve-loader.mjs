@@ -4,7 +4,7 @@ const GENERATED_TARGET = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const TARGET = process.env.SUPERCOV_PLAYWRIGHT_MODULE ??
     (GENERATED_TARGET.startsWith("__") ? "@playwright/test" : GENERATED_TARGET);
 const REPLACEMENT = process.env.SUPERCOV_PLAYWRIGHT_WRAPPER ??
-    "./.supercov/node_modules/playwright.js";
+    "./.supercov/node_modules/playwright.mjs";
 const PROJECT_ROOT = process.env.SUPERCOV_PROJECT_ROOT;
 const ORIGINAL_CONFIG = process.env.SUPERCOV_ORIGINAL_PLAYWRIGHT_CONFIG;
 function belongsToProject(parentURL) {
@@ -29,10 +29,10 @@ export async function resolve(specifier, context, nextResolve) {
     // source-local copy keeps strict rootDir compilers happy; this fallback
     // resolves the emitted import to Supercov's generated runtime without
     // requiring the project's build to copy our helper directory.
-    if (specifier.endsWith("/.supercov/node_modules/runtime.js") &&
+    if (specifier.endsWith("/.supercov/node_modules/runtime.mjs") &&
         belongsToProject(context.parentURL)) {
         return {
-            url: new URL("./runtime.js", import.meta.url).href,
+            url: new URL("./runtime.mjs", import.meta.url).href,
             shortCircuit: true,
         };
     }
@@ -40,7 +40,7 @@ export async function resolve(specifier, context, nextResolve) {
         (specifier === "node:test" || specifier === "test") &&
         belongsToProject(context.parentURL)) {
         return {
-            url: new URL("./nodeTest.js", import.meta.url).href,
+            url: new URL("./nodeTest.mjs", import.meta.url).href,
             shortCircuit: true,
         };
     }
@@ -48,7 +48,7 @@ export async function resolve(specifier, context, nextResolve) {
         ["assert", "node:assert", "assert/strict", "node:assert/strict"].includes(specifier) &&
         belongsToProject(context.parentURL)) {
         return {
-            url: new URL(specifier.endsWith("/strict") ? "./nodeAssertStrict.js" : "./nodeAssert.js", import.meta.url).href,
+            url: new URL(specifier.endsWith("/strict") ? "./nodeAssertStrict.mjs" : "./nodeAssert.mjs", import.meta.url).href,
             shortCircuit: true,
         };
     }

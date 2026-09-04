@@ -1706,7 +1706,7 @@ mod tests {
         fs::create_dir_all(workspace.join("dist")).unwrap();
         fs::write(
             workspace.join("dist/app.js"),
-            "import { coverageHit } from \"./.supercov/node_modules/runtime.js\";\ncoverageHit(0);\n",
+            "import { coverageHit } from \"./.supercov/node_modules/runtime.mjs\";\ncoverageHit(0);\n",
         )
         .unwrap();
         fs::write(

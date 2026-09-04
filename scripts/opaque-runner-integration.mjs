@@ -44,7 +44,7 @@ if (summary.transport.workspaceCapabilities !== 1)
   throw new Error("opaque workspace capability was not discovered exactly once");
 if (summary.transport.remoteLaunches !== 1)
   throw new Error("opaque remote launch was not intercepted exactly once");
-if (readFileSync(resolve("runtime/javascript/launchSupervisor.js"), "utf8").includes("supermachine"))
+if (readFileSync(resolve("runtime/javascript/launchSupervisor.mjs"), "utf8").includes("supermachine"))
   throw new Error("provider-specific behavior leaked into the public fixture");
 
 console.log(

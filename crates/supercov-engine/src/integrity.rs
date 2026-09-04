@@ -664,7 +664,7 @@ mod tests {
             version: "javascript-v1".into(),
             root: root.to_owned(),
             instrumenter_files: vec![root.join("instrumenter.js")],
-            execution_files: vec![root.join("runtime.js")],
+            execution_files: vec![root.join("runtime.mjs")],
             engine_instrumenter_sha256: env!("SUPERCOV_JS_FRONTEND_SOURCE_SHA256").into(),
             engine_execution_sha256: env!("SUPERCOV_ENGINE_SOURCE_SHA256").into(),
         }
@@ -694,7 +694,7 @@ mod tests {
             "ignored copied test",
         );
         write(&shim, "instrumenter.js", "instrument");
-        write(&shim, "runtime.js", "runtime");
+        write(&shim, "runtime.mjs", "runtime");
         (root, shim)
     }
 

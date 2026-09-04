@@ -1,4 +1,4 @@
-import { withNodeAssertionPhase } from "./runtime.js";
+import { withNodeAssertionPhase } from "./runtime.mjs";
 const ASSERTION_METHODS = new Set([
     "deepEqual",
     "deepStrictEqual",

@@ -14,10 +14,10 @@ import https from "node:https";
 import { syncBuiltinESMExports } from "node:module";
 import { relative, resolve, sep } from "node:path";
 import * as standardPlaywright from "@playwright/test";
-import * as coverageRuntime from "./runtime.js";
-import { inferTestProvenance } from "./provenance.js";
-import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.js";
-import { COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, } from "./transport.js";
+import * as coverageRuntime from "./runtime.mjs";
+import { inferTestProvenance } from "./provenance.mjs";
+import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
+import { COVERAGE_PHASE_HEADER, COVERAGE_PHASE_COOKIE, COVERAGE_SCOPE_COOKIE, COVERAGE_SCOPE_HEADER, COVERAGE_CARRIER_ENV, encodeCoverageCarrier, encodeCoverageScope, serverEvidenceDirectory, serverEvidencePath, } from "./transport.mjs";
 export * from "@playwright/test";
 const generatedTargetModule = "__SUPERCOV_PLAYWRIGHT_MODULE__";
 const targetModule = process.env["SUPERCOV_PLAYWRIGHT_MODULE"] ??

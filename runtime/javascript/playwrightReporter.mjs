@@ -1,6 +1,6 @@
 import { relative, resolve, sep } from "node:path";
-import { inferTestProvenance } from "./provenance.js";
-import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.js";
+import { inferTestProvenance } from "./provenance.mjs";
+import { appendJsonLineDurableSync, appendJsonLineSync } from "./atomic.mjs";
 const GENERATED_EVIDENCE_DIRECTORY = "__SUPERCOV_EVIDENCE_DIRECTORY__";
 const evidenceWriterIdentity = () => (process.env.SUPERCOV_EXECUTION_LOG_SHARD ?? `pid-${process.pid}`)
     .replace(/[^A-Za-z0-9_-]/g, "_");

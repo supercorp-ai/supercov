@@ -30,23 +30,23 @@ const FRONTEND_CACHE_SCHEMA_VERSION: u32 = 2;
 const FRONTEND_CACHE_FILE: &str = ".supercov/frontend-cache.json";
 const FRONTEND_CACHE_DIRECTORY: &str = ".supercov/frontend-cache-artifacts";
 const RUNTIME_FILES: &[&str] = &[
-    "atomic.js",
-    "capability.js",
-    "launchSupervisor.js",
-    "nodeAssert.js",
-    "nodeAssertAdapter.js",
-    "nodeAssertStrict.js",
-    "nodeTest.js",
-    "playwright.js",
-    "playwrightReporter.js",
-    "provenance.js",
+    "atomic.mjs",
+    "capability.mjs",
+    "launchSupervisor.mjs",
+    "nodeAssert.mjs",
+    "nodeAssertAdapter.mjs",
+    "nodeAssertStrict.mjs",
+    "nodeTest.mjs",
+    "playwright.mjs",
+    "playwrightReporter.mjs",
+    "provenance.mjs",
     "register.mjs",
     "resolve-loader.mjs",
-    "runnerEvidence.js",
-    "runtime.js",
-    "transport.js",
-    "vitest.js",
-    "vitestReporter.js",
+    "runnerEvidence.mjs",
+    "runtime.mjs",
+    "transport.mjs",
+    "vitest.mjs",
+    "vitestReporter.mjs",
 ];
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
@@ -251,8 +251,8 @@ pub fn load_cached_javascript_frontend(
 fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<String> {
     let mut artifacts = vec![
         ".supercov/node_modules/package.json".to_owned(),
-        ".supercov/node_modules/applicationRuntime.js".to_owned(),
-        ".supercov/node_modules/runtime.d.ts".to_owned(),
+        ".supercov/node_modules/applicationRuntime.mjs".to_owned(),
+        ".supercov/node_modules/runtime.d.mts".to_owned(),
         ".supercov/playwright.config.mjs".to_owned(),
         ".supercov/vite.config.mjs".to_owned(),
         ".supercov/vitest.config.mjs".to_owned(),
@@ -284,7 +284,7 @@ fn frontend_artifact_paths(workspace: &Path, project: &CoverageProject) -> Vec<S
         } else {
             Path::new(root)
         };
-        for name in ["package.json", "runtime.js", "runtime.d.ts"] {
+        for name in ["package.json", "runtime.mjs", "runtime.d.mts"] {
             let path = host.join(".supercov/node_modules").join(name);
             if let Some(path) = path.to_str() {
                 artifacts.push(path.replace('\\', "/"));
@@ -343,36 +343,36 @@ struct ViteTransform {
 
 fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
     match name {
-        "atomic.js" => Some(include_bytes!("../../../runtime/javascript/atomic.js")),
-        "capability.js" => Some(include_bytes!("../../../runtime/javascript/capability.js")),
-        "launchSupervisor.js" => Some(include_bytes!(
-            "../../../runtime/javascript/launchSupervisor.js"
+        "atomic.mjs" => Some(include_bytes!("../../../runtime/javascript/atomic.mjs")),
+        "capability.mjs" => Some(include_bytes!("../../../runtime/javascript/capability.mjs")),
+        "launchSupervisor.mjs" => Some(include_bytes!(
+            "../../../runtime/javascript/launchSupervisor.mjs"
         )),
-        "nodeAssert.js" => Some(include_bytes!("../../../runtime/javascript/nodeAssert.js")),
-        "nodeAssertAdapter.js" => Some(include_bytes!(
-            "../../../runtime/javascript/nodeAssertAdapter.js"
+        "nodeAssert.mjs" => Some(include_bytes!("../../../runtime/javascript/nodeAssert.mjs")),
+        "nodeAssertAdapter.mjs" => Some(include_bytes!(
+            "../../../runtime/javascript/nodeAssertAdapter.mjs"
         )),
-        "nodeAssertStrict.js" => Some(include_bytes!(
-            "../../../runtime/javascript/nodeAssertStrict.js"
+        "nodeAssertStrict.mjs" => Some(include_bytes!(
+            "../../../runtime/javascript/nodeAssertStrict.mjs"
         )),
-        "nodeTest.js" => Some(include_bytes!("../../../runtime/javascript/nodeTest.js")),
-        "playwright.js" => Some(include_bytes!("../../../runtime/javascript/playwright.js")),
-        "playwrightReporter.js" => Some(include_bytes!(
-            "../../../runtime/javascript/playwrightReporter.js"
+        "nodeTest.mjs" => Some(include_bytes!("../../../runtime/javascript/nodeTest.mjs")),
+        "playwright.mjs" => Some(include_bytes!("../../../runtime/javascript/playwright.mjs")),
+        "playwrightReporter.mjs" => Some(include_bytes!(
+            "../../../runtime/javascript/playwrightReporter.mjs"
         )),
-        "provenance.js" => Some(include_bytes!("../../../runtime/javascript/provenance.js")),
+        "provenance.mjs" => Some(include_bytes!("../../../runtime/javascript/provenance.mjs")),
         "register.mjs" => Some(include_bytes!("../../../runtime/javascript/register.mjs")),
         "resolve-loader.mjs" => Some(include_bytes!(
             "../../../runtime/javascript/resolve-loader.mjs"
         )),
-        "runnerEvidence.js" => Some(include_bytes!(
-            "../../../runtime/javascript/runnerEvidence.js"
+        "runnerEvidence.mjs" => Some(include_bytes!(
+            "../../../runtime/javascript/runnerEvidence.mjs"
         )),
-        "runtime.js" => Some(include_bytes!("../../../runtime/javascript/runtime.js")),
-        "transport.js" => Some(include_bytes!("../../../runtime/javascript/transport.js")),
-        "vitest.js" => Some(include_bytes!("../../../runtime/javascript/vitest.js")),
-        "vitestReporter.js" => Some(include_bytes!(
-            "../../../runtime/javascript/vitestReporter.js"
+        "runtime.mjs" => Some(include_bytes!("../../../runtime/javascript/runtime.mjs")),
+        "transport.mjs" => Some(include_bytes!("../../../runtime/javascript/transport.mjs")),
+        "vitest.mjs" => Some(include_bytes!("../../../runtime/javascript/vitest.mjs")),
+        "vitestReporter.mjs" => Some(include_bytes!(
+            "../../../runtime/javascript/vitestReporter.mjs"
         )),
         _ => None,
     }
@@ -612,7 +612,7 @@ fn copy_runtime(generated: &Path, collector_id: &str) -> Result<(), JavascriptFr
             .expect("every declared runtime file must have an embedded asset")
             .to_vec();
         let bytes = strip_source_map_reference(bytes);
-        if *name == "runtime.js" {
+        if *name == "runtime.mjs" {
             let text = String::from_utf8(bytes).map_err(|source| {
                 io_error(
                     &source_path,
@@ -624,7 +624,7 @@ fn copy_runtime(generated: &Path, collector_id: &str) -> Result<(), JavascriptFr
                 isolate_runtime(&text, collector_id)?.as_bytes(),
             )?;
             atomic_write(
-                &generated.join("applicationRuntime.js"),
+                &generated.join("applicationRuntime.mjs"),
                 isolate_runtime(&text, &format!("{collector_id}-application"))?.as_bytes(),
             )?;
         } else {
@@ -632,7 +632,7 @@ fn copy_runtime(generated: &Path, collector_id: &str) -> Result<(), JavascriptFr
         }
     }
     atomic_write(
-        &generated.join("runtime.d.ts"),
+        &generated.join("runtime.d.mts"),
         // Generated files must be immune to the HOST project's lint policy --
         // the same rule the Rust runtime enforces with #[allow(warnings)].
         // Next.js runs the project's eslint over the build graph, and
@@ -700,7 +700,7 @@ fn generic_runtime_binding(
         &runtime_directory.join("package.json"),
         b"{\"private\":true,\"type\":\"module\"}\n",
     )?;
-    for name in ["runtime.js", "runtime.d.ts"] {
+    for name in ["runtime.mjs", "runtime.d.mts"] {
         let source = generated.join("node_modules").join(name);
         let destination = runtime_directory.join(name);
         let contents = fs::read(&source).map_err(|error| io_error(&source, error))?;
@@ -714,9 +714,9 @@ fn generic_runtime_binding(
     })?;
     let depth = local.components().count();
     Ok(if depth == 0 {
-        "./.supercov/node_modules/runtime.js".into()
+        "./.supercov/node_modules/runtime.mjs".into()
     } else {
-        format!("{}.supercov/node_modules/runtime.js", "../".repeat(depth))
+        format!("{}.supercov/node_modules/runtime.mjs", "../".repeat(depth))
     })
 }
 
@@ -775,7 +775,7 @@ fn write_vitest_config(
          }};\n\
          const viteNamespace = await supercovLoadVite();\n\
          import {{ resolve }} from 'node:path';\n\
-         import SupercovVitestReporter from './node_modules/vitestReporter.js';\n\
+         import SupercovVitestReporter from './node_modules/vitestReporter.mjs';\n\
          import {{ supercovViteInstrumentation }} from './viteInstrumentation.mjs';\n\
          const vite = viteNamespace.default ?? viteNamespace;\n\
          const {{ loadConfigFromFile, mergeConfig }} = vite;\n\
@@ -786,7 +786,7 @@ fn write_vitest_config(
            const config = mergeConfig(loaded?.config ?? {{}}, {{\n\
              cacheDir: resolve(process.cwd(), '.supercov/vitest-cache'),\n\
              plugins: [supercovViteInstrumentation(process.cwd())],\n\
-             test: {{ setupFiles: [resolve(process.cwd(), '.supercov/node_modules/vitest.js')], maxConcurrency: 1 }},\n\
+             test: {{ setupFiles: [resolve(process.cwd(), '.supercov/node_modules/vitest.mjs')], maxConcurrency: 1 }},\n\
            }});\n\
            const configuredReporters = loaded?.config?.test?.reporters;\n\
            config.test ??= {{}};\n\
@@ -804,7 +804,7 @@ fn configure_playwright_runtime(
     generated: &Path,
     project: &CoverageProject,
 ) -> Result<(), JavascriptFrontendError> {
-    let adapter_path = generated.join("playwright.js");
+    let adapter_path = generated.join("playwright.mjs");
     let mut adapter =
         fs::read_to_string(&adapter_path).map_err(|source| io_error(&adapter_path, source))?;
     adapter = adapter
@@ -922,7 +922,7 @@ fn write_playwright_config(
          const reporters = configuredReporters\n\
            ? (typeof configuredReporters === 'string' ? [[configuredReporters]] : (Array.isArray(configuredReporters[0]) ? configuredReporters : [configuredReporters]))\n\
            : [['list']];\n\
-         const coverageReporter = resolve(runtimeProjectRoot, '.supercov/node_modules/playwrightReporter.js');\n\
+         const coverageReporter = resolve(runtimeProjectRoot, '.supercov/node_modules/playwrightReporter.mjs');\n\
          export default {{ ...normalized, reporter: [...reporters, [coverageReporter]] }};\n",
         serde_json::to_string(
             &original
@@ -1009,7 +1009,7 @@ import { relative, resolve, sep } from 'node:path';\n\
 const transforms = JSON.parse(readFileSync(new URL('./vite-transforms.json', import.meta.url), 'utf8'));\n\
 const sha256 = value => createHash('sha256').update(value).digest('hex');\n\
 export function supercovViteInstrumentation(root) {\n\
-  const runtimePath = resolve(root, '.supercov/node_modules/applicationRuntime.js');\n\
+  const runtimePath = resolve(root, '.supercov/node_modules/applicationRuntime.mjs');\n\
   return {\n\
     name: 'supercov-rust-instrumentation',\n\
     enforce: 'pre',\n\
@@ -1064,7 +1064,7 @@ pub fn prepare_javascript_frontend(
     for file in &project.source_files {
         let path = checked_source_path(workspace, file)?;
         let source = fs::read_to_string(&path).map_err(|source| io_error(&path, source))?;
-        let capability_wrapper = runtime_specifier(file, "capability.js")?;
+        let capability_wrapper = runtime_specifier(file, "capability.mjs")?;
         let mut output = match project.build_adapter {
             BuildAdapter::Vite | BuildAdapter::Generic => {
                 instrument_candidate_with_runtime_hooks(&source, file, &capability_wrapper)
@@ -1136,9 +1136,9 @@ pub fn prepare_javascript_frontend(
             continue;
         };
         let capability_wrapper = (!project.source_files.contains(&entry.file))
-            .then(|| runtime_specifier(&entry.file, "capability.js"))
+            .then(|| runtime_specifier(&entry.file, "capability.mjs"))
             .transpose()?;
-        let assertion_runtime = runtime_specifier(&entry.file, "runtime.js")?;
+        let assertion_runtime = runtime_specifier(&entry.file, "runtime.mjs")?;
         let output = crate::js_instrumenter::instrument_node_assertion_phases_with_runtime_imports(
             &source,
             &entry.file,
@@ -1253,7 +1253,7 @@ mod tests {
     fn copied_runtime_does_not_reference_unshipped_source_maps() {
         let generated = temporary("runtime-source-maps");
         copy_runtime(&generated, "collector-test").unwrap();
-        for name in ["vitest.js", "provenance.js", "atomic.js"] {
+        for name in ["vitest.mjs", "provenance.mjs", "atomic.mjs"] {
             let contents = fs::read_to_string(generated.join(name)).unwrap();
             assert!(
                 !contents.contains("sourceMappingURL"),
@@ -1347,7 +1347,7 @@ mod tests {
             assert!(!bytes.is_empty(), "embedded runtime is empty: {name}");
         }
         assert!(
-            std::str::from_utf8(embedded_runtime("runtime.js").unwrap())
+            std::str::from_utf8(embedded_runtime("runtime.mjs").unwrap())
                 .unwrap()
                 .contains(RUNTIME_INSTANCE_MARKER)
         );
