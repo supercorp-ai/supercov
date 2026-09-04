@@ -6,8 +6,12 @@
 //! and fast steps see nothing at all. It only appears when stderr is an
 //! interactive terminal. The owner must drop it before writing other output.
 
+// The status line is written only on Unix; the Windows arm stays silent, so
+// the trait is unused there and the first Windows build said so.
+#[cfg(unix)]
+use std::io::Write;
 use std::{
-    io::{IsTerminal, Write},
+    io::IsTerminal,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},

@@ -1,8 +1,12 @@
 //! Privacy-preserving child-process supervision for arbitrary test commands.
 
+// Descriptor and watchdog handling reads the filesystem only on Unix; on
+// Windows the module path is unused and the first Windows build said so.
+#[cfg(unix)]
+use std::fs;
 use std::{
     ffi::OsString,
-    fs::{self, OpenOptions},
+    fs::OpenOptions,
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
@@ -508,6 +512,18 @@ unsafe extern "system" fn record_console_signal(control: u32) -> i32 {
 
 #[cfg(windows)]
 struct JobHandle(windows_sys::Win32::Foundation::HANDLE);
+
+// A job-object handle is a process-wide kernel token, not a pointer into this
+// thread's memory: assigning a process to it, terminating it and closing it are
+// all safe from any thread, which is the same invariant std's OwnedHandle
+// carries by being Send and Sync. Without these the raw HANDLE makes the whole
+// supervisor !Sync on Windows, and the Rust test runner, which shares one
+// supervisor across scoped threads, does not compile there -- the first
+// Windows build found exactly that.
+#[cfg(windows)]
+unsafe impl Send for JobHandle {}
+#[cfg(windows)]
+unsafe impl Sync for JobHandle {}
 
 #[cfg(windows)]
 impl JobHandle {
