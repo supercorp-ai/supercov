@@ -48,6 +48,20 @@ for (const name of runtimeFiles) {
   assert.equal(checked.status, 0, `${name} is invalid JavaScript:\n${checked.stderr}`);
 }
 
+// The Python frontend names coverage.py because it is differentially tested
+// against it; that file is exempt from the oracle scan. The exemption is by
+// file name, not by a "/"-joined suffix: the first Windows build failed on
+// exactly that, when D:\a\...\python_frontend.rs did not end with
+// "/python_frontend.rs" and the scan ran on a file it was never meant to.
+function isOracleDifferential(path) {
+  // Not path.basename: on a POSIX host it does not split on "\", so a check
+  // that must hold for a Windows path has to split on either separator itself.
+  return path.split(/[\\/]/).at(-1) === "python_frontend.rs";
+}
+assert(isOracleDifferential("D:\\a\\supercov\\crates\\supercov-engine\\src\\python_frontend.rs"));
+assert(isOracleDifferential("/w/crates/supercov-engine/src/python_frontend.rs"));
+assert(!isOracleDifferential("/w/crates/supercov-engine/src/python_project.rs"));
+
 // Independent coverage implementations are development oracles only. A user
 // run must never shell out to them or enable compiler-native coverage. Keep
 // this audit over every product Rust source and every shipped executable shim;
@@ -58,7 +72,7 @@ const productSources = [
   ...runtimeFiles.map((name) => resolve(runtime, name)),
   ...sourceFiles(resolve(repository, "crates/supercov-cli/src"), ".rs"),
   ...sourceFiles(resolve(repository, "crates/supercov-engine/src"), ".rs").filter(
-    (path) => !path.endsWith("/python_frontend.rs"),
+    (path) => !isOracleDifferential(path),
   ),
   ...sourceFiles(
     resolve(repository, "crates/supercov-engine/runtime-assets"),
@@ -112,6 +126,15 @@ for (const line of notes.split("\n")) {
     `unexpected changelog line for ${manifest.version}: ${JSON.stringify(line)}`,
   );
 }
+// A Windows runner checks the changelog out with CRLF endings. The first
+// Windows build failed right here, on "**Fixed**\r", before a line of Rust was
+// compiled; the notes must read identically however the file was checked out.
+const changelogPath = resolve(repository, "CHANGELOG.md");
+const crlfNotes = releaseNotes(
+  manifest.version,
+  readFileSync(changelogPath, "utf8").replace(/\r?\n/g, "\r\n"),
+);
+assert.equal(crlfNotes, notes, "release notes must not depend on the checkout's line endings");
 
 console.log(
   `[package-preflight] Rust-only launcher, ${runtimeFiles.length} target-language shims, no legacy engine or product-oracle dependencies`,

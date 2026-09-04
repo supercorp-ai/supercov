@@ -9,7 +9,10 @@ import { resolve } from "node:path";
 const repository = resolve(import.meta.dirname, "..");
 
 export function releaseNotes(version, changelog = readFileSync(resolve(repository, "CHANGELOG.md"), "utf8")) {
-  const lines = changelog.split("\n");
+  // A Windows checkout arrives with CRLF line endings, and every consumer of
+  // these notes -- the shape gate in preflight, the word count, the release
+  // body -- reasons about lines. Normalise once here so no caller has to know.
+  const lines = changelog.replace(/\r\n?/g, "\n").split("\n");
   const start = lines.findIndex((line) => line.trim() === `## ${version}`);
   if (start === -1) return null;
   const rest = lines.slice(start + 1);
