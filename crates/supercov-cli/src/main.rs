@@ -1552,6 +1552,43 @@ fn public_coverage_run(command: Vec<String>) -> ExitCode {
             }
         };
     }
+    if detection.frontends == [supercov_engine::frontend_detection::FrontendLanguage::Ruby] {
+        let request = supercov_engine::ruby_run::DirectRubyRunRequest {
+            root: root.clone(),
+            command,
+            run_id,
+            started_at,
+        };
+        let mut diagnostics = std::io::stderr().lock();
+        let result = supercov_engine::ruby_run::run_direct_ruby(&request, &mut diagnostics);
+        spawn_trash_sweeper(&root);
+        return match result {
+            Ok(result) => {
+                println!(
+                    "[coverage] evidence: {}",
+                    result.run_directory.join("evidence.raw.gz").display()
+                );
+                eprintln!(
+                    "[supercov] Ruby coverage: {} test(s) across {} source file(s), {} interpreter process(es) on Ruby {}",
+                    result.tests,
+                    result.source_files,
+                    result.interpreters,
+                    result.ruby_versions.join(", ")
+                );
+                if let Some(timings) = &result.metadata.timings {
+                    eprintln!(
+                        "[supercov] timings {}",
+                        format_run_timings(timings, result.metadata.duration_ms)
+                    );
+                }
+                process_exit_code(result.exit_code)
+            }
+            Err(error) => {
+                eprintln!("[supercov] {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let watchdog_program = std::env::current_exe()
         .ok()
         .and_then(|path| fs::canonicalize(path).ok());
@@ -1731,6 +1768,8 @@ fn current_integrity_for_run(
     let version = run.metadata.integrity.instrumenter_version.as_str();
     if version.starts_with("supercov-rust-") {
         supercov_engine::rust_run::current_rust_integrity(root, &run.metadata.command).ok()
+    } else if version.starts_with("supercov-ruby-") {
+        supercov_engine::ruby_run::current_ruby_integrity(root, &run.metadata.command).ok()
     } else if version.starts_with("supercov-python-") {
         supercov_engine::python_run::current_python_integrity(root, &run.metadata.command).ok()
     } else {

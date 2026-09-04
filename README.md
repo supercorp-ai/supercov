@@ -109,11 +109,12 @@ The denominator comes from source structure before the run, so adding or removin
 | TypeScript | Available | `npx supercov -- npm test` |
 | Rust | Available | `npx supercov -- cargo test` |
 | Python | Available | `npx supercov -- pytest` |
+| Ruby | Available | `npx supercov -- rspec` |
 | Zig | Coming soon | — |
 | PHP | Coming soon | — |
 | C | Coming soon | — |
 
-Supercov requires Node.js 22 or newer. Rust support currently uses Rust 1.95; cargo-nextest 0.9.138 and 0.9.140 are supported. Python support requires CPython 3.12 or newer and measures pytest and unittest runs.
+Supercov requires Node.js 22 or newer. Rust support currently uses Rust 1.95; cargo-nextest 0.9.138 and 0.9.140 are supported. Python support requires CPython 3.12 or newer and measures pytest and unittest runs. Ruby support requires Ruby 3.3 or newer (3.4 or newer for full measurement) and measures RSpec, Minitest, test-unit and Cucumber runs.
 
 ## Supported test suites
 

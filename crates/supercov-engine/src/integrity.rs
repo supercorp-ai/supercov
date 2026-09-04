@@ -80,6 +80,18 @@ impl FrontendIntegrityInputs {
             engine_execution_sha256: env!("SUPERCOV_ENGINE_SOURCE_SHA256").into(),
         }
     }
+
+    pub fn embedded_ruby() -> Self {
+        Self {
+            language: "ruby".into(),
+            version: "ruby-coverage-v1".into(),
+            root: PathBuf::from("."),
+            instrumenter_files: Vec::new(),
+            execution_files: Vec::new(),
+            engine_instrumenter_sha256: env!("SUPERCOV_RUBY_FRONTEND_SOURCE_SHA256").into(),
+            engine_execution_sha256: env!("SUPERCOV_ENGINE_SOURCE_SHA256").into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

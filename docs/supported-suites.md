@@ -1,6 +1,6 @@
 # Supported languages and test suites
 
-Supercov supports JavaScript, TypeScript, Rust, and Python today. Start with
+Supercov supports JavaScript, TypeScript, Rust, Python, and Ruby today. Start with
 the same test command the repository already uses; Supercov detects supported
 runners inside that command.
 
@@ -9,6 +9,7 @@ npx supercov -- npm test
 npx supercov -- npx playwright test
 npx supercov -- cargo test
 npx supercov -- pytest
+npx supercov -- rspec
 ```
 
 ## Language support
@@ -19,6 +20,7 @@ npx supercov -- pytest
 | TypeScript | Available | `npx supercov -- npm test` |
 | Rust | Available | `npx supercov -- cargo test` |
 | Python | Available | `npx supercov -- pytest` |
+| Ruby | Available | `npx supercov -- rspec` |
 | Zig | Coming soon | — |
 | PHP | Coming soon | — |
 | C | Coming soon | — |
@@ -135,6 +137,87 @@ npx supercov -- pytest
 npx supercov -- python -m pytest -n 4
 npx supercov -- uv run pytest
 npx supercov -- python -m unittest
+```
+
+## Ruby
+
+| Runner | Attribution | Current requirement |
+| --- | --- | --- |
+| RSpec | Exact example and before/example/after phase identity | Ruby 3.4 or newer for full measurement; run with `npx supercov -- rspec` or `bundle exec rspec` |
+| Minitest (including Minitest::Spec and ActiveSupport::TestCase) | Exact test and setup/test/teardown identity; skips recorded | `ruby -Itest ...`, `rake test`, `rails test` |
+| test-unit | Exact test and setup/test/teardown identity; omissions and pendings recorded | `ruby -Itest ...`, `rake test` |
+| parallel_tests, Rails process workers | Exact per worker process | Workers inherit the run through `RUBYOPT`; verified on a Rails app with bootsnap, Zeitwerk and two forked workers |
+| Thread-parallel Minitest (`parallelize_me!`, `parallelize(with: :threads)`) | Probe observations exact per test; line, method and simple-branch observations made while phases overlapped go to the run, declared | |
+| Cucumber | Exact scenario identity (`features/x.feature:LINE`), hook steps as setup/teardown | `cucumber`, `bundle exec cucumber` |
+
+Supercov measures Ruby with Ruby's own `Coverage` module plus probe calls it
+splices into application files in memory as they load. Nothing on disk is
+rewritten or copied; the project runs with its own interpreter and bundle, and
+Supercov only adds a `-r` entry to `RUBYOPT` and a few `SUPERCOV_*` variables.
+No insertion adds a line, so backtraces keep their line numbers.
+
+Measured obligations are statements, method definitions, `if`/`unless`/
+ternary/`while`/`until` decisions with MC/DC vectors over `&&`/`||` operands,
+`while`/`until`/`for` iteration and the idiomatic iterator blocks (`each`,
+`map`, `times`, `select`, ...), `&&`/`||`/`||=`/`&&=` short-circuiting,
+`case`/`when`, `case`/`in` and `&.` selection, and `begin`/`rescue` completion,
+handler selection and propagation. `||=` and `&&=` on method-call, index and
+constant targets are exact too: an arrival probe and a right-side probe count
+the skipped side without re-reading the target. Blocks and lambdas are
+statements inside their methods, not function entry points, and that includes
+a `define_method` block: Ruby's own method coverage reports one entry per
+method it defines, but the block's body is measured statement by statement
+instead of as a definition.
+
+A statement on a line Ruby's own line table never counts (`x = case`, a
+multi-line literal assignment, a bare `begin`, `if false`) gets a probe at load
+time instead.
+`if true`/`if false`/`if nil` and other literal predicates are folded the way
+Ruby folds them: no branch, and the dead arm is not an obligation. A Spring
+preloader started before the run has no hook and fails closed; JRuby and
+TruffleRuby are not supported.
+
+The runtime loads through `RUBYOPT` before Bundler and requires only
+`coverage`, so it never activates a gem an application's Gemfile pins
+differently. Insertions are checked against Ruby itself by a sweep
+(`scripts/ruby-position-sweep.rb`) over Ruby's whole standard library and the
+Rails, Rack, RSpec, Minitest and Cucumber gems, about 3,000 files: every file
+is transformed and compiled, and every position Supercov expects is compared
+with what Ruby reports. With `--load` each file also runs twice, untouched and
+transformed, so the probes are proven to preserve behaviour and every method
+position is checked.
+
+A `begin` whose body ends in an expression that can `return` from inside
+itself has its handlers and propagation measured as usual, but its normal
+completion is declared instead of probed unless every branch of that
+expression can carry the probe: Ruby cannot pass such an expression as an
+argument, which is what a probe wrapper does.
+
+Measuring never breaks the program being measured. If a file cannot be
+compiled with its probes, it loads unmodified: Ruby's `Coverage` still
+measures its lines, methods and own branches, and only the obligations a
+probe would have proven are declared for that file. Setting
+`SUPERCOV_RUBY_SKIP_PROBES` to a comma-separated list of path fragments puts
+chosen files on that same path deliberately, which is the escape hatch if
+instrumentation ever disagrees with one of yours.
+
+An obligation Supercov declares unmeasured leaves the obligation totals and is
+reported as a measurement limit rather than a gap. Its line still counts in
+the line total, as it does for every other language, so a file with declared
+obligations reads slightly pessimistically on lines.
+
+Ruby 3.3 does not apply its `Coverage` module to code compiled by a load hook,
+so on 3.3 Supercov measures through `Coverage` alone: lines, methods and the
+branches Ruby reports itself. Everything that needs a probe (multi-condition
+decisions, `||=`, loops, `rescue` flow, a second statement on a line) is
+declared unmeasured on that interpreter rather than shown as a gap. Ruby 3.4
+and newer measure everything.
+
+```sh
+npx supercov -- rspec
+npx supercov -- bundle exec rspec
+npx supercov -- ruby -Itest test/shapes_test.rb
+npx supercov -- bin/rails test
 ```
 
 ## Containers, VMs, and remote execution

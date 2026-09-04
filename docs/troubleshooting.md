@@ -60,6 +60,21 @@ Compare the command with [Supported suites](supported-suites.md). If the runner
 should be supported, preserve the summary and exact command when reporting the
 problem.
 
+## A Ruby file behaves differently while Supercov measures it
+
+Supercov splices probe calls into Ruby sources in memory as they load, and a
+file that cannot be compiled with them is measured through Ruby's `Coverage`
+module alone rather than failing the run. To put a file on that path
+deliberately, name a fragment of its path:
+
+```sh
+SUPERCOV_RUBY_SKIP_PROBES=app/models/order.rb npx supercov -- bundle exec rspec
+```
+
+Its lines, methods and simple branches stay measured; everything that needs a
+probe is declared as a measurement limit for that file. Please report the file,
+since Supercov aims to instrument every Ruby source correctly.
+
 ## A run is marked stale
 
 A stored run remains valid history, but it stops describing the current

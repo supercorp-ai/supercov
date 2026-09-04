@@ -16,6 +16,7 @@ use crate::project_discovery::expanded_command;
 pub enum FrontendLanguage {
     JavaScript,
     Python,
+    Ruby,
     Rust,
 }
 
@@ -90,6 +91,25 @@ fn supported_by_command(command_tokens: &[String]) -> Vec<(FrontendLanguage, &'s
             "the expanded test command launches a Python test runner",
         ));
     }
+    let ruby_command = command_tokens
+        .iter()
+        .any(|token| matches!(token.as_str(), "rspec" | "minitest" | "cucumber" | "m"))
+        || has_sequence(command_tokens, &["rake", "spec"])
+        || has_sequence(command_tokens, &["rake", "test"])
+        || has_sequence(command_tokens, &["rails", "test"])
+        || (command_tokens.iter().any(|token| token == "ruby")
+            && command_tokens.iter().any(|token| {
+                token.ends_with("_spec.rb")
+                    || token.ends_with("_test.rb")
+                    || token.starts_with("-itest")
+                    || token.starts_with("-ispec")
+            }));
+    if ruby_command {
+        launched.push((
+            FrontendLanguage::Ruby,
+            "the expanded test command launches a Ruby test runner",
+        ));
+    }
 
     let javascript_command = command_tokens.iter().any(|token| {
         matches!(
@@ -132,6 +152,14 @@ pub fn detect_frontends(root: &Path, command: &[String]) -> FrontendDetection {
                 FrontendLanguage::Rust,
                 regular_file(&root.join("Cargo.toml")),
                 "Cargo.toml exists and the test command is opaque",
+            ),
+            (
+                FrontendLanguage::Ruby,
+                ["Gemfile", ".rspec", "Rakefile"]
+                    .iter()
+                    .any(|name| root.join(name).is_file())
+                    && (root.join("spec").is_dir() || root.join("test").is_dir()),
+                "Ruby project/test metadata exists and the test command is opaque",
             ),
             (
                 FrontendLanguage::Python,
@@ -198,7 +226,6 @@ pub fn detect_unsupported_ecosystem(
     let command_tokens = tokens(&expanded);
     let by_command: &[(&str, &[&str])] = &[
         ("Go", &["go"]),
-        ("Ruby", &["rspec", "minitest"]),
         ("Java/Kotlin", &["mvn", "maven", "gradle", "gradlew"]),
         ("PHP", &["phpunit", "pest"]),
         (".NET", &["dotnet"]),
@@ -227,7 +254,6 @@ pub fn detect_unsupported_ecosystem(
     }
     let by_manifest: &[(&str, &[&str])] = &[
         ("Go", &["go.mod"]),
-        ("Ruby", &["Gemfile"]),
         (
             "Java/Kotlin",
             &["pom.xml", "build.gradle", "build.gradle.kts"],
@@ -332,14 +358,33 @@ mod tests {
 
     #[test]
     fn a_known_unsupported_manifest_is_named_when_the_command_is_opaque() {
-        let root = fixture("gemfile");
-        fs::write(root.join("Gemfile"), "source 'https://rubygems.org'\n").unwrap();
+        let root = fixture("gomod");
+        fs::write(root.join("go.mod"), "module example.com/app\n").unwrap();
         let detected = detect_frontends(&root, &["make".into(), "test".into()]);
         assert_eq!(detected.frontends, []);
         let ecosystem =
             detect_unsupported_ecosystem(&root, &["make".into(), "test".into()]).unwrap();
-        assert_eq!(ecosystem.language, "Ruby");
-        assert_eq!(ecosystem.evidence, "Gemfile is present");
+        assert_eq!(ecosystem.language, "Go");
+        assert_eq!(ecosystem.evidence, "go.mod is present");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ruby_runners_and_manifests_select_the_ruby_frontend() {
+        let root = fixture("ruby");
+        fs::write(root.join("Gemfile"), "source 'https://rubygems.org'\n").unwrap();
+        fs::create_dir_all(root.join("spec")).unwrap();
+        for command in [
+            vec!["rspec".to_string()],
+            vec!["bundle".into(), "exec".into(), "rspec".into()],
+            vec!["ruby".into(), "-Itest".into(), "test/app_test.rb".into()],
+            vec!["bin/rails".into(), "test".into()],
+            vec!["make".into(), "test".into()],
+        ] {
+            let detected = detect_frontends(&root, &command);
+            assert_eq!(detected.frontends, [FrontendLanguage::Ruby], "{command:?}");
+        }
+        assert!(detect_unsupported_ecosystem(&root, &["make".into(), "test".into()]).is_none());
         fs::remove_dir_all(root).unwrap();
     }
 

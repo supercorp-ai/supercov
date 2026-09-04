@@ -54,10 +54,12 @@ fn main() {
     let repository_root = crate_root.join("../..");
     let runtime_root = repository_root.join("runtime/javascript");
     let python_runtime_root = repository_root.join("runtime/python");
+    let ruby_runtime_root = repository_root.join("runtime/ruby");
     let mut files = Vec::new();
     collect_files(&crate_root.join("src"), &mut files);
     collect_files(&runtime_root, &mut files);
     collect_files(&python_runtime_root, &mut files);
+    collect_files(&ruby_runtime_root, &mut files);
     files.extend([crate_root.join("build.rs"), crate_root.join("Cargo.toml")]);
     files.sort();
     files.dedup();
@@ -94,5 +96,18 @@ fn main() {
     println!(
         "cargo:rustc-env=SUPERCOV_PYTHON_FRONTEND_SOURCE_SHA256={}",
         digest_files(&python_frontend, &repository_root)
+    );
+    let mut ruby_frontend = vec![
+        crate_root.join("src/ruby_instrumenter.rs"),
+        crate_root.join("src/ruby_evidence.rs"),
+        crate_root.join("src/ruby_project.rs"),
+        crate_root.join("Cargo.toml"),
+    ];
+    collect_files(&ruby_runtime_root, &mut ruby_frontend);
+    ruby_frontend.sort();
+    ruby_frontend.dedup();
+    println!(
+        "cargo:rustc-env=SUPERCOV_RUBY_FRONTEND_SOURCE_SHA256={}",
+        digest_files(&ruby_frontend, &repository_root)
     );
 }
