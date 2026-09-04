@@ -65,9 +65,23 @@ try {
     }) + '\n',
   );
   const application = [
+    // An executable entry: `#!` is only legal on the first line, and
+    // TypeScript reports anything else as a parse error that no directive can
+    // suppress, so instrumentation must never displace it.
+    '#!/usr/bin/env node',
     'export function permission(admin: boolean, owner: boolean): string {',
     '  if (admin || owner) return "allowed";',
     '  return "denied";',
+    '}',
+    '',
+    // Instrumentation rewrites conditions into sequences the compiler cannot
+    // narrow through, so strict source only survives the build because the
+    // instrumented copies are exempt from type checking.
+    'export function label(value?: string): string {',
+    '  if (!value) {',
+    '    return "none";',
+    '  }',
+    '  return value.trim();',
     '}',
     '',
   ].join('\n');
@@ -77,13 +91,15 @@ try {
     [
       "import assert from 'node:assert/strict';",
       "import test from 'node:test';",
-      "import { permission } from '../dist/permission.js';",
+      "import { label, permission } from '../dist/permission.js';",
       'for (const [name, admin, owner, expected] of [',
       "  ['admin', true, false, 'allowed'],",
       "  ['owner', false, true, 'allowed'],",
       "  ['both', true, true, 'allowed'],",
       "  ['neither', false, false, 'denied'],",
       ']) test(name, () => assert.equal(permission(admin, owner), expected));',
+      "test('narrowed', () => assert.equal(label(' hi '), 'hi'));",
+      "test('missing', () => assert.equal(label(), 'none'));",
       '',
     ].join('\n'),
   );
@@ -95,7 +111,8 @@ try {
     startedAt: '2026-08-25T00:00:07.000Z',
   });
   assert.equal(run.exitCode, 0);
-  assert.equal(run.assertionCalls, 1);
+  // One call site in the table-driven loop, one per narrowing test.
+  assert.equal(run.assertionCalls, 3);
   assert.equal(readFileSync(resolve(project, 'src/permission.ts'), 'utf8'), application);
   assert.ok(run.metadata.timings.instrumentedBuildMs > 0);
   const summary = rust('__query-stored-run', {
@@ -108,12 +125,12 @@ try {
   });
   assert.equal(summary.data.valid, true);
   assert.equal(summary.data.complete, true);
-  assert.equal(summary.data.tests, 4);
+  assert.equal(summary.data.tests, 6);
   assert.equal(summary.data.coverage.conditionCoveragePct, 100);
   assert.equal(summary.data.coverage.lines.percentage, 100);
   assert.equal(summary.data.coverage.branches.percentage, 100);
-  assert.equal(summary.data.confidence.lines.asserted, 3);
-  assert.equal(summary.data.confidence.assertionCoveredMcdcConditions, 2);
+  assert.equal(summary.data.confidence.lines.asserted, 7);
+  assert.equal(summary.data.confidence.assertionCoveredMcdcConditions, 3);
   console.log(
     '[rust-generic-tsc] Rust preserves strict rootDir compilation and exact Node attribution',
   );

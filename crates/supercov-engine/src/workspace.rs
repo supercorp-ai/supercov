@@ -1576,8 +1576,18 @@ pub fn sync_command_outputs(
             sync.skipped_instrumented.push(relative.clone());
             continue;
         }
-        validate_writeback_destination(root, relative)?;
         let from = workspace.join(relative);
+        // A file the command built FROM an instrumented source carries the
+        // instrumentation with it. Copying that into the project would leave
+        // probes and a workspace-only runtime import in the application's own
+        // build output, which is the one thing isolation promises never
+        // happens. The generated runtime lives only inside a workspace, so a
+        // reference to it is proof the file is not the command's own output.
+        if references_generated_runtime(&from)? {
+            sync.skipped_instrumented.push(relative.clone());
+            continue;
+        }
+        validate_writeback_destination(root, relative)?;
         let to = root.join(relative);
         if let Some(parent) = to.parent() {
             fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
@@ -1591,6 +1601,21 @@ pub fn sync_command_outputs(
         }
     }
     Ok(sync)
+}
+
+/// Whether `path` mentions the generated runtime module, which exists only
+/// inside an instrumented workspace. Read as bytes: build output can be
+/// minified, source-mapped or not valid UTF-8, and the marker is ASCII.
+fn references_generated_runtime(path: &Path) -> Result<bool, WorkspaceError> {
+    const MARKER: &[u8] = b".supercov/node_modules/";
+    let contents = match fs::read(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(io_error(path, error)),
+    };
+    Ok(contents
+        .windows(MARKER.len())
+        .any(|window| window == MARKER))
 }
 
 pub fn prune_cached_workspace_sources(
@@ -1666,6 +1691,42 @@ mod tests {
         assert!(sync.deleted_in_workspace.is_empty());
         assert!(!root.join("node_modules").exists());
         assert!(!root.join("packages").exists());
+        fs::remove_dir_all(root.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn output_built_from_instrumented_sources_never_flows_back() {
+        // A build the command runs inside the workspace compiles the
+        // instrumented copies, so its output carries probes and an import of a
+        // runtime that exists only in the workspace. Writing that into the
+        // project would leave the application's own build output instrumented
+        // after the run, which isolation promises never happens.
+        let (root, workspace) = writeback_fixture("built-output");
+        let baseline = workspace_output_baseline(&workspace).unwrap();
+        fs::create_dir_all(workspace.join("dist")).unwrap();
+        fs::write(
+            workspace.join("dist/app.js"),
+            "import { coverageHit } from \"./.supercov/node_modules/runtime.js\";\ncoverageHit(0);\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("dist/app.d.ts"),
+            "export declare const a: number;\n",
+        )
+        .unwrap();
+
+        let sync = sync_command_outputs(&root, &workspace, &baseline, &BTreeSet::new()).unwrap();
+
+        assert_eq!(
+            sync.skipped_instrumented,
+            vec![PathBuf::from("dist/app.js")],
+            "the instrumented artifact is reported, not copied"
+        );
+        assert!(!root.join("dist/app.js").exists());
+        // A sibling the build emitted that carries no instrumentation is the
+        // command's own output and still belongs to the project.
+        assert_eq!(sync.synced, 1);
+        assert!(root.join("dist/app.d.ts").exists());
         fs::remove_dir_all(root.parent().unwrap()).unwrap();
     }
 

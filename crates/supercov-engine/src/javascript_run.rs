@@ -859,7 +859,7 @@ pub fn run_direct_javascript(
         if !outputs.skipped_instrumented.is_empty() {
             let _ = writeln!(
                 diagnostics,
-                "[supercov] the command modified {} instrumented source file(s); those changes stay in the isolated workspace because the instrumented copies must not overwrite your sources: {}",
+                "[supercov] {} file(s) stayed in the isolated workspace: they are instrumented copies, or were built from them, and must not overwrite your project: {}",
                 outputs.skipped_instrumented.len(),
                 outputs
                     .skipped_instrumented

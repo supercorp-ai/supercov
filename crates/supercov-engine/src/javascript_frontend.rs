@@ -483,6 +483,28 @@ fn runtime_specifier(file: &str, name: &str) -> Result<String, JavascriptFronten
     })
 }
 
+/// The banner that exempts an instrumented source from the host project's lint
+/// and type policy. The disable line comes FIRST so the host's own
+/// ban-ts-comment rule cannot reject the `@ts-nocheck` below it: Next.js lints
+/// instrumented sources during `next build`, and a real monorepo failed on
+/// every route file. Generated and instrumented code is immune to host lint
+/// policy as a class.
+const GENERATED_SOURCE_BANNER: &str =
+    "/* eslint-disable */\n// @ts-nocheck -- generated coverage workspace only\n";
+
+/// Prefix `code` with that banner, keeping a shebang on the first line. `#!`
+/// anywhere else is a parse error TypeScript reports as TS18026, which
+/// `@ts-nocheck` cannot suppress because it is syntax and not semantics, so a
+/// banner in front of it failed the build of every project whose entry point
+/// is executable.
+fn generated_source_banner(code: &str) -> String {
+    let Some(rest) = code.strip_prefix("#!") else {
+        return format!("{GENERATED_SOURCE_BANNER}{code}");
+    };
+    let (line, remainder) = rest.split_once('\n').unwrap_or((rest, ""));
+    format!("#!{line}\n{GENERATED_SOURCE_BANNER}{remainder}")
+}
+
 fn isolate_runtime(source: &str, collector_id: &str) -> Result<String, JavascriptFrontendError> {
     // Generated runtime files sit inside the lint graph of bundlers that lint
     // whatever they compile (Next.js does), so they must disarm host lint
@@ -516,7 +538,9 @@ fn isolate_runtime(source: &str, collector_id: &str) -> Result<String, Javascrip
 /// The instrumented file may have banner lines prepended AFTER the map was
 /// computed (`/* eslint-disable */` and `@ts-nocheck`); VLQ mappings are
 /// generated-line-relative with one `;` per line, so the map is shifted by
-/// prefixing one semicolon per banner line rather than re-encoding tokens.
+/// prefixing one semicolon per banner line rather than re-encoding tokens. A
+/// shebang keeps the first line and maps to itself, so the banner below it
+/// shifts everything after by the same amount.
 fn inline_instrumentation_map(
     code: &str,
     map: Option<&serde_json::Value>,
@@ -528,6 +552,7 @@ fn inline_instrumentation_map(
     let object = map.as_object_mut()?;
     let banner_lines = code
         .lines()
+        .skip(usize::from(code.starts_with("#!")))
         .take_while(|line| {
             line.starts_with("/* eslint-disable */") || line.starts_with("// @ts-nocheck")
         })
@@ -1059,15 +1084,7 @@ pub fn prepare_javascript_frontend(
                 path.extension().and_then(|value| value.to_str()),
                 Some("ts" | "tsx" | "mts" | "cts")
             ) {
-                // The disable line comes FIRST so the host's own
-                // ban-ts-comment rule cannot reject the @ts-nocheck below it:
-                // Next.js lints instrumented sources during `next build`, and a
-                // real monorepo failed on every route file. Generated and
-                // instrumented code is immune to host lint policy as a class.
-                output.code = format!(
-                    "/* eslint-disable */\n// @ts-nocheck -- generated coverage workspace only\n{}",
-                    output.code
-                );
+                output.code = generated_source_banner(&output.code);
             }
         }
         if project.build_adapter == BuildAdapter::Vite {
