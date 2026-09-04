@@ -64,7 +64,7 @@
     "benchmark:check": "cargo build --release -p supercov && node scripts/rust-transform-benchmark.mjs",
     "benchmark:python-monitoring": "cargo build -p supercov && node scripts/python-monitoring-benchmark.mjs",
     "check": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && npm run test && npm run test:runtime && npm run test:rust-assets && node scripts/package-preflight.mjs",
-    "release:check": "npm run check && npm run test:engine && npm run test:fixture && npm run test:watchdog && npm run test:engine-contract && npm run test:agent && npm run test:python-monitoring && npm run test:packed-npx && npm run test:clang-mcdc && npm run benchmark:check",
+    "release:check": "npm run check && npm run test:engine && npm run test:fixture && npm run test:watchdog && npm run test:engine-contract && npm run test:agent && npm run test:python-monitoring && npm run test:ruby-coverage && npm run test:packed-npx && npm run test:clang-mcdc && npm run benchmark:check",
     "prepack": "node scripts/package-preflight.mjs",
     "prepublishOnly": "npm run release:check",
     "test:python-monitoring": "cargo build -p supercov && node scripts/python-monitoring-integration.mjs",
