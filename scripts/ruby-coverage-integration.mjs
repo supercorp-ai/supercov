@@ -274,8 +274,21 @@ try {
     /test_hard_killed/,
     'SIGKILL cannot be caught, so that result is gone and must not be claimed',
   );
+  // Losing it is unavoidable; reporting those lines as merely uncovered is
+  // not. The run says a process never reported, which blocks completeness, so
+  // the number is read as the floor it is.
+  const signalSummary = query(['runs', 'latest', 'summary'], environment, signalProject);
+  assert.ok(
+    signalSummary.measurement.limitations >= 1 && signalSummary.measurement.blocking >= 1,
+    `a killed process must declare the gap it left: ${JSON.stringify(signalSummary.measurement)}`,
+  );
+  assert.equal(
+    signalSummary.complete,
+    false,
+    'a run missing a process cannot call itself complete',
+  );
 
-  console.log(`[ruby-coverage] ${ruby} measured the fixture through RSpec, Minitest, test-unit, Cucumber and thread-parallel Minitest with exact totals, and a signalled child keeps its coverage`);
+  console.log(`[ruby-coverage] ${ruby} measured the fixture through RSpec, Minitest, test-unit, Cucumber and thread-parallel Minitest with exact totals, a signalled child keeps its coverage, and a killed one declares what it took with it`);
 } finally {
   rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 }

@@ -358,6 +358,8 @@ fn read_evidence_file(
         .ok_or_else(|| invalid_transport("process id is missing"))?;
     let mut contexts = BTreeMap::<u64, Identity>::new();
     let mut process_worker: Option<String> = None;
+    let mut process_started = false;
+    let mut process_reported = false;
     let mut cursor = TRANSPORT_HEADER_SIZE;
     let mut record_index = 0;
     while cursor + TRANSPORT_RECORD_HEADER_SIZE <= contents.len() {
@@ -444,6 +446,7 @@ fn read_evidence_file(
                 }
                 evidence.interpreters += 1;
                 evidence.ruby_versions.insert(ruby);
+                process_started = true;
                 process_worker = Some(worker);
             }
             Record::Worker { worker } => process_worker = Some(worker),
@@ -562,9 +565,27 @@ fn read_evidence_file(
                 file,
                 obligation,
             }),
-            Record::Exit { .. } => {}
+            Record::Exit { .. } => process_reported = true,
         }
         cursor = next_cursor;
+    }
+    // Ruby reads Coverage's own result in the `at_exit` that writes this
+    // record, so a process that never wrote one -- killed with a signal it
+    // could not catch, or left through `exit!` -- took everything it had
+    // observed since its last test boundary with it. Nothing outside that
+    // process can recover the counters or say which lines they were, so the
+    // run declares the gap instead of reporting those lines as merely
+    // uncovered. A declared limitation blocks completeness, which is the
+    // honest answer: coverage measured here is a floor, not a total.
+    if process_started && !process_reported {
+        evidence.limitations.push(RuntimeLimitation {
+            id: "ruby-process-did-not-report".into(),
+            reason: format!(
+                "an interpreter process (pid {transport_pid}) ended without reporting, so line, branch and method observations it made after its last test boundary are missing; a process killed with SIGKILL, or one that left through exit!, cannot flush them"
+            ),
+            file: None,
+            obligation: None,
+        });
     }
     Ok(())
 }
@@ -1240,6 +1261,56 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn declares_the_gap_when_a_process_never_reported() {
+        // Coverage's own result is read in the `at_exit` that writes the exit
+        // record, so a transport without one belongs to a process that was
+        // killed or left through `exit!`. What it observed is unrecoverable and
+        // unknowable, so the run says so rather than reporting those lines as
+        // uncovered. The same records WITH an exit record must stay silent, or
+        // every ordinary run would claim a gap it does not have.
+        let source = "def f(a)\n  a\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/m.rb", source.as_bytes(), &mut probe).unwrap();
+        let statement = obligations
+            .manifest
+            .points
+            .iter()
+            .find(|point| point.kind == PointKind::Statement)
+            .unwrap();
+        let base = [
+            serde_json::json!({"t":"process","v":1,"run":"run-1","pid":7,"worker":"main","ruby":"4.0.6","executable":"ruby","argv":["child.rb"]}),
+            serde_json::json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"MTest#test_x","retry":0,"phase":"call"}),
+            serde_json::json!({"t":"hit","ctx":1,"id":statement.id}),
+            serde_json::json!({"t":"outcome","worker":"main","test":"MTest#test_x","retry":0,"phase":"call","outcome":"passed","xfail":false,"runner":"minitest"}),
+        ];
+
+        let killed = temporary("killed");
+        fs::write(killed.join("main.7.a.mmap"), transport(&base)).unwrap();
+        let run =
+            build_ruby_frontend_run(&obligations.manifest, &killed, "run-1", "now", 0).unwrap();
+        let declared = serde_json::to_string(&run.request.manifest.limitations).unwrap();
+        assert!(
+            declared.contains("ruby-process-did-not-report"),
+            "a process that never reported must declare the gap: {declared}"
+        );
+        fs::remove_dir_all(&killed).unwrap();
+
+        let mut clean = base.to_vec();
+        clean.push(serde_json::json!({"t":"exit","at":9}));
+        let reported = temporary("reported");
+        fs::write(reported.join("main.7.a.mmap"), transport(&clean)).unwrap();
+        let run =
+            build_ruby_frontend_run(&obligations.manifest, &reported, "run-1", "now", 0).unwrap();
+        let declared = serde_json::to_string(&run.request.manifest.limitations).unwrap();
+        assert!(
+            !declared.contains("ruby-process-did-not-report"),
+            "a process that reported cleanly must declare nothing: {declared}"
+        );
+        fs::remove_dir_all(&reported).unwrap();
     }
 
     #[test]
