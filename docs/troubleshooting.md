@@ -100,6 +100,14 @@ Read the reason in the summary, `scope`, or `gaps` output. Fix a configuration
 problem when one is named. Otherwise stop the coverage loop and report the
 limit; do not change application code or add a meaningless test to chase 100%.
 
+One limit names a cause you can remove. `ruby-process-did-not-report` means a
+Ruby process the run measured ended without reporting: it was killed with
+`SIGKILL`, or left through `exit!`, before the exit where Ruby hands over its
+coverage. Whatever that process observed since its last test boundary is gone,
+and its lines are not shown as uncovered because nothing can say whether they
+ran. Stop the process with `SIGTERM` instead, or wait for it to exit, and the
+limit does not appear.
+
 ## Coverage is aggregate instead of per test
 
 Aggregate coverage still shows which source ran, but Supercov cannot truthfully

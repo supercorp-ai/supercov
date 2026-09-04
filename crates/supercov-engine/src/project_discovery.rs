@@ -440,7 +440,55 @@ fn child_process_launcher(expression: &Expression<'_>) -> bool {
         Expression::StaticMemberExpression(member) => Some(member.property.name.as_str()),
         _ => None,
     };
-    name.is_some_and(|name| ["spawn", "spawnSync", "execFile", "execFileSync"].contains(&name))
+    name.is_some_and(|name| {
+        [
+            "spawn",
+            "spawnSync",
+            "exec",
+            "execSync",
+            "execFile",
+            "execFileSync",
+        ]
+        .contains(&name)
+    })
+}
+
+/// The package script a launch runs, whether the call names a program and an
+/// argument array (`spawn("npm", ["run", "start"])`) or hands the shell one
+/// command string (`execSync("npm run start")`, or `spawn` with `shell`). The
+/// string form is how most suites start a server, and it is the form the
+/// array-only match missed.
+fn launched_package_script<'a>(
+    program: &'a str,
+    arguments: Option<&'a oxc_ast::ast::ArrayExpression<'a>>,
+) -> Option<String> {
+    let words: Vec<String> = match arguments {
+        Some(arguments) => {
+            if !package_manager(program) {
+                return None;
+            }
+            arguments
+                .elements
+                .iter()
+                .map(|element| match element {
+                    ArrayExpressionElement::StringLiteral(value) => Some(value.value.to_string()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?
+        }
+        None => {
+            let mut tokens = command_tokens(program);
+            if tokens.is_empty() || !package_manager(&tokens.remove(0)) {
+                return None;
+            }
+            tokens
+        }
+    };
+    match words.first().map(String::as_str) {
+        Some("run") => words.get(1).cloned(),
+        Some(_) => words.first().cloned(),
+        None => None,
+    }
 }
 
 fn package_manager(value: &str) -> bool {
@@ -498,22 +546,14 @@ impl<'a> Visit<'a> for BuildOutputScanner<'_> {
             self.found |= relative_build_output(source.value.as_str());
         }
         if child_process_launcher(&call.callee)
-            && let [
-                Argument::StringLiteral(program),
-                Argument::ArrayExpression(arguments),
-                ..,
-            ] = call.arguments.as_slice()
-            && package_manager(program.value.as_str())
+            && let Some(Argument::StringLiteral(program)) = call.arguments.first()
         {
-            let literal = |index| match arguments.elements.get(index) {
-                Some(ArrayExpressionElement::StringLiteral(value)) => Some(value.value.as_str()),
+            let arguments = match call.arguments.get(1) {
+                Some(Argument::ArrayExpression(arguments)) => Some(&**arguments),
                 _ => None,
             };
-            let script = match (literal(0), literal(1)) {
-                (Some("run"), script) => script,
-                (script, _) => script,
-            };
-            self.found |= script.is_some_and(|script| self.build_output_scripts.contains(script));
+            self.found |= launched_package_script(program.value.as_str(), arguments)
+                .is_some_and(|script| self.build_output_scripts.contains(&script));
         }
         walk::walk_call_expression(self, call);
     }
@@ -948,6 +988,33 @@ mod tests {
                 (
                     "tests/index.test.ts",
                     "import { spawn } from 'node:child_process';\nspawn('npm', ['run', 'start']);\n",
+                ),
+            ],
+        );
+        let discovered =
+            discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
+        assert_eq!(discovered.build_adapter, BuildAdapter::Generic);
+        assert_eq!(discovered.build_command, command(&["npm", "run", "build"]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retains_the_build_when_tests_exec_a_compiled_package_script_as_one_string() {
+        // `execSync("npm run start")` hands the shell a single string. It is
+        // how most suites start the server they test against, and the
+        // array-only match let it through to the same hang as an unbuilt
+        // gateway.
+        let root = project(
+            "exec-compiled-script",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"tsc","start":"node dist/index.js","test":"node --test tests/*.test.ts"}}"#,
+                ),
+                ("src/index.ts", "export const ready = true"),
+                (
+                    "tests/index.test.ts",
+                    "import { execSync } from 'node:child_process';\nexecSync('npm run start');\n",
                 ),
             ],
         );

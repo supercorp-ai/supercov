@@ -63,6 +63,20 @@ TypeScript, and TSX are supported.
 Supercov instruments an isolated copy. It does not ask you to add an import,
 reporter, plugin, or alternate build output.
 
+A suite that runs its own compiled output is built before the tests start.
+Supercov reads the tests: one that imports from `dist/`, or launches a package
+script that does—`spawn("npm", ["run", "start"])`, `execSync("npm run
+start")`, or any launch handed to the shell as one string—means the build is
+part of the run, and a `build` script is run inside the isolated copy first.
+Without it the server under test would never exist. A launch that only names a
+build subcommand, such as `vite build`, is not taken as consuming a build.
+
+Instrumented TypeScript is exempt from the host's type policy whether the
+compile is Supercov's own build step or the test command's own `tsc`.
+Instrumentation necessarily rewrites control-flow expressions in ways a type
+checker cannot narrow through, so a project that compiles inside its test
+command builds under measurement exactly as it does without it.
+
 ### Browsers, servers, and child processes
 
 Playwright support includes Chromium, Firefox, and WebKit, along with pages,
@@ -81,6 +95,15 @@ Node child processes inherit coverage automatically. Long-running servers get
 a short drain window after the test command finishes so buffered evidence can
 arrive. Work without a reliable test identity is kept as background coverage
 instead of being assigned to an arbitrary test.
+
+A child a test stops in teardown keeps the coverage it produced. Buffered
+evidence is written when a terminating signal arrives—`SIGTERM`, `SIGINT`,
+`SIGHUP`—not only when the process exits on its own, so killing a gateway
+after the request it served does not lose the request. The program's own
+signal handling is untouched: a process with no handler still dies from the
+signal exactly as it would unmeasured, and one with its own handler keeps
+it. `SIGKILL` cannot be caught by anything and is the one stop that loses
+whatever was still buffered.
 
 ## Rust
 
@@ -207,6 +230,16 @@ branches Ruby reports itself. Everything that needs a probe (multi-condition
 decisions, `||=`, loops, `rescue` flow, a second statement on a line) is
 declared unmeasured on that interpreter rather than shown as a gap. Ruby 3.4
 and newer measure everything.
+
+Ruby reads its own coverage as the interpreter exits, and that shapes what a
+stopped process keeps. A process ended by a signal it can catch—`SIGTERM`
+from a test's teardown, `SIGINT`—unwinds through that exit and reports
+everything it measured. A process killed with `SIGKILL`, or one that leaves
+through `exit!`, never gets there and takes with it whatever it observed since
+its last test boundary. Supercov cannot recover that or say which lines it
+would have been, so the run declares that a process did not report, which
+blocks completeness, rather than counting those lines against the code. Stop a
+Ruby server with `SIGTERM`, or wait for it to exit, and it reports.
 
 ```sh
 npx supercov -- rspec
