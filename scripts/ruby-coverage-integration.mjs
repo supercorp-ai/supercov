@@ -5,7 +5,7 @@
 // denominator and observations the fixture is designed to produce.
 
 import assert from 'node:assert/strict';
-import { cpSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -41,16 +41,16 @@ function run(program, args, options = {}) {
   return result;
 }
 
-function supercov(args, environment) {
+function supercov(args, environment, cwd = project) {
   return spawnSync(process.execPath, [launcher, ...args], {
-    cwd: project,
+    cwd,
     encoding: 'utf8',
     env: environment,
   });
 }
 
-function query(args, environment) {
-  const result = supercov([...args, '--json'], environment);
+function query(args, environment, cwd = project) {
+  const result = supercov([...args, '--json'], environment, cwd);
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
   assert.equal(payload.ok, true, result.stdout);
@@ -188,7 +188,94 @@ try {
   const countdown = query(['runs', 'latest', 'line', 'lib/shapes.rb:99'], environment);
   assert.match(JSON.stringify(countdown), /features\/shapes\.feature:7/, 'Cucumber scenario identity reaches the line');
 
-  console.log(`[ruby-coverage] ${ruby} measured the fixture through RSpec, Minitest, test-unit, Cucumber and thread-parallel Minitest with exact totals`);
+
+  // A suite stops a server it started by signalling it, and what a signalled
+  // process keeps is not obvious: Ruby turns a terminating signal into
+  // SignalException, which unwinds through the `at_exit` where Coverage's own
+  // result is read, so the child keeps every line it measured. SIGKILL cannot
+  // be caught in any language and loses that result, which is the documented
+  // boundary. Both are asserted together, because a trap installed in the
+  // runtime could quietly turn the first case into the second.
+  const signalProject = resolve(temporary, 'signals');
+  mkdirSync(resolve(signalProject, 'lib'), { recursive: true });
+  mkdirSync(resolve(signalProject, 'test'), { recursive: true });
+  writeFileSync(
+    resolve(signalProject, 'lib/worker.rb'),
+    [
+      'module Worker',
+      '  def self.handle(kind)',
+      '    if kind == "termed"',
+      '      first = kind.length',
+      '      return "termed#{first}"',
+      '    end',
+      '    if kind == "killed"',
+      '      second = kind.length',
+      '      return "killed#{second}"',
+      '    end',
+      '    "other"',
+      '  end',
+      'end',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    resolve(signalProject, 'child.rb'),
+    [
+      'require "worker"',
+      '$stdout.sync = true',
+      'while (line = $stdin.gets)',
+      '  $stdout.puts Worker.handle(line.strip)',
+      'end',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    resolve(signalProject, 'test/signal_test.rb'),
+    [
+      'require "minitest/autorun"',
+      'require "open3"',
+      'require "rbconfig"',
+      '',
+      'class SignalTest < Minitest::Test',
+      '  def drive(word, signal)',
+      '    stdin, stdout, wait = Open3.popen2(RbConfig.ruby, "-Ilib", "child.rb")',
+      '    stdin.puts word',
+      '    assert_match(/#{word}/, stdout.gets.strip)',
+      '    Process.kill(signal, wait.pid)',
+      '    refute_nil wait.value.termsig, "the child must die from the signal"',
+      '  end',
+      '',
+      '  def test_terminated',
+      '    drive("termed", "TERM")',
+      '  end',
+      '',
+      '  def test_hard_killed',
+      '    drive("killed", "KILL")',
+      '  end',
+      'end',
+      '',
+    ].join('\n'),
+  );
+  const signals = supercov(
+    ['--', 'ruby', '-Ilib', '-Itest', 'test/signal_test.rb'],
+    environment,
+    signalProject,
+  );
+  assert.equal(signals.status, 0, `${signals.stdout}\n${signals.stderr}`);
+  const terminated = query(['runs', 'latest', 'line', 'lib/worker.rb:4'], environment, signalProject);
+  assert.match(
+    JSON.stringify(terminated),
+    /test_terminated/,
+    'a child that took SIGTERM must keep the lines it covered',
+  );
+  const hardKilled = query(['runs', 'latest', 'line', 'lib/worker.rb:8'], environment, signalProject);
+  assert.doesNotMatch(
+    JSON.stringify(hardKilled),
+    /test_hard_killed/,
+    'SIGKILL cannot be caught, so that result is gone and must not be claimed',
+  );
+
+  console.log(`[ruby-coverage] ${ruby} measured the fixture through RSpec, Minitest, test-unit, Cucumber and thread-parallel Minitest with exact totals, and a signalled child keeps its coverage`);
 } finally {
   rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 }

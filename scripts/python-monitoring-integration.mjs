@@ -6,7 +6,7 @@
 // coverage.py itself is never imported by the product path.
 
 import assert from 'node:assert/strict';
-import { cpSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, delimiter, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -319,8 +319,89 @@ try {
   );
   assertOracleAgreement(oracleProject, oracleEnvironment);
 
+
+  // A suite stops a server it started by signalling it. Python's default
+  // SIGTERM ends the process without running atexit, so nothing written at
+  // exit would survive -- but evidence goes into an mmap that the kernel has
+  // already made durable, which is what makes a killed worker's coverage
+  // recoverable at all. Assert that directly, for SIGKILL as well as SIGTERM,
+  // because any move back to a buffer flushed at exit would silently undo it.
+  const signalProject = resolve(temporary, 'signals');
+  mkdirSync(signalProject, { recursive: true });
+  writeFileSync(
+    resolve(signalProject, 'worker.py'),
+    [
+      'def handle(kind):',
+      '    if kind == "termed":',
+      '        first = len(kind)',
+      '        return "termed%d" % first',
+      '    if kind == "killed":',
+      '        second = len(kind)',
+      '        return "killed%d" % second',
+      '    return "other"',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    resolve(signalProject, 'child.py'),
+    [
+      'import sys',
+      'from worker import handle',
+      '',
+      'for line in sys.stdin:',
+      '    sys.stdout.write(handle(line.strip()) + "\\n")',
+      '    sys.stdout.flush()',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    resolve(signalProject, 'test_signal.py'),
+    [
+      'import os',
+      'import signal',
+      'import subprocess',
+      'import sys',
+      '',
+      '',
+      'def drive(word, number):',
+      '    child = subprocess.Popen(',
+      '        [sys.executable, "child.py"],',
+      '        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,',
+      '    )',
+      '    child.stdin.write(word + "\\n")',
+      '    child.stdin.flush()',
+      '    assert word in child.stdout.readline()',
+      '    os.kill(child.pid, number)',
+      '    child.wait()',
+      '    assert child.returncode == -number, "the child must die from the signal"',
+      '',
+      '',
+      'def test_terminated():',
+      '    drive("termed", signal.SIGTERM)',
+      '',
+      '',
+      'def test_hard_killed():',
+      '    drive("killed", signal.SIGKILL)',
+      '',
+    ].join('\n'),
+  );
+  const signalEnvironment = environmentFor(signalProject, venv);
+  successfulSupercov(
+    signalProject,
+    ['--', 'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'test_signal.py'],
+    signalEnvironment,
+  );
+  for (const [line, test] of [[3, 'test_terminated'], [6, 'test_hard_killed']]) {
+    const detail = query(signalProject, ['runs', 'latest', 'line', `worker.py:${line}`], signalEnvironment);
+    assert.match(
+      JSON.stringify(detail),
+      new RegExp(test),
+      `worker.py:${line} must keep the coverage its signalled child produced`,
+    );
+  }
+
   console.log(
-    `[python-monitoring] ${basename(python)} passed serial, xdist, retry, crash, concurrency, unittest, positions and oracle differentials`,
+    `[python-monitoring] ${basename(python)} passed serial, xdist, retry, crash, concurrency, unittest, positions, signalled children and oracle differentials`,
   );
 } finally {
   rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
