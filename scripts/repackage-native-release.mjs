@@ -20,6 +20,7 @@ import {
   nativeChecksumName,
   nativePackageStem,
   nativeTarballName,
+  releaseTargets,
 } from "./native-package-names.mjs";
 
 const repository = resolve(import.meta.dirname, "..");
@@ -98,7 +99,7 @@ const sourceChecksums = filesUnder(source)
   .map(path => ({ path, value: JSON.parse(readFileSync(path, "utf8")) }));
 mkdirSync(output, { recursive: true });
 
-for (const target of registry.targets) {
+for (const target of releaseTargets(registry)) {
   const matches = sourceChecksums.filter(
     entry => entry.value.rustTarget === target.rustTarget,
   );

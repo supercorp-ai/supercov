@@ -1,0 +1,30 @@
+name: Windows probe
+
+# Windows can only be proven on a Windows runner: three dependencies compile C
+# and assembly in their build scripts and need MSVC, which no other host has,
+# and the Windows process supervisor has never been compiled in CI. This builds
+# the two MSVC targets through the same steps a release uses -- compile, packed
+# install, real coverage run, staging, packing, size and checksum gates -- while
+# the release set is not verified, because these targets are held out of it
+# with "publish": false until a run here is green.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  windows:
+    uses: ./.github/workflows/native-artifacts.yml
+    with:
+      verify-release-set: false
+      matrix-json: >-
+        {"include":[
+          {"runner":"windows-latest","target":"x86_64-pc-windows-msvc","package":"@supercov/cli-win32-x64","artifact":"supercov-cli-win32-x64","executable":"supercov.exe","packedInstall":true},
+          {"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","package":"@supercov/cli-win32-arm64","artifact":"supercov-cli-win32-arm64","executable":"supercov.exe","packedInstall":true}
+        ]}
+    permissions:
+      actions: read
+      contents: read

@@ -6,6 +6,7 @@ import { gunzipSync } from "node:zlib";
 import {
   nativeChecksumName,
   nativeTarballName,
+  releaseTargets,
 } from "./native-package-names.mjs";
 
 const repository = resolve(import.meta.dirname, "..");
@@ -19,7 +20,7 @@ const registry = JSON.parse(
 assert.deepEqual(
   mainPackage.optionalDependencies,
   Object.fromEntries(
-    registry.targets
+    releaseTargets(registry)
       .map(target => [target.package, mainPackage.version])
       .sort(([left], [right]) => left.localeCompare(right)),
   ),
@@ -63,7 +64,7 @@ function tarEntries(path) {
 }
 
 const packages = [];
-for (const target of registry.targets) {
+for (const target of releaseTargets(registry)) {
   const tarballName = nativeTarballName(target.package, mainPackage.version);
   const tarball = resolve(directory, tarballName);
   const checksumPath = resolve(directory, nativeChecksumName(target.package));

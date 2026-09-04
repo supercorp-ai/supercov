@@ -18,6 +18,13 @@ on:
         required: false
         type: string
         default: ''
+      # A probe of one platform builds and validates its targets without being
+      # asked to constitute the whole release set; a release leaves this on.
+      verify-release-set:
+        description: Verify the built targets form the complete native release set
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   actions: read
@@ -84,7 +91,7 @@ jobs:
   release-set:
     name: Verify complete native release set
     needs: build
-    if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    if: ${{ always() && inputs.verify-release-set && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
