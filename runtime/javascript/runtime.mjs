@@ -480,12 +480,59 @@ function appendDurableBackgroundRecord(fs, runId, record) {
   return path;
 }
 var _a7;
+// Evidence buffered for the current turn is lost when a signal ends the
+// process, because "exit" does not run for one -- and killing a child in
+// teardown is exactly how a suite stops a gateway it started. Flush on the
+// terminating signals as well as on exit.
+//
+// Exactly one listener per signal serves every flusher: two of our own would
+// each see a sibling listener, neither would judge itself alone, and a
+// signalled process would stay alive. Having flushed, restore what the signal
+// would have done -- if nothing else is listening the program expected to die,
+// so re-raise with our listener gone; if the program installed its own handler
+// it deliberately suppressed that default and we must not exit on its behalf.
+function flushOnTermination(flush) {
+  var _a9;
+  if (typeof process === "undefined")
+    return;
+  const flushers = (_a9 = runtimeGlobal.__SUPERCOV_TERMINATION_FLUSHERS__) != null ? _a9 : /* @__PURE__ */ new Set();
+  runtimeGlobal.__SUPERCOV_TERMINATION_FLUSHERS__ = flushers;
+  flushers.add(flush);
+  if (runtimeGlobal.__SUPERCOV_TERMINATION_INSTALLED__)
+    return;
+  runtimeGlobal.__SUPERCOV_TERMINATION_INSTALLED__ = true;
+  const drain = () => {
+    var _a10;
+    for (const value of (_a10 = runtimeGlobal.__SUPERCOV_TERMINATION_FLUSHERS__) != null ? _a10 : []) {
+      try {
+        value();
+      } catch (e) {
+      }
+    }
+  };
+  try {
+    process.on("exit", drain);
+  } catch (e) {
+  }
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP", "SIGBREAK"]) {
+    try {
+      process.on(signal, () => {
+        drain();
+        if (process.listenerCount(signal) <= 1) {
+          process.removeAllListeners(signal);
+          process.kill(process.pid, signal);
+        }
+      });
+    } catch (e) {
+    }
+  }
+}
 if (!isBrowser) {
   const flushers = (_a7 = runtimeGlobal.__SUPERCOV_BUFFER_FLUSHERS__) != null ? _a7 : /* @__PURE__ */ new Set();
   runtimeGlobal.__SUPERCOV_BUFFER_FLUSHERS__ = flushers;
   flushers.add(flushAllBufferedServerEvidence);
   if (!runtimeGlobal.__SUPERCOV_BUFFER_EXIT_INSTALLED__) {
-    process.once("exit", () => {
+    flushOnTermination(() => {
       var _a8;
       for (const flush of (_a8 = runtimeGlobal.__SUPERCOV_BUFFER_FLUSHERS__) != null ? _a8 : [])
         flush();
@@ -538,7 +585,7 @@ function enqueueServerAppend(directory, path, line, runId) {
   if (!state.serverExitHookInstalled && typeof process !== "undefined") {
     state.serverExitHookInstalled = true;
     try {
-      process.on("exit", flushServerAppends);
+      flushOnTermination(flushServerAppends);
     } catch (e) {
     }
   }
@@ -1238,6 +1285,7 @@ export {
   enableRuntimeSnapshotEvidence,
   flushBufferedBackgroundEvidence,
   flushBufferedServerEvidence,
+  flushOnTermination,
   loopBegin,
   loopEnd,
   loopEntered,

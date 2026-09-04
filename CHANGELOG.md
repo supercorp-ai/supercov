@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- Coverage a process buffered is no longer lost when a signal ends it, so a server or gateway a test kills in teardown keeps the coverage it produced.
+- Instrumented TypeScript carries the generated-source exemption under a direct test command, not only a Supercov-orchestrated build, so a project that compiles inside its own test command builds under measurement.
+- A project whose tests launch a package script that runs compiled output is built before the runner, instead of the run reaching a gateway that was never built.
+
 ## 0.0.34
 
 **Fixed**

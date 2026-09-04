@@ -86,23 +86,21 @@ try {
     '',
   ].join('\n');
   writeFileSync(resolve(project, 'src/permission.ts'), application);
-  writeFileSync(
-    resolve(project, 'tests/permission.test.js'),
-    [
-      "import assert from 'node:assert/strict';",
-      "import test from 'node:test';",
-      "import { label, permission } from '../dist/permission.js';",
-      'for (const [name, admin, owner, expected] of [',
-      "  ['admin', true, false, 'allowed'],",
-      "  ['owner', false, true, 'allowed'],",
-      "  ['both', true, true, 'allowed'],",
-      "  ['neither', false, false, 'denied'],",
-      ']) test(name, () => assert.equal(permission(admin, owner), expected));',
-      "test('narrowed', () => assert.equal(label(' hi '), 'hi'));",
-      "test('missing', () => assert.equal(label(), 'none'));",
-      '',
-    ].join('\n'),
-  );
+  const tests = [
+    "import assert from 'node:assert/strict';",
+    "import test from 'node:test';",
+    "import { label, permission } from '../dist/permission.js';",
+    'for (const [name, admin, owner, expected] of [',
+    "  ['admin', true, false, 'allowed'],",
+    "  ['owner', false, true, 'allowed'],",
+    "  ['both', true, true, 'allowed'],",
+    "  ['neither', false, false, 'denied'],",
+    ']) test(name, () => assert.equal(permission(admin, owner), expected));',
+    "test('narrowed', () => assert.equal(label(' hi '), 'hi'));",
+    "test('missing', () => assert.equal(label(), 'none'));",
+    '',
+  ].join('\n');
+  writeFileSync(resolve(project, 'tests/permission.test.js'), tests);
 
   const run = rust('__run-js-direct', {
     root: project,
@@ -131,8 +129,78 @@ try {
   assert.equal(summary.data.coverage.branches.percentage, 100);
   assert.equal(summary.data.confidence.lines.asserted, 7);
   assert.equal(summary.data.confidence.assertionCoveredMcdcConditions, 3);
+
+  // A project may intentionally compile inside its test command. With no
+  // separately declared build script this is a Direct adapter run, so its
+  // instrumented TypeScript still needs the generated-source type exemption.
+  const directProject = resolve(temporary, 'direct-project');
+  mkdirSync(resolve(directProject, 'src'), { recursive: true });
+  mkdirSync(resolve(directProject, 'tests'), { recursive: true });
+  mkdirSync(resolve(directProject, 'node_modules/.bin'), { recursive: true });
+  symlinkSync(
+    resolve(repository, 'node_modules/typescript'),
+    resolve(directProject, 'node_modules/typescript'),
+  );
+  symlinkSync(
+    resolve(repository, 'node_modules/.bin/tsc'),
+    resolve(directProject, 'node_modules/.bin/tsc'),
+  );
+  writeFileSync(
+    resolve(directProject, 'package.json'),
+    JSON.stringify({
+      name: 'supercov-rust-direct-tsc-fixture',
+      private: true,
+      type: 'module',
+      scripts: {
+        test: 'tsc -p tsconfig.json && node --test',
+      },
+    }) + '\n',
+  );
+  writeFileSync(
+    resolve(directProject, 'tsconfig.json'),
+    JSON.stringify({
+      compilerOptions: {
+        target: 'ES2022',
+        module: 'NodeNext',
+        moduleResolution: 'NodeNext',
+        rootDir: 'src',
+        outDir: 'dist',
+        strict: true,
+      },
+      include: ['src/**/*.ts'],
+    }) + '\n',
+  );
+  writeFileSync(resolve(directProject, 'src/permission.ts'), application);
+  writeFileSync(resolve(directProject, 'tests/permission.test.js'), tests);
+
+  const directRun = rust('__run-js-direct', {
+    root: directProject,
+    command: ['npm', 'test'],
+    runId: 'rust-direct-tsc',
+    startedAt: '2026-08-25T00:00:08.000Z',
+  });
+  assert.equal(directRun.exitCode, 0);
+  assert.equal(directRun.assertionCalls, 3);
+  assert.equal(
+    readFileSync(resolve(directProject, 'src/permission.ts'), 'utf8'),
+    application,
+  );
+  assert.equal(directRun.metadata.timings.instrumentedBuildMs, 0);
+  const directSummary = rust('__query-stored-run', {
+    root: directProject,
+    query: {
+      runId: directRun.runId,
+      filter: 'passed',
+      command: 'summary',
+    },
+  });
+  assert.equal(directSummary.data.valid, true);
+  assert.equal(directSummary.data.complete, true);
+  assert.equal(directSummary.data.tests, 6);
+  assert.equal(directSummary.data.coverage.lines.percentage, 100);
+  assert.equal(directSummary.data.coverage.branches.percentage, 100);
   console.log(
-    '[rust-generic-tsc] Rust preserves strict rootDir compilation and exact Node attribution',
+    '[rust-generic-tsc] Rust preserves strict rootDir compilation for generic and direct commands with exact Node attribution',
   );
 } finally {
   if (process.env.SUPERCOV_KEEP_FIXTURE === '1')

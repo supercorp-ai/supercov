@@ -1080,12 +1080,20 @@ pub fn prepare_javascript_frontend(
         if project.build_adapter == BuildAdapter::Generic {
             let runtime = generic_runtime_binding(workspace, project, &path, &generated)?;
             output.code = output.code.replace("virtual:supercov-runtime", &runtime);
-            if matches!(
+        }
+        // Direct commands can compile TypeScript themselves (`npm test` may
+        // begin with `tsc`), so they need the same generated-source exemption
+        // as Supercov's separately orchestrated generic build. Instrumentation
+        // necessarily changes control-flow expressions in ways the host type
+        // checker cannot narrow through, while source syntax remains covered
+        // by the parser before this banner is applied.
+        if project.build_adapter != BuildAdapter::Vite
+            && matches!(
                 path.extension().and_then(|value| value.to_str()),
                 Some("ts" | "tsx" | "mts" | "cts")
-            ) {
-                output.code = generated_source_banner(&output.code);
-            }
+            )
+        {
+            output.code = generated_source_banner(&output.code);
         }
         if project.build_adapter == BuildAdapter::Vite {
             vite_transforms.insert(

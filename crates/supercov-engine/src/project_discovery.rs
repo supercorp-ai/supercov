@@ -8,8 +8,9 @@ use std::{
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, BinaryExpression, CallExpression, Expression, ImportDeclarationSpecifier,
-    ImportExpression, ImportOrExportKind, Program, Statement, StaticMemberExpression,
+    Argument, ArrayExpressionElement, BinaryExpression, CallExpression, Expression,
+    ImportDeclarationSpecifier, ImportExpression, ImportOrExportKind, Program, Statement,
+    StaticMemberExpression,
 };
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
@@ -428,12 +429,56 @@ fn string_expression<'a>(expression: &'a Expression<'_>) -> Option<&'a str> {
     Some(literal.value.as_str())
 }
 
-#[derive(Default)]
-struct BuildOutputScanner {
+struct BuildOutputScanner<'a> {
     found: bool,
+    build_output_scripts: &'a BTreeSet<String>,
 }
 
-impl<'a> Visit<'a> for BuildOutputScanner {
+fn child_process_launcher(expression: &Expression<'_>) -> bool {
+    let name = match expression {
+        Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+        Expression::StaticMemberExpression(member) => Some(member.property.name.as_str()),
+        _ => None,
+    };
+    name.is_some_and(|name| ["spawn", "spawnSync", "execFile", "execFileSync"].contains(&name))
+}
+
+fn package_manager(value: &str) -> bool {
+    let executable = value
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(value)
+        .trim_end_matches(".cmd")
+        .trim_end_matches(".exe");
+    ["npm", "pnpm", "yarn", "bun"].contains(&executable)
+}
+
+fn script_references_build_output(command: &str) -> bool {
+    command_tokens(command).iter().any(|token| {
+        let token = token.trim_start_matches("../").trim_start_matches("./");
+        let mut segments = token.split(['/', '\\']);
+        let directory = segments.next();
+        // A bare `build` is a subcommand -- `vite build` produces output, it
+        // does not consume any -- so only a path reaching INTO the directory
+        // means the script runs something already compiled.
+        segments.next().is_some() && matches!(directory, Some("dist" | "build" | "out" | "output"))
+    })
+}
+
+fn build_output_scripts(manifest: &Value) -> BTreeSet<String> {
+    manifest
+        .get("scripts")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, command)| match command.as_str() {
+            Some(command) if script_references_build_output(command) => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+impl<'a> Visit<'a> for BuildOutputScanner<'_> {
     fn visit_import_declaration(&mut self, declaration: &oxc_ast::ast::ImportDeclaration<'a>) {
         self.found |= relative_build_output(declaration.source.value.as_str());
         walk::walk_import_declaration(self, declaration);
@@ -452,12 +497,32 @@ impl<'a> Visit<'a> for BuildOutputScanner {
         {
             self.found |= relative_build_output(source.value.as_str());
         }
+        if child_process_launcher(&call.callee)
+            && let [
+                Argument::StringLiteral(program),
+                Argument::ArrayExpression(arguments),
+                ..,
+            ] = call.arguments.as_slice()
+            && package_manager(program.value.as_str())
+        {
+            let literal = |index| match arguments.elements.get(index) {
+                Some(ArrayExpressionElement::StringLiteral(value)) => Some(value.value.as_str()),
+                _ => None,
+            };
+            let script = match (literal(0), literal(1)) {
+                (Some("run"), script) => script,
+                (script, _) => script,
+            };
+            self.found |= script.is_some_and(|script| self.build_output_scripts.contains(script));
+        }
         walk::walk_call_expression(self, call);
     }
 }
 
-fn tests_import_build_output(root: &Path) -> bool {
-    fn visit(directory: &Path) -> bool {
+/// Whether tests consume compiled output directly or launch a package script
+/// that does. Either form requires the instrumented build before the runner.
+fn tests_require_build_output(root: &Path, manifest: &Value) -> bool {
+    fn visit(directory: &Path, build_output_scripts: &BTreeSet<String>) -> bool {
         let Ok(entries) = read_directory(directory) else {
             return false;
         };
@@ -474,7 +539,7 @@ fn tests_import_build_output(root: &Path) -> bool {
             if file_type.is_symlink() {
                 continue;
             }
-            if file_type.is_dir() && visit(&path) {
+            if file_type.is_dir() && visit(&path, build_output_scripts) {
                 return true;
             }
             if file_type.is_file()
@@ -483,7 +548,10 @@ fn tests_import_build_output(root: &Path) -> bool {
             {
                 let allocator = Allocator::default();
                 if let Some(program) = parse_program(&allocator, &path, &source) {
-                    let mut scanner = BuildOutputScanner::default();
+                    let mut scanner = BuildOutputScanner {
+                        found: false,
+                        build_output_scripts,
+                    };
                     scanner.visit_program(&program);
                     if scanner.found {
                         return true;
@@ -494,9 +562,10 @@ fn tests_import_build_output(root: &Path) -> bool {
         false
     }
 
+    let build_output_scripts = build_output_scripts(manifest);
     ["test", "tests", "spec", "specs", "e2e", "__tests__"]
         .iter()
-        .any(|directory| visit(&root.join(directory)))
+        .any(|directory| visit(&root.join(directory), &build_output_scripts))
 }
 
 fn identifier(expression: &Expression<'_>, name: &str) -> bool {
@@ -706,8 +775,12 @@ pub fn discover_coverage_project(
     let owns_build = ["vite", "tsc", "webpack", "rollup", "next", "remix"]
         .iter()
         .any(|tool| has_tool(&tokens, tool));
-    let executes_source_directly = (source_transforming_runner && !tests_import_build_output(root))
-        || (node_test && typescript_test && !owns_build);
+    // Reading the suite is the expensive half of this question, so it stays on
+    // the right of `&&`: a command that never executes source directly answers
+    // it without parsing a single test file.
+    let executes_source_directly = (source_transforming_runner
+        || (node_test && typescript_test && !owns_build))
+        && !tests_require_build_output(root, &manifest);
     let build_command = if script(&manifest, "build").is_some() && !executes_source_directly {
         vec!["npm".into(), "run".into(), "build".into()]
     } else {
@@ -859,6 +932,52 @@ mod tests {
             discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
         assert_eq!(discovered.build_adapter, BuildAdapter::Generic);
         assert!(discovered.uses_jest);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn retains_the_build_when_source_direct_tests_spawn_a_compiled_package_script() {
+        let root = project(
+            "spawned-compiled-script",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"tsc","start":"node dist/index.js","test":"node --test tests/*.test.ts"}}"#,
+                ),
+                ("src/index.ts", "export const ready = true"),
+                (
+                    "tests/index.test.ts",
+                    "import { spawn } from 'node:child_process';\nspawn('npm', ['run', 'start']);\n",
+                ),
+            ],
+        );
+        let discovered =
+            discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
+        assert_eq!(discovered.build_adapter, BuildAdapter::Generic);
+        assert_eq!(discovered.build_command, command(&["npm", "run", "build"]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn keeps_source_direct_when_a_spawned_script_only_runs_a_build_subcommand() {
+        let root = project(
+            "spawned-build-subcommand",
+            &[
+                (
+                    "package.json",
+                    r#"{"scripts":{"build":"tsc","dev":"vite build","test":"node --test tests/*.test.ts"}}"#,
+                ),
+                ("src/index.ts", "export const ready = true"),
+                (
+                    "tests/index.test.ts",
+                    "import { spawn } from 'node:child_process';\nspawn('npm', ['run', 'dev']);\n",
+                ),
+            ],
+        );
+        let discovered =
+            discover_coverage_project(&root, &BTreeMap::new(), &command(&["npm", "test"])).unwrap();
+        assert_eq!(discovered.build_adapter, BuildAdapter::Direct);
+        assert!(discovered.build_command.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
