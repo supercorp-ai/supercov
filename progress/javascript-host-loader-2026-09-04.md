@@ -1,7 +1,8 @@
 # A host ESM loader claims our generated modules — 2026-09-04
 
-Status: reproduced, not fixed. Found while triaging a report from measuring
-Supergateway, whose test command is
+Status: fixed by giving the generated modules the .mjs extension, with a gate
+that reproduces the loader property. Found while triaging a report from
+measuring Supergateway, whose test command is
 
 ```sh
 node --test --experimental-loader ts-node/esm --experimental-test-module-mocks tests/**/*.test.ts
@@ -36,32 +37,33 @@ We already declare the generated directory ESM with its own
 themselves: `capability.js` imports nothing and `launchSupervisor.js` imports
 only Node built-ins. The cycle appears through the loader, not through us.
 
-## What does not fix it
+## What identified it
 
-Renaming to an unambiguously-ESM extension. Copying `capability.js` to
-`capability.mjs` and importing each under the loader links both fine, so the
-extension is not the discriminator. `register.mjs` is already `.mjs` and is
-still transformed. Registering the loader twice, which the failing run does,
-also links fine in isolation.
+The directory name, not the loader. The same file, under the same loader, in
+two places: under a directory called `node_modules` it fails, under one that
+is not it links. Loaders skip dependencies by convention, so `ts-node/esm`
+hands anything under `node_modules` back as CommonJS. Two earlier suspicions
+were wrong and are recorded so nobody re-runs them: the extension appeared not
+to matter, because the comparison was made outside `node_modules` where
+nothing fails, and the duplicate loader registration the failing run performs
+links fine on its own.
 
-## The shape a fix should take
+## The fix
 
-Generated modules are immune to the host's lint policy and its type policy;
-they are not immune to its module policy, and they must be. Two candidates:
+The generated modules carry the `.mjs` extension. It keeps the directory and
+every path-based exclusion that depends on its name, changes no resolution,
+and no tool can misread it. The generated `package.json` declaring the
+directory ESM was already written and is bypassed by a loader that claims the
+file, so the extension is what settles it: under `node_modules` the `.mjs`
+copy links even with no `package.json` present.
 
-- Stop depending on link-time named exports between generated modules. If
-  `register.mjs` bound the capability wrapper through a runtime property
-  lookup rather than a static named import, no host loader could break the
-  link, because there would be no link. This is small, but it touches the
-  browser-safe seam whose reasoning is documented at the top of
-  `capability.js`.
-- Or keep the generated runtime outside the project directory so host loaders
-  never see it. Larger, and it fights the design that keeps everything under
-  `.supercov/`.
+`scripts/rust-host-loader-integration.mjs` runs a fixture under a loader with
+exactly that property, which reproduces ts-node without depending on its
+version. Putting one module back to `.js` fails it.
 
-## Why it matters more than one project
+## Still open from the same report
 
-Any project running a custom ESM loader hits this, and the suite cannot be
-measured at all: the failure is at link time, before any test executes. It
-also blocks confirming the child-process attribution question in the same
-report, because no test ever runs.
+Child-process attribution through an SDK's stdio transport. It could not be
+judged while the suite died at link time; the suite now runs, so it can be
+measured. Their own suite hangs in a gateway test, which their report also
+describes.
