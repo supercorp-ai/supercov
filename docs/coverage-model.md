@@ -58,7 +58,8 @@ owners are allowed, and everyone else is denied. Branches, decision vectors, and
 MC/DC expose those missing cases instead of treating one executed line as proof
 that the decision is safe.
 
-The same principle applies to Rust boolean expressions and control flow.
+The same principle applies to Rust, Python, and Ruby boolean expressions and
+control flow.
 
 ## What 100% means
 

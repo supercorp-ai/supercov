@@ -40,6 +40,7 @@ npx supercov -- cargo test
 npx supercov -- cargo nextest run
 npx supercov -- pytest
 npx supercov -- python -m unittest
+npx supercov -- bundle exec rspec
 ```
 
 ## Give Supercov a job
@@ -129,6 +130,9 @@ Supercov uses exact per-test attribution where an adapter is available. For othe
 | AVA and Mocha | Aggregate structural coverage |
 | Cargo's standard libtest runner | Exact test and attempt identity |
 | cargo-nextest | Exact test, attempt, retry, and binary identity |
+| RSpec | Exact example and before/example/after phase identity |
+| Minitest and test-unit | Exact test and setup/test/teardown identity |
+| Cucumber | Exact scenario and hook-phase identity |
 
 Supercov works with Vite, Next, Turbopack, Webpack, esbuild, SWC, and projects with no build step. One command can collect evidence from several supported runners into a single run.
 

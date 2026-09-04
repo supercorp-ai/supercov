@@ -68,12 +68,15 @@ aggregate instead of being assigned to whichever test happened to be nearby.
 
 Release checks cover program behavior before and after instrumentation, line and
 branch results, decision vectors and MC/DC, supported JavaScript, TypeScript,
-and Rust runner contracts, Chromium, Firefox, and WebKit execution, clean
-installation, interrupted-run recovery, and isolated publication.
+Rust, Python, and Ruby runner contracts, Chromium, Firefox, and WebKit
+execution, clean installation, interrupted-run recovery, and isolated
+publication.
 
 JavaScript behavior is exercised against a pinned TC39 Test262 corpus. MC/DC
 cases are also compared with an independent LLVM implementation so a
-self-consistent calculation error does not pass unnoticed.
+self-consistent calculation error does not pass unnoticed. Python and Ruby
+gates run real suites through their supported runners and assert the resulting
+coverage totals, test identity, and measurement limits.
 
 These checks reduce risk; they do not replace reviewing the assertions and
 behavior protected by a new test.
