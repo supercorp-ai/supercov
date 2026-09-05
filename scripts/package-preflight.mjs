@@ -112,6 +112,20 @@ for (const [name, version] of Object.entries(manifest.optionalDependencies ?? {}
   assert.equal(version, manifest.version);
 }
 
+// npm installs the tarball the lockfile names, not the version beside it. When
+// those disagree the launcher installs one release and refuses it as another,
+// which is how a plain `npm ci` ended up with 0.0.18 binaries under 0.0.38.
+const lockfile = JSON.parse(readFileSync(resolve(repository, "package-lock.json"), "utf8"));
+for (const [name, entry] of Object.entries(lockfile.packages)) {
+  if (!name.startsWith("node_modules/@supercov/cli-")) continue;
+  assert.equal(entry.version, manifest.version, `${name} version in package-lock.json`);
+  assert.equal(
+    entry.resolved,
+    `https://registry.npmjs.org/${name.replace("node_modules/", "")}/-/${name.split("/").at(-1)}-${manifest.version}.tgz`,
+    `${name} tarball URL in package-lock.json`,
+  );
+}
+
 // The release publishes this section verbatim, so a version cannot be tagged
 // without notes, and the notes stay short enough for a reader to scan.
 const notes = releaseNotes(manifest.version);
