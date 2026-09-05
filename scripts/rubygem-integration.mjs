@@ -49,13 +49,13 @@ try {
     readFileSync(resolve(repository, "npm/native-targets.json"), "utf8"),
   );
   const rustTarget = option("--target");
+  const localPlatform = run("ruby", ["-e", "print Gem::Platform.local.to_s"]).stdout.trim();
   let platform;
   if (rustTarget) {
     const target = registry.targets.find((entry) => entry.rustTarget === rustTarget);
     assert(target?.gemPlatform, `${rustTarget} has no RubyGems platform`);
     platform = target.gemPlatform;
   } else {
-    const localPlatform = run("ruby", ["-e", "print Gem::Platform.local.to_s"]).stdout.trim();
     const matching = registry.targets
       .map((target) => target.gemPlatform)
       .filter(Boolean)
@@ -97,7 +97,17 @@ try {
     recursive: true,
     filter: (source) => !source.endsWith("/.supercov"),
   });
-  const covered = run(...shell(resolve(bindir, windows ? "supercov.bat" : "supercov"), ["--", process.execPath, "--test"]), {
+  // RubyGems activates an executable only for a platform the host claims, and
+  // it decides that when the shim runs, not when the gem installs. A musl gem
+  // is built on a glibc runner, where its shim refuses even though its static
+  // binary runs there; for such a gem the installed wrapper -- the file the
+  // shim would have loaded -- is run directly, which still proves the packaged
+  // wrapper and binary with a real coverage run.
+  const activatable = Gem_matches(platform, localPlatform);
+  const launch = activatable
+    ? shell(resolve(bindir, windows ? "supercov.bat" : "supercov"), ["--", process.execPath, "--test"])
+    : ["ruby", [resolve(gemHome, "gems", `supercov-${version}-${platform}`, "exe", "supercov"), "--", process.execPath, "--test"]];
+  const covered = run(...launch, {
     cwd: project,
     env: { ...process.env, GEM_HOME: gemHome, GEM_PATH: gemHome },
   });
