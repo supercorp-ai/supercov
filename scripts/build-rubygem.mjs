@@ -110,10 +110,11 @@ end
 writeFileSync(resolve(staging, "supercov.gemspec"), gemspec);
 
 mkdirSync(outputRoot, { recursive: true });
-const built = spawnSync(
-  "gem",
-  ["build", "supercov.gemspec", "--output", output],
-  { cwd: staging, encoding: "utf8" },
-);
+// On Windows `gem` is a batch file, which only a command interpreter can start.
+const gemCommand =
+  process.platform === "win32"
+    ? [process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", "gem.cmd", "build", "supercov.gemspec", "--output", output]]
+    : ["gem", ["build", "supercov.gemspec", "--output", output]];
+const built = spawnSync(gemCommand[0], gemCommand[1], { cwd: staging, encoding: "utf8" });
 assert.equal(built.status, 0, built.stderr || built.stdout);
 console.log(`[rubygem] built ${output}`);
