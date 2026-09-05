@@ -140,7 +140,7 @@ The CLI is a single native binary. `npx supercov` selects the build for the mach
 | Linux | arm64, x64 | glibc 2.28 or newer (Debian 10, Ubuntu 18.10, RHEL 8 and later), or musl (Alpine); chosen automatically |
 | Windows | arm64, x64 | Windows 10 or newer |
 
-On Windows, JavaScript and TypeScript suites are verified on every release. Python and Ruby suites do not work there yet: a Ruby run cannot start a gem's executable, and a Python run records no coverage. Both are verified on Linux and macOS -- CPython 3.12, 3.13 and 3.14, and Ruby 3.3 and 3.4. Containers, VMs, and remote executors run the same Linux builds. Every release publishes the same binaries to npm, PyPI (`supercov-cli`, a wheel per platform) and RubyGems (`supercov`, a gem per platform except arm64 Windows, which Ruby has no platform for), and the source to crates.io (`supercov`).
+JavaScript, TypeScript, Python and Ruby suites are verified on Linux, macOS and Windows -- CPython 3.12, 3.13 and 3.14, and Ruby 3.3 and 3.4 on every one. Rust suites are verified on Linux and macOS; on Windows a Rust run is refused with a plain message, because the probe transport is not ported there yet. Containers, VMs, and remote executors run the same Linux builds. Every release publishes the same binaries to npm, PyPI (`supercov-cli`, a wheel per platform) and RubyGems (`supercov`, a gem per platform except arm64 Windows, which Ruby has no platform for), and the source to crates.io (`supercov`).
 
 ## Supported test suites
 

@@ -9,11 +9,13 @@
 
 **Fixed**
 
+- On Windows, a Python run measured nothing: the project root reached the runtime with a `\\?\` prefix its files did not carry, so no file was ever under it. A Ruby run could not start `rspec`, because a gem's executable there is a batch shim and only `.exe` was looked for. Both frontends now work on Windows, and both runtimes say so when a run executes files but none under the root, instead of reporting zero in silence.
+- A Rust run on Windows now stops with a plain message instead of failing inside rustc: the probe transport is not ported there yet, and a run without it would report zero coverage.
 - A plain `npm ci` installed native binaries from an older release and then refused them, because the lockfile recorded one version beside a tarball URL naming another.
 
 **Notes**
 
-- Python and Ruby suites are now verified on Linux and macOS. On Windows they do not work yet: a Ruby run cannot start a gem's executable, and a Python run records no coverage. JavaScript and TypeScript suites are unaffected and stay verified on Windows.
+- Python (3.12, 3.13, 3.14) and Ruby (3.3, 3.4) suites are verified on Linux, macOS and Windows; the compatibility matrix now runs the same versions on every operating system.
 
 ## 0.0.38
 
