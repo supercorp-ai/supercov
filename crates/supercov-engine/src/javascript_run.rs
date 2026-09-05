@@ -3,7 +3,6 @@
 use std::{
     collections::BTreeMap,
     ffi::OsString,
-    fs,
     path::{Path, PathBuf},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };

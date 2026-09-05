@@ -107,7 +107,7 @@ fn omit_escaping_link(path: &Path, target: &Path) {
 /// misjudge every link, and the prefix shows up in every diagnostic. Canonical
 /// paths are simplified back to the ordinary form at the one place they are
 /// made, so nothing downstream ever sees the verbatim spelling.
-pub(crate) fn canonicalize_simplified(path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn canonicalize_simplified<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
     fs::canonicalize(path).map(simplified)
 }
 
@@ -265,7 +265,7 @@ fn container_for_locator(
     match locator.placement {
         CargoWorkspacePlacement::Sibling => preferred_cargo_workspace_container(root),
         CargoWorkspacePlacement::Temporary => {
-            let temporary_root = canonicalize_simplified(&std::env::temp_dir())
+            let temporary_root = canonicalize_simplified(std::env::temp_dir())
                 .map_err(|source| io_error(&std::env::temp_dir(), source))?;
             Ok(temporary_root.join(format!(
                 ".supercov-cargo-{}-{}",
@@ -933,7 +933,8 @@ fn link_node_modules<Operations: WorkspaceOperations>(
     // anyway, so following the root link loses no isolation -- refusing it
     // forced one user to materialise a 3.7 GB tree by hand.
     let source = if source_metadata.file_type().is_symlink() {
-        let resolved = canonicalize_simplified(&source).map_err(|error| io_error(&source, error))?;
+        let resolved =
+            canonicalize_simplified(&source).map_err(|error| io_error(&source, error))?;
         if !fs::symlink_metadata(&resolved)
             .map_err(|error| io_error(&resolved, error))?
             .file_type()
@@ -1285,7 +1286,8 @@ fn prepare_cargo_cached_workspace_with_operations<Operations: WorkspaceOperation
     let staging = cargo_transaction_path(root, &container, "staging")?;
     let previous = cargo_transaction_path(root, &container, "previous")?;
     let result = (|| {
-        let canonical_root = canonicalize_simplified(root).map_err(|error| io_error(root, error))?;
+        let canonical_root =
+            canonicalize_simplified(root).map_err(|error| io_error(root, error))?;
         copy_tree(
             root,
             &staging,
@@ -1390,7 +1392,8 @@ fn prepare_cached_workspace_with_operations<Operations: WorkspaceOperations>(
     let staging = transaction_path(root, "staging")?;
     let previous = transaction_path(root, "previous")?;
     let result = (|| {
-        let canonical_root = canonicalize_simplified(root).map_err(|error| io_error(root, error))?;
+        let canonical_root =
+            canonicalize_simplified(root).map_err(|error| io_error(root, error))?;
         copy_tree(
             root,
             &staging,
@@ -1422,8 +1425,8 @@ fn prepare_cached_workspace_with_operations<Operations: WorkspaceOperations>(
             }
             let metadata = fs::symlink_metadata(&from).map_err(|error| io_error(&from, error))?;
             if metadata.file_type().is_dir() {
-                let canonical_workspace =
-                    canonicalize_simplified(&workspace).map_err(|error| io_error(&workspace, error))?;
+                let canonical_workspace = canonicalize_simplified(&workspace)
+                    .map_err(|error| io_error(&workspace, error))?;
                 copy_tree(
                     &from,
                     &to,

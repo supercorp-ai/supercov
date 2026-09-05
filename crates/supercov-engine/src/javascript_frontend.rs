@@ -445,7 +445,16 @@ fn describe_ancestors(path: &Path) -> String {
             Ok(metadata) if metadata.file_type().is_symlink() => "link",
             Ok(metadata) if metadata.file_type().is_dir() => "dir",
             Ok(_) => "file",
-            Err(error) if error.kind() == io::ErrorKind::NotFound => "missing",
+            // A component below a file is "not a directory" on Unix and "path
+            // not found" on Windows; either way nothing exists there.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                "missing"
+            }
             Err(error) => return format!("{} -> {error}", current.display()),
         };
         parts.push(format!("{}={state}", current.display()));
