@@ -15,6 +15,9 @@ const mainPackage = JSON.parse(readFileSync(resolve(repository, "package.json"),
 const registry = JSON.parse(
   readFileSync(resolve(repository, "npm/native-targets.json"), "utf8"),
 );
+const distribution = readFileSync(resolve(repository, "pyproject.toml"), "utf8")
+  .match(/^name = "([^"]+)"$/m)[1]
+  .replaceAll("-", "_");
 
 assert.deepEqual(
   mainPackage.optionalDependencies,
@@ -73,7 +76,7 @@ for (const target of registry.targets) {
     `missing native checksum metadata: ${basename(checksumPath)}`,
   );
   const checksum = JSON.parse(readFileSync(checksumPath, "utf8"));
-  assert.equal(checksum.schemaVersion, 2, `${target.package} checksum schema`);
+  assert.equal(checksum.schemaVersion, 3, `${target.package} checksum schema`);
   assert.equal(checksum.package, target.package, `${target.package} package identity`);
   assert.equal(checksum.version, mainPackage.version, `${target.package} package version`);
   assert.equal(checksum.rustTarget, target.rustTarget, `${target.package} Rust target`);
@@ -88,6 +91,25 @@ for (const target of registry.targets) {
     checksum.binary.gzipBytes <= 15 * 1024 * 1024,
     `${target.package} exceeds the compressed binary gate`,
   );
+  // The wheel and the gem carry this same binary for PyPI and RubyGems; the
+  // set is complete only when each target's files are present as recorded.
+  const recorded = (kind, record, name) => {
+    assert.equal(record?.file, name, `${target.package} ${kind} name`);
+    const path = resolve(directory, name);
+    assert(statSync(path).isFile(), `missing ${kind}: ${name}`);
+    assert.equal(statSync(path).size, record.bytes, `${target.package} ${kind} size`);
+    assert.equal(sha256(path), record.sha256, `${target.package} ${kind} digest`);
+  };
+  recorded(
+    "wheel",
+    checksum.wheel,
+    `${distribution}-${mainPackage.version}-py3-none-${target.wheelPlatform}.whl`,
+  );
+  if (target.gemPlatform) {
+    recorded("gem", checksum.gem, `supercov-${mainPackage.version}-${target.gemPlatform}.gem`);
+  } else {
+    assert.equal(checksum.gem, undefined, `${target.package} has no RubyGems platform yet records a gem`);
+  }
   const entries = tarEntries(tarball);
   const manifestEntry = entries.get("package/package.json");
   const binaryEntry = entries.get(`package/bin/${target.executable}`);
@@ -114,6 +136,8 @@ for (const target of registry.targets) {
     rustTarget: target.rustTarget,
     tarball: checksum.npmTarball,
     binary: checksum.binary,
+    wheel: checksum.wheel,
+    ...(checksum.gem ? { gem: checksum.gem } : {}),
   });
 }
 
@@ -123,4 +147,6 @@ const releaseSet = {
   packages,
 };
 writeFileSync(output, `${JSON.stringify(releaseSet, null, 2)}\n`);
-console.log(`[native-release] verified ${packages.length} exact-version platform artifacts`);
+console.log(
+  `[native-release] verified ${packages.length} exact-version platform artifacts, ${packages.length} wheels, ${packages.filter(entry => entry.gem).length} gems`,
+);

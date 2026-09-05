@@ -15,6 +15,9 @@ const version = JSON.parse(readFileSync(resolve(repository, "package.json"), "ut
 const registry = JSON.parse(
   readFileSync(resolve(repository, "npm/native-targets.json"), "utf8"),
 );
+const distribution = readFileSync(resolve(repository, "pyproject.toml"), "utf8")
+  .match(/^name = "([^"]+)"$/m)[1]
+  .replaceAll("-", "_");
 function digest(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
@@ -58,10 +61,24 @@ try {
     );
     assert.equal(packed.status, 0, packed.stderr || packed.stdout);
     const tarball = resolve(temporary, tarballName);
+    // The wheel and the gem stand in for the real ones: what the verifier
+    // checks is that each is present, named for its platform, and unchanged.
+    const stub = (name, contents) => {
+      const path = resolve(temporary, name);
+      writeFileSync(path, contents);
+      return { file: name, bytes: contents.byteLength, sha256: digest(contents) };
+    };
+    const wheel = stub(
+      `${distribution}-${version}-py3-none-${target.wheelPlatform}.whl`,
+      Buffer.from(`deterministic wheel ${index}\n`),
+    );
+    const gem = target.gemPlatform
+      ? stub(`supercov-${version}-${target.gemPlatform}.gem`, Buffer.from(`deterministic gem ${index}\n`))
+      : undefined;
     writeFileSync(
       resolve(temporary, nativeChecksumName(target.package)),
       `${JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         package: target.package,
         version,
         rustTarget: target.rustTarget,
@@ -80,6 +97,8 @@ try {
           bytes: statSync(tarball).size,
           sha256: digest(readFileSync(tarball)),
         },
+        wheel,
+        ...(gem ? { gem } : {}),
       }, null, 2)}\n`,
     );
   }
@@ -107,6 +126,19 @@ try {
     validRepackaged.stderr || validRepackaged.stdout,
   );
 
+  // A wheel that no longer matches its record is refused before the set is;
+  // the first target is whole, so the failure names the second target's wheel.
+  const damagedWheel = resolve(
+    temporary,
+    `${distribution}-${version}-py3-none-${registry.targets[1].wheelPlatform}.whl`,
+  );
+  const wheelBytes = readFileSync(damagedWheel);
+  writeFileSync(damagedWheel, "damaged");
+  const invalidWheel = verify();
+  assert.notEqual(invalidWheel.status, 0);
+  assert.match(invalidWheel.stderr, /wheel size|wheel digest/);
+  writeFileSync(damagedWheel, wheelBytes);
+
   const damaged = resolve(
     temporary,
     nativeTarballName(registry.targets[0].package, version),
@@ -115,7 +147,7 @@ try {
   const invalid = verify();
   assert.notEqual(invalid.status, 0);
   assert.match(invalid.stderr, /tarball size|tarball digest/);
-  console.log("[native-release] complete-set and corruption gates passed");
+  console.log("[native-release] complete-set, wheel, gem and corruption gates passed");
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }

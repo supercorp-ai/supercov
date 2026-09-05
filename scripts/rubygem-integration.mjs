@@ -50,7 +50,14 @@ try {
 
   const gemHome = resolve(temporary, "gem-home");
   const bindir = resolve(temporary, "bin");
-  run("gem", [
+  // On Windows both `gem` and the installed shim are batch files, which only a
+  // command interpreter can start.
+  const windows = process.platform === "win32";
+  const shell = (command, args) =>
+    windows
+      ? [process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", command, ...args]]
+      : [command, args];
+  run(...shell(windows ? "gem.cmd" : "gem", [
     "install",
     "--local",
     "--no-document",
@@ -59,14 +66,14 @@ try {
     "--bindir",
     bindir,
     resolve(gemDirectory, gems[0]),
-  ]);
+  ]));
 
   const project = resolve(temporary, "project");
   cpSync(resolve(repository, "tests/fixtures/no-build-node"), project, {
     recursive: true,
     filter: (source) => !source.endsWith("/.supercov"),
   });
-  const covered = run(resolve(bindir, "supercov"), ["--", process.execPath, "--test"], {
+  const covered = run(...shell(resolve(bindir, windows ? "supercov.bat" : "supercov"), ["--", process.execPath, "--test"]), {
     cwd: project,
     env: { ...process.env, GEM_HOME: gemHome, GEM_PATH: gemHome },
   });

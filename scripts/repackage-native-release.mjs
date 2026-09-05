@@ -105,7 +105,7 @@ for (const target of registry.targets) {
   assert.equal(matches.length, 1, `expected one source artifact for ${target.rustTarget}`);
   const sourceEntry = matches[0];
   const checksum = sourceEntry.value;
-  assert.equal(checksum.schemaVersion, 2, `${target.rustTarget} checksum schema`);
+  assert.equal(checksum.schemaVersion, 3, `${target.rustTarget} checksum schema`);
   assert(
     [target.package, legacyPackageFor(target.package)].includes(checksum.package),
     `${target.rustTarget} unexpected source package ${checksum.package}`,
@@ -129,6 +129,16 @@ for (const target of registry.targets) {
   assert(binary, `${target.rustTarget} source binary is missing`);
   assert.equal(binary.byteLength, checksum.binary.bytes, `${target.rustTarget} binary size`);
   assert.equal(digestBytes(binary), checksum.binary.sha256, `${target.rustTarget} binary digest`);
+
+  // The wheel and the gem carry this same binary and are already named for
+  // their platforms; they pass through once their records agree.
+  for (const [kind, record] of [["wheel", checksum.wheel], ["gem", checksum.gem]]) {
+    if (!record) continue;
+    const bytes = readFileSync(resolve(dirname(sourceEntry.path), record.file));
+    assert.equal(bytes.byteLength, record.bytes, `${target.rustTarget} ${kind} size`);
+    assert.equal(digestBytes(bytes), record.sha256, `${target.rustTarget} ${kind} digest`);
+    writeFileSync(resolve(output, record.file), bytes);
+  }
 
   const temporary = mkdtempSync(resolve(tmpdir(), "supercov-native-repackage-"));
   try {
@@ -157,7 +167,7 @@ for (const target of registry.targets) {
     writeFileSync(
       resolve(output, nativeChecksumName(target.package)),
       `${JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 3,
         package: target.package,
         version: mainPackage.version,
         rustTarget: target.rustTarget,
@@ -176,6 +186,8 @@ for (const target of registry.targets) {
           bytes: tarballBytes.byteLength,
           sha256: digestBytes(tarballBytes),
         },
+        wheel: checksum.wheel,
+        ...(checksum.gem ? { gem: checksum.gem } : {}),
         repackagedFrom: {
           package: checksum.package,
           npmTarballSha256: checksum.npmTarball.sha256,

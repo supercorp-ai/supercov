@@ -88,7 +88,7 @@ try {
     "--out", artifactMetadata,
   ]);
   const artifact = JSON.parse(readFileSync(artifactMetadata, "utf8"));
-  assert.equal(artifact.schemaVersion, 2);
+  assert.equal(artifact.schemaVersion, 3);
   assert.equal(artifact.package, target.package);
   assert.equal(
     artifact.version,

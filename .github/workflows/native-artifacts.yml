@@ -7,7 +7,7 @@ on:
         description: Exact native target matrix to build for this invocation
         required: false
         type: string
-        default: '{"include":[{"runner":"macos-15","target":"aarch64-apple-darwin","package":"@supercov/cli-darwin-arm64","artifact":"supercov-cli-darwin-arm64","executable":"supercov","packedInstall":true},{"runner":"macos-15-intel","target":"x86_64-apple-darwin","package":"@supercov/cli-darwin-x64","artifact":"supercov-cli-darwin-x64","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","package":"@supercov/cli-linux-arm64-gnu","artifact":"supercov-cli-linux-arm64-gnu","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","package":"@supercov/cli-linux-x64-gnu","artifact":"supercov-cli-linux-x64-gnu","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","package":"@supercov/cli-linux-arm64-musl","artifact":"supercov-cli-linux-arm64-musl","executable":"supercov","musl":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","package":"@supercov/cli-linux-x64-musl","artifact":"supercov-cli-linux-x64-musl","executable":"supercov","musl":true},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","package":"@supercov/cli-win32-x64","artifact":"supercov-cli-win32-x64","executable":"supercov.exe","packedInstall":true},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","package":"@supercov/cli-win32-arm64","artifact":"supercov-cli-win32-arm64","executable":"supercov.exe","packedInstall":true}]}'
+        default: '{"include":[{"runner":"macos-15","target":"aarch64-apple-darwin","package":"@supercov/cli-darwin-arm64","artifact":"supercov-cli-darwin-arm64","executable":"supercov","packedInstall":true},{"runner":"macos-15-intel","target":"x86_64-apple-darwin","package":"@supercov/cli-darwin-x64","artifact":"supercov-cli-darwin-x64","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","package":"@supercov/cli-linux-arm64-gnu","artifact":"supercov-cli-linux-arm64-gnu","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","package":"@supercov/cli-linux-x64-gnu","artifact":"supercov-cli-linux-x64-gnu","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","package":"@supercov/cli-linux-arm64-musl","artifact":"supercov-cli-linux-arm64-musl","executable":"supercov","musl":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","package":"@supercov/cli-linux-x64-musl","artifact":"supercov-cli-linux-x64-musl","executable":"supercov","musl":true},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","package":"@supercov/cli-win32-x64","artifact":"supercov-cli-win32-x64","executable":"supercov.exe","packedInstall":true},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","package":"@supercov/cli-win32-arm64","artifact":"supercov-cli-win32-arm64","executable":"supercov.exe","packedInstall":true,"gem":false}]}'
       build-targets:
         description: Build selected targets; false verifies only reused artifacts
         required: false
@@ -71,13 +71,42 @@ jobs:
         # npm 11 treats an unprefixed path containing a slash as a GitHub
         # repository shorthand. `./` makes this unambiguously local.
         run: npm pack ./native-dist/${{ matrix.package }} --pack-destination native-dist --ignore-scripts
-      - name: Validate binary, size gate, and checksums
-        run: node scripts/native-artifact-check.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --tarball native-dist/${{ matrix.artifact }}-${{ env.SUPERCOV_VERSION }}.tgz --out native-dist/${{ matrix.artifact }}.checksums.json
+      # Every channel ships this same binary. The gem and the wheel are packaged
+      # here, on the platform that can install and run them, and each completes
+      # a real coverage run before the release set will accept it.
+      - uses: ruby/setup-ruby@v1
+        if: matrix.gem != false
+        with:
+          ruby-version: "3.4"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build the platform gem
+        if: matrix.gem != false
+        run: node scripts/build-rubygem.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }}
+      - name: Install the gem and complete a real coverage run
+        if: matrix.gem != false
+        run: node scripts/rubygem-integration.mjs
+      - name: Build the platform wheel
+        run: node scripts/build-wheel.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --out target/wheels
+      - name: Install the wheel and complete a real coverage run
+        env:
+          SUPERCOV_PYTHON: python
+        run: node scripts/pypi-wheel-integration.mjs
+      - name: Gather the release files
+        shell: bash
+        run: |
+          cp target/wheels/*.whl native-dist/
+          if [ "${{ matrix.gem }}" != "false" ]; then cp target/rubygems/*.gem native-dist/; fi
+      - name: Validate binary, glibc floor, size gate, and checksums
+        run: node scripts/native-artifact-check.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --tarball native-dist/${{ matrix.artifact }}-${{ env.SUPERCOV_VERSION }}.tgz --wheels native-dist --gems native-dist --out native-dist/${{ matrix.artifact }}.checksums.json
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: |
             native-dist/${{ matrix.artifact }}-${{ env.SUPERCOV_VERSION }}.tgz
+            native-dist/*.whl
+            native-dist/*.gem
             native-dist/${{ matrix.artifact }}.checksums.json
           if-no-files-found: error
 
@@ -117,6 +146,8 @@ jobs:
           name: supercov-native-release-set
           path: |
             native-release-ready/*.tgz
+            native-release-ready/*.whl
+            native-release-ready/*.gem
             native-release-ready/*.checksums.json
             native-release-ready/release-set.json
           if-no-files-found: error

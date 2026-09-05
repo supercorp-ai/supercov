@@ -38,8 +38,13 @@ try {
   const environment = { ...process.env };
   delete environment.SUPERCOV_RUST_BINARY;
 
-  run("python3", ["-m", "venv", resolve(temporary, "venv")]);
-  const python = resolve(temporary, "venv", "bin", "python");
+  // The wheel requires CPython 3.12 or newer, which `python3` need not be on a
+  // developer machine; SUPERCOV_PYTHON names the interpreter to use. A venv
+  // puts its executables under Scripts/ on Windows and bin/ everywhere else.
+  run(process.env.SUPERCOV_PYTHON ?? "python3", ["-m", "venv", resolve(temporary, "venv")]);
+  const windows = process.platform === "win32";
+  const scripts = resolve(temporary, "venv", windows ? "Scripts" : "bin");
+  const python = resolve(scripts, windows ? "python.exe" : "python");
   run(python, [
     "-m",
     "pip",
@@ -52,8 +57,8 @@ try {
   cpSync(resolve(repository, "tests/fixtures/no-build-node"), project, {
     recursive: true,
   });
-  const executable = resolve(temporary, "venv", "bin", "supercov");
-  chmodSync(executable, 0o755);
+  const executable = resolve(scripts, windows ? "supercov.exe" : "supercov");
+  if (!windows) chmodSync(executable, 0o755);
   const covered = run(executable, ["--", process.execPath, "--test"], {
     cwd: project,
     env: environment,
