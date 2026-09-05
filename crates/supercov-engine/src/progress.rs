@@ -8,8 +8,6 @@
 
 // The status line is written only on Unix; the Windows arm stays silent, so
 // the trait is unused there and the first Windows build said so.
-#[cfg(unix)]
-use std::io::Write;
 use std::{
     io::IsTerminal,
     sync::{
@@ -17,8 +15,9 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::JoinHandle,
-    time::Duration,
 };
+#[cfg(unix)]
+use std::{io::Write, time::Duration};
 
 /// How long a step must run before the status line appears.
 // Read only by the Unix progress path and its test.

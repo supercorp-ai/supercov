@@ -1357,10 +1357,10 @@ impl ProcessSupervisor {
                 .and_then(|_| writer.flush());
                 forward_windows_control(child);
                 termination = Some(now);
-                write_diagnostic(&child, started, writer);
+                write_diagnostic(child, started, writer);
             }
             if now >= next_diagnostic && !timed_out {
-                write_diagnostic(&child, started, writer);
+                write_diagnostic(child, started, writer);
                 while next_diagnostic <= now {
                     next_diagnostic += options.diagnostic_interval;
                 }
