@@ -586,6 +586,9 @@ pub fn run_direct_javascript(
     .map_err(|error| error.to_string())?;
     drop(instrumentation_progress);
     let adapter_setup_ms = elapsed_ms(adapter_started);
+    if let Some(detail) = crate::javascript_frontend::setup_timing_detail() {
+        writeln!(diagnostics, "[supercov] {detail}").map_err(|error| error.to_string())?;
+    }
 
     let evidence_relative = format!(".supercov/evidence/{run_id}");
     let evidence_directory = workspace.join(&evidence_relative);

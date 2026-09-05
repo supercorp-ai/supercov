@@ -9,8 +9,11 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -49,6 +52,120 @@ const RUNTIME_FILES: &[&str] = &[
     "vitestReporter.mjs",
 ];
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
+
+/// Where the setup phase spends its time.
+///
+/// The timings line reports `setup` as one number, and one number cannot say
+/// which operation is slow: on a Windows runner it read 18.7 s for the same
+/// two-file fixture that takes 0.4-0.6 s on macOS. Every file operation the
+/// frontend performs adds to these counters, and `SUPERCOV_PHASE_TIMING=1`
+/// prints them beside the phase, so the next platform surprise is measured
+/// rather than guessed at. The stage counters (runtime, configs, sources,
+/// assertions, cache) partition the phase; the operation counters cut across
+/// those stages, and `instrument` is the parsing and rewriting inside
+/// `sources`, with the rest of that stage being the writes.
+struct SetupAccounting {
+    files: AtomicU64,
+    bytes: AtomicU64,
+    create_ns: AtomicU64,
+    write_ns: AtomicU64,
+    sync_ns: AtomicU64,
+    rename_ns: AtomicU64,
+    directory_sync_ns: AtomicU64,
+    directories: AtomicU64,
+    directory_retries: AtomicU64,
+    directory_ns: AtomicU64,
+    runtime_ns: AtomicU64,
+    config_ns: AtomicU64,
+    sources_ns: AtomicU64,
+    instrument_ns: AtomicU64,
+    assertion_ns: AtomicU64,
+    cache_ns: AtomicU64,
+}
+
+impl SetupAccounting {
+    const fn new() -> Self {
+        Self {
+            files: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            create_ns: AtomicU64::new(0),
+            write_ns: AtomicU64::new(0),
+            sync_ns: AtomicU64::new(0),
+            rename_ns: AtomicU64::new(0),
+            directory_sync_ns: AtomicU64::new(0),
+            directories: AtomicU64::new(0),
+            directory_retries: AtomicU64::new(0),
+            directory_ns: AtomicU64::new(0),
+            runtime_ns: AtomicU64::new(0),
+            config_ns: AtomicU64::new(0),
+            sources_ns: AtomicU64::new(0),
+            instrument_ns: AtomicU64::new(0),
+            assertion_ns: AtomicU64::new(0),
+            cache_ns: AtomicU64::new(0),
+        }
+    }
+}
+
+static SETUP: SetupAccounting = SetupAccounting::new();
+
+fn account(counter: &AtomicU64, started: Instant) {
+    counter.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+}
+
+fn accounted_ms(counter: &AtomicU64) -> f64 {
+    counter.load(Ordering::Relaxed) as f64 / 1_000_000.0
+}
+
+fn counted(counter: &AtomicU64) -> u64 {
+    counter.load(Ordering::Relaxed)
+}
+
+fn timed<T>(counter: &AtomicU64, operation: impl FnOnce() -> T) -> T {
+    let started = Instant::now();
+    let value = operation();
+    account(counter, started);
+    value
+}
+
+/// TEMPORARY, for the Windows setup-cost measurement: drops the per-file
+/// `sync_all` and the per-write directory sync, so one probe binary can measure
+/// both behaviours in one run. The committed default is the behaviour that
+/// ships today; the experiment becomes the default only once a runner has
+/// shown what it is worth. Remove with the measurement.
+fn durable_workspace_writes() -> bool {
+    static DURABLE: OnceLock<bool> = OnceLock::new();
+    *DURABLE
+        .get_or_init(|| std::env::var("SUPERCOV_BUFFERED_WORKSPACE_WRITES").as_deref() != Ok("1"))
+}
+
+/// One line saying where the setup phase went, when `SUPERCOV_PHASE_TIMING=1`
+/// asked for it.
+pub fn setup_timing_detail() -> Option<String> {
+    if std::env::var("SUPERCOV_PHASE_TIMING").as_deref() != Ok("1") {
+        return None;
+    }
+    Some(format!(
+        "setup detail runtime={:.1}ms configs={:.1}ms sources={:.1}ms (instrument={:.1}ms) \
+assertions={:.1}ms cache={:.1}ms | files={} bytes={} create={:.1}ms write={:.1}ms fsync={:.1}ms \
+rename={:.1}ms directory-sync={:.1}ms | directories={} retries={} directory-wait={:.1}ms",
+        accounted_ms(&SETUP.runtime_ns),
+        accounted_ms(&SETUP.config_ns),
+        accounted_ms(&SETUP.sources_ns),
+        accounted_ms(&SETUP.instrument_ns),
+        accounted_ms(&SETUP.assertion_ns),
+        accounted_ms(&SETUP.cache_ns),
+        counted(&SETUP.files),
+        counted(&SETUP.bytes),
+        accounted_ms(&SETUP.create_ns),
+        accounted_ms(&SETUP.write_ns),
+        accounted_ms(&SETUP.sync_ns),
+        accounted_ms(&SETUP.rename_ns),
+        accounted_ms(&SETUP.directory_sync_ns),
+        counted(&SETUP.directories),
+        counted(&SETUP.directory_retries),
+        accounted_ms(&SETUP.directory_ns),
+    ))
+}
 
 #[derive(Debug)]
 pub enum JavascriptFrontendError {
@@ -392,7 +509,10 @@ fn unique() -> String {
 
 #[cfg(not(windows))]
 fn create_directory_all(path: &Path) -> Result<(), JavascriptFrontendError> {
-    fs::create_dir_all(path).map_err(|source| io_error(path, source))
+    SETUP.directories.fetch_add(1, Ordering::Relaxed);
+    timed(&SETUP.directory_ns, || {
+        fs::create_dir_all(path).map_err(|source| io_error(path, source))
+    })
 }
 
 #[cfg(windows)]
@@ -408,17 +528,23 @@ fn create_directory_all(path: &Path) -> Result<(), JavascriptFrontendError> {
     // cannot see is a diagnosis rather than a guess.
     const ATTEMPTS: usize = 16;
     let started = std::time::Instant::now();
+    SETUP.directories.fetch_add(1, Ordering::Relaxed);
     let mut delay = std::time::Duration::from_millis(20);
     for attempt in 0..ATTEMPTS {
         match fs::create_dir_all(path) {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                account(&SETUP.directory_ns, started);
+                return Ok(());
+            }
             Err(source)
                 if source.kind() == io::ErrorKind::PermissionDenied && attempt + 1 < ATTEMPTS =>
             {
+                SETUP.directory_retries.fetch_add(1, Ordering::Relaxed);
                 std::thread::sleep(delay);
                 delay = (delay * 2).min(std::time::Duration::from_millis(500));
             }
             Err(source) => {
+                account(&SETUP.directory_ns, started);
                 let detail = format!(
                     "{source} (after {} attempt(s) over {:?}; ancestors: {})",
                     attempt + 1,
@@ -474,20 +600,49 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), JavascriptFrontendEr
                 .create_new(true)
                 .open(&temporary)
         };
-        let mut output = match open() {
+        let opened = timed(&SETUP.create_ns, open);
+        let mut output = match opened {
             Ok(output) => output,
             Err(source) if source.kind() == io::ErrorKind::NotFound => {
                 create_directory_all(parent)?;
-                open().map_err(|source| io_error(&temporary, source))?
+                timed(&SETUP.create_ns, open).map_err(|source| io_error(&temporary, source))?
             }
             Err(source) => return Err(io_error(&temporary, source)),
         };
-        output
-            .write_all(contents)
-            .and_then(|_| output.sync_all())
+        timed(&SETUP.write_ns, || output.write_all(contents))
             .map_err(|source| io_error(&temporary, source))?;
-        fs::rename(&temporary, path).map_err(|source| io_error(path, source))?;
-        crate::lifecycle::sync_directory_handle(parent).map_err(|source| io_error(parent, source))
+        // Whether these writes need to be durable at all is what the
+        // experiment measures. Every file the
+        // frontend writes lives in the regenerable workspace cache, and every
+        // one is listed in `frontend_artifact_paths`: a later run either
+        // rewrites it from the embedded assets and the project's sources, or
+        // restores it from the frontend cache, which verifies each artifact's
+        // sha256 when it reads the cache and again when it restores. A file
+        // left half-written by a crash therefore cannot be reused as if it
+        // were whole -- it fails its digest and the frontend regenerates it --
+        // and mirrored sources are pruned and re-copied every run. `rename`
+        // still publishes each file atomically, so nothing in this run can
+        // observe a partial one. What is given up is only surviving a power
+        // loss for files the next run rebuilds anyway. Durability that does
+        // matter -- evidence, run state, cache metadata -- goes through
+        // `lifecycle::atomic_write`, which still syncs.
+        if durable_workspace_writes() {
+            timed(&SETUP.sync_ns, || output.sync_all())
+                .map_err(|source| io_error(&temporary, source))?;
+        }
+        timed(&SETUP.rename_ns, || fs::rename(&temporary, path))
+            .map_err(|source| io_error(path, source))?;
+        SETUP.files.fetch_add(1, Ordering::Relaxed);
+        SETUP
+            .bytes
+            .fetch_add(contents.len() as u64, Ordering::Relaxed);
+        if durable_workspace_writes() {
+            timed(&SETUP.directory_sync_ns, || {
+                crate::lifecycle::sync_directory_handle(parent)
+            })
+            .map_err(|source| io_error(parent, source))?;
+        }
+        Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -1089,11 +1244,15 @@ pub fn prepare_javascript_frontend(
     // isInsideNodeModules check) stay suppressed when Supercov's module
     // hooks are on the call path.
     let runtime_directory = generated.join("node_modules");
-    copy_runtime(&runtime_directory, collector_id)?;
+    timed(&SETUP.runtime_ns, || {
+        copy_runtime(&runtime_directory, collector_id)
+    })?;
+    let configuration_started = Instant::now();
     configure_playwright_runtime(&runtime_directory, project)?;
     let playwright_config_path = write_playwright_config(workspace, project, &generated)?;
     let vite_config_path = write_vite_config(workspace, &generated)?;
     let vitest_config_path = write_vitest_config(workspace, project, &generated)?;
+    account(&SETUP.config_ns, configuration_started);
 
     let mut decisions = BTreeMap::new();
     let mut points = BTreeMap::new();
@@ -1104,18 +1263,19 @@ pub fn prepare_javascript_frontend(
         limitations.insert(limitation.id.clone(), limitation_from_source(limitation));
     }
 
+    let sources_started = Instant::now();
     for file in &project.source_files {
         let path = checked_source_path(workspace, file)?;
         let source = fs::read_to_string(&path).map_err(|source| io_error(&path, source))?;
         let capability_wrapper = runtime_specifier(file, "capability.mjs")?;
-        let mut output = match project.build_adapter {
+        let mut output = timed(&SETUP.instrument_ns, || match project.build_adapter {
             BuildAdapter::Vite | BuildAdapter::Generic => {
                 instrument_candidate_with_runtime_hooks(&source, file, &capability_wrapper)
             }
             BuildAdapter::Direct => {
                 instrument_direct_candidate_with_runtime_hooks(&source, file, &capability_wrapper)
             }
-        }
+        })
         .map_err(|source| JavascriptFrontendError::Instrument {
             file: file.clone(),
             source,
@@ -1178,8 +1338,10 @@ pub fn prepare_javascript_frontend(
             limitations.insert(value.id.clone(), value);
         }
     }
+    account(&SETUP.sources_ns, sources_started);
     write_vite_transforms(&generated, &vite_transforms)?;
 
+    let assertions_started = Instant::now();
     let mut assertion_calls = 0;
     for entry in &project.source_scope.entries {
         let path = checked_source_path(workspace, &entry.file)?;
@@ -1209,6 +1371,8 @@ pub fn prepare_javascript_frontend(
             assertion_calls += output.assertions;
         }
     }
+
+    account(&SETUP.assertion_ns, assertions_started);
 
     let mut manifest = JavascriptManifest {
         decisions: decisions.into_values().collect(),
@@ -1259,7 +1423,9 @@ pub fn prepare_javascript_frontend(
         &generated.join("instrumentation-complete"),
         b"coverage-completeness-v2\n",
     )?;
-    write_javascript_frontend_cache(workspace, project, cache_key, assertion_calls)?;
+    timed(&SETUP.cache_ns, || {
+        write_javascript_frontend_cache(workspace, project, cache_key, assertion_calls)
+    })?;
     Ok(PreparedJavascriptFrontend {
         manifest,
         manifest_path,

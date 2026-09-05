@@ -131,6 +131,12 @@ try {
     `supercov exited ${covered.status}\n--- stderr ---\n${covered.stderr}\n--- stdout ---\n${covered.stdout}`,
   );
   assert.match(covered.stdout, /\[coverage\] evidence:/);
+  // The gate captures both streams so a failure can report them. When a run is
+  // being measured, its timing lines are the point of running it at all.
+  if (process.env.SUPERCOV_PHASE_TIMING === "1") {
+    process.stdout.write(covered.stdout);
+    process.stderr.write(covered.stderr);
+  }
 
   const installedPackage = resolve(consumer, "node_modules", target.package);
   const installedManifest = resolve(installedPackage, "package.json");
