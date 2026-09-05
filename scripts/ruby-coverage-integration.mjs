@@ -271,10 +271,17 @@ try {
       '    stdin.puts word',
       '    assert_match(/#{word}/, stdout.gets.strip)',
       '    Process.kill(signal, wait.pid)',
-      '    refute_nil wait.value.termsig, "the child must die from the signal"',
+      '    if Gem.win_platform?',
+      '      # Windows has no signals: "KILL" is TerminateProcess and the child',
+      '      # ends with an exit status, never a termsig.',
+      '      refute_equal 0, wait.value.exitstatus, "the child must die from the kill"',
+      '    else',
+      '      refute_nil wait.value.termsig, "the child must die from the signal"',
+      '    end',
       '  end',
       '',
       '  def test_terminated',
+      '    skip "Windows has no SIGTERM; every kill there is the hard case" if Gem.win_platform?',
       '    drive("termed", "TERM")',
       '  end',
       '',
@@ -291,12 +298,15 @@ try {
     signalProject,
   );
   assert.equal(signals.status, 0, `${signals.stdout}\n${signals.stderr}`);
-  const terminated = query(['runs', 'latest', 'line', 'lib/worker.rb:4'], environment, signalProject);
-  assert.match(
-    JSON.stringify(terminated),
-    /test_terminated/,
-    'a child that took SIGTERM must keep the lines it covered',
-  );
+  if (!windows) {
+    // Windows has no SIGTERM, so the fixture skips this case there.
+    const terminated = query(['runs', 'latest', 'line', 'lib/worker.rb:4'], environment, signalProject);
+    assert.match(
+      JSON.stringify(terminated),
+      /test_terminated/,
+      'a child that took SIGTERM must keep the lines it covered',
+    );
+  }
   const hardKilled = query(['runs', 'latest', 'line', 'lib/worker.rb:8'], environment, signalProject);
   assert.doesNotMatch(
     JSON.stringify(hardKilled),
@@ -317,7 +327,10 @@ try {
     'a run missing a process cannot call itself complete',
   );
 
-  console.log(`[ruby-coverage] ${ruby} measured the fixture through RSpec, Minitest, test-unit, Cucumber and thread-parallel Minitest with exact totals, a signalled child keeps its coverage, and a killed one declares what it took with it`);
+  const signalled = windows
+    ? 'a killed child declares what it took with it (Windows has no SIGTERM to keep coverage through)'
+    : 'a signalled child keeps its coverage, and a killed one declares what it took with it';
+  console.log(`[ruby-coverage] ${ruby} measured the fixture through RSpec, Minitest, test-unit, Cucumber and thread-parallel Minitest with exact totals, and ${signalled}`);
 } finally {
   rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 }
