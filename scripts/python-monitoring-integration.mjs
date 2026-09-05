@@ -12,7 +12,7 @@ import { basename, delimiter, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const repository = resolve(import.meta.dirname, '..');
-const binary = resolve(repository, 'target/debug/supercov');
+const binary = resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const launcher = resolve(repository, 'bin/supercov.js');
 const monitoringFixture = resolve(repository, 'tests/fixtures/python-monitoring');
 const positionFixture = resolve(repository, 'tests/fixtures/python-position-corpus');

@@ -23,7 +23,7 @@ import {dirname} from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const scratch = process.env.SUPERCOV_RATCHET_WORK ?? join(root, 'target', 'exactness-ratchet');
-const wrapper = join(root, 'spikes/rustc-backend/target/debug/supercov-rustc-backend-spike');
+const wrapper = join(root, `spikes/rustc-backend/target/debug/supercov-rustc-backend-spike${process.platform === 'win32' ? '.exe' : ''}`);
 const baselinePath = join(root, 'spikes/rustc-backend/exactness-baseline.json');
 const work = join(scratch, 'exactness-work');
 

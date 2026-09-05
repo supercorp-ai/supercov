@@ -15,7 +15,7 @@ import { resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 
 const repository = resolve(import.meta.dirname, '..');
-const binary = resolve(repository, 'target/debug/supercov');
+const binary = resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const launcher = resolve(repository, 'bin/supercov.js');
 const fixture = resolve(repository, 'tests/fixtures/generic-node');
 const temporary = mkdtempSync(resolve(tmpdir(), 'supercov-rust-public-run-'));

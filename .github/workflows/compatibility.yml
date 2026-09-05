@@ -94,7 +94,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: npm run test:filesystem
-      - run: npm run test:rust-platform
+      - run: npm run test:platform
 
   python:
     name: CPython ${{ matrix.python }} (${{ matrix.os }})

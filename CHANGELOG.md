@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- `cargo binstall supercov` downloads the prebuilt binary from the release instead of compiling the engine, which takes minutes. Plain `cargo install` still builds from source.
+- The Ruby frontend runs in CI: Ruby 3.3 and 3.4 on Linux, and 3.4 on macOS and Windows.
+
 ## 0.0.38
 
 **Fixed**

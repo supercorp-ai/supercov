@@ -15,7 +15,7 @@ import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const supercov = join(root, 'target/debug/supercov');
+const supercov = join(root, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const scratch = mkdtempSync(join(tmpdir(), 'supercov-cargo-runner-'));
 const workspace = join(scratch, 'workspace');
 const configuredRunner = join(workspace, 'bin with spaces', 'runner.mjs');

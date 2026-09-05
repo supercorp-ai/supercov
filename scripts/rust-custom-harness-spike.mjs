@@ -8,10 +8,10 @@ import {fileURLToPath} from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const fixture = join(root, 'spikes/rustc-backend/custom-harness-fixture');
-const supercov = join(root, 'target/debug/supercov');
+const supercov = join(root, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const companion = join(
   root,
-  'spikes/rustc-backend/target/debug/supercov-rustc-backend-spike',
+  `spikes/rustc-backend/target/debug/supercov-rustc-backend-spike${process.platform === 'win32' ? '.exe' : ''}`,
 );
 const scratch = mkdtempSync(join(tmpdir(), 'supercov-custom-harness-'));
 

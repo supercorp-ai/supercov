@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const supercov = join(root, 'target/debug/supercov');
+const supercov = join(root, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const nextest = process.env.SUPERCOV_NEXTEST_BIN;
 const nextestVersion = process.env.SUPERCOV_NEXTEST_VERSION ?? '0.9.140';
 if (!['0.9.138', '0.9.140'].includes(nextestVersion)) {

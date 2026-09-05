@@ -12,7 +12,7 @@ import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const repository = resolve(import.meta.dirname, '..');
-const binary = resolve(repository, 'target/debug/supercov');
+const binary = resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const temporary = mkdtempSync(resolve(tmpdir(), 'supercov-rust-esbuild-'));
 const project = resolve(temporary, 'project');
 

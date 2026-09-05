@@ -1405,6 +1405,8 @@ mod tests {
     #[test]
     fn resolves_an_explicit_installed_rustup_toolchain_before_target_configuration() {
         let root = fixture();
+        // The toolchain has to be really installed for `+1.95.0` to resolve to
+        // a real rustc, which is what this test is about.
         let rustc = Command::new("rustc")
             .args(["+1.95.0", "-vV"])
             .output()
@@ -1414,11 +1416,12 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&rustc.stderr)
         );
-        let rustc = String::from_utf8(rustc.stdout).unwrap();
-        let host = rustc
-            .lines()
-            .find_map(|line| line.strip_prefix("host: "))
-            .unwrap();
+        // The target comes from `model_inputs`, which pins the host the way
+        // every other test in this file does. Reading it from the machine
+        // instead made the test pass only on an Apple silicon Mac: everywhere
+        // else the plan honoured the pinned host and the assertion compared it
+        // against the real one.
+        let host = "aarch64-apple-darwin";
         fs::write(
             root.join(".cargo/config.toml"),
             format!("[target.{host}]\nrunner=[\"selected-runner\",\"--selected\"]\n"),

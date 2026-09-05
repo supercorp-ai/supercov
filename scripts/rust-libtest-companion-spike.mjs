@@ -18,7 +18,7 @@ const source = join(
   root,
   'spikes/rustc-backend/libtest-presentation-fixture/src/lib.rs',
 );
-const engine = join(root, 'target/debug/supercov');
+const engine = join(root, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const scratch = mkdtempSync(join(tmpdir(), 'supercov-libtest-companion-'));
 const eventToken = '0123456789abcdef0123456789abcdef';
 const eventModule = readFileSync(

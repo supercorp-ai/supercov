@@ -28,9 +28,9 @@ const fixture = join(root, 'spikes/rustc-backend/fixture/Cargo.toml');
 const fixtureRoot = dirname(fixture);
 const wrapper = join(
   root,
-  'spikes/rustc-backend/target/debug/supercov-rustc-backend-spike',
+  `spikes/rustc-backend/target/debug/supercov-rustc-backend-spike${process.platform === 'win32' ? '.exe' : ''}`,
 );
-const supercov = join(root, 'target/debug/supercov');
+const supercov = join(root, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const scratch = mkdtempSync(join(tmpdir(), 'supercov-rustc-spike-'));
 const rustcTargetLibdirResult = spawnSync('rustc', ['--print', 'target-libdir'], {
   encoding: 'utf8',

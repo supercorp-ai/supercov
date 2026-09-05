@@ -33,7 +33,7 @@ import { spawnSync } from 'node:child_process';
 // hold — the assertion is the whole file at 100%, attributed per test.
 
 const repository = resolve(import.meta.dirname, '..');
-const binary = resolve(repository, 'target/debug/supercov');
+const binary = resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const temporary = mkdtempSync(resolve(tmpdir(), 'supercov-rust-custom-browser-'));
 const project = resolve(temporary, 'project');
 

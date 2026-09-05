@@ -63,7 +63,7 @@ try {
   const environment = {
     ...process.env,
     PATH: `${resolve(venv, process.platform === 'win32' ? 'Scripts' : 'bin')}${delimiter}${process.env.PATH}`,
-    SUPERCOV_RUST_BINARY: resolve(repository, 'target/debug/supercov'),
+    SUPERCOV_RUST_BINARY: resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`),
     SUPERCOV_VERBOSE: '1',
   };
   const plain = run(venvPython, ['-m', 'pytest', '-q'], { cwd: project, env: environment });

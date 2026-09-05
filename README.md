@@ -110,10 +110,10 @@ The same binary ships through each language's own package manager, at the same v
 npx supercov -- npm test                          # npm
 uvx --from supercov-cli supercov -- pytest        # PyPI
 gem install supercov && supercov -- bundle exec rspec   # RubyGems
-cargo install supercov && supercov -- cargo test  # crates.io, built from source
+cargo binstall supercov && supercov -- cargo test  # crates.io
 ```
 
-`pip install supercov-cli` and `gem install supercov` install a wheel or gem that carries the binary for your platform; nothing is compiled. The crate builds from source and needs Rust 1.95.
+`pip install supercov-cli` and `gem install supercov` install a wheel or gem that carries the binary for your platform; nothing is compiled. `cargo binstall` downloads that same binary from the GitHub release, while plain `cargo install supercov` builds it from source and needs Rust 1.95.
 
 ## Supported languages
 

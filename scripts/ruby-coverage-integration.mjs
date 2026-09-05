@@ -11,7 +11,7 @@ import { delimiter, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const repository = resolve(import.meta.dirname, '..');
-const binary = resolve(repository, 'target/debug/supercov');
+const binary = resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const launcher = resolve(repository, 'bin/supercov.js');
 const fixture = resolve(repository, 'tests/fixtures/ruby-coverage');
 const temporary = mkdtempSync(resolve(tmpdir(), 'supercov-ruby-coverage-'));
@@ -22,6 +22,15 @@ function interpreterVersion(program) {
   if (probe.status !== 0) return null;
   const [major, minor] = probe.stdout.trim().split('.').map(Number);
   return { major, minor };
+}
+
+// Where `gem` and the interpreter itself live. Deriving this from the string
+// that launched Ruby breaks the moment that string is a bare `ruby` from PATH,
+// which is how every CI runner provides it.
+function interpreterBindir(program) {
+  const probe = spawnSync(program, ['-e', 'print RbConfig::CONFIG["bindir"]'], { encoding: 'utf8' });
+  assert.equal(probe.status, 0, `could not ask ${program} for its bindir: ${probe.stderr}`);
+  return probe.stdout.trim();
 }
 
 function findInterpreter() {
@@ -95,7 +104,7 @@ try {
   const version = interpreterVersion(ruby);
   const probes = version.major > 3 || version.minor >= 4;
   const assertTotals = probes ? assertFixtureTotals : assertStdlibOnlyTotals;
-  const rubyDirectory = resolve(ruby, '..');
+  const rubyDirectory = interpreterBindir(ruby);
   const gems = resolve(temporary, 'gems');
   run(...shell(resolve(rubyDirectory, windows ? 'gem.cmd' : 'gem'), [
     'install',
