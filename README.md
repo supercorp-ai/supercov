@@ -125,9 +125,9 @@ The CLI is a single native binary. `npx supercov` selects the build for the mach
 | --- | --- | --- |
 | macOS | arm64 (Apple silicon), x64 (Intel) | macOS 11 or newer |
 | Linux | arm64, x64 | glibc and musl (Alpine) builds, chosen automatically |
-| Windows | — | Not yet available; in progress |
+| Windows | arm64, x64 | Windows 10 or newer |
 
-Containers, VMs, and remote executors run the same Linux builds. The npm package is the current release channel for every language, including Rust, Python, and Ruby projects. A PyPI package (`supercov-cli`), a RubyGems gem (`supercov`), and a crate (`supercov`) exist for macOS arm64 at an earlier version and are being brought up to date with each release.
+On Windows, JavaScript and TypeScript suites are verified on every release; Python, Ruby, and Rust suites are not yet verified there. Containers, VMs, and remote executors run the same Linux builds. The npm package is the current release channel for every language, including Rust, Python, and Ruby projects. A PyPI package (`supercov-cli`), a RubyGems gem (`supercov`), and a crate (`supercov`) exist for macOS arm64 at an earlier version and are being brought up to date with each release.
 
 ## Supported test suites
 

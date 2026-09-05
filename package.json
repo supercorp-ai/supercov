@@ -1,7 +1,7 @@
 {
   "name": "supercov",
   "version": "0.0.35",
-  "description": "Zero-edit, runner-aware coverage completeness for JavaScript, TypeScript, Rust, and Python test suites",
+  "description": "Zero-edit, runner-aware coverage completeness for JavaScript, TypeScript, Rust, Python, and Ruby test suites",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -79,7 +79,9 @@
     "@supercov/cli-linux-arm64-gnu": "0.0.35",
     "@supercov/cli-linux-arm64-musl": "0.0.35",
     "@supercov/cli-linux-x64-gnu": "0.0.35",
-    "@supercov/cli-linux-x64-musl": "0.0.35"
+    "@supercov/cli-linux-x64-musl": "0.0.35",
+    "@supercov/cli-win32-arm64": "0.0.35",
+    "@supercov/cli-win32-x64": "0.0.35"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.55.0",

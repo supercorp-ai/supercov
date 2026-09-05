@@ -15,8 +15,8 @@ Supercov supports JavaScript, TypeScript, Rust, Python, and Ruby today.
 
 You need:
 
-- macOS (arm64 or x64) or Linux (arm64 or x64, glibc or musl); Windows is not
-  yet available;
+- macOS (arm64 or x64), Linux (arm64 or x64, glibc or musl), or Windows (arm64
+  or x64; JavaScript and TypeScript suites are verified there today);
 - Node.js 22 or newer;
 - a test command that already works in the repository; and
 - for Rust, the Rust 1.95 toolchain;

@@ -15,8 +15,8 @@ const repository = resolve(import.meta.dirname, "..");
 
 // Every quoted occurrence in these files is Supercov's own version.
 const EXPECTED = {
-  "package.json": 7,
-  "package-lock.json": 8,
+  "package.json": 9,
+  "package-lock.json": 12,
   "Cargo.toml": 3,
   "Cargo.lock": 3,
 };

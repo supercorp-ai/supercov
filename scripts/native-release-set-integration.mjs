@@ -7,7 +7,6 @@ import { spawnSync } from "node:child_process";
 import {
   nativeChecksumName,
   nativeTarballName,
-  releaseTargets,
 } from "./native-package-names.mjs";
 
 const repository = resolve(import.meta.dirname, "..");
@@ -28,7 +27,7 @@ function verify(directory = temporary) {
 }
 
 try {
-  for (const [index, target] of releaseTargets(registry).entries()) {
+  for (const [index, target] of registry.targets.entries()) {
     const tarballName = nativeTarballName(target.package, version);
     const binary = resolve(temporary, `binary-${index}`, target.executable);
     mkdirSync(resolve(binary, ".."), { recursive: true });
@@ -88,7 +87,7 @@ try {
   assert.equal(valid.status, 0, valid.stderr || valid.stdout);
   const releaseSet = JSON.parse(readFileSync(resolve(temporary, "release-set.json"), "utf8"));
   assert.equal(releaseSet.version, version);
-  assert.equal(releaseSet.packages.length, releaseTargets(registry).length);
+  assert.equal(releaseSet.packages.length, registry.targets.length);
 
   const repackaged = resolve(temporary, "repackaged");
   const repackage = spawnSync(
@@ -110,7 +109,7 @@ try {
 
   const damaged = resolve(
     temporary,
-    nativeTarballName(releaseTargets(registry)[0].package, version),
+    nativeTarballName(registry.targets[0].package, version),
   );
   writeFileSync(damaged, "damaged");
   const invalid = verify();
