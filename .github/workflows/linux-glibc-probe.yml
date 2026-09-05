@@ -39,7 +39,7 @@ jobs:
       # cargo-zigbuild links with zig's bundled clang against the glibc version
       # named in the target suffix; the runner's own glibc no longer matters.
       - run: pipx install cargo-zigbuild
-      - run: cargo zigbuild --version
+      - run: cargo-zigbuild --version
       - run: npm ci --omit=optional
       - run: cargo zigbuild --release --target ${{ matrix.target }}.2.28 -p supercov
       - name: The binary's real glibc floor
@@ -67,10 +67,12 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-      # The image has a compiler but no Rust; rust-toolchain.toml selects the
-      # pinned compiler once rustup is present.
-      - name: Install rustup
+      # The image has gcc but neither Rust nor libclang; rust-toolchain.toml
+      # selects the pinned compiler once rustup is present, and bindgen -- a
+      # build dependency of ruby-prism-sys -- needs libclang to read headers.
+      - name: Install rustup and libclang
         run: |
+          dnf install -y clang-libs
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: rustc --version && cargo --version && ldd --version | head -1
