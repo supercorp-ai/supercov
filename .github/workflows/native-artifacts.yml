@@ -130,7 +130,7 @@ jobs:
       - name: Install the wheel and complete a real coverage run
         env:
           SUPERCOV_PYTHON: python
-        run: node scripts/pypi-wheel-integration.mjs
+        run: node scripts/pypi-wheel-integration.mjs --target ${{ matrix.target }}
       - name: Gather the release files
         shell: bash
         run: |
