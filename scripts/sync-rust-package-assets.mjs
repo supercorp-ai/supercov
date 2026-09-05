@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 const repository = resolve(import.meta.dirname, "..");
 const mappings = [
@@ -36,7 +36,50 @@ const mappings = [
     `tests/golden/${name}`,
     `crates/supercov-engine/test-assets/agent/${name}`,
   ]),
+  // The runtime shims the engine embeds. `runtime/` at the repository root is
+  // what the npm package ships and what the language runtimes are developed
+  // in; the engine reads these copies so that the crate cargo packages -- which
+  // holds nothing outside its own directory -- still builds from source.
+  ...runtimeFiles("javascript", [
+    "atomic.mjs",
+    "capability.mjs",
+    "launchSupervisor.mjs",
+    "nodeAssert.mjs",
+    "nodeAssertAdapter.mjs",
+    "nodeAssertStrict.mjs",
+    "nodeTest.mjs",
+    "playwright.mjs",
+    "playwrightReporter.mjs",
+    "provenance.mjs",
+    "register.mjs",
+    "resolve-loader.mjs",
+    "runnerEvidence.mjs",
+    "runtime.mjs",
+    "transport.mjs",
+    "vitest.mjs",
+    "vitestReporter.mjs",
+  ]),
+  ...runtimeFiles("python", [
+    "sitecustomize.py",
+    "supercov_pytest.py",
+    "supercov_runtime.py",
+    "supercov_unittest.py",
+  ]),
+  ...runtimeFiles("ruby", [
+    "supercov_cucumber.rb",
+    "supercov_minitest.rb",
+    "supercov_rspec.rb",
+    "supercov_runtime.rb",
+    "supercov_testunit.rb",
+  ]),
 ];
+
+function runtimeFiles(language, names) {
+  return names.map(name => [
+    `runtime/${language}/${name}`,
+    `crates/supercov-engine/runtime-assets/${language}/${name}`,
+  ]);
+}
 const check = process.argv.includes("--check");
 
 for (const [source, destination] of mappings) {
@@ -49,6 +92,7 @@ for (const [source, destination] of mappings) {
       `${destination} differs from ${source}; run npm run sync:rust-assets`,
     );
   } else {
+    mkdirSync(dirname(destinationPath), { recursive: true });
     writeFileSync(destinationPath, expected);
   }
 }

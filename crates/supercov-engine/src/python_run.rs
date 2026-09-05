@@ -61,19 +61,19 @@ fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 4] {
     [
         (
             "sitecustomize.py",
-            include_bytes!("../../../runtime/python/sitecustomize.py"),
+            include_bytes!("../runtime-assets/python/sitecustomize.py"),
         ),
         (
             "supercov_runtime.py",
-            include_bytes!("../../../runtime/python/supercov_runtime.py"),
+            include_bytes!("../runtime-assets/python/supercov_runtime.py"),
         ),
         (
             "supercov_pytest.py",
-            include_bytes!("../../../runtime/python/supercov_pytest.py"),
+            include_bytes!("../runtime-assets/python/supercov_pytest.py"),
         ),
         (
             "supercov_unittest.py",
-            include_bytes!("../../../runtime/python/supercov_unittest.py"),
+            include_bytes!("../runtime-assets/python/supercov_unittest.py"),
         ),
     ]
 }

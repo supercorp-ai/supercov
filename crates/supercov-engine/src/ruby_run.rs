@@ -61,23 +61,23 @@ fn embedded_runtime_files() -> [(&'static str, &'static [u8]); 5] {
     [
         (
             "supercov_runtime.rb",
-            include_bytes!("../../../runtime/ruby/supercov_runtime.rb"),
+            include_bytes!("../runtime-assets/ruby/supercov_runtime.rb"),
         ),
         (
             "supercov_rspec.rb",
-            include_bytes!("../../../runtime/ruby/supercov_rspec.rb"),
+            include_bytes!("../runtime-assets/ruby/supercov_rspec.rb"),
         ),
         (
             "supercov_minitest.rb",
-            include_bytes!("../../../runtime/ruby/supercov_minitest.rb"),
+            include_bytes!("../runtime-assets/ruby/supercov_minitest.rb"),
         ),
         (
             "supercov_testunit.rb",
-            include_bytes!("../../../runtime/ruby/supercov_testunit.rb"),
+            include_bytes!("../runtime-assets/ruby/supercov_testunit.rb"),
         ),
         (
             "supercov_cucumber.rb",
-            include_bytes!("../../../runtime/ruby/supercov_cucumber.rb"),
+            include_bytes!("../runtime-assets/ruby/supercov_cucumber.rb"),
         ),
     ]
 }

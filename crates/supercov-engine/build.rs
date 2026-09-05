@@ -25,11 +25,11 @@ fn collect_files(path: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-fn digest_files(files: &[PathBuf], workspace_root: &Path) -> String {
+fn digest_files(files: &[PathBuf], crate_root: &Path) -> String {
     let mut hash = Sha256::new();
     for path in files {
         let label = path
-            .strip_prefix(workspace_root)
+            .strip_prefix(crate_root)
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
@@ -49,12 +49,15 @@ fn digest_files(files: &[PathBuf], workspace_root: &Path) -> String {
 }
 
 fn main() {
+    // Everything digested lives inside the crate: the runtime shims are
+    // synchronised copies under runtime-assets/, so the tarball cargo packages
+    // builds from source, and every label is relative to the crate rather than
+    // to a repository checkout that a packaged build does not have.
     let crate_root =
         PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
-    let repository_root = crate_root.join("../..");
-    let runtime_root = repository_root.join("runtime/javascript");
-    let python_runtime_root = repository_root.join("runtime/python");
-    let ruby_runtime_root = repository_root.join("runtime/ruby");
+    let runtime_root = crate_root.join("runtime-assets/javascript");
+    let python_runtime_root = crate_root.join("runtime-assets/python");
+    let ruby_runtime_root = crate_root.join("runtime-assets/ruby");
     let mut files = Vec::new();
     collect_files(&crate_root.join("src"), &mut files);
     collect_files(&runtime_root, &mut files);
@@ -69,7 +72,7 @@ fn main() {
     }
     println!(
         "cargo:rustc-env=SUPERCOV_ENGINE_SOURCE_SHA256={}",
-        digest_files(&files, &repository_root)
+        digest_files(&files, &crate_root)
     );
     let javascript_frontend = [
         crate_root.join("src/js_instrumenter.rs"),
@@ -82,7 +85,7 @@ fn main() {
     javascript_frontend.dedup();
     println!(
         "cargo:rustc-env=SUPERCOV_JS_FRONTEND_SOURCE_SHA256={}",
-        digest_files(&javascript_frontend, &repository_root)
+        digest_files(&javascript_frontend, &crate_root)
     );
     let mut python_frontend = vec![
         crate_root.join("src/python_instrumenter.rs"),
@@ -95,7 +98,7 @@ fn main() {
     python_frontend.dedup();
     println!(
         "cargo:rustc-env=SUPERCOV_PYTHON_FRONTEND_SOURCE_SHA256={}",
-        digest_files(&python_frontend, &repository_root)
+        digest_files(&python_frontend, &crate_root)
     );
     let mut ruby_frontend = vec![
         crate_root.join("src/ruby_instrumenter.rs"),
@@ -108,6 +111,6 @@ fn main() {
     ruby_frontend.dedup();
     println!(
         "cargo:rustc-env=SUPERCOV_RUBY_FRONTEND_SOURCE_SHA256={}",
-        digest_files(&ruby_frontend, &repository_root)
+        digest_files(&ruby_frontend, &crate_root)
     );
 }

@@ -441,36 +441,44 @@ struct ViteTransform {
 
 fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
     match name {
-        "atomic.mjs" => Some(include_bytes!("../../../runtime/javascript/atomic.mjs")),
-        "capability.mjs" => Some(include_bytes!("../../../runtime/javascript/capability.mjs")),
-        "launchSupervisor.mjs" => Some(include_bytes!(
-            "../../../runtime/javascript/launchSupervisor.mjs"
+        "atomic.mjs" => Some(include_bytes!("../runtime-assets/javascript/atomic.mjs")),
+        "capability.mjs" => Some(include_bytes!(
+            "../runtime-assets/javascript/capability.mjs"
         )),
-        "nodeAssert.mjs" => Some(include_bytes!("../../../runtime/javascript/nodeAssert.mjs")),
+        "launchSupervisor.mjs" => Some(include_bytes!(
+            "../runtime-assets/javascript/launchSupervisor.mjs"
+        )),
+        "nodeAssert.mjs" => Some(include_bytes!(
+            "../runtime-assets/javascript/nodeAssert.mjs"
+        )),
         "nodeAssertAdapter.mjs" => Some(include_bytes!(
-            "../../../runtime/javascript/nodeAssertAdapter.mjs"
+            "../runtime-assets/javascript/nodeAssertAdapter.mjs"
         )),
         "nodeAssertStrict.mjs" => Some(include_bytes!(
-            "../../../runtime/javascript/nodeAssertStrict.mjs"
+            "../runtime-assets/javascript/nodeAssertStrict.mjs"
         )),
-        "nodeTest.mjs" => Some(include_bytes!("../../../runtime/javascript/nodeTest.mjs")),
-        "playwright.mjs" => Some(include_bytes!("../../../runtime/javascript/playwright.mjs")),
+        "nodeTest.mjs" => Some(include_bytes!("../runtime-assets/javascript/nodeTest.mjs")),
+        "playwright.mjs" => Some(include_bytes!(
+            "../runtime-assets/javascript/playwright.mjs"
+        )),
         "playwrightReporter.mjs" => Some(include_bytes!(
-            "../../../runtime/javascript/playwrightReporter.mjs"
+            "../runtime-assets/javascript/playwrightReporter.mjs"
         )),
-        "provenance.mjs" => Some(include_bytes!("../../../runtime/javascript/provenance.mjs")),
-        "register.mjs" => Some(include_bytes!("../../../runtime/javascript/register.mjs")),
+        "provenance.mjs" => Some(include_bytes!(
+            "../runtime-assets/javascript/provenance.mjs"
+        )),
+        "register.mjs" => Some(include_bytes!("../runtime-assets/javascript/register.mjs")),
         "resolve-loader.mjs" => Some(include_bytes!(
-            "../../../runtime/javascript/resolve-loader.mjs"
+            "../runtime-assets/javascript/resolve-loader.mjs"
         )),
         "runnerEvidence.mjs" => Some(include_bytes!(
-            "../../../runtime/javascript/runnerEvidence.mjs"
+            "../runtime-assets/javascript/runnerEvidence.mjs"
         )),
-        "runtime.mjs" => Some(include_bytes!("../../../runtime/javascript/runtime.mjs")),
-        "transport.mjs" => Some(include_bytes!("../../../runtime/javascript/transport.mjs")),
-        "vitest.mjs" => Some(include_bytes!("../../../runtime/javascript/vitest.mjs")),
+        "runtime.mjs" => Some(include_bytes!("../runtime-assets/javascript/runtime.mjs")),
+        "transport.mjs" => Some(include_bytes!("../runtime-assets/javascript/transport.mjs")),
+        "vitest.mjs" => Some(include_bytes!("../runtime-assets/javascript/vitest.mjs")),
         "vitestReporter.mjs" => Some(include_bytes!(
-            "../../../runtime/javascript/vitestReporter.mjs"
+            "../runtime-assets/javascript/vitestReporter.mjs"
         )),
         _ => None,
     }
