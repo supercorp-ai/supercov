@@ -6,7 +6,7 @@
 // coverage.py itself is never imported by the product path.
 
 import assert from 'node:assert/strict';
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, delimiter, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -17,7 +17,10 @@ const launcher = resolve(repository, 'bin/supercov.js');
 const monitoringFixture = resolve(repository, 'tests/fixtures/python-monitoring');
 const positionFixture = resolve(repository, 'tests/fixtures/python-position-corpus');
 const oracleFixture = resolve(repository, 'tests/fixtures/python-pytest');
-const temporary = mkdtempSync(resolve(tmpdir(), 'supercov-python-monitoring-'));
+// The runner spells TEMP as an 8.3 short name; the product resolves paths
+// to long names, and a Ruby load path in two spellings loads every file
+// twice. Real installations live under long names, so hand it those.
+const temporary = mkdtempSync(resolve(realpathSync.native(tmpdir()), 'supercov-python-monitoring-'));
 
 function interpreterVersion(program) {
   const probe = spawnSync(program, ['-c', 'import sys; print(sys.version_info[0], sys.version_info[1])'], {
@@ -373,7 +376,11 @@ try {
       '    assert word in child.stdout.readline()',
       '    os.kill(child.pid, number)',
       '    child.wait()',
-      '    assert child.returncode == -number, "the child must die from the signal"',
+      '    # POSIX reports a signal death as the negated number. Windows has no',
+      '    # signals: os.kill there is TerminateProcess with the number as the',
+      '    # exit code, and every kill is already the hard kind.',
+      '    expected = number if sys.platform == "win32" else -number',
+      '    assert child.returncode == expected, "the child must die from the signal"',
       '',
       '',
       'def test_terminated():',
@@ -381,7 +388,7 @@ try {
       '',
       '',
       'def test_hard_killed():',
-      '    drive("killed", signal.SIGKILL)',
+      '    drive("killed", getattr(signal, "SIGKILL", signal.SIGABRT))',
       '',
     ].join('\n'),
   );

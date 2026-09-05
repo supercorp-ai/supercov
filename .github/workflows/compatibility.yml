@@ -54,7 +54,8 @@ jobs:
           VITE_VERSION: ${{ matrix.vite }}
           VITEST_VERSION: ${{ matrix.vitest }}
         run: npm install --no-save "@playwright/test@$PLAYWRIGHT_VERSION" "vite@$VITE_VERSION" "vitest@$VITEST_VERSION"
-      - run: npx playwright install --with-deps chromium
+      # The fixture matrix drives Chromium, Firefox and WebKit.
+      - run: npx playwright install --with-deps
       - run: npm run test:fixture
 
   browsers:

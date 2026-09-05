@@ -860,11 +860,17 @@ fn prepare_shared_rust_runtime_with_fault(
                                 io::Error::from_raw_os_error(libc::ENOSPC),
                             ));
                         }
+                        // rustc has closed the archive; it is reopened only to
+                        // make it durable before publication. Windows needs
+                        // write access for that flush and answers a read-only
+                        // handle with "Access is denied".
                         let file = OpenOptions::new()
                             .read(true)
+                            .write(true)
                             .open(&partial)
                             .map_err(|error| io_error(&partial, error))?;
                         file.sync_all().map_err(|error| io_error(&partial, error))?;
+                        drop(file);
                         fs::rename(&partial, &archive)
                             .map_err(|error| io_error(&archive, error))?;
                         sync_directory(directory)?;

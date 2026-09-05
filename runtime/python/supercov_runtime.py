@@ -411,6 +411,7 @@ class Runtime:
         self.tool_id = None
         self.lock = threading.RLock()
         self.path_cache: dict[str, str | None] = {}
+        self.under_root = False
         self.code_cache: dict[int, tuple] = {}
         self.context = contextvars.ContextVar("supercov_python_context", default=0)
         self.identities: dict[int, dict] = {}
@@ -725,6 +726,7 @@ class Runtime:
                 except OSError:
                     continue
                 if real == self.root or real.startswith(self.root + os.sep):
+                    self.under_root = True
                     relative = real[len(self.root) + 1 :].replace(os.sep, "/")
                     if relative in self.files:
                         break
@@ -1505,11 +1507,7 @@ class Runtime:
             self.closed = True
             self._record({"t": "exit", "at": _now_ms()})
             self._close_output(flush=True)
-            unmatched = (
-                self.worker == "main"
-                and bool(self.path_cache)
-                and all(relative is None for relative in self.path_cache.values())
-            )
+            unmatched = self.worker == "main" and bool(self.path_cache) and not self.under_root
         if unmatched:
             # Every executed code object lay outside the measured tree. That is
             # what a run reports as zero coverage without a word of explanation

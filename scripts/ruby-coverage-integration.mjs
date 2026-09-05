@@ -5,7 +5,7 @@
 // denominator and observations the fixture is designed to produce.
 
 import assert from 'node:assert/strict';
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -14,7 +14,10 @@ const repository = resolve(import.meta.dirname, '..');
 const binary = resolve(repository, `target/debug/supercov${process.platform === 'win32' ? '.exe' : ''}`);
 const launcher = resolve(repository, 'bin/supercov.js');
 const fixture = resolve(repository, 'tests/fixtures/ruby-coverage');
-const temporary = mkdtempSync(resolve(tmpdir(), 'supercov-ruby-coverage-'));
+// The runner spells TEMP as an 8.3 short name; the product resolves paths
+// to long names, and a Ruby load path in two spellings loads every file
+// twice. Real installations live under long names, so hand it those.
+const temporary = mkdtempSync(resolve(realpathSync.native(tmpdir()), 'supercov-ruby-coverage-'));
 const project = resolve(temporary, 'project');
 
 function interpreterVersion(program) {
