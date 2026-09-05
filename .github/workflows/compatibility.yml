@@ -127,3 +127,33 @@ jobs:
       - run: npm run test:python-monitoring
         env:
           SUPERCOV_PYTHON: python
+
+  ruby:
+    name: Ruby ${{ matrix.ruby }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 3.3 measures through Coverage alone and declares the rest; 3.4 is
+          # the first version the probes can measure everything on.
+          - os: ubuntu-latest
+            ruby: "3.3"
+          - os: ubuntu-latest
+            ruby: "3.4"
+          - os: macos-latest
+            ruby: "3.4"
+          - os: windows-latest
+            ruby: "3.4"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm ci
+      - run: npm run test:ruby-coverage

@@ -35,6 +35,14 @@ function findInterpreter() {
   throw new Error('ruby-coverage integration needs Ruby 3.3 or newer on PATH (or SUPERCOV_RUBY)');
 }
 
+// On Windows `gem` is a batch file, which only a command interpreter can start.
+const windows = process.platform === 'win32';
+function shell(command, args) {
+  return windows
+    ? [process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', command, ...args]]
+    : [command, args];
+}
+
 function run(program, args, options = {}) {
   const result = spawnSync(program, args, { encoding: 'utf8', ...options });
   assert.equal(result.status, 0, `${program} ${args.join(' ')}\n${result.stdout}\n${result.stderr}`);
@@ -89,7 +97,16 @@ try {
   const assertTotals = probes ? assertFixtureTotals : assertStdlibOnlyTotals;
   const rubyDirectory = resolve(ruby, '..');
   const gems = resolve(temporary, 'gems');
-  run(resolve(rubyDirectory, 'gem'), ['install', '--install-dir', gems, '--no-document', 'rspec', 'minitest', 'test-unit', 'cucumber']);
+  run(...shell(resolve(rubyDirectory, windows ? 'gem.cmd' : 'gem'), [
+    'install',
+    '--install-dir',
+    gems,
+    '--no-document',
+    'rspec',
+    'minitest',
+    'test-unit',
+    'cucumber',
+  ]));
   cpSync(fixture, project, { recursive: true });
   run('git', ['init', '-q', '.'], { cwd: project });
 
