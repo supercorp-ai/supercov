@@ -12,6 +12,8 @@
 - A crate whose only tests were doctests reported zero tests.
 - The test count names tests, not attempts: a test retried once is one test.
 - Only the files rustc compiles are instrumented: each crate root and the modules it reaches through `mod`, `#[path]` and a literal `include!`. A `.rs` file a crate embeds as data with `include_str!`, or keeps as a fixture, stays byte-for-byte as written; before, it received probes that referenced a runtime module its consumer did not have.
+- Match arms are measured. Each arm records when it is selected and when the match passes it over on the way to a later arm; before, arms were listed as obligations but nothing ever observed them, and the last arm of an exhaustive match demanded a "not selected" outcome that cannot happen. The last arm now has only "selected".
+- The manifest no longer declares doctests unmeasured, since they are measured.
 - A program a test builds and runs with its own instrumentation no longer breaks the run: evidence files name the instrumentation that wrote them, and another program's evidence is left out instead of being reported as an unknown obligation.
 
 ## 0.0.39

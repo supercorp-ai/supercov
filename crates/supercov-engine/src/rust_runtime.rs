@@ -300,6 +300,22 @@ mod {module_name} {{
         }}
     }}
 
+    /// One arm of a match was selected. `ids` holds each arm's `not selected`
+    /// and `selected` IDs in source order, so every arm before `selected` was
+    /// considered and passed over. Each ID is a distinct static string, which
+    /// is what `hit` dedupes on.
+    #[inline]
+    pub fn arms(ids: &[&'static str], selected: usize) {{
+        for arm in 0..selected {{
+            if let Some(id) = ids.get(arm * 2) {{
+                hit(id);
+            }}
+        }}
+        if let Some(id) = ids.get(selected * 2 + 1) {{
+            hit(id);
+        }}
+    }}
+
     #[inline]
     pub fn condition(value: bool, frame: &mut DecisionFrame, index: usize) -> bool {{
         if index < frame.conditions {{

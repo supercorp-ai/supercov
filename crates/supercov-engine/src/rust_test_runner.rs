@@ -1831,11 +1831,20 @@ mod tests {
 pub fn choose(left: bool, right: bool) -> i32 {
     if left && right { 1 } else { 0 }
 }
+pub fn pick(value: i32) -> &'static str {
+    match value {
+        0 => "zero",
+        1 => "one",
+        _ => "many",
+    }
+}
 #[cfg(test)]
 mod tests {
     #[test] fn false_path() { assert_eq!(super::choose(false, true), 0); }
     #[test] fn true_path() { assert_eq!(super::choose(true, true), 1); }
     #[test] #[ignore] fn ignored_path() { unreachable!(); }
+    #[test] fn pick_zero() { assert_eq!(super::pick(0), "zero"); }
+    #[test] fn pick_many() { assert_eq!(super::pick(7), "many"); }
 }
 "#,
         )
@@ -1853,14 +1862,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(run.exit_code, 0);
-        assert_eq!(run.request.raw_results.len(), 3);
+        assert_eq!(run.request.raw_results.len(), 5);
         assert_eq!(
             run.request
                 .raw_results
                 .iter()
                 .filter_map(|result| result.status.as_deref())
                 .collect::<Vec<_>>(),
-            ["passed", "skipped", "passed"]
+            ["passed", "skipped", "passed", "passed", "passed"]
         );
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
         let archive = root.join("evidence.raw.gz");
@@ -1873,9 +1882,46 @@ mod tests {
             test_exit_code: ExitCodeInput::Present(Some(0)),
         })
         .unwrap();
-        assert_eq!(report.view.tests.len(), 3);
+        assert_eq!(report.view.tests.len(), 5);
         assert!(report.view.summary.lines.covered > 0);
         assert!(report.view.summary.decisions > 0);
+
+        // The match in `pick`: pick(0) selects the first arm; pick(7) passes
+        // the first two over and selects the last. Nothing selects `1`.
+        let mut arms = report
+            .view
+            .branches
+            .iter()
+            .filter(|branch| branch.meta.kind == "match-arm")
+            .collect::<Vec<_>>();
+        arms.sort_by_key(|branch| branch.meta.line);
+        assert_eq!(arms.len(), 3);
+        let alternative = |arm: usize, label: &str| {
+            arms[arm]
+                .alternatives
+                .iter()
+                .find(|alternative| alternative.label == label)
+                .unwrap_or_else(|| panic!("arm {arm} has no alternative {label}"))
+        };
+        assert_eq!(
+            alternative(0, "selected").tests,
+            ["src/lib.rs::tests::pick_zero"]
+        );
+        assert_eq!(
+            alternative(0, "not selected").tests,
+            ["src/lib.rs::tests::pick_many"]
+        );
+        assert!(!alternative(1, "selected").covered);
+        assert_eq!(
+            alternative(1, "not selected").tests,
+            ["src/lib.rs::tests::pick_many"]
+        );
+        assert_eq!(arms[2].alternatives.len(), 1);
+        assert_eq!(
+            alternative(2, "selected").tests,
+            ["src/lib.rs::tests::pick_many"]
+        );
+        assert!(arms[0].covered && !arms[1].covered && arms[2].covered);
 
         fs::remove_dir_all(root).unwrap();
     }

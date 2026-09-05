@@ -96,18 +96,6 @@ fn valid_runtime_path(path: &str) -> bool {
 /// crates. The scan is line-based and deliberately coarse: a fence inside a
 /// doc comment declares the limitation even when the fence is `ignore`d, which
 /// over-declares the unmeasured surface rather than ever under-declaring it.
-fn source_has_doctest_fences(source: &str) -> bool {
-    source.lines().any(|line| {
-        let line = line.trim_start();
-        let documentation = line
-            .strip_prefix("///")
-            .or_else(|| line.strip_prefix("//!"))
-            .or_else(|| line.strip_prefix("#![doc"))
-            .or_else(|| line.strip_prefix("#[doc"));
-        documentation.is_some_and(|text| text.contains("```"))
-    })
-}
-
 fn in_const_context(node: &ra_ap_syntax::SyntaxNode) -> bool {
     let start = node.text_range().start();
     node.ancestors().any(|ancestor| {
@@ -275,6 +263,29 @@ fn allocate_frame_name(
     let id = stable_id(file, "decision", condition.syntax().text_range(), kind);
     let suffix = id.rsplit(':').next().unwrap_or("decision");
     let base = format!("__supercov_decision_{suffix}");
+    let mut candidate = base.clone();
+    let mut attempt = 0_usize;
+    while !identifiers.insert(candidate.clone()) {
+        attempt += 1;
+        candidate = format!("{base}_{attempt}");
+    }
+    candidate
+}
+
+/// The `const` naming a match's alternative IDs. Upper case, so it raises no
+/// naming lint in a crate that denies warnings.
+fn allocate_table_name(
+    file: &str,
+    expression: &ast::MatchExpr,
+    identifiers: &mut BTreeSet<String>,
+) -> String {
+    let id = stable_id(file, "match", expression.syntax().text_range(), "arms");
+    let suffix = id
+        .rsplit(':')
+        .next()
+        .unwrap_or("match")
+        .to_ascii_uppercase();
+    let base = format!("__SUPERCOV_ARMS_{suffix}");
     let mut candidate = base.clone();
     let mut attempt = 0_usize;
     while !identifiers.insert(candidate.clone()) {
@@ -631,12 +642,27 @@ impl<'a> RustObligationCollector<'a> {
                 [("zero", "zero iterations"), ("entered", "entered")],
             );
         }
-        for arm in root.descendants().filter_map(ast::MatchArm::cast) {
-            self.branch(
-                arm.syntax().text_range(),
-                "match-arm",
-                [("missed", "not selected"), ("selected", "selected")],
-            );
+        for expression in root.descendants().filter_map(ast::MatchExpr::cast) {
+            let Some(list) = expression.match_arm_list() else {
+                continue;
+            };
+            let arms = list.arms().collect::<Vec<_>>();
+            let last = arms.len().saturating_sub(1);
+            for (index, arm) in arms.iter().enumerate() {
+                let range = arm.syntax().text_range();
+                if index == last {
+                    // A match is exhaustive, so once every earlier arm has
+                    // been passed over the last one is selected: it can be
+                    // reached but never skipped.
+                    self.branch(range, "match-arm", [("selected", "selected")]);
+                } else {
+                    self.branch(
+                        range,
+                        "match-arm",
+                        [("missed", "not selected"), ("selected", "selected")],
+                    );
+                }
+            }
         }
         for expression in root.descendants().filter_map(ast::TryExpr::cast) {
             self.branch(
@@ -655,20 +681,6 @@ impl<'a> RustObligationCollector<'a> {
             );
         }
 
-        // Doctests are compiled and run by rustdoc as separate crates that the
-        // libtest runner never sees, so nothing in them is measured. Under the
-        // honesty rule an unmeasured surface must be declared, not silently
-        // omitted: bytes-1.12.1 has 248 doctests, and a report that says
-        // nothing about them overstates what was checked. Detection scans doc
-        // comments for a code fence, which rustdoc's test collector also keys
-        // on; fences marked `ignore`/`text`/`no_run` still declare, which can
-        // only over-declare the unmeasured surface, never under-declare it.
-        if source_has_doctest_fences(&root.text().to_string()) {
-            self.limitation(
-                "rust-doctests-not-measured",
-                "Doctests are compiled by rustdoc as separate crates and are not yet measured",
-            );
-        }
         // An obligation the probes cannot reach stays in the denominator, but the
         // gap has to be declared rather than left to read as merely uncovered.
         // Only a context that actually holds an obligation counts:
@@ -758,6 +770,26 @@ fn block_entry_offset(block: &ast::BlockExpr) -> Option<usize> {
             list.l_curly_token()
                 .map(|token| usize::from(token.text_range().end()))
         })
+}
+
+/// Where an item for `node` can go: the entry of the nearest enclosing block.
+/// An item declared there is visible to the whole block, so nothing about the
+/// expression itself -- its value, its temporaries -- changes.
+fn enclosing_block_entry(node: &ra_ap_syntax::SyntaxNode) -> Option<usize> {
+    node.ancestors()
+        .skip(1)
+        .find_map(ast::BlockExpr::cast)
+        .and_then(|block| block_entry_offset(&block))
+}
+
+/// A block written as a bare `{ ... }`: a probe placed just inside its brace
+/// runs when the block is entered. Labeled, `unsafe`, `async` and `const`
+/// blocks are wrapped instead, so an `async` body does not defer the probe.
+fn plain_block(block: &ast::BlockExpr) -> bool {
+    block
+        .syntax()
+        .first_token()
+        .is_some_and(|token| token.kind() == SyntaxKind::L_CURLY)
 }
 
 fn instrument_decision(
@@ -966,6 +998,67 @@ pub fn instrument_rust_source(
         }
     }
 
+    // Match arms. One `const` per match, at the entry of the enclosing block,
+    // names every arm's `not selected` and `selected` IDs in source order;
+    // each arm then records itself as selected and every arm before it as
+    // passed over, since a match tries its arms in order and stops at the
+    // first that fits. The runtime dedupes by ID, so a hot match costs one
+    // record per alternative.
+    for expression in root.descendants().filter_map(ast::MatchExpr::cast) {
+        if cannot_carry_probe(expression.syntax()) {
+            continue;
+        }
+        let Some(list) = expression.match_arm_list() else {
+            continue;
+        };
+        let arms = list.arms().collect::<Vec<_>>();
+        if arms.is_empty() {
+            continue;
+        }
+        let Some(table_offset) = enclosing_block_entry(expression.syntax()) else {
+            continue;
+        };
+        let table = allocate_table_name(file, &expression, &mut identifiers);
+        let entries = arms
+            .iter()
+            .map(|arm| {
+                let id = stable_id(file, "branch", arm.syntax().text_range(), "match-arm");
+                format!(
+                    "{:?}, {:?}",
+                    format!("{id}:missed"),
+                    format!("{id}:selected")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        push_direct(
+            &mut insertions,
+            table_offset,
+            format!("\nconst {table}: &[&str] = &[{entries}];"),
+        );
+        for (index, arm) in arms.iter().enumerate() {
+            let Some(body) = arm.expr() else {
+                continue;
+            };
+            let call = format!("{runtime_path}::arms({table}, {index});");
+            match &body {
+                ast::Expr::BlockExpr(block) if plain_block(block) => {
+                    if let Some(offset) = block_entry_offset(block) {
+                        push_direct(&mut insertions, offset, format!("\n{call}"));
+                    }
+                }
+                _ => push_wrapper(
+                    &mut insertions,
+                    body.syntax().text_range(),
+                    arm.syntax().text_range(),
+                    0,
+                    format!("{{ {call} ("),
+                    ") }".into(),
+                ),
+            }
+        }
+    }
+
     let mut skipped_let_condition = false;
     for expression in root.descendants().filter_map(ast::IfExpr::cast) {
         if let Some(condition) = expression.condition() {
@@ -1039,19 +1132,14 @@ pub fn instrument_rust_source(
         !branch.id.ends_with(":outcome")
             && matches!(
                 branch.kind.as_str(),
-                "logical-and"
-                    | "logical-or"
-                    | "for-loop"
-                    | "while-loop"
-                    | "match-arm"
-                    | "try-operator"
+                "logical-and" | "logical-or" | "for-loop" | "while-loop" | "try-operator"
             )
     }) {
         add_manifest_limitation(
             &mut manifest,
             file,
             "rust-structural-branch-probes-not-yet-injected",
-            "Logical selection, loop, match-arm and try-operator obligations remain visible but their owned observations are not yet injected",
+            "Logical selection, loop and try-operator obligations remain visible but their owned observations are not yet injected",
         );
     }
     manifest.limitations.sort_by(|left, right| {
@@ -1091,6 +1179,7 @@ mod __supercov_runtime_v1 {
         pub fn new(_: &'static str, _: usize) -> Self { Self }
     }
     pub fn hit(_: &'static str) {}
+    pub fn arms(_: &[&'static str], _: usize) {}
     pub fn condition(value: bool, _: &mut DecisionFrame, _: usize) -> bool { value }
     pub fn decision(value: bool, _: &mut DecisionFrame) -> bool { value }
 }
@@ -1171,11 +1260,30 @@ fn closure(value: i32) -> bool {
                 .iter()
                 .any(|branch| branch.kind == "for-loop")
         );
-        assert!(
-            first
-                .branches
+        let mut arms = first
+            .branches
+            .iter()
+            .filter(|branch| branch.kind == "match-arm")
+            .collect::<Vec<_>>();
+        arms.sort_by_key(|branch| branch.line);
+        assert_eq!(arms.len(), 2);
+        assert_eq!(
+            arms[0]
+                .alternatives
                 .iter()
-                .any(|branch| branch.kind == "match-arm")
+                .map(|alternative| alternative.label.as_str())
+                .collect::<Vec<_>>(),
+            ["not selected", "selected"]
+        );
+        // The last arm of an exhaustive match is reached or not; it is never
+        // considered and passed over.
+        assert_eq!(
+            arms[1]
+                .alternatives
+                .iter()
+                .map(|alternative| alternative.label.as_str())
+                .collect::<Vec<_>>(),
+            ["selected"]
         );
         assert!(
             first
@@ -1409,36 +1517,81 @@ fn main() {
     }
 
     #[test]
-    fn doctest_fences_declare_an_unmeasured_surface() {
-        // rustdoc compiles fenced doc blocks as separate test crates that the
-        // libtest runner never sees. bytes-1.12.1 has 248 of them; a report
-        // that says nothing about doctests overstates what was checked.
-        let with_doctest = r#"/// Doubles a value.
-///
-/// ```
-/// assert_eq!(demo::double(2), 4);
-/// ```
-pub fn double(value: usize) -> usize {
-    value * 2
-}
-"#;
-        let manifest = build_rust_manifest("src/lib.rs", with_doctest).unwrap();
-        assert!(manifest.limitations.iter().any(|limitation| {
-            limitation.get("id").and_then(|id| id.as_str()) == Some("rust-doctests-not-measured")
-        }));
+    fn match_arms_record_selection_without_changing_behavior() {
+        let source = r#"#[derive(Debug)]
+enum Shape { Dot, Line(i32), Box { w: i32, h: i32 } }
 
-        // Doc comments without fences, and fences outside doc comments, are
-        // not doctests and must not raise the limitation.
-        let without_doctest = r#"/// Doubles a value, documented without examples.
-pub fn double(value: usize) -> usize {
-    // a stray fence in a plain comment: ```
-    value * 2
+fn area(shape: &Shape) -> i32 {
+    match shape {
+        Shape::Dot => 0,
+        Shape::Line(length) if *length < 0 => -length,
+        Shape::Line(length) => *length,
+        Shape::Box { w, h } => {
+            let area = w * h;
+            area
+        }
+    }
+}
+
+fn describe(value: i32) -> &'static str {
+    let inner = |v: i32| match v { 0 => "none", 1 => "one", _ => "many" };
+    match value {
+        0 => inner(value),
+        n if n < 0 => unsafe { std::hint::unreachable_unchecked() },
+        n => match n % 2 {
+            0 => "even",
+            _ => inner(n),
+        },
+    }
+}
+
+fn main() {
+    for shape in [Shape::Dot, Shape::Line(-3), Shape::Line(4), Shape::Box { w: 2, h: 5 }] {
+        println!("{shape:?}={}", area(&shape));
+    }
+    for value in [0, 1, 3, 8] {
+        println!("{value}:{}", describe(value));
+    }
 }
 "#;
-        let manifest = build_rust_manifest("src/lib.rs", without_doctest).unwrap();
-        assert!(!manifest.limitations.iter().any(|limitation| {
-            limitation.get("id").and_then(|id| id.as_str()) == Some("rust-doctests-not-measured")
-        }));
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        assert!(transformed.code.contains("::arms(__SUPERCOV_ARMS_"));
+        assert_eq!(
+            transformed.code.matches("const __SUPERCOV_ARMS_").count(),
+            4
+        );
+        let arms = transformed
+            .manifest
+            .branches
+            .iter()
+            .filter(|branch| branch.kind == "match-arm")
+            .count();
+        assert_eq!(arms, 4 + 3 + 3 + 2);
+        // Every arm's alternatives appear in a table, and the source keeps
+        // its meaning.
+        for branch in transformed
+            .manifest
+            .branches
+            .iter()
+            .filter(|branch| branch.kind == "match-arm")
+        {
+            for alternative in &branch.alternatives {
+                assert!(
+                    transformed.code.contains(&format!("{:?}", alternative.id)),
+                    "{} is not in any table",
+                    alternative.id
+                );
+            }
+        }
+        let original = compile_and_run(source, "original-arms");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "instrumented-arms",
+        );
+        assert_eq!(instrumented.status, original.status);
+        assert_eq!(instrumented.stdout, original.stdout);
+        assert_eq!(instrumented.stderr, original.stderr);
     }
 
     #[test]
