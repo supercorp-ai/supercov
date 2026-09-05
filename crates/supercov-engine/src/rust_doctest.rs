@@ -1788,10 +1788,7 @@ pub fn publish_rustdoc_outcome_unit(
             ));
         }
         fs::rename(&partial, &destination).map_err(|error| outcome_io(&destination, error))?;
-        OpenOptions::new()
-            .read(true)
-            .open(directory)
-            .and_then(|directory| directory.sync_all())
+        crate::lifecycle::sync_directory_handle(directory)
             .map_err(|error| outcome_io(directory, error))?;
         Ok(destination.clone())
     })();

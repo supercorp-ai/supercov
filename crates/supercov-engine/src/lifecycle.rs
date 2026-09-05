@@ -161,14 +161,28 @@ fn unique_name() -> String {
     )
 }
 
-pub(crate) fn sync_directory(path: &Path) -> Result<(), LifecycleError> {
+/// Make a rename or creation inside `path` durable. On Unix a directory opens
+/// like a file and fsync flushes its entries. On Windows there is nothing to
+/// do and no way to do it: CreateFileW refuses to open a directory without
+/// FILE_FLAG_BACKUP_SEMANTICS and answers ERROR_ACCESS_DENIED, which is how
+/// the first Windows run died -- in the JavaScript frontend's own copy of this
+/// idiom, on the generated node_modules directory it had just created -- and
+/// NTFS journals directory metadata without an explicit sync. Every place
+/// that syncs a directory goes through here so the rule is stated once.
+pub(crate) fn sync_directory_handle(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
-    File::open(path)
-        .and_then(|file| file.sync_all())
-        .map_err(|source| io_error(path, source))?;
+    {
+        File::open(path).and_then(|directory| directory.sync_all())
+    }
     #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+pub(crate) fn sync_directory(path: &Path) -> Result<(), LifecycleError> {
+    sync_directory_handle(path).map_err(|source| io_error(path, source))
 }
 
 pub(crate) fn atomic_rename(source: &Path, destination: &Path) -> Result<(), LifecycleError> {

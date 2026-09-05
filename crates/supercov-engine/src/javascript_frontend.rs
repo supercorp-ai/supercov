@@ -487,11 +487,7 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), JavascriptFrontendEr
             .and_then(|_| output.sync_all())
             .map_err(|source| io_error(&temporary, source))?;
         fs::rename(&temporary, path).map_err(|source| io_error(path, source))?;
-        OpenOptions::new()
-            .read(true)
-            .open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|source| io_error(parent, source))
+        crate::lifecycle::sync_directory_handle(parent).map_err(|source| io_error(parent, source))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
