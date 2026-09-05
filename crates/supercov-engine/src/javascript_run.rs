@@ -485,7 +485,7 @@ pub fn run_direct_javascript(
     }
     let total_started = Instant::now();
     let initialization_started = Instant::now();
-    let root = fs::canonicalize(&request.root)
+    let root = crate::workspace::canonicalize_simplified(&request.root)
         .map_err(|error| format!("{}: {error}", request.root.display()))?;
     let nonce = now_nonce();
     let run_id = request

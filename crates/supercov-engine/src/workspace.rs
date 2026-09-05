@@ -100,6 +100,47 @@ fn omit_escaping_link(path: &Path, target: &Path) {
     );
 }
 
+/// `fs::canonicalize` on Windows returns a verbatim path -- `\\?\C:\...` or
+/// `\\?\UNC\server\share\...` -- and that prefix does not survive contact with
+/// anything else: Node's pathToFileURL reads `?` as a UNC host, `Path::starts_with`
+/// treats `\\?\C:\` and `C:\` as different prefixes so containment checks
+/// misjudge every link, and the prefix shows up in every diagnostic. Canonical
+/// paths are simplified back to the ordinary form at the one place they are
+/// made, so nothing downstream ever sees the verbatim spelling.
+pub(crate) fn canonicalize_simplified(path: &Path) -> io::Result<PathBuf> {
+    fs::canonicalize(path).map(simplified)
+}
+
+#[cfg(windows)]
+pub(crate) fn simplified(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(strip_verbatim) {
+        Some(plain) => PathBuf::from(plain),
+        None => path,
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn simplified(path: PathBuf) -> PathBuf {
+    path
+}
+
+/// The pure string half, kept host-independent so it can be tested anywhere:
+/// `\\?\C:\a` -> `C:\a`, `\\?\UNC\srv\share\a` -> `\\srv\share\a`, and `None`
+/// for a path that carries no verbatim prefix.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn strip_verbatim(path: &str) -> Option<String> {
+    let rest = path.strip_prefix(r"\\?\")?;
+    if let Some(unc) = rest.strip_prefix(r"UNC\") {
+        return Some(format!(r"\\{unc}"));
+    }
+    let mut chars = rest.chars();
+    let drive = chars.next()?;
+    if drive.is_ascii_alphabetic() && chars.next() == Some(':') {
+        return Some(rest.to_owned());
+    }
+    None
+}
+
 fn io_error(path: &Path, source: io::Error) -> WorkspaceError {
     WorkspaceError::Io {
         path: path.to_owned(),
@@ -179,7 +220,7 @@ struct CargoWorkspaceLocator {
 }
 
 fn canonical_root_and_digest(root: &Path) -> Result<(PathBuf, String), WorkspaceError> {
-    let canonical = fs::canonicalize(root).map_err(|error| io_error(root, error))?;
+    let canonical = canonicalize_simplified(root).map_err(|error| io_error(root, error))?;
     let digest = format!(
         "{:x}",
         Sha256::digest(canonical.as_os_str().as_encoded_bytes())
@@ -224,7 +265,7 @@ fn container_for_locator(
     match locator.placement {
         CargoWorkspacePlacement::Sibling => preferred_cargo_workspace_container(root),
         CargoWorkspacePlacement::Temporary => {
-            let temporary_root = fs::canonicalize(std::env::temp_dir())
+            let temporary_root = canonicalize_simplified(&std::env::temp_dir())
                 .map_err(|source| io_error(&std::env::temp_dir(), source))?;
             Ok(temporary_root.join(format!(
                 ".supercov-cargo-{}-{}",
@@ -798,7 +839,7 @@ fn copy_tree<Operations: WorkspaceOperations>(
             // real monorepo on first touch. It resolves to nothing, so it can
             // leak nothing; the LEXICAL containment check still applies, and
             // the link is preserved as-is so the workspace matches the source.
-            let canonical_target = match fs::canonicalize(&from) {
+            let canonical_target = match canonicalize_simplified(&from) {
                 Ok(target) => Some(target),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => None,
                 Err(error) => return Err(io_error(&from, error)),
@@ -892,7 +933,7 @@ fn link_node_modules<Operations: WorkspaceOperations>(
     // anyway, so following the root link loses no isolation -- refusing it
     // forced one user to materialise a 3.7 GB tree by hand.
     let source = if source_metadata.file_type().is_symlink() {
-        let resolved = fs::canonicalize(&source).map_err(|error| io_error(&source, error))?;
+        let resolved = canonicalize_simplified(&source).map_err(|error| io_error(&source, error))?;
         if !fs::symlink_metadata(&resolved)
             .map_err(|error| io_error(&resolved, error))?
             .file_type()
@@ -924,7 +965,7 @@ fn link_node_modules<Operations: WorkspaceOperations>(
                 .file_type()
                 .map_err(|error| io_error(&target, error))?;
             let resolved = if file_type.is_symlink() {
-                fs::canonicalize(&target).map_err(|error| io_error(&target, error))?
+                canonicalize_simplified(&target).map_err(|error| io_error(&target, error))?
             } else {
                 target.clone()
             };
@@ -961,7 +1002,7 @@ pub fn prepare_isolated_workspace(
     let mut operations = SystemWorkspaceOperations;
     let workspace = isolated_workspace_path(root, run_id)?;
     remove_stored_tree_deferred(root, &workspace)?;
-    let canonical_root = fs::canonicalize(root).map_err(|error| io_error(root, error))?;
+    let canonical_root = canonicalize_simplified(root).map_err(|error| io_error(root, error))?;
     copy_tree(
         root,
         &workspace,
@@ -1244,7 +1285,7 @@ fn prepare_cargo_cached_workspace_with_operations<Operations: WorkspaceOperation
     let staging = cargo_transaction_path(root, &container, "staging")?;
     let previous = cargo_transaction_path(root, &container, "previous")?;
     let result = (|| {
-        let canonical_root = fs::canonicalize(root).map_err(|error| io_error(root, error))?;
+        let canonical_root = canonicalize_simplified(root).map_err(|error| io_error(root, error))?;
         copy_tree(
             root,
             &staging,
@@ -1349,7 +1390,7 @@ fn prepare_cached_workspace_with_operations<Operations: WorkspaceOperations>(
     let staging = transaction_path(root, "staging")?;
     let previous = transaction_path(root, "previous")?;
     let result = (|| {
-        let canonical_root = fs::canonicalize(root).map_err(|error| io_error(root, error))?;
+        let canonical_root = canonicalize_simplified(root).map_err(|error| io_error(root, error))?;
         copy_tree(
             root,
             &staging,
@@ -1382,7 +1423,7 @@ fn prepare_cached_workspace_with_operations<Operations: WorkspaceOperations>(
             let metadata = fs::symlink_metadata(&from).map_err(|error| io_error(&from, error))?;
             if metadata.file_type().is_dir() {
                 let canonical_workspace =
-                    fs::canonicalize(&workspace).map_err(|error| io_error(&workspace, error))?;
+                    canonicalize_simplified(&workspace).map_err(|error| io_error(&workspace, error))?;
                 copy_tree(
                     &from,
                     &to,
@@ -1653,6 +1694,21 @@ pub fn prune_cached_workspace_sources(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn verbatim_prefixes_are_stripped_and_plain_paths_left_alone() {
+        use super::strip_verbatim;
+        assert_eq!(strip_verbatim(r"\\?\C:\a\b").as_deref(), Some(r"C:\a\b"));
+        assert_eq!(strip_verbatim(r"\\?\d:\x").as_deref(), Some(r"d:\x"));
+        assert_eq!(
+            strip_verbatim(r"\\?\UNC\server\share\dir").as_deref(),
+            Some(r"\\server\share\dir")
+        );
+        assert_eq!(strip_verbatim(r"C:\a\b"), None);
+        assert_eq!(strip_verbatim("/w/project"), None);
+        assert_eq!(strip_verbatim(r"\\server\share"), None);
+        assert_eq!(strip_verbatim(r"\\?\"), None);
+    }
+
     use super::*;
 
     fn writeback_fixture(name: &str) -> (PathBuf, PathBuf) {
@@ -2102,7 +2158,7 @@ mod tests {
         let container = cargo_workspace_container(&root).unwrap();
         assert_eq!(
             container.parent(),
-            fs::canonicalize(&root).unwrap().parent()
+            canonicalize_simplified(&root).unwrap().parent()
         );
         assert!(!workspace.starts_with(&root));
         assert_eq!(workspace.file_name(), root.file_name());
@@ -2446,8 +2502,8 @@ mod tests {
         let isolated_link = workspace.join("linked-shared");
         assert!(junction::exists(&isolated_link).unwrap());
         assert_eq!(
-            fs::canonicalize(junction::get_target(&isolated_link).unwrap()).unwrap(),
-            fs::canonicalize(workspace.join("shared")).unwrap()
+            canonicalize_simplified(junction::get_target(&isolated_link).unwrap()).unwrap(),
+            canonicalize_simplified(workspace.join("shared")).unwrap()
         );
         assert_eq!(
             fs::read_to_string(isolated_link.join("value")).unwrap(),
@@ -2469,8 +2525,8 @@ mod tests {
         let package = workspace.join("node_modules/example");
         assert!(junction::exists(&package).unwrap());
         assert_eq!(
-            fs::canonicalize(junction::get_target(&package).unwrap()).unwrap(),
-            fs::canonicalize(root.join("node_modules/example")).unwrap()
+            canonicalize_simplified(junction::get_target(&package).unwrap()).unwrap(),
+            canonicalize_simplified(root.join("node_modules/example")).unwrap()
         );
         let metadata = workspace.join("node_modules/.package-lock.json");
         assert!(fs::symlink_metadata(&metadata).unwrap().is_file());

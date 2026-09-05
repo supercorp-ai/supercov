@@ -397,22 +397,60 @@ fn create_directory_all(path: &Path) -> Result<(), JavascriptFrontendError> {
 
 #[cfg(windows)]
 fn create_directory_all(path: &Path) -> Result<(), JavascriptFrontendError> {
-    const ATTEMPTS: usize = 11;
+    // Windows scanners and just-closed directory handles reject creation of a
+    // brand-new path with ERROR_ACCESS_DENIED for as long as they hold the
+    // parent open. On a hosted runner with real-time scanning that is not
+    // milliseconds: the first Windows build exhausted eleven 20 ms retries on
+    // the generated node_modules directory right after the mirror had filled
+    // its sibling with junctions. Back off up to a few seconds against the
+    // exact owned path -- never broaden or redirect the target -- and when it
+    // still fails, say what every ancestor was, so a failure on a machine we
+    // cannot see is a diagnosis rather than a guess.
+    const ATTEMPTS: usize = 16;
+    let started = std::time::Instant::now();
+    let mut delay = std::time::Duration::from_millis(20);
     for attempt in 0..ATTEMPTS {
         match fs::create_dir_all(path) {
             Ok(()) => return Ok(()),
             Err(source)
                 if source.kind() == io::ErrorKind::PermissionDenied && attempt + 1 < ATTEMPTS =>
             {
-                // Windows scanners and just-closed directory handles can
-                // transiently reject creation of a brand-new path. Retry the
-                // exact owned path; never broaden or redirect the target.
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(std::time::Duration::from_millis(500));
             }
-            Err(source) => return Err(io_error(path, source)),
+            Err(source) => {
+                let detail = format!(
+                    "{source} (after {} attempt(s) over {:?}; ancestors: {})",
+                    attempt + 1,
+                    started.elapsed(),
+                    describe_ancestors(path)
+                );
+                return Err(io_error(path, io::Error::new(source.kind(), detail)));
+            }
         }
     }
     unreachable!("the final directory-creation attempt always returns")
+}
+
+/// One line per path component from the root down: whether it exists and as
+/// what. `symlink_metadata` is used so a reparse point is reported as a link
+/// rather than as whatever it points to.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn describe_ancestors(path: &Path) -> String {
+    let mut current = PathBuf::new();
+    let mut parts = Vec::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        let state = match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => "link",
+            Ok(metadata) if metadata.file_type().is_dir() => "dir",
+            Ok(_) => "file",
+            Err(error) if error.kind() == io::ErrorKind::NotFound => "missing",
+            Err(error) => return format!("{} -> {error}", current.display()),
+        };
+        parts.push(format!("{}={state}", current.display()));
+    }
+    parts.join("; ")
 }
 
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), JavascriptFrontendError> {
@@ -1230,6 +1268,18 @@ pub fn prepare_javascript_frontend(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ancestor_description_names_each_component_and_its_state() {
+        let root = std::env::temp_dir().join(format!("supercov-ancestors-{}", unique()));
+        fs::create_dir_all(root.join("present")).unwrap();
+        fs::write(root.join("present/file.txt"), b"x").unwrap();
+        let described = super::describe_ancestors(&root.join("present/file.txt/child"));
+        assert!(described.contains("present=dir"), "{described}");
+        assert!(described.contains("file.txt=file"), "{described}");
+        assert!(described.ends_with("child=missing"), "{described}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     use super::*;
     use crate::project_discovery::discover_coverage_project;
 
@@ -1243,7 +1293,7 @@ mod tests {
         // semantic fixtures in Cargo's ignored target tree so hosted-runner
         // policies on the system temporary directory cannot affect them.
         fs::create_dir_all(&path).unwrap();
-        fs::canonicalize(path).unwrap()
+        crate::workspace::canonicalize_simplified(path).unwrap()
     }
 
     #[test]
