@@ -85,7 +85,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest, windows-11-arm]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -107,7 +107,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest, windows-11-arm]
         python: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
@@ -130,7 +130,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest, windows-11-arm]
         # 3.3 measures through Coverage alone and declares the rest; 3.4 is
         # the first version the probes can measure everything on.
         ruby: ["3.3", "3.4", "4.0"]
@@ -153,7 +153,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest, windows-11-arm]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -166,3 +166,33 @@ jobs:
           components: rust-src
       - run: npm ci
       - run: npm run test:rust-public-cargo
+
+  # The binary we ship, on the machine it is shipped for. Three of the eight
+  # native packages had never executed anywhere but the cross-compiler.
+  released:
+    name: Released binary (${{ matrix.native }})
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { native: cli-linux-x64-gnu, os: ubuntu-latest }
+          - { native: cli-linux-arm64-gnu, os: ubuntu-24.04-arm }
+          - { native: cli-linux-x64-musl, os: ubuntu-latest, container: "node:22-alpine" }
+          - { native: cli-linux-arm64-musl, os: ubuntu-24.04-arm, container: "node:22-alpine" }
+          - { native: cli-darwin-arm64, os: macos-latest }
+          - { native: cli-darwin-x64, os: macos-15-intel }
+          - { native: cli-win32-x64, os: windows-latest }
+          - { native: cli-win32-arm64, os: windows-11-arm }
+    steps:
+      - uses: actions/checkout@v6
+      # The Alpine image brings its own Node; setup-node has no musl build.
+      - if: ${{ !matrix.container }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: node scripts/released-binary-smoke.mjs
+        env:
+          SUPERCOV_EXPECTED_NATIVE: ${{ matrix.native }}
+
