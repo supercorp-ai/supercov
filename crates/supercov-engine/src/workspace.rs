@@ -141,6 +141,47 @@ pub(crate) fn strip_verbatim(path: &str) -> Option<String> {
     None
 }
 
+/// The `file://` URL for an absolute path, the way Node's `pathToFileURL`
+/// derives it. Node takes a bare `--import=C:\...` for a URL with scheme `c:`
+/// and refuses it -- ERR_UNSUPPORTED_ESM_URL_SCHEME -- while `/abs/path` has no
+/// colon and passes, which is why every POSIX run worked and every Windows run
+/// died in the first Node child. Windows paths reach here already simplified
+/// (no `\\?\`); `\` becomes `/`, a drive path becomes `file:///C:/...`, a UNC
+/// path `file://server/share/...`, and every byte outside the URL-safe set is
+/// percent-encoded so a space or a `#` in a temp directory cannot break it.
+pub(crate) fn file_url(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    let text = text.replace('\\', "/");
+    file_url_from_slash_path(&text)
+}
+
+/// The pure half: `slash_path` uses `/` separators on every host.
+pub(crate) fn file_url_from_slash_path(slash_path: &str) -> String {
+    let mut url = String::from("file://");
+    let mut rest = slash_path;
+    if let Some(unc) = rest.strip_prefix("//") {
+        // `//server/share/dir` -> `file://server/share/dir`: the host is the server.
+        let (host, tail) = unc.split_once('/').unwrap_or((unc, ""));
+        url.push_str(host);
+        rest = tail;
+        url.push('/');
+    } else if !rest.starts_with('/') {
+        // A drive path such as `C:/dir`.
+        url.push('/');
+    }
+    for byte in rest.bytes() {
+        let keep =
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/' | b':');
+        if keep {
+            url.push(byte as char);
+        } else {
+            url.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    url
+}
+
 fn io_error(path: &Path, source: io::Error) -> WorkspaceError {
     WorkspaceError::Io {
         path: path.to_owned(),
@@ -1697,6 +1738,31 @@ pub fn prune_cached_workspace_sources(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_urls_match_what_node_derives_for_every_path_shape() {
+        use super::file_url_from_slash_path;
+        assert_eq!(
+            file_url_from_slash_path("C:/Users/runner/AppData/Local/Temp/x/register.mjs"),
+            "file:///C:/Users/runner/AppData/Local/Temp/x/register.mjs"
+        );
+        assert_eq!(
+            file_url_from_slash_path("C:/Users/a b/#1/register.mjs"),
+            "file:///C:/Users/a%20b/%231/register.mjs"
+        );
+        assert_eq!(
+            file_url_from_slash_path("//server/share/dir/register.mjs"),
+            "file://server/share/dir/register.mjs"
+        );
+        assert_eq!(
+            file_url_from_slash_path("/w/p/register.mjs"),
+            "file:///w/p/register.mjs"
+        );
+        assert_eq!(
+            file_url_from_slash_path("/w/p x?q/ü.mjs"),
+            "file:///w/p%20x%3Fq/%C3%BC.mjs"
+        );
+    }
+
     #[test]
     fn verbatim_prefixes_are_stripped_and_plain_paths_left_alone() {
         use super::strip_verbatim;

@@ -122,7 +122,14 @@ try {
     encoding: "utf8",
     env: process.env,
   });
-  assert.equal(covered.status, 0, covered.stderr || covered.stdout);
+  // Under `node --test` each file runs in a child whose stderr the runner
+  // captures and reports on STDOUT, so a failing test -- or a preload that
+  // failed to load in that child -- is visible only there. Show both streams.
+  assert.equal(
+    covered.status,
+    0,
+    `supercov exited ${covered.status}\n--- stderr ---\n${covered.stderr}\n--- stdout ---\n${covered.stdout}`,
+  );
   assert.match(covered.stdout, /\[coverage\] evidence:/);
 
   const installedPackage = resolve(consumer, "node_modules", target.package);

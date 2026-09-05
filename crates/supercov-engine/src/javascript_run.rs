@@ -438,10 +438,15 @@ fn node_options(preload: &Path) -> String {
     // `packages/react#build` resolved `.supercov/register.mjs` against
     // `packages/react/` and aborted every task with ERR_MODULE_NOT_FOUND.
     let preload = std::path::absolute(preload).unwrap_or_else(|_| preload.to_path_buf());
+    // And it must be a URL, not a path: Node reads a bare `C:\...` as a URL
+    // with scheme `c:` and refuses it, so on Windows the first Node child died
+    // at startup and the suite reported only that its exit code was 1. The
+    // JavaScript runtime already passes this import as a file URL; so does
+    // this.
     [
         std::env::var("NODE_OPTIONS").ok(),
         Some("--enable-source-maps".into()),
-        Some(format!("--import={}", preload.display())),
+        Some(format!("--import={}", crate::workspace::file_url(&preload))),
     ]
     .into_iter()
     .flatten()
