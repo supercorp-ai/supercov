@@ -356,6 +356,8 @@ module Supercov
       @limitations = {}
       @active_threads = {}
       @realpath_cache = {}
+      @saw_file = false
+      @matched_file = false
       # Ruby 3.4 applies Coverage to iseqs compiled through a load hook;
       # 3.3 does not, so it runs on stdlib coverage alone and declares every
       # probe-only obligation unmeasured.
@@ -555,7 +557,12 @@ module Supercov
 
     def relative(absolute)
       return nil unless absolute
-      absolute.start_with?(@root + "/") ? absolute[(@root.length + 1)..] : nil
+
+      @saw_file = true
+      return nil unless absolute.start_with?(@root + "/")
+
+      @matched_file = true
+      absolute[(@root.length + 1)..]
     end
 
     # -- identity -----------------------------------------------------------
@@ -963,7 +970,7 @@ module Supercov
     end
 
     def close
-      @mutex.synchronize do
+      unmatched = @mutex.synchronize do
         return if @closed
 
         settle_arrivals(@context)
@@ -971,7 +978,14 @@ module Supercov
         @closed = true
         record("t" => "exit", "at" => now_ms)
         @transport&.close
+        @worker == "main" && @saw_file && !@matched_file
       end
+      return unless unmatched
+
+      # Every file Ruby loaded lay outside the measured tree, which is what a
+      # run reports as zero coverage without a word of explanation. Name the
+      # root so the mismatch is visible.
+      warn "[supercov] none of the files Ruby loaded lay under the measured root #{@root}"
     end
 
     def now_ms

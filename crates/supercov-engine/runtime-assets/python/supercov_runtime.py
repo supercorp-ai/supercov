@@ -1505,6 +1505,24 @@ class Runtime:
             self.closed = True
             self._record({"t": "exit", "at": _now_ms()})
             self._close_output(flush=True)
+            unmatched = (
+                self.worker == "main"
+                and bool(self.path_cache)
+                and all(relative is None for relative in self.path_cache.values())
+            )
+        if unmatched:
+            # Every executed code object lay outside the measured tree. That is
+            # what a run reports as zero coverage without a word of explanation
+            # -- on Windows the root once carried a `\\?\` prefix its files did
+            # not -- so name the root and one file that missed it.
+            sample = next(
+                (name for name in self.path_cache if not name.startswith("<")),
+                next(iter(self.path_cache)),
+            )
+            sys.stderr.write(
+                f"[supercov] none of the {len(self.path_cache)} executed files lay under "
+                f"the measured root {self.root}; for example {sample}\n"
+            )
         if TIMING:
             sys.stderr.write(
                 "[supercov:timing] "

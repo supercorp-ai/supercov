@@ -5,7 +5,7 @@
 #[cfg(unix)]
 use std::fs;
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs::OpenOptions,
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -102,7 +102,7 @@ impl CommandSpec {
         if self.program.is_empty() {
             return Err(SupervisionError::EmptyCommand);
         }
-        let mut command = Command::new(&self.program);
+        let mut command = Command::new(self.resolved_program());
         command
             .args(&self.arguments)
             .current_dir(&self.cwd)
@@ -142,6 +142,85 @@ impl CommandSpec {
         }
         Ok(command)
     }
+}
+
+impl CommandSpec {
+    /// Windows finds `foo.exe` for a bare `foo` and nothing else, while a
+    /// gem's or npm's executable there is a `.bat` or `.cmd` shim: `rspec`
+    /// failed with "program not found" with `rspec.bat` sitting on PATH.
+    /// Resolve the program the way the shell does -- every PATH entry, every
+    /// PATHEXT extension -- so the standard library sees the extension and
+    /// runs a batch file through cmd.exe with its own quoting.
+    #[cfg(windows)]
+    fn resolved_program(&self) -> OsString {
+        // Variable names are case-insensitive there, and PATH is usually
+        // spelled `Path`.
+        let variable = |name: &str| match &self.environment {
+            Some(environment) => environment
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.clone()),
+            None => std::env::var_os(name),
+        };
+        resolve_program_with(
+            &self.program,
+            &self.cwd,
+            variable("PATH"),
+            variable("PATHEXT"),
+        )
+    }
+
+    #[cfg(not(windows))]
+    fn resolved_program(&self) -> OsString {
+        self.program.clone()
+    }
+}
+
+/// The host-independent half of program resolution, so it is tested on every
+/// host. A bare name is looked for in each PATH directory, a name with a
+/// separator relative to the working directory; in either place a candidate
+/// carrying a PATHEXT extension wins over the bare file, as in cmd.exe,
+/// because an extensionless script cannot be started on Windows even when it
+/// exists. A program nothing matches is returned unchanged so the operating
+/// system reports the failure in its own words.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn resolve_program_with(
+    program: &OsStr,
+    cwd: &Path,
+    path: Option<OsString>,
+    pathext: Option<OsString>,
+) -> OsString {
+    const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+    let pathext = pathext
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_PATHEXT.into());
+    let extensions = pathext
+        .to_string_lossy()
+        .split(';')
+        .filter(|extension| !extension.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let directories = if program.to_string_lossy().contains(['\\', '/']) {
+        vec![cwd.to_path_buf()]
+    } else {
+        path.map(|path| std::env::split_paths(&path).collect())
+            .unwrap_or_default()
+    };
+    let is_file = |candidate: &Path| std::fs::metadata(candidate).is_ok_and(|meta| meta.is_file());
+    for directory in directories {
+        let base = directory.join(program);
+        for extension in &extensions {
+            let mut candidate = base.clone().into_os_string();
+            candidate.push(extension);
+            if is_file(Path::new(&candidate)) {
+                return candidate;
+            }
+        }
+        if base.extension().is_some() && is_file(&base) {
+            return base.into_os_string();
+        }
+    }
+    program.to_owned()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1356,6 +1435,102 @@ pub fn supervise_captured_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch_directory(label: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "supercov-{label}-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn resolves_programs_the_way_the_windows_shell_does() {
+        let root = scratch_directory("program-resolution");
+        std::fs::create_dir(root.join("sub")).unwrap();
+        // `tool.CMD` is the same file as `tool.cmd` where names are
+        // case-insensitive and a second file where they are not; either way
+        // the default extension list finds it under its own spelling.
+        for name in ["tool.cmd", "tool.CMD", "named.exe", "plain", "sub/tool.cmd"] {
+            std::fs::write(root.join(name), "").unwrap();
+        }
+        let path = Some(std::env::join_paths([root.join("elsewhere"), root.clone()]).unwrap());
+        let pathext = Some(OsString::from(".exe;.cmd"));
+        let resolve = |program: &str| {
+            resolve_program_with(OsStr::new(program), &root, path.clone(), pathext.clone())
+        };
+
+        assert_eq!(resolve("tool"), root.join("tool.cmd").into_os_string());
+        assert_eq!(resolve("named"), root.join("named.exe").into_os_string());
+        assert_eq!(
+            resolve("named.exe"),
+            root.join("named.exe").into_os_string()
+        );
+        // An extensionless file is never chosen: cmd.exe cannot start it either.
+        assert_eq!(resolve("plain"), OsString::from("plain"));
+        assert_eq!(resolve("missing"), OsString::from("missing"));
+        // A separator means relative to the working directory, not PATH.
+        assert_eq!(
+            resolve("sub/tool"),
+            root.join("sub/tool.cmd").into_os_string()
+        );
+        assert_eq!(
+            resolve("./sub/tool"),
+            root.join("./sub/tool.cmd").into_os_string()
+        );
+        let absolute = root.join("named.exe");
+        assert_eq!(
+            resolve_program_with(
+                absolute.as_os_str(),
+                Path::new("/nowhere"),
+                None,
+                pathext.clone()
+            ),
+            absolute.clone().into_os_string()
+        );
+        // No PATHEXT at all means the Windows default list.
+        assert_eq!(
+            resolve_program_with(OsStr::new("tool"), &root, path.clone(), None),
+            root.join("tool.CMD").into_os_string()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn starts_a_batch_shim_found_through_pathext() {
+        let root = scratch_directory("batch-shim");
+        std::fs::write(root.join("shim.cmd"), "@echo off\r\nexit /b 3\r\n").unwrap();
+        let mut environment = vec![
+            (OsString::from("Path"), root.clone().into_os_string()),
+            (
+                OsString::from("PATHEXT"),
+                OsString::from(".COM;.EXE;.BAT;.CMD"),
+            ),
+        ];
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            environment.push((OsString::from("SystemRoot"), system_root));
+        }
+        let spec = CommandSpec {
+            program: "shim".into(),
+            arguments: vec!["ignored".into()],
+            cwd: std::env::current_dir().unwrap(),
+            environment: Some(environment),
+            captured_output: None,
+        };
+        let mut diagnostics = Vec::new();
+        let result =
+            supervise_command(&spec, SupervisionOptions::default(), &mut diagnostics).unwrap();
+        assert_eq!(result.exit_code(), 3);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn parses_only_positive_integer_milliseconds() {

@@ -220,6 +220,16 @@ pub fn run_direct_rust(
     if request.command.is_empty() {
         return Err("test command must not be empty".into());
     }
+    // The shared probe runtime maps its evidence file with mmap and hooks
+    // pthread_create and posix_spawn; on any other host every probe is a
+    // no-op, so a run there would report zero coverage without a word of
+    // explanation. Refuse plainly until the transport is ported.
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        return Err(
+            "Rust suites are not supported on this platform yet: the probe transport is Unix-only, so a run here would measure nothing"
+                .into(),
+        );
+    }
     let total_started = Instant::now();
     let initialization_started = Instant::now();
     let root = fs::canonicalize(&request.root)

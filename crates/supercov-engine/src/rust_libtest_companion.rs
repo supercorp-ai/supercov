@@ -585,6 +585,7 @@ pub fn prepare_exact_libtest_source(
         .write_all(event_runtime.as_bytes())
         .and_then(|()| event_file.sync_all())
         .map_err(|error| io_error(&event_path, error))?;
+    drop(event_file);
 
     let identity = RustLibtestCompanionSourceIdentity {
         event_protocol_version: RUST_LIBTEST_EVENT_PROTOCOL_VERSION,
@@ -608,6 +609,10 @@ pub fn prepare_exact_libtest_source(
         .write_all(&identity_bytes)
         .and_then(|()| identity_file.sync_all())
         .map_err(|error| io_error(&identity_path, error))?;
+    // Windows will not rename a directory while a file inside it is open, so
+    // both writers are closed before the tree is published; the file
+    // publications below already did this.
+    drop(identity_file);
     fs::rename(&partial, &destination).map_err(|error| io_error(&destination, error))?;
     sync_directory(&parent)?;
     cleanup.0 = None;

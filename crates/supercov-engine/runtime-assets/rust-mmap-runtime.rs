@@ -3,9 +3,22 @@
 mod __SUPERCOV_MODULE__ {
     use std::cell::{Cell, RefCell};
     use std::collections::BTreeSet;
-    use std::fs::OpenOptions;
     use std::sync::OnceLock;
-    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // The descriptor commit byte exists only where a mapping does; on any
+    // other target this import was the stub's first unused warning.
+    #[cfg(any(
+        all(
+            target_os = "macos",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        all(
+            target_os = "linux",
+            any(target_env = "gnu", target_env = "musl"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        )
+    ))]
+    use std::sync::atomic::AtomicU8;
 
     const MAGIC: &[u8; 8] = b"SCVRUST3";
     const VERSION: u32 = 3;
@@ -463,6 +476,7 @@ mod __SUPERCOV_MODULE__ {
     ))]
     impl Transport {
         fn open() -> Option<Self> {
+            use std::fs::OpenOptions;
             use std::os::fd::AsRawFd as _;
             use std::os::unix::fs::OpenOptionsExt as _;
 
@@ -568,6 +582,13 @@ mod __SUPERCOV_MODULE__ {
         fn atomic_u64(&self, offset: usize) -> &AtomicU64 {
             // SAFETY: header offsets are aligned within the page-aligned map.
             unsafe { &*self.pointer.add(offset).cast::<AtomicU64>() }
+        }
+
+        /// A nonce for derived phase identities, drawn from the shared header
+        /// so every attached process takes from one sequence.
+        fn next_phase_nonce(&self) -> u64 {
+            self.atomic_u64(NEXT_PHASE_OFFSET)
+                .fetch_add(1, Ordering::Relaxed)
         }
 
         fn dropped(&self) {
@@ -980,6 +1001,15 @@ mod __SUPERCOV_MODULE__ {
         }
 
         fn finish_ordinal(&self, _token: u64, _ordinal: u64) {}
+
+        /// Without a mapping there is no shared sequence; a process-local one
+        /// keeps derived identities distinct within this process. The stub
+        /// had no such method and was never compiled until a Windows host
+        /// ran the tests that build it.
+        fn next_phase_nonce(&self) -> u64 {
+            static NONCE: AtomicU64 = AtomicU64::new(0);
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        }
     }
 
     impl Drop for Transport {
@@ -1134,9 +1164,7 @@ mod __SUPERCOV_MODULE__ {
         let Some(transport) = transport() else {
             return enter_context(parent);
         };
-        let nonce = transport
-            .atomic_u64(NEXT_PHASE_OFFSET)
-            .fetch_add(1, Ordering::Relaxed);
+        let nonce = transport.next_phase_nonce();
         let child = thread_context_id(parent, nonce);
         let mut definition = [0_u8; 16];
         definition[..8].copy_from_slice(&parent.to_le_bytes());
@@ -1342,9 +1370,7 @@ mod __SUPERCOV_MODULE__ {
         if parent == 0 {
             return NO_CONTEXT_OVERRIDE;
         }
-        let nonce = transport
-            .atomic_u64(NEXT_PHASE_OFFSET)
-            .fetch_add(1, Ordering::Relaxed);
+        let nonce = transport.next_phase_nonce();
         let child = assertion_context_id(parent, id_high, id_low, nonce);
         let id = decision_id(id_high, id_low);
         // SAFETY: decision_id writes only the fixed ASCII prefix and lowercase

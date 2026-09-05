@@ -142,7 +142,7 @@ fn workspace_output_directories(workspace: &Path) -> Vec<String> {
             }
             if OUTPUT_CANDIDATES.contains(&name) {
                 if let Ok(relative) = entry.path().strip_prefix(workspace) {
-                    found.push(relative.to_string_lossy().into_owned());
+                    found.push(slash_path(relative));
                 }
             } else if depth < SCAN_DEPTH_LIMIT {
                 pending.push((entry.path(), depth + 1));
@@ -150,6 +150,16 @@ fn workspace_output_directories(workspace: &Path) -> Vec<String> {
         }
     }
     found
+}
+
+/// Cache metadata is read back through `Path::new`, which accepts `/` on
+/// every host; a path spelled with `\\` would only ever be right on the host
+/// that wrote it.
+fn slash_path(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 pub fn write_build_cache(

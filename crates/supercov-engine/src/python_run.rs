@@ -16,6 +16,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use crate::workspace::canonicalize_simplified;
 use crate::{
     evidence_archive::write_archive,
     frontend_protocol::validate_frontend_report_request,
@@ -173,7 +174,7 @@ pub fn current_python_integrity(
     root: &Path,
     command: &[String],
 ) -> Result<crate::run_store::RunIntegrity, String> {
-    let root = fs::canonicalize(root).map_err(|error| error.to_string())?;
+    let root = canonicalize_simplified(root).map_err(|error| error.to_string())?;
     let files = crate::python_project::discover_python_files(&root)?;
     create_explicit_run_integrity(
         &root,
@@ -192,7 +193,7 @@ pub fn run_direct_python(
     }
     let total_started = Instant::now();
     let initialization_started = Instant::now();
-    let root = fs::canonicalize(&request.root)
+    let root = canonicalize_simplified(&request.root)
         .map_err(|error| format!("{}: {error}", request.root.display()))?;
     let mut lock = ProjectLock::acquire(&root, &request.run_id, &request.started_at)
         .map_err(|error| error.to_string())?;

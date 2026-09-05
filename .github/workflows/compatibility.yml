@@ -102,17 +102,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            python: "3.12"
-          - os: ubuntu-latest
-            python: "3.13"
-          - os: ubuntu-latest
-            python: "3.14"
-          - os: macos-latest
-            python: "3.14"
-          - os: windows-latest
-            python: "3.14"
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -134,17 +125,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # 3.3 measures through Coverage alone and declares the rest; 3.4 is
-          # the first version the probes can measure everything on.
-          - os: ubuntu-latest
-            ruby: "3.3"
-          - os: ubuntu-latest
-            ruby: "3.4"
-          - os: macos-latest
-            ruby: "3.4"
-          - os: windows-latest
-            ruby: "3.4"
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # 3.3 measures through Coverage alone and declares the rest; 3.4 is
+        # the first version the probes can measure everything on.
+        ruby: ["3.3", "3.4"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
