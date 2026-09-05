@@ -11,10 +11,20 @@ const version = JSON.parse(readFileSync(resolve(repository, "package.json"))).ve
 const temporary = mkdtempSync(resolve(tmpdir(), "supercov-rubygem-"));
 
 // `Gem::Platform.local` is versioned -- "arm64-darwin-22" -- while a published
-// platform is the family, "arm64-darwin". A gem matches when the local platform
-// starts with the family, which is what RubyGems' own resolver decides.
+// platform is the family, "arm64-darwin"; and a glibc Ruby calls itself
+// "x86_64-linux", which RubyGems treats as the same platform as
+// "x86_64-linux-gnu". A gem matches when the local platform is, or begins
+// with, the family under either spelling.
 function Gem_matches(platform, localPlatform) {
-  return localPlatform === platform || localPlatform.startsWith(`${platform}-`);
+  const families = [platform, platform.replace(/-linux-gnu$/, "-linux")];
+  return families.some(
+    (family) => localPlatform === family || localPlatform.startsWith(`${family}-`),
+  );
+}
+
+function option(name) {
+  const index = process.argv.indexOf(name);
+  return index === -1 ? undefined : process.argv[index + 1];
 }
 
 function run(program, args, options = {}) {
@@ -28,25 +38,37 @@ try {
   const built = readdirSync(gemDirectory).filter(
     (entry) => entry.startsWith(`supercov-${version}-`) && entry.endsWith(".gem"),
   );
-  // A release builds one gem per platform into this directory, and only the
-  // one for this machine can be installed here. Ask Ruby which platform it is
-  // rather than mapping Node's names onto RubyGems' own.
-  const localPlatform = run("ruby", ["-e", "print Gem::Platform.local.to_s"]).stdout.trim();
+  // A release job names the target whose gem it just built, and RubyGems is
+  // told that platform outright: the runner's Ruby may call itself
+  // "x86_64-linux" while the gem says "x86_64-linux-gnu", and a musl gem is
+  // built on a glibc runner, where its static binary still runs. Without a
+  // target -- a developer's machine -- the gem for the local platform is the
+  // one to install, and Ruby is asked which platform that is rather than
+  // mapping Node's names onto RubyGems' own.
   const registry = JSON.parse(
     readFileSync(resolve(repository, "npm/native-targets.json"), "utf8"),
   );
-  const platforms = registry.targets
-    .map((target) => target.gemPlatform)
-    .filter(Boolean)
-    .filter((platform) => Gem_matches(platform, localPlatform));
-  const gems = built.filter((entry) =>
-    platforms.some((platform) => entry === `supercov-${version}-${platform}.gem`),
-  );
-  assert.equal(
-    gems.length,
-    1,
-    `expected exactly one supercov ${version} gem installable on ${localPlatform}, found ${gems} among ${built}`,
-  );
+  const rustTarget = option("--target");
+  let platform;
+  if (rustTarget) {
+    const target = registry.targets.find((entry) => entry.rustTarget === rustTarget);
+    assert(target?.gemPlatform, `${rustTarget} has no RubyGems platform`);
+    platform = target.gemPlatform;
+  } else {
+    const localPlatform = run("ruby", ["-e", "print Gem::Platform.local.to_s"]).stdout.trim();
+    const matching = registry.targets
+      .map((target) => target.gemPlatform)
+      .filter(Boolean)
+      .filter((candidate) => Gem_matches(candidate, localPlatform));
+    assert.equal(
+      matching.length,
+      1,
+      `expected exactly one registered gem platform for ${localPlatform}, found ${matching}`,
+    );
+    platform = matching[0];
+  }
+  const gems = built.filter((entry) => entry === `supercov-${version}-${platform}.gem`);
+  assert.equal(gems.length, 1, `expected supercov-${version}-${platform}.gem, found ${built}`);
 
   const gemHome = resolve(temporary, "gem-home");
   const bindir = resolve(temporary, "bin");
@@ -60,6 +82,8 @@ try {
   run(...shell(windows ? "gem.cmd" : "gem", [
     "install",
     "--local",
+    "--platform",
+    platform,
     "--no-document",
     "--install-dir",
     gemHome,

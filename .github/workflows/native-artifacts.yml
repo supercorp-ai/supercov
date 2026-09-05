@@ -124,7 +124,7 @@ jobs:
         run: node scripts/build-rubygem.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }}
       - name: Install the gem and complete a real coverage run
         if: matrix.gem
-        run: node scripts/rubygem-integration.mjs
+        run: node scripts/rubygem-integration.mjs --target ${{ matrix.target }}
       - name: Build the platform wheel
         run: node scripts/build-wheel.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --out target/wheels
       - name: Install the wheel and complete a real coverage run
