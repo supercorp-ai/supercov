@@ -93,7 +93,11 @@ jobs:
           node-version: 24
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - run: npm ci
+      # The only clippy pass that sees Windows- and macOS-only code.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: npm run test:filesystem
       - run: npm run test:platform
 
