@@ -7,6 +7,14 @@
 - `cargo binstall supercov` downloads the prebuilt binary from the release instead of compiling the engine, which takes minutes. Plain `cargo install` still builds from source.
 - The Ruby frontend runs in CI: Ruby 3.3 and 3.4 on Linux, and 3.4 on macOS and Windows.
 
+**Fixed**
+
+- A plain `npm ci` installed native binaries from an older release and then refused them, because the lockfile recorded one version beside a tarball URL naming another.
+
+**Notes**
+
+- Python and Ruby suites are now verified on Linux and macOS. On Windows they do not work yet: a Ruby run cannot start a gem's executable, and a Python run records no coverage. JavaScript and TypeScript suites are unaffected and stay verified on Windows.
+
 ## 0.0.38
 
 **Fixed**
