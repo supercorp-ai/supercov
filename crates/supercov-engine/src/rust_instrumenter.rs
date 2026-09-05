@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 
 use ra_ap_syntax::{
     AstNode, Edition, SourceFile, SyntaxKind, TextRange,
-    ast::{self, BinaryOp, HasAttrs, HasName, LogicOp},
+    ast::{self, BinaryOp, HasAttrs, HasLoopBody, HasName, LogicOp},
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -286,6 +286,24 @@ fn allocate_table_name(
         .unwrap_or("match")
         .to_ascii_uppercase();
     let base = format!("__SUPERCOV_ARMS_{suffix}");
+    let mut candidate = base.clone();
+    let mut attempt = 0_usize;
+    while !identifiers.insert(candidate.clone()) {
+        attempt += 1;
+        candidate = format!("{base}_{attempt}");
+    }
+    candidate
+}
+
+/// The local that remembers whether a `while` loop has run its body.
+fn allocate_flag_name(
+    file: &str,
+    expression: &ast::WhileExpr,
+    identifiers: &mut BTreeSet<String>,
+) -> String {
+    let id = stable_id(file, "loop", expression.syntax().text_range(), "flag");
+    let suffix = id.rsplit(':').next().unwrap_or("loop");
+    let base = format!("__supercov_loop_{suffix}");
     let mut candidate = base.clone();
     let mut attempt = 0_usize;
     while !identifiers.insert(candidate.clone()) {
@@ -823,11 +841,14 @@ fn instrument_decision(
         ),
         format!("), &mut {frame_name}) }})"),
     );
+    // Each condition's scope is the condition itself, so a wrapper that
+    // started earlier and ends where this condition ends -- the left operand
+    // of a logical operator -- closes after it, not before.
     for (index, atomic_range) in condition_ranges.into_iter().enumerate() {
         push_wrapper(
             insertions,
             atomic_range,
-            range,
+            atomic_range,
             1,
             format!("{runtime_path}::condition(("),
             format!("), &mut {frame_name}, {index})"),
@@ -839,9 +860,11 @@ fn instrument_decision(
 /// Produce a private Rust candidate using only Supercov-owned probe calls.
 ///
 /// The caller supplies a collision-free generated crate-local runtime path.
-/// This stage instruments the surfaces whose source transform already has
-/// semantic tests. Remaining branch surfaces stay in the denominator and are
-/// paired with a blocking manifest limitation.
+/// Every obligation the manifest declares -- statements, functions, decisions
+/// with their conditions, match arms, logical operators, loops and the try
+/// operator -- takes an owned probe; what a probe cannot reach (const
+/// contexts, macro expansions, attributed statements, let chains) stays in
+/// the denominator behind an explicit limitation.
 pub fn instrument_rust_source(
     file: &str,
     source: &str,
@@ -1059,6 +1082,152 @@ pub fn instrument_rust_source(
         }
     }
 
+    let mut skipped_let_chain_operator = false;
+    // Logical operators: the left operand alone decides whether the right one
+    // runs, so wrapping it records the outcome without touching evaluation
+    // order. `&&` short-circuits on false, `||` on true.
+    for binary in root.descendants().filter_map(ast::BinExpr::cast) {
+        let short_circuits_when = match binary.op_kind() {
+            Some(BinaryOp::LogicOp(LogicOp::And)) => false,
+            Some(BinaryOp::LogicOp(LogicOp::Or)) => true,
+            _ => continue,
+        };
+        if cannot_carry_probe(binary.syntax()) {
+            continue;
+        }
+        let (Some(left), Some(right)) = (binary.lhs(), binary.rhs()) else {
+            continue;
+        };
+        // In a let chain the left operand is (or holds) a `let`, whose
+        // bindings must stay in scope for the right operand; it cannot pass
+        // through a call. That stays declared with the let-chain limitation.
+        if left
+            .syntax()
+            .descendants()
+            .any(|node| ast::LetExpr::can_cast(node.kind()))
+        {
+            skipped_let_chain_operator = true;
+            continue;
+        }
+        let kind = if short_circuits_when {
+            "logical-or"
+        } else {
+            "logical-and"
+        };
+        let id = stable_id(file, "branch", right.syntax().text_range(), kind);
+        push_wrapper(
+            &mut insertions,
+            left.syntax().text_range(),
+            binary.syntax().text_range(),
+            2,
+            format!("{runtime_path}::logical(("),
+            format!(
+                "), {short_circuits_when}, {:?}, {:?})",
+                format!("{id}:short-circuit"),
+                format!("{id}:evaluated")
+            ),
+        );
+    }
+
+    // `for` loops: the iterable passes through an adapter that records, on
+    // the first `next`, whether the body ran at all. `into_iter` is called
+    // where the loop would have called it, on the same expression.
+    for expression in root.descendants().filter_map(ast::ForExpr::cast) {
+        if cannot_carry_probe(expression.syntax()) {
+            continue;
+        }
+        let Some(iterable) = expression.iterable() else {
+            continue;
+        };
+        let id = stable_id(file, "branch", expression.syntax().text_range(), "for-loop");
+        // Scope is the wrapped range itself: any wrapper that also starts
+        // here and reaches further -- a decision, a match arm -- must stay
+        // outside this one.
+        push_wrapper(
+            &mut insertions,
+            iterable.syntax().text_range(),
+            iterable.syntax().text_range(),
+            0,
+            format!("{runtime_path}::for_loop(("),
+            format!(
+                "), {:?}, {:?})",
+                format!("{id}:zero"),
+                format!("{id}:entered")
+            ),
+        );
+    }
+
+    // `while` loops: a flag beside the loop, cleared by the first body entry
+    // and read once the loop is over. The condition stays as written, so
+    // `while let` is covered too.
+    for expression in root.descendants().filter_map(ast::WhileExpr::cast) {
+        if cannot_carry_probe(expression.syntax()) {
+            continue;
+        }
+        let Some(offset) = expression.loop_body().as_ref().and_then(block_entry_offset) else {
+            continue;
+        };
+        let id = stable_id(
+            file,
+            "branch",
+            expression.syntax().text_range(),
+            "while-loop",
+        );
+        let flag = allocate_flag_name(file, &expression, &mut identifiers);
+        let range = expression.syntax().text_range();
+        push_wrapper(
+            &mut insertions,
+            range,
+            range,
+            0,
+            format!("{{ let mut {flag} = true; "),
+            format!(
+                " {runtime_path}::zero_iterations({flag}, {:?}) }}",
+                format!("{id}:zero")
+            ),
+        );
+        push_direct(
+            &mut insertions,
+            offset,
+            format!(
+                "\n{runtime_path}::entered(&mut {flag}, {:?});",
+                format!("{id}:entered")
+            ),
+        );
+    }
+
+    // The try operator: the operand passes through a probe that reads which
+    // way `?` will go. Every stable `Try` type is covered by the runtime's
+    // `TryProbe` implementations.
+    for expression in root.descendants().filter_map(ast::TryExpr::cast) {
+        if cannot_carry_probe(expression.syntax()) {
+            continue;
+        }
+        let Some(operand) = expression.expr() else {
+            continue;
+        };
+        let id = stable_id(
+            file,
+            "branch",
+            expression.syntax().text_range(),
+            "try-operator",
+        );
+        // Scope is the operand alone: a decision wrapping `expr?` as its
+        // condition starts at the same offset and must close after this.
+        push_wrapper(
+            &mut insertions,
+            operand.syntax().text_range(),
+            operand.syntax().text_range(),
+            0,
+            format!("{runtime_path}::TryProbe::probe(("),
+            format!(
+                "), {:?}, {:?})",
+                format!("{id}:continued"),
+                format!("{id}:returned")
+            ),
+        );
+    }
+
     let mut skipped_let_condition = false;
     for expression in root.descendants().filter_map(ast::IfExpr::cast) {
         if let Some(condition) = expression.condition() {
@@ -1120,26 +1289,12 @@ pub fn instrument_rust_source(
             "Statements carrying outer attributes cannot take an adjacent probe without changing cfg selection",
         );
     }
-    if skipped_let_condition {
+    if skipped_let_condition || skipped_let_chain_operator {
         add_manifest_limitation(
             &mut manifest,
             file,
             "rust-let-chain-probes-not-injected",
             "Pattern conditions and let chains remain in the denominator but do not yet have semantics-proven owned condition probes",
-        );
-    }
-    if manifest.branches.iter().any(|branch| {
-        !branch.id.ends_with(":outcome")
-            && matches!(
-                branch.kind.as_str(),
-                "logical-and" | "logical-or" | "for-loop" | "while-loop" | "try-operator"
-            )
-    }) {
-        add_manifest_limitation(
-            &mut manifest,
-            file,
-            "rust-structural-branch-probes-not-yet-injected",
-            "Logical selection, loop and try-operator obligations remain visible but their owned observations are not yet injected",
         );
     }
     manifest.limitations.sort_by(|left, right| {
@@ -1180,6 +1335,16 @@ mod __supercov_runtime_v1 {
     }
     pub fn hit(_: &'static str) {}
     pub fn arms(_: &[&'static str], _: usize) {}
+    pub fn logical(left: bool, _: bool, _: &'static str, _: &'static str) -> bool { left }
+    pub fn for_loop<I: IntoIterator>(iterable: I, _: &'static str, _: &'static str) -> I::IntoIter {
+        iterable.into_iter()
+    }
+    pub fn entered(_: &mut bool, _: &'static str) {}
+    pub fn zero_iterations(_: bool, _: &'static str) {}
+    pub trait TryProbe: Sized {
+        fn probe(self, _: &'static str, _: &'static str) -> Self { self }
+    }
+    impl<T> TryProbe for T {}
     pub fn condition(value: bool, _: &mut DecisionFrame, _: usize) -> bool { value }
     pub fn decision(value: bool, _: &mut DecisionFrame) -> bool { value }
 }
@@ -1588,6 +1753,121 @@ fn main() {
         let instrumented = compile_and_run(
             &format!("{}\n{NOOP_RUNTIME}", transformed.code),
             "instrumented-arms",
+        );
+        assert_eq!(instrumented.status, original.status);
+        assert_eq!(instrumented.stdout, original.stdout);
+        assert_eq!(instrumented.stderr, original.stderr);
+    }
+
+    #[test]
+    fn loops_logic_and_try_record_their_branches_without_changing_behavior() {
+        let source = r#"use std::ops::ControlFlow;
+
+fn total(values: &[i32]) -> i32 {
+    let mut sum = 0;
+    for value in values {
+        sum += value;
+    }
+    'outer: for row in 0..3 {
+        for column in 0..3 {
+            if column > row {
+                continue 'outer;
+            }
+            sum += row * column;
+        }
+    }
+    sum
+}
+
+fn first_even(values: &[i32]) -> Option<i32> {
+    let mut index = 0;
+    'scan: while index < values.len() {
+        if values[index] % 2 == 0 {
+            break 'scan;
+        }
+        index += 1;
+    }
+    let mut it = values.iter().skip(index);
+    while let Some(value) = it.next() {
+        return Some(*value);
+    }
+    None
+}
+
+fn parse_twice(text: &str) -> Result<i32, String> {
+    let value: i32 = text.trim().parse().map_err(|_| "bad".to_string())?;
+    let doubled = Some(value).map(|v| v * 2).ok_or("none")?;
+    Ok(doubled)
+}
+
+fn halve(value: i32) -> Option<i32> {
+    let even = (value % 2 == 0).then_some(value)?;
+    Some(even / 2)
+}
+
+fn flow(values: &[i32]) -> ControlFlow<i32, i32> {
+    let mut sum = 0;
+    for value in values {
+        let step: ControlFlow<i32, i32> = if *value < 0 { ControlFlow::Break(*value) } else { ControlFlow::Continue(*value) };
+        sum += step?;
+    }
+    ControlFlow::Continue(sum)
+}
+
+fn gate(a: bool, b: bool, c: bool) -> bool {
+    let both = a && b;
+    let either = a || b || c;
+    both || (either && !c) || (c && a && (b || !b))
+}
+
+fn main() {
+    println!("{} {}", total(&[]), total(&[1, 2, 3]));
+    println!("{:?} {:?} {:?}", first_even(&[]), first_even(&[1, 3]), first_even(&[1, 4, 6]));
+    println!("{:?} {:?}", parse_twice(" 21 "), parse_twice("x"));
+    println!("{:?} {:?}", halve(8), halve(7));
+    println!("{:?} {:?}", flow(&[1, 2]), flow(&[1, -5, 2]));
+    for a in [false, true] {
+        for b in [false, true] {
+            for c in [false, true] {
+                print!("{}", gate(a, b, c) as u8);
+            }
+        }
+    }
+    println!();
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        for marker in [
+            "::logical((",
+            "::for_loop((",
+            "::entered(&mut __supercov_loop_",
+            "::zero_iterations(__supercov_loop_",
+            "::TryProbe::probe((",
+        ] {
+            assert!(transformed.code.contains(marker), "{marker} missing");
+        }
+        let kinds = |kind: &str| {
+            transformed
+                .manifest
+                .branches
+                .iter()
+                .filter(|branch| branch.kind == kind)
+                .count()
+        };
+        assert_eq!(kinds("for-loop"), 3 + 1 + 3);
+        assert_eq!(kinds("while-loop"), 2);
+        assert_eq!(kinds("try-operator"), 4);
+        assert_eq!(kinds("logical-and"), 4);
+        assert_eq!(kinds("logical-or"), 5);
+        assert!(!transformed.manifest.limitations.iter().any(|limitation| {
+            limitation.get("id").and_then(|id| id.as_str())
+                == Some("rust-structural-branch-probes-not-yet-injected")
+        }));
+        let original = compile_and_run(source, "original-structural");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "instrumented-structural",
         );
         assert_eq!(instrumented.status, original.status);
         assert_eq!(instrumented.stdout, original.stdout);

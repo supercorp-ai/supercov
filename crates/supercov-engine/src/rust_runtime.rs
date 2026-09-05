@@ -99,6 +99,8 @@ mod {module_name} {{
     use std::string::String;
     use std::sync::atomic::{{AtomicBool, AtomicUsize, Ordering}};
     use std::sync::{{Mutex, OnceLock}};
+    use std::ops::ControlFlow;
+    use std::task::Poll;
     use std::vec::Vec;
 
     const MAGIC: &[u8] = b"{RUST_PROBE_MAGIC}\n";
@@ -313,6 +315,120 @@ mod {module_name} {{
         }}
         if let Some(id) = ids.get(selected * 2 + 1) {{
             hit(id);
+        }}
+    }}
+
+    /// The left operand of `&&` or `||`: it short-circuits when it equals
+    /// `short_circuits_when`, otherwise the right operand is about to run.
+    #[inline]
+    pub fn logical(
+        left: bool,
+        short_circuits_when: bool,
+        short_circuit: &'static str,
+        evaluated: &'static str,
+    ) -> bool {{
+        hit(if left == short_circuits_when {{ short_circuit }} else {{ evaluated }});
+        left
+    }}
+
+    /// A `for` loop's iterator, recording on the first `next` whether the
+    /// body ran at all. `size_hint` passes through so collection sizing is
+    /// unchanged; nothing else about the iterator is observable to the loop.
+    pub struct ForLoop<I> {{
+        inner: I,
+        first: bool,
+        zero: &'static str,
+        entered: &'static str,
+    }}
+
+    impl<I: Iterator> Iterator for ForLoop<I> {{
+        type Item = I::Item;
+
+        #[inline]
+        fn next(&mut self) -> Option<I::Item> {{
+            let item = self.inner.next();
+            if self.first {{
+                self.first = false;
+                hit(if item.is_some() {{ self.entered }} else {{ self.zero }});
+            }}
+            item
+        }}
+
+        #[inline]
+        fn size_hint(&self) -> (usize, Option<usize>) {{
+            self.inner.size_hint()
+        }}
+    }}
+
+    #[inline]
+    pub fn for_loop<I: IntoIterator>(
+        iterable: I,
+        zero: &'static str,
+        entered: &'static str,
+    ) -> ForLoop<I::IntoIter> {{
+        ForLoop {{ inner: iterable.into_iter(), first: true, zero, entered }}
+    }}
+
+    /// A `while` body ran: clear the loop's flag on the first entry.
+    #[inline]
+    pub fn entered(first: &mut bool, id: &'static str) {{
+        if *first {{
+            *first = false;
+            hit(id);
+        }}
+    }}
+
+    /// A `while` loop is over: a flag still set means the body never ran.
+    #[inline]
+    pub fn zero_iterations(first: bool, id: &'static str) {{
+        if first {{
+            hit(id);
+        }}
+    }}
+
+    /// The operand of `?`, recording which way the operator goes. Every type
+    /// `?` accepts on stable Rust implements this.
+    pub trait TryProbe: Sized {{
+        fn probe(self, continued: &'static str, returned: &'static str) -> Self;
+    }}
+
+    impl<T> TryProbe for Option<T> {{
+        #[inline]
+        fn probe(self, continued: &'static str, returned: &'static str) -> Self {{
+            hit(if self.is_some() {{ continued }} else {{ returned }});
+            self
+        }}
+    }}
+
+    impl<T, E> TryProbe for Result<T, E> {{
+        #[inline]
+        fn probe(self, continued: &'static str, returned: &'static str) -> Self {{
+            hit(if self.is_ok() {{ continued }} else {{ returned }});
+            self
+        }}
+    }}
+
+    impl<B, C> TryProbe for ControlFlow<B, C> {{
+        #[inline]
+        fn probe(self, continued: &'static str, returned: &'static str) -> Self {{
+            hit(if matches!(self, ControlFlow::Continue(_)) {{ continued }} else {{ returned }});
+            self
+        }}
+    }}
+
+    impl<T, E> TryProbe for Poll<Result<T, E>> {{
+        #[inline]
+        fn probe(self, continued: &'static str, returned: &'static str) -> Self {{
+            hit(if matches!(self, Poll::Ready(Err(_))) {{ returned }} else {{ continued }});
+            self
+        }}
+    }}
+
+    impl<T, E> TryProbe for Poll<Option<Result<T, E>>> {{
+        #[inline]
+        fn probe(self, continued: &'static str, returned: &'static str) -> Self {{
+            hit(if matches!(self, Poll::Ready(Some(Err(_)))) {{ returned }} else {{ continued }});
+            self
         }}
     }}
 

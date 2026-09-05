@@ -904,9 +904,22 @@ fn build_test_artifacts(
         .output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !output.status.success() {
-        return Err(RustTestRunnerError::CargoFailed(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ));
+        // With --message-format=json the compiler's diagnostics travel on
+        // stdout as JSON and Cargo's own summary on stderr; show both, or a
+        // failed build says only which crate failed.
+        let rendered = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+            .filter(|message| {
+                message["reason"] == "compiler-message" && message["message"]["level"] == "error"
+            })
+            .filter_map(|message| message["message"]["rendered"].as_str().map(str::to_owned))
+            .collect::<String>();
+        return Err(RustTestRunnerError::CargoFailed(format!(
+            "{rendered}{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
     }
     let canonical_target = fs::canonicalize(&project.target_directory)
         .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
@@ -1838,6 +1851,27 @@ pub fn pick(value: i32) -> &'static str {
         _ => "many",
     }
 }
+pub fn total(values: &[i32]) -> i32 {
+    let mut sum = 0;
+    for value in values {
+        sum += value;
+    }
+    sum
+}
+pub fn first_even(values: &[i32]) -> Option<i32> {
+    let mut index = 0;
+    while index < values.len() {
+        if values[index] % 2 == 0 {
+            return Some(values[index]);
+        }
+        index += 1;
+    }
+    None
+}
+pub fn parse_twice(text: &str) -> Option<i32> {
+    let value: i32 = text.parse().ok()?;
+    Some(value * 2)
+}
 #[cfg(test)]
 mod tests {
     #[test] fn false_path() { assert_eq!(super::choose(false, true), 0); }
@@ -1845,6 +1879,12 @@ mod tests {
     #[test] #[ignore] fn ignored_path() { unreachable!(); }
     #[test] fn pick_zero() { assert_eq!(super::pick(0), "zero"); }
     #[test] fn pick_many() { assert_eq!(super::pick(7), "many"); }
+    #[test] fn total_empty() { assert_eq!(super::total(&[]), 0); }
+    #[test] fn total_some() { assert_eq!(super::total(&[1, 2]), 3); }
+    #[test] fn first_even_empty() { assert_eq!(super::first_even(&[]), None); }
+    #[test] fn first_even_found() { assert_eq!(super::first_even(&[1, 4]), Some(4)); }
+    #[test] fn parse_ok() { assert_eq!(super::parse_twice("4"), Some(8)); }
+    #[test] fn parse_bad() { assert_eq!(super::parse_twice("x"), None); }
 }
 "#,
         )
@@ -1862,14 +1902,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(run.exit_code, 0);
-        assert_eq!(run.request.raw_results.len(), 5);
+        assert_eq!(run.request.raw_results.len(), 11);
+        let statuses = run
+            .request
+            .raw_results
+            .iter()
+            .filter_map(|result| result.status.as_deref())
+            .collect::<Vec<_>>();
         assert_eq!(
-            run.request
-                .raw_results
+            statuses
                 .iter()
-                .filter_map(|result| result.status.as_deref())
-                .collect::<Vec<_>>(),
-            ["passed", "skipped", "passed", "passed", "passed"]
+                .filter(|status| **status == "skipped")
+                .count(),
+            1
+        );
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| **status == "passed")
+                .count(),
+            10
         );
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
         let archive = root.join("evidence.raw.gz");
@@ -1882,9 +1934,68 @@ mod tests {
             test_exit_code: ExitCodeInput::Present(Some(0)),
         })
         .unwrap();
-        assert_eq!(report.view.tests.len(), 5);
+        assert_eq!(report.view.tests.len(), 11);
         assert!(report.view.summary.lines.covered > 0);
         assert!(report.view.summary.decisions > 0);
+
+        // Loops, the try operator and the logical operator, each with both
+        // outcomes attributed to the test that produced it.
+        let single = |kind: &str| {
+            let mut found = report
+                .view
+                .branches
+                .iter()
+                .filter(|branch| branch.meta.kind == kind);
+            let branch = found.next().unwrap_or_else(|| panic!("no {kind} branch"));
+            assert!(found.next().is_none(), "more than one {kind} branch");
+            branch
+        };
+        let tests_of = |branch: &crate::coverage_report::BranchResult, label: &str| {
+            branch
+                .alternatives
+                .iter()
+                .find(|alternative| alternative.label == label)
+                .unwrap_or_else(|| panic!("{} has no alternative {label}", branch.meta.kind))
+                .tests
+                .clone()
+        };
+        let for_loop = single("for-loop");
+        assert_eq!(
+            tests_of(for_loop, "zero iterations"),
+            ["src/lib.rs::tests::total_empty"]
+        );
+        assert_eq!(
+            tests_of(for_loop, "entered"),
+            ["src/lib.rs::tests::total_some"]
+        );
+        let while_loop = single("while-loop");
+        assert_eq!(
+            tests_of(while_loop, "zero iterations"),
+            ["src/lib.rs::tests::first_even_empty"]
+        );
+        assert_eq!(
+            tests_of(while_loop, "entered"),
+            ["src/lib.rs::tests::first_even_found"]
+        );
+        let try_operator = single("try-operator");
+        assert_eq!(
+            tests_of(try_operator, "continued"),
+            ["src/lib.rs::tests::parse_ok"]
+        );
+        assert_eq!(
+            tests_of(try_operator, "early return"),
+            ["src/lib.rs::tests::parse_bad"]
+        );
+        let logical = single("logical-and");
+        assert_eq!(
+            tests_of(logical, "short-circuited"),
+            ["src/lib.rs::tests::false_path"]
+        );
+        assert_eq!(
+            tests_of(logical, "right operand evaluated"),
+            ["src/lib.rs::tests::true_path"]
+        );
+        assert!(for_loop.covered && while_loop.covered && try_operator.covered && logical.covered);
 
         // The match in `pick`: pick(0) selects the first arm; pick(7) passes
         // the first two over and selects the last. Nothing selects `1`.
