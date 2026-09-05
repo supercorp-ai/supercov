@@ -757,7 +757,8 @@ enum SharedRuntimeBuildFault {
     None,
     #[cfg(test)]
     NoSpaceAfterCompile,
-    #[cfg(test)]
+    // Constructed only by the Unix-only lock-contention test.
+    #[cfg(all(test, unix))]
     WaitAfterLock {
         ready: PathBuf,
     },
@@ -820,7 +821,7 @@ fn prepare_shared_rust_runtime_with_fault(
                     .and_then(|()| writeln!(lock_file, "{}", std::process::id()))
                     .and_then(|()| lock_file.sync_all())
                     .map_err(|error| io_error(&lock, error))?;
-                #[cfg(test)]
+                #[cfg(all(test, unix))]
                 if let SharedRuntimeBuildFault::WaitAfterLock { ready } = &_fault {
                     fs::write(ready, b"locked\n").map_err(|error| io_error(ready, error))?;
                     loop {

@@ -1344,7 +1344,7 @@ impl ProcessSupervisor {
                 && let Some(signal) = self.signals.received()
             {
                 interrupted_signal = Some(signal);
-                forward_windows_control(&child);
+                forward_windows_control(child);
                 termination = Some(now);
             }
             if termination.is_none() && timeout_at.is_some_and(|deadline| now >= deadline) {
@@ -1355,7 +1355,7 @@ impl ProcessSupervisor {
                     options.timeout.expect("timeout deadline").as_millis()
                 )
                 .and_then(|_| writer.flush());
-                forward_windows_control(&child);
+                forward_windows_control(child);
                 termination = Some(now);
                 write_diagnostic(&child, started, writer);
             }

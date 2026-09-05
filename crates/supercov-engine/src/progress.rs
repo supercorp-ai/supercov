@@ -21,6 +21,8 @@ use std::{
 };
 
 /// How long a step must run before the status line appears.
+// Read only by the Unix progress path and its test.
+#[cfg(unix)]
 const QUIET_PERIOD: Duration = Duration::from_millis(120);
 
 /// The run holds std's locked stderr as its diagnostics writer, so this
