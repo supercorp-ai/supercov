@@ -2,12 +2,21 @@ name: Compatibility
 
 on:
   workflow_dispatch:
-
+    inputs:
+      only:
+        description: "Comma-separated job names to run (node, runners, browsers, filesystems, python, ruby, rust, released). Empty runs every job except released."
+        default: ""
+        type: string
+      os:
+        description: "JSON list of runners for the per-OS jobs. Empty runs all five."
+        default: ""
+        type: string
 permissions:
   contents: read
 
 jobs:
   node:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',node,') }}
     name: Node ${{ matrix.node }}
     runs-on: ubuntu-latest
     strategy:
@@ -27,6 +36,7 @@ jobs:
         working-directory: tests/fixtures/no-build-node
 
   runners:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',runners,') }}
     name: ${{ matrix.name }} runners
     runs-on: ubuntu-latest
     strategy:
@@ -59,6 +69,7 @@ jobs:
       - run: npm run test:fixture
 
   browsers:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',browsers,') }}
     name: Playwright ${{ matrix.browser }}
     runs-on: ubuntu-latest
     strategy:
@@ -80,12 +91,13 @@ jobs:
           SUPERCOV_BROWSER: ${{ matrix.browser }}
 
   filesystems:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',filesystems,') }}
     name: Filesystem safety (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest, windows-11-arm]
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -102,12 +114,13 @@ jobs:
       - run: npm run test:platform
 
   python:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',python,') }}
     name: CPython ${{ matrix.python }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest, windows-11-arm]
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
         python: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
@@ -125,15 +138,20 @@ jobs:
           SUPERCOV_PYTHON: python
 
   ruby:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',ruby,') }}
     name: Ruby ${{ matrix.ruby }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest, windows-11-arm]
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
         # 3.3 measures through Coverage alone and declares the rest; 3.4 is
         # the first version the probes can measure everything on.
         ruby: ["3.3", "3.4", "4.0"]
+        exclude:
+          # RubyInstaller ships no 3.3 for arm64 Windows; 3.4 is the first.
+          - os: windows-11-arm
+            ruby: "3.3"
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -148,12 +166,13 @@ jobs:
       - run: npm run test:ruby-coverage
 
   rust:
+    if: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), ',rust,') }}
     name: Rust suites (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest, windows-11-arm]
+        os: ${{ fromJSON(inputs.os || '["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest", "windows-11-arm"]') }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -164,35 +183,43 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rust-src
+      # One of the two nextest releases the runner contract is verified against.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
       - run: npm ci
       - run: npm run test:rust-public-cargo
 
   # The binary we ship, on the machine it is shipped for. Three of the eight
   # native packages had never executed anywhere but the cross-compiler.
   released:
+    if: ${{ contains(format(',{0},', inputs.only), ',released,') }}
     name: Released binary (${{ matrix.native }})
     runs-on: ${{ matrix.os }}
-    container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - { native: cli-linux-x64-gnu, os: ubuntu-latest }
           - { native: cli-linux-arm64-gnu, os: ubuntu-24.04-arm }
-          - { native: cli-linux-x64-musl, os: ubuntu-latest, container: "node:22-alpine" }
-          - { native: cli-linux-arm64-musl, os: ubuntu-24.04-arm, container: "node:22-alpine" }
+          - { native: cli-linux-x64-musl, os: ubuntu-latest, image: "node:22-alpine" }
+          - { native: cli-linux-arm64-musl, os: ubuntu-24.04-arm, image: "node:22-alpine" }
           - { native: cli-darwin-arm64, os: macos-latest }
           - { native: cli-darwin-x64, os: macos-15-intel }
           - { native: cli-win32-x64, os: windows-latest }
           - { native: cli-win32-arm64, os: windows-11-arm }
     steps:
       - uses: actions/checkout@v6
-      # The Alpine image brings its own Node; setup-node has no musl build.
-      - if: ${{ !matrix.container }}
+      - if: ${{ !matrix.image }}
         uses: actions/setup-node@v6
         with:
           node-version: 24
-      - run: node scripts/released-binary-smoke.mjs
+      - if: ${{ !matrix.image }}
+        run: node scripts/released-binary-smoke.mjs
         env:
           SUPERCOV_EXPECTED_NATIVE: ${{ matrix.native }}
+      # musl through Docker from the host: JavaScript actions cannot run inside
+      # an Alpine container on arm64 runners, and the image brings its own Node.
+      - if: ${{ matrix.image }}
+        run: docker run --rm -e SUPERCOV_EXPECTED_NATIVE=${{ matrix.native }} -v "$PWD:/work" -w /work ${{ matrix.image }} node scripts/released-binary-smoke.mjs
 
