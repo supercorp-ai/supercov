@@ -378,26 +378,26 @@ struct CargoProfile {
 }
 
 #[derive(Debug, Deserialize)]
-struct CargoMetadataOutput {
-    packages: Vec<CargoMetadataPackage>,
+pub(crate) struct CargoMetadataOutput {
+    pub(crate) packages: Vec<CargoMetadataPackage>,
 }
 
 #[derive(Debug, Deserialize)]
-struct CargoMetadataPackage {
-    id: String,
-    name: String,
-    manifest_path: PathBuf,
-    targets: Vec<CargoMetadataTarget>,
+pub(crate) struct CargoMetadataPackage {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) manifest_path: PathBuf,
+    pub(crate) targets: Vec<CargoMetadataTarget>,
 }
 
 #[derive(Debug, Deserialize)]
-struct CargoMetadataTarget {
-    name: String,
-    kind: Vec<String>,
-    src_path: PathBuf,
+pub(crate) struct CargoMetadataTarget {
+    pub(crate) name: String,
+    pub(crate) kind: Vec<String>,
+    pub(crate) src_path: PathBuf,
 }
 
-fn cargo_metadata_arguments(
+pub(crate) fn cargo_metadata_arguments(
     invocation: &crate::rust_test_runner::CargoTestInvocation,
 ) -> Result<Vec<String>, RustCompilerOrchestrationError> {
     let command = invocation.command_position().ok_or_else(|| {

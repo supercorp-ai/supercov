@@ -301,9 +301,18 @@ pub fn run_direct_rust(
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
 
+        let nextest = request
+            .command
+            .windows(2)
+            .any(|pair| pair == ["nextest", "run"]);
         writeln!(
             diagnostics,
-            "[supercov] building once and running each libtest case in its own process"
+            "{}",
+            if nextest {
+                "[supercov] running cargo nextest with Supercov as its target runner, each attempt in its own process"
+            } else {
+                "[supercov] building once and running each libtest case and doctest in its own process"
+            }
         )
         .map_err(|error| error.to_string())?;
         let run = run_prepared_rust_tests(
@@ -381,7 +390,14 @@ pub fn run_direct_rust(
             run_id: request.run_id.clone(),
             run_directory,
             exit_code: run.exit_code,
-            tests: run.request.raw_results.len(),
+            // Tests, not attempts: a retried test is still one test.
+            tests: run
+                .request
+                .raw_results
+                .iter()
+                .map(|result| result.test.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
             artifacts: run.artifacts,
             recovered_runs,
             metadata,

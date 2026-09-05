@@ -3,7 +3,10 @@
 // for what each test proved. Two tests reach library code indirectly -- one
 // from a spawned thread, one from a child binary -- because that attribution
 // rests on the runtime taking over thread and process creation, which is
-// interposition on POSIX and import-table patching on Windows.
+// interposition on POSIX and import-table patching on Windows. A doctest is
+// the only thing that reaches one branch, so the rustdoc wrapper is proven
+// too; and when cargo-nextest is on PATH, a test that fails its first attempt
+// runs again under `cargo nextest run --retries 1`.
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,6 +22,9 @@ const temporary = mkdtempSync(resolve(realpathSync.native(tmpdir()), 'supercov-r
 const project = resolve(temporary, 'fixture');
 
 const library = [
+  '/// ```',
+  '/// assert_eq!(public_rust_fixture::classify(0), "zero");',
+  '/// ```',
   'pub fn classify(value: i32) -> &\'static str {',
   '    if value < 0 {',
   '        "negative"',
@@ -37,9 +43,14 @@ const library = [
   '    format!("child:{word}")',
   '}',
   '',
+  'pub fn never_called() -> i32 {',
+  '    99',
+  '}',
+  '',
 ];
 const line = (text) => library.indexOf(text) + 1;
 const zeroLine = line('        "zero"');
+const neverLine = line('    99');
 const doubledLine = line('    value * 2');
 const greetingLine = line('    format!("child:{word}")');
 
@@ -113,17 +124,30 @@ try {
       '    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "child:hi");',
       '}',
       '',
+      '// Fails on its first nextest attempt and passes on the second; under',
+      '// plain cargo test the variable is absent and it passes at once.',
+      '#[test]',
+      'fn passes_on_retry() {',
+      '    assert_ne!(std::env::var("NEXTEST_ATTEMPT").as_deref(), Ok("1"));',
+      '}',
+      '',
     ].join('\n'),
   );
 
   const run = supercov(['--', 'cargo', 'test']);
   assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
   assert.match(run.stderr, /\[supercov\] detected Rust/);
-  assert.match(run.stderr, /\[supercov\] Rust coverage: 4 test\(s\)/, run.stderr);
+  // Five integration tests and one doctest.
+  assert.match(run.stderr, /\[supercov\] Rust coverage: 6 test\(s\)/, run.stderr);
 
   const summary = query(['runs', 'latest', 'summary']);
   const { lines } = summary.coverage;
-  assert.ok(lines.covered > 0 && lines.covered < lines.total, `the zero branch is never taken: ${JSON.stringify(lines)}`);
+  assert.ok(lines.covered > 0 && lines.covered < lines.total, `never_called is never called: ${JSON.stringify(lines)}`);
+
+  // The zero branch is reached only from the doctest, through the rustdoc wrapper.
+  const documented = JSON.stringify(query(['runs', 'latest', 'line', `src/lib.rs:${zeroLine}`]));
+  assert.match(documented, /src\/lib\.rs - classify \(line \d+\)/, `the zero branch belongs to the doctest: ${documented}`);
+  assert.doesNotMatch(documented, /classifies_/, `no integration test reaches the zero branch: ${documented}`);
 
   // What each test proved, through the paths that depend on the platform hooks.
   const threaded = query(['runs', 'latest', 'line', `src/lib.rs:${doubledLine}`]);
@@ -138,11 +162,25 @@ try {
     /greets_from_a_child/,
     `a line reached only in a child process must belong to the test that started it: ${JSON.stringify(child)}`,
   );
-  const untaken = query(['runs', 'latest', 'line', `src/lib.rs:${zeroLine}`]);
-  assert.doesNotMatch(JSON.stringify(untaken), /classifies_/, `no test reaches the zero branch: ${JSON.stringify(untaken)}`);
+  const untaken = JSON.stringify(query(['runs', 'latest', 'line', `src/lib.rs:${neverLine}`]));
+  assert.doesNotMatch(untaken, /classifies_|doubles_|greets_|passes_on_retry|\(line \d+\)/, `nothing reaches never_called: ${untaken}`);
+
+  // nextest: the same crate, one test retried once.
+  const nextestVersion = spawnSync('cargo', ['nextest', '--version'], { encoding: 'utf8', shell: process.platform === 'win32' });
+  let nextestNote = 'cargo-nextest is not on PATH, so its leg did not run';
+  if (nextestVersion.status === 0) {
+    const retried = supercov(['--', 'cargo', 'nextest', 'run', '--retries', '1']);
+    assert.equal(retried.status, 0, `${retried.stdout}\n${retried.stderr}`);
+    assert.match(retried.stdout + retried.stderr, /1 flaky/, `one test must have passed on its second attempt: ${retried.stdout}\n${retried.stderr}`);
+    // nextest runs the integration tests, not the doctest.
+    assert.match(retried.stderr, /\[supercov\] Rust coverage: 5 test\(s\)/, retried.stderr);
+    const retriedLine = JSON.stringify(query(['runs', 'latest', 'line', `src/lib.rs:${doubledLine}`]));
+    assert.match(retriedLine, /doubles_on_a_thread/, `attribution holds under nextest: ${retriedLine}`);
+    nextestNote = `${nextestVersion.stdout.trim().split('\n')[0]} retried one test once`;
+  }
 
   console.log(
-    `[rust-public-cargo] ${process.platform} ran the public cargo test path through the exact compiler chain; a spawned thread and a child process kept their tests`,
+    `[rust-public-cargo] ${process.platform} ran the public cargo test path through the exact compiler chain; a spawned thread, a child process and a doctest kept their tests; ${nextestNote}`,
   );
 } finally {
   rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });

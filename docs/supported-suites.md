@@ -110,11 +110,16 @@ whatever was still buffered.
 | Runner | Attribution | Current requirement |
 | --- | --- | --- |
 | Cargo's standard libtest runner | Exact test and attempt identity | Rust 1.95; run with `npx supercov -- cargo test` |
+| rustdoc doctests | Exact doctest identity; every doctest runs in a process of its own | Rust 1.95; part of `npx supercov -- cargo test` |
 | cargo-nextest | Exact test, attempt, retry, and binary identity | cargo-nextest 0.9.138 or 0.9.140 |
 
 Supercov preserves Cargo's test selection, scheduling, fail-fast behavior,
-environment, and exit status. Use the repository's normal flags after the
-wrapped command:
+environment, and exit status. Doctests are measured like any other test:
+Supercov stands in for rustdoc during `cargo test --doc`, runs each doctest
+in its own process, and attributes what it executed to that doctest by name.
+With nextest, Supercov is nextest's target runner, so nextest's own
+scheduling, retries and output stay as they are and each attempt is recorded
+separately. Use the repository's normal flags after the wrapped command:
 
 ```sh
 npx supercov -- cargo test --workspace

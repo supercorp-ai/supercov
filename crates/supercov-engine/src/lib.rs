@@ -50,6 +50,8 @@ pub mod rust_doctest;
 pub mod rust_instrumenter;
 pub mod rust_libtest_companion;
 pub mod rust_libtest_events;
+pub mod rust_owned_doctests;
+pub mod rust_owned_nextest;
 pub mod rust_phase_projection;
 pub mod rust_probe_transport;
 pub mod rust_project;

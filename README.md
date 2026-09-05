@@ -154,6 +154,7 @@ Supercov uses exact per-test attribution where an adapter is available. For othe
 | `node:test` | Exact per test |
 | AVA and Mocha | Aggregate structural coverage |
 | Cargo's standard libtest runner | Exact test and attempt identity |
+| rustdoc doctests | Exact per doctest |
 | cargo-nextest | Exact test, attempt, retry, and binary identity |
 | RSpec | Exact example and before/example/after phase identity |
 | Minitest and test-unit | Exact test and setup/test/teardown identity |

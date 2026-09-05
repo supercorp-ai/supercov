@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- Doctests are measured. `cargo test` runs them with Supercov standing in for rustdoc: every doctest runs in a process of its own and the lines it executed are attributed to it by name, for merged (edition 2024) and standalone doctests alike.
+- `cargo nextest run` works on the public path. Supercov is nextest's target runner, so nextest's scheduling, retries, filters and exit status are untouched, and each attempt is recorded on its own; a test that passes on retry is reported flaky.
+
+**Fixed**
+
+- A crate whose only tests were doctests reported zero tests.
+- The test count names tests, not attempts: a test retried once is one test.
+
 ## 0.0.39
 
 **Added**

@@ -179,6 +179,18 @@ fn main() -> ExitCode {
     {
         return rust_cargo_test_runner(os_arguments.into_iter().skip(1).collect());
     }
+    // nextest's target runner for the owned frontend: test arguments pass
+    // through untouched, so dispatch before anything reads them as UTF-8.
+    if os_arguments.first().is_some_and(|argument| {
+        argument == supercov_engine::rust_owned_nextest::RUNNER_MODE_ARGUMENT
+    }) {
+        return ExitCode::from(
+            supercov_engine::rust_owned_nextest::nextest_runner(
+                os_arguments.into_iter().skip(1).collect(),
+            )
+            .clamp(0, 255) as u8,
+        );
+    }
     if std::env::var_os(supercov_engine::rust_compiler_orchestration::RUST_COMPILER_INNER_MODE_ENV)
         .is_some()
     {
@@ -209,6 +221,19 @@ fn main() -> ExitCode {
         return rust_compiler_wrapper(os_arguments);
     }
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    // Doctests of the owned frontend: a merged harness spawns this program
+    // once per case; Cargo runs it in place of rustdoc during `cargo test
+    // --doc`. Both are told apart by their environment alone.
+    if supercov_engine::rust_owned_doctests::is_doctest_child() {
+        return ExitCode::from(
+            supercov_engine::rust_owned_doctests::doctest_child().clamp(0, 255) as u8,
+        );
+    }
+    if supercov_engine::rust_owned_doctests::is_rustdoc_wrapper(&arguments) {
+        return ExitCode::from(
+            supercov_engine::rust_owned_doctests::rustdoc_wrapper(arguments).clamp(0, 255) as u8,
+        );
+    }
     if std::env::var_os(supercov_engine::rust_compiler_orchestration::RUSTDOC_WRAPPER_MODE_ENV)
         .is_some()
     {
@@ -258,6 +283,10 @@ fn main() -> ExitCode {
         Some("__join-rustdoc-merged-manifest") => join_rustdoc_merged_manifest(),
         Some("__prepare-rustdoc-transport") => prepare_rustdoc_transport(arguments.collect()),
         Some("__publish-rustdoc-outcome") => publish_rustdoc_outcome(arguments.collect()),
+        Some(supercov_engine::rust_owned_doctests::RUNTOOL_MODE_ARGUMENT) => ExitCode::from(
+            supercov_engine::rust_owned_doctests::doctest_runtool(arguments.collect()).clamp(0, 255)
+                as u8,
+        ),
         Some("__project-rust-compiler-evidence") => project_rust_compiler_evidence(),
         Some("__select-rust-compiler-companion") => select_rust_compiler_companion(),
         Some("__prepare-rust-libtest-source") => prepare_rust_libtest_source(arguments.collect()),

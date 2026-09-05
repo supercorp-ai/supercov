@@ -1,11 +1,12 @@
 //! Stable Cargo/libtest execution for the owned Rust frontend.
 //!
-//! Source preparation happens in an isolated workspace. Cargo builds each test
-//! artifact once. Ordinary libtest artifacts execute once with the selected
-//! toolchain's exact Supercov companion, preserving stock scheduling, capture,
-//! process-global state and presentation while authenticated lifecycle events
-//! provide exact attempt identity. Nextest and opaque custom runners retain
-//! their own intrinsic process boundaries.
+//! Source preparation happens in an isolated workspace. For `cargo test`,
+//! Cargo builds each test artifact once and every libtest case then runs in a
+//! process of its own with an evidence directory of its own, so attribution
+//! is exact by construction; doctests run through `rust_owned_doctests`, with
+//! this program standing in for rustdoc. For `cargo nextest run`, nextest
+//! keeps its own scheduling and retries and this program serves as its target
+//! runner (`rust_owned_nextest`), recording each attempt it launches.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -865,7 +866,7 @@ pub(crate) fn rust_cargo_execution_selection(
     })
 }
 
-fn relative_source(root: &Path, path: &Path) -> Result<String, RustTestRunnerError> {
+pub(crate) fn relative_source(root: &Path, path: &Path) -> Result<String, RustTestRunnerError> {
     let relative = path
         .strip_prefix(root)
         .map_err(|_| RustTestRunnerError::UnsafeArtifact(path.display().to_string()))?;
@@ -895,16 +896,11 @@ fn build_test_artifacts(
     // trips `unused_parens` into a hard error under it. Capping lints to warn
     // changes nothing about the user's own `cargo test` runs. The user's
     // RUSTFLAGS are preserved ahead of the cap.
-    let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
-    if !rustflags.is_empty() {
-        rustflags.push(' ');
-    }
-    rustflags.push_str("--cap-lints=warn");
     let output = Command::new(&invocation.program)
         .args(invocation.arguments)
         .current_dir(&project.workspace_root)
         .env("CARGO_TARGET_DIR", &project.target_directory)
-        .env("RUSTFLAGS", rustflags)
+        .env("RUSTFLAGS", capped_rustflags())
         .output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !output.status.success() {
@@ -962,8 +958,8 @@ fn build_test_artifacts(
     Ok(artifacts)
 }
 
-fn list_tests(artifact: &TestArtifact) -> Result<Vec<String>, RustTestRunnerError> {
-    let output = Command::new(&artifact.executable)
+fn list_tests(executable: &Path) -> Result<Vec<String>, RustTestRunnerError> {
+    let output = Command::new(executable)
         .args(["--list", "--format", "terse"])
         .output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
@@ -982,7 +978,7 @@ fn list_tests(artifact: &TestArtifact) -> Result<Vec<String>, RustTestRunnerErro
         };
         return Err(RustTestRunnerError::ListFailed(format!(
             "{} exited with {} when asked to --list: {detail}",
-            artifact.executable.display(),
+            executable.display(),
             output.status
         )));
     }
@@ -996,7 +992,7 @@ fn list_tests(artifact: &TestArtifact) -> Result<Vec<String>, RustTestRunnerErro
     Ok(tests)
 }
 
-fn snapshot(
+pub(crate) fn snapshot(
     manifest: &CoverageManifest,
     directory: &Path,
 ) -> Result<RuntimeSnapshot, RustTestRunnerError> {
@@ -1090,6 +1086,7 @@ fn rust_coverage_model() -> CoverageModelDeclaration {
             "owned Rust statements and function entries".into(),
             "owned atomic condition vectors and decision outcomes".into(),
             "exact process-per-libtest attribution".into(),
+            "exact process-per-doctest attribution".into(),
         ],
         not_measured: vec![
             "macro-expanded and generated Rust code".into(),
@@ -1101,6 +1098,83 @@ fn rust_coverage_model() -> CoverageModelDeclaration {
     }
 }
 
+/// The user's RUSTFLAGS, then a cap so the HOST crate's lint policy cannot
+/// reject generated sources: serde builds with `#![deny(warnings)]`, and
+/// http's `if ({ frame ... })` decision wrapping trips `unused_parens` into a
+/// hard error under it. The user's own `cargo test` runs are unaffected.
+pub(crate) fn capped_rustflags() -> String {
+    let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
+    if !rustflags.is_empty() {
+        rustflags.push(' ');
+    }
+    rustflags.push_str("--cap-lints=warn");
+    rustflags
+}
+
+pub(crate) fn io_error(error: impl std::fmt::Display) -> RustTestRunnerError {
+    RustTestRunnerError::Io(error.to_string())
+}
+
+/// A libtest case that exited cleanly but ran nothing, or ran its one test as
+/// ignored, was skipped rather than passed.
+pub(crate) fn libtest_skipped(exit: i32, stdout: &str) -> bool {
+    exit == 0 && (stdout.contains("running 0 tests") || stdout.contains("; 1 ignored;"))
+}
+
+/// Limitation IDs are unique across a declaration, so each runner names its
+/// own: the libtest runner keeps the original IDs, rustdoc's carry its name.
+fn rust_runner_limitations(runner: &str) -> Vec<FrontendLimitation> {
+    let prefix = if runner == "rust-libtest" {
+        "rust".to_owned()
+    } else {
+        runner.to_owned()
+    };
+    vec![
+        FrontendLimitation {
+            id: format!("{prefix}-action-linkage-unavailable"),
+            scopes: vec![FrontendLimitationScope::Action],
+            reason: "Rust test frameworks expose no general action lifecycle".into(),
+        },
+        FrontendLimitation {
+            id: format!("{prefix}-assertion-linkage-unavailable"),
+            scopes: vec![FrontendLimitationScope::Assertion],
+            reason: "assertion macros do not expose a stable per-assertion success lifecycle"
+                .into(),
+        },
+    ]
+}
+
+fn rust_runner_declaration(runner: &str) -> FrontendRunnerDeclaration {
+    FrontendRunnerDeclaration {
+        runner: runner.into(),
+        execution_model: ExecutionModel::ProcessPerTest,
+        attribution: FrontendAttribution {
+            run: AttributionPrecision::Exact,
+            worker: AttributionPrecision::Exact,
+            test: AttributionPrecision::Exact,
+            retry: AttributionPrecision::Exact,
+            phase: AttributionPrecision::Exact,
+            action: AttributionPrecision::Unavailable,
+            assertion: AttributionPrecision::Unavailable,
+        },
+        limitations: rust_runner_limitations(runner),
+    }
+}
+
+/// The manifest's structural limitation IDs, as the declaration references them.
+fn structural_limitations(project: &PreparedRustProject) -> Vec<String> {
+    project
+        .manifest
+        .limitations
+        .iter()
+        .filter_map(|item| {
+            item.get("id")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
 pub fn run_prepared_rust_tests(
     project: &PreparedRustProject,
     command: &[String],
@@ -1108,8 +1182,18 @@ pub fn run_prepared_rust_tests(
     generated_at: &str,
     diagnostics: &mut dyn Write,
 ) -> Result<RustFrontendRun, RustTestRunnerError> {
+    let invocation = cargo_invocation(&project.workspace_root, command)?;
+    let selection = rust_cargo_execution_selection(&invocation)?;
     let build_started = Instant::now();
-    let artifacts = build_test_artifacts(project, command)?;
+    // `cargo test --doc` alone builds nothing here: Cargo refuses `--no-run`
+    // with `--doc`, and the doctest phase below builds what it runs.
+    // nextest builds for itself; Cargo builds the libtest artifacts here.
+    let artifacts = if selection.run_libtests && invocation.kind == RustCargoCommandKind::CargoTest
+    {
+        build_test_artifacts(project, command)?
+    } else {
+        Vec::new()
+    };
     let build_ms = build_started.elapsed().as_secs_f64() * 1000.0;
     let evidence_root = project
         .workspace_root
@@ -1120,9 +1204,46 @@ pub fn run_prepared_rust_tests(
     let mut results = Vec::new();
     let mut overall_exit = 0;
     let execution_started = Instant::now();
+    if invocation.kind == RustCargoCommandKind::NextestRun {
+        // nextest builds, schedules and retries on its own; this program is
+        // its target runner and records every attempt it launches.
+        let outcome = crate::rust_owned_nextest::run_nextest(
+            project,
+            &invocation,
+            &evidence_root.join("nextest"),
+            run_id,
+            diagnostics,
+        )?;
+        let artifact_count = outcome.artifact_files.len();
+        return Ok(RustFrontendRun {
+            declaration: FrontendRunDeclaration {
+                protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
+                frontend_id: "rust".into(),
+                frontend_version: "rust-owned-v1".into(),
+                language: "rust".into(),
+                structural_source: StructuralSource::OwnedProbes,
+                runners: vec![rust_runner_declaration("nextest")],
+                structural_limitations: structural_limitations(project),
+            },
+            request: CoverageReportRequest {
+                run_id: run_id.into(),
+                manifest: project.manifest.clone(),
+                raw_results: outcome.results,
+                generated_at: generated_at.into(),
+                coverage_model: Some(rust_coverage_model()),
+                integrity: None,
+                test_exit_code: ExitCodeInput::Present(Some(outcome.exit_code)),
+            },
+            exit_code: outcome.exit_code,
+            artifacts: artifact_count,
+            artifact_files: outcome.artifact_files,
+            build_ms,
+            execution_ms: execution_started.elapsed().as_secs_f64() * 1000.0,
+        });
+    }
     let mut tasks = Vec::new();
     for (artifact_index, artifact) in artifacts.iter().enumerate() {
-        let tests = list_tests(artifact)?;
+        let tests = list_tests(&artifact.executable)?;
         let contexts = preflight_rust_test_contexts(tests.clone())
             .map_err(|error| RustTestRunnerError::Context(error.to_string()))?;
         for (test_index, test) in tests.into_iter().enumerate() {
@@ -1217,8 +1338,7 @@ pub fn run_prepared_rust_tests(
         let output = outcome.output;
         let exit = output.status.code().unwrap_or(1);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let skipped =
-            exit == 0 && (stdout.contains("running 0 tests") || stdout.contains("; 1 ignored;"));
+        let skipped = libtest_skipped(exit, &stdout);
         if exit != 0 {
             writeln!(diagnostics, "[supercov] Rust test failed: {test_id}")
                 .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
@@ -1270,16 +1390,33 @@ pub fn run_prepared_rust_tests(
             server: Vec::new(),
         });
     }
-    let structural_limitations = project
-        .manifest
-        .limitations
-        .iter()
-        .filter_map(|item| {
-            item.get("id")
-                .and_then(|value| value.as_str())
-                .map(str::to_owned)
-        })
-        .collect();
+    let doctest_results =
+        if selection.run_doctests && invocation.kind == RustCargoCommandKind::CargoTest {
+            crate::rust_owned_doctests::run_doctests(
+                project,
+                &invocation,
+                &selection,
+                &evidence_root.join("doctests"),
+                run_id,
+                diagnostics,
+                &mut overall_exit,
+            )?
+        } else {
+            Vec::new()
+        };
+    // Only observed runners may be declared. A run with no tests at all keeps
+    // the libtest declaration, as it always has.
+    let ran_libtests = !results.is_empty();
+    let ran_doctests = !doctest_results.is_empty();
+    results.extend(doctest_results);
+    let mut runners = Vec::new();
+    if ran_libtests || !ran_doctests {
+        runners.push(rust_runner_declaration("rust-libtest"));
+    }
+    if ran_doctests {
+        runners.push(rust_runner_declaration("rustdoc"));
+    }
+    let structural_limitations = structural_limitations(project);
     Ok(RustFrontendRun {
         declaration: FrontendRunDeclaration {
             protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
@@ -1287,31 +1424,7 @@ pub fn run_prepared_rust_tests(
             frontend_version: "rust-owned-v1".into(),
             language: "rust".into(),
             structural_source: StructuralSource::OwnedProbes,
-            runners: vec![FrontendRunnerDeclaration {
-                runner: "rust-libtest".into(),
-                execution_model: ExecutionModel::ProcessPerTest,
-                attribution: FrontendAttribution {
-                    run: AttributionPrecision::Exact,
-                    worker: AttributionPrecision::Exact,
-                    test: AttributionPrecision::Exact,
-                    retry: AttributionPrecision::Exact,
-                    phase: AttributionPrecision::Exact,
-                    action: AttributionPrecision::Unavailable,
-                    assertion: AttributionPrecision::Unavailable,
-                },
-                limitations: vec![
-                    FrontendLimitation {
-                        id: "rust-action-linkage-unavailable".into(),
-                        scopes: vec![FrontendLimitationScope::Action],
-                        reason: "Rust test frameworks expose no general action lifecycle".into(),
-                    },
-                    FrontendLimitation {
-                        id: "rust-assertion-linkage-unavailable".into(),
-                        scopes: vec![FrontendLimitationScope::Assertion],
-                        reason: "assertion macros do not expose a stable per-assertion success lifecycle".into(),
-                    },
-                ],
-            }],
+            runners,
             structural_limitations,
         },
         request: CoverageReportRequest {
@@ -1721,9 +1834,12 @@ mod tests {
         )
         .unwrap();
         let project = prepare_rust_project(&root).unwrap();
+        // Doctests need the CLI binary standing in for rustdoc, which this
+        // test binary cannot do; scripts/rust-public-cargo-integration.mjs
+        // covers them end to end. `--lib` keeps this run to the libtests.
         let run = run_prepared_rust_tests(
             &project,
-            &["cargo".into(), "test".into()],
+            &["cargo".into(), "test".into(), "--lib".into()],
             "rust-fixture",
             "2026-08-26T00:00:00.000Z",
             &mut Vec::new(),
@@ -1753,6 +1869,7 @@ mod tests {
         assert_eq!(report.view.tests.len(), 3);
         assert!(report.view.summary.lines.covered > 0);
         assert!(report.view.summary.decisions > 0);
+
         fs::remove_dir_all(root).unwrap();
     }
 }
