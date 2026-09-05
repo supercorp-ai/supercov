@@ -211,21 +211,31 @@ mod tests {
         ffi::OsString,
         fs,
         path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::*;
 
     fn temporary() -> PathBuf {
+        // The clock ticks once per microsecond, so four tests that start
+        // together were drawing the same directory: one test read another's
+        // `successful.log` and another's command exited nonzero because its
+        // script had just been deleted by a neighbour's cleanup. The counter is
+        // what makes each name its own, and `create_dir` -- not
+        // `create_dir_all` -- means a repeat is a failure here rather than a
+        // mystery somewhere else.
+        static UNIQUE: AtomicU64 = AtomicU64::new(0);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "supercov-orchestration-{}-{nonce}",
-            std::process::id()
+            "supercov-orchestration-{}-{nonce}-{}",
+            std::process::id(),
+            UNIQUE.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir_all(&path).unwrap();
+        fs::create_dir(&path).unwrap();
         path
     }
 

@@ -124,6 +124,7 @@ mod tests {
     use std::{
         fs,
         path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -134,13 +135,22 @@ mod tests {
     use super::*;
 
     fn temporary_directory() -> PathBuf {
+        // The clock ticks once per microsecond, so two tests that start
+        // together drew the same directory and queried each other's runs. The
+        // counter is what makes each name its own, and `create_dir` -- not
+        // `create_dir_all` -- means a repeat fails here rather than somewhere
+        // that reads as a bug in the code under test.
+        static UNIQUE: AtomicU64 = AtomicU64::new(0);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("supercov-run-query-{}-{nonce}", std::process::id()));
-        fs::create_dir_all(&path).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "supercov-run-query-{}-{nonce}-{}",
+            std::process::id(),
+            UNIQUE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&path).unwrap();
         path
     }
 

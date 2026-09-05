@@ -313,22 +313,73 @@ pub fn merge_coverage_runs(
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeSet,
         fs,
+        sync::{
+            Arc, Barrier,
+            atomic::{AtomicU64, Ordering},
+        },
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::*;
     use crate::{evidence_archive::read_archive, run_store::create_analyzable_test_run};
 
-    fn temporary() -> std::path::PathBuf {
+    /// The name alone, so the uniqueness this depends on can be tested without
+    /// creating a directory for every sample.
+    fn temporary_name() -> String {
+        // The clock below ticks once per microsecond, so the pid and the nonce
+        // do not distinguish two tests that start together -- and the tests in
+        // this module rewrite run-b's metadata and delete the root when they
+        // finish, which the other test then reads as an incomplete run. The
+        // counter is what makes each name its own.
+        static UNIQUE: AtomicU64 = AtomicU64::new(0);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("supercov-run-merge-{}-{nonce}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
+        format!(
+            "supercov-run-merge-{}-{nonce}-{}",
+            std::process::id(),
+            UNIQUE.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    fn temporary() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(temporary_name());
+        // `create_dir`, not `create_dir_all`: if a root is ever handed out
+        // twice, the second test must fail here saying so, rather than share a
+        // directory and fail somewhere else for a reason that reads as a bug in
+        // the code under test.
+        fs::create_dir(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn temporary_roots_stay_distinct_when_tests_start_together() {
+        // What the harness does to adjacent tests: release several at once and
+        // require that no two of them are handed the same directory.
+        const THREADS: usize = 8;
+        const EACH: usize = 500;
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let names: Vec<String> = (0..THREADS)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    (0..EACH).map(|_| temporary_name()).collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flat_map(|handle| handle.join().unwrap())
+            .collect();
+        let distinct = names.iter().collect::<BTreeSet<_>>();
+        assert_eq!(
+            distinct.len(),
+            names.len(),
+            "two tests would have shared a temporary root"
+        );
     }
 
     #[test]
