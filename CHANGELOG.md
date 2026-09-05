@@ -1,21 +1,21 @@
 # Changelog
 
-## Unreleased
+## 0.0.39
 
 **Added**
 
-- `cargo binstall supercov` downloads the prebuilt binary from the release instead of compiling the engine, which takes minutes. Plain `cargo install` still builds from source.
-- The Ruby frontend runs in CI: Ruby 3.3, 3.4 and 4.0 on Linux, macOS and Windows.
-- Rust suites run on Windows. The probe runtime maps its evidence file through a Windows file mapping and takes over thread and process creation through the executable's import table, so a thread or child started inside a test is attributed to that test there as it is on Linux and macOS.
+- `cargo binstall supercov` downloads the prebuilt binary from the GitHub release instead of compiling from source.
+- Rust suites run on Windows. The probe runtime maps its evidence file through a Windows file mapping and hooks thread and process creation through the executable's import table, so threads and children started inside a test stay attributed to it.
+- Ruby 4.0 is supported and verified.
 
 **Fixed**
 
-- On Windows, a Python run measured nothing: the project root reached the runtime with a `\\?\` prefix its files did not carry, so no file was ever under it. A Ruby run could not start `rspec`, because a gem's executable there is a batch shim and only `.exe` was looked for. Both frontends now work on Windows, and both runtimes say so when a run executes files but none under the root, instead of reporting zero in silence.
-- A plain `npm ci` installed native binaries from an older release and then refused them, because the lockfile recorded one version beside a tarball URL naming another.
+- On Windows, a Python run measured nothing: the project root reached the runtime with a `\\?\` prefix its files lacked. A Ruby run could not start `rspec`, a batch shim. Both work now, and both runtimes warn when a run executes files but none under the root.
+- A plain `npm ci` installed native binaries from an older release: the lockfile named one version beside a tarball URL of another.
 
 **Notes**
 
-- Python (3.12, 3.13, 3.14), Ruby (3.3, 3.4, 4.0) and Rust suites are verified on Linux, macOS and Windows; the compatibility matrix runs the same versions on every operating system, and the Rust frontend runs in CI for the first time.
+- Python 3.12 to 3.14, Ruby 3.3 to 4.0 and Rust suites are verified on Linux, macOS and Windows; the Rust frontend runs in CI for the first time.
 
 ## 0.0.38
 

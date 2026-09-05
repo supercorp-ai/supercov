@@ -1,6 +1,6 @@
 {
   "name": "supercov",
-  "version": "0.0.38",
+  "version": "0.0.39",
   "description": "Zero-edit, runner-aware coverage completeness for JavaScript, TypeScript, Rust, Python, and Ruby test suites",
   "license": "MIT",
   "repository": {
@@ -73,14 +73,14 @@
     "test:rust-public-cargo": "cargo build -p supercov && node scripts/rust-public-cargo-integration.mjs"
   },
   "optionalDependencies": {
-    "@supercov/cli-darwin-arm64": "0.0.38",
-    "@supercov/cli-darwin-x64": "0.0.38",
-    "@supercov/cli-linux-arm64-gnu": "0.0.38",
-    "@supercov/cli-linux-arm64-musl": "0.0.38",
-    "@supercov/cli-linux-x64-gnu": "0.0.38",
-    "@supercov/cli-linux-x64-musl": "0.0.38",
-    "@supercov/cli-win32-arm64": "0.0.38",
-    "@supercov/cli-win32-x64": "0.0.38"
+    "@supercov/cli-darwin-arm64": "0.0.39",
+    "@supercov/cli-darwin-x64": "0.0.39",
+    "@supercov/cli-linux-arm64-gnu": "0.0.39",
+    "@supercov/cli-linux-arm64-musl": "0.0.39",
+    "@supercov/cli-linux-x64-gnu": "0.0.39",
+    "@supercov/cli-linux-x64-musl": "0.0.39",
+    "@supercov/cli-win32-arm64": "0.0.39",
+    "@supercov/cli-win32-x64": "0.0.39"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.55.0",
