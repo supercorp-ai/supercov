@@ -33,9 +33,13 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      # Components installed up front: cargo-zigbuild queries rustc while cargo
+      # runs, and two rustup proxies syncing the same missing component race
+      # into "detected conflict: bin/cargo-fmt".
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
+          components: clippy, rustfmt
       # cargo-zigbuild links with zig's bundled clang against the glibc version
       # named in the target suffix; the runner's own glibc no longer matters. It
       # finds zig through `python3 -m ziglang`, so both live in the user site.

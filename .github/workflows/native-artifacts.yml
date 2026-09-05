@@ -40,9 +40,14 @@ jobs:
       # Install matrix targets into the same pinned compiler Cargo selects via
       # rust-toolchain.toml. Installing them into a moving `stable` toolchain
       # leaves the pinned compiler without its target standard library.
+      # The components rust-toolchain.toml names are installed here, once,
+      # rather than by rustup on the first cargo call: cargo-zigbuild queries
+      # rustc while cargo runs, and two rustup proxies syncing the same missing
+      # component at once fail with "detected conflict: bin/cargo-fmt".
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
+          components: clippy, rustfmt
       - name: Install musl linker
         if: matrix.musl
         run: sudo apt-get update -qq && sudo apt-get install -y musl-tools
