@@ -1,13 +1,35 @@
 name: Native artifact matrix
 
+# Dispatching this workflow on its own builds and verifies the complete
+# release set -- every binary, wheel and gem, proved on its platform -- without
+# a tag and without publishing anything. Run it before a release whenever the
+# matrix or the packaging steps change; the release then rebuilds the same set.
 on:
+  workflow_dispatch:
+    inputs:
+      matrix-json:
+        description: Exact native target matrix to build for this invocation
+        required: false
+        type: string
+        default: '{"include":[{"runner":"macos-15","target":"aarch64-apple-darwin","package":"@supercov/cli-darwin-arm64","artifact":"supercov-cli-darwin-arm64","executable":"supercov","packedInstall":true,"gem":true},{"runner":"macos-15-intel","target":"x86_64-apple-darwin","package":"@supercov/cli-darwin-x64","artifact":"supercov-cli-darwin-x64","executable":"supercov","packedInstall":true,"gem":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","package":"@supercov/cli-linux-arm64-gnu","artifact":"supercov-cli-linux-arm64-gnu","executable":"supercov","packedInstall":true,"glibc":"2.28","gem":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","package":"@supercov/cli-linux-x64-gnu","artifact":"supercov-cli-linux-x64-gnu","executable":"supercov","packedInstall":true,"glibc":"2.28","gem":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","package":"@supercov/cli-linux-arm64-musl","artifact":"supercov-cli-linux-arm64-musl","executable":"supercov","musl":true,"gem":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","package":"@supercov/cli-linux-x64-musl","artifact":"supercov-cli-linux-x64-musl","executable":"supercov","musl":true,"gem":true},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","package":"@supercov/cli-win32-x64","artifact":"supercov-cli-win32-x64","executable":"supercov.exe","packedInstall":true,"gem":true},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","package":"@supercov/cli-win32-arm64","artifact":"supercov-cli-win32-arm64","executable":"supercov.exe","packedInstall":true,"gem":false}]}'
+      build-targets:
+        description: Build selected targets; false verifies only reused artifacts
+        required: false
+        type: boolean
+        default: true
+      reuse-run-id:
+        description: Optional prior workflow run whose successful target artifacts should be reused
+        required: false
+        type: string
+        default: ''
+
   workflow_call:
     inputs:
       matrix-json:
         description: Exact native target matrix to build for this invocation
         required: false
         type: string
-        default: '{"include":[{"runner":"macos-15","target":"aarch64-apple-darwin","package":"@supercov/cli-darwin-arm64","artifact":"supercov-cli-darwin-arm64","executable":"supercov","packedInstall":true},{"runner":"macos-15-intel","target":"x86_64-apple-darwin","package":"@supercov/cli-darwin-x64","artifact":"supercov-cli-darwin-x64","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","package":"@supercov/cli-linux-arm64-gnu","artifact":"supercov-cli-linux-arm64-gnu","executable":"supercov","packedInstall":true,"glibc":"2.28"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","package":"@supercov/cli-linux-x64-gnu","artifact":"supercov-cli-linux-x64-gnu","executable":"supercov","packedInstall":true,"glibc":"2.28"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","package":"@supercov/cli-linux-arm64-musl","artifact":"supercov-cli-linux-arm64-musl","executable":"supercov","musl":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","package":"@supercov/cli-linux-x64-musl","artifact":"supercov-cli-linux-x64-musl","executable":"supercov","musl":true},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","package":"@supercov/cli-win32-x64","artifact":"supercov-cli-win32-x64","executable":"supercov.exe","packedInstall":true},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","package":"@supercov/cli-win32-arm64","artifact":"supercov-cli-win32-arm64","executable":"supercov.exe","packedInstall":true,"gem":false}]}'
+        default: '{"include":[{"runner":"macos-15","target":"aarch64-apple-darwin","package":"@supercov/cli-darwin-arm64","artifact":"supercov-cli-darwin-arm64","executable":"supercov","packedInstall":true,"gem":true},{"runner":"macos-15-intel","target":"x86_64-apple-darwin","package":"@supercov/cli-darwin-x64","artifact":"supercov-cli-darwin-x64","executable":"supercov","packedInstall":true,"gem":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","package":"@supercov/cli-linux-arm64-gnu","artifact":"supercov-cli-linux-arm64-gnu","executable":"supercov","packedInstall":true,"glibc":"2.28","gem":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","package":"@supercov/cli-linux-x64-gnu","artifact":"supercov-cli-linux-x64-gnu","executable":"supercov","packedInstall":true,"glibc":"2.28","gem":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","package":"@supercov/cli-linux-arm64-musl","artifact":"supercov-cli-linux-arm64-musl","executable":"supercov","musl":true,"gem":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","package":"@supercov/cli-linux-x64-musl","artifact":"supercov-cli-linux-x64-musl","executable":"supercov","musl":true,"gem":true},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","package":"@supercov/cli-win32-x64","artifact":"supercov-cli-win32-x64","executable":"supercov.exe","packedInstall":true,"gem":true},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","package":"@supercov/cli-win32-arm64","artifact":"supercov-cli-win32-arm64","executable":"supercov.exe","packedInstall":true,"gem":false}]}'
       build-targets:
         description: Build selected targets; false verifies only reused artifacts
         required: false
@@ -91,17 +113,17 @@ jobs:
       # here, on the platform that can install and run them, and each completes
       # a real coverage run before the release set will accept it.
       - uses: ruby/setup-ruby@v1
-        if: matrix.gem != false
+        if: matrix.gem
         with:
           ruby-version: "3.4"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Build the platform gem
-        if: matrix.gem != false
+        if: matrix.gem
         run: node scripts/build-rubygem.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }}
       - name: Install the gem and complete a real coverage run
-        if: matrix.gem != false
+        if: matrix.gem
         run: node scripts/rubygem-integration.mjs
       - name: Build the platform wheel
         run: node scripts/build-wheel.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --out target/wheels
@@ -113,7 +135,7 @@ jobs:
         shell: bash
         run: |
           cp target/wheels/*.whl native-dist/
-          if [ "${{ matrix.gem }}" != "false" ]; then cp target/rubygems/*.gem native-dist/; fi
+          if [ "${{ matrix.gem }}" = "true" ]; then cp target/rubygems/*.gem native-dist/; fi
       - name: Validate binary, glibc floor, size gate, and checksums
         run: node scripts/native-artifact-check.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --tarball native-dist/${{ matrix.artifact }}-${{ env.SUPERCOV_VERSION }}.tgz --wheels native-dist --gems native-dist --out native-dist/${{ matrix.artifact }}.checksums.json
       - uses: actions/upload-artifact@v7
