@@ -9,10 +9,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::{
-        OnceLock,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -57,8 +54,9 @@ static UNIQUE: AtomicU64 = AtomicU64::new(0);
 ///
 /// The timings line reports `setup` as one number, and one number cannot say
 /// which operation is slow: on a Windows runner it read 18.7 s for the same
-/// two-file fixture that takes 0.4-0.6 s on macOS. Every file operation the
-/// frontend performs adds to these counters, and `SUPERCOV_PHASE_TIMING=1`
+/// two-file fixture that takes 0.4-0.6 s on macOS -- per-file syncs, as it
+/// turned out. Every file operation the frontend performs adds to these
+/// counters, and `SUPERCOV_PHASE_TIMING=1`
 /// prints them beside the phase, so the next platform surprise is measured
 /// rather than guessed at. The stage counters (runtime, configs, sources,
 /// assertions, cache) partition the phase; the operation counters cut across
@@ -69,9 +67,7 @@ struct SetupAccounting {
     bytes: AtomicU64,
     create_ns: AtomicU64,
     write_ns: AtomicU64,
-    sync_ns: AtomicU64,
     rename_ns: AtomicU64,
-    directory_sync_ns: AtomicU64,
     directories: AtomicU64,
     directory_retries: AtomicU64,
     directory_ns: AtomicU64,
@@ -90,9 +86,7 @@ impl SetupAccounting {
             bytes: AtomicU64::new(0),
             create_ns: AtomicU64::new(0),
             write_ns: AtomicU64::new(0),
-            sync_ns: AtomicU64::new(0),
             rename_ns: AtomicU64::new(0),
-            directory_sync_ns: AtomicU64::new(0),
             directories: AtomicU64::new(0),
             directory_retries: AtomicU64::new(0),
             directory_ns: AtomicU64::new(0),
@@ -127,17 +121,6 @@ fn timed<T>(counter: &AtomicU64, operation: impl FnOnce() -> T) -> T {
     value
 }
 
-/// TEMPORARY, for the Windows setup-cost measurement: drops the per-file
-/// `sync_all` and the per-write directory sync, so one probe binary can measure
-/// both behaviours in one run. The committed default is the behaviour that
-/// ships today; the experiment becomes the default only once a runner has
-/// shown what it is worth. Remove with the measurement.
-fn durable_workspace_writes() -> bool {
-    static DURABLE: OnceLock<bool> = OnceLock::new();
-    *DURABLE
-        .get_or_init(|| std::env::var("SUPERCOV_BUFFERED_WORKSPACE_WRITES").as_deref() != Ok("1"))
-}
-
 /// One line saying where the setup phase went, when `SUPERCOV_PHASE_TIMING=1`
 /// asked for it.
 pub fn setup_timing_detail() -> Option<String> {
@@ -146,8 +129,8 @@ pub fn setup_timing_detail() -> Option<String> {
     }
     Some(format!(
         "setup detail runtime={:.1}ms configs={:.1}ms sources={:.1}ms (instrument={:.1}ms) \
-assertions={:.1}ms cache={:.1}ms | files={} bytes={} create={:.1}ms write={:.1}ms fsync={:.1}ms \
-rename={:.1}ms directory-sync={:.1}ms | directories={} retries={} directory-wait={:.1}ms",
+assertions={:.1}ms cache={:.1}ms | files={} bytes={} create={:.1}ms write={:.1}ms \
+rename={:.1}ms | directories={} retries={} directory-wait={:.1}ms",
         accounted_ms(&SETUP.runtime_ns),
         accounted_ms(&SETUP.config_ns),
         accounted_ms(&SETUP.sources_ns),
@@ -158,9 +141,7 @@ rename={:.1}ms directory-sync={:.1}ms | directories={} retries={} directory-wait
         counted(&SETUP.bytes),
         accounted_ms(&SETUP.create_ns),
         accounted_ms(&SETUP.write_ns),
-        accounted_ms(&SETUP.sync_ns),
         accounted_ms(&SETUP.rename_ns),
-        accounted_ms(&SETUP.directory_sync_ns),
         counted(&SETUP.directories),
         counted(&SETUP.directory_retries),
         accounted_ms(&SETUP.directory_ns),
@@ -611,37 +592,35 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), JavascriptFrontendEr
         };
         timed(&SETUP.write_ns, || output.write_all(contents))
             .map_err(|source| io_error(&temporary, source))?;
-        // Whether these writes need to be durable at all is what the
-        // experiment measures. Every file the
-        // frontend writes lives in the regenerable workspace cache, and every
-        // one is listed in `frontend_artifact_paths`: a later run either
-        // rewrites it from the embedded assets and the project's sources, or
-        // restores it from the frontend cache, which verifies each artifact's
-        // sha256 when it reads the cache and again when it restores. A file
-        // left half-written by a crash therefore cannot be reused as if it
-        // were whole -- it fails its digest and the frontend regenerates it --
-        // and mirrored sources are pruned and re-copied every run. `rename`
-        // still publishes each file atomically, so nothing in this run can
-        // observe a partial one. What is given up is only surviving a power
-        // loss for files the next run rebuilds anyway. Durability that does
-        // matter -- evidence, run state, cache metadata -- goes through
-        // `lifecycle::atomic_write`, which still syncs.
-        if durable_workspace_writes() {
-            timed(&SETUP.sync_ns, || output.sync_all())
-                .map_err(|source| io_error(&temporary, source))?;
-        }
+        // This file is not forced to disk, deliberately. Everything the
+        // frontend writes lives in the regenerable workspace cache and is
+        // listed in `frontend_artifact_paths`: a later run either rewrites it
+        // from the embedded assets and the project's sources, or restores it
+        // from the frontend cache, which verifies each artifact's sha256 when
+        // it reads the cache and again when it restores it, while mirrored
+        // sources are pruned and re-copied every run. A file left half-written
+        // by a crash therefore cannot be read back as if it were whole: it
+        // fails its digest and is regenerated. `rename` still publishes each
+        // file atomically, so no reader in this run can observe a partial one.
+        // What is given up is only surviving a power loss for files the next
+        // run rebuilds anyway.
+        //
+        // What it buys is the phase. Preparing a two-file fixture writes 61
+        // files, and the syncs were most of the wait: 240-260 ms of a 290-310
+        // ms phase on a Windows runner, and 190 ms of file sync plus 180 ms of
+        // directory sync in a 400 ms phase on macOS. Both become 14-55 ms. A
+        // Windows probe once measured this same phase at 18.7 s, which is a
+        // per-sync latency of about 300 ms; a scanner busy enough to do that
+        // no longer has anything here to block on.
+        //
+        // Durability that does matter -- evidence, run state, cache metadata
+        // -- goes through `lifecycle::atomic_write`, which still syncs.
         timed(&SETUP.rename_ns, || fs::rename(&temporary, path))
             .map_err(|source| io_error(path, source))?;
         SETUP.files.fetch_add(1, Ordering::Relaxed);
         SETUP
             .bytes
             .fetch_add(contents.len() as u64, Ordering::Relaxed);
-        if durable_workspace_writes() {
-            timed(&SETUP.directory_sync_ns, || {
-                crate::lifecycle::sync_directory_handle(parent)
-            })
-            .map_err(|source| io_error(parent, source))?;
-        }
         Ok(())
     })();
     if result.is_err() {

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Changed**
+
+- Preparing a run no longer forces each generated file to disk. Those files are rebuilt, or restored from a digest-verified cache, on every run, so the wait bought nothing: setup drops from 290-310 ms to about 50 ms on Windows, and from 400 ms to 14 ms on macOS.
+
 ## 0.0.36
 
 **Added**

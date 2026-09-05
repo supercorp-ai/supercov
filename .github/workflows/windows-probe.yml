@@ -7,9 +7,8 @@ name: Windows probe
 # size gates a release also needs, so a Windows question can be answered in one
 # dispatch.
 #
-# `SUPERCOV_PHASE_TIMING=1` makes a run print where its setup phase went, and
-# the fixture is run under both write durability settings, twice each in
-# alternating order, because the second run of an identical file set on a
+# `SUPERCOV_PHASE_TIMING=1` makes the run print where its setup phase went, and
+# the gate runs twice, because a second run over an identical file set on a
 # machine with real-time scanning is not the same measurement as the first.
 
 on:
@@ -48,21 +47,11 @@ jobs:
       # everywhere else that installs before a release.
       - run: npm ci --omit=optional
       - run: cargo build --release --target ${{ matrix.target }} -p supercov
-      - name: Durable writes, first pass
+      - name: Packed install and real Rust run, first pass
         env:
           SUPERCOV_PHASE_TIMING: 1
         run: node scripts/native-package-integration.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/supercov.exe
-      - name: Buffered writes, first pass
+      - name: Packed install and real Rust run, second pass
         env:
           SUPERCOV_PHASE_TIMING: 1
-          SUPERCOV_BUFFERED_WORKSPACE_WRITES: 1
-        run: node scripts/native-package-integration.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/supercov.exe
-      - name: Durable writes, second pass
-        env:
-          SUPERCOV_PHASE_TIMING: 1
-        run: node scripts/native-package-integration.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/supercov.exe
-      - name: Buffered writes, second pass
-        env:
-          SUPERCOV_PHASE_TIMING: 1
-          SUPERCOV_BUFFERED_WORKSPACE_WRITES: 1
         run: node scripts/native-package-integration.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/supercov.exe
