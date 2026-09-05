@@ -102,6 +102,19 @@ From lines and branches to MC/DC, every gap becomes a concrete test target. Supe
 
 The denominator comes from source structure before the run, so adding or removing tests cannot silently change what 100% means. Ambiguous source scope, uninstrumented code, and missing evidence remain visible as completeness blockers.
 
+## Install for your language
+
+The same binary ships through each language's own package manager, at the same version, from one release:
+
+```bash
+npx supercov -- npm test                          # npm
+uvx --from supercov-cli supercov -- pytest        # PyPI
+gem install supercov && supercov -- bundle exec rspec   # RubyGems
+cargo install supercov && supercov -- cargo test  # crates.io, built from source
+```
+
+`pip install supercov-cli` and `gem install supercov` install a wheel or gem that carries the binary for your platform; nothing is compiled. The crate builds from source and needs Rust 1.95.
+
 ## Supported languages
 
 | Language | Status | Start with |
@@ -124,10 +137,10 @@ The CLI is a single native binary. `npx supercov` selects the build for the mach
 | Operating system | Architectures | Notes |
 | --- | --- | --- |
 | macOS | arm64 (Apple silicon), x64 (Intel) | macOS 11 or newer |
-| Linux | arm64, x64 | glibc and musl (Alpine) builds, chosen automatically |
+| Linux | arm64, x64 | glibc 2.28 or newer (Debian 10, Ubuntu 18.10, RHEL 8 and later), or musl (Alpine); chosen automatically |
 | Windows | arm64, x64 | Windows 10 or newer |
 
-On Windows, JavaScript and TypeScript suites are verified on every release; Python, Ruby, and Rust suites are not yet verified there. Containers, VMs, and remote executors run the same Linux builds. The npm package is the current release channel for every language, including Rust, Python, and Ruby projects. A PyPI package (`supercov-cli`), a RubyGems gem (`supercov`), and a crate (`supercov`) exist for macOS arm64 at an earlier version and are being brought up to date with each release.
+On Windows, JavaScript and TypeScript suites are verified on every release; Python, Ruby, and Rust suites are not yet verified there. Containers, VMs, and remote executors run the same Linux builds. Every release publishes the same binaries to npm, PyPI (`supercov-cli`, a wheel per platform) and RubyGems (`supercov`, a gem per platform except arm64 Windows, which Ruby has no platform for), and the source to crates.io (`supercov`).
 
 ## Supported test suites
 

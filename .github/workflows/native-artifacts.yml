@@ -7,7 +7,7 @@ on:
         description: Exact native target matrix to build for this invocation
         required: false
         type: string
-        default: '{"include":[{"runner":"macos-15","target":"aarch64-apple-darwin","package":"@supercov/cli-darwin-arm64","artifact":"supercov-cli-darwin-arm64","executable":"supercov","packedInstall":true},{"runner":"macos-15-intel","target":"x86_64-apple-darwin","package":"@supercov/cli-darwin-x64","artifact":"supercov-cli-darwin-x64","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","package":"@supercov/cli-linux-arm64-gnu","artifact":"supercov-cli-linux-arm64-gnu","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","package":"@supercov/cli-linux-x64-gnu","artifact":"supercov-cli-linux-x64-gnu","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","package":"@supercov/cli-linux-arm64-musl","artifact":"supercov-cli-linux-arm64-musl","executable":"supercov","musl":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","package":"@supercov/cli-linux-x64-musl","artifact":"supercov-cli-linux-x64-musl","executable":"supercov","musl":true},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","package":"@supercov/cli-win32-x64","artifact":"supercov-cli-win32-x64","executable":"supercov.exe","packedInstall":true},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","package":"@supercov/cli-win32-arm64","artifact":"supercov-cli-win32-arm64","executable":"supercov.exe","packedInstall":true,"gem":false}]}'
+        default: '{"include":[{"runner":"macos-15","target":"aarch64-apple-darwin","package":"@supercov/cli-darwin-arm64","artifact":"supercov-cli-darwin-arm64","executable":"supercov","packedInstall":true},{"runner":"macos-15-intel","target":"x86_64-apple-darwin","package":"@supercov/cli-darwin-x64","artifact":"supercov-cli-darwin-x64","executable":"supercov","packedInstall":true},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","package":"@supercov/cli-linux-arm64-gnu","artifact":"supercov-cli-linux-arm64-gnu","executable":"supercov","packedInstall":true,"glibc":"2.28"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","package":"@supercov/cli-linux-x64-gnu","artifact":"supercov-cli-linux-x64-gnu","executable":"supercov","packedInstall":true,"glibc":"2.28"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-musl","package":"@supercov/cli-linux-arm64-musl","artifact":"supercov-cli-linux-arm64-musl","executable":"supercov","musl":true},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-musl","package":"@supercov/cli-linux-x64-musl","artifact":"supercov-cli-linux-x64-musl","executable":"supercov","musl":true},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","package":"@supercov/cli-win32-x64","artifact":"supercov-cli-win32-x64","executable":"supercov.exe","packedInstall":true},{"runner":"windows-11-arm","target":"aarch64-pc-windows-msvc","package":"@supercov/cli-win32-arm64","artifact":"supercov-cli-win32-arm64","executable":"supercov.exe","packedInstall":true,"gem":false}]}'
       build-targets:
         description: Build selected targets; false verifies only reused artifacts
         required: false
@@ -46,6 +46,14 @@ jobs:
       - name: Install musl linker
         if: matrix.musl
         run: sudo apt-get update -qq && sudo apt-get install -y musl-tools
+      # A gnu binary inherits the glibc of the machine that links it, and this
+      # runner's is 2.39 -- too new for Debian 12, Ubuntu 22.04, RHEL 9 or
+      # Amazon Linux 2023. cargo-zigbuild links with zig's clang against the
+      # glibc named in the target suffix instead, and it finds zig through
+      # `python3 -m ziglang`, so both live in the user site.
+      - name: Install cargo-zigbuild
+        if: matrix.glibc
+        run: python3 -m pip install --user --break-system-packages cargo-zigbuild ziglang
       # The same-version native packages do not exist until this matrix
       # publishes them. Install the reproducible JS toolchain while omitting
       # that circular optional dependency.
@@ -57,8 +65,11 @@ jobs:
         if: runner.os == 'Windows'
         run: node scripts/native-package-integration.mjs --npm-preflight
       - name: Build native binary
-        if: matrix.musl != true
+        if: matrix.musl != true && !matrix.glibc
         run: cargo build --release --target ${{ matrix.target }} -p supercov
+      - name: Build native binary against glibc ${{ matrix.glibc }}
+        if: matrix.glibc
+        run: cargo zigbuild --release --target ${{ matrix.target }}.${{ matrix.glibc }} -p supercov
       - name: Build static musl binary
         if: matrix.musl
         run: cargo build --config 'target.${{ matrix.target }}.linker="musl-gcc"' --release --target ${{ matrix.target }} -p supercov
