@@ -5,17 +5,17 @@
 **Added**
 
 - `cargo binstall supercov` downloads the prebuilt binary from the release instead of compiling the engine, which takes minutes. Plain `cargo install` still builds from source.
-- The Ruby frontend runs in CI: Ruby 3.3 and 3.4 on Linux, and 3.4 on macOS and Windows.
+- The Ruby frontend runs in CI: Ruby 3.3, 3.4 and 4.0 on Linux, macOS and Windows.
+- Rust suites run on Windows. The probe runtime maps its evidence file through a Windows file mapping and takes over thread and process creation through the executable's import table, so a thread or child started inside a test is attributed to that test there as it is on Linux and macOS.
 
 **Fixed**
 
 - On Windows, a Python run measured nothing: the project root reached the runtime with a `\\?\` prefix its files did not carry, so no file was ever under it. A Ruby run could not start `rspec`, because a gem's executable there is a batch shim and only `.exe` was looked for. Both frontends now work on Windows, and both runtimes say so when a run executes files but none under the root, instead of reporting zero in silence.
-- A Rust run on Windows now stops with a plain message instead of failing inside rustc: the probe transport is not ported there yet, and a run without it would report zero coverage.
 - A plain `npm ci` installed native binaries from an older release and then refused them, because the lockfile recorded one version beside a tarball URL naming another.
 
 **Notes**
 
-- Python (3.12, 3.13, 3.14) and Ruby (3.3, 3.4) suites are verified on Linux, macOS and Windows; the compatibility matrix now runs the same versions on every operating system.
+- Python (3.12, 3.13, 3.14), Ruby (3.3, 3.4, 4.0) and Rust suites are verified on Linux, macOS and Windows; the compatibility matrix runs the same versions on every operating system, and the Rust frontend runs in CI for the first time.
 
 ## 0.0.38
 
