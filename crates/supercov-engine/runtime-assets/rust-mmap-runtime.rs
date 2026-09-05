@@ -690,6 +690,20 @@ mod __SUPERCOV_MODULE__ {
             INSTALL.call_once(|| unsafe { patch_imports() });
         }
 
+        /// POSIX interposition is in force from the first instruction; a
+        /// thread spawned before any probe fires -- in a child process that
+        /// inherits its context from the environment, say -- is still seen.
+        /// The CRT runs every pointer in `.CRT$XCU` before main, which is the
+        /// Windows form of that, so the table is patched there as well as
+        /// when the transport opens.
+        unsafe extern "C" fn install_at_start() {
+            install();
+        }
+
+        #[used]
+        #[unsafe(link_section = ".CRT$XCU")]
+        static INSTALL_AT_START: unsafe extern "C" fn() = install_at_start;
+
         unsafe fn read<T: Copy>(address: usize) -> T {
             // SAFETY: callers pass addresses inside the mapped image that the
             // PE headers declare.
