@@ -119,7 +119,11 @@ Supercov stands in for rustdoc during `cargo test --doc`, runs each doctest
 in its own process, and attributes what it executed to that doctest by name.
 With nextest, Supercov is nextest's target runner, so nextest's own
 scheduling, retries and output stay as they are and each attempt is recorded
-separately. Use the repository's normal flags after the wrapped command:
+separately. The measured source is what rustc compiles: every crate root and
+the modules it reaches through `mod` declarations, `#[path]` attributes and
+literal `include!` calls; a `.rs` file nothing declares as a module, such as
+one embedded with `include_str!`, is left untouched. Use the repository's
+normal flags after the wrapped command:
 
 ```sh
 npx supercov -- cargo test --workspace

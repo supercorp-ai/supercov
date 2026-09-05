@@ -234,20 +234,23 @@ pub(crate) fn run_doctests(
                     directory
                 }
             };
+            // rustdoc writes the path with the platform's separator; test
+            // identities use `/` everywhere, as the libtest path does.
+            let name = case.name.replace('\\', "/");
             results.push(RawTestResult {
-                test_id: Some(case.name.clone()),
+                test_id: Some(name.clone()),
                 scope: Some(ExecutionScope {
                     version: 1,
                     run_id: run_id.into(),
                     worker_id: format!("doctest-{index:04}"),
-                    test_id: case.name.clone(),
-                    test_key: case.name.clone(),
+                    test_id: name.clone(),
+                    test_key: name.clone(),
                     retry: 0,
                     attempt_id: format!("{run_id}:doctest:{index:08}"),
                 }),
-                test: case.name.clone(),
+                test: name.clone(),
                 test_file: Some(test_file),
-                title: Some(case.name.clone()),
+                title: Some(name),
                 retry: Some(0),
                 status: Some(case.status.clone()),
                 expected_status: Some("passed".into()),

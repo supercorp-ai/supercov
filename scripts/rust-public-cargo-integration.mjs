@@ -171,7 +171,9 @@ try {
   if (nextestVersion.status === 0) {
     const retried = supercov(['--', 'cargo', 'nextest', 'run', '--retries', '1']);
     assert.equal(retried.status, 0, `${retried.stdout}\n${retried.stderr}`);
-    assert.match(retried.stdout + retried.stderr, /1 flaky/, `one test must have passed on its second attempt: ${retried.stdout}\n${retried.stderr}`);
+    // nextest colors its summary on CI; compare the plain text.
+    const plain = (retried.stdout + retried.stderr).replace(/\x1b\[[0-9;]*m/g, '');
+    assert.match(plain, /1 flaky/, `one test must have passed on its second attempt: ${plain}`);
     // nextest runs the integration tests, not the doctest.
     assert.match(retried.stderr, /\[supercov\] Rust coverage: 5 test\(s\)/, retried.stderr);
     const retriedLine = JSON.stringify(query(['runs', 'latest', 'line', `src/lib.rs:${doubledLine}`]));

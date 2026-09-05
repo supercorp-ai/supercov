@@ -7,6 +7,10 @@ use std::{
     process::Command,
 };
 
+use ra_ap_syntax::{
+    AstNode, AstToken, Edition, SourceFile,
+    ast::{self, HasAttrs, HasModuleItem, HasName},
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -130,46 +134,165 @@ fn cargo_metadata(root: &Path) -> Result<CargoMetadata, RustProjectError> {
         .map_err(|error| RustProjectError::MetadataJson(error.to_string()))
 }
 
-fn collect_rust_files(
-    directory: &Path,
+/// The files rustc compiles for the given crate roots: each root and,
+/// transitively, every module it declares with `mod name;` (resolved the way
+/// rustc resolves it, `#[path]` included) and every file it pulls in with a
+/// literal `include!("....rs")`. A `.rs` file under the package that no module
+/// reaches -- a runtime source embedded as data with `include_str!`, a test
+/// fixture, a snippet -- is not part of any crate, so instrumenting it would
+/// change the data and count code that is never compiled.
+///
+/// A file that does not exist is skipped, not an error: a `#[cfg]`-gated
+/// module may name a file the checkout lacks, and rustc only complains when
+/// that cfg is active. Files outside the workspace are left alone as well.
+fn resolve_module_tree(
+    workspace: &Path,
+    roots: &BTreeSet<PathBuf>,
     files: &mut BTreeSet<PathBuf>,
 ) -> Result<(), RustProjectError> {
-    let mut entries = fs::read_dir(directory)
-        .map_err(|error| RustProjectError::Io {
-            path: directory.to_owned(),
-            reason: error.to_string(),
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| RustProjectError::Io {
-            path: directory.to_owned(),
-            reason: error.to_string(),
-        })?;
-    entries.sort_by_key(fs::DirEntry::file_name);
-    for entry in entries {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if matches!(name.as_ref(), ".git" | ".supercov" | "target") {
+    // (file, directory its `mod` children resolve in)
+    let mut pending = roots
+        .iter()
+        .map(|root| (root.clone(), owner_directory(root)))
+        .collect::<Vec<_>>();
+    while let Some((file, directory)) = pending.pop() {
+        if !file.starts_with(workspace) {
             continue;
         }
-        let file_type = entry.file_type().map_err(|error| RustProjectError::Io {
-            path: entry.path(),
+        let Ok(metadata) = fs::symlink_metadata(&file) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            return Err(RustProjectError::UnsafePath(file.display().to_string()));
+        }
+        if !metadata.is_file() || !files.insert(file.clone()) {
+            continue;
+        }
+        let source = fs::read_to_string(&file).map_err(|error| RustProjectError::Io {
+            path: file.clone(),
             reason: error.to_string(),
         })?;
-        if file_type.is_symlink() {
-            return Err(RustProjectError::UnsafePath(
-                entry.path().display().to_string(),
-            ));
-        }
-        if file_type.is_dir() {
-            collect_rust_files(&entry.path(), files)?;
-        } else if file_type.is_file()
-            && entry.path().extension().and_then(|value| value.to_str()) == Some("rs")
-            && entry.file_name() != "build.rs"
-        {
-            files.insert(entry.path());
-        }
+        let parsed = SourceFile::parse(&source, Edition::CURRENT).tree();
+        collect_module_declarations(parsed.items(), &file, &directory, false, &mut pending);
     }
     Ok(())
+}
+
+fn owner_directory(file: &Path) -> PathBuf {
+    file.parent().map_or_else(PathBuf::new, Path::to_path_buf)
+}
+
+/// Walk the items of one module body. `directory` is where this module's
+/// `mod name;` children live; `inline` says whether we are inside a
+/// `mod name { ... }` block, which changes what `#[path]` is relative to.
+fn collect_module_declarations(
+    items: impl Iterator<Item = ast::Item>,
+    file: &Path,
+    directory: &Path,
+    inline: bool,
+    pending: &mut Vec<(PathBuf, PathBuf)>,
+) {
+    for item in items {
+        match item {
+            ast::Item::Module(module) => {
+                let Some(name) = module.name() else {
+                    continue;
+                };
+                let name = name.text().to_string();
+                let path_attribute = module.attrs().find_map(|attr| {
+                    let is_path = attr
+                        .path()
+                        .is_some_and(|path| path.syntax().text() == "path");
+                    is_path.then(|| string_literal(attr.syntax())).flatten()
+                });
+                if let Some(list) = module.item_list() {
+                    let nested = directory.join(&name);
+                    collect_module_declarations(list.items(), file, &nested, true, pending);
+                } else if let Some(path) = path_attribute {
+                    // Relative to the file's own directory at the top level,
+                    // to the inline module's directory inside a block; the
+                    // loaded file owns its directory like a `mod.rs` does.
+                    let base = if inline {
+                        directory.to_path_buf()
+                    } else {
+                        owner_directory(file)
+                    };
+                    let target = base.join(path);
+                    let owner = owner_directory(&target);
+                    pending.push((target, owner));
+                } else {
+                    // `name.rs` and `name/mod.rs` both put their children in
+                    // `directory/name/`.
+                    let children = directory.join(&name);
+                    pending.push((directory.join(format!("{name}.rs")), children.clone()));
+                    pending.push((children.join("mod.rs"), children));
+                }
+            }
+            ast::Item::MacroCall(call) => {
+                let is_include = call.path().is_some_and(|path| {
+                    matches!(
+                        path.syntax().text().to_string().as_str(),
+                        "include" | "std::include" | "core::include" | "::std::include"
+                    )
+                });
+                if !is_include {
+                    continue;
+                }
+                let Some(literal) = string_literal(call.syntax()) else {
+                    continue;
+                };
+                if !literal.ends_with(".rs") {
+                    continue;
+                }
+                // Included code is spliced into this module: its own `mod`
+                // declarations resolve where this module's do.
+                pending.push((owner_directory(file).join(literal), directory.to_path_buf()));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The first string literal under a node, unescaped. Inside a macro's token
+/// tree the literal is a bare token, not a `Literal` node, so look at tokens.
+fn string_literal(node: &ra_ap_syntax::SyntaxNode) -> Option<String> {
+    node.descendants_with_tokens().find_map(|element| {
+        let string = ast::String::cast(element.into_token()?)?;
+        string.value().ok().map(|value| value.into_owned())
+    })
+}
+
+/// The crate roots of every workspace member: the source file of each Cargo
+/// target except build scripts, which Cargo compiles and runs on their own.
+fn crate_roots(
+    workspace: &Path,
+    packages: &[CargoPackage],
+) -> Result<BTreeSet<PathBuf>, RustProjectError> {
+    let mut roots = BTreeSet::new();
+    for package in packages {
+        let directory = package.manifest_path.parent().ok_or_else(|| {
+            RustProjectError::UnsafePath(package.manifest_path.display().to_string())
+        })?;
+        let directory = canonical_directory(directory)?;
+        confined_relative(workspace, &directory).or_else(|error| {
+            (directory == workspace)
+                .then_some(String::new())
+                .ok_or(error)
+        })?;
+        for target in &package.targets {
+            if target.kind.iter().any(|kind| kind == "custom-build") {
+                continue;
+            }
+            let root =
+                fs::canonicalize(&target.src_path).map_err(|error| RustProjectError::Io {
+                    path: target.src_path.clone(),
+                    reason: error.to_string(),
+                })?;
+            confined_relative(workspace, &root)?;
+            roots.insert(root);
+        }
+    }
+    Ok(roots)
 }
 
 /// Read-only Cargo workspace source discovery used by integrity checks. This
@@ -196,18 +319,7 @@ pub fn discover_rust_source_files(workspace: &Path) -> Result<Vec<String>, RustP
         return Err(RustProjectError::NoWorkspacePackages);
     }
     let mut files = BTreeSet::new();
-    for package in packages {
-        let directory = package.manifest_path.parent().ok_or_else(|| {
-            RustProjectError::UnsafePath(package.manifest_path.display().to_string())
-        })?;
-        let directory = canonical_directory(directory)?;
-        confined_relative(&workspace, &directory).or_else(|error| {
-            (directory == workspace)
-                .then_some(String::new())
-                .ok_or(error)
-        })?;
-        collect_rust_files(&directory, &mut files)?;
-    }
+    resolve_module_tree(&workspace, &crate_roots(&workspace, &packages)?, &mut files)?;
     if files.is_empty() {
         return Err(RustProjectError::NoSourceFiles);
     }
@@ -232,12 +344,48 @@ fn runtime_module_name(sources: &BTreeMap<String, String>) -> String {
     }
 }
 
-fn crate_key(path: &str) -> String {
-    let digest = Sha256::digest(path.as_bytes());
-    digest[..12]
+/// Twelve hex digits identifying an instrumentation: a digest of every
+/// obligation ID in the manifest. Two builds of the same sources share it;
+/// any other program's instrumentation, such as a fixture a test prepares
+/// and runs, has another.
+pub fn manifest_token(manifest: &CoverageManifest) -> String {
+    let mut ids = manifest
+        .points
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+        .map(|point| point.id.as_str())
+        .chain(
+            manifest
+                .decisions
+                .iter()
+                .map(|decision| decision.id.as_str()),
+        )
+        .chain(manifest.branches.iter().flat_map(|branch| {
+            branch
+                .alternatives
+                .iter()
+                .map(|alternative| alternative.id.as_str())
+        }))
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut hasher = Sha256::new();
+    for id in ids {
+        hasher.update(id.as_bytes());
+        hasher.update(b"\n");
+    }
+    hex(&hasher.finalize()[..6])
+}
+
+/// The runtime names its evidence files `<crate key>-<pid>.events`; the key
+/// is the manifest token followed by a digest of the crate root, so the
+/// reader can tell this instrumentation's files from any other's and two
+/// crates of one process write separate files.
+fn crate_key(token: &str, path: &str) -> String {
+    format!("{token}{}", hex(&Sha256::digest(path.as_bytes())[..6]))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn merge_manifest(
@@ -305,32 +453,9 @@ pub fn prepare_rust_project(workspace: &Path) -> Result<PreparedRustProject, Rus
         return Err(RustProjectError::NoWorkspacePackages);
     }
 
+    let roots = crate_roots(&workspace, &packages)?;
     let mut files = BTreeSet::new();
-    let mut roots = BTreeSet::new();
-    for package in &packages {
-        let directory = package.manifest_path.parent().ok_or_else(|| {
-            RustProjectError::UnsafePath(package.manifest_path.display().to_string())
-        })?;
-        let directory = canonical_directory(directory)?;
-        confined_relative(&workspace, &directory).or_else(|error| {
-            (directory == workspace)
-                .then_some(String::new())
-                .ok_or(error)
-        })?;
-        collect_rust_files(&directory, &mut files)?;
-        for target in &package.targets {
-            if target.kind.iter().any(|kind| kind == "custom-build") {
-                continue;
-            }
-            let root =
-                fs::canonicalize(&target.src_path).map_err(|error| RustProjectError::Io {
-                    path: target.src_path.clone(),
-                    reason: error.to_string(),
-                })?;
-            confined_relative(&workspace, &root)?;
-            roots.insert(root);
-        }
-    }
+    resolve_module_tree(&workspace, &roots, &mut files)?;
     if files.is_empty() {
         return Err(RustProjectError::NoSourceFiles);
     }
@@ -371,10 +496,11 @@ pub fn prepare_rust_project(workspace: &Path) -> Result<PreparedRustProject, Rus
         })?;
     }
 
+    let token = manifest_token(&manifest);
     let mut crate_roots = Vec::new();
     for root in roots {
         let relative = confined_relative(&workspace, &root)?;
-        let runtime = render_rust_runtime(&runtime_module, &crate_key(&relative))
+        let runtime = render_rust_runtime(&runtime_module, &crate_key(&token, &relative))
             .map_err(RustProjectError::Runtime)?;
         let mut source = fs::read_to_string(&root).map_err(|error| RustProjectError::Io {
             path: root.clone(),
@@ -484,6 +610,134 @@ fn integration_choice() {
         )
         .unwrap();
         root
+    }
+
+    #[test]
+    fn only_files_the_module_tree_reaches_are_instrumented() {
+        let root = fixture();
+        fs::create_dir_all(root.join("src/nested")).unwrap();
+        fs::create_dir_all(root.join("src/deep/inner")).unwrap();
+        fs::create_dir_all(root.join("runtime-assets")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            concat!(
+                "mod util;\n",
+                "mod nested;\n",
+                "#[path = \"renamed_file.rs\"]\n",
+                "mod renamed;\n",
+                "mod deep;\n",
+                "include!(\"included.rs\");\n",
+                "pub const EMBEDDED: &str = include_str!(\"../runtime-assets/embedded.rs\");\n",
+                "pub fn choose(first: bool, second: bool) -> i32 {\n",
+                "    if first && second { util::seven() } else { nested::three() }\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(root.join("src/util.rs"), "pub fn seven() -> i32 { 7 }\n").unwrap();
+        fs::write(
+            root.join("src/nested/mod.rs"),
+            "mod leaf;\npub fn three() -> i32 { leaf::three() }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/nested/leaf.rs"),
+            "pub fn three() -> i32 { 3 }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/renamed_file.rs"),
+            "pub fn renamed() -> i32 { 1 }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/deep.rs"),
+            "pub mod inner {\n    mod block_child;\n    pub fn deep() -> i32 { block_child::v() }\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/deep/inner/block_child.rs"),
+            "pub fn v() -> i32 { 9 }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/included.rs"),
+            "pub fn included() -> i32 { 2 }\n",
+        )
+        .unwrap();
+        // Data, not code: embedded verbatim and compiled by a consumer of
+        // its own, which would not know any runtime module of ours.
+        let embedded = "pub fn standalone() -> i32 { if true { 1 } else { 0 } }\n";
+        fs::write(root.join("runtime-assets/embedded.rs"), embedded).unwrap();
+        fs::write(
+            root.join("src/orphan.rs"),
+            "pub fn unreachable_module() {}\n",
+        )
+        .unwrap();
+
+        let prepared = prepare_rust_project(&root).unwrap();
+        assert_eq!(
+            prepared.source_files,
+            [
+                "src/deep.rs",
+                "src/deep/inner/block_child.rs",
+                "src/included.rs",
+                "src/lib.rs",
+                "src/nested/leaf.rs",
+                "src/nested/mod.rs",
+                "src/renamed_file.rs",
+                "src/util.rs",
+                "tests/integration.rs",
+            ]
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("runtime-assets/embedded.rs")).unwrap(),
+            embedded
+        );
+        assert!(
+            !fs::read_to_string(root.join("src/orphan.rs"))
+                .unwrap()
+                .contains("__supercov")
+        );
+        assert!(
+            fs::read_to_string(root.join("src/deep/inner/block_child.rs"))
+                .unwrap()
+                .contains("__supercov")
+        );
+        let build = Command::new("cargo")
+            .args(["test", "--no-run"])
+            .current_dir(&root)
+            .env("CARGO_TARGET_DIR", &prepared.target_directory)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn crate_keys_carry_the_manifest_token() {
+        let root = fixture();
+        let prepared = prepare_rust_project(&root).unwrap();
+        let token = manifest_token(&prepared.manifest);
+        assert_eq!(token.len(), 12);
+        assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_eq!(token, manifest_token(&prepared.manifest));
+        let key = crate_key(&token, "src/lib.rs");
+        assert_eq!(key.len(), 24);
+        assert!(key.starts_with(&token));
+        assert_ne!(key, crate_key(&token, "tests/integration.rs"));
+        for crate_root in &prepared.crate_roots {
+            assert!(
+                fs::read_to_string(root.join(crate_root))
+                    .unwrap()
+                    .contains(&crate_key(&token, crate_root))
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

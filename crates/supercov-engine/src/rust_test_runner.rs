@@ -1018,10 +1018,17 @@ pub(crate) fn snapshot(
         .collect::<BTreeMap<_, _>>();
     let mut hits = BTreeSet::new();
     let mut vectors = BTreeMap::<String, BTreeSet<(Vec<Option<bool>>, bool)>>::new();
-    for observations in read_rust_probe_directory(directory)
+    // Evidence files are named by the instrumentation that wrote them. A
+    // test may build and run a program instrumented on its own -- a fixture
+    // prepared inside the instrumented workspace -- and that program
+    // inherits the evidence directory; its obligations are not this run's.
+    let token = crate::rust_project::manifest_token(manifest);
+    for (name, observations) in read_rust_probe_directory(directory)
         .map_err(|error| RustTestRunnerError::Probe(error.to_string()))?
-        .into_values()
     {
+        if !name.starts_with(&token) {
+            continue;
+        }
         for observation in observations {
             match observation {
                 RustProbeObservation::Hit { id } => {
