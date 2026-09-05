@@ -18,8 +18,10 @@ function belongsToProject(parentURL) {
         return false;
     if (!PROJECT_ROOT)
         return parentURL.includes("/tests/");
-    const normalizedRoot = PROJECT_ROOT.replaceAll("\\", "/").replace(/\/$/, "");
-    const projectURL = `file://${normalizedRoot}/`;
+    // Derive the URL the way Node derives parentURL, or the two never match on
+    // Windows: a hand-built `file://C:/...` is not the `file:///C:/...` that
+    // pathToFileURL produces, and every project module would read as foreign.
+    const projectURL = pathToFileURL(PROJECT_ROOT).href.replace(/\/?$/, "/");
     const generatedURL = `${projectURL}.supercov/`;
     return (parentURL.startsWith(projectURL) && !parentURL.startsWith(generatedURL));
 }

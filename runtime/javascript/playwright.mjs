@@ -13,6 +13,7 @@ import http from "node:http";
 import https from "node:https";
 import { syncBuiltinESMExports } from "node:module";
 import { relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import * as standardPlaywright from "@playwright/test";
 import * as coverageRuntime from "./runtime.mjs";
 import { inferTestProvenance } from "./provenance.mjs";
@@ -147,8 +148,11 @@ function callerSource() {
         .replace(/\/$/, "");
     if (!projectRoot)
         return normalized;
+    // A stack frame's URL is what Node's pathToFileURL produces -- on Windows
+    // `file:///C:/...`, never a hand-built `file://C:/...` -- so strip the
+    // prefix derived the same way, then the bare path for frames without one.
     return normalized
-        .replace(`file://${projectRoot}/`, "")
+        .replace(`${pathToFileURL(projectRoot).href}/`, "")
         .replace(`${projectRoot}/`, "");
 }
 class CoveragePhaseController {
