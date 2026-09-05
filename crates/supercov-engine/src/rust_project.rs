@@ -428,19 +428,27 @@ pub fn prepare_rust_project(workspace: &Path) -> Result<PreparedRustProject, Rus
 mod tests {
     use std::{
         process::Command,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::*;
 
     fn fixture() -> PathBuf {
+        // One test calls this today, so nothing can collide with it yet. The
+        // counter is here because the clock is not enough on its own: it ticks
+        // once per microsecond and every test shares the pid, so the second
+        // test to use this helper would draw the same root as the first when
+        // the two start together.
+        static UNIQUE: AtomicU64 = AtomicU64::new(0);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let root = std::env::temp_dir().join(format!(
-            "supercov-rust-project-{}-{nonce}",
-            std::process::id()
+            "supercov-rust-project-{}-{nonce}-{}",
+            std::process::id(),
+            UNIQUE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
         fs::create_dir(root.join("src")).unwrap();
