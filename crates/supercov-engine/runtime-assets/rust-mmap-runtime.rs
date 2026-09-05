@@ -16,6 +16,10 @@ mod __SUPERCOV_MODULE__ {
             target_os = "linux",
             any(target_env = "gnu", target_env = "musl"),
             any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        all(
+            target_os = "windows",
+            any(target_arch = "aarch64", target_arch = "x86_64")
         )
     ))]
     use std::sync::atomic::AtomicU8;
@@ -449,6 +453,572 @@ mod __SUPERCOV_MODULE__ {
         }
     }
 
+    /// The transport file mapped whole, read-write and shared, on the POSIX
+    /// hosts: a symlink is refused, the file must be regular and at least a
+    /// header long.
+    #[cfg(any(
+        all(
+            target_os = "macos",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        all(
+            target_os = "linux",
+            any(target_env = "gnu", target_env = "musl"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        )
+    ))]
+    mod mapping {
+        use std::{
+            ffi::{OsStr, c_void},
+            fs::OpenOptions,
+            os::{fd::AsRawFd as _, unix::fs::OpenOptionsExt as _},
+        };
+
+        #[cfg(target_os = "linux")]
+        const O_NOFOLLOW: i32 = 0x2_0000;
+        #[cfg(target_os = "macos")]
+        const O_NOFOLLOW: i32 = 0x100;
+
+        unsafe extern "C" {
+            fn mmap(
+                address: *mut c_void,
+                length: usize,
+                protection: i32,
+                flags: i32,
+                file: i32,
+                offset: isize,
+            ) -> *mut c_void;
+            fn munmap(address: *mut c_void, length: usize) -> i32;
+        }
+
+        pub fn map(path: &OsStr, minimum: usize) -> Option<(*mut u8, usize)> {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(O_NOFOLLOW)
+                .open(path)
+                .ok()?;
+            let metadata = file.metadata().ok()?;
+            if !metadata.file_type().is_file() {
+                return None;
+            }
+            let length = usize::try_from(metadata.len()).ok()?;
+            if length < minimum {
+                return None;
+            }
+            // SAFETY: the descriptor is valid for the call and the mapping
+            // outlives the file, which may close afterwards.
+            let pointer = unsafe {
+                mmap(std::ptr::null_mut(), length, 1 | 2, 1, file.as_raw_fd(), 0)
+            };
+            if pointer as isize == -1 {
+                return None;
+            }
+            Some((pointer.cast::<u8>(), length))
+        }
+
+        /// # Safety
+        /// `pointer` and `length` must be exactly what `map` returned.
+        pub unsafe fn unmap(pointer: *mut u8, length: usize) {
+            // SAFETY: guaranteed by the caller.
+            let _ = unsafe { munmap(pointer.cast(), length) };
+        }
+    }
+
+    /// The same mapping on Windows. A view of a file mapping is backed by the
+    /// section object, so its dirty pages survive a killed process exactly as
+    /// mmap's do, which is what makes a killed worker's coverage recoverable.
+    #[cfg(all(
+        target_os = "windows",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
+    mod mapping {
+        use std::{
+            ffi::{OsStr, c_void},
+            fs::OpenOptions,
+            os::windows::{fs::OpenOptionsExt as _, io::AsRawHandle as _},
+        };
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn CreateFileMappingW(
+                file: *mut c_void,
+                attributes: *mut c_void,
+                protection: u32,
+                maximum_size_high: u32,
+                maximum_size_low: u32,
+                name: *const u16,
+            ) -> *mut c_void;
+            fn MapViewOfFile(
+                mapping: *mut c_void,
+                access: u32,
+                offset_high: u32,
+                offset_low: u32,
+                length: usize,
+            ) -> *mut c_void;
+            fn UnmapViewOfFile(address: *const c_void) -> i32;
+            fn CloseHandle(handle: *mut c_void) -> i32;
+        }
+
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const PAGE_READWRITE: u32 = 0x04;
+        const FILE_MAP_WRITE: u32 = 0x0002;
+        const FILE_MAP_READ: u32 = 0x0004;
+
+        pub fn map(path: &OsStr, minimum: usize) -> Option<(*mut u8, usize)> {
+            // Opening the reparse point itself rather than its target is the
+            // O_NOFOLLOW of Windows; a link then fails the regular-file check.
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(path)
+                .ok()?;
+            let metadata = file.metadata().ok()?;
+            if !metadata.file_type().is_file() {
+                return None;
+            }
+            let length = usize::try_from(metadata.len()).ok()?;
+            if length < minimum {
+                return None;
+            }
+            // SAFETY: the handle is valid for the call; a zero maximum size
+            // maps the whole file.
+            let section = unsafe {
+                CreateFileMappingW(
+                    file.as_raw_handle(),
+                    std::ptr::null_mut(),
+                    PAGE_READWRITE,
+                    0,
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            if section.is_null() {
+                return None;
+            }
+            // SAFETY: the section handle is valid and the length is the
+            // file's; the view keeps the section alive after both close.
+            let view = unsafe { MapViewOfFile(section, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, length) };
+            // SAFETY: the section handle was returned above and is closed once.
+            let _ = unsafe { CloseHandle(section) };
+            if view.is_null() {
+                return None;
+            }
+            Some((view.cast::<u8>(), length))
+        }
+
+        /// # Safety
+        /// `pointer` must be exactly what `map` returned.
+        pub unsafe fn unmap(pointer: *mut u8, _length: usize) {
+            // SAFETY: guaranteed by the caller.
+            let _ = unsafe { UnmapViewOfFile(pointer.cast()) };
+        }
+    }
+
+    /// Windows has no symbol interposition: `CreateThread` and
+    /// `CreateProcessW` reach kernel32 through the executable's import address
+    /// table, and std -- linked into the test binary -- imports both there. The
+    /// table is patched once, when the transport opens, to the same contract
+    /// as the POSIX interposers above. Anything unexpected in the image leaves
+    /// the table untouched: threads and children then attribute to background
+    /// rather than crash the program under test.
+    #[cfg(all(
+        target_os = "windows",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
+    mod inherited_windows_context {
+        use std::{
+            ffi::c_void,
+            mem,
+            sync::{
+                Once,
+                atomic::{AtomicUsize, Ordering},
+            },
+        };
+
+        type Handle = *mut c_void;
+        type Bool = i32;
+        type StartRoutine = unsafe extern "system" fn(*mut c_void) -> u32;
+        type CreateThreadFn = unsafe extern "system" fn(
+            *mut c_void,
+            usize,
+            Option<StartRoutine>,
+            *mut c_void,
+            u32,
+            *mut u32,
+        ) -> Handle;
+        type CreateProcessWFn = unsafe extern "system" fn(
+            *const u16,
+            *mut u16,
+            *mut c_void,
+            *mut c_void,
+            Bool,
+            u32,
+            *mut c_void,
+            *const u16,
+            *mut c_void,
+            *mut c_void,
+        ) -> Bool;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetModuleHandleW(name: *const u16) -> Handle;
+            fn VirtualProtect(
+                address: *mut c_void,
+                size: usize,
+                protection: u32,
+                previous: *mut u32,
+            ) -> Bool;
+            fn GetEnvironmentStringsW() -> *mut u16;
+            fn FreeEnvironmentStringsW(block: *mut u16) -> Bool;
+        }
+
+        const PAGE_READWRITE: u32 = 0x04;
+        const CREATE_UNICODE_ENVIRONMENT: u32 = 0x400;
+        const IMAGE_DIRECTORY_ENTRY_IMPORT: usize = 1;
+        const IMAGE_ORDINAL_FLAG64: u64 = 1 << 63;
+        const CONTEXT_PREFIX: &str = "SUPERCOV_RUST_CONTEXT_ID=";
+
+        static REAL_CREATE_THREAD: AtomicUsize = AtomicUsize::new(0);
+        static REAL_CREATE_PROCESS_W: AtomicUsize = AtomicUsize::new(0);
+        static INSTALL: Once = Once::new();
+
+        pub fn install() {
+            // SAFETY: the executable image is mapped for the life of the
+            // process and only its own import table is rewritten.
+            INSTALL.call_once(|| unsafe { patch_imports() });
+        }
+
+        unsafe fn read<T: Copy>(address: usize) -> T {
+            // SAFETY: callers pass addresses inside the mapped image that the
+            // PE headers declare.
+            unsafe { std::ptr::read_unaligned(address as *const T) }
+        }
+
+        unsafe fn patch_imports() {
+            // SAFETY: a null name asks for the executable's own module.
+            let base = unsafe { GetModuleHandleW(std::ptr::null()) } as usize;
+            if base == 0 {
+                return;
+            }
+            // IMAGE_DOS_HEADER: "MZ", with e_lfanew at 0x3c.
+            if unsafe { read::<u16>(base) } != 0x5a4d {
+                return;
+            }
+            let nt = base + unsafe { read::<u32>(base + 0x3c) } as usize;
+            // "PE\0\0", then IMAGE_FILE_HEADER (20 bytes), then the optional
+            // header, whose PE32+ magic is 0x20b and whose data directories
+            // start at offset 112.
+            if unsafe { read::<u32>(nt) } != 0x0000_4550 {
+                return;
+            }
+            let optional = nt + 4 + 20;
+            if unsafe { read::<u16>(optional) } != 0x20b {
+                return;
+            }
+            let import_rva =
+                unsafe { read::<u32>(optional + 112 + IMAGE_DIRECTORY_ENTRY_IMPORT * 8) } as usize;
+            if import_rva == 0 {
+                return;
+            }
+            let mut descriptor = base + import_rva;
+            loop {
+                // IMAGE_IMPORT_DESCRIPTOR: OriginalFirstThunk, TimeDateStamp,
+                // ForwarderChain, Name, FirstThunk -- 20 bytes, zero-terminated.
+                let names_rva = unsafe { read::<u32>(descriptor) } as usize;
+                let name_rva = unsafe { read::<u32>(descriptor + 12) } as usize;
+                let table_rva = unsafe { read::<u32>(descriptor + 16) } as usize;
+                if name_rva == 0 && table_rva == 0 {
+                    break;
+                }
+                if names_rva != 0 && table_rva != 0 {
+                    let mut index = 0_usize;
+                    loop {
+                        let entry = unsafe { read::<u64>(base + names_rva + index * 8) };
+                        if entry == 0 {
+                            break;
+                        }
+                        if entry & IMAGE_ORDINAL_FLAG64 == 0 {
+                            // IMAGE_IMPORT_BY_NAME: a u16 hint, then the name.
+                            let name = base + entry as usize + 2;
+                            let slot = base + table_rva + index * 8;
+                            if unsafe { name_is(name, b"CreateThread") } {
+                                unsafe {
+                                    replace(slot, create_thread as *const () as usize, &REAL_CREATE_THREAD)
+                                };
+                            } else if unsafe { name_is(name, b"CreateProcessW") } {
+                                unsafe {
+                                    replace(
+                                        slot,
+                                        create_process_w as *const () as usize,
+                                        &REAL_CREATE_PROCESS_W,
+                                    )
+                                };
+                            }
+                        }
+                        index += 1;
+                    }
+                }
+                descriptor += 20;
+            }
+        }
+
+        unsafe fn name_is(address: usize, expected: &[u8]) -> bool {
+            for (offset, byte) in expected.iter().enumerate() {
+                if unsafe { read::<u8>(address + offset) } != *byte {
+                    return false;
+                }
+            }
+            (unsafe { read::<u8>(address + expected.len()) }) == 0
+        }
+
+        /// Point one import slot at the replacement, remembering the real
+        /// function the first time. A second slot with the same name imports
+        /// the same kernel32 export, so the first original serves both.
+        unsafe fn replace(slot: usize, replacement: usize, original: &AtomicUsize) {
+            let current = unsafe { read::<usize>(slot) };
+            if current == 0 || current == replacement {
+                return;
+            }
+            let _ = original.compare_exchange(0, current, Ordering::AcqRel, Ordering::Acquire);
+            let mut previous = 0_u32;
+            // SAFETY: the slot lies inside the image's import table.
+            if unsafe {
+                VirtualProtect(
+                    slot as *mut c_void,
+                    mem::size_of::<usize>(),
+                    PAGE_READWRITE,
+                    &mut previous,
+                )
+            } == 0
+            {
+                return;
+            }
+            // SAFETY: the page is writable now and the slot is pointer-sized.
+            unsafe { std::ptr::write_unaligned(slot as *mut usize, replacement) };
+            let mut ignored = 0_u32;
+            // SAFETY: restores the protection VirtualProtect reported.
+            let _ = unsafe {
+                VirtualProtect(
+                    slot as *mut c_void,
+                    mem::size_of::<usize>(),
+                    previous,
+                    &mut ignored,
+                )
+            };
+        }
+
+        struct ThreadStart {
+            routine: StartRoutine,
+            argument: *mut c_void,
+            context: u64,
+        }
+
+        unsafe extern "system" fn run_with_context(opaque: *mut c_void) -> u32 {
+            // SAFETY: CreateThread received exactly one Box allocation from
+            // the hook and starts this routine at most once.
+            let start = unsafe { Box::from_raw(opaque.cast::<ThreadStart>()) };
+            // The thread runs under a fresh derived thread-phase context, so
+            // a thread that outlives its creating test can be detected and
+            // failed closed to background instead of contaminating the test.
+            let previous = super::enter_thread_context(start.context);
+            // SAFETY: the original routine and argument came directly from
+            // the caller's CreateThread invocation.
+            let result = unsafe { (start.routine)(start.argument) };
+            super::exit_thread_context(previous);
+            result
+        }
+
+        unsafe extern "system" fn create_thread(
+            attributes: *mut c_void,
+            stack_size: usize,
+            routine: Option<StartRoutine>,
+            argument: *mut c_void,
+            flags: u32,
+            thread_id: *mut u32,
+        ) -> Handle {
+            // SAFETY: the slot was patched only after the real address was
+            // stored, and that address has CreateThreadFn's ABI.
+            let real = unsafe {
+                mem::transmute::<usize, CreateThreadFn>(REAL_CREATE_THREAD.load(Ordering::Acquire))
+            };
+            let context = super::active_context();
+            let Some(routine) = routine else {
+                // SAFETY: forwarded unchanged to the platform.
+                return unsafe { real(attributes, stack_size, None, argument, flags, thread_id) };
+            };
+            if matches!(context, 0 | u64::MAX) {
+                // SAFETY: forwarded unchanged to the platform.
+                return unsafe {
+                    real(attributes, stack_size, Some(routine), argument, flags, thread_id)
+                };
+            }
+            let raw = Box::into_raw(Box::new(ThreadStart {
+                routine,
+                argument,
+                context,
+            }))
+            .cast::<c_void>();
+            // SAFETY: run_with_context has the platform start-routine ABI and
+            // owns raw only if the thread was created.
+            let handle = unsafe {
+                real(
+                    attributes,
+                    stack_size,
+                    Some(run_with_context),
+                    raw,
+                    flags,
+                    thread_id,
+                )
+            };
+            if handle.is_null() {
+                // SAFETY: a failed CreateThread never handed raw to a thread,
+                // so it is reclaimed exactly once here.
+                unsafe { drop(Box::from_raw(raw.cast::<ThreadStart>())) };
+            }
+            handle
+        }
+
+        unsafe extern "system" fn create_process_w(
+            application: *const u16,
+            command_line: *mut u16,
+            process_attributes: *mut c_void,
+            thread_attributes: *mut c_void,
+            inherit_handles: Bool,
+            flags: u32,
+            environment: *mut c_void,
+            current_directory: *const u16,
+            startup: *mut c_void,
+            information: *mut c_void,
+        ) -> Bool {
+            // SAFETY: as for create_thread.
+            let real = unsafe {
+                mem::transmute::<usize, CreateProcessWFn>(
+                    REAL_CREATE_PROCESS_W.load(Ordering::Acquire),
+                )
+            };
+            let context = super::active_context();
+            let replacement = if matches!(context, 0 | u64::MAX) {
+                None
+            } else {
+                // SAFETY: the caller's block is read only for the duration of
+                // this synchronous call.
+                unsafe { child_environment(environment, flags, context) }
+            };
+            match replacement {
+                // SAFETY: every argument but the environment block and the
+                // flag describing it is forwarded unchanged; the block lives
+                // until the call returns.
+                Some(mut block) => unsafe {
+                    real(
+                        application,
+                        command_line,
+                        process_attributes,
+                        thread_attributes,
+                        inherit_handles,
+                        flags | CREATE_UNICODE_ENVIRONMENT,
+                        block.as_mut_ptr().cast(),
+                        current_directory,
+                        startup,
+                        information,
+                    )
+                },
+                // SAFETY: forwarded unchanged to the platform.
+                None => unsafe {
+                    real(
+                        application,
+                        command_line,
+                        process_attributes,
+                        thread_attributes,
+                        inherit_handles,
+                        flags,
+                        environment,
+                        current_directory,
+                        startup,
+                        information,
+                    )
+                },
+            }
+        }
+
+        /// The child's environment block with the active context in place of
+        /// the inherited one. `None` leaves the call untouched: an ANSI block
+        /// this runtime does not rewrite, or a block from which the variable
+        /// was removed -- absence is meaningful, as on POSIX: Command::env_remove
+        /// opts the child into authenticated background attribution.
+        unsafe fn child_environment(
+            environment: *mut c_void,
+            flags: u32,
+            context: u64,
+        ) -> Option<Vec<u16>> {
+            let source = if environment.is_null() {
+                // SAFETY: the block returned is owned by this process until
+                // freed below.
+                let strings = unsafe { GetEnvironmentStringsW() };
+                if strings.is_null() {
+                    return None;
+                }
+                let copied = unsafe { copy_block(strings) };
+                let _ = unsafe { FreeEnvironmentStringsW(strings) };
+                copied
+            } else if flags & CREATE_UNICODE_ENVIRONMENT == 0 {
+                return None;
+            } else {
+                // SAFETY: a non-null Unicode block is double-NUL-terminated.
+                unsafe { copy_block(environment.cast::<u16>()) }
+            };
+            let mut block = Vec::with_capacity(source.len() + 64);
+            let mut found = false;
+            for entry in source.split(|unit| *unit == 0) {
+                if entry.is_empty() {
+                    continue;
+                }
+                if has_prefix_ignore_ascii_case(entry, CONTEXT_PREFIX) {
+                    found = true;
+                    continue;
+                }
+                block.extend_from_slice(entry);
+                block.push(0);
+            }
+            if !found {
+                return None;
+            }
+            block.extend(format!("{CONTEXT_PREFIX}{context:016x}").encode_utf16());
+            block.push(0);
+            block.push(0);
+            Some(block)
+        }
+
+        /// Copy a block of NUL-terminated UTF-16 strings ended by an empty one.
+        unsafe fn copy_block(block: *const u16) -> Vec<u16> {
+            let mut copied = Vec::new();
+            let mut index = 0_usize;
+            loop {
+                // SAFETY: the block is terminated by two NULs, and reading
+                // stops at the second.
+                let unit = unsafe { *block.add(index) };
+                copied.push(unit);
+                if unit == 0 && (index == 0 || copied[index - 1] == 0) {
+                    break;
+                }
+                index += 1;
+            }
+            copied
+        }
+
+        /// Environment names are case-insensitive on Windows.
+        fn has_prefix_ignore_ascii_case(entry: &[u16], prefix: &str) -> bool {
+            entry.len() >= prefix.len()
+                && entry
+                    .iter()
+                    .zip(prefix.bytes())
+                    .all(|(unit, byte)| {
+                        u8::try_from(*unit).is_ok_and(|unit| unit.eq_ignore_ascii_case(&byte))
+                    })
+        }
+    }
+
     struct Transport {
         pointer: *mut u8,
         length: usize,
@@ -472,30 +1042,14 @@ mod __SUPERCOV_MODULE__ {
             target_os = "linux",
             any(target_env = "gnu", target_env = "musl"),
             any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        all(
+            target_os = "windows",
+            any(target_arch = "aarch64", target_arch = "x86_64")
         )
     ))]
     impl Transport {
         fn open() -> Option<Self> {
-            use std::fs::OpenOptions;
-            use std::os::fd::AsRawFd as _;
-            use std::os::unix::fs::OpenOptionsExt as _;
-
-            #[cfg(target_os = "linux")]
-            const O_NOFOLLOW: i32 = 0x2_0000;
-            #[cfg(target_os = "macos")]
-            const O_NOFOLLOW: i32 = 0x100;
-
-            unsafe extern "C" {
-                fn mmap(
-                    address: *mut std::ffi::c_void,
-                    length: usize,
-                    protection: i32,
-                    flags: i32,
-                    file: i32,
-                    offset: isize,
-                ) -> *mut std::ffi::c_void;
-            }
-
             let path = std::env::var_os("SUPERCOV_RUST_TRANSPORT_FILE")?;
             let token = parse_token(&std::env::var("SUPERCOV_RUST_TRANSPORT_TOKEN").ok()?)?;
             let context_id = match std::env::var(CONTEXT_ENV) {
@@ -503,35 +1057,7 @@ mod __SUPERCOV_MODULE__ {
                 Err(std::env::VarError::NotPresent) => 0,
                 Err(std::env::VarError::NotUnicode(_)) => return None,
             };
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .custom_flags(O_NOFOLLOW)
-                .open(path)
-                .ok()?;
-            if !file.metadata().ok()?.file_type().is_file() {
-                return None;
-            }
-            let length = usize::try_from(file.metadata().ok()?.len()).ok()?;
-            if length < HEADER_SIZE {
-                return None;
-            }
-            // SAFETY: the file is kept open through mmap and the returned map
-            // is checked before any typed access.
-            let pointer = unsafe {
-                mmap(
-                    std::ptr::null_mut(),
-                    length,
-                    1 | 2,
-                    1,
-                    file.as_raw_fd(),
-                    0,
-                )
-            };
-            if pointer as isize == -1 {
-                return None;
-            }
-            let pointer = pointer.cast::<u8>();
+            let (pointer, length) = mapping::map(&path, HEADER_SIZE)?;
             let parsed = (|| {
                 // SAFETY: the mapping has at least HEADER_SIZE readable bytes.
                 let header = unsafe { std::slice::from_raw_parts(pointer, HEADER_SIZE) };
@@ -560,9 +1086,9 @@ mod __SUPERCOV_MODULE__ {
                     .then_some((descriptor_capacity, payload_capacity, payload_base))
             })();
             let Some((descriptor_capacity, payload_capacity, payload_base)) = parsed else {
-                // SAFETY: this is the exact mapping returned by mmap and it
-                // has not been transferred into a Transport.
-                let _ = unsafe { munmap_region(pointer, length) };
+                // SAFETY: this is the exact mapping the platform returned and
+                // it has not been transferred into a Transport.
+                unsafe { mapping::unmap(pointer, length) };
                 return None;
             };
             let transport = Self {
@@ -960,6 +1486,10 @@ mod __SUPERCOV_MODULE__ {
             target_os = "linux",
             any(target_env = "gnu", target_env = "musl"),
             any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        all(
+            target_os = "windows",
+            any(target_arch = "aarch64", target_arch = "x86_64")
         )
     )))]
     impl Transport {
@@ -1014,21 +1544,8 @@ mod __SUPERCOV_MODULE__ {
 
     impl Drop for Transport {
         fn drop(&mut self) {
-            #[cfg(any(
-                all(
-                    target_os = "macos",
-                    any(target_arch = "aarch64", target_arch = "x86_64")
-                ),
-                all(
-                    target_os = "linux",
-                    any(target_env = "gnu", target_env = "musl"),
-                    any(target_arch = "aarch64", target_arch = "x86_64")
-                )
-            ))]
-            {
-                // SAFETY: this is the exact live mapping returned by mmap.
-                let _ = unsafe { munmap_region(self.pointer, self.length) };
-            }
+            // SAFETY: this is the exact live mapping the platform returned.
+            unsafe { unmap_mapping(self.pointer, self.length) }
         }
     }
 
@@ -1041,15 +1558,33 @@ mod __SUPERCOV_MODULE__ {
             target_os = "linux",
             any(target_env = "gnu", target_env = "musl"),
             any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        all(
+            target_os = "windows",
+            any(target_arch = "aarch64", target_arch = "x86_64")
         )
     ))]
-    unsafe fn munmap_region(pointer: *mut u8, length: usize) -> i32 {
-        unsafe extern "C" {
-            fn munmap(address: *mut std::ffi::c_void, length: usize) -> i32;
-        }
+    unsafe fn unmap_mapping(pointer: *mut u8, length: usize) {
         // SAFETY: the caller owns the exact live mapping and length.
-        unsafe { munmap(pointer.cast(), length) }
+        unsafe { mapping::unmap(pointer, length) }
     }
+
+    #[cfg(not(any(
+        all(
+            target_os = "macos",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        all(
+            target_os = "linux",
+            any(target_env = "gnu", target_env = "musl"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        all(
+            target_os = "windows",
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        )
+    )))]
+    unsafe fn unmap_mapping(_pointer: *mut u8, _length: usize) {}
 
     fn read_u32(source: &[u8], offset: usize) -> Option<u32> {
         Some(u32::from_le_bytes(source.get(offset..offset + 4)?.try_into().ok()?))
@@ -1224,8 +1759,33 @@ mod __SUPERCOV_MODULE__ {
 
     fn transport() -> Option<&'static Transport> {
         static TRANSPORT: OnceLock<Option<Transport>> = OnceLock::new();
-        TRANSPORT.get_or_init(Transport::open).as_ref()
+        TRANSPORT
+            .get_or_init(|| {
+                let transport = Transport::open();
+                if transport.is_some() {
+                    install_platform_hooks();
+                }
+                transport
+            })
+            .as_ref()
     }
+
+    /// POSIX hooks are exported symbols and need no installation; Windows
+    /// hooks are written into the executable's import table once the
+    /// transport is known to exist.
+    #[cfg(all(
+        target_os = "windows",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
+    fn install_platform_hooks() {
+        inherited_windows_context::install();
+    }
+
+    #[cfg(not(all(
+        target_os = "windows",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    )))]
+    fn install_platform_hooks() {}
 
     pub struct DecisionFrame {
         id: &'static str,
@@ -1349,6 +1909,9 @@ mod __SUPERCOV_MODULE__ {
     #[inline(never)]
     pub fn enter_context(context_id: u64) -> u64 {
         debug_assert!(!matches!(context_id, 0 | u64::MAX));
+        // A thread or child spawned inside this context must be seen by the
+        // platform hooks, which install with the transport.
+        let _ = transport();
         CONTEXT_OVERRIDE
             .with(|current| current.replace(Some(context_id)))
             .unwrap_or(NO_CONTEXT_OVERRIDE)

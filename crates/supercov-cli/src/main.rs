@@ -599,7 +599,14 @@ fn rustdoc_wrapper(arguments: Vec<String>) -> ExitCode {
         }
         #[cfg(not(unix))]
         {
-            Err("the exact Rust rustdoc wrapper is not yet implemented on Windows".into())
+            // Windows has no exec: run the companion in place and hand its
+            // exit status back to Cargo.
+            let status = command.status().map_err(|error| {
+                format!("could not execute exact Rust rustdoc companion: {error}")
+            })?;
+            Ok(ExitCode::from(
+                status.code().unwrap_or(1).clamp(0, 255) as u8
+            ))
         }
     })();
     match result {

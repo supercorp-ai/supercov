@@ -429,8 +429,10 @@ fn inherit_lock_through_exec(command: &mut Command, lock: &fs::File) {
 
 #[cfg(not(unix))]
 fn inherit_lock_through_exec(_command: &mut Command, _lock: &fs::File) {
-    // Windows process/handle inheritance remains a private-platform promotion
-    // gate; public Rust support stays fail-closed there until it is proven.
+    // Windows releases a process's byte-range locks when it terminates, an
+    // inherited handle notwithstanding, so the Unix trick has no counterpart.
+    // A builder killed while its rustc still writes leaves one uniquely named
+    // .partial behind; the next builder ignores it and publishes its own.
 }
 
 fn remove_owned_path(path: &Path, expect_directory: bool) -> Result<(), RustLibtestCompanionError> {

@@ -21,6 +21,7 @@ use std::{
 use nextest_metadata::TestListSummary;
 use serde::{Deserialize, Serialize};
 
+use crate::workspace::canonicalize_simplified;
 use crate::{
     process_supervision::{
         CommandSpec, ForwardedSignal, ProcessSupervisor, SupervisedOutput, SupervisionOptions,
@@ -453,7 +454,7 @@ fn package_identity(
     let manifest_metadata =
         fs::symlink_metadata(manifest_path).map_err(|error| io_error(manifest_path, error))?;
     let manifest =
-        fs::canonicalize(manifest_path).map_err(|error| io_error(manifest_path, error))?;
+        canonicalize_simplified(manifest_path).map_err(|error| io_error(manifest_path, error))?;
     let package_root = manifest
         .parent()
         .and_then(|path| path.strip_prefix(project_root).ok())
@@ -493,10 +494,10 @@ fn nextest_artifacts(
     target_directory: &Path,
     project_root: &Path,
 ) -> Result<Vec<RustCompilerTestArtifact>, RustCompilerOrchestrationError> {
-    let canonical_target =
-        fs::canonicalize(target_directory).map_err(|error| io_error(target_directory, error))?;
+    let canonical_target = canonicalize_simplified(target_directory)
+        .map_err(|error| io_error(target_directory, error))?;
     let canonical_project =
-        fs::canonicalize(project_root).map_err(|error| io_error(project_root, error))?;
+        canonicalize_simplified(project_root).map_err(|error| io_error(project_root, error))?;
     let packages = metadata
         .packages
         .iter()
@@ -539,7 +540,7 @@ fn nextest_artifacts(
                 "nextest binary {binary_id} ambiguously matches Cargo metadata targets"
             )));
         }
-        let executable = fs::canonicalize(suite.binary.binary_path.as_std_path())
+        let executable = canonicalize_simplified(suite.binary.binary_path.as_std_path())
             .map_err(|error| io_error(suite.binary.binary_path.as_std_path(), error))?;
         let executable_metadata =
             fs::symlink_metadata(&executable).map_err(|error| io_error(&executable, error))?;
@@ -550,7 +551,7 @@ fn nextest_artifacts(
                 executable.display()
             )));
         }
-        let source_path = fs::canonicalize(&target.src_path)
+        let source_path = canonicalize_simplified(&target.src_path)
             .map_err(|error| io_error(&target.src_path, error))?;
         if !source_path.starts_with(&canonical_project) {
             return Err(RustCompilerOrchestrationError::CargoOutput(format!(
@@ -626,7 +627,7 @@ fn ensure_directories(
 }
 
 fn regular_executable(path: &Path) -> Result<PathBuf, RustCompilerOrchestrationError> {
-    let path = fs::canonicalize(path).map_err(|error| io_error(path, error))?;
+    let path = canonicalize_simplified(path).map_err(|error| io_error(path, error))?;
     let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
     if !metadata.file_type().is_file() {
         return Err(io_error(&path, "expected a regular executable"));
@@ -1039,10 +1040,10 @@ fn cargo_artifacts(
     target_directory: &Path,
     project_root: &Path,
 ) -> Result<Vec<RustCompilerTestArtifact>, RustCompilerOrchestrationError> {
-    let canonical_target =
-        fs::canonicalize(target_directory).map_err(|error| io_error(target_directory, error))?;
+    let canonical_target = canonicalize_simplified(target_directory)
+        .map_err(|error| io_error(target_directory, error))?;
     let canonical_project =
-        fs::canonicalize(project_root).map_err(|error| io_error(project_root, error))?;
+        canonicalize_simplified(project_root).map_err(|error| io_error(project_root, error))?;
     let mut artifacts = Vec::new();
     for line in stdout
         .split(|byte| *byte == b'\n')
@@ -1061,7 +1062,7 @@ fn cargo_artifacts(
             continue;
         };
         let executable =
-            fs::canonicalize(&executable).map_err(|error| io_error(&executable, error))?;
+            canonicalize_simplified(&executable).map_err(|error| io_error(&executable, error))?;
         let metadata =
             fs::symlink_metadata(&executable).map_err(|error| io_error(&executable, error))?;
         if !executable.starts_with(&canonical_target) || !metadata.file_type().is_file() {
@@ -1072,8 +1073,8 @@ fn cargo_artifacts(
         }
         let manifest_metadata = fs::symlink_metadata(&manifest_path)
             .map_err(|error| io_error(&manifest_path, error))?;
-        let manifest =
-            fs::canonicalize(&manifest_path).map_err(|error| io_error(&manifest_path, error))?;
+        let manifest = canonicalize_simplified(&manifest_path)
+            .map_err(|error| io_error(&manifest_path, error))?;
         let package_root = manifest
             .parent()
             .and_then(|path| path.strip_prefix(&canonical_project).ok())
@@ -1221,7 +1222,7 @@ pub fn build_with_rust_compiler_companion_supervised(
                 .into(),
         ));
     }
-    let project_root = fs::canonicalize(&request.project_root)
+    let project_root = canonicalize_simplified(&request.project_root)
         .map_err(|error| io_error(&request.project_root, error))?;
     if !fs::symlink_metadata(&project_root).is_ok_and(|metadata| metadata.file_type().is_dir()) {
         return Err(io_error(&project_root, "expected a project directory"));

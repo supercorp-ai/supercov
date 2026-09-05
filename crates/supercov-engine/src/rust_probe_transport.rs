@@ -1816,11 +1816,11 @@ fn main() {{
         fs::remove_dir_all(directory).unwrap();
     }
 
-    /// Off macOS and Linux the runtime template compiles to its stub, whose
-    /// probes record nothing and attach to nothing. That is the premise of
-    /// `run_direct_rust` refusing there: the stub must build, and it must not
-    /// pretend to measure.
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    /// Off macOS, Linux and Windows the runtime template compiles to its
+    /// stub, whose probes record nothing and attach to nothing. That is the
+    /// premise of `run_direct_rust` refusing there: the stub must build, and
+    /// it must not pretend to measure.
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     #[test]
     fn runtime_stub_compiles_and_records_nothing_elsewhere() {
         let directory = temporary_directory("stub");
@@ -1841,7 +1841,7 @@ fn main() {{
         fs::remove_dir_all(directory).unwrap();
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     #[test]
     fn mmap_transport_is_concurrent_bounded_strict_and_kill_resilient() {
         let directory = temporary_directory("all");

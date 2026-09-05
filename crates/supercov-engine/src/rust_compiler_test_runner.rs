@@ -29,6 +29,7 @@ use supercov_contracts::{
     LANGUAGE_FRONTEND_PROTOCOL_VERSION, StructuralSource,
 };
 
+use crate::workspace::canonicalize_simplified;
 use crate::{
     coverage_report::{
         CoverageModelDeclaration, CoveragePhase, CoverageReportRequest, ExecutionScope,
@@ -519,7 +520,7 @@ fn epoch_ms() -> Result<i64, RustCompilerTestError> {
 }
 
 fn relative_source(root: &Path, source: &Path) -> Result<String, RustCompilerTestError> {
-    let source = fs::canonicalize(source).map_err(|error| io_error(source, error))?;
+    let source = canonicalize_simplified(source).map_err(|error| io_error(source, error))?;
     let relative = source
         .strip_prefix(root)
         .map_err(|_| RustCompilerTestError::UnsafeArtifact(source.display().to_string()))?;
@@ -540,12 +541,12 @@ fn normalize_artifacts(
     target_directory: &Path,
     artifacts: &[RustCompilerTestArtifact],
 ) -> Result<Vec<TestArtifact>, RustCompilerTestError> {
-    let target_directory =
-        fs::canonicalize(target_directory).map_err(|error| io_error(target_directory, error))?;
+    let target_directory = canonicalize_simplified(target_directory)
+        .map_err(|error| io_error(target_directory, error))?;
     artifacts
         .iter()
         .map(|artifact| {
-            let executable = fs::canonicalize(&artifact.executable)
+            let executable = canonicalize_simplified(&artifact.executable)
                 .map_err(|error| io_error(&artifact.executable, error))?;
             if !executable.starts_with(&target_directory) {
                 return Err(RustCompilerTestError::UnsafeArtifact(
@@ -1018,7 +1019,7 @@ fn regular_directory(path: &Path) -> Result<PathBuf, RustCompilerTestError> {
             path.display().to_string(),
         ));
     }
-    fs::canonicalize(path).map_err(|error| io_error(path, error))
+    canonicalize_simplified(path).map_err(|error| io_error(path, error))
 }
 
 #[cfg(unix)]
@@ -1289,7 +1290,7 @@ pub fn run_cargo_libtest_runner(
     })?;
     let artifact_path = PathBuf::from(&artifact_argument);
     let artifact =
-        fs::canonicalize(&artifact_path).map_err(|error| io_error(&artifact_path, error))?;
+        canonicalize_simplified(&artifact_path).map_err(|error| io_error(&artifact_path, error))?;
     if !artifact.starts_with(&target_directory)
         || !fs::symlink_metadata(&artifact).is_ok_and(|metadata| metadata.file_type().is_file())
     {
@@ -2625,7 +2626,7 @@ fn execute_compiler_build(
     build: RustCompilerBuild,
     diagnostics: &mut dyn Write,
 ) -> Result<RustCompilerFrontendRun, RustCompilerTestError> {
-    let project_root = fs::canonicalize(&request.project_root)
+    let project_root = canonicalize_simplified(&request.project_root)
         .map_err(|error| io_error(&request.project_root, error))?;
     let artifacts = normalize_artifacts(&project_root, &build.target_directory, &build.artifacts)?;
     let artifact_by_path = artifacts
@@ -2666,7 +2667,7 @@ fn execute_compiler_build(
                     "nextest skipped suite {binary_id} contains test cases"
                 )));
             }
-            let executable = fs::canonicalize(suite.binary.binary_path.as_std_path())
+            let executable = canonicalize_simplified(suite.binary.binary_path.as_std_path())
                 .map_err(|error| io_error(suite.binary.binary_path.as_std_path(), error))?;
             let (artifact_index, artifact) =
                 artifact_by_path.get(&executable).ok_or_else(|| {

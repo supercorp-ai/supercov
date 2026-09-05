@@ -129,7 +129,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         # 3.3 measures through Coverage alone and declares the rest; 3.4 is
         # the first version the probes can measure everything on.
-        ruby: ["3.3", "3.4"]
+        ruby: ["3.3", "3.4", "4.0"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -142,3 +142,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: npm ci
       - run: npm run test:ruby-coverage
+
+  rust:
+    name: Rust suites (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      # The libtest companion patches the toolchain's own library/test source.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rust-src
+      - run: npm ci
+      - run: npm run test:rust-public-cargo

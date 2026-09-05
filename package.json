@@ -39,8 +39,6 @@
     "check:rustc-backend-spike": "(cd spikes/rustc-backend && RUSTC_BOOTSTRAP=1 RUSTUP_TOOLCHAIN=1.95.0 cargo fmt --check && RUSTC_BOOTSTRAP=1 RUSTUP_TOOLCHAIN=1.95.0 cargo clippy --all-targets -- -D warnings)",
     "test:rustc-backend-spike": "node scripts/rustc-backend-spike.mjs",
     "test:rust-compiler-spikes": "cargo build -p supercov && node scripts/rust-libtest-companion-spike.mjs && node scripts/rust-async-attribution-spike.mjs && node scripts/rust-subprocess-attribution-spike.mjs && node scripts/rust-custom-harness-spike.mjs && node scripts/rust-libtest-builder-lifecycle-spike.mjs",
-    "test:rust-cargo-runner": "cargo build -p supercov && node scripts/rust-cargo-runner-integration.mjs",
-    "test:rust-nextest-runner": "cargo build -p supercov && node scripts/rust-nextest-runner-integration.mjs",
     "test": "cargo test --workspace",
     "test:runtime": "node --test tests/runtime/*.test.mjs",
     "test:fixture": "cargo build -p supercov && node scripts/rust-fixture-matrix.mjs",
@@ -64,14 +62,15 @@
     "benchmark:check": "cargo build --release -p supercov && node scripts/rust-transform-benchmark.mjs",
     "benchmark:python-monitoring": "cargo build -p supercov && node scripts/python-monitoring-benchmark.mjs",
     "check": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && npm run test && npm run test:runtime && npm run test:rust-assets && node scripts/package-preflight.mjs && node scripts/verify-binstall-metadata.mjs --offline",
-    "release:check": "npm run check && npm run test:engine && npm run test:fixture && npm run test:watchdog && npm run test:engine-contract && npm run test:agent && npm run test:child-attribution && npm run test:host-loader && npm run test:python-monitoring && npm run test:ruby-coverage && npm run test:packed-npx && npm run test:clang-mcdc && npm run benchmark:check",
+    "release:check": "npm run check && npm run test:engine && npm run test:fixture && npm run test:watchdog && npm run test:engine-contract && npm run test:agent && npm run test:child-attribution && npm run test:host-loader && npm run test:python-monitoring && npm run test:ruby-coverage && npm run test:rust-public-cargo && npm run test:packed-npx && npm run test:clang-mcdc && npm run benchmark:check",
     "release:bump": "node scripts/bump-version.mjs",
     "prepack": "node scripts/package-preflight.mjs",
     "prepublishOnly": "npm run release:check",
     "test:child-attribution": "cargo build -p supercov && node scripts/rust-child-attribution-integration.mjs",
     "test:host-loader": "cargo build -p supercov && node scripts/rust-host-loader-integration.mjs",
     "test:python-monitoring": "cargo build -p supercov && node scripts/python-monitoring-integration.mjs",
-    "test:ruby-coverage": "cargo build -p supercov && node scripts/ruby-coverage-integration.mjs"
+    "test:ruby-coverage": "cargo build -p supercov && node scripts/ruby-coverage-integration.mjs",
+    "test:rust-public-cargo": "cargo build -p supercov && node scripts/rust-public-cargo-integration.mjs"
   },
   "optionalDependencies": {
     "@supercov/cli-darwin-arm64": "0.0.38",
