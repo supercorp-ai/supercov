@@ -573,6 +573,7 @@ impl<'a> RustObligationCollector<'a> {
         mut self,
         file: &SourceFile,
         assertions: &[TextRange],
+        matches: &[TextRange],
     ) -> Result<CoverageManifest, RustInstrumenterError> {
         let root = file.syntax();
 
@@ -640,6 +641,9 @@ impl<'a> RustObligationCollector<'a> {
             if let Some(condition) = assertion_condition(root, *arguments) {
                 self.decision(&condition, "assert");
             }
+        }
+        for expression in standalone_matches(root, matches, assertions) {
+            self.decision(&expression, "matches");
         }
 
         for binary in root.descendants().filter_map(ast::BinExpr::cast) {
@@ -779,9 +783,10 @@ pub const FAILED_TRANSFORM_DUMP_ENV: &str = "SUPERCOV_RUST_DUMP_FAILED_INSTRUMEN
 /// turned into `_` (and `vec!`'s brackets into parentheses), `name!(args)`
 /// reads as the call `name_(args)` at the same byte offsets -- the same
 /// statement start, the arguments an argument list. Probes then land inside
-/// the arguments, and the macro receives instrumented expressions.
-/// `matches!` is absent on purpose: its second argument is a pattern;
-/// `vec![x; n]` is left alone, since `(x; n)` is not an argument list.
+/// the arguments, and the macro receives instrumented expressions. `vec![x;
+/// n]` reads as the array `[x; n]` instead, with `vec!` blanked. `matches!`
+/// reads as a call on its scrutinee alone, its pattern blanked, and the whole
+/// `matches!` is a decision of its own.
 const EXPRESSION_MACROS: &[&str] = &[
     "assert",
     "debug_assert",
@@ -803,6 +808,7 @@ const EXPRESSION_MACROS: &[&str] = &[
     "unimplemented",
     "vec",
     "dbg",
+    "matches",
 ];
 
 /// Macros whose first argument decides whether the program goes on.
@@ -814,6 +820,8 @@ const ASSERTION_MACROS: &[&str] = &["assert", "debug_assert"];
 struct ExpressionView {
     text: String,
     assertions: Vec<TextRange>,
+    /// The ranges of whole `matches!(...)` calls: each is a boolean decision.
+    matches: Vec<TextRange>,
 }
 
 /// The editions tried when parsing, newest first: a file that parses under
@@ -849,16 +857,45 @@ fn parse_any_edition(source: &str) -> Result<(SourceFile, Edition), Vec<String>>
 fn expression_view(source: &str, edition: Edition) -> ExpressionView {
     let mut text = source.to_owned();
     let mut assertions = Vec::new();
+    let mut matches = Vec::new();
     // A macro inside another macro's arguments is tokens until the outer one
     // reads as a call, so rewrite, re-parse, and repeat until nothing changes.
     for _ in 0..16 {
         let tree = SourceFile::parse(&text, edition).tree();
-        let Some(next) = rewrite_expression_macros(&text, &tree, edition, &mut assertions) else {
+        let Some(next) =
+            rewrite_expression_macros(&text, &tree, edition, &mut assertions, &mut matches)
+        else {
             break;
         };
         text = next;
     }
-    ExpressionView { text, assertions }
+    ExpressionView {
+        text,
+        assertions,
+        matches,
+    }
+}
+
+/// Whether a macro call is a statement of its own or a block's tail: there
+/// its start is the statement's start, which a blanked prefix would move.
+fn is_statement_macro(call: &ast::MacroCall) -> bool {
+    call.syntax().parent().is_some_and(|parent| {
+        ast::MacroExpr::can_cast(parent.kind())
+            && parent.parent().is_some_and(|grandparent| {
+                ast::ExprStmt::can_cast(grandparent.kind())
+                    || ast::StmtList::can_cast(grandparent.kind())
+            })
+    })
+}
+
+/// The offset just after the first top-level comma of a token tree, if any.
+fn first_top_level_comma_end(arguments: &ast::TokenTree) -> Option<usize> {
+    arguments
+        .syntax()
+        .children_with_tokens()
+        .filter_map(|element| element.into_token())
+        .find(|token| token.kind() == SyntaxKind::COMMA)
+        .map(|token| usize::from(token.text_range().end()))
 }
 
 /// One pass over the known macros of `tree`; the rewritten text, or None when
@@ -868,6 +905,7 @@ fn rewrite_expression_macros(
     tree: &SourceFile,
     edition: Edition,
     assertions: &mut Vec<TextRange>,
+    matches: &mut Vec<TextRange>,
 ) -> Option<String> {
     let mut text = source.as_bytes().to_vec();
     let mut changed = false;
@@ -899,12 +937,46 @@ fn rewrite_expression_macros(
                 .last_mut()
                 .expect("a token tree has a closing delimiter") = b')';
         }
+        if name == "matches" {
+            // `matches!(e, pat)`: the scrutinee is an expression, the pattern
+            // is not. Blank the pattern so the call reads as `matches_(e, )`.
+            let Some(comma_end) = first_top_level_comma_end(&arguments) else {
+                continue;
+            };
+            for byte in &mut rewritten[comma_end - start..end - start - 1] {
+                if *byte != b'\n' {
+                    *byte = b' ';
+                }
+            }
+        }
         // The arguments must read as a call's argument list.
         let probe = format!(
             "fn __supercov() {{ let _ = __f{}; }}",
             String::from_utf8_lossy(&rewritten)
         );
         if !SourceFile::parse(&probe, edition).errors().is_empty() {
+            // `vec![x; n]` is no argument list; as the array `[x; n]` it still
+            // holds expressions. Blanking `vec!` moves the start of a
+            // statement the macro forms on its own, so that shape stays.
+            if !parenthesised && !is_statement_macro(&call) {
+                let array = source.as_bytes()[start..end].to_vec();
+                let array_probe = format!(
+                    "fn __supercov() {{ let _ = {}; }}",
+                    String::from_utf8_lossy(&array)
+                );
+                if SourceFile::parse(&array_probe, edition).errors().is_empty() {
+                    let prefix_start = usize::from(call.syntax().text_range().start());
+                    let prefix_start = call.attrs().last().map_or(prefix_start, |attribute| {
+                        usize::from(attribute.syntax().text_range().end())
+                    });
+                    for byte in &mut text[prefix_start..start] {
+                        if *byte != b'\n' {
+                            *byte = b' ';
+                        }
+                    }
+                    changed = true;
+                }
+            }
             continue;
         }
         text[usize::from(bang.text_range().start())] = b'_';
@@ -912,6 +984,9 @@ fn rewrite_expression_macros(
         changed = true;
         if ASSERTION_MACROS.contains(&name.as_str()) {
             assertions.push(range);
+        }
+        if name == "matches" {
+            matches.push(call.syntax().text_range());
         }
     }
     changed.then(|| String::from_utf8(text).expect("rewriting ASCII keeps the source UTF-8"))
@@ -940,9 +1015,14 @@ fn assertion_condition(root: &ra_ap_syntax::SyntaxNode, arguments: TextRange) ->
 /// collector and the instrumenter walk. Should the view not parse -- an
 /// argument list that stands alone but not in place -- the original tree is
 /// used and every macro stays declared.
-fn parse_for_instrumentation(
-    source: &str,
-) -> Result<(SourceFile, Vec<TextRange>, Edition), RustInstrumenterError> {
+struct ParsedSource {
+    tree: SourceFile,
+    assertions: Vec<TextRange>,
+    matches: Vec<TextRange>,
+    edition: Edition,
+}
+
+fn parse_for_instrumentation(source: &str) -> Result<ParsedSource, RustInstrumenterError> {
     if source.len() > u32::MAX as usize {
         return Err(RustInstrumenterError::SourceTooLarge);
     }
@@ -950,18 +1030,68 @@ fn parse_for_instrumentation(
     let view = expression_view(source, edition);
     let parsed_view = SourceFile::parse(&view.text, edition);
     if parsed_view.errors().is_empty() {
-        Ok((parsed_view.tree(), view.assertions, edition))
+        Ok(ParsedSource {
+            tree: parsed_view.tree(),
+            assertions: view.assertions,
+            matches: view.matches,
+            edition,
+        })
     } else {
-        Ok((tree, Vec::new(), edition))
+        Ok(ParsedSource {
+            tree,
+            assertions: Vec::new(),
+            matches: Vec::new(),
+            edition,
+        })
     }
+}
+
+/// The `matches!` calls that stand as decisions of their own: those not
+/// already serving as an atomic condition of an `if`, `while`, guard or
+/// assertion, whose decision records them.
+fn standalone_matches(
+    root: &ra_ap_syntax::SyntaxNode,
+    matches: &[TextRange],
+    assertions: &[TextRange],
+) -> Vec<ast::Expr> {
+    let mut atoms = Vec::new();
+    let mut conditions = Vec::new();
+    for expression in root.descendants().filter_map(ast::IfExpr::cast) {
+        conditions.extend(expression.condition());
+    }
+    for expression in root.descendants().filter_map(ast::WhileExpr::cast) {
+        conditions.extend(expression.condition());
+    }
+    for guard in root.descendants().filter_map(ast::MatchGuard::cast) {
+        conditions.extend(guard.condition());
+    }
+    for arguments in assertions {
+        conditions.extend(assertion_condition(root, *arguments));
+    }
+    for condition in &conditions {
+        RustObligationCollector::atomic_condition_ranges(condition, &mut atoms);
+    }
+    matches
+        .iter()
+        .filter(|range| !atoms.contains(range))
+        .filter_map(|range| {
+            root.descendants()
+                .find(|node| node.text_range() == *range && ast::CallExpr::can_cast(node.kind()))
+                .and_then(ast::Expr::cast)
+        })
+        .collect()
 }
 
 pub fn build_rust_manifest(
     file: &str,
     source: &str,
 ) -> Result<CoverageManifest, RustInstrumenterError> {
-    let (tree, assertions, _) = parse_for_instrumentation(source)?;
-    RustObligationCollector::new(file, source).collect(&tree, &assertions)
+    let parsed = parse_for_instrumentation(source)?;
+    RustObligationCollector::new(file, source).collect(
+        &parsed.tree,
+        &parsed.assertions,
+        &parsed.matches,
+    )
 }
 
 fn block_entry_offset(block: &ast::BlockExpr) -> Option<usize> {
@@ -1343,7 +1473,12 @@ pub fn instrument_rust_source(
         return Err(RustInstrumenterError::InvalidRuntimePath);
     }
     let mut manifest = build_rust_manifest(file, source)?;
-    let (tree, assertions, edition) = parse_for_instrumentation(source)?;
+    let ParsedSource {
+        tree,
+        assertions,
+        matches,
+        edition,
+    } = parse_for_instrumentation(source)?;
     let root = tree.syntax();
     let mut insertions = Vec::new();
     let mut identifiers = root
@@ -1368,6 +1503,7 @@ pub fn instrument_rust_source(
                             skipped: &mut bool,
                             expression: Option<ast::Expr>,
                             has_attrs: bool,
+                            trailing: bool,
                             range: TextRange,
                             id: String| {
         if !has_attrs {
@@ -1392,6 +1528,43 @@ pub fn instrument_rust_source(
             );
             return;
         }
+        // A brace-delimited macro call closing a block without a semicolon
+        // is a STATEMENT to rustc even though it supplies the block's value
+        // -- `fn f() -> T { #[rustfmt::skip] m! { .. } }` compiles -- and
+        // wrapping it as `#[attr] { hit; (m! { .. }) }` would make it an
+        // attributed tail expression, which is unstable (E0658; tokio's
+        // `#[rustfmt::skip] tokio::select! { .. }`). The probe goes before
+        // the attributes instead, in a block wrapping attributes and macro
+        // together, where the macro is again a trailing statement. A `cfg`
+        // attribute would then fire the probe for a statement cfg strips, so
+        // that shape is declared.
+        if trailing && let ast::Expr::MacroExpr(_) = &expression {
+            if expression.attrs().any(|attribute| {
+                // This grammar parses `cfg(..)` as a keyword and predicate
+                // rather than a path, so the meta's leading word is read.
+                attribute.meta().is_some_and(|meta| {
+                    let text = meta.syntax().text().to_string();
+                    let name = text
+                        .chars()
+                        .take_while(|character| character.is_alphanumeric() || *character == '_')
+                        .collect::<String>();
+                    matches!(name.as_str(), "cfg" | "cfg_attr")
+                })
+            }) {
+                *skipped = true;
+                return;
+            }
+            let range = expression.syntax().text_range();
+            push_wrapper(
+                insertions,
+                range,
+                range,
+                0,
+                format!("{{ {runtime_path}::hit({id:?}); "),
+                " }".into(),
+            );
+            return;
+        }
         // Any other attributed expression -- or the initializer of an
         // attributed `let` -- moves into a block that carries the probe: the
         // attributes now govern probe and expression together, the block has
@@ -1412,8 +1585,9 @@ pub fn instrument_rust_source(
         );
     };
     for list in root.descendants().filter_map(ast::StmtList::cast) {
+        let last_statement = list.statements().last();
         for statement in list.statements() {
-            let (range, expression, has_attrs) = match statement {
+            let (range, expression, has_attrs, trailing) = match &statement {
                 ast::Stmt::ExprStmt(statement) if !cannot_carry_probe(statement.syntax()) => {
                     let expression = statement.expr();
                     // Outer attributes on an expression statement attach to
@@ -1421,14 +1595,29 @@ pub fn instrument_rust_source(
                     let has_attrs = expression
                         .as_ref()
                         .is_some_and(|expression| expression.attrs().next().is_some());
-                    (statement.syntax().text_range(), expression, has_attrs)
+                    // The block's last statement, without a semicolon and
+                    // with no tail expression after it, closes the block.
+                    let trailing = statement.semicolon_token().is_none()
+                        && list.tail_expr().is_none()
+                        && last_statement.as_ref() == Some(&ast::Stmt::ExprStmt(statement.clone()));
+                    (
+                        statement.syntax().text_range(),
+                        expression,
+                        has_attrs,
+                        trailing,
+                    )
                 }
                 ast::Stmt::LetStmt(statement) if !cannot_carry_probe(statement.syntax()) => {
                     let has_attrs = statement.attrs().next().is_some();
                     // Only an attributed `let` needs its initializer; a plain
                     // one takes the probe before the statement.
                     let initializer = has_attrs.then(|| statement.initializer()).flatten();
-                    (statement.syntax().text_range(), initializer, has_attrs)
+                    (
+                        statement.syntax().text_range(),
+                        initializer,
+                        has_attrs,
+                        false,
+                    )
                 }
                 _ => continue,
             };
@@ -1438,6 +1627,7 @@ pub fn instrument_rust_source(
                 &mut skipped_attributed_statement,
                 expression,
                 has_attrs,
+                trailing,
                 range,
                 id,
             );
@@ -1454,6 +1644,7 @@ pub fn instrument_rust_source(
                 &mut skipped_attributed_statement,
                 Some(tail),
                 has_attrs,
+                true,
                 range,
                 id,
             );
@@ -1813,6 +2004,19 @@ pub fn instrument_rust_source(
             );
         }
     }
+    // `matches!(e, pat)` is a boolean decision wherever it stands; as a
+    // condition of an `if` it is already one of that decision's atoms.
+    for expression in standalone_matches(root, &matches, &assertions) {
+        let frame_name = allocate_frame_name(file, &expression, "matches", &mut identifiers);
+        instrument_decision(
+            &mut insertions,
+            runtime_path,
+            file,
+            &expression,
+            "matches",
+            &frame_name,
+        );
+    }
 
     if skipped_attributed_statement {
         add_manifest_limitation(
@@ -1878,7 +2082,7 @@ mod __supercov_runtime_v1 {
         fn probe(self, _: &'static str, _: &'static str) -> Self { self }
     }
     impl<T> TryProbe for T {}
-    pub fn condition(value: bool, _: &mut DecisionFrame, _: usize) -> bool { value }
+    pub fn condition<V: std::ops::Not<Output = bool>>(value: V, _: &mut DecisionFrame, _: usize) -> bool { !!value }
     pub fn decision(value: bool, _: &mut DecisionFrame) -> bool { value }
     pub fn reached(_: &mut DecisionFrame, _: usize) -> bool { true }
     pub fn decision_chain(_: &mut DecisionFrame, _: bool, _: &[(usize, &'static str, &'static str)]) {}
@@ -2005,17 +2209,21 @@ fn closure(value: i32) -> bool {
     fn declares_macro_and_const_boundaries_instead_of_hiding_them() {
         let source = r#"const fn doubled(value: usize) -> usize { value * 2 }
 
+macro_rules! noop {
+    () => {};
+}
+
 fn checked(value: bool) -> bool {
     assert!(value);
-    let _ = matches!(value, true);
+    noop!();
     const { doubled(2) == 4 }
 }
 "#;
         let manifest = build_rust_manifest("src/lib.rs", source).unwrap();
-        // The assertion is a decision of its own; `matches!` keeps the macro
-        // limitation, since its pattern argument is not an expression.
+        // The assertion is a decision of its own; the crate's own macro keeps
+        // the macro limitation.
         assert!(manifest.decisions.iter().any(|decision| {
-            decision.line == 4 && decision.source == "value" && decision.conditions == ["value"]
+            decision.line == 8 && decision.source == "value" && decision.conditions == ["value"]
         }));
         let ids = manifest
             .limitations
@@ -2124,6 +2332,12 @@ fn classify(values: &[i32], strict: bool) -> String {
     assert!(values.len() < 10 && (strict || !values.is_empty()), "bad input {:?}", values);
     debug_assert!(values.iter().all(|v| *v > -100));
     let doubled = vec![values.iter().map(|v| v * 2).sum::<i32>(), if strict { 1 } else { 2 }];
+    let repeated = vec![if strict { 1 } else { 0 }; values.len()];
+    let small = matches!(values.first(), Some(v) if *v < 3);
+    if matches!(values.len(), 1 | 2) && small {
+        println!("small");
+    }
+    println!("{}", repeated.len() + small as usize);
     write!(out, "{}", doubled.iter().map(|d| if *d > 4 { "big" } else { "small" }).collect::<Vec<_>>().join(",")).unwrap();
     println!("{} {}", format!("{:?}", doubled), if values.first().copied().unwrap_or(0) > 0 && strict { "positive" } else { "other" });
     assert_eq!(doubled.len(), if strict { 2 } else { 2 }, "length for strict={strict}");
@@ -2188,6 +2402,37 @@ fn main() {
                 .code
                 .contains(", if ({ let mut __supercov_decision_")
         );
+        // `vec![x; n]`: the element takes probes as an array element would.
+        assert!(
+            transformed
+                .code
+                .contains("vec![if ({ let mut __supercov_decision_")
+        );
+        // A standalone `matches!` is a decision; one that is already an `if`
+        // condition's atom is not doubled.
+        assert!(
+            transformed
+                .code
+                .contains("let small = ({ let mut __supercov_decision_")
+        );
+        assert_eq!(
+            transformed
+                .manifest
+                .decisions
+                .iter()
+                .filter(|decision| decision.line == 10)
+                .count(),
+            1
+        );
+        assert_eq!(
+            transformed
+                .manifest
+                .decisions
+                .iter()
+                .filter(|decision| decision.line == 9)
+                .count(),
+            1
+        );
         assert!(
             transformed
                 .code
@@ -2234,8 +2479,21 @@ fn check(value: i32) {
     assert!(value > 0 && value < 10, "value {value} out of range");
 }
 
+// tokio: `assert!` only negates its operand, so a `&bool` is accepted.
+fn all_seen(seen: &[bool]) {
+    for was_seen in seen {
+        assert!(was_seen);
+        debug_assert!(was_seen, "seen");
+    }
+}
+
 fn main() {
     std::panic::set_hook(Box::new(|_| {}));
+    all_seen(&[true, true]);
+    match std::panic::catch_unwind(|| all_seen(&[true, false])) {
+        Ok(()) => println!("ok"),
+        Err(payload) => println!("{}", payload.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_default()),
+    }
     for (len, capacity) in [(3, 5), (8, 5)] {
         match std::panic::catch_unwind(|| grow(len, capacity)) {
             Ok(()) => println!("ok"),
@@ -2260,6 +2518,9 @@ fn main() {
         assert!(
             String::from_utf8_lossy(&instrumented.stdout)
                 .contains("assertion failed: new_capacity >= len")
+        );
+        assert!(
+            String::from_utf8_lossy(&instrumented.stdout).contains("assertion failed: was_seen")
         );
     }
 
@@ -2858,6 +3119,77 @@ fn main() {
             "cfg-let-instrumented",
         );
         assert_eq!(instrumented.status, original.status);
+        assert_eq!(instrumented.stdout, original.stdout);
+        assert_eq!(instrumented.stderr, original.stderr);
+
+        // A brace macro closing a block is a statement to rustc, so its
+        // attributes are legal where an attributed tail expression's are not
+        // (tokio: `#[rustfmt::skip] tokio::select! { .. }`). The probe goes
+        // before the attributes; a `cfg` there stays declared.
+        let trailing_macro = r#"macro_rules! pick { ($e:expr) => { $e } }
+fn value() -> i32 {
+    let base = 20;
+    #[rustfmt::skip]
+    pick! { base + 1 }
+}
+fn effect() {
+    #[rustfmt::skip]
+    println! { "effect" }
+}
+fn gated() {
+    #[cfg(target_endian = "little")]
+    println! { "little" }
+}
+fn main() {
+    effect();
+    gated();
+    println!("{}", value());
+}
+"#;
+        let transformed = instrument_rust_source(
+            "src/main.rs",
+            trailing_macro,
+            "crate::__supercov_runtime_v1",
+        )
+        .unwrap();
+        assert!(
+            transformed
+                .code
+                .contains("{ crate::__supercov_runtime_v1::hit(\"rs:statement:")
+        );
+        assert!(
+            transformed
+                .code
+                .contains("); #[rustfmt::skip]\n    pick! { base + 1 } }")
+        );
+        assert!(
+            transformed
+                .code
+                .contains("); #[rustfmt::skip]\n    println! { \"effect\" } }")
+        );
+        assert!(
+            transformed.code.contains(
+                "\n    #[cfg(target_endian = \"little\")]\n    println! { \"little\" }\n"
+            )
+        );
+        let ids = transformed
+            .manifest
+            .limitations
+            .iter()
+            .filter_map(|limitation| limitation.get("id")?.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(ids.contains("rust-attributed-statement-probes-not-injected"));
+        let original = compile_and_run(trailing_macro, "trailing-macro-original");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "trailing-macro-instrumented",
+        );
+        assert_eq!(
+            instrumented.status,
+            original.status,
+            "{}",
+            String::from_utf8_lossy(&instrumented.stderr)
+        );
         assert_eq!(instrumented.stdout, original.stdout);
         assert_eq!(instrumented.stderr, original.stderr);
     }

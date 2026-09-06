@@ -10,6 +10,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
     fs,
     io::Write,
     path::{Component, Path, PathBuf},
@@ -156,6 +157,7 @@ struct CargoMessage {
     #[serde(default)]
     profile: Option<CargoArtifactProfile>,
     executable: Option<PathBuf>,
+    manifest_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,6 +178,9 @@ struct TestArtifact {
     name: String,
     kind: String,
     source: String,
+    /// Where Cargo runs the binary: the directory of its package's manifest.
+    /// tokio's `basic_fs` reads `Cargo.toml` from there.
+    package_directory: PathBuf,
 }
 
 #[derive(Debug)]
@@ -950,8 +955,14 @@ fn build_test_artifacts(
         }
         let source = fs::canonicalize(target.src_path)
             .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
+        let package_directory = message
+            .manifest_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map_or_else(|| project.workspace_root.clone(), Path::to_path_buf);
         artifacts.push(TestArtifact {
             executable,
+            package_directory,
             name: target.name,
             kind: if target.kind.iter().any(|kind| kind == "test") {
                 "integration".into()
@@ -971,9 +982,13 @@ fn build_test_artifacts(
     Ok(artifacts)
 }
 
-fn list_tests(executable: &Path) -> Result<Vec<String>, RustTestRunnerError> {
+fn list_tests(
+    executable: &Path,
+    environment: &[(&'static str, OsString)],
+) -> Result<Vec<String>, RustTestRunnerError> {
     let output = Command::new(executable)
         .args(["--list", "--format", "terse"])
+        .envs(environment.iter().map(|(key, value)| (key, value)))
         .output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     if !output.status.success() {
@@ -1137,6 +1152,70 @@ pub(crate) fn instrumented_stack_environment() -> Vec<(&'static str, &'static st
     }
 }
 
+/// One path the selected toolchain reports through `rustc --print`.
+fn rustc_print_path(request: &str) -> Result<PathBuf, RustTestRunnerError> {
+    let output = Command::new("rustc")
+        .args(["--print", request])
+        .output()
+        .map_err(|error| {
+            RustTestRunnerError::Launch(format!("rustc --print {request}: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(RustTestRunnerError::Launch(format!(
+            "rustc --print {request} exited with {}",
+            output.status
+        )));
+    }
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
+}
+
+/// The selected toolchain's sysroot, as `rustc --print sysroot` reports it.
+pub(crate) fn rustc_sysroot() -> Result<PathBuf, RustTestRunnerError> {
+    rustc_print_path("sysroot")
+}
+
+/// The directory holding the toolchain's own dynamic libraries
+/// (`<sysroot>/lib/rustlib/<host>/lib`), where libstd's dylib lives; the
+/// plain `<sysroot>/lib` no longer holds it.
+pub(crate) fn rustc_target_libdir() -> Result<PathBuf, RustTestRunnerError> {
+    rustc_print_path("target-libdir")
+}
+
+/// The dynamic library search path Cargo gives a test binary it runs: the
+/// artifact's own directories and the toolchain's target library directory.
+/// A proc-macro crate's test harness links libstd dynamically -- async-trait's
+/// and serde_derive's cannot even list their tests without this -- and any
+/// dylib dependency is found the same way. The user's own path follows.
+pub(crate) fn dynamic_library_environment(
+    target_libdir: &Path,
+    executable: &Path,
+) -> Vec<(&'static str, OsString)> {
+    let variable = if cfg!(target_os = "macos") {
+        "DYLD_FALLBACK_LIBRARY_PATH"
+    } else if cfg!(windows) {
+        "PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    };
+    let mut entries = Vec::new();
+    if let Some(deps) = executable.parent() {
+        entries.push(deps.to_path_buf());
+        if let Some(profile) = deps.parent() {
+            entries.push(profile.to_path_buf());
+        }
+    }
+    entries.push(target_libdir.to_path_buf());
+    if let Some(existing) = std::env::var_os(variable) {
+        entries.extend(std::env::split_paths(&existing));
+    }
+    match std::env::join_paths(entries) {
+        Ok(value) => vec![(variable, value)],
+        Err(_) => Vec::new(),
+    }
+}
+
 pub(crate) fn capped_rustflags() -> String {
     let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
     if !rustflags.is_empty() {
@@ -1277,8 +1356,16 @@ pub fn run_prepared_rust_tests(
         });
     }
     let mut tasks = Vec::new();
+    let target_libdir = if artifacts.is_empty() {
+        PathBuf::new()
+    } else {
+        rustc_target_libdir()?
+    };
     for (artifact_index, artifact) in artifacts.iter().enumerate() {
-        let tests = list_tests(&artifact.executable)?;
+        let tests = list_tests(
+            &artifact.executable,
+            &dynamic_library_environment(&target_libdir, &artifact.executable),
+        )?;
         let contexts = preflight_rust_test_contexts(tests.clone())
             .map_err(|error| RustTestRunnerError::Context(error.to_string()))?;
         for (test_index, test) in tests.into_iter().enumerate() {
@@ -1320,8 +1407,12 @@ pub fn run_prepared_rust_tests(
                         // iteration, and --nocapture alone cost 6.9s of its
                         // 14.4s (baseline 8.0s streamed vs 1.0s captured).
                         .args(["--exact", &task.test])
-                        .current_dir(&project.workspace_root)
+                        .current_dir(&task.artifact.package_directory)
                         .envs(instrumented_stack_environment())
+                        .envs(dynamic_library_environment(
+                            &target_libdir,
+                            &task.artifact.executable,
+                        ))
                         .env("SUPERCOV_RUST_EVIDENCE_DIR", &task.directory)
                         .env(
                             crate::rust_probe_transport::RUST_CONTEXT_ENV,
@@ -1836,6 +1927,58 @@ mod tests {
             assert!(selection.run_libtests);
             assert!(!selection.run_doctests);
         }
+    }
+
+    #[test]
+    fn libtest_processes_run_in_their_package_directory() {
+        // Cargo runs a test binary in its package's directory, and tokio's
+        // `basic_fs` reads `Cargo.toml` from there; the workspace root has a
+        // different manifest.
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-runner-cwd-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("member/src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = ['member']\nresolver = '2'\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("member/Cargo.toml"),
+            "[package]\nname='member'\nversion='0.0.0'\nedition='2024'\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("member/src/lib.rs"),
+            r#"
+pub fn manifest() -> String {
+    std::fs::read_to_string("Cargo.toml").unwrap()
+}
+#[cfg(test)]
+mod tests {
+    #[test] fn reads_own_manifest() { assert!(super::manifest().contains("name='member'")); }
+}
+"#,
+        )
+        .unwrap();
+        let project = prepare_rust_project(&root).unwrap();
+        let run = run_prepared_rust_tests(
+            &project,
+            &["cargo".into(), "test".into(), "--lib".into()],
+            "rust-fixture-cwd",
+            "2026-08-26T00:00:00.000Z",
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(run.exit_code, 0, "{:?}", run.request.raw_results);
+        assert_eq!(run.request.raw_results.len(), 1);
+        assert_eq!(run.request.raw_results[0].status.as_deref(), Some("passed"));
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

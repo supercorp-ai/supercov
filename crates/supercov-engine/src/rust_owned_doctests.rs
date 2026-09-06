@@ -58,7 +58,7 @@ use crate::{
     rust_project::PreparedRustProject,
     rust_test_runner::{
         CargoTestInvocation, RustCargoExecutionSelection, RustTestRunnerError, capped_rustflags,
-        instrumented_stack_environment, io_error, relative_source, snapshot,
+        instrumented_stack_environment, io_error, relative_source, rustc_sysroot, snapshot,
     },
 };
 
@@ -153,7 +153,7 @@ pub(crate) fn run_doctests(
     let program = std::env::current_exe()
         .and_then(fs::canonicalize)
         .map_err(io_error)?;
-    let real_rustdoc = real_rustdoc(&project.workspace_root)?;
+    let real_rustdoc = real_rustdoc()?;
     let output = Command::new(&invocation.program)
         .args(&selection.doctest_arguments)
         .current_dir(&project.workspace_root)
@@ -275,22 +275,11 @@ pub(crate) fn run_doctests(
 
 /// The rustdoc Cargo would have run: whatever `RUSTDOC` already named, else
 /// the one beside the selected toolchain's rustc.
-fn real_rustdoc(workspace_root: &Path) -> Result<PathBuf, RustTestRunnerError> {
+fn real_rustdoc() -> Result<PathBuf, RustTestRunnerError> {
     if let Some(configured) = std::env::var_os("RUSTDOC") {
         return Ok(PathBuf::from(configured));
     }
-    let output = Command::new("rustc")
-        .args(["--print", "sysroot"])
-        .current_dir(workspace_root)
-        .output()
-        .map_err(|error| RustTestRunnerError::Launch(format!("rustc --print sysroot: {error}")))?;
-    if !output.status.success() {
-        return Err(RustTestRunnerError::Launch(format!(
-            "rustc --print sysroot exited with {}",
-            output.status
-        )));
-    }
-    let sysroot = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let sysroot = rustc_sysroot()?;
     let rustdoc = sysroot
         .join("bin")
         .join(format!("rustdoc{}", std::env::consts::EXE_SUFFIX));

@@ -568,8 +568,16 @@ mod {module_name} {{
         }}
     }}
 
+    // Anything `!` turns into a bool: `assert!(was_seen)` compiles with a
+    // `&bool` (tokio iterates `for was_seen in &seen`), since the macro only
+    // negates its operand.
     #[inline(always)]
-    pub fn condition(value: bool, frame: &mut DecisionFrame, index: usize) -> bool {{
+    pub fn condition<V: std::ops::Not<Output = bool>>(
+        value: V,
+        frame: &mut DecisionFrame,
+        index: usize,
+    ) -> bool {{
+        let value = !!value;
         if index < frame.conditions && index < MAX_CONDITIONS {{
             frame.set_value(index, if value {{ 2 }} else {{ 1 }});
         }}

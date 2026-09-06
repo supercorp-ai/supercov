@@ -1822,8 +1822,15 @@ mod __SUPERCOV_MODULE__ {
         }
     }
 
+    // Anything `!` turns into a bool: `assert!(was_seen)` compiles with a
+    // `&bool`, since the macro only negates its operand.
     #[inline]
-    pub fn condition(value: bool, frame: &mut DecisionFrame, index: usize) -> bool {
+    pub fn condition<V: std::ops::Not<Output = bool>>(
+        value: V,
+        frame: &mut DecisionFrame,
+        index: usize,
+    ) -> bool {
+        let value = !!value;
         if let Some(slot) = frame.values.get_mut(index) {
             *slot = if value { 2 } else { 1 };
         }
