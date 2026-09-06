@@ -4,19 +4,17 @@
 
 **Added**
 
-- Arguments of the std expression macros (`assert!`, `assert_eq!`, `println!`, `format!`, `write!`, `vec!`, `dbg!`, `panic!` and friends) are measured like any other expression, and an `assert!`/`debug_assert!` condition is a decision with condition vectors of its own. `vec![x; n]` measures its element, and `matches!` measures its scrutinee and counts as a boolean decision of its own unless it already serves as an `if` condition. The macro limitation now covers only other macros.
+- Arguments of the std expression macros (`assert!`, `assert_eq!`, `println!`, `format!`, `write!`, `vec!`, `dbg!`, `panic!`, `matches!`, ...) are measured. An `assert!` condition is a decision with its own condition vectors; `matches!` is a boolean decision unless it already serves as an `if` condition.
 
 **Fixed**
 
-- Found by running the Rust frontend over bytes, memchr, itertools, serde_json, anyhow, semver and smallvec: a plain `if let` or `while let` in a crate before edition 2024 became a let chain, which those editions reject (the evaluation is now marked by a statement, and a `while let` tells a `break` from the condition failing); an `assert!` without a message lost the condition text in its panic message, breaking `#[should_panic(expected = ...)]` tests (the original text is supplied as the message); a `#[path = "../src/..."]` module was rejected as escaping its directory; a file whose source uses a word a newer edition reserves (`rng.gen()`) failed to parse, since every file was read as edition 2024 (editions are now tried newest first).
-- `SUPERCOV_RUST_DUMP_FAILED_INSTRUMENTATION=<dir>` writes the transformed text of any file whose instrumentation no longer parses, for diagnosis.
-- Found by a second wave (hashbrown, indexmap, bitflags, ryu, once_cell, crossbeam, regex): a `should_panic` doctest was reported by libtest as `name - should panic` and went unmatched, failing the run; a module shared between crates through a symlink (crossbeam's `alloc_helper.rs`) was rejected as unsafe, and is now followed when its target stays inside the workspace and instrumented once.
-- Found by a third wave (async-channel, thiserror, async-trait, typenum, heapless, serde, tokio): a proc-macro crate's test harness links libstd dynamically and could not be listed or run, since the test processes lacked the dynamic library path Cargo gives them; they now get the artifact's own directories and the toolchain's target library directory, ahead of the user's path. Tokio's `#[rustfmt::skip] tokio::select! { .. }` closing a test body took a wrapper that made it an attributed tail expression (unstable); the probe now goes before the attributes, and a `cfg` on such a trailing macro stays declared. `assert!(was_seen)` over a `&bool` (tokio's `for was_seen in &seen`) compiles because the macro only negates its operand, but the condition probe demanded a `bool`; it now takes anything `!` turns into one. Each test process now runs in its package's directory, as Cargo runs it, rather than the workspace root (tokio's `basic_fs` reads `Cargo.toml` from there).
-- Deep recursion no longer overflows under instrumentation (serde_json's recursion-limit test). Probes had grown every frame by kilobytes in debug builds: inlined record buffers now stay in never-inlined functions and a decision frame packs into 48 bytes. Instrumented test processes also get a 16 MiB thread stack through `RUST_MIN_STACK` unless the user set one, since probes still add some stack to every frame.
+- Found by running the Rust frontend over 21 real crates (bytes, serde_json, regex, serde, tokio, ...) under `cargo test` and `cargo nextest run`: `if let`/`while let` before edition 2024 became a let chain; a message-less `assert!` lost its panic text; `#[path = "../src/..."]` and symlinked modules were rejected; a word a newer edition reserves failed to parse; `should_panic` doctests went unmatched; proc-macro crate tests lacked the dynamic library path; a trailing attributed macro became an unstable attributed expression; `assert!` over a `&bool` failed to compile; tests ran in the workspace root, not their package directory. All match plain Cargo.
+- Deep recursion no longer overflows: probe frames shrank and test processes get a 16 MiB stack via `RUST_MIN_STACK`.
+- `SUPERCOV_RUST_DUMP_FAILED_INSTRUMENTATION=<dir>` dumps failed transforms.
 
 **Changed**
 
-- Rust probes cost less in hot loops. The probe runtime is compiled in the crate's own profile, unoptimized under `cargo test`, so its dedupe paths are now plain loops: a repeated statement hit is one atomic load, and a repeated decision vector compares only the words it uses, without a lock. Measured on a three-million-iteration loop: a decision evaluation from about 190ns to about 70ns, statement hits unchanged at a few nanoseconds.
+- Rust probes cost less in hot loops: repeated hits and decisions dedupe without locks (a decision from about 190ns to 70ns).
 
 ## 0.0.40
 
