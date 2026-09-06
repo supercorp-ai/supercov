@@ -877,12 +877,26 @@ const EXPRESSION_MACROS: &[&str] = &[
 /// Macros whose first argument decides whether the program goes on.
 const ASSERTION_MACROS: &[&str] = &["assert", "debug_assert"];
 
+/// Macros that check something and panic when it does not hold. Passing one
+/// witnesses whatever ran before it.
+const ASSERTION_STATEMENT_MACROS: &[&str] = &[
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "debug_assert",
+    "debug_assert_eq",
+    "debug_assert_ne",
+];
+
 /// The source as the instrumenter reads it: every expression macro rewritten
 /// so its arguments parse as expressions, offsets intact. `assertions` holds
 /// the argument-list ranges of `assert!`-like calls.
 struct ExpressionView {
     text: String,
     assertions: Vec<TextRange>,
+    /// The whole `assert!`-like calls, as opposed to their arguments: a
+    /// statement containing one is a statement that asserts.
+    assertion_calls: Vec<TextRange>,
     /// The ranges of whole `matches!(...)` calls: each is a boolean decision.
     matches: Vec<TextRange>,
 }
@@ -920,14 +934,20 @@ fn parse_any_edition(source: &str) -> Result<(SourceFile, Edition), Vec<String>>
 fn expression_view(source: &str, edition: Edition) -> ExpressionView {
     let mut text = source.to_owned();
     let mut assertions = Vec::new();
+    let mut assertion_calls = Vec::new();
     let mut matches = Vec::new();
     // A macro inside another macro's arguments is tokens until the outer one
     // reads as a call, so rewrite, re-parse, and repeat until nothing changes.
     for _ in 0..16 {
         let tree = SourceFile::parse(&text, edition).tree();
-        let Some(next) =
-            rewrite_expression_macros(&text, &tree, edition, &mut assertions, &mut matches)
-        else {
+        let Some(next) = rewrite_expression_macros(
+            &text,
+            &tree,
+            edition,
+            &mut assertions,
+            &mut assertion_calls,
+            &mut matches,
+        ) else {
             break;
         };
         text = next;
@@ -935,6 +955,7 @@ fn expression_view(source: &str, edition: Edition) -> ExpressionView {
     ExpressionView {
         text,
         assertions,
+        assertion_calls,
         matches,
     }
 }
@@ -968,6 +989,7 @@ fn rewrite_expression_macros(
     tree: &SourceFile,
     edition: Edition,
     assertions: &mut Vec<TextRange>,
+    assertion_calls: &mut Vec<TextRange>,
     matches: &mut Vec<TextRange>,
 ) -> Option<String> {
     let mut text = source.as_bytes().to_vec();
@@ -1048,6 +1070,9 @@ fn rewrite_expression_macros(
         if ASSERTION_MACROS.contains(&name.as_str()) {
             assertions.push(range);
         }
+        if ASSERTION_STATEMENT_MACROS.contains(&name.as_str()) {
+            assertion_calls.push(call.syntax().text_range());
+        }
         if name == "matches" {
             matches.push(call.syntax().text_range());
         }
@@ -1081,6 +1106,7 @@ fn assertion_condition(root: &ra_ap_syntax::SyntaxNode, arguments: TextRange) ->
 struct ParsedSource {
     tree: SourceFile,
     assertions: Vec<TextRange>,
+    assertion_calls: Vec<TextRange>,
     matches: Vec<TextRange>,
     edition: Edition,
 }
@@ -1096,6 +1122,7 @@ fn parse_for_instrumentation(source: &str) -> Result<ParsedSource, RustInstrumen
         Ok(ParsedSource {
             tree: parsed_view.tree(),
             assertions: view.assertions,
+            assertion_calls: view.assertion_calls,
             matches: view.matches,
             edition,
         })
@@ -1103,6 +1130,7 @@ fn parse_for_instrumentation(source: &str) -> Result<ParsedSource, RustInstrumen
         Ok(ParsedSource {
             tree,
             assertions: Vec::new(),
+            assertion_calls: Vec::new(),
             matches: Vec::new(),
             edition,
         })
@@ -1535,13 +1563,24 @@ pub fn instrument_rust_source(
     if !valid_runtime_path(runtime_path) {
         return Err(RustInstrumenterError::InvalidRuntimePath);
     }
-    let mut manifest = build_rust_manifest(file, source)?;
+    // Parsing is the whole cost of preparing a workspace -- 33s of regex's
+    // 34s, 18s of tokio's 19s -- and every file was parsed twice: once to
+    // build the manifest and once to place the probes. Each parse tries the
+    // editions in turn and then rewrites the expression view to a fixpoint,
+    // re-parsing each round.
+    let parsed = parse_for_instrumentation(source)?;
+    let mut manifest = RustObligationCollector::new(file, source).collect(
+        &parsed.tree,
+        &parsed.assertions,
+        &parsed.matches,
+    )?;
     let ParsedSource {
         tree,
         assertions,
+        assertion_calls,
         matches,
         edition,
-    } = parse_for_instrumentation(source)?;
+    } = parsed;
     let root = tree.syntax();
     let mut insertions = Vec::new();
     let mut identifiers = root
@@ -1628,6 +1667,28 @@ pub fn instrument_rust_source(
             );
             return;
         }
+        // An attributed macro STATEMENT keeps its macro in statement
+        // position: what a macro expands to may only be legal there.
+        // hyper's `trace!` expands to `#[cfg(feature = "tracing")] { .. }`,
+        // and `#[cfg(..)] { hit; (trace!("..")) }` makes that expansion an
+        // attributed expression (E0658). The probe goes ahead of it inside
+        // the block instead, and the attribute still governs both.
+        if let ast::Expr::MacroExpr(_) = &expression {
+            let start = expression.attrs().last().map_or_else(
+                || expression.syntax().text_range().start(),
+                |attribute| attribute.syntax().text_range().end(),
+            );
+            let wrapped = TextRange::new(start, expression.syntax().text_range().end());
+            push_wrapper(
+                insertions,
+                wrapped,
+                wrapped,
+                0,
+                format!(" {{ {runtime_path}::hit({id:?}); "),
+                "; }".into(),
+            );
+            return;
+        }
         // Any other attributed expression -- or the initializer of an
         // attributed `let` -- moves into a block that carries the probe: the
         // attributes now govern probe and expression together, the block has
@@ -1685,6 +1746,24 @@ pub fn instrument_rust_source(
                 _ => continue,
             };
             let id = stable_id(file, "statement", range, "");
+            // Passing a statement that asserts means every assertion in it
+            // held: a failing one panics instead. What this thread recorded
+            // before that point was in scope for the check. An attributed
+            // statement gets no marker -- a `cfg` that strips the statement
+            // would leave the marker behind -- and neither does a trailing
+            // expression, where a statement after it changes the value.
+            if !has_attrs
+                && !trailing
+                && assertion_calls
+                    .iter()
+                    .any(|call| range.contains_range(*call))
+            {
+                push_direct(
+                    &mut insertions,
+                    usize::from(range.end()),
+                    format!("{runtime_path}::assertion({id:?});"),
+                );
+            }
             attributed_probe(
                 &mut insertions,
                 &mut skipped_attributed_statement,
@@ -2154,6 +2233,7 @@ mod __supercov_runtime_v1 {
     pub fn decision(value: bool, _: &mut DecisionFrame) -> bool { value }
     pub fn reached(_: &mut DecisionFrame, _: usize) -> bool { true }
     pub fn decision_chain(_: &mut DecisionFrame, _: bool, _: &[(usize, &'static str, &'static str)]) {}
+    pub fn assertion(_: &'static str) {}
 }
 "#;
 
@@ -3251,6 +3331,53 @@ fn main() {
         let instrumented = compile_and_run(
             &format!("{}\n{NOOP_RUNTIME}", transformed.code),
             "trailing-macro-instrumented",
+        );
+        assert_eq!(
+            instrumented.status,
+            original.status,
+            "{}",
+            String::from_utf8_lossy(&instrumented.stderr)
+        );
+        assert_eq!(instrumented.stdout, original.stdout);
+        assert_eq!(instrumented.stderr, original.stderr);
+    }
+
+    #[test]
+    fn an_attributed_macro_statement_keeps_its_macro_in_statement_position() {
+        // hyper's `trace!` expands to `#[cfg(feature = "tracing")] { .. }`,
+        // which is legal only where the expansion is a statement. Wrapping
+        // the call as `#[cfg(..)] { hit; (trace!("..")) }` made it an
+        // attributed expression, which is unstable, and hyper did not build.
+        let source = r#"macro_rules! trace {
+    ($($arg:tt)*) => {
+        #[cfg(target_endian = "little")]
+        {
+            println!($($arg)+);
+        }
+    }
+}
+fn manual() {
+    #[cfg(any(target_endian = "little", target_endian = "big"))]
+    trace!("manual");
+    let _ = 1;
+}
+fn main() {
+    manual();
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        // The probe is inside the block, ahead of the macro, and the macro
+        // keeps its semicolon.
+        assert!(
+            transformed.code.contains(r#"trace!("manual"); }"#),
+            "{}",
+            transformed.code
+        );
+        let original = compile_and_run(source, "attributed-macro-statement-original");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "attributed-macro-statement-instrumented",
         );
         assert_eq!(
             instrumented.status,

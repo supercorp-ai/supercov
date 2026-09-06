@@ -258,6 +258,8 @@ pub(crate) fn run_nextest(
             )
             .map_err(io_error)?;
         }
+        let attempt_id = format!("{run_id}:{}:{}", record.runner_attempt_id, record.attempt);
+        let evidence = snapshot(&project.manifest, &record.evidence, &attempt_id)?;
         results.push(RawTestResult {
             test_id: Some(test_id.clone()),
             scope: Some(ExecutionScope {
@@ -267,7 +269,7 @@ pub(crate) fn run_nextest(
                 test_id: test_id.clone(),
                 test_key: test_id.clone(),
                 retry: record.attempt - 1,
-                attempt_id: format!("{run_id}:{}:{}", record.runner_attempt_id, record.attempt),
+                attempt_id: attempt_id.clone(),
             }),
             test: test_id,
             test_file: Some(artifact.source.clone()),
@@ -283,8 +285,8 @@ pub(crate) fn run_nextest(
                 source: "supercov-owned-process-per-test".into(),
             },
             role: "test".into(),
-            phases: Vec::new(),
-            runtime: vec![snapshot(&project.manifest, &record.evidence)?],
+            phases: evidence.phases,
+            runtime: vec![evidence.snapshot],
             browser: Vec::new(),
             server: Vec::new(),
         });

@@ -237,6 +237,8 @@ pub(crate) fn run_doctests(
             // rustdoc writes the path with the platform's separator; test
             // identities use `/` everywhere, as the libtest path does.
             let name = case.name.replace('\\', "/");
+            let attempt_id = format!("{run_id}:doctest:{index:08}");
+            let recorded = snapshot(&project.manifest, &evidence, &attempt_id)?;
             results.push(RawTestResult {
                 test_id: Some(name.clone()),
                 scope: Some(ExecutionScope {
@@ -246,7 +248,7 @@ pub(crate) fn run_doctests(
                     test_id: name.clone(),
                     test_key: name.clone(),
                     retry: 0,
-                    attempt_id: format!("{run_id}:doctest:{index:08}"),
+                    attempt_id: attempt_id.clone(),
                 }),
                 test: name.clone(),
                 test_file: Some(test_file),
@@ -262,8 +264,8 @@ pub(crate) fn run_doctests(
                     source: "supercov-owned-process-per-test".into(),
                 },
                 role: "test".into(),
-                phases: Vec::new(),
-                runtime: vec![snapshot(&project.manifest, &evidence)?],
+                phases: recorded.phases,
+                runtime: vec![recorded.snapshot],
                 browser: Vec::new(),
                 server: Vec::new(),
             });

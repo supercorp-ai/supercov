@@ -32,9 +32,9 @@ use supercov_contracts::{
 use crate::{
     coverage_analysis::McdcVector,
     coverage_report::{
-        CoverageManifest, CoverageModelDeclaration, CoverageReportRequest, DecisionMeta,
-        DecisionSnapshot, ExecutionScope, ExitCodeInput, PersistedCoverageModel, RawTestResult,
-        RuntimeSnapshot, TestProvenance,
+        CoverageManifest, CoverageModelDeclaration, CoveragePhase, CoverageReportRequest,
+        DecisionMeta, DecisionSnapshot, ExecutionScope, ExitCodeInput, PersistedCoverageModel,
+        RawTestResult, RuntimeEvent, RuntimeSnapshot, TestProvenance,
     },
     evidence_archive::EvidenceArchiveEntry,
     rust_project::PreparedRustProject,
@@ -1020,15 +1020,34 @@ fn list_tests(
     Ok(tests)
 }
 
+/// What one test process recorded: the coverage snapshot and the assertion
+/// phases the evidence witnesses.
+pub(crate) struct RustEvidence {
+    pub(crate) snapshot: RuntimeSnapshot,
+    pub(crate) phases: Vec<CoveragePhase>,
+}
+
+/// One record a thread wrote, waiting to learn whether an assertion follows.
+struct PendingRecord {
+    event_type: &'static str,
+    id: String,
+    vector: Option<McdcVector>,
+    sequence: i64,
+}
+
+/// `attempt` names what this evidence belongs to, so its phase IDs are
+/// unique across the run: every test runs in a process of its own and numbers
+/// its records from one.
 pub(crate) fn snapshot(
     manifest: &CoverageManifest,
     directory: &Path,
-) -> Result<RuntimeSnapshot, RustTestRunnerError> {
+    attempt: &str,
+) -> Result<RustEvidence, RustTestRunnerError> {
     let points = manifest
         .points
         .iter()
-        .map(|point| point.id.as_str())
-        .collect::<BTreeSet<_>>();
+        .map(|point| (point.id.as_str(), point))
+        .collect::<BTreeMap<_, _>>();
     let alternatives = manifest
         .branches
         .iter()
@@ -1046,6 +1065,15 @@ pub(crate) fn snapshot(
         .collect::<BTreeMap<_, _>>();
     let mut hits = BTreeSet::new();
     let mut vectors = BTreeMap::<String, BTreeSet<(Vec<Option<bool>>, bool)>>::new();
+    // Records a thread wrote since its last assertion. An assertion witnesses
+    // its own thread's records and no other's: a test that spawns threads
+    // interleaves them in one file.
+    let mut pending = BTreeMap::<u64, Vec<PendingRecord>>::new();
+    let mut events = Vec::new();
+    let mut phases = Vec::new();
+    // Records carry no clock. The order they were written in is what matters,
+    // and a sequence number preserves exactly that.
+    let mut sequence = 0_i64;
     // Evidence files are named by the instrumentation that wrote them. A
     // test may build and run a program instrumented on its own -- a fixture
     // prepared inside the instrumented workspace -- and that program
@@ -1057,13 +1085,21 @@ pub(crate) fn snapshot(
         if !name.starts_with(&token) {
             continue;
         }
-        for observation in observations {
-            match observation {
+        for entry in observations {
+            sequence += 1;
+            let thread = entry.thread;
+            match entry.observation {
                 RustProbeObservation::Hit { id } => {
-                    if !points.contains(id.as_str()) && !alternatives.contains(id.as_str()) {
+                    if !points.contains_key(id.as_str()) && !alternatives.contains(id.as_str()) {
                         return Err(RustTestRunnerError::UnknownProbe(id));
                     }
-                    hits.insert(id);
+                    hits.insert(id.clone());
+                    pending.entry(thread).or_default().push(PendingRecord {
+                        event_type: "hit",
+                        id,
+                        vector: None,
+                        sequence,
+                    });
                 }
                 RustProbeObservation::Decision {
                     id,
@@ -1088,7 +1124,48 @@ pub(crate) fn snapshot(
                     vectors
                         .entry(meta.id.clone())
                         .or_default()
-                        .insert((values, outcome));
+                        .insert((values.clone(), outcome));
+                    pending.entry(thread).or_default().push(PendingRecord {
+                        event_type: "decision",
+                        id,
+                        vector: Some(McdcVector { values, outcome }),
+                        sequence,
+                    });
+                }
+                RustProbeObservation::Assertion { id } => {
+                    // The marker names the statement that asserts, which is
+                    // a point of this manifest.
+                    let Some(point) = points.get(id.as_str()) else {
+                        return Err(RustTestRunnerError::UnknownProbe(id));
+                    };
+                    let witnessed = pending.remove(&thread).unwrap_or_default();
+                    if witnessed.is_empty() {
+                        continue;
+                    }
+                    let phase_id = format!("{attempt}:assertion:{sequence}");
+                    phases.push(CoveragePhase {
+                        id: phase_id.clone(),
+                        kind: "assertion".into(),
+                        operation: format!("{}:{}", point.file, point.line),
+                        source: Some(point.source.clone()),
+                        caused_by_phase_id: None,
+                        started_at_ms: witnessed.first().map_or(sequence, |record| record.sequence),
+                        ended_at_ms: Some(sequence),
+                        // Reaching the marker is the proof: a failing
+                        // assertion panics before it.
+                        status: Some("passed".into()),
+                        error: None,
+                    });
+                    for record in witnessed {
+                        events.push(RuntimeEvent {
+                            event_type: record.event_type.into(),
+                            id: record.id,
+                            vector: record.vector,
+                            timestamp_ms: record.sequence,
+                            phase_id: Some(phase_id.clone()),
+                            environment: "server".into(),
+                        });
+                    }
                 }
             }
         }
@@ -1104,10 +1181,13 @@ pub(crate) fn snapshot(
                 .collect(),
         });
     }
-    Ok(RuntimeSnapshot {
-        decisions: decision_snapshots,
-        hits: hits.into_iter().collect(),
-        events: Vec::new(),
+    Ok(RustEvidence {
+        snapshot: RuntimeSnapshot {
+            decisions: decision_snapshots,
+            hits: hits.into_iter().collect(),
+            events,
+        },
+        phases,
     })
 }
 
@@ -1566,6 +1646,7 @@ pub fn run_prepared_rust_tests(
         if exit != 0 {
             overall_exit = exit;
         }
+        let evidence = snapshot(&project.manifest, &directory, &attempt_id)?;
         results.push(RawTestResult {
             test_id: Some(test_id.clone()),
             scope: Some(ExecutionScope {
@@ -1600,8 +1681,8 @@ pub fn run_prepared_rust_tests(
                 source: "supercov-owned-process-per-test".into(),
             },
             role: "test".into(),
-            phases: Vec::new(),
-            runtime: vec![snapshot(&project.manifest, &directory)?],
+            phases: evidence.phases,
+            runtime: vec![evidence.snapshot],
             browser: Vec::new(),
             server: Vec::new(),
         });
@@ -2112,6 +2193,105 @@ mod tests {
             report.view.summary.lines.percentage, 100.0,
             "declined obligations must not read as uncovered"
         );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn evidence_a_passing_assertion_witnessed_is_marked_as_such() {
+        // Records are appended in execution order, so what a thread wrote
+        // before it passed an assertion was in scope for that check. Without
+        // this every Rust line read "execution only", however thoroughly the
+        // tests checked it.
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-runner-assert-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='fixture'\nversion='0.0.0'\nedition='2024'\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+pub fn checked(value: i32) -> i32 {
+    value * 2
+}
+pub fn unchecked(value: i32) -> i32 {
+    value + 1
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn asserts() {
+        let doubled = super::checked(2);
+        assert_eq!(doubled, 4);
+    }
+    #[test]
+    fn asserts_nothing() {
+        let _ = super::unchecked(1);
+    }
+}
+"#,
+        )
+        .unwrap();
+        let project = prepare_rust_project(&root).unwrap();
+        let run = run_prepared_rust_tests(
+            &project,
+            &["cargo".into(), "test".into(), "--lib".into()],
+            "rust-fixture-assert",
+            "2026-08-26T00:00:00.000Z",
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(run.exit_code, 0);
+
+        // The asserting test carries an assertion phase that passed; the
+        // other carries none.
+        let phases = |test: &str| {
+            run.request
+                .raw_results
+                .iter()
+                .find(|result| result.test.ends_with(test))
+                .unwrap_or_else(|| panic!("no test {test}"))
+                .phases
+                .clone()
+        };
+        let asserting = phases("asserts");
+        assert!(
+            !asserting.is_empty(),
+            "the asserting test recorded no phase"
+        );
+        assert!(
+            asserting
+                .iter()
+                .all(|phase| phase.kind == "assertion" && phase.status.as_deref() == Some("passed"))
+        );
+        assert!(
+            phases("asserts_nothing").is_empty(),
+            "a test that checks nothing witnesses nothing"
+        );
+
+        let report =
+            crate::frontend_protocol::analyze_frontend_results(&run.declaration, &run.request)
+                .unwrap();
+        let level = |line: usize| {
+            report
+                .view
+                .lines
+                .iter()
+                .find(|entry| entry.file == "src/lib.rs" && entry.line == line)
+                .map(|entry| entry.confidence.level.clone())
+                .unwrap_or_else(|| panic!("no line {line}"))
+        };
+        // `value * 2` was checked; `value + 1` only ran.
+        assert_eq!(level(3), "asserted");
+        assert_eq!(level(6), "executed");
         fs::remove_dir_all(&root).ok();
     }
 

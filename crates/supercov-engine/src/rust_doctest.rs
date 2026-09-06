@@ -2152,7 +2152,9 @@ impl RustdocMergedJoin {
         for observation in &mut translated.observations {
             observation.context_id = translate_record_context(observation.context_id)?;
             let id = match &mut observation.observation {
-                RustProbeObservation::Hit { id } | RustProbeObservation::Decision { id, .. } => id,
+                RustProbeObservation::Hit { id, .. }
+                | RustProbeObservation::Decision { id, .. }
+                | RustProbeObservation::Assertion { id, .. } => id,
             };
             if let Some(final_id) = self.obligation_ids.get(id) {
                 *id = final_id.clone();

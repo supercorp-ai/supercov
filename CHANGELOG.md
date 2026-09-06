@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+**Added**
+
+- Rust coverage says whether a test checked what it ran. Evidence recorded before a passing `assert!`, `assert_eq!` or `assert_ne!` on the same thread is linked to that assertion, so a line reads "linked to a passing assertion" instead of "execution only" -- the confidence tiers the report has always described and the Rust frontend could not fill. A failing assertion panics, so reaching the marker is the proof it held, and evidence from another thread is never claimed.
+
+**Changed**
+
+- Preparing a Rust workspace is faster: every file was parsed twice, once to build the manifest and once to place the probes, and parsing is nearly all of that phase.
+
 **Fixed**
 
 - A Rust module the compiler never builds no longer counts as uncovered. Source discovery follows `mod` declarations, which is what rustc resolves, not what it compiles: a module behind a `#[cfg]` that is off was measured and could never be covered. memchr carried thirteen such files for other architectures (816 lines), hashbrown nine, indexmap eleven. After the build, the depinfo rustc writes beside each artifact says which sources went into it, and obligations in the others are reported as unmeasured instead of uncovered. memchr's line coverage reads 84.4% where it read 63.2%.

@@ -24,6 +24,21 @@ pub enum RustProbeObservation {
         values: Vec<Option<bool>>,
         outcome: bool,
     },
+    /// Control passed a statement that asserts. A failing assertion panics,
+    /// so reaching the marker means it held.
+    Assertion {
+        id: String,
+    },
+}
+
+/// One record of an owned-runtime evidence file, with the thread that wrote
+/// it. Evidence is appended under one mutex, so a file is in execution order,
+/// but a test that spawns threads interleaves them: an assertion witnesses
+/// its own thread's records and no other's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustProbeEntry {
+    pub thread: u64,
+    pub observation: RustProbeObservation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +63,15 @@ impl std::fmt::Display for RustProbeReadError {
 }
 
 impl std::error::Error for RustProbeReadError {}
+
+/// A thread ordinal: decimal, no sign, no padding, and small enough to parse.
+fn valid_thread(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 20
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'))
+        && value.parse::<u64>().is_ok()
+}
 
 pub(crate) fn valid_probe_id(id: &str) -> bool {
     let mut parts = id.split(':');
@@ -108,6 +132,7 @@ mod {module_name} {{
     use std::string::String;
     use std::sync::atomic::{{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering}};
     use std::sync::{{Mutex, OnceLock}};
+    use std::cell::Cell;
     use std::ops::ControlFlow;
     use std::task::Poll;
     use std::vec::Vec;
@@ -154,6 +179,104 @@ mod {module_name} {{
     // never correctness, whereas dropping one would cost a real observation.
     const SEEN_SLOTS: usize = 1 << 16;
     static SEEN: [AtomicUsize; SEEN_SLOTS] = [const {{ AtomicUsize::new(0) }}; SEEN_SLOTS];
+
+    // Which thread wrote a record. Evidence is appended under one mutex, so
+    // the file is in execution order -- but a test that spawns threads
+    // interleaves them, and an assertion on one thread witnesses nothing on
+    // another. Ordinals are handed out on a thread's first record; the main
+    // test thread is 1.
+    static NEXT_THREAD: AtomicU64 = AtomicU64::new(1);
+    std::thread_local! {{
+        static THREAD_ORDINAL: Cell<u64> = const {{ Cell::new(0) }};
+    }}
+
+    fn thread_ordinal() -> u64 {{
+        THREAD_ORDINAL.with(|slot| {{
+            let existing = slot.get();
+            if existing != 0 {{
+                return existing;
+            }}
+            let assigned = NEXT_THREAD.fetch_add(1, Ordering::Relaxed);
+            slot.set(assigned);
+            assigned
+        }})
+    }}
+
+    /// Decimal digits of `value`, written into `record`.
+    fn push_number(record: &mut [u8; RECORD_CAPACITY], length: &mut usize, value: u64) -> bool {{
+        let mut digits = [0u8; 20];
+        let mut count = 0;
+        let mut rest = value;
+        loop {{
+            digits[count] = b'0' + (rest % 10) as u8;
+            count += 1;
+            rest /= 10;
+            if rest == 0 {{
+                break;
+            }}
+        }}
+        let mut index = count;
+        while index > 0 {{
+            index -= 1;
+            if !push(record, length, &[digits[index]]) {{
+                return false;
+            }}
+        }}
+        true
+    }}
+
+    // An assertion marker is deduped separately from hits: it names the
+    // statement that asserts, and that statement's own hit has already been
+    // recorded by the time control reaches the marker.
+    const ASSERTED_SLOTS: usize = 1 << 12;
+    static ASSERTED: [AtomicUsize; ASSERTED_SLOTS] =
+        [const {{ AtomicUsize::new(0) }}; ASSERTED_SLOTS];
+
+    #[inline(always)]
+    fn first_assertion(id: &'static str) -> bool {{
+        let key = id.as_ptr() as usize;
+        let mut slot = (key >> 4) & (ASSERTED_SLOTS - 1);
+        for _ in 0..8 {{
+            let seen = ASSERTED[slot].load(Ordering::Relaxed);
+            if seen == key {{
+                return false;
+            }}
+            if seen == 0 {{
+                match ASSERTED[slot].compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed)
+                {{
+                    Ok(_) => return true,
+                    Err(now) if now == key => return false,
+                    Err(_) => {{}}
+                }}
+            }}
+            slot = (slot + 1) & (ASSERTED_SLOTS - 1);
+        }}
+        true
+    }}
+
+    /// Control passed a statement that asserts, so every assertion in it
+    /// held: a failing one panics instead. Evidence this thread wrote before
+    /// this point was in scope for that check.
+    #[inline(always)]
+    pub fn assertion(id: &'static str) {{
+        if first_assertion(id) {{
+            record_assertion(id);
+        }}
+    }}
+
+    #[inline(never)]
+    fn record_assertion(id: &'static str) {{
+        let mut record = [0u8; RECORD_CAPACITY];
+        let mut length = 0;
+        if push(&mut record, &mut length, b"A\t")
+            && push_number(&mut record, &mut length, thread_ordinal())
+            && push(&mut record, &mut length, b"\t")
+            && push(&mut record, &mut length, id.as_bytes())
+            && push(&mut record, &mut length, b"\n")
+        {{
+            write_record(&record[..length]);
+        }}
+    }}
 
     #[inline(always)]
     fn first_sighting(id: &'static str) -> bool {{
@@ -440,6 +563,8 @@ mod {module_name} {{
         let mut record = [0u8; RECORD_CAPACITY];
         let mut length = 0;
         if push(&mut record, &mut length, b"H\t")
+            && push_number(&mut record, &mut length, thread_ordinal())
+            && push(&mut record, &mut length, b"\t")
             && push(&mut record, &mut length, id.as_bytes())
             && push(&mut record, &mut length, b"\n")
         {{
@@ -621,6 +746,8 @@ mod {module_name} {{
         let mut record = [0u8; RECORD_CAPACITY];
         let mut length = 0;
         let mut fits = push(&mut record, &mut length, b"D\t")
+            && push_number(&mut record, &mut length, thread_ordinal())
+            && push(&mut record, &mut length, b"\t")
             && push(&mut record, &mut length, frame.id.as_bytes())
             && push(&mut record, &mut length, b"\t");
         let mut index = 0;
@@ -641,9 +768,7 @@ mod {module_name} {{
     ))
 }
 
-pub fn parse_rust_probe_events(
-    input: &[u8],
-) -> Result<Vec<RustProbeObservation>, RustProbeReadError> {
+pub fn parse_rust_probe_events(input: &[u8]) -> Result<Vec<RustProbeEntry>, RustProbeReadError> {
     let text = std::str::from_utf8(input).map_err(|_| RustProbeReadError::InvalidHeader)?;
     let mut lines = text.lines();
     if lines.next() != Some(RUST_PROBE_MAGIC) {
@@ -654,11 +779,21 @@ pub fn parse_rust_probe_events(
         let line_number = index + 2;
         let fields = line.split('\t').collect::<Vec<_>>();
         match fields.as_slice() {
-            ["H", id] if valid_probe_id(id) => {
-                observations.push(RustProbeObservation::Hit { id: (*id).into() })
+            ["H", thread, id] if valid_probe_id(id) && valid_thread(thread) => {
+                observations.push(RustProbeEntry {
+                    thread: thread.parse().expect("a validated thread ordinal"),
+                    observation: RustProbeObservation::Hit { id: (*id).into() },
+                })
             }
-            ["D", id, digits, outcome]
+            ["A", thread, id] if valid_probe_id(id) && valid_thread(thread) => {
+                observations.push(RustProbeEntry {
+                    thread: thread.parse().expect("a validated thread ordinal"),
+                    observation: RustProbeObservation::Assertion { id: (*id).into() },
+                })
+            }
+            ["D", thread, id, digits, outcome]
                 if valid_probe_id(id)
+                    && valid_thread(thread)
                     && id.starts_with("rs:decision:")
                     && !digits.is_empty()
                     && digits
@@ -666,18 +801,21 @@ pub fn parse_rust_probe_events(
                         .all(|digit| matches!(digit, b'0' | b'1' | b'2'))
                     && matches!(*outcome, "0" | "1") =>
             {
-                observations.push(RustProbeObservation::Decision {
-                    id: (*id).into(),
-                    values: digits
-                        .bytes()
-                        .map(|digit| match digit {
-                            b'0' => None,
-                            b'1' => Some(false),
-                            b'2' => Some(true),
-                            _ => unreachable!(),
-                        })
-                        .collect(),
-                    outcome: *outcome == "1",
+                observations.push(RustProbeEntry {
+                    thread: thread.parse().expect("a validated thread ordinal"),
+                    observation: RustProbeObservation::Decision {
+                        id: (*id).into(),
+                        values: digits
+                            .bytes()
+                            .map(|digit| match digit {
+                                b'0' => None,
+                                b'1' => Some(false),
+                                b'2' => Some(true),
+                                _ => unreachable!(),
+                            })
+                            .collect(),
+                        outcome: *outcome == "1",
+                    },
                 });
             }
             _ => return Err(RustProbeReadError::InvalidRecord(line_number)),
@@ -688,7 +826,7 @@ pub fn parse_rust_probe_events(
 
 pub fn read_rust_probe_directory(
     directory: &Path,
-) -> Result<BTreeMap<String, Vec<RustProbeObservation>>, RustProbeReadError> {
+) -> Result<BTreeMap<String, Vec<RustProbeEntry>>, RustProbeReadError> {
     let mut files = fs::read_dir(directory)
         .map_err(|error| RustProbeReadError::Io(error.to_string()))?
         .collect::<Result<Vec<_>, _>>()
@@ -785,11 +923,11 @@ fn main() {
         let observations = files.values().next().unwrap();
         let decisions = observations
             .iter()
-            .filter_map(|observation| match observation {
+            .filter_map(|entry| match &entry.observation {
                 RustProbeObservation::Decision {
                     values, outcome, ..
                 } => Some((values.clone(), *outcome)),
-                RustProbeObservation::Hit { .. } => None,
+                RustProbeObservation::Hit { .. } | RustProbeObservation::Assertion { .. } => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -954,13 +1092,13 @@ fn main() {
         let observations = files.values().next().unwrap();
         let decisions = observations
             .iter()
-            .filter_map(|observation| match observation {
+            .filter_map(|entry| match &entry.observation {
                 RustProbeObservation::Decision {
                     id,
                     values,
                     outcome,
                 } => Some((id.clone(), values.clone(), *outcome)),
-                RustProbeObservation::Hit { .. } => None,
+                RustProbeObservation::Hit { .. } | RustProbeObservation::Assertion { .. } => None,
             })
             .collect::<Vec<_>>();
         // Suppression costs only duplicates: `classify` runs outside any probe,
@@ -1048,8 +1186,8 @@ fn main() {
 
         // `doubled > 4` runs 64 times; its hit is recorded once.
         let mut hits = BTreeMap::<&str, usize>::new();
-        for observation in observations {
-            if let RustProbeObservation::Hit { id } = observation {
+        for entry in observations {
+            if let RustProbeObservation::Hit { id } = &entry.observation {
                 *hits.entry(id.as_str()).or_default() += 1;
             }
         }
@@ -1065,11 +1203,11 @@ fn main() {
         // and takes exactly two distinct shapes, so exactly two records survive.
         let decisions = observations
             .iter()
-            .filter_map(|observation| match observation {
+            .filter_map(|entry| match &entry.observation {
                 RustProbeObservation::Decision {
                     values, outcome, ..
                 } => Some((values.clone(), *outcome)),
-                RustProbeObservation::Hit { .. } => None,
+                RustProbeObservation::Hit { .. } | RustProbeObservation::Assertion { .. } => None,
             })
             .collect::<Vec<_>>();
         assert_eq!(

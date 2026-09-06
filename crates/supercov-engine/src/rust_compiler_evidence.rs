@@ -210,7 +210,9 @@ pub fn project_rust_compiler_evidence(
             &mut background,
         )?;
         match &record.observation {
-            RustProbeObservation::Hit { id } => {
+            // Assertion markers come from the owned runtime only.
+            RustProbeObservation::Assertion { .. } => continue,
+            RustProbeObservation::Hit { id, .. } => {
                 if !points_and_alternatives.contains(id.as_str()) {
                     return Err(RustCompilerEvidenceError::UnknownProbe(id.clone()));
                 }
@@ -220,6 +222,7 @@ pub fn project_rust_compiler_evidence(
                 id,
                 values,
                 outcome,
+                ..
             } => {
                 let Some(meta) = decisions.get(id.as_str()) else {
                     return Err(RustCompilerEvidenceError::UnknownProbe(id.clone()));
