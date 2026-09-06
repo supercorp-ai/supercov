@@ -123,10 +123,10 @@ separately. The measured source is what rustc compiles: every crate root and
 the modules it reaches through `mod` declarations, `#[path]` attributes and
 literal `include!` calls; a `.rs` file nothing declares as a module, such as
 one embedded with `include_str!`, is left untouched. Statements, functions,
-`if`/`while`/match-guard decisions with their conditions, match arms, `&&`
-and `||`, `for` and `while` loops and the `?` operator each take a probe;
-const contexts, macro expansions and let chains stay in the denominator
-behind an explicit limitation. Use the repository's normal flags after the
+`if`/`while`/match-guard decisions with their conditions (let chains
+included), match arms, `&&` and `||`, `for` and `while` loops and the `?`
+operator each take a probe; const contexts and macro expansions stay in the
+denominator behind an explicit limitation. Use the repository's normal flags after the
 wrapped command:
 
 ```sh

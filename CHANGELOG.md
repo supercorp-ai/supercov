@@ -15,6 +15,8 @@
 - Match arms are measured. Each arm records when it is selected and when the match passes it over on the way to a later arm; before, arms were listed as obligations but nothing ever observed them, and the last arm of an exhaustive match demanded a "not selected" outcome that cannot happen. The last arm now has only "selected".
 - The manifest no longer declares doctests unmeasured, since they are measured.
 - Logical operators, `for` and `while` loops and the try operator are measured: whether `&&` and `||` short-circuited or evaluated their right operand, whether a loop body ran at all, and which way `?` went. These were the last structural branches that sat in the denominator without a probe, so the "structural branch probes not yet injected" limitation is gone.
+- Let chains are measured as decisions. A `let` cannot pass through a probe, so the runtime derives each pattern's outcome from how far the chain got and where it ended, which is exact because a chain stops at the first condition that fails; the `&&` operators of a chain are recorded the same way. `if let`, `else if let` and `while let` chains all report condition vectors.
+- Statements with outer attributes are measured: the probe moves into a block under the same attributes, so `#[cfg]` keeps governing probe and statement together. Only an attributed `let` without an initializer stays declared.
 - A program a test builds and runs with its own instrumentation no longer breaks the run: evidence files name the instrumentation that wrote them, and another program's evidence is left out instead of being reported as an unknown obligation.
 
 ## 0.0.39

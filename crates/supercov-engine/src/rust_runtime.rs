@@ -272,6 +272,9 @@ mod {module_name} {{
     pub struct DecisionFrame {{
         id: &'static str,
         values: [u8; MAX_CONDITIONS],
+        /// Let-chain conditions the evaluation got to: a `let` cannot be
+        /// wrapped, so it is marked reached instead and resolved later.
+        reached: [bool; MAX_CONDITIONS],
         conditions: usize,
         recordable: bool,
     }}
@@ -281,10 +284,63 @@ mod {module_name} {{
             Self {{
                 id,
                 values: [0; MAX_CONDITIONS],
+                reached: [false; MAX_CONDITIONS],
                 conditions,
                 recordable: conditions <= MAX_CONDITIONS,
             }}
         }}
+    }}
+
+    /// A let chain got to condition `index` (0 marks the chain evaluated at
+    /// all). Always true, so it sits in the chain as an operand.
+    #[inline]
+    pub fn reached(frame: &mut DecisionFrame, index: usize) -> bool {{
+        if let Some(slot) = frame.reached.get_mut(index) {{
+            *slot = true;
+        }}
+        true
+    }}
+
+    /// A let chain decided. A chain tries its conditions in order and stops
+    /// at the first that fails, so every reached `let` before the last
+    /// reached condition held, the last one held when the chain was taken and
+    /// failed when it was not, and conditions never reached stay unevaluated.
+    /// `operators` lists the `&&` whose left side holds a `let`, by the index
+    /// of their right side's first condition: reached means the operator
+    /// evaluated its right side, otherwise it short-circuited. The frame then
+    /// resets for the next evaluation, which a `while let` makes every turn.
+    pub fn decision_chain(
+        frame: &mut DecisionFrame,
+        outcome: bool,
+        operators: &[(usize, &'static str, &'static str)],
+    ) {{
+        if !frame.reached[0] {{
+            return;
+        }}
+        let conditions = frame.conditions.min(MAX_CONDITIONS);
+        let mut last = 0;
+        for index in 0..conditions {{
+            if frame.reached[index] || frame.values[index] != 0 {{
+                last = index;
+            }}
+        }}
+        for index in 0..conditions {{
+            if frame.values[index] == 0 && frame.reached[index] {{
+                frame.values[index] = if index < last || outcome {{ 2 }} else {{ 1 }};
+            }}
+        }}
+        for (first, short_circuit, evaluated) in operators {{
+            let got_there = frame
+                .reached
+                .get(*first)
+                .copied()
+                .unwrap_or(false)
+                || frame.values.get(*first).is_some_and(|value| *value != 0);
+            hit(if got_there {{ evaluated }} else {{ short_circuit }});
+        }}
+        decision(outcome, frame);
+        frame.values = [0; MAX_CONDITIONS];
+        frame.reached = [false; MAX_CONDITIONS];
     }}
 
     #[inline]

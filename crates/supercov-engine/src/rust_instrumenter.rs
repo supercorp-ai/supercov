@@ -790,6 +790,204 @@ fn block_entry_offset(block: &ast::BlockExpr) -> Option<usize> {
         })
 }
 
+/// A node's range without its outer attributes: a wrapper placed here stays
+/// under the attributes, so `#[cfg]` governs the wrapper and the node alike.
+fn range_after_attributes(node: &impl HasAttrs) -> TextRange {
+    let range = node.syntax().text_range();
+    node.attrs().last().map_or(range, |attribute| {
+        TextRange::new(attribute.syntax().text_range().end(), range.end())
+    })
+}
+
+fn has_let(expression: &ast::Expr) -> bool {
+    expression
+        .syntax()
+        .descendants()
+        .any(|node| ast::LetExpr::can_cast(node.kind()))
+}
+
+/// The expression whose condition is a let chain.
+enum ChainHost<'a> {
+    If(&'a ast::IfExpr),
+    While(&'a ast::WhileExpr),
+}
+
+/// The `const` naming a let chain's `&&` operators and their alternative IDs.
+fn allocate_chain_table_name(
+    file: &str,
+    condition: &ast::Expr,
+    identifiers: &mut BTreeSet<String>,
+) -> String {
+    let id = stable_id(file, "chain", condition.syntax().text_range(), "operators");
+    let suffix = id
+        .rsplit(':')
+        .next()
+        .unwrap_or("chain")
+        .to_ascii_uppercase();
+    let base = format!("__SUPERCOV_CHAIN_{suffix}");
+    let mut candidate = base.clone();
+    let mut attempt = 0_usize;
+    while !identifiers.insert(candidate.clone()) {
+        attempt += 1;
+        candidate = format!("{base}_{attempt}");
+    }
+    candidate
+}
+
+/// A decision whose condition is a let chain. A `let` cannot pass through a
+/// call and the chain cannot be wrapped as a whole, so the frame lives in a
+/// block around the `if` or `while`, ordinary conditions take `condition`
+/// wrappers, each later `let` is preceded by a `reached` marker, and the
+/// outcome is recorded where it becomes known: at the entry of the then
+/// branch or loop body (taken) and at the else branch or after the loop (not
+/// taken). From those, the runtime derives every pattern's outcome exactly:
+/// a chain tries its conditions in order and stops at the first that fails.
+/// The chain's `&&` operators are recorded from the same frame, through a
+/// table of the operators whose left side holds a `let`.
+fn instrument_let_chain(
+    insertions: &mut Vec<Insertion>,
+    runtime_path: &str,
+    file: &str,
+    condition: &ast::Expr,
+    host: ChainHost<'_>,
+    identifiers: &mut BTreeSet<String>,
+) {
+    // The block goes after any outer attributes, so `#[cfg]` keeps governing
+    // the frame together with the expression it belongs to.
+    let (kind, host_range, body) = match &host {
+        ChainHost::If(expression) => (
+            "if",
+            range_after_attributes(*expression),
+            expression.then_branch(),
+        ),
+        ChainHost::While(expression) => (
+            "while",
+            range_after_attributes(*expression),
+            expression.loop_body(),
+        ),
+    };
+    let Some(body_offset) = body.as_ref().and_then(block_entry_offset) else {
+        return;
+    };
+    let range = condition.syntax().text_range();
+    let id = stable_id(file, "decision", range, kind);
+    let mut atoms = Vec::new();
+    RustObligationCollector::atomic_condition_ranges(condition, &mut atoms);
+    let lets = condition
+        .syntax()
+        .descendants()
+        .filter_map(ast::LetExpr::cast)
+        .map(|expression| expression.syntax().text_range())
+        .collect::<Vec<_>>();
+    let frame = allocate_frame_name(file, condition, kind, identifiers);
+    let table = allocate_chain_table_name(file, condition, identifiers);
+
+    let mut operators = Vec::new();
+    for binary in condition
+        .syntax()
+        .descendants()
+        .filter_map(ast::BinExpr::cast)
+    {
+        // Let chains are `&&`-only at the top level; an operator whose left
+        // side holds a `let` is one the logical wrapper could not touch.
+        if !matches!(binary.op_kind(), Some(BinaryOp::LogicOp(LogicOp::And))) {
+            continue;
+        }
+        let (Some(left), Some(right)) = (binary.lhs(), binary.rhs()) else {
+            continue;
+        };
+        if !has_let(&left) {
+            continue;
+        }
+        let branch = stable_id(file, "branch", right.syntax().text_range(), "logical-and");
+        let right_range = right.syntax().text_range();
+        let Some(first) = atoms
+            .iter()
+            .position(|atom| right_range.contains_range(*atom))
+        else {
+            continue;
+        };
+        operators.push(format!(
+            "({first}, {:?}, {:?})",
+            format!("{branch}:short-circuit"),
+            format!("{branch}:evaluated")
+        ));
+    }
+
+    let prefix = format!(
+        "{{ const {table}: &[(usize, &str, &str)] = &[{}]; let mut {frame} = {runtime_path}::DecisionFrame::new({id:?}, {}); ",
+        operators.join(", "),
+        atoms.len()
+    );
+    let suffix = match &host {
+        ChainHost::If(expression) => match expression.else_branch() {
+            Some(_) => " }".to_owned(),
+            None => format!(
+                " else {{ {runtime_path}::decision_chain(&mut {frame}, false, {table}); }} }}"
+            ),
+        },
+        ChainHost::While(_) => {
+            format!(" {runtime_path}::decision_chain(&mut {frame}, false, {table}); }}")
+        }
+    };
+    push_wrapper(insertions, host_range, host_range, 1, prefix, suffix);
+    push_direct(
+        insertions,
+        usize::from(range.start()),
+        format!("{runtime_path}::reached(&mut {frame}, 0) && "),
+    );
+    for (index, atom) in atoms.iter().enumerate() {
+        if lets.contains(atom) {
+            if index > 0 {
+                push_direct(
+                    insertions,
+                    usize::from(atom.start()),
+                    format!("{runtime_path}::reached(&mut {frame}, {index}) && "),
+                );
+            }
+        } else {
+            push_wrapper(
+                insertions,
+                *atom,
+                *atom,
+                1,
+                format!("{runtime_path}::condition(("),
+                format!("), &mut {frame}, {index})"),
+            );
+        }
+    }
+    push_direct(
+        insertions,
+        body_offset,
+        format!("\n{runtime_path}::decision_chain(&mut {frame}, true, {table});"),
+    );
+    if let ChainHost::If(expression) = &host {
+        match expression.else_branch() {
+            Some(ast::ElseBranch::Block(block)) => {
+                if let Some(offset) = block_entry_offset(&block) {
+                    push_direct(
+                        insertions,
+                        offset,
+                        format!("\n{runtime_path}::decision_chain(&mut {frame}, false, {table});"),
+                    );
+                }
+            }
+            Some(ast::ElseBranch::IfExpr(nested)) => {
+                let nested_range = nested.syntax().text_range();
+                push_wrapper(
+                    insertions,
+                    nested_range,
+                    nested_range,
+                    0,
+                    format!("{{ {runtime_path}::decision_chain(&mut {frame}, false, {table}); "),
+                    " }".into(),
+                );
+            }
+            None => {}
+        }
+    }
+}
+
 /// Where an item for `node` can go: the entry of the nearest enclosing block.
 /// An item declared there is visible to the whole block, so nothing about the
 /// expression itself -- its value, its temporaries -- changes.
@@ -861,10 +1059,11 @@ fn instrument_decision(
 ///
 /// The caller supplies a collision-free generated crate-local runtime path.
 /// Every obligation the manifest declares -- statements, functions, decisions
-/// with their conditions, match arms, logical operators, loops and the try
-/// operator -- takes an owned probe; what a probe cannot reach (const
-/// contexts, macro expansions, attributed statements, let chains) stays in
-/// the denominator behind an explicit limitation.
+/// with their conditions -- let chains included -- match arms, logical
+/// operators, loops and the try operator -- takes an owned probe; what a
+/// probe cannot reach (const contexts, macro expansions, an attributed `let`
+/// with no initializer) stays in the denominator behind an explicit
+/// limitation.
 pub fn instrument_rust_source(
     file: &str,
     source: &str,
@@ -893,8 +1092,9 @@ pub fn instrument_rust_source(
     // from one of two cfg-gated blocks, and the stray probe turned the kept
     // block into a statement and the probe itself into a `()` tail -- 32
     // E0308s across the crate. An attributed BLOCK takes the probe inside its
-    // braces, where the same cfg governs both; any other attributed statement
-    // is skipped and declared, mirroring the let-chain limitation.
+    // braces, where the same cfg governs both; any other attributed
+    // expression is wrapped in such a block. Only a `let` with no initializer
+    // has nowhere to put a probe, and is declared.
     let attributed_probe = |insertions: &mut Vec<Insertion>,
                             skipped: &mut bool,
                             expression: Option<ast::Expr>,
@@ -909,8 +1109,12 @@ pub fn instrument_rust_source(
             );
             return;
         }
-        if let Some(ast::Expr::BlockExpr(block)) = expression
-            && let Some(offset) = block_entry_offset(&block)
+        let Some(expression) = expression else {
+            *skipped = true;
+            return;
+        };
+        if let ast::Expr::BlockExpr(block) = &expression
+            && let Some(offset) = block_entry_offset(block)
         {
             push_direct(
                 insertions,
@@ -919,7 +1123,24 @@ pub fn instrument_rust_source(
             );
             return;
         }
-        *skipped = true;
+        // Any other attributed expression -- or the initializer of an
+        // attributed `let` -- moves into a block that carries the probe: the
+        // attributes now govern probe and expression together, the block has
+        // the expression's value where the expression was, and a block's tail
+        // still extends the temporaries a `let` would have extended.
+        let start = expression.attrs().last().map_or_else(
+            || expression.syntax().text_range().start(),
+            |attribute| attribute.syntax().text_range().end(),
+        );
+        let wrapped = TextRange::new(start, expression.syntax().text_range().end());
+        push_wrapper(
+            insertions,
+            wrapped,
+            wrapped,
+            0,
+            format!(" {{ {runtime_path}::hit({id:?}); ("),
+            ") }".into(),
+        );
     };
     for list in root.descendants().filter_map(ast::StmtList::cast) {
         for statement in list.statements() {
@@ -935,7 +1156,10 @@ pub fn instrument_rust_source(
                 }
                 ast::Stmt::LetStmt(statement) if !cannot_carry_probe(statement.syntax()) => {
                     let has_attrs = statement.attrs().next().is_some();
-                    (statement.syntax().text_range(), None, has_attrs)
+                    // Only an attributed `let` needs its initializer; a plain
+                    // one takes the probe before the statement.
+                    let initializer = has_attrs.then(|| statement.initializer()).flatten();
+                    (statement.syntax().text_range(), initializer, has_attrs)
                 }
                 _ => continue,
             };
@@ -1082,7 +1306,6 @@ pub fn instrument_rust_source(
         }
     }
 
-    let mut skipped_let_chain_operator = false;
     // Logical operators: the left operand alone decides whether the right one
     // runs, so wrapping it records the outcome without touching evaluation
     // order. `&&` short-circuits on false, `||` on true.
@@ -1100,13 +1323,8 @@ pub fn instrument_rust_source(
         };
         // In a let chain the left operand is (or holds) a `let`, whose
         // bindings must stay in scope for the right operand; it cannot pass
-        // through a call. That stays declared with the let-chain limitation.
-        if left
-            .syntax()
-            .descendants()
-            .any(|node| ast::LetExpr::can_cast(node.kind()))
-        {
-            skipped_let_chain_operator = true;
+        // through a call. The chain's own probes record that operator.
+        if has_let(&left) {
             continue;
         }
         let kind = if short_circuits_when {
@@ -1174,7 +1392,7 @@ pub fn instrument_rust_source(
             "while-loop",
         );
         let flag = allocate_flag_name(file, &expression, &mut identifiers);
-        let range = expression.syntax().text_range();
+        let range = range_after_attributes(&expression);
         push_wrapper(
             &mut insertions,
             range,
@@ -1228,44 +1446,59 @@ pub fn instrument_rust_source(
         );
     }
 
-    let mut skipped_let_condition = false;
     for expression in root.descendants().filter_map(ast::IfExpr::cast) {
-        if let Some(condition) = expression.condition() {
-            let frame_name = allocate_frame_name(file, &condition, "if", &mut identifiers);
-            if !instrument_decision(
-                &mut insertions,
-                runtime_path,
-                file,
-                &condition,
-                "if",
-                &frame_name,
-            ) && condition
-                .syntax()
-                .descendants()
-                .any(|node| ast::LetExpr::can_cast(node.kind()))
-            {
-                skipped_let_condition = true;
+        let Some(condition) = expression.condition() else {
+            continue;
+        };
+        if has_let(&condition) {
+            if !cannot_carry_probe(condition.syntax()) {
+                instrument_let_chain(
+                    &mut insertions,
+                    runtime_path,
+                    file,
+                    &condition,
+                    ChainHost::If(&expression),
+                    &mut identifiers,
+                );
             }
+            continue;
         }
+        let frame_name = allocate_frame_name(file, &condition, "if", &mut identifiers);
+        instrument_decision(
+            &mut insertions,
+            runtime_path,
+            file,
+            &condition,
+            "if",
+            &frame_name,
+        );
     }
     for expression in root.descendants().filter_map(ast::WhileExpr::cast) {
-        if let Some(condition) = expression.condition() {
-            let frame_name = allocate_frame_name(file, &condition, "while", &mut identifiers);
-            if !instrument_decision(
-                &mut insertions,
-                runtime_path,
-                file,
-                &condition,
-                "while",
-                &frame_name,
-            ) && condition
-                .syntax()
-                .descendants()
-                .any(|node| ast::LetExpr::can_cast(node.kind()))
-            {
-                skipped_let_condition = true;
+        let Some(condition) = expression.condition() else {
+            continue;
+        };
+        if has_let(&condition) {
+            if !cannot_carry_probe(condition.syntax()) {
+                instrument_let_chain(
+                    &mut insertions,
+                    runtime_path,
+                    file,
+                    &condition,
+                    ChainHost::While(&expression),
+                    &mut identifiers,
+                );
             }
+            continue;
         }
+        let frame_name = allocate_frame_name(file, &condition, "while", &mut identifiers);
+        instrument_decision(
+            &mut insertions,
+            runtime_path,
+            file,
+            &condition,
+            "while",
+            &frame_name,
+        );
     }
     for guard in root.descendants().filter_map(ast::MatchGuard::cast) {
         if let Some(condition) = guard.condition() {
@@ -1286,15 +1519,7 @@ pub fn instrument_rust_source(
             &mut manifest,
             file,
             "rust-attributed-statement-probes-not-injected",
-            "Statements carrying outer attributes cannot take an adjacent probe without changing cfg selection",
-        );
-    }
-    if skipped_let_condition || skipped_let_chain_operator {
-        add_manifest_limitation(
-            &mut manifest,
-            file,
-            "rust-let-chain-probes-not-injected",
-            "Pattern conditions and let chains remain in the denominator but do not yet have semantics-proven owned condition probes",
+            "A `let` without an initializer that carries outer attributes has no expression to hold a probe",
         );
     }
     manifest.limitations.sort_by(|left, right| {
@@ -1347,6 +1572,8 @@ mod __supercov_runtime_v1 {
     impl<T> TryProbe for T {}
     pub fn condition(value: bool, _: &mut DecisionFrame, _: usize) -> bool { value }
     pub fn decision(value: bool, _: &mut DecisionFrame) -> bool { value }
+    pub fn reached(_: &mut DecisionFrame, _: usize) -> bool { true }
+    pub fn decision_chain(_: &mut DecisionFrame, _: bool, _: &[(usize, &'static str, &'static str)]) {}
 }
 "#;
 
@@ -1530,7 +1757,7 @@ fn main() {
     }
 
     #[test]
-    fn skips_let_chains_and_const_contexts_with_explicit_limitations() {
+    fn let_chains_take_derived_condition_probes_and_const_contexts_stay_declared() {
         let source = r#"const fn enabled(value: bool) -> bool {
     if value { true } else { false }
 }
@@ -1548,8 +1775,89 @@ fn classify(value: Option<bool>, fallback: bool) -> bool {
             .filter_map(|limitation| limitation.get("id")?.as_str())
             .collect::<BTreeSet<_>>();
         assert!(ids.contains("rust-const-context-not-instrumented"));
-        assert!(ids.contains("rust-let-chain-probes-not-injected"));
-        assert!(!transformed.code.contains("condition("));
+        assert!(!ids.contains("rust-let-chain-probes-not-injected"));
+        // The chain: a marker at the front, ordinary conditions wrapped, the
+        // outcome recorded in both branches; the `let` itself untouched.
+        assert!(
+            transformed
+                .code
+                .contains("::reached(&mut __supercov_decision_")
+        );
+        assert!(
+            transformed
+                .code
+                .contains("::condition((inner), &mut __supercov_decision_")
+        );
+        assert!(
+            transformed
+                .code
+                .contains("::decision_chain(&mut __supercov_decision_")
+        );
+        assert!(transformed.code.contains("&& let Some(inner) = value &&"));
+        assert!(!transformed.code.contains("condition((let"));
+    }
+
+    #[test]
+    fn let_chains_keep_their_behavior() {
+        let source = r#"fn describe(value: Option<i32>, flag: bool) -> &'static str {
+    if let Some(inner) = value && inner > 0 && flag {
+        "positive"
+    } else if let Some(inner) = value && (inner < 0 || flag) {
+        "negative-or-flagged"
+    } else {
+        "other"
+    }
+}
+
+fn count_pairs(values: &[(Option<i32>, i32)]) -> i32 {
+    let mut total = 0;
+    let mut it = values.iter();
+    while let Some((first, second)) = it.next() && let Some(inner) = first && *second > 0 {
+        total += inner * second;
+        if total > 100 {
+            break;
+        }
+    }
+    total
+}
+
+fn tail(value: Option<&str>) -> usize {
+    let pick = |v: Option<&str>| if let Some(text) = v && !text.is_empty() { text.len() } else { 0 };
+    if let Some(text) = value && text.starts_with('x') {
+        println!("x-prefixed");
+    }
+    pick(value)
+}
+
+fn main() {
+    for value in [Some(3), Some(-3), Some(0), None] {
+        for flag in [true, false] {
+            println!("{value:?} {flag} {}", describe(value, flag));
+        }
+    }
+    println!("{}", count_pairs(&[(Some(2), 3), (Some(4), 5), (None, 1), (Some(9), 9)]));
+    println!("{}", count_pairs(&[(Some(50), 3), (Some(4), 5)]));
+    println!("{} {} {}", tail(Some("xyz")), tail(Some("")), tail(None));
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        assert_eq!(
+            transformed.code.matches("const __SUPERCOV_CHAIN_").count(),
+            5
+        );
+        assert!(!transformed.manifest.limitations.iter().any(|limitation| {
+            limitation.get("id").and_then(|id| id.as_str())
+                == Some("rust-let-chain-probes-not-injected")
+        }));
+        let original = compile_and_run(source, "original-chains");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "instrumented-chains",
+        );
+        assert_eq!(instrumented.status, original.status);
+        assert_eq!(instrumented.stdout, original.stdout);
+        assert_eq!(instrumented.stderr, original.stderr);
     }
 
     #[test]
@@ -1915,13 +2223,26 @@ fn main() {
                     .contains("{\ncrate::__supercov_runtime_v1::hit(")
         );
 
-        // An attributed non-block statement is skipped and declared.
+        // An attributed `let` takes the probe inside its initializer, an
+        // attributed expression statement inside a block; a `let` without an
+        // initializer is the one shape left declared.
         let attributed_let = r#"fn main() {
     #[cfg(target_endian = "little")]
     let value = 1;
     #[cfg(not(target_endian = "little"))]
     let value = 2;
-    println!("{value}");
+    #[cfg(target_endian = "little")]
+    let borrowed: &String = &String::from("little");
+    #[cfg(not(target_endian = "little"))]
+    let borrowed: &String = &String::from("big");
+    #[cfg(target_endian = "little")]
+    print!("le ");
+    #[cfg(not(target_endian = "little"))]
+    print!("be ");
+    #[allow(unused_assignments)]
+    let mut later;
+    later = value + 1;
+    println!("{value} {borrowed} {later}");
 }
 "#;
         let transformed = instrument_rust_source(
@@ -1936,13 +2257,31 @@ fn main() {
             .iter()
             .filter_map(|limitation| limitation.get("id")?.as_str())
             .collect::<BTreeSet<_>>();
+        // Declared only for `let mut later;`.
         assert!(ids.contains("rust-attributed-statement-probes-not-injected"));
+        assert!(
+            transformed
+                .code
+                .contains("let value =  { crate::__supercov_runtime_v1::hit(")
+        );
+        assert!(
+            transformed
+                .code
+                .contains("let borrowed: &String =  { crate::__supercov_runtime_v1::hit(")
+        );
+        assert!(
+            transformed
+                .code
+                .contains("] { crate::__supercov_runtime_v1::hit(")
+        );
         let original = compile_and_run(attributed_let, "cfg-let-original");
         let instrumented = compile_and_run(
             &format!("{}\n{NOOP_RUNTIME}", transformed.code),
             "cfg-let-instrumented",
         );
+        assert_eq!(instrumented.status, original.status);
         assert_eq!(instrumented.stdout, original.stdout);
+        assert_eq!(instrumented.stderr, original.stderr);
     }
 
     #[test]

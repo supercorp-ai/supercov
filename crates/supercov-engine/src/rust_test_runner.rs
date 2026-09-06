@@ -1872,6 +1872,13 @@ pub fn parse_twice(text: &str) -> Option<i32> {
     let value: i32 = text.parse().ok()?;
     Some(value * 2)
 }
+pub fn describe(value: Option<i32>, flag: bool) -> &'static str {
+    if let Some(inner) = value && inner > 0 && flag {
+        "positive"
+    } else {
+        "other"
+    }
+}
 #[cfg(test)]
 mod tests {
     #[test] fn false_path() { assert_eq!(super::choose(false, true), 0); }
@@ -1885,6 +1892,10 @@ mod tests {
     #[test] fn first_even_found() { assert_eq!(super::first_even(&[1, 4]), Some(4)); }
     #[test] fn parse_ok() { assert_eq!(super::parse_twice("4"), Some(8)); }
     #[test] fn parse_bad() { assert_eq!(super::parse_twice("x"), None); }
+    #[test] fn chain_taken() { assert_eq!(super::describe(Some(1), true), "positive"); }
+    #[test] fn chain_pattern_fails() { assert_eq!(super::describe(None, true), "other"); }
+    #[test] fn chain_negative() { assert_eq!(super::describe(Some(-1), true), "other"); }
+    #[test] fn chain_flag_fails() { assert_eq!(super::describe(Some(1), false), "other"); }
 }
 "#,
         )
@@ -1902,7 +1913,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(run.exit_code, 0);
-        assert_eq!(run.request.raw_results.len(), 11);
+        assert_eq!(run.request.raw_results.len(), 15);
         let statuses = run
             .request
             .raw_results
@@ -1921,7 +1932,45 @@ mod tests {
                 .iter()
                 .filter(|status| **status == "passed")
                 .count(),
-            10
+            14
+        );
+
+        // The let chain's condition vectors, with the pattern's outcome
+        // derived: [let Some(inner) = value, inner > 0, flag].
+        let chain_vectors = |test: &str| {
+            let result = run
+                .request
+                .raw_results
+                .iter()
+                .find(|result| result.test.ends_with(test))
+                .unwrap_or_else(|| panic!("no test {test}"));
+            let snapshot = result
+                .runtime
+                .iter()
+                .flat_map(|snapshot| &snapshot.decisions)
+                .find(|decision| decision.meta.source.starts_with("let Some(inner) = value"))
+                .unwrap_or_else(|| panic!("{test} recorded no chain decision"));
+            snapshot
+                .vectors
+                .iter()
+                .map(|vector| (vector.values.clone(), vector.outcome))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            chain_vectors("chain_taken"),
+            [(vec![Some(true), Some(true), Some(true)], true)]
+        );
+        assert_eq!(
+            chain_vectors("chain_pattern_fails"),
+            [(vec![Some(false), None, None], false)]
+        );
+        assert_eq!(
+            chain_vectors("chain_negative"),
+            [(vec![Some(true), Some(false), None], false)]
+        );
+        assert_eq!(
+            chain_vectors("chain_flag_fails"),
+            [(vec![Some(true), Some(true), Some(false)], false)]
         );
         validate_frontend_report_request(&run.declaration, &run.request).unwrap();
         let archive = root.join("evidence.raw.gz");
@@ -1934,7 +1983,7 @@ mod tests {
             test_exit_code: ExitCodeInput::Present(Some(0)),
         })
         .unwrap();
-        assert_eq!(report.view.tests.len(), 11);
+        assert_eq!(report.view.tests.len(), 15);
         assert!(report.view.summary.lines.covered > 0);
         assert!(report.view.summary.decisions > 0);
 
@@ -1986,16 +2035,51 @@ mod tests {
             tests_of(try_operator, "early return"),
             ["src/lib.rs::tests::parse_bad"]
         );
-        let logical = single("logical-and");
+        let mut logical = report
+            .view
+            .branches
+            .iter()
+            .filter(|branch| branch.meta.kind == "logical-and")
+            .collect::<Vec<_>>();
+        logical.sort_by_key(|branch| (branch.meta.line, branch.meta.column));
+        // `left && right` in choose, then the chain's two operators.
+        assert_eq!(logical.len(), 3);
         assert_eq!(
-            tests_of(logical, "short-circuited"),
+            tests_of(logical[0], "short-circuited"),
             ["src/lib.rs::tests::false_path"]
         );
         assert_eq!(
-            tests_of(logical, "right operand evaluated"),
+            tests_of(logical[0], "right operand evaluated"),
             ["src/lib.rs::tests::true_path"]
         );
-        assert!(for_loop.covered && while_loop.covered && try_operator.covered && logical.covered);
+        assert_eq!(
+            tests_of(logical[1], "short-circuited"),
+            ["src/lib.rs::tests::chain_pattern_fails"]
+        );
+        assert_eq!(
+            tests_of(logical[1], "right operand evaluated"),
+            [
+                "src/lib.rs::tests::chain_flag_fails",
+                "src/lib.rs::tests::chain_negative",
+                "src/lib.rs::tests::chain_taken",
+            ]
+        );
+        assert_eq!(
+            tests_of(logical[2], "short-circuited"),
+            [
+                "src/lib.rs::tests::chain_negative",
+                "src/lib.rs::tests::chain_pattern_fails",
+            ]
+        );
+        assert_eq!(
+            tests_of(logical[2], "right operand evaluated"),
+            [
+                "src/lib.rs::tests::chain_flag_fails",
+                "src/lib.rs::tests::chain_taken",
+            ]
+        );
+        assert!(for_loop.covered && while_loop.covered && try_operator.covered);
+        assert!(logical.iter().all(|branch| branch.covered));
 
         // The match in `pick`: pick(0) selects the first arm; pick(7) passes
         // the first two over and selects the last. Nothing selects `1`.
