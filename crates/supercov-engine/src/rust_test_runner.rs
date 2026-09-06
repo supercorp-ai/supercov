@@ -1202,11 +1202,12 @@ fn rust_coverage_model() -> CoverageModelDeclaration {
             "owned atomic condition vectors and decision outcomes".into(),
             "exact process-per-libtest attribution".into(),
             "exact process-per-doctest attribution".into(),
+            "evidence a passing assertion of the same thread witnessed".into(),
         ],
         not_measured: vec![
             "macro-expanded and generated Rust code".into(),
             "const-evaluated code and unsupported structural branch probes".into(),
-            "causal linkage to individual actions or passing assertions".into(),
+            "causal linkage to individual actions".into(),
             "all input values, semantic partitions, paths, or concurrency interleavings".into(),
             "mutation score or assertion fault-detection strength".into(),
         ],

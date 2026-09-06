@@ -109,7 +109,7 @@ whatever was still buffered.
 
 | Runner | Attribution | Current requirement |
 | --- | --- | --- |
-| Cargo's standard libtest runner | Exact test and attempt identity | Rust 1.95; run with `npx supercov -- cargo test` |
+| Cargo's standard libtest runner | Exact test, attempt, and passing-assertion identity | Rust 1.95; run with `npx supercov -- cargo test` |
 | rustdoc doctests | Exact doctest identity; every doctest runs in a process of its own | Rust 1.95; part of `npx supercov -- cargo test` |
 | cargo-nextest | Exact test, attempt, retry, and binary identity | cargo-nextest 0.9.138 or 0.9.140 |
 
@@ -125,7 +125,9 @@ literal `include!` calls; a `.rs` file nothing declares as a module, such as
 one embedded with `include_str!`, is left untouched. Statements, functions,
 `if`/`while`/match-guard decisions with their conditions (let chains
 included), match arms, `&&` and `||`, `for` and `while` loops and the `?`
-operator each take a probe; const contexts and macro expansions stay in the
+operator each take a probe; what a thread recorded before it passed an
+`assert!`, `assert_eq!` or `assert_ne!` is linked to that assertion, so the
+report can separate code a test checked from code it merely ran; const contexts and macro expansions stay in the
 denominator behind an explicit limitation. Use the repository's normal flags after the
 wrapped command:
 

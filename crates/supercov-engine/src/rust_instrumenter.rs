@@ -1605,6 +1605,10 @@ pub fn instrument_rust_source(
                             skipped: &mut bool,
                             expression: Option<ast::Expr>,
                             has_attrs: bool,
+                            // Whether `expression` IS the statement, as
+                            // opposed to the initializer of a `let`, whose
+                            // value the binding needs.
+                            statement: bool,
                             trailing: bool,
                             range: TextRange,
                             id: String| {
@@ -1673,7 +1677,7 @@ pub fn instrument_rust_source(
         // and `#[cfg(..)] { hit; (trace!("..")) }` makes that expansion an
         // attributed expression (E0658). The probe goes ahead of it inside
         // the block instead, and the attribute still governs both.
-        if let ast::Expr::MacroExpr(_) = &expression {
+        if statement && let ast::Expr::MacroExpr(_) = &expression {
             let start = expression.attrs().last().map_or_else(
                 || expression.syntax().text_range().start(),
                 |attribute| attribute.syntax().text_range().end(),
@@ -1711,7 +1715,7 @@ pub fn instrument_rust_source(
     for list in root.descendants().filter_map(ast::StmtList::cast) {
         let last_statement = list.statements().last();
         for statement in list.statements() {
-            let (range, expression, has_attrs, trailing) = match &statement {
+            let (range, expression, has_attrs, statement_expression, trailing) = match &statement {
                 ast::Stmt::ExprStmt(statement) if !cannot_carry_probe(statement.syntax()) => {
                     let expression = statement.expr();
                     // Outer attributes on an expression statement attach to
@@ -1728,6 +1732,7 @@ pub fn instrument_rust_source(
                         statement.syntax().text_range(),
                         expression,
                         has_attrs,
+                        true,
                         trailing,
                     )
                 }
@@ -1740,6 +1745,7 @@ pub fn instrument_rust_source(
                         statement.syntax().text_range(),
                         initializer,
                         has_attrs,
+                        false,
                         false,
                     )
                 }
@@ -1769,6 +1775,7 @@ pub fn instrument_rust_source(
                 &mut skipped_attributed_statement,
                 expression,
                 has_attrs,
+                statement_expression,
                 trailing,
                 range,
                 id,
@@ -1786,6 +1793,7 @@ pub fn instrument_rust_source(
                 &mut skipped_attributed_statement,
                 Some(tail),
                 has_attrs,
+                true,
                 true,
                 range,
                 id,
@@ -3387,6 +3395,51 @@ fn main() {
         );
         assert_eq!(instrumented.stdout, original.stdout);
         assert_eq!(instrumented.stderr, original.stderr);
+    }
+
+    #[test]
+    fn an_attributed_lets_macro_initialiser_keeps_its_value() {
+        // The rule that keeps an attributed macro STATEMENT in statement
+        // position must not reach a `let` initialiser: tokio's
+        // `#[cfg(..)] let coop = ready!(..);` became `let coop = { hit;
+        // ready!(..); };`, which is `()`, and the next line called a method
+        // on it.
+        let source = r#"macro_rules! first {
+    ($e:expr) => { $e }
+}
+fn value(flag: bool) -> i32 {
+    #[cfg(any(target_endian = "little", target_endian = "big"))]
+    let chosen = first!(if flag { 7 } else { 3 });
+    chosen + 1
+}
+fn main() {
+    println!("{}", value(true));
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        // The initialiser keeps its value: the block ends in the macro, with
+        // no semicolon to discard it.
+        assert!(
+            !transformed
+                .code
+                .contains("first!(if flag { 7 } else { 3 }); }"),
+            "{}",
+            transformed.code
+        );
+        let original = compile_and_run(source, "attributed-let-macro-original");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "attributed-let-macro-instrumented",
+        );
+        assert_eq!(
+            instrumented.status,
+            original.status,
+            "{}",
+            String::from_utf8_lossy(&instrumented.stderr)
+        );
+        assert_eq!(instrumented.stdout, original.stdout);
+        assert_eq!(instrumented.stdout, b"8\n");
     }
 
     #[test]
