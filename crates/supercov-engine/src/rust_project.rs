@@ -8,7 +8,7 @@ use std::{
 };
 
 use ra_ap_syntax::{
-    AstNode, AstToken, Edition, SourceFile,
+    AstNode, AstToken, Edition, SourceFile, SyntaxKind,
     ast::{self, HasAttrs, HasModuleItem, HasName},
 };
 use serde::Deserialize;
@@ -376,6 +376,16 @@ fn collect_module_declarations(
                     )
                 });
                 if !is_include {
+                    // A macro that selects among implementations declares its
+                    // modules in its token tree, where no item walk reaches
+                    // them: hashbrown's `cfg_select!` and the `cfg_if!` in
+                    // crates everywhere. Both arms are followed; the build
+                    // decides which one counts.
+                    for name in token_tree_modules(call.syntax()) {
+                        let children = directory.join(&name);
+                        pending.push((directory.join(format!("{name}.rs")), children.clone()));
+                        pending.push((children.join("mod.rs"), children));
+                    }
                     continue;
                 }
                 let Some(literal) = string_literal(call.syntax()) else {
@@ -393,6 +403,40 @@ fn collect_module_declarations(
     }
 }
 
+/// Every `mod <name>;` declared inside a macro's token tree. The tokens are
+/// unparsed there, so the sequence is matched directly.
+fn token_tree_modules(node: &ra_ap_syntax::SyntaxNode) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut tokens = node
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| !token.kind().is_trivia())
+        .peekable();
+    while let Some(token) = tokens.next() {
+        if token.text() != "mod" {
+            continue;
+        }
+        let Some(name) = tokens
+            .peek()
+            .filter(|next| next.kind() == SyntaxKind::IDENT)
+        else {
+            continue;
+        };
+        let name = name.text().to_string();
+        tokens.next();
+        // `mod name;` declares a file; `mod name { .. }` is inline and its
+        // items are already in this tree.
+        if tokens
+            .peek()
+            .is_some_and(|next| next.kind() == SyntaxKind::SEMICOLON)
+        {
+            tokens.next();
+            names.push(name);
+        }
+    }
+    names
+}
+
 /// The first string literal under a node, unescaped. Inside a macro's token
 /// tree the literal is a bare token, not a `Literal` node, so look at tokens.
 fn string_literal(node: &ra_ap_syntax::SyntaxNode) -> Option<String> {
@@ -404,6 +448,33 @@ fn string_literal(node: &ra_ap_syntax::SyntaxNode) -> Option<String> {
 
 /// The crate roots of every workspace member: the source file of each Cargo
 /// target except build scripts, which Cargo compiles and runs on their own.
+/// The crate roots of proc-macro targets. What they compile to is a compiler
+/// plugin: rustc loads it while building the crate under test and runs it
+/// there, so no test process ever executes it and the owned probes see
+/// nothing.
+fn proc_macro_crate_roots(
+    workspace: &Path,
+    packages: &[CargoPackage],
+) -> Result<BTreeSet<PathBuf>, RustProjectError> {
+    let mut roots = BTreeSet::new();
+    for package in packages {
+        for target in &package.targets {
+            if !target.kind.iter().any(|kind| kind == "proc-macro") {
+                continue;
+            }
+            let root =
+                fs::canonicalize(&target.src_path).map_err(|error| RustProjectError::Io {
+                    path: target.src_path.clone(),
+                    reason: error.to_string(),
+                })?;
+            if confined_relative(workspace, &root).is_ok() {
+                roots.insert(root);
+            }
+        }
+    }
+    Ok(roots)
+}
+
 fn crate_roots(
     workspace: &Path,
     packages: &[CargoPackage],
@@ -488,6 +559,75 @@ fn runtime_module_name(sources: &BTreeMap<String, String>) -> String {
 /// obligation ID in the manifest. Two builds of the same sources share it;
 /// any other program's instrumentation, such as a fixture a test prepares
 /// and runs, has another.
+/// Obligations in a proc-macro crate leave the denominator: the compiler runs
+/// that code while it builds the crate under test, so a test process cannot
+/// observe it. They stay in the manifest -- the evidence files are named by a
+/// token over its obligation IDs -- and are declined, with one limitation per
+/// file saying why.
+fn decline_proc_macro_obligations(
+    workspace: &Path,
+    proc_macro_roots: &BTreeSet<PathBuf>,
+    manifest: &mut CoverageManifest,
+) -> Result<(), RustProjectError> {
+    if proc_macro_roots.is_empty() {
+        return Ok(());
+    }
+    let mut reached = BTreeSet::new();
+    resolve_module_tree(workspace, proc_macro_roots, &mut reached)?;
+    let mut files = BTreeSet::new();
+    for path in reached {
+        if let Ok(relative) = confined_relative(workspace, &path) {
+            files.insert(relative);
+        }
+    }
+    if files.is_empty() {
+        return Ok(());
+    }
+    let mut unmeasured = manifest.unmeasured.iter().cloned().collect::<BTreeSet<_>>();
+    unmeasured.extend(
+        manifest
+            .points
+            .iter()
+            .filter(|point| files.contains(&point.file))
+            .map(|point| point.id.clone()),
+    );
+    unmeasured.extend(
+        manifest
+            .decisions
+            .iter()
+            .filter(|decision| files.contains(&decision.file))
+            .map(|decision| decision.id.clone()),
+    );
+    unmeasured.extend(
+        manifest
+            .branches
+            .iter()
+            .filter(|branch| files.contains(&branch.file))
+            .map(|branch| branch.id.clone()),
+    );
+    manifest.unmeasured = unmeasured.into_iter().collect();
+    // The boundaries already declared inside these files say nothing now.
+    manifest.limitations.retain(|limitation| {
+        limitation
+            .get("file")
+            .and_then(|file| file.as_str())
+            .is_none_or(|file| !files.contains(file))
+    });
+    for file in files {
+        manifest.limitations.push(serde_json::json!({
+            "id": format!("rust-proc-macro-runs-in-the-compiler#{file}"),
+            "kind": "source-scope",
+            "file": file,
+            "line": 1,
+            "column": 0,
+            "source": "",
+            "blocking": false,
+            "reason": "This crate compiles to a compiler plugin: rustc loads it and runs it while building the crate under test, so no test process executes it"
+        }));
+    }
+    Ok(())
+}
+
 pub fn manifest_token(manifest: &CoverageManifest) -> String {
     let mut ids = manifest
         .points
@@ -616,6 +756,7 @@ pub fn prepare_rust_project(workspace: &Path) -> Result<PreparedRustProject, Rus
 
     let started = std::time::Instant::now();
     let roots = crate_roots(&workspace, &packages)?;
+    let proc_macro_roots = proc_macro_crate_roots(&workspace, &packages)?;
     let mut files = BTreeSet::new();
     resolve_module_tree(&workspace, &roots, &mut files)?;
     if files.is_empty() {
@@ -662,6 +803,8 @@ pub fn prepare_rust_project(workspace: &Path) -> Result<PreparedRustProject, Rus
 
     preparation.instrument_ms = elapsed(started);
     let started = std::time::Instant::now();
+    decline_proc_macro_obligations(&workspace, &proc_macro_roots, &mut manifest)?;
+
     let token = manifest_token(&manifest);
     let mut crate_roots = Vec::new();
     for root in roots {
@@ -778,6 +921,95 @@ fn integration_choice() {
         )
         .unwrap();
         root
+    }
+
+    #[test]
+    fn a_proc_macro_crates_own_code_is_declined() {
+        // async-trait, serde_derive and thiserror-impl compile to compiler
+        // plugins: rustc loads them while building the crate under test and
+        // runs them there, so no test process executes a line of them and
+        // every file read 0%.
+        let root = fixture();
+        fs::write(
+            root.join("Cargo.toml"),
+            concat!(
+                "[package]\nname='rust_project_fixture'\nversion='0.0.0'\nedition='2024'\n",
+                "\n[lib]\nproc-macro=true\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            "mod helper;\npub fn entry(flag: bool) -> i32 { if flag { helper::one() } else { 0 } }\n",
+        )
+        .unwrap();
+        fs::write(root.join("src/helper.rs"), "pub fn one() -> i32 { 1 }\n").unwrap();
+
+        let prepared = prepare_rust_project(&root).unwrap();
+        // The files are still instrumented and still in the manifest; their
+        // obligations are declined, and a limitation says why.
+        let declined = prepared.manifest.unmeasured.iter().collect::<BTreeSet<_>>();
+        assert!(!declined.is_empty());
+        for point in &prepared.manifest.points {
+            let plugin = point.file == "src/lib.rs" || point.file == "src/helper.rs";
+            assert_eq!(declined.contains(&point.id), plugin, "{}", point.file);
+        }
+        let reasons = prepared
+            .manifest
+            .limitations
+            .iter()
+            .filter_map(|limitation| limitation.get("id")?.as_str())
+            .filter(|id| id.starts_with("rust-proc-macro-runs-in-the-compiler#"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            reasons,
+            BTreeSet::from([
+                "rust-proc-macro-runs-in-the-compiler#src/helper.rs",
+                "rust-proc-macro-runs-in-the-compiler#src/lib.rs",
+            ])
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn modules_declared_inside_a_macro_are_instrumented() {
+        // hashbrown selects its SIMD group with `cfg_select! { ... mod neon;
+        // ... }`, and `cfg_if!` has the same shape; the declaration lives in
+        // the macro's token tree, which no item walk reaches. Both arms are
+        // followed -- the build decides which one is in the denominator.
+        let root = fixture();
+        fs::write(
+            root.join("src/lib.rs"),
+            concat!(
+                "macro_rules! select { ($($rest:tt)*) => { $($rest)* } }\n",
+                "select! {\n",
+                "    #[cfg(target_endian = \"little\")]\n",
+                "    mod little;\n",
+                "    #[cfg(not(target_endian = \"little\"))]\n",
+                "    mod big;\n",
+                "    mod inline { pub fn here() -> i32 { 1 } }\n",
+                "}\n",
+                "pub fn value() -> i32 { inline::here() }\n",
+            ),
+        )
+        .unwrap();
+        fs::write(root.join("src/little.rs"), "pub fn v() -> i32 { 1 }\n").unwrap();
+        fs::write(root.join("src/big.rs"), "pub fn v() -> i32 { 2 }\n").unwrap();
+
+        let prepared = prepare_rust_project(&root).unwrap();
+        // Both arms, and never the inline module, which has no file.
+        assert_eq!(
+            prepared.source_files,
+            [
+                "src/big.rs",
+                "src/lib.rs",
+                "src/little.rs",
+                "tests/integration.rs"
+            ],
+            "{:?}",
+            prepared.source_files
+        );
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

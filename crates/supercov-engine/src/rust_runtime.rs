@@ -93,9 +93,18 @@ mod {module_name} {{
     // written out in full. Without this the module does not compile and the
     // whole build fails, which is a hard failure rather than a degradation.
     extern crate std;
+    // Every name is imported explicitly: this module is appended to a crate
+    // root, and a crate root may be `no_std` or may turn the prelude off
+    // outright (tracing's macro tests carry `#![no_implicit_prelude]`).
+    use std::cmp::{{Ord, PartialEq, PartialOrd}};
+    use std::convert::From;
     use std::fs::{{File, OpenOptions}};
     use std::io::Write as _;
+    use std::iter::{{IntoIterator, Iterator}};
+    use std::marker::Sized;
+    use std::mem::drop;
     use std::option::Option::{{self, None, Some}};
+    use std::result::Result::{{self, Err, Ok}};
     use std::string::String;
     use std::sync::atomic::{{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering}};
     use std::sync::{{Mutex, OnceLock}};
@@ -547,7 +556,10 @@ mod {module_name} {{
     impl<B, C> TryProbe for ControlFlow<B, C> {{
         #[inline(always)]
         fn probe(self, continued: &'static str, returned: &'static str) -> Self {{
-            hit(if matches!(self, ControlFlow::Continue(_)) {{ continued }} else {{ returned }});
+            hit(match self {{
+                ControlFlow::Continue(_) => continued,
+                _ => returned,
+            }});
             self
         }}
     }}
@@ -555,7 +567,10 @@ mod {module_name} {{
     impl<T, E> TryProbe for Poll<Result<T, E>> {{
         #[inline(always)]
         fn probe(self, continued: &'static str, returned: &'static str) -> Self {{
-            hit(if matches!(self, Poll::Ready(Err(_))) {{ returned }} else {{ continued }});
+            hit(match self {{
+                Poll::Ready(Err(_)) => returned,
+                _ => continued,
+            }});
             self
         }}
     }}
@@ -563,7 +578,10 @@ mod {module_name} {{
     impl<T, E> TryProbe for Poll<Option<Result<T, E>>> {{
         #[inline(always)]
         fn probe(self, continued: &'static str, returned: &'static str) -> Self {{
-            hit(if matches!(self, Poll::Ready(Some(Err(_)))) {{ returned }} else {{ continued }});
+            hit(match self {{
+                Poll::Ready(Some(Err(_))) => returned,
+                _ => continued,
+            }});
             self
         }}
     }}
@@ -1061,6 +1079,51 @@ fn main() {
             [(vec![Some(false)], false), (vec![Some(true)], true)],
             "both distinct vectors must survive, and neither may repeat"
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn generated_runtime_survives_a_host_without_the_prelude() {
+        // tracing's macro tests carry `#![no_implicit_prelude]` on purpose,
+        // to prove their macros do not depend on it. The runtime imports
+        // every name it uses for `no_std` hosts, but three `TryProbe` impls
+        // reached for `matches!`, which is a prelude macro.
+        let source = r#"#![no_implicit_prelude]
+
+fn parse(text: &str) -> ::std::option::Option<i32> {
+    let value: i32 = text.parse().ok()?;
+    ::std::option::Option::Some(value * 2)
+}
+
+fn main() {
+    ::std::println!("{:?} {:?}", parse("4"), parse("x"));
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        // The `?` takes a probe, which is what pulls in the TryProbe impls.
+        assert!(transformed.code.contains("TryProbe"));
+        let runtime =
+            render_rust_runtime("__supercov_runtime_v1", "0123456789abcdef01234567").unwrap();
+        let directory = temporary_directory("no-implicit-prelude");
+        let input = directory.join("main.rs");
+        let binary = directory.join("program");
+        fs::write(&input, format!("{}\n{runtime}", transformed.code)).unwrap();
+        let compile = Command::new("rustc")
+            .arg("--edition=2024")
+            .arg("--cap-lints=warn")
+            .arg(&input)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap();
+        assert!(
+            compile.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let output = Command::new(&binary).output().unwrap();
+        assert_eq!(output.stdout, b"Some(8) None\n");
         fs::remove_dir_all(directory).unwrap();
     }
 
