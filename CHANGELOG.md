@@ -4,20 +4,16 @@
 
 **Added**
 
-- Doctests are measured. `cargo test` runs them with Supercov standing in for rustdoc: every doctest runs in a process of its own and the lines it executed are attributed to it by name, for merged (edition 2024) and standalone doctests alike.
-- `cargo nextest run` works on the public path. Supercov is nextest's target runner, so nextest's scheduling, retries, filters and exit status are untouched, and each attempt is recorded on its own; a test that passes on retry is reported flaky.
+- Doctests are measured: `cargo test` runs them with Supercov standing in for rustdoc, each in its own process, attributed by name, merged and standalone alike.
+- `cargo nextest run` works on the public path. Supercov is nextest's target runner: scheduling, retries, filters and exit status are untouched, each attempt is recorded, and a pass on retry is flaky.
+- Every Rust branch obligation has a probe: match arms, `&&` and `||`, `for` and `while` loops, `?`, let chains (pattern outcomes derived exactly from where the chain stopped) and attributed statements. Only const contexts and macro expansions remain declared.
 
 **Fixed**
 
-- A crate whose only tests were doctests reported zero tests.
-- The test count names tests, not attempts: a test retried once is one test.
-- Only the files rustc compiles are instrumented: each crate root and the modules it reaches through `mod`, `#[path]` and a literal `include!`. A `.rs` file a crate embeds as data with `include_str!`, or keeps as a fixture, stays byte-for-byte as written; before, it received probes that referenced a runtime module its consumer did not have.
-- Match arms are measured. Each arm records when it is selected and when the match passes it over on the way to a later arm; before, arms were listed as obligations but nothing ever observed them, and the last arm of an exhaustive match demanded a "not selected" outcome that cannot happen. The last arm now has only "selected".
-- The manifest no longer declares doctests unmeasured, since they are measured.
-- Logical operators, `for` and `while` loops and the try operator are measured: whether `&&` and `||` short-circuited or evaluated their right operand, whether a loop body ran at all, and which way `?` went. These were the last structural branches that sat in the denominator without a probe, so the "structural branch probes not yet injected" limitation is gone.
-- Let chains are measured as decisions. A `let` cannot pass through a probe, so the runtime derives each pattern's outcome from how far the chain got and where it ended, which is exact because a chain stops at the first condition that fails; the `&&` operators of a chain are recorded the same way. `if let`, `else if let` and `while let` chains all report condition vectors.
-- Statements with outer attributes are measured: the probe moves into a block under the same attributes, so `#[cfg]` keeps governing probe and statement together. Only an attributed `let` without an initializer stays declared.
-- A program a test builds and runs with its own instrumentation no longer breaks the run: evidence files name the instrumentation that wrote them, and another program's evidence is left out instead of being reported as an unknown obligation.
+- A doctest-only crate reported zero tests; the test count names tests, not attempts.
+- Only files rustc compiles are instrumented: crate roots and the modules reached through `mod`, `#[path]` and literal `include!`. A `.rs` file embedded with `include_str!` stays as written.
+- Evidence files name their instrumentation, so a program a test builds and runs with its own probes no longer breaks the run.
+- The last arm of an exhaustive match no longer demands an impossible "not selected" outcome.
 
 ## 0.0.39
 
