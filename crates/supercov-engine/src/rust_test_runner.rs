@@ -1122,6 +1122,21 @@ fn rust_coverage_model() -> CoverageModelDeclaration {
 /// reject generated sources: serde builds with `#![deny(warnings)]`, and
 /// http's `if ({ frame ... })` decision wrapping trips `unused_parens` into a
 /// hard error under it. The user's own `cargo test` runs are unaffected.
+/// The stack an instrumented test thread gets. Probes add stack to every
+/// frame -- a decision frame, a `?` operand copied through its probe, a
+/// wrapper's temporaries -- and a test that recurses to a depth chosen against
+/// the default 2 MiB (serde_json's recursion-limit test) overflows under
+/// instrumentation. libtest sizes test threads from `RUST_MIN_STACK`, so an
+/// instrumented process gets 16 MiB unless the user chose a size. The
+/// reservation is virtual; only touched pages cost memory.
+pub(crate) fn instrumented_stack_environment() -> Vec<(&'static str, &'static str)> {
+    if std::env::var_os("RUST_MIN_STACK").is_some() {
+        Vec::new()
+    } else {
+        vec![("RUST_MIN_STACK", "16777216")]
+    }
+}
+
 pub(crate) fn capped_rustflags() -> String {
     let mut rustflags = std::env::var("RUSTFLAGS").unwrap_or_default();
     if !rustflags.is_empty() {
@@ -1306,6 +1321,7 @@ pub fn run_prepared_rust_tests(
                         // 14.4s (baseline 8.0s streamed vs 1.0s captured).
                         .args(["--exact", &task.test])
                         .current_dir(&project.workspace_root)
+                        .envs(instrumented_stack_environment())
                         .env("SUPERCOV_RUST_EVIDENCE_DIR", &task.directory)
                         .env(
                             crate::rust_probe_transport::RUST_CONTEXT_ENV,
@@ -1879,6 +1895,14 @@ pub fn describe(value: Option<i32>, flag: bool) -> &'static str {
         "other"
     }
 }
+pub fn depth(n: u32) -> Result<u32, String> {
+    if n == 0 {
+        Ok(0)
+    } else {
+        let below = depth(n - 1)?;
+        Ok(below + 1)
+    }
+}
 #[cfg(test)]
 mod tests {
     #[test] fn false_path() { assert_eq!(super::choose(false, true), 0); }
@@ -1896,6 +1920,7 @@ mod tests {
     #[test] fn chain_pattern_fails() { assert_eq!(super::describe(None, true), "other"); }
     #[test] fn chain_negative() { assert_eq!(super::describe(Some(-1), true), "other"); }
     #[test] fn chain_flag_fails() { assert_eq!(super::describe(Some(1), false), "other"); }
+    #[test] fn deep_recursion() { assert_eq!(super::depth(5_000), Ok(5_000)); }
 }
 "#,
         )
@@ -1913,7 +1938,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(run.exit_code, 0);
-        assert_eq!(run.request.raw_results.len(), 15);
+        assert_eq!(run.request.raw_results.len(), 16);
         let statuses = run
             .request
             .raw_results
@@ -1932,7 +1957,7 @@ mod tests {
                 .iter()
                 .filter(|status| **status == "passed")
                 .count(),
-            14
+            15
         );
 
         // The let chain's condition vectors, with the pattern's outcome
@@ -1983,7 +2008,7 @@ mod tests {
             test_exit_code: ExitCodeInput::Present(Some(0)),
         })
         .unwrap();
-        assert_eq!(report.view.tests.len(), 15);
+        assert_eq!(report.view.tests.len(), 16);
         assert!(report.view.summary.lines.covered > 0);
         assert!(report.view.summary.decisions > 0);
 
@@ -2026,7 +2051,16 @@ mod tests {
             tests_of(while_loop, "entered"),
             ["src/lib.rs::tests::first_even_found"]
         );
-        let try_operator = single("try-operator");
+        // `depth` adds a second `?`; the one in `parse_twice` is the one
+        // exercised both ways.
+        let try_operator = report
+            .view
+            .branches
+            .iter()
+            .find(|branch| {
+                branch.meta.kind == "try-operator" && branch.meta.source.contains("parse().ok()")
+            })
+            .expect("parse_twice's try operator");
         assert_eq!(
             tests_of(try_operator, "continued"),
             ["src/lib.rs::tests::parse_ok"]

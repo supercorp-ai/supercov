@@ -6,6 +6,12 @@
 
 - Arguments of the std expression macros (`assert!`, `assert_eq!`, `println!`, `format!`, `write!`, `vec!`, `dbg!`, `panic!` and friends) are measured like any other expression, and an `assert!`/`debug_assert!` condition is a decision with condition vectors of its own. The macro limitation now covers only other macros.
 
+**Fixed**
+
+- Found by running the Rust frontend over bytes, memchr, itertools, serde_json, anyhow, semver and smallvec: a plain `if let` or `while let` in a crate before edition 2024 became a let chain, which those editions reject (the evaluation is now marked by a statement, and a `while let` tells a `break` from the condition failing); an `assert!` without a message lost the condition text in its panic message, breaking `#[should_panic(expected = ...)]` tests (the original text is supplied as the message); a `#[path = "../src/..."]` module was rejected as escaping its directory; a file whose source uses a word a newer edition reserves (`rng.gen()`) failed to parse, since every file was read as edition 2024 (editions are now tried newest first).
+- `SUPERCOV_RUST_DUMP_FAILED_INSTRUMENTATION=<dir>` writes the transformed text of any file whose instrumentation no longer parses, for diagnosis.
+- Deep recursion no longer overflows under instrumentation (serde_json's recursion-limit test). Probes had grown every frame by kilobytes in debug builds: inlined record buffers now stay in never-inlined functions and a decision frame packs into 48 bytes. Instrumented test processes also get a 16 MiB thread stack through `RUST_MIN_STACK` unless the user set one, since probes still add some stack to every frame.
+
 **Changed**
 
 - Rust probes cost less in hot loops. The probe runtime is compiled in the crate's own profile, unoptimized under `cargo test`, so its dedupe paths are now plain loops: a repeated statement hit is one atomic load, and a repeated decision vector compares only the words it uses, without a lock. Measured on a three-million-iteration loop: a decision evaluation from about 190ns to about 70ns, statement hits unchanged at a few nanoseconds.

@@ -771,6 +771,10 @@ impl<'a> RustObligationCollector<'a> {
     }
 }
 
+/// Set to a directory to receive the transformed text of any file whose
+/// instrumentation no longer parses, named after the file.
+pub const FAILED_TRANSFORM_DUMP_ENV: &str = "SUPERCOV_RUST_DUMP_FAILED_INSTRUMENTATION";
+
 /// The std macros whose arguments are ordinary expressions. With the `!`
 /// turned into `_` (and `vec!`'s brackets into parentheses), `name!(args)`
 /// reads as the call `name_(args)` at the same byte offsets -- the same
@@ -812,14 +816,44 @@ struct ExpressionView {
     assertions: Vec<TextRange>,
 }
 
-fn expression_view(source: &str) -> ExpressionView {
+/// The editions tried when parsing, newest first: a file that parses under
+/// the newest is the common case, and an older one accepts words the newest
+/// reserves -- `gen` is an identifier before 2024, and crates still call
+/// `rng.gen()`. The edition that parses the original also parses its view and
+/// its transformed text.
+const EDITIONS: [Edition; 4] = [
+    Edition::Edition2024,
+    Edition::Edition2021,
+    Edition::Edition2018,
+    Edition::Edition2015,
+];
+
+fn parse_any_edition(source: &str) -> Result<(SourceFile, Edition), Vec<String>> {
+    let mut newest_errors = None;
+    for edition in EDITIONS {
+        let parsed = SourceFile::parse(source, edition);
+        let errors = parsed.errors();
+        if errors.is_empty() {
+            return Ok((parsed.tree(), edition));
+        }
+        newest_errors.get_or_insert_with(|| {
+            errors
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+        });
+    }
+    Err(newest_errors.unwrap_or_default())
+}
+
+fn expression_view(source: &str, edition: Edition) -> ExpressionView {
     let mut text = source.to_owned();
     let mut assertions = Vec::new();
     // A macro inside another macro's arguments is tokens until the outer one
     // reads as a call, so rewrite, re-parse, and repeat until nothing changes.
     for _ in 0..16 {
-        let tree = SourceFile::parse(&text, Edition::CURRENT).tree();
-        let Some(next) = rewrite_expression_macros(&text, &tree, &mut assertions) else {
+        let tree = SourceFile::parse(&text, edition).tree();
+        let Some(next) = rewrite_expression_macros(&text, &tree, edition, &mut assertions) else {
             break;
         };
         text = next;
@@ -832,6 +866,7 @@ fn expression_view(source: &str) -> ExpressionView {
 fn rewrite_expression_macros(
     source: &str,
     tree: &SourceFile,
+    edition: Edition,
     assertions: &mut Vec<TextRange>,
 ) -> Option<String> {
     let mut text = source.as_bytes().to_vec();
@@ -869,10 +904,7 @@ fn rewrite_expression_macros(
             "fn __supercov() {{ let _ = __f{}; }}",
             String::from_utf8_lossy(&rewritten)
         );
-        if !SourceFile::parse(&probe, Edition::CURRENT)
-            .errors()
-            .is_empty()
-        {
+        if !SourceFile::parse(&probe, edition).errors().is_empty() {
             continue;
         }
         text[usize::from(bang.text_range().start())] = b'_';
@@ -883,6 +915,15 @@ fn rewrite_expression_macros(
         }
     }
     changed.then(|| String::from_utf8(text).expect("rewriting ASCII keeps the source UTF-8"))
+}
+
+/// How many arguments an `assert!`-like call has: one means the macro would
+/// build the panic message from the condition's own text.
+fn assertion_argument_count(root: &ra_ap_syntax::SyntaxNode, arguments: TextRange) -> usize {
+    root.descendants()
+        .find(|node| node.text_range() == arguments && ast::ArgList::can_cast(node.kind()))
+        .and_then(ast::ArgList::cast)
+        .map_or(0, |list| list.args().count())
 }
 
 /// The condition of an `assert!`-like call, found in the view by the range of
@@ -901,25 +942,17 @@ fn assertion_condition(root: &ra_ap_syntax::SyntaxNode, arguments: TextRange) ->
 /// used and every macro stays declared.
 fn parse_for_instrumentation(
     source: &str,
-) -> Result<(SourceFile, Vec<TextRange>), RustInstrumenterError> {
+) -> Result<(SourceFile, Vec<TextRange>, Edition), RustInstrumenterError> {
     if source.len() > u32::MAX as usize {
         return Err(RustInstrumenterError::SourceTooLarge);
     }
-    let parsed = SourceFile::parse(source, Edition::CURRENT);
-    let errors = parsed
-        .errors()
-        .into_iter()
-        .map(|error| error.to_string())
-        .collect::<Vec<_>>();
-    if !errors.is_empty() {
-        return Err(RustInstrumenterError::Parse(errors));
-    }
-    let view = expression_view(source);
-    let parsed_view = SourceFile::parse(&view.text, Edition::CURRENT);
+    let (tree, edition) = parse_any_edition(source).map_err(RustInstrumenterError::Parse)?;
+    let view = expression_view(source, edition);
+    let parsed_view = SourceFile::parse(&view.text, edition);
     if parsed_view.errors().is_empty() {
-        Ok((parsed_view.tree(), view.assertions))
+        Ok((parsed_view.tree(), view.assertions, edition))
     } else {
-        Ok((parsed.tree(), Vec::new()))
+        Ok((tree, Vec::new(), edition))
     }
 }
 
@@ -927,7 +960,7 @@ pub fn build_rust_manifest(
     file: &str,
     source: &str,
 ) -> Result<CoverageManifest, RustInstrumenterError> {
-    let (tree, assertions) = parse_for_instrumentation(source)?;
+    let (tree, assertions, _) = parse_for_instrumentation(source)?;
     RustObligationCollector::new(file, source).collect(&tree, &assertions)
 }
 
@@ -986,16 +1019,68 @@ fn allocate_chain_table_name(
     candidate
 }
 
-/// A decision whose condition is a let chain. A `let` cannot pass through a
-/// call and the chain cannot be wrapped as a whole, so the frame lives in a
-/// block around the `if` or `while`, ordinary conditions take `condition`
-/// wrappers, each later `let` is preceded by a `reached` marker, and the
-/// outcome is recorded where it becomes known: at the entry of the then
-/// branch or loop body (taken) and at the else branch or after the loop (not
-/// taken). From those, the runtime derives every pattern's outcome exactly:
-/// a chain tries its conditions in order and stops at the first that fails.
-/// The chain's `&&` operators are recorded from the same frame, through a
-/// table of the operators whose left side holds a `let`.
+/// A fresh identifier for generated code, from the obligation it serves.
+fn allocate_identifier(
+    file: &str,
+    range: TextRange,
+    kind: &str,
+    identifiers: &mut BTreeSet<String>,
+) -> String {
+    let id = stable_id(file, kind, range, "");
+    let suffix = id.rsplit(':').next().unwrap_or(kind);
+    let base = format!("__supercov_{kind}_{suffix}");
+    let mut candidate = base.clone();
+    let mut attempt = 0_usize;
+    while !identifiers.insert(candidate.clone()) {
+        attempt += 1;
+        candidate = format!("{base}_{attempt}");
+    }
+    candidate
+}
+
+/// The `break`s in `body` that leave the loop it belongs to: unlabeled ones
+/// with no other loop between them and the body, and labeled ones naming the
+/// loop's own label.
+fn own_breaks(body: &ast::BlockExpr, label: Option<ast::Label>) -> Vec<TextRange> {
+    let own_label = label
+        .and_then(|label| label.lifetime())
+        .map(|lifetime| lifetime.text().to_string());
+    body.syntax()
+        .descendants()
+        .filter_map(ast::BreakExpr::cast)
+        .filter(|expression| match expression.lifetime() {
+            Some(lifetime) => own_label.as_deref() == Some(lifetime.text().to_string().as_str()),
+            None => !expression
+                .syntax()
+                .ancestors()
+                .skip(1)
+                .take_while(|ancestor| ancestor != body.syntax())
+                .any(|ancestor| {
+                    ast::LoopExpr::can_cast(ancestor.kind())
+                        || ast::WhileExpr::can_cast(ancestor.kind())
+                        || ast::ForExpr::can_cast(ancestor.kind())
+                        || ast::ClosureExpr::can_cast(ancestor.kind())
+                }),
+        })
+        .map(|expression| expression.syntax().text_range())
+        .collect()
+}
+
+/// A decision whose condition holds a `let`. A `let` cannot pass through a
+/// call and the condition cannot be wrapped as a whole, so the frame lives in
+/// a block around the `if` or `while`, ordinary conditions take `condition`
+/// wrappers, each later `let` of a chain is preceded by a `reached` marker,
+/// and the outcome is recorded where it becomes known: at the entry of the
+/// then branch or loop body (taken) and at the else branch or after the loop
+/// (not taken). From those, the runtime derives every pattern's outcome
+/// exactly: a chain tries its conditions in order and stops at the first that
+/// fails. The chain's `&&` operators are recorded from the same frame, through
+/// a table of the operators whose left side holds a `let`.
+///
+/// A lone `let` is not a chain, and an `&&` marker would make it one -- which
+/// editions before 2024 reject. Its evaluation is marked by a statement
+/// instead: once before an `if`, and for a `while` at each body entry and
+/// after the loop, where a `break` has to be told from the condition failing.
 fn instrument_let_chain(
     insertions: &mut Vec<Insertion>,
     runtime_path: &str,
@@ -1006,19 +1091,24 @@ fn instrument_let_chain(
 ) {
     // The block goes after any outer attributes, so `#[cfg]` keeps governing
     // the frame together with the expression it belongs to.
-    let (kind, host_range, body) = match &host {
+    let (kind, host_range, body, label) = match &host {
         ChainHost::If(expression) => (
             "if",
             range_after_attributes(*expression),
             expression.then_branch(),
+            None,
         ),
         ChainHost::While(expression) => (
             "while",
             range_after_attributes(*expression),
             expression.loop_body(),
+            expression.label(),
         ),
     };
-    let Some(body_offset) = body.as_ref().and_then(block_entry_offset) else {
+    let Some(body) = body else {
+        return;
+    };
+    let Some(body_offset) = block_entry_offset(&body) else {
         return;
     };
     let range = condition.syntax().text_range();
@@ -1033,6 +1123,13 @@ fn instrument_let_chain(
         .collect::<Vec<_>>();
     let frame = allocate_frame_name(file, condition, kind, identifiers);
     let table = allocate_chain_table_name(file, condition, identifiers);
+    let single_let = atoms.len() == 1;
+    let broke = match &host {
+        ChainHost::While(_) if single_let => {
+            Some(allocate_identifier(file, range, "broke", identifiers))
+        }
+        _ => None,
+    };
 
     let mut operators = Vec::new();
     for binary in condition
@@ -1066,28 +1163,38 @@ fn instrument_let_chain(
         ));
     }
 
-    let prefix = format!(
+    let mark = format!("{runtime_path}::reached(&mut {frame}, 0);");
+    let record_false = format!("{runtime_path}::decision_chain(&mut {frame}, false, {table});");
+    let mut prefix = format!(
         "{{ const {table}: &[(usize, &str, &str)] = &[{}]; let mut {frame} = {runtime_path}::DecisionFrame::new({id:?}, {}); ",
         operators.join(", "),
         atoms.len()
     );
+    if single_let {
+        prefix.push_str(&mark);
+        prefix.push(' ');
+    }
+    if let Some(broke) = &broke {
+        prefix.push_str(&format!("let mut {broke} = false; "));
+    }
     let suffix = match &host {
         ChainHost::If(expression) => match expression.else_branch() {
             Some(_) => " }".to_owned(),
-            None => format!(
-                " else {{ {runtime_path}::decision_chain(&mut {frame}, false, {table}); }} }}"
-            ),
+            None => format!(" else {{ {record_false} }} }}"),
         },
-        ChainHost::While(_) => {
-            format!(" {runtime_path}::decision_chain(&mut {frame}, false, {table}); }}")
-        }
+        ChainHost::While(_) => match &broke {
+            Some(broke) => format!(" if !{broke} {{ {mark} {record_false} }} }}"),
+            None => format!(" {record_false} }}"),
+        },
     };
     push_wrapper(insertions, host_range, host_range, 1, prefix, suffix);
-    push_direct(
-        insertions,
-        usize::from(range.start()),
-        format!("{runtime_path}::reached(&mut {frame}, 0) && "),
-    );
+    if !single_let {
+        push_direct(
+            insertions,
+            usize::from(range.start()),
+            format!("{runtime_path}::reached(&mut {frame}, 0) && "),
+        );
+    }
     for (index, atom) in atoms.iter().enumerate() {
         if lets.contains(atom) {
             if index > 0 {
@@ -1108,20 +1215,31 @@ fn instrument_let_chain(
             );
         }
     }
-    push_direct(
-        insertions,
-        body_offset,
-        format!("\n{runtime_path}::decision_chain(&mut {frame}, true, {table});"),
-    );
+    let mut entry = String::new();
+    if broke.is_some() {
+        entry.push_str(&format!("\n{mark}"));
+    }
+    entry.push_str(&format!(
+        "\n{runtime_path}::decision_chain(&mut {frame}, true, {table});"
+    ));
+    push_direct(insertions, body_offset, entry);
+    if let Some(broke) = &broke {
+        for break_range in own_breaks(&body, label) {
+            push_wrapper(
+                insertions,
+                break_range,
+                break_range,
+                0,
+                format!("{{ {broke} = true; "),
+                " }".into(),
+            );
+        }
+    }
     if let ChainHost::If(expression) = &host {
         match expression.else_branch() {
             Some(ast::ElseBranch::Block(block)) => {
                 if let Some(offset) = block_entry_offset(&block) {
-                    push_direct(
-                        insertions,
-                        offset,
-                        format!("\n{runtime_path}::decision_chain(&mut {frame}, false, {table});"),
-                    );
+                    push_direct(insertions, offset, format!("\n{record_false}"));
                 }
             }
             Some(ast::ElseBranch::IfExpr(nested)) => {
@@ -1131,7 +1249,7 @@ fn instrument_let_chain(
                     nested_range,
                     nested_range,
                     0,
-                    format!("{{ {runtime_path}::decision_chain(&mut {frame}, false, {table}); "),
+                    format!("{{ {record_false} "),
                     " }".into(),
                 );
             }
@@ -1225,7 +1343,7 @@ pub fn instrument_rust_source(
         return Err(RustInstrumenterError::InvalidRuntimePath);
     }
     let mut manifest = build_rust_manifest(file, source)?;
-    let (tree, assertions) = parse_for_instrumentation(source)?;
+    let (tree, assertions, edition) = parse_for_instrumentation(source)?;
     let root = tree.syntax();
     let mut insertions = Vec::new();
     let mut identifiers = root
@@ -1666,16 +1784,32 @@ pub fn instrument_rust_source(
     }
     // `assert!(cond, ...)`: the condition decides whether the program goes
     // on, and the macro takes an instrumented expression like any other.
+    // Without a message of its own, `assert!` stringifies the condition into
+    // the panic message -- which `#[should_panic(expected = "...")]` tests
+    // read -- so the original text is supplied as the message, exactly as
+    // the macro would have built it.
     for arguments in &assertions {
-        if let Some(condition) = assertion_condition(root, *arguments) {
-            let frame_name = allocate_frame_name(file, &condition, "assert", &mut identifiers);
-            instrument_decision(
+        let Some(condition) = assertion_condition(root, *arguments) else {
+            continue;
+        };
+        let frame_name = allocate_frame_name(file, &condition, "assert", &mut identifiers);
+        if !instrument_decision(
+            &mut insertions,
+            runtime_path,
+            file,
+            &condition,
+            "assert",
+            &frame_name,
+        ) {
+            continue;
+        }
+        if assertion_argument_count(root, *arguments) == 1 {
+            let range = condition.syntax().text_range();
+            let original = &source[usize::from(range.start())..usize::from(range.end())];
+            push_direct(
                 &mut insertions,
-                runtime_path,
-                file,
-                &condition,
-                "assert",
-                &frame_name,
+                usize::from(range.end()),
+                format!(", \"assertion failed: {{}}\", stringify!({original})"),
             );
         }
     }
@@ -1695,13 +1829,21 @@ pub fn instrument_rust_source(
     });
 
     let code = apply_insertions(source, insertions)?;
-    let transformed = SourceFile::parse(&code, Edition::CURRENT);
+    let transformed = SourceFile::parse(&code, edition);
     let errors = transformed
         .errors()
         .into_iter()
         .map(|error| error.to_string())
         .collect::<Vec<_>>();
     if !errors.is_empty() {
+        // The transformed text is what a diagnosis needs; the parse errors
+        // alone do not say where. Written only when asked, since it is the
+        // size of the source.
+        if let Some(directory) = std::env::var_os(FAILED_TRANSFORM_DUMP_ENV) {
+            let name = file.replace(['/', '\\'], "__");
+            let _ = std::fs::create_dir_all(&directory);
+            let _ = std::fs::write(std::path::Path::new(&directory).join(name), &code);
+        }
         return Err(RustInstrumenterError::Parse(errors));
     }
     Ok(RustInstrumentedSource { code, manifest })
@@ -1744,6 +1886,10 @@ mod __supercov_runtime_v1 {
 "#;
 
     fn compile_and_run(source: &str, name: &str) -> std::process::Output {
+        compile_and_run_edition(source, name, "2024")
+    }
+
+    fn compile_and_run_edition(source: &str, name: &str, edition: &str) -> std::process::Output {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1757,7 +1903,7 @@ mod __supercov_runtime_v1 {
         let binary = directory.join("program");
         fs::write(&input, source).unwrap();
         let compile = Command::new("rustc")
-            .arg("--edition=2024")
+            .arg(format!("--edition={edition}"))
             .arg(&input)
             .arg("-o")
             .arg(&binary)
@@ -1994,6 +2140,17 @@ fn main() {
 "#;
         let transformed =
             instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        // `debug_assert!(cond)` had no message: the condition's own text is
+        // supplied so the panic message is the one the macro would build.
+        assert!(transformed.code.contains(
+            r#", "assertion failed: {}", stringify!(values.iter().all(|v| *v > -100)))"#
+        ));
+        // `assert!(cond, "msg", args)` keeps its message untouched.
+        assert!(
+            transformed
+                .code
+                .contains(r#"), "bad input {:?}", values);"#)
+        );
         // The assertion's condition is a two-condition decision, the `if`
         // inside `vec!` and `println!` are decisions, the logical operators
         // inside the macros are branches, and no macro is left declared.
@@ -2063,6 +2220,159 @@ fn main() {
             after_location(&instrumented.stderr),
             after_location(&original.stderr)
         );
+    }
+
+    #[test]
+    fn assertion_panic_messages_survive_instrumentation() {
+        // smallvec's `#[should_panic(expected = "new_capacity >= len")]` reads
+        // the message `assert!` builds from its condition's text.
+        let source = r#"fn grow(len: usize, new_capacity: usize) {
+    assert!(new_capacity >= len);
+}
+
+fn check(value: i32) {
+    assert!(value > 0 && value < 10, "value {value} out of range");
+}
+
+fn main() {
+    std::panic::set_hook(Box::new(|_| {}));
+    for (len, capacity) in [(3, 5), (8, 5)] {
+        match std::panic::catch_unwind(|| grow(len, capacity)) {
+            Ok(()) => println!("ok"),
+            Err(payload) => println!("{}", payload.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_default()),
+        }
+    }
+    match std::panic::catch_unwind(|| check(12)) {
+        Ok(()) => println!("ok"),
+        Err(payload) => println!("{}", payload.downcast_ref::<String>().cloned().unwrap_or_default()),
+    }
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        let original = compile_and_run(source, "original-assert-message");
+        let instrumented = compile_and_run(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "instrumented-assert-message",
+        );
+        assert_eq!(instrumented.status, original.status);
+        assert_eq!(instrumented.stdout, original.stdout);
+        assert!(
+            String::from_utf8_lossy(&instrumented.stdout)
+                .contains("assertion failed: new_capacity >= len")
+        );
+    }
+
+    #[test]
+    fn files_that_predate_a_reserved_word_still_instrument() {
+        // itertools' tests call `rng.gen()`; `gen` is a keyword in 2024 only.
+        let source = r#"struct Rng(u64);
+impl Rng {
+    fn gen(&mut self) -> u64 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+        self.0 >> 33
+    }
+}
+
+fn main() {
+    let mut rng = Rng(7);
+    let mut odd = 0;
+    for _ in 0..10 {
+        if rng.gen() % 2 == 1 {
+            odd += 1;
+        }
+    }
+    println!("{odd}");
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        assert!(
+            transformed
+                .manifest
+                .decisions
+                .iter()
+                .any(|decision| decision.line == 13)
+        );
+        let original = compile_and_run_edition(source, "original-gen", "2021");
+        let instrumented = compile_and_run_edition(
+            &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+            "instrumented-gen",
+            "2021",
+        );
+        assert_eq!(instrumented.status, original.status);
+        assert_eq!(instrumented.stdout, original.stdout);
+    }
+
+    #[test]
+    fn lone_let_conditions_compile_before_edition_2024_and_record_breaks() {
+        // bytes and memchr are edition 2018/2021: a plain `if let` there must
+        // not become a let chain. `while let` needs its `break`s told apart
+        // from the condition failing, including labeled ones from inner loops.
+        let source = r#"fn first_even(values: &[i32]) -> Option<i32> {
+    let mut it = values.iter();
+    'scan: while let Some(value) = it.next() {
+        if *value < 0 {
+            break;
+        }
+        for _ in 0..1 {
+            if *value == 99 {
+                break 'scan;
+            }
+            if *value == 98 {
+                break;
+            }
+        }
+        if *value % 2 == 0 {
+            return Some(*value);
+        }
+    }
+    None
+}
+
+fn describe(value: Option<i32>) -> &'static str {
+    if let Some(inner) = value {
+        if inner > 0 { "positive" } else { "non-positive" }
+    } else if let None = value {
+        "none"
+    } else {
+        "unreachable"
+    }
+}
+
+fn count(values: &[Option<i32>]) -> usize {
+    let mut total = 0;
+    for value in values {
+        if let Some(_) = value {
+            total += 1;
+        }
+    }
+    total
+}
+
+fn main() {
+    println!("{:?} {:?} {:?} {:?}", first_even(&[1, 3, 4]), first_even(&[1, -1, 4]), first_even(&[99, 4]), first_even(&[98, 3, 6]));
+    println!("{} {} {}", describe(Some(2)), describe(Some(-2)), describe(None));
+    println!("{}", count(&[Some(1), None, Some(3)]));
+}
+"#;
+        let transformed =
+            instrument_rust_source("src/main.rs", source, "crate::__supercov_runtime_v1").unwrap();
+        assert!(!transformed.code.contains("&& let"));
+        assert!(transformed.code.contains("__supercov_broke_"));
+        assert_eq!(transformed.code.matches("= true; break").count(), 2);
+        for edition in ["2021", "2024"] {
+            let original =
+                compile_and_run_edition(source, &format!("original-lone-let-{edition}"), edition);
+            let instrumented = compile_and_run_edition(
+                &format!("{}\n{NOOP_RUNTIME}", transformed.code),
+                &format!("instrumented-lone-let-{edition}"),
+                edition,
+            );
+            assert_eq!(instrumented.status, original.status);
+            assert_eq!(instrumented.stdout, original.stdout);
+            assert_eq!(instrumented.stderr, original.stderr);
+        }
     }
 
     #[test]

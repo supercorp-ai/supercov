@@ -36,8 +36,8 @@ use crate::{
         parse_nextest_version_output, validate_nextest_version,
     },
     rust_test_runner::{
-        CargoTestInvocation, RustTestRunnerError, capped_rustflags, io_error,
-        nextest_list_invocation, nextest_version_arguments, relative_source, snapshot,
+        CargoTestInvocation, RustTestRunnerError, capped_rustflags, instrumented_stack_environment,
+        io_error, nextest_list_invocation, nextest_version_arguments, relative_source, snapshot,
     },
 };
 
@@ -530,6 +530,7 @@ fn nextest_runner_inner(arguments: Vec<OsString>) -> Result<i32, RustTestRunnerE
     let evidence = attempts.join(format!("{sequence:08}"));
     fs::create_dir_all(&evidence).map_err(io_error)?;
     let status = command
+        .envs(instrumented_stack_environment())
         .env(EVIDENCE_DIR_ENV, &evidence)
         .status()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;

@@ -156,6 +156,11 @@ fn resolve_module_tree(
         .map(|root| (root.clone(), owner_directory(root)))
         .collect::<Vec<_>>();
     while let Some((file, directory)) = pending.pop() {
+        // `#[path = "../src/shared.rs"]` climbs out of its directory; the
+        // path is normalised lexically so the workspace check and the file
+        // set see one spelling of it.
+        let file = normalize(&file);
+        let directory = normalize(&directory);
         if !file.starts_with(workspace) {
             continue;
         }
@@ -176,6 +181,21 @@ fn resolve_module_tree(
         collect_module_declarations(parsed.items(), &file, &directory, false, &mut pending);
     }
     Ok(())
+}
+
+/// Resolve `.` and `..` components without touching the filesystem.
+fn normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn owner_directory(file: &Path) -> PathBuf {
@@ -663,6 +683,20 @@ fn integration_choice() {
         fs::write(
             root.join("src/included.rs"),
             "pub fn included() -> i32 { 2 }\n",
+        )
+        .unwrap();
+        // serde_json's tests reach into src with `#[path = "../src/..."]`.
+        fs::write(
+            root.join("tests/integration.rs"),
+            concat!(
+                "#[path = \"../src/util.rs\"]\n",
+                "mod util;\n",
+                "#[test]\n",
+                "fn integration_choice() {\n",
+                "    assert_eq!(rust_project_fixture::choose(false, true), 3);\n",
+                "    assert_eq!(util::seven(), 7);\n",
+                "}\n",
+            ),
         )
         .unwrap();
         // Data, not code: embedded verbatim and compiled by a consumer of

@@ -220,7 +220,7 @@ mod {module_name} {{
         let mut index = 0;
         while index < conditions {{
             let byte = 10 + index;
-            words[byte / 8] |= (frame.values[index] as u64) << ((byte % 8) * 8);
+            words[byte / 8] |= (frame.value(index) as u64) << ((byte % 8) * 8);
             index += 1;
         }}
         let used = (10 + conditions).div_ceil(8);
@@ -318,12 +318,18 @@ mod {module_name} {{
         true
     }}
 
+    // A frame lives on the stack of the function whose decision it records,
+    // once per decision, and a recursive descent parser carries every one of
+    // them down every level: serde_json's recursion-limit test overflowed the
+    // test thread's stack when each frame held two 64-byte arrays. Values are
+    // two bits each in a u128 (0 unevaluated, 1 false, 2 true) and reached
+    // marks one bit each, so a frame is 48 bytes.
     pub struct DecisionFrame {{
         id: &'static str,
-        values: [u8; MAX_CONDITIONS],
+        values: u128,
         /// Let-chain conditions the evaluation got to: a `let` cannot be
         /// wrapped, so it is marked reached instead and resolved later.
-        reached: [bool; MAX_CONDITIONS],
+        reached: u64,
         conditions: usize,
         recordable: bool,
     }}
@@ -332,11 +338,27 @@ mod {module_name} {{
         pub fn new(id: &'static str, conditions: usize) -> Self {{
             Self {{
                 id,
-                values: [0; MAX_CONDITIONS],
-                reached: [false; MAX_CONDITIONS],
+                values: 0,
+                reached: 0,
                 conditions,
                 recordable: conditions <= MAX_CONDITIONS,
             }}
+        }}
+
+        #[inline(always)]
+        fn value(&self, index: usize) -> u8 {{
+            ((self.values >> (2 * index)) & 3) as u8
+        }}
+
+        #[inline(always)]
+        fn set_value(&mut self, index: usize, value: u8) {{
+            let shift = 2 * index;
+            self.values = (self.values & !(3u128 << shift)) | ((value as u128) << shift);
+        }}
+
+        #[inline(always)]
+        fn is_reached(&self, index: usize) -> bool {{
+            index < MAX_CONDITIONS && (self.reached >> index) & 1 == 1
         }}
     }}
 
@@ -344,8 +366,8 @@ mod {module_name} {{
     /// all). Always true, so it sits in the chain as an operand.
     #[inline(always)]
     pub fn reached(frame: &mut DecisionFrame, index: usize) -> bool {{
-        if let Some(slot) = frame.reached.get_mut(index) {{
-            *slot = true;
+        if index < MAX_CONDITIONS {{
+            frame.reached |= 1u64 << index;
         }}
         true
     }}
@@ -363,40 +385,49 @@ mod {module_name} {{
         outcome: bool,
         operators: &[(usize, &'static str, &'static str)],
     ) {{
-        if !frame.reached[0] {{
+        if !frame.is_reached(0) {{
             return;
         }}
         let conditions = frame.conditions.min(MAX_CONDITIONS);
         let mut last = 0;
-        for index in 0..conditions {{
-            if frame.reached[index] || frame.values[index] != 0 {{
+        let mut index = 0;
+        while index < conditions {{
+            if frame.is_reached(index) || frame.value(index) != 0 {{
                 last = index;
             }}
+            index += 1;
         }}
-        for index in 0..conditions {{
-            if frame.values[index] == 0 && frame.reached[index] {{
-                frame.values[index] = if index < last || outcome {{ 2 }} else {{ 1 }};
+        let mut index = 0;
+        while index < conditions {{
+            if frame.value(index) == 0 && frame.is_reached(index) {{
+                frame.set_value(index, if index < last || outcome {{ 2 }} else {{ 1 }});
             }}
+            index += 1;
         }}
         for (first, short_circuit, evaluated) in operators {{
-            let got_there = frame
-                .reached
-                .get(*first)
-                .copied()
-                .unwrap_or(false)
-                || frame.values.get(*first).is_some_and(|value| *value != 0);
+            let got_there = frame.is_reached(*first)
+                || (*first < MAX_CONDITIONS && frame.value(*first) != 0);
             hit(if got_there {{ evaluated }} else {{ short_circuit }});
         }}
         decision(outcome, frame);
-        frame.values = [0; MAX_CONDITIONS];
-        frame.reached = [false; MAX_CONDITIONS];
+        frame.values = 0;
+        frame.reached = 0;
     }}
 
+    // The hot paths are inlined into every probe site, so nothing with a
+    // stack buffer may be: an inlined 256-byte record per site turned each
+    // instrumented function's frame into kilobytes, and serde_json's
+    // recursion-limit test overflowed. Writing a record is the rare path and
+    // stays a call of its own.
     #[inline(always)]
     pub fn hit(id: &'static str) {{
-        if !first_sighting(id) {{
-            return;
+        if first_sighting(id) {{
+            record_hit(id);
         }}
+    }}
+
+    #[inline(never)]
+    fn record_hit(id: &'static str) {{
         let mut record = [0u8; RECORD_CAPACITY];
         let mut length = 0;
         if push(&mut record, &mut length, b"H\t")
@@ -539,29 +570,37 @@ mod {module_name} {{
 
     #[inline(always)]
     pub fn condition(value: bool, frame: &mut DecisionFrame, index: usize) -> bool {{
-        if index < frame.conditions {{
-            if let Some(slot) = frame.values.get_mut(index) {{
-                *slot = if value {{ 2 }} else {{ 1 }};
-            }}
+        if index < frame.conditions && index < MAX_CONDITIONS {{
+            frame.set_value(index, if value {{ 2 }} else {{ 1 }});
         }}
         value
     }}
 
     #[inline(always)]
     pub fn decision(value: bool, frame: &mut DecisionFrame) -> bool {{
+        if frame.recordable {{
+            record_decision(value, frame);
+        }}
+        value
+    }}
+
+    #[inline(never)]
+    fn record_decision(value: bool, frame: &DecisionFrame) {{
         // `writer()` comes first so the file's mutex boxes its platform mutex
         // while `OPENING` still makes re-entry harmless; the decision table
         // itself is lock-free and allocates nothing.
-        if !frame.recordable || writer().is_none() || !first_decision(frame, value) {{
-            return value;
+        if writer().is_none() || !first_decision(frame, value) {{
+            return;
         }}
         let mut record = [0u8; RECORD_CAPACITY];
         let mut length = 0;
         let mut fits = push(&mut record, &mut length, b"D\t")
             && push(&mut record, &mut length, frame.id.as_bytes())
             && push(&mut record, &mut length, b"\t");
-        for index in 0..frame.conditions {{
-            fits = fits && push(&mut record, &mut length, &[b'0' + frame.values[index]]);
+        let mut index = 0;
+        while index < frame.conditions {{
+            fits = fits && push(&mut record, &mut length, &[b'0' + frame.value(index)]);
+            index += 1;
         }}
         fits = fits
             && push(&mut record, &mut length, b"\t")
@@ -570,7 +609,6 @@ mod {module_name} {{
         if fits {{
             write_record(&record[..length]);
         }}
-        value
     }}
 }}
 "#

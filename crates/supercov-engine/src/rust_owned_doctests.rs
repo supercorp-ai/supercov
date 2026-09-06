@@ -58,7 +58,7 @@ use crate::{
     rust_project::PreparedRustProject,
     rust_test_runner::{
         CargoTestInvocation, RustCargoExecutionSelection, RustTestRunnerError, capped_rustflags,
-        io_error, relative_source, snapshot,
+        instrumented_stack_environment, io_error, relative_source, snapshot,
     },
 };
 
@@ -968,6 +968,7 @@ fn doctest_runtool_inner(arguments: &[String]) -> Result<i32, RustTestRunnerErro
             let evidence = directory.join("evidence");
             fs::create_dir_all(&evidence).map_err(io_error)?;
             let output = Command::new(&binary)
+                .envs(instrumented_stack_environment())
                 .env(EVIDENCE_DIR_ENV, &evidence)
                 .output()
                 .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
@@ -1034,6 +1035,7 @@ fn doctest_child_inner() -> Result<i32, RustTestRunnerError> {
         .env_remove(RUSTDOC_BIN_PATH_ENV)
         .env_remove(CHILD_DIR_ENV)
         .env_remove(CHILD_BINARY_ENV)
+        .envs(instrumented_stack_environment())
         .env(EVIDENCE_DIR_ENV, &evidence)
         .output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
