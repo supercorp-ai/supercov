@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- Arguments of the std expression macros (`assert!`, `assert_eq!`, `println!`, `format!`, `write!`, `vec!`, `dbg!`, `panic!` and friends) are measured like any other expression, and an `assert!`/`debug_assert!` condition is a decision with condition vectors of its own. The macro limitation now covers only other macros.
+
 ## 0.0.40
 
 **Added**
