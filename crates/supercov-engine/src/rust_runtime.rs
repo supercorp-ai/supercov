@@ -97,7 +97,7 @@ mod {module_name} {{
     use std::io::Write as _;
     use std::option::Option::{{self, None, Some}};
     use std::string::String;
-    use std::sync::atomic::{{AtomicBool, AtomicUsize, Ordering}};
+    use std::sync::atomic::{{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering}};
     use std::sync::{{Mutex, OnceLock}};
     use std::ops::ControlFlow;
     use std::task::Poll;
@@ -146,15 +146,25 @@ mod {module_name} {{
     const SEEN_SLOTS: usize = 1 << 16;
     static SEEN: [AtomicUsize; SEEN_SLOTS] = [const {{ AtomicUsize::new(0) }}; SEEN_SLOTS];
 
+    #[inline(always)]
     fn first_sighting(id: &'static str) -> bool {{
         let key = id.as_ptr() as usize;
         let mut slot = (key >> 4) & (SEEN_SLOTS - 1);
         for _ in 0..8 {{
-            match SEEN[slot].compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed) {{
-                Ok(_) => return true,
-                Err(seen) if seen == key => return false,
-                Err(_) => slot = (slot + 1) & (SEEN_SLOTS - 1),
+            // Almost every call is a repeat, and a plain load settles it; the
+            // CAS is for the one insertion.
+            let seen = SEEN[slot].load(Ordering::Relaxed);
+            if seen == key {{
+                return false;
             }}
+            if seen == 0 {{
+                match SEEN[slot].compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed) {{
+                    Ok(_) => return true,
+                    Err(now) if now == key => return false,
+                    Err(_) => {{}}
+                }}
+            }}
+            slot = (slot + 1) & (SEEN_SLOTS - 1);
         }}
         true
     }}
@@ -167,49 +177,90 @@ mod {module_name} {{
     // ~2.8M iterations.
     //
     // Entries hold the whole record -- id pointer, outcome, width, values -- and
-    // are compared byte for byte. A hash would be smaller and faster, but a
+    // are compared word for word. A hash would be smaller and faster, but a
     // collision would silently drop a distinct vector and understate MC/DC, and
     // that is exactly the kind of wrong number this project refuses to risk.
     // A full probe chain falls back to writing, which costs a duplicate.
+    //
+    // The table is lock-free: a decision in a hot loop is evaluated millions
+    // of times, and a mutex per evaluation was most of what a probe cost. A
+    // slot's state goes 0 (empty) -> 1 (being written) -> 2 (readable); a
+    // reader compares only readable slots, so a slot mid-write reads as
+    // "different" and at worst costs one duplicate record.
     const DECISION_SLOTS: usize = 1 << 11;
     const DECISION_ENTRY: usize = 10 + MAX_CONDITIONS;
+    const DECISION_WORDS: usize = DECISION_ENTRY.div_ceil(8);
 
-    struct DecisionTable {{
-        entries: [[u8; DECISION_ENTRY]; DECISION_SLOTS],
+    struct DecisionSlot {{
+        state: AtomicU8,
+        words: [AtomicU64; DECISION_WORDS],
     }}
 
-    impl DecisionTable {{
-        const fn new() -> Self {{
-            Self {{ entries: [[0; DECISION_ENTRY]; DECISION_SLOTS] }}
+    static DECISIONS: [DecisionSlot; DECISION_SLOTS] = [const {{
+        DecisionSlot {{
+            state: AtomicU8::new(0),
+            words: [const {{ AtomicU64::new(0) }}; DECISION_WORDS],
         }}
-    }}
+    }}; DECISION_SLOTS];
 
-    // `Mutex::new` is const, so the table is a genuine static with no lazy
-    // allocation of its own. Its first lock still boxes a platform mutex, which
-    // `writer()` forces during startup.
-    static DECISIONS: Mutex<DecisionTable> = Mutex::new(DecisionTable::new());
-
+    // This module is compiled in the crate's own profile -- unoptimized under
+    // `cargo test` -- so the paths below are plain indexed loops: iterator
+    // chains and closures cost real function calls there, and a decision in a
+    // hot loop pays them millions of times.
     fn first_decision(frame: &DecisionFrame, outcome: bool) -> bool {{
         let key = frame.id.as_ptr() as usize;
-        let mut entry = [0u8; DECISION_ENTRY];
-        entry[..8].copy_from_slice(&(key as u64).to_le_bytes());
-        // Non-zero for an occupied slot, so an all-zero entry means empty.
-        entry[8] = if outcome {{ 2 }} else {{ 1 }};
-        entry[9] = frame.conditions as u8;
-        entry[10..10 + frame.conditions].copy_from_slice(&frame.values[..frame.conditions]);
-        let Ok(mut table) = DECISIONS.lock() else {{
-            return true;
-        }};
+        let conditions = if frame.conditions < MAX_CONDITIONS {{ frame.conditions }} else {{ MAX_CONDITIONS }};
+        // Word 0 is the id pointer; word 1 starts with outcome and width, then
+        // the condition values fill the remaining bytes. Entries of the same
+        // width are zero beyond `used` words, and the width byte sits in word
+        // 1, so comparing `used` words is exact.
+        let mut words = [0u64; DECISION_WORDS];
+        words[0] = key as u64;
+        words[1] = (if outcome {{ 2u64 }} else {{ 1u64 }}) | ((conditions as u64) << 8);
+        let mut index = 0;
+        while index < conditions {{
+            let byte = 10 + index;
+            words[byte / 8] |= (frame.values[index] as u64) << ((byte % 8) * 8);
+            index += 1;
+        }}
+        let used = (10 + conditions).div_ceil(8);
         let mut slot = (key >> 4) & (DECISION_SLOTS - 1);
-        for _ in 0..16 {{
-            if table.entries[slot] == entry {{
-                return false;
-            }}
-            if table.entries[slot][8] == 0 {{
-                table.entries[slot] = entry;
-                return true;
+        let mut attempts = 0;
+        while attempts < 16 {{
+            let cell = &DECISIONS[slot];
+            let state = cell.state.load(Ordering::Acquire);
+            if state == 2 {{
+                let mut same = true;
+                let mut word = 0;
+                while word < used {{
+                    if cell.words[word].load(Ordering::Relaxed) != words[word] {{
+                        same = false;
+                        break;
+                    }}
+                    word += 1;
+                }}
+                if same {{
+                    return false;
+                }}
+            }} else if state == 0 {{
+                if cell
+                    .state
+                    .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+                    .is_ok()
+                {{
+                    let mut word = 0;
+                    while word < DECISION_WORDS {{
+                        cell.words[word].store(words[word], Ordering::Relaxed);
+                        word += 1;
+                    }}
+                    cell.state.store(2, Ordering::Release);
+                    return true;
+                }}
+                // Another thread took this slot first: look at it again.
+                continue;
             }}
             slot = (slot + 1) & (DECISION_SLOTS - 1);
+            attempts += 1;
         }}
         true
     }}
@@ -245,8 +296,6 @@ mod {module_name} {{
             // re-enter the host allocator. Force it here, where `OPENING`
             // already makes re-entry harmless.
             drop(guarded.lock());
-            // Same reason: the decision table's mutex boxes on first lock.
-            drop(DECISIONS.lock());
             Some(guarded)
         }});
         OPENING.store(false, Ordering::SeqCst);
@@ -293,7 +342,7 @@ mod {module_name} {{
 
     /// A let chain got to condition `index` (0 marks the chain evaluated at
     /// all). Always true, so it sits in the chain as an operand.
-    #[inline]
+    #[inline(always)]
     pub fn reached(frame: &mut DecisionFrame, index: usize) -> bool {{
         if let Some(slot) = frame.reached.get_mut(index) {{
             *slot = true;
@@ -343,7 +392,7 @@ mod {module_name} {{
         frame.reached = [false; MAX_CONDITIONS];
     }}
 
-    #[inline]
+    #[inline(always)]
     pub fn hit(id: &'static str) {{
         if !first_sighting(id) {{
             return;
@@ -362,7 +411,7 @@ mod {module_name} {{
     /// and `selected` IDs in source order, so every arm before `selected` was
     /// considered and passed over. Each ID is a distinct static string, which
     /// is what `hit` dedupes on.
-    #[inline]
+    #[inline(always)]
     pub fn arms(ids: &[&'static str], selected: usize) {{
         for arm in 0..selected {{
             if let Some(id) = ids.get(arm * 2) {{
@@ -376,7 +425,7 @@ mod {module_name} {{
 
     /// The left operand of `&&` or `||`: it short-circuits when it equals
     /// `short_circuits_when`, otherwise the right operand is about to run.
-    #[inline]
+    #[inline(always)]
     pub fn logical(
         left: bool,
         short_circuits_when: bool,
@@ -400,7 +449,7 @@ mod {module_name} {{
     impl<I: Iterator> Iterator for ForLoop<I> {{
         type Item = I::Item;
 
-        #[inline]
+        #[inline(always)]
         fn next(&mut self) -> Option<I::Item> {{
             let item = self.inner.next();
             if self.first {{
@@ -410,13 +459,13 @@ mod {module_name} {{
             item
         }}
 
-        #[inline]
+        #[inline(always)]
         fn size_hint(&self) -> (usize, Option<usize>) {{
             self.inner.size_hint()
         }}
     }}
 
-    #[inline]
+    #[inline(always)]
     pub fn for_loop<I: IntoIterator>(
         iterable: I,
         zero: &'static str,
@@ -426,7 +475,7 @@ mod {module_name} {{
     }}
 
     /// A `while` body ran: clear the loop's flag on the first entry.
-    #[inline]
+    #[inline(always)]
     pub fn entered(first: &mut bool, id: &'static str) {{
         if *first {{
             *first = false;
@@ -435,7 +484,7 @@ mod {module_name} {{
     }}
 
     /// A `while` loop is over: a flag still set means the body never ran.
-    #[inline]
+    #[inline(always)]
     pub fn zero_iterations(first: bool, id: &'static str) {{
         if first {{
             hit(id);
@@ -449,7 +498,7 @@ mod {module_name} {{
     }}
 
     impl<T> TryProbe for Option<T> {{
-        #[inline]
+        #[inline(always)]
         fn probe(self, continued: &'static str, returned: &'static str) -> Self {{
             hit(if self.is_some() {{ continued }} else {{ returned }});
             self
@@ -457,7 +506,7 @@ mod {module_name} {{
     }}
 
     impl<T, E> TryProbe for Result<T, E> {{
-        #[inline]
+        #[inline(always)]
         fn probe(self, continued: &'static str, returned: &'static str) -> Self {{
             hit(if self.is_ok() {{ continued }} else {{ returned }});
             self
@@ -465,7 +514,7 @@ mod {module_name} {{
     }}
 
     impl<B, C> TryProbe for ControlFlow<B, C> {{
-        #[inline]
+        #[inline(always)]
         fn probe(self, continued: &'static str, returned: &'static str) -> Self {{
             hit(if matches!(self, ControlFlow::Continue(_)) {{ continued }} else {{ returned }});
             self
@@ -473,7 +522,7 @@ mod {module_name} {{
     }}
 
     impl<T, E> TryProbe for Poll<Result<T, E>> {{
-        #[inline]
+        #[inline(always)]
         fn probe(self, continued: &'static str, returned: &'static str) -> Self {{
             hit(if matches!(self, Poll::Ready(Err(_))) {{ returned }} else {{ continued }});
             self
@@ -481,14 +530,14 @@ mod {module_name} {{
     }}
 
     impl<T, E> TryProbe for Poll<Option<Result<T, E>>> {{
-        #[inline]
+        #[inline(always)]
         fn probe(self, continued: &'static str, returned: &'static str) -> Self {{
             hit(if matches!(self, Poll::Ready(Some(Err(_)))) {{ returned }} else {{ continued }});
             self
         }}
     }}
 
-    #[inline]
+    #[inline(always)]
     pub fn condition(value: bool, frame: &mut DecisionFrame, index: usize) -> bool {{
         if index < frame.conditions {{
             if let Some(slot) = frame.values.get_mut(index) {{
@@ -498,13 +547,11 @@ mod {module_name} {{
         value
     }}
 
-    #[inline]
+    #[inline(always)]
     pub fn decision(value: bool, frame: &mut DecisionFrame) -> bool {{
-        // `writer()` must come FIRST: it forces the decision table's mutex to box
-        // its platform mutex while `OPENING` still makes re-entry harmless.
-        // Deduplicating before that put the very first lock -- and its
-        // allocation -- on the probe path, which recursed straight back through
-        // an instrumented allocator. The allocator gate caught it.
+        // `writer()` comes first so the file's mutex boxes its platform mutex
+        // while `OPENING` still makes re-entry harmless; the decision table
+        // itself is lock-free and allocates nothing.
         if !frame.recordable || writer().is_none() || !first_decision(frame, value) {{
             return value;
         }}

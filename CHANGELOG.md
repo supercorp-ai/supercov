@@ -6,6 +6,10 @@
 
 - Arguments of the std expression macros (`assert!`, `assert_eq!`, `println!`, `format!`, `write!`, `vec!`, `dbg!`, `panic!` and friends) are measured like any other expression, and an `assert!`/`debug_assert!` condition is a decision with condition vectors of its own. The macro limitation now covers only other macros.
 
+**Changed**
+
+- Rust probes cost less in hot loops. The probe runtime is compiled in the crate's own profile, unoptimized under `cargo test`, so its dedupe paths are now plain loops: a repeated statement hit is one atomic load, and a repeated decision vector compares only the words it uses, without a lock. Measured on a three-million-iteration loop: a decision evaluation from about 190ns to about 70ns, statement hits unchanged at a few nanoseconds.
+
 ## 0.0.40
 
 **Added**
