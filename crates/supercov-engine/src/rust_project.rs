@@ -150,6 +150,7 @@ fn resolve_module_tree(
     roots: &BTreeSet<PathBuf>,
     files: &mut BTreeSet<PathBuf>,
 ) -> Result<(), RustProjectError> {
+    let canonical_workspace = canonical_directory(workspace)?;
     // (file, directory its `mod` children resolve in)
     let mut pending = roots
         .iter()
@@ -167,10 +168,26 @@ fn resolve_module_tree(
         let Ok(metadata) = fs::symlink_metadata(&file) else {
             continue;
         };
-        if metadata.file_type().is_symlink() {
-            return Err(RustProjectError::UnsafePath(file.display().to_string()));
-        }
-        if !metadata.is_file() || !files.insert(file.clone()) {
+        // A symlink is followed only within the workspace: crossbeam shares
+        // one source file between its crates that way. The file is recorded
+        // under its target's path, so it is instrumented and digested once as
+        // a regular file; a symlink leaving the workspace would be
+        // instrumented in place, outside the copy, and is refused.
+        let file = if metadata.file_type().is_symlink() {
+            let target = fs::canonicalize(&file).map_err(|error| RustProjectError::Io {
+                path: file.clone(),
+                reason: error.to_string(),
+            })?;
+            if !target.starts_with(&canonical_workspace) || !target.is_file() {
+                return Err(RustProjectError::UnsafePath(file.display().to_string()));
+            }
+            target
+        } else if metadata.is_file() {
+            file.clone()
+        } else {
+            continue;
+        };
+        if !files.insert(file.clone()) {
             continue;
         }
         let source = fs::read_to_string(&file).map_err(|error| RustProjectError::Io {
@@ -738,6 +755,60 @@ fn integration_choice() {
                 .unwrap()
                 .contains("__supercov")
         );
+        let build = Command::new("cargo")
+            .args(["test", "--no-run"])
+            .current_dir(&root)
+            .env("CARGO_TARGET_DIR", &prepared.target_directory)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_module_shared_through_a_symlink_is_instrumented_once() {
+        let root = fixture();
+        fs::write(root.join("src/shared.rs"), "pub fn shared() -> i32 { 5 }\n").unwrap();
+        std::os::unix::fs::symlink("../src/shared.rs", root.join("tests/shared.rs")).unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            concat!(
+                "pub mod shared;\n",
+                "pub fn choose(first: bool, second: bool) -> i32 {\n",
+                "    if first && second { 7 } else { shared::shared() }\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join("tests/integration.rs"),
+            concat!(
+                "mod shared;\n",
+                "#[test]\n",
+                "fn integration_choice() {\n",
+                "    assert_eq!(rust_project_fixture::choose(false, true), 5);\n",
+                "    assert_eq!(shared::shared(), 5);\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+        let prepared = prepare_rust_project(&root).unwrap();
+        // The target's path, once; never the symlink's spelling.
+        let shared = prepared
+            .source_files
+            .iter()
+            .filter(|file| file.ends_with("shared.rs"))
+            .collect::<Vec<_>>();
+        assert_eq!(shared, ["src/shared.rs"], "{:?}", prepared.source_files);
+        // The one function in it carries one function probe: instrumented
+        // once, through whichever spelling reached it first.
+        let instrumented = fs::read_to_string(root.join("src/shared.rs")).unwrap();
+        assert_eq!(instrumented.matches("rs:function:").count(), 1);
         let build = Command::new("cargo")
             .args(["test", "--no-run"])
             .current_dir(&root)

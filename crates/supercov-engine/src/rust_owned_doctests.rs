@@ -468,11 +468,13 @@ fn harness_lines(text: &str) -> Vec<(String, String)> {
         .filter_map(|line| {
             let rest = line.strip_prefix("test ")?;
             let (name, outcome) = rest.rsplit_once(" ... ")?;
-            // libtest appends the test mode to `no_run` and `compile_fail`
-            // doctests when it prints them; the listing names them plainly.
+            // libtest appends the test mode to `no_run`, `compile_fail` and
+            // `should_panic` doctests when it prints them; the listing names
+            // them plainly.
             let name = name
                 .strip_suffix(" - compile fail")
                 .or_else(|| name.strip_suffix(" - compile"))
+                .or_else(|| name.strip_suffix(" - should panic"))
                 .unwrap_or(name);
             let status = if outcome.starts_with("ok") {
                 "passed"
@@ -1164,11 +1166,12 @@ mod tests {
     fn harness_lines_drop_the_test_mode_libtest_appends() {
         assert_eq!(
             harness_lines(
-                "test src/lib.rs - f (line 9) - compile ... ok\ntest src/lib.rs - g (line 2) - compile fail ... FAILED\n"
+                "test src/lib.rs - f (line 9) - compile ... ok\ntest src/lib.rs - g (line 2) - compile fail ... FAILED\ntest src/map.rs - h (line 1632) - should panic ... ok\n"
             ),
             [
                 ("src/lib.rs - f (line 9)".to_owned(), "passed".to_owned()),
                 ("src/lib.rs - g (line 2)".to_owned(), "failed".to_owned()),
+                ("src/map.rs - h (line 1632)".to_owned(), "passed".to_owned()),
             ]
         );
     }
