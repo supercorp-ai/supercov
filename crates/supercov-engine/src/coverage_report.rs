@@ -1057,6 +1057,15 @@ pub fn coverage_summary_for_tests(
     )
 }
 
+/// Whether a manifest limitation blocks measurement of the denominator, as
+/// opposed to declaring a boundary of it. Absent means blocking.
+pub fn blocking_limitation(limitation: &Value) -> bool {
+    limitation
+        .get("blocking")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
 fn confidence_for(
     test_ids: impl IntoIterator<Item = String>,
     phase_ids: impl IntoIterator<Item = String>,
@@ -1890,7 +1899,13 @@ fn create_coverage_view_with_model(
             (measured_obligations as f64) * 100.0 / (total_obligations as f64)
         });
     }
-    if !manifest.limitations.is_empty() {
+    // A limitation that says `"blocking": false` is a declared boundary of
+    // the denominator -- a macro the compiler expands, a const context no
+    // probe can run in -- not a failure to measure what is inside it. Only a
+    // blocking one makes the run incomplete. A limitation that says nothing
+    // is blocking, so a frontend that has not been taught the difference
+    // keeps its behaviour.
+    if manifest.limitations.iter().any(blocking_limitation) {
         summary.coverage_complete = false;
         summary.completeness_blocked = Some(true);
     }

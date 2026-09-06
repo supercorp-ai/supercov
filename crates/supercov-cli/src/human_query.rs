@@ -463,7 +463,16 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 first.push_str(&format!(" [STALE: {}]", data.stale_reasons.join(", ")));
             }
             let measurement = if data.measurement.complete {
-                "Complete for the measured command and coverage model".into()
+                if data.measurement.declared == 0 {
+                    "Complete for the measured command and coverage model".into()
+                } else {
+                    // Nothing inside the denominator went unmeasured; what is
+                    // declared is what the denominator excludes.
+                    format!(
+                        "Complete for the measured command and coverage model — {} declared boundary(ies) in {} file(s)",
+                        data.measurement.declared, data.measurement.files
+                    )
+                }
             } else {
                 if data.measurement.files > 0 {
                     format!(
@@ -692,7 +701,14 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
             lines.push(format!(
                 "measurement {}",
                 if data.measurement.complete {
-                    "complete".into()
+                    if data.measurement.declared == 0 {
+                        "complete".into()
+                    } else {
+                        format!(
+                            "complete, {} declared boundary(ies)",
+                            data.measurement.declared
+                        )
+                    }
                 } else {
                     format!("{} blocking limitation(s)", data.measurement.blocking)
                 }

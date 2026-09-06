@@ -235,22 +235,31 @@ fn apply_insertions(
     Ok(output)
 }
 
+/// A limitation record's ID. One record stands for one kind in one file, and
+/// the protocol requires every record's ID to be unique across the manifest,
+/// so the file is part of it.
+fn limitation_id(kind: &str, file: &str) -> String {
+    format!("{kind}#{file}")
+}
+
 fn add_manifest_limitation(manifest: &mut CoverageManifest, file: &str, id: &str, reason: &str) {
-    if manifest
-        .limitations
-        .iter()
-        .any(|limitation| limitation.get("id").and_then(|value| value.as_str()) == Some(id))
-    {
+    let id = limitation_id(id, file);
+    if manifest.limitations.iter().any(|limitation| {
+        limitation.get("id").and_then(|value| value.as_str()) == Some(id.as_str())
+    }) {
         return;
     }
     manifest.limitations.push(json!({
         "id": id,
-        "kind": "rust-frontend-readiness",
+        "kind": "source-scope",
         "file": file,
         "line": 1,
         "column": 0,
         "source": "",
-        "reason": reason
+        "reason": reason,
+        // A shape the probes cannot reach is a boundary of the denominator,
+        // not a failure to measure what is inside it.
+        "blocking": false
     }));
 }
 
@@ -383,7 +392,8 @@ struct RustObligationCollector<'a> {
     point_ids: BTreeSet<String>,
     decision_ids: BTreeSet<String>,
     branch_ids: BTreeSet<String>,
-    limitation_ids: BTreeSet<&'static str>,
+    /// Limitation kinds already declared for this file.
+    site_limitations: BTreeSet<&'static str>,
     error: Option<RustInstrumenterError>,
 }
 
@@ -403,7 +413,7 @@ impl<'a> RustObligationCollector<'a> {
             point_ids: BTreeSet::new(),
             decision_ids: BTreeSet::new(),
             branch_ids: BTreeSet::new(),
-            limitation_ids: BTreeSet::new(),
+            site_limitations: BTreeSet::new(),
             error: None,
         }
     }
@@ -554,17 +564,38 @@ impl<'a> RustObligationCollector<'a> {
         });
     }
 
-    fn limitation(&mut self, id: &'static str, reason: &'static str) {
-        if !self.limitation_ids.insert(id) {
+    /// One limitation for one kind in this file, at the first site it hides.
+    /// The report can then point at a line, and the file listing counts it
+    /// against the file it belongs to. `kind` is "source-scope", which the
+    /// index knows for code outside the measured denominator; anything else
+    /// it renders as "unknown".
+    fn site_limitation(&mut self, id: &'static str, range: TextRange, reason: String) {
+        if self.site_limitations.contains(id) {
             return;
         }
+        let Some((line, column, source)) = self.location_source(range) else {
+            return;
+        };
+        self.site_limitations.insert(id);
+        // The first line of the site is enough to recognise it; a macro
+        // invocation can run to dozens of lines.
+        let source = source.lines().next().unwrap_or("").trim();
+        let source = if source.chars().count() > 120 {
+            format!("{}...", source.chars().take(117).collect::<String>())
+        } else {
+            source.to_owned()
+        };
         self.manifest.limitations.push(json!({
-            "id": id,
-            "kind": "rust-frontend-readiness",
+            "id": limitation_id(id, self.file),
+            "kind": "source-scope",
             "file": self.file,
-            "line": 1,
-            "column": 0,
-            "source": "",
+            "line": line,
+            "column": column,
+            "source": source,
+            // These are permanent boundaries of source instrumentation: the
+            // obligations they hide are outside the denominator, not
+            // unmeasured within it.
+            "blocking": false,
             "reason": reason
         }));
     }
@@ -599,9 +630,10 @@ impl<'a> RustObligationCollector<'a> {
                 continue;
             }
             if function.const_token().is_some() {
-                self.limitation(
+                self.site_limitation(
                     "rust-const-context-not-instrumented",
-                    "Runtime probes cannot execute in const fn or compile-time evaluation",
+                    function.syntax().text_range(),
+                    "Runtime probes cannot execute in const fn or compile-time evaluation".into(),
                 );
                 continue;
             }
@@ -703,14 +735,43 @@ impl<'a> RustObligationCollector<'a> {
             );
         }
 
-        if root.descendants().any(|node| {
-            ast::MacroCall::can_cast(node.kind()) || ast::MacroExpr::can_cast(node.kind())
-        }) {
-            // Only macros the view could not open remain: anything but the
-            // std expression macros.
-            self.limitation(
+        // Only macros the view could not open remain: anything but the std
+        // expression macros. One limitation for the file, at the first call
+        // site, naming the macros it stands for: one per call site would let
+        // a file full of `bail!` outrank every real gap, and the file-wide
+        // entry this replaces sat at line 1 and named nothing.
+        let mut macro_names = BTreeSet::new();
+        let mut first_macro = None;
+        let mut macro_sites = 0;
+        for call in root.descendants().filter_map(ast::MacroCall::cast) {
+            macro_names.insert(
+                call.path()
+                    .map(|path| path.syntax().text().to_string())
+                    .unwrap_or_else(|| "?".into()),
+            );
+            first_macro.get_or_insert_with(|| call.syntax().text_range());
+            macro_sites += 1;
+        }
+        if let Some(range) = first_macro {
+            let named = macro_names
+                .iter()
+                .take(4)
+                .map(|name| format!("`{name}!`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let rest = macro_names.len().saturating_sub(4);
+            self.site_limitation(
                 "rust-macro-expansion-not-instrumented",
-                "Arguments of macros other than the std expression macros (assert!, println!, vec!, ...) and all macro expansions are not part of the owned source denominator",
+                range,
+                format!(
+                    "{named}{} expand in the compiler: their arguments and expansions are outside the owned source denominator ({macro_sites} call site{} in this file)",
+                    if rest == 0 {
+                        String::new()
+                    } else {
+                        format!(" and {rest} other macro{}", if rest == 1 { "" } else { "s" })
+                    },
+                    if macro_sites == 1 { "" } else { "s" }
+                ),
             );
         }
 
@@ -735,22 +796,24 @@ impl<'a> RustObligationCollector<'a> {
                     )
                 })
         };
-        if root
+        if let Some(node) = root
             .descendants()
-            .any(|node| bears_obligation(&node) && in_const_context(&node))
+            .find(|node| bears_obligation(node) && in_const_context(node))
         {
-            self.limitation(
+            self.site_limitation(
                 "rust-const-context-not-instrumented",
-                "Runtime probes cannot execute in const fn or compile-time evaluation",
+                node.text_range(),
+                "Runtime probes cannot execute in const fn or compile-time evaluation; this and any later const context in the file stay declared".into(),
             );
         }
-        if root
+        if let Some(node) = root
             .descendants()
-            .any(|node| bears_obligation(&node) && in_global_allocator(&node))
+            .find(|node| bears_obligation(node) && in_global_allocator(node))
         {
-            self.limitation(
+            self.site_limitation(
                 "rust-global-allocator-not-instrumented",
-                "Probing a GlobalAlloc implementation recurses into itself, because the runtime allocates",
+                node.text_range(),
+                "Probing a GlobalAlloc implementation recurses into itself, because the runtime allocates".into(),
             );
         }
 
@@ -2063,6 +2126,11 @@ mod tests {
 
     use super::*;
 
+    /// A limitation's kind: its ID without the file that scopes it.
+    fn limitation_kind_of(limitation: &serde_json::Value) -> Option<&str> {
+        limitation.get("id")?.as_str()?.split('#').next()
+    }
+
     const NOOP_RUNTIME: &str = r#"
 #[doc(hidden)]
 mod __supercov_runtime_v1 {
@@ -2228,7 +2296,7 @@ fn checked(value: bool) -> bool {
         let ids = manifest
             .limitations
             .iter()
-            .filter_map(|limitation| limitation.get("id")?.as_str())
+            .filter_map(limitation_kind_of)
             .collect::<BTreeSet<_>>();
         assert_eq!(
             ids,
@@ -2298,7 +2366,7 @@ fn classify(value: Option<bool>, fallback: bool) -> bool {
             .manifest
             .limitations
             .iter()
-            .filter_map(|limitation| limitation.get("id")?.as_str())
+            .filter_map(limitation_kind_of)
             .collect::<BTreeSet<_>>();
         assert!(ids.contains("rust-const-context-not-instrumented"));
         assert!(!ids.contains("rust-let-chain-probes-not-injected"));
@@ -2744,7 +2812,7 @@ fn main() {
             .manifest
             .limitations
             .iter()
-            .filter_map(|limitation| limitation.get("id")?.as_str())
+            .filter_map(limitation_kind_of)
             .collect::<BTreeSet<_>>();
         assert!(ids.contains("rust-const-context-not-instrumented"));
 
@@ -2814,7 +2882,7 @@ fn main() {
             .manifest
             .limitations
             .iter()
-            .filter_map(|limitation| limitation.get("id")?.as_str())
+            .filter_map(limitation_kind_of)
             .collect::<BTreeSet<_>>();
         assert!(ids.contains("rust-global-allocator-not-instrumented"));
 
@@ -3094,7 +3162,7 @@ fn main() {
             .manifest
             .limitations
             .iter()
-            .filter_map(|limitation| limitation.get("id")?.as_str())
+            .filter_map(limitation_kind_of)
             .collect::<BTreeSet<_>>();
         // Declared only for `let mut later;`.
         assert!(ids.contains("rust-attributed-statement-probes-not-injected"));
@@ -3176,7 +3244,7 @@ fn main() {
             .manifest
             .limitations
             .iter()
-            .filter_map(|limitation| limitation.get("id")?.as_str())
+            .filter_map(limitation_kind_of)
             .collect::<BTreeSet<_>>();
         assert!(ids.contains("rust-attributed-statement-probes-not-injected"));
         let original = compile_and_run(trailing_macro, "trailing-macro-original");

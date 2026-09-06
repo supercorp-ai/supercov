@@ -268,7 +268,10 @@ pub fn run_direct_rust(
         recover_cached_workspace(&root, &lock).map_err(|error| error.to_string())?;
         let workspace = cached_workspace_path(&root).map_err(|error| error.to_string())?;
         let target_directory = rust_target_directory(&root);
+        let cache_started = Instant::now();
         let cached = read_rust_build_cache(&workspace, &target_directory, &build_cache_key);
+        let cache_read_ms = elapsed_ms(cache_started);
+        let mut copy_ms = 0.0;
         let reused_build = cached.is_some();
         let mut project = if let Some(cached) = cached {
             writeln!(
@@ -284,10 +287,13 @@ pub fn run_direct_rust(
                 crate_roots: Vec::new(),
                 runtime_module: String::new(),
                 manifest: cached.manifest,
+                preparation: Default::default(),
             }
         } else {
+            let copy_started = Instant::now();
             let workspace =
                 prepare_cached_workspace(&root, &lock, &[]).map_err(|error| error.to_string())?;
+            copy_ms = elapsed_ms(copy_started);
             writeln!(
                 diagnostics,
                 "[supercov] detected Rust; instrumenting isolated Cargo workspace {}",
@@ -300,6 +306,18 @@ pub fn run_direct_rust(
         fs::create_dir_all(&project.target_directory).map_err(|error| error.to_string())?;
         let workspace_preparation_ms = elapsed_ms(workspace_started);
         let adapter_setup_ms = (elapsed_ms(adapter_started) - workspace_preparation_ms).max(0.0);
+        if std::env::var("SUPERCOV_PHASE_TIMING").as_deref() == Ok("1") {
+            let preparation = &project.preparation;
+            writeln!(
+                diagnostics,
+                "[supercov] workspace timings cache-check={cache_read_ms:.1}ms copy={copy_ms:.1}ms metadata={:.1}ms discovery={:.1}ms instrument={:.1}ms runtime={:.1}ms",
+                preparation.metadata_ms,
+                preparation.discovery_ms,
+                preparation.instrument_ms,
+                preparation.runtime_ms,
+            )
+            .map_err(|error| error.to_string())?;
+        }
 
         let nextest = request
             .command
@@ -329,7 +347,9 @@ pub fn run_direct_rust(
             &build_cache_key,
             &request.started_at,
             &project.source_files,
-            &project.manifest,
+            // The manifest the run reported: pruned to what the build
+            // compiled, so a reused build reuses the same denominator.
+            &run.request.manifest,
             &run.artifact_files,
         )?;
 

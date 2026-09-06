@@ -53,7 +53,7 @@ const SUMMARY_RECORD_SIZE: usize = 176;
 const FILE_GAP_RECORD_SIZE: usize = 176;
 const DECISION_GAP_RECORD_SIZE: usize = 96;
 const DIMENSION_RECORD_SIZE: usize = 192;
-const PROJECTION_RECORD_SIZE: usize = 528;
+const PROJECTION_RECORD_SIZE: usize = 536;
 const SCOPE_ENTRY_RECORD_SIZE: usize = 96;
 const CONFIDENCE_RECORD_SIZE: usize = 96;
 const LINE_RECORD_SIZE: usize = 80;
@@ -401,6 +401,9 @@ pub struct IndexedMeasurement {
     pub limitations: usize,
     pub evidence_corruptions: usize,
     pub blocking: usize,
+    /// Limitations that declare a boundary of the denominator rather than
+    /// blocking measurement inside it.
+    pub declared: usize,
     pub files: usize,
     pub by_kind: IndexedMeasurementKinds,
 }
@@ -568,6 +571,9 @@ pub struct IndexedLimitation {
     pub column: usize,
     pub source: String,
     pub reason: String,
+    /// Whether this blocks measurement of the denominator, as opposed to
+    /// declaring a boundary of it.
+    pub blocking: bool,
 }
 
 #[derive(Default)]
@@ -1048,10 +1054,18 @@ fn projection_record(
         .transport
         .as_ref()
         .map_or(0, |value| value.corrupt_files);
+    // A limitation that declares a boundary of the denominator does not block
+    // measurement inside it; corrupt evidence always does.
+    let declared = view
+        .limitations
+        .iter()
+        .filter(|limitation| !crate::coverage_report::blocking_limitation(limitation))
+        .count();
     for (offset, value) in [
         (192, view.limitations.len()),
         (200, corrupt_records),
-        (208, view.limitations.len() + corrupt_records),
+        (208, view.limitations.len() - declared + corrupt_records),
+        (528, declared),
         (216, limitation_files.len() + corrupt_files),
         (224, limitation_kinds[0]),
         (232, limitation_kinds[1]),
@@ -1705,6 +1719,7 @@ fn limitation_record(
     };
     let mut record = [0_u8; LIMITATION_RECORD_SIZE];
     record[0] = view_id as u8;
+    record[1] = u8::from(crate::coverage_report::blocking_limitation(limitation));
     put_u32(&mut record, 4, strings.intern(field("id")?)?);
     put_u32(&mut record, 8, strings.intern(field("kind")?)?);
     put_u32(&mut record, 12, strings.intern(field("file")?)?);
@@ -2662,7 +2677,8 @@ impl<'a> CoverageIndex<'a> {
             let limitations = number(192)?;
             let evidence_corruptions = number(200)?;
             let blocking = number(208)?;
-            if blocking != limitations + evidence_corruptions {
+            let declared = number(528)?;
+            if blocking + declared != limitations + evidence_corruptions {
                 return Err(CoverageIndexError::InvalidRecord(
                     "measurement blocking count",
                 ));
@@ -2779,6 +2795,7 @@ impl<'a> CoverageIndex<'a> {
                     limitations,
                     evidence_corruptions,
                     blocking,
+                    declared,
                     files: number(216)?,
                     by_kind: IndexedMeasurementKinds {
                         dynamic_code: number(224)?,
@@ -3347,7 +3364,7 @@ impl<'a> CoverageIndex<'a> {
             if CoverageViewId::try_from(record[0])? != view {
                 continue;
             }
-            if record[1..4].iter().any(|byte| *byte != 0)
+            if record[2..4].iter().any(|byte| *byte != 0)
                 || record[40..].iter().any(|byte| *byte != 0)
             {
                 return Err(CoverageIndexError::InvalidRecord("limitation record"));
@@ -3362,6 +3379,7 @@ impl<'a> CoverageIndex<'a> {
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
                 column: usize::try_from(get_u64(record, 32)?)
                     .map_err(|_| CoverageIndexError::SizeOverflow)?,
+                blocking: bool_field(record[1])?,
             });
         }
         Ok(limitations)

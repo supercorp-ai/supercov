@@ -739,7 +739,7 @@ pub fn coverage_covers_query(
             column: limitation.column,
             source: limitation.source,
             reason: limitation.reason,
-            blocking: true,
+            blocking: limitation.blocking,
             effect: "outside-measured-denominator".into(),
         })
         .collect::<Vec<_>>();
@@ -1623,6 +1623,10 @@ pub struct CoverageFileLimitation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoverageFileCounts {
+    /// Measured lines in the file, and how many the selected tests covered:
+    /// the file's own line coverage, comparable with other tools'.
+    pub total_lines: usize,
+    pub covered_lines: usize,
     pub uncovered_lines: usize,
     pub uncovered_statements: usize,
     pub uncovered_functions: usize,
@@ -1805,6 +1809,10 @@ pub fn coverage_file_detail_query(
             tests.iter().any(|test| selected.contains(test))
         })
     };
+    let total_lines = lines
+        .iter()
+        .filter(|line| line.measured && line.file == file)
+        .count();
     let uncovered_lines = lines
         .iter()
         .filter(|line| line.measured && line.file == file && !selected_includes(&line.tests))
@@ -1932,7 +1940,7 @@ pub fn coverage_file_detail_query(
             column: limitation.column,
             source: limitation.source,
             reason: limitation.reason,
-            blocking: true,
+            blocking: limitation.blocking,
             effect: "outside-measured-denominator".into(),
         })
         .collect::<Vec<_>>();
@@ -2010,6 +2018,8 @@ pub fn coverage_file_detail_query(
             file,
             metric: options.metric,
             counts: CoverageFileCounts {
+                total_lines,
+                covered_lines: total_lines - uncovered_lines.len(),
                 uncovered_lines: uncovered_lines.len(),
                 uncovered_statements: statements.len(),
                 uncovered_functions: functions.len(),

@@ -27,6 +27,17 @@ pub struct PreparedRustProject {
     pub crate_roots: Vec<String>,
     pub runtime_module: String,
     pub manifest: CoverageManifest,
+    pub preparation: RustPreparationTimings,
+}
+
+/// Where preparing the instrumented workspace spent its time, for
+/// `SUPERCOV_PHASE_TIMING=1`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RustPreparationTimings {
+    pub metadata_ms: f64,
+    pub discovery_ms: f64,
+    pub instrument_ms: f64,
+    pub runtime_ms: f64,
 }
 
 #[derive(Debug)]
@@ -132,6 +143,98 @@ fn cargo_metadata(root: &Path) -> Result<CargoMetadata, RustProjectError> {
     }
     serde_json::from_slice(&output.stdout)
         .map_err(|error| RustProjectError::MetadataJson(error.to_string()))
+}
+
+/// The workspace sources the build actually read, from the depinfo rustc
+/// writes beside every artifact (`<artifact>.d`: a make rule whose
+/// prerequisites are every file that went into it). `None` when no depinfo
+/// could be read, which means "do not prune".
+///
+/// Source discovery follows `mod` declarations because that is what rustc
+/// RESOLVES; this is what it COMPILES. A module behind a `#[cfg]` that is off
+/// is resolved and never built, and its obligations can never be covered --
+/// smallvec's `serde`, `borsh`, `rayon` and `specialization` modules are 142
+/// such lines. Reading the build is exact for every `cfg` predicate, where
+/// evaluating them here would have to reproduce Cargo's feature resolution.
+pub fn compiled_source_files(
+    workspace: &Path,
+    target_directory: &Path,
+) -> Option<BTreeSet<String>> {
+    let mut compiled = BTreeSet::new();
+    let mut depinfo_files = 0;
+    let mut directories = vec![target_directory.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(file_type) if file_type.is_dir() => directories.push(path),
+                Ok(file_type) if file_type.is_file() => {
+                    if path.extension().is_some_and(|extension| extension == "d")
+                        && let Ok(text) = fs::read_to_string(&path)
+                    {
+                        depinfo_files += 1;
+                        collect_depinfo_sources(&text, workspace, &mut compiled);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (depinfo_files > 0).then_some(compiled)
+}
+
+/// The prerequisites of every rule in a depinfo file, as workspace-relative
+/// paths. A rule is `target: prerequisite prerequisite`, and a space inside a
+/// path is escaped as `\ `.
+fn collect_depinfo_sources(text: &str, workspace: &Path, compiled: &mut BTreeSet<String>) {
+    for line in text.lines() {
+        // A prerequisite-only line (`path:` with nothing after it) carries no
+        // sources, and a target's own path is not a source.
+        let Some((_, prerequisites)) = line.split_once(": ") else {
+            continue;
+        };
+        let mut current = String::new();
+        let mut characters = prerequisites.chars().peekable();
+        while let Some(character) = characters.next() {
+            match character {
+                '\\' if characters.peek() == Some(&' ') => {
+                    characters.next();
+                    current.push(' ');
+                }
+                ' ' => {
+                    push_workspace_source(&current, workspace, compiled);
+                    current.clear();
+                }
+                _ => current.push(character),
+            }
+        }
+        push_workspace_source(&current, workspace, compiled);
+    }
+}
+
+fn push_workspace_source(path: &str, workspace: &Path, compiled: &mut BTreeSet<String>) {
+    let path = path.trim();
+    if path.is_empty() || !path.ends_with(".rs") {
+        return;
+    }
+    // Cargo runs rustc with the workspace as its working directory, so a
+    // source of the crate being built is named relatively and a dependency's
+    // source -- from the registry -- absolutely.
+    let candidate = Path::new(path);
+    let relative = if candidate.is_absolute() {
+        let Ok(relative) = candidate.strip_prefix(workspace) else {
+            return;
+        };
+        relative
+    } else {
+        candidate
+    };
+    if let Some(text) = relative.to_str() {
+        compiled.insert(text.replace('\\', "/"));
+    }
 }
 
 /// The files rustc compiles for the given crate roots: each root and,
@@ -455,12 +558,29 @@ fn merge_manifest(
     destination.points.append(&mut source.points);
     destination.decisions.append(&mut source.decisions);
     destination.branches.append(&mut source.branches);
+    // A limitation is one site in one file. Deduping on the id alone kept a
+    // single macro-expansion limitation for the whole project, charged to
+    // whichever file merged first.
+    let site = |value: &serde_json::Value| {
+        (
+            value
+                .get("id")
+                .and_then(|id| id.as_str())
+                .map(str::to_owned),
+            value
+                .get("file")
+                .and_then(|file| file.as_str())
+                .map(str::to_owned),
+            value.get("line").and_then(serde_json::Value::as_u64),
+            value.get("column").and_then(serde_json::Value::as_u64),
+        )
+    };
     for limitation in source.limitations {
-        let id = limitation.get("id").and_then(|value| value.as_str());
+        let key = site(&limitation);
         if !destination
             .limitations
             .iter()
-            .any(|existing| existing.get("id").and_then(|value| value.as_str()) == id)
+            .any(|existing| site(existing) == key)
         {
             destination.limitations.push(limitation);
         }
@@ -469,8 +589,12 @@ fn merge_manifest(
 }
 
 pub fn prepare_rust_project(workspace: &Path) -> Result<PreparedRustProject, RustProjectError> {
+    let elapsed = |started: std::time::Instant| started.elapsed().as_secs_f64() * 1000.0;
+    let mut preparation = RustPreparationTimings::default();
     let workspace = canonical_directory(workspace)?;
+    let started = std::time::Instant::now();
     let metadata = cargo_metadata(&workspace)?;
+    preparation.metadata_ms = elapsed(started);
     let metadata_root = canonical_directory(&metadata.workspace_root)?;
     if metadata_root != workspace {
         return Err(RustProjectError::UnsafePath(
@@ -490,6 +614,7 @@ pub fn prepare_rust_project(workspace: &Path) -> Result<PreparedRustProject, Rus
         return Err(RustProjectError::NoWorkspacePackages);
     }
 
+    let started = std::time::Instant::now();
     let roots = crate_roots(&workspace, &packages)?;
     let mut files = BTreeSet::new();
     resolve_module_tree(&workspace, &roots, &mut files)?;
@@ -506,6 +631,8 @@ pub fn prepare_rust_project(workspace: &Path) -> Result<PreparedRustProject, Rus
         })?;
         sources.insert(relative, source);
     }
+    preparation.discovery_ms = elapsed(started);
+    let started = std::time::Instant::now();
     let runtime_module = runtime_module_name(&sources);
     let runtime_path = format!("crate::{runtime_module}");
     let mut manifest = CoverageManifest {
@@ -533,6 +660,8 @@ pub fn prepare_rust_project(workspace: &Path) -> Result<PreparedRustProject, Rus
         })?;
     }
 
+    preparation.instrument_ms = elapsed(started);
+    let started = std::time::Instant::now();
     let token = manifest_token(&manifest);
     let mut crate_roots = Vec::new();
     for root in roots {
@@ -551,6 +680,7 @@ pub fn prepare_rust_project(workspace: &Path) -> Result<PreparedRustProject, Rus
         })?;
         crate_roots.push(relative);
     }
+    preparation.runtime_ms = elapsed(started);
 
     manifest
         .points
@@ -584,6 +714,7 @@ pub fn prepare_rust_project(workspace: &Path) -> Result<PreparedRustProject, Rus
         crate_roots,
         runtime_module,
         manifest,
+        preparation,
     })
 }
 

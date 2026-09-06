@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+**Fixed**
+
+- A Rust module the compiler never builds no longer counts as uncovered. Source discovery follows `mod` declarations, which is what rustc resolves, not what it compiles: a module behind a `#[cfg]` that is off was measured and could never be covered. memchr carried thirteen such files for other architectures (816 lines), hashbrown nine, indexmap eleven. After the build, the depinfo rustc writes beside each artifact says which sources went into it, and obligations in the others are reported as unmeasured instead of uncovered. memchr's line coverage reads 84.4% where it read 63.2%.
+- A Rust measurement limitation is now reported where it applies and at its real severity. Every limitation carried the kind `rust-frontend-readiness`, which the report rendered as "(unknown)"; there was one record per kind for the whole project, at line 1 of whichever file merged first; and each one made the run read as "Instrumentation Incomplete". There is now one record per kind per file, at the first site it covers, naming what it covers, and a boundary of the denominator (a macro the compiler expands, a const context) no longer reads as a failure to measure what is inside it.
+
+**Added**
+
+- `supercov runs <run> file <path> --json` reports `totalLines` and `coveredLines`, so a file's line coverage can be compared with another tool's.
+- `SUPERCOV_PHASE_TIMING=1` breaks the Rust workspace phase into cache check, copy, metadata, discovery, instrumentation and runtime generation.
+
 ## 0.0.41
 
 **Added**

@@ -1275,10 +1275,76 @@ fn rust_runner_declaration(runner: &str) -> FrontendRunnerDeclaration {
     }
 }
 
+/// Obligations in files the build never read, declined rather than counted.
+/// Returns the manifest to report against and the files it declined.
+///
+/// The obligations stay in the manifest: the evidence files are named by a
+/// token derived from its obligation IDs, so removing them would orphan every
+/// record the run wrote. `unmeasured` is what the report reads to take an
+/// obligation out of the covered/uncovered denominator without pretending it
+/// was never there.
+fn decline_uncompiled_sources(
+    project: &PreparedRustProject,
+) -> (CoverageManifest, BTreeSet<String>) {
+    let mut manifest = project.manifest.clone();
+    let Some(compiled) = crate::rust_project::compiled_source_files(
+        &project.workspace_root,
+        &project.target_directory,
+    ) else {
+        return (manifest, BTreeSet::new());
+    };
+    let declined = project
+        .source_files
+        .iter()
+        .filter(|file| !compiled.contains(*file))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    // Depinfo that accounts for no crate root at all is depinfo this run did
+    // not produce; declining on it would empty the denominator.
+    if declined.is_empty()
+        || project
+            .crate_roots
+            .iter()
+            .all(|root| !compiled.contains(root))
+    {
+        return (manifest, BTreeSet::new());
+    }
+    let mut unmeasured = manifest.unmeasured.iter().cloned().collect::<BTreeSet<_>>();
+    unmeasured.extend(
+        manifest
+            .points
+            .iter()
+            .filter(|point| declined.contains(&point.file))
+            .map(|point| point.id.clone()),
+    );
+    unmeasured.extend(
+        manifest
+            .decisions
+            .iter()
+            .filter(|decision| declined.contains(&decision.file))
+            .map(|decision| decision.id.clone()),
+    );
+    unmeasured.extend(
+        manifest
+            .branches
+            .iter()
+            .filter(|branch| declined.contains(&branch.file))
+            .map(|branch| branch.id.clone()),
+    );
+    manifest.unmeasured = unmeasured.into_iter().collect();
+    // A boundary declared inside a file that was never compiled says nothing.
+    manifest.limitations.retain(|limitation| {
+        limitation
+            .get("file")
+            .and_then(|file| file.as_str())
+            .is_none_or(|file| !declined.contains(file))
+    });
+    (manifest, declined)
+}
+
 /// The manifest's structural limitation IDs, as the declaration references them.
-fn structural_limitations(project: &PreparedRustProject) -> Vec<String> {
-    project
-        .manifest
+fn structural_limitations(manifest: &CoverageManifest) -> Vec<String> {
+    manifest
         .limitations
         .iter()
         .filter_map(|item| {
@@ -1309,6 +1375,29 @@ pub fn run_prepared_rust_tests(
         Vec::new()
     };
     let build_ms = build_started.elapsed().as_secs_f64() * 1000.0;
+    // The denominator is what the compiler built, not what the module tree
+    // resolves: a module behind a `#[cfg]` that is off is resolved, never
+    // compiled, and could never be covered.
+    let (manifest, declined) = decline_uncompiled_sources(project);
+    if !declined.is_empty() {
+        writeln!(
+            diagnostics,
+            "[supercov] {} source file(s) this build did not compile are outside the denominator: {}{}",
+            declined.len(),
+            declined
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+            if declined.len() > 3 { ", ..." } else { "" }
+        )
+        .map_err(|error| RustTestRunnerError::Io(error.to_string()))?;
+    }
+    let project = &PreparedRustProject {
+        manifest,
+        ..project.clone()
+    };
     let evidence_root = project
         .workspace_root
         .join(".supercov/rust-evidence")
@@ -1337,7 +1426,7 @@ pub fn run_prepared_rust_tests(
                 language: "rust".into(),
                 structural_source: StructuralSource::OwnedProbes,
                 runners: vec![rust_runner_declaration("nextest")],
-                structural_limitations: structural_limitations(project),
+                structural_limitations: structural_limitations(&project.manifest),
             },
             request: CoverageReportRequest {
                 run_id: run_id.into(),
@@ -1543,7 +1632,7 @@ pub fn run_prepared_rust_tests(
     if ran_doctests {
         runners.push(rust_runner_declaration("rustdoc"));
     }
-    let structural_limitations = structural_limitations(project);
+    let structural_limitations = structural_limitations(&project.manifest);
     Ok(RustFrontendRun {
         declaration: FrontendRunDeclaration {
             protocol_version: LANGUAGE_FRONTEND_PROTOCOL_VERSION,
@@ -1927,6 +2016,103 @@ mod tests {
             assert!(selection.run_libtests);
             assert!(!selection.run_doctests);
         }
+    }
+
+    #[test]
+    fn a_module_the_build_never_compiles_leaves_the_denominator() {
+        // `#[cfg(feature = ...)]` with the feature off resolves as a module
+        // and is never compiled, so nothing in it can ever be covered.
+        // memchr carries thirteen such files for other architectures.
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-runner-cfg-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='fixture'\nversion='0.0.0'\nedition='2024'\n\n[features]\nextra=[]\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+#[cfg(feature = "extra")]
+mod extra;
+
+pub fn kept(value: i32) -> i32 {
+    if value > 0 { value } else { -value }
+}
+#[cfg(test)]
+mod tests {
+    #[test] fn positive() { assert_eq!(super::kept(2), 2); }
+    #[test] fn negative() { assert_eq!(super::kept(-2), 2); }
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/extra.rs"),
+            "pub fn never_built(value: i32) -> i32 {\n    if value > 0 { 1 } else { 0 }\n}\n",
+        )
+        .unwrap();
+        let project = prepare_rust_project(&root).unwrap();
+        // Discovery still reaches it: the module tree is what rustc resolves.
+        assert!(
+            project
+                .source_files
+                .iter()
+                .any(|file| file == "src/extra.rs"),
+            "{:?}",
+            project.source_files
+        );
+        let run = run_prepared_rust_tests(
+            &project,
+            &["cargo".into(), "test".into(), "--lib".into()],
+            "rust-fixture-cfg",
+            "2026-08-26T00:00:00.000Z",
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(run.exit_code, 0);
+        // Its obligations stay in the manifest, so the evidence token still
+        // matches and the file is still addressable, but they are declined.
+        let manifest = &run.request.manifest;
+        assert!(
+            manifest
+                .points
+                .iter()
+                .any(|point| point.file == "src/extra.rs"),
+            "the obligations must stay in the manifest"
+        );
+        let declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
+        for point in &manifest.points {
+            assert_eq!(
+                declined.contains(&point.id),
+                point.file == "src/extra.rs",
+                "{} in {}",
+                point.id,
+                point.file
+            );
+        }
+        for decision in &manifest.decisions {
+            assert_eq!(
+                declined.contains(&decision.id),
+                decision.file == "src/extra.rs"
+            );
+        }
+        // The tests cover everything the build compiled.
+        let report =
+            crate::frontend_protocol::analyze_frontend_results(&run.declaration, &run.request)
+                .unwrap();
+        assert_eq!(
+            report.view.summary.lines.percentage, 100.0,
+            "declined obligations must not read as uncovered"
+        );
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]
