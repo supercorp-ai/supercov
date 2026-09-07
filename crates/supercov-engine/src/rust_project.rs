@@ -698,6 +698,9 @@ fn merge_manifest(
     destination.points.append(&mut source.points);
     destination.decisions.append(&mut source.decisions);
     destination.branches.append(&mut source.branches);
+    // Obligations the file declined -- a `const fn` body, a `GlobalAlloc`
+    // implementation -- are declined for the project too.
+    destination.unmeasured.append(&mut source.unmeasured);
     // A limitation is one site in one file. Deduping on the id alone kept a
     // single macro-expansion limitation for the whole project, charged to
     // whichever file merged first.

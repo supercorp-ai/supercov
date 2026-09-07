@@ -141,6 +141,19 @@ fn in_global_allocator(node: &ra_ap_syntax::SyntaxNode) -> bool {
     })
 }
 
+/// Report whether this `impl` block implements `GlobalAlloc`.
+fn in_global_allocator_impl(node: &ra_ap_syntax::SyntaxNode) -> bool {
+    ast::Impl::cast(node.clone()).is_some_and(|block| {
+        block.trait_().is_some_and(|implemented| {
+            implemented
+                .syntax()
+                .descendants_with_tokens()
+                .filter_map(|element| element.into_token())
+                .any(|token| token.kind() == SyntaxKind::IDENT && token.text() == "GlobalAlloc")
+        })
+    })
+}
+
 /// Report whether a probe placed at this node could not run correctly.
 fn cannot_carry_probe(node: &ra_ap_syntax::SyntaxNode) -> bool {
     in_const_context(node) || in_global_allocator(node)
@@ -394,6 +407,9 @@ struct RustObligationCollector<'a> {
     branch_ids: BTreeSet<String>,
     /// Limitation kinds already declared for this file.
     site_limitations: BTreeSet<&'static str>,
+    /// Where each obligation sits, so the ones no probe can reach can be
+    /// declined once the whole file has been read.
+    obligation_ranges: Vec<(String, TextRange)>,
     error: Option<RustInstrumenterError>,
 }
 
@@ -414,6 +430,7 @@ impl<'a> RustObligationCollector<'a> {
             decision_ids: BTreeSet::new(),
             branch_ids: BTreeSet::new(),
             site_limitations: BTreeSet::new(),
+            obligation_ranges: Vec::new(),
             error: None,
         }
     }
@@ -438,6 +455,7 @@ impl<'a> RustObligationCollector<'a> {
             PointKind::Function => "function",
         };
         let id = stable_id(self.file, kind_name, range, label.as_deref().unwrap_or(""));
+        self.obligation_ranges.push((id.clone(), range));
         if !self.point_ids.insert(id.clone()) {
             return;
         }
@@ -484,6 +502,7 @@ impl<'a> RustObligationCollector<'a> {
     fn decision(&mut self, test: &ast::Expr, kind: &str) {
         let range = test.syntax().text_range();
         let id = stable_id(self.file, "decision", range, kind);
+        self.obligation_ranges.push((id.clone(), range));
         if !self.decision_ids.insert(id.clone()) {
             return;
         }
@@ -541,6 +560,7 @@ impl<'a> RustObligationCollector<'a> {
         source: String,
         alternatives: [(&str, &str); N],
     ) {
+        self.obligation_ranges.push((id.clone(), range));
         if !self.branch_ids.insert(id.clone()) {
             return;
         }
@@ -562,6 +582,46 @@ impl<'a> RustObligationCollector<'a> {
                 })
                 .collect(),
         });
+    }
+
+    /// Obligations inside a region no probe can reach leave the denominator.
+    /// They stay in the manifest -- the evidence files are named by a token
+    /// over its obligation IDs, and the report still needs a line to hang the
+    /// limitation on -- and are reported as unmeasured rather than uncovered.
+    fn decline_unreachable_obligations(&mut self, root: &ra_ap_syntax::SyntaxNode) {
+        // The regions themselves, not their contents: a node is unreachable
+        // exactly when one of these encloses it.
+        let unreachable = root
+            .descendants()
+            .filter(|node| {
+                (ast::Fn::cast(node.clone())
+                    .is_some_and(|function| function.const_token().is_some())
+                    || ast::BlockExpr::cast(node.clone())
+                        .is_some_and(|block| block.const_token().is_some())
+                    || ast::Const::can_cast(node.kind())
+                    || ast::Static::can_cast(node.kind()))
+                    || ast::Impl::can_cast(node.kind()) && in_global_allocator_impl(node)
+            })
+            .map(|node| node.text_range())
+            .collect::<Vec<_>>();
+        if unreachable.is_empty() {
+            return;
+        }
+        let mut declined = self
+            .manifest
+            .unmeasured
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for (id, range) in &self.obligation_ranges {
+            if unreachable
+                .iter()
+                .any(|region| region.contains_range(*range))
+            {
+                declined.insert(id.clone());
+            }
+        }
+        self.manifest.unmeasured = declined.into_iter().collect();
     }
 
     /// One limitation for one kind in this file, at the first site it hides.
@@ -816,6 +876,8 @@ impl<'a> RustObligationCollector<'a> {
                 "Probing a GlobalAlloc implementation recurses into itself, because the runtime allocates".into(),
             );
         }
+
+        self.decline_unreachable_obligations(root);
 
         if let Some(error) = self.error {
             return Err(error);
@@ -3440,6 +3502,68 @@ fn main() {
         );
         assert_eq!(instrumented.stdout, original.stdout);
         assert_eq!(instrumented.stdout, b"8\n");
+    }
+
+    #[test]
+    fn obligations_no_probe_can_reach_are_declined() {
+        // A `const fn` body has no runtime to record into, and a
+        // `GlobalAlloc` implementation would probe the allocator its probe
+        // allocates in. Both were declared and still counted, so smallvec's
+        // `TaggedLen` -- four `const fn` methods -- read 0% covered where
+        // cargo-llvm-cov reads 89%.
+        let source = r#"pub struct Tagged(usize);
+impl Tagged {
+    pub const fn new(len: usize, on_heap: bool) -> Self {
+        Self(if on_heap { len << 1 } else { len })
+    }
+    pub fn plain(len: usize) -> Self {
+        Self(if len > 0 { len } else { 0 })
+    }
+}
+"#;
+        let manifest = build_rust_manifest("src/lib.rs", source).unwrap();
+        let declined = manifest.unmeasured.iter().collect::<BTreeSet<_>>();
+        assert!(!declined.is_empty(), "the const fn was not declined");
+
+        // Everything the const fn holds is declined; the plain one is not.
+        let line_of = |id: &str| {
+            manifest
+                .points
+                .iter()
+                .find(|point| point.id == id)
+                .map(|point| point.line)
+                .or_else(|| {
+                    manifest
+                        .decisions
+                        .iter()
+                        .find(|decision| decision.id == id)
+                        .map(|decision| decision.line)
+                })
+                .or_else(|| {
+                    manifest
+                        .branches
+                        .iter()
+                        .find(|branch| branch.id == id)
+                        .map(|branch| branch.line)
+                })
+        };
+        for id in &declined {
+            let line = line_of(id).unwrap_or_else(|| panic!("no obligation {id}"));
+            assert!(
+                (3..=5).contains(&line),
+                "declined an obligation outside the const fn, at line {line}"
+            );
+        }
+        let measured = manifest
+            .points
+            .iter()
+            .map(|point| (point.id.clone(), point.line))
+            .filter(|(id, _)| !declined.contains(id))
+            .collect::<Vec<_>>();
+        assert!(
+            measured.iter().any(|(_, line)| (6..=8).contains(line)),
+            "the plain fn must stay measured: {measured:?}"
+        );
     }
 
     #[test]
