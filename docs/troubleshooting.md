@@ -176,3 +176,16 @@ never looks complete. Since 0.0.29 the background and execution-trace writers al
 clone sharing their file and move to a fresh one, so this should be rare; if it
 persists, check whether something outside Supercov appends to
 `.supercov/…/server/background/`.
+
+## "Complete ... — N declared boundary(ies)"
+
+A limitation is either blocking or declared. A blocking one means Supercov
+could not measure something inside the denominator it claims — corrupt
+evidence, a transport that never reported — and the run reads as
+"Incomplete". A declared one marks a boundary of the denominator itself: a
+Rust macro the compiler expands, a `const fn` body no runtime probe can
+enter, a proc-macro crate whose code runs inside the compiler. Nothing inside
+the measured denominator went unmeasured, so the run reads as complete within
+those boundaries, and each boundary is reported at the line it covers with a
+reason. `runs <run> file <path>` lists them per file; the `measurement`
+object in `--json` output counts them under `declared`.

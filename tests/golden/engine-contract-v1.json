@@ -57,6 +57,7 @@
       "limitations": 0,
       "evidenceCorruptions": 0,
       "blocking": 0,
+      "declared": 0,
       "files": 0,
       "byKind": {
         "dynamic-code": 0,
