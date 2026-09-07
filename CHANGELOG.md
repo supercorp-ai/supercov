@@ -4,25 +4,19 @@
 
 **Added**
 
-- Rust coverage says whether a test checked what it ran. Evidence recorded before a passing `assert!`, `assert_eq!` or `assert_ne!` on the same thread is linked to that assertion, so a line reads "linked to a passing assertion" instead of "execution only" -- the confidence tiers the report has always described and the Rust frontend could not fill. A failing assertion panics, so reaching the marker is the proof it held, and evidence from another thread is never claimed.
-
-**Changed**
-
-- Preparing a Rust workspace is faster: every file was parsed twice, once to build the manifest and once to place the probes, and parsing is nearly all of that phase.
+- Rust coverage says whether a test checked what it ran. Evidence a thread recorded before passing an `assert!`, `assert_eq!` or `assert_ne!` links to that assertion, so a line reads "linked to a passing assertion", not "execution only". On hyper: 6,204 of 6,707 covered lines.
+- `runs <run> file <path> --json` reports `totalLines` and `coveredLines`; `SUPERCOV_PHASE_TIMING=1` breaks the Rust workspace phase down.
 
 **Fixed**
 
-- Rust code no probe can reach no longer counts as uncovered. A `const fn` body has no runtime to record into and a `GlobalAlloc` implementation cannot carry a probe that allocates; both were declared as limitations and both still counted, so smallvec's `TaggedLen` -- four `const fn` methods -- read 0 of 12 lines covered where cargo-llvm-cov reads 89%. They are reported as unmeasured now. A file's unmeasured obligations were also dropped when the project manifest was assembled.
-- A Rust module the compiler never builds no longer counts as uncovered. Source discovery follows `mod` declarations, which is what rustc resolves, not what it compiles: a module behind a `#[cfg]` that is off was measured and could never be covered. memchr carried thirteen such files for other architectures (816 lines), hashbrown nine, indexmap eleven. After the build, the depinfo rustc writes beside each artifact says which sources went into it, and obligations in the others are reported as unmeasured instead of uncovered. memchr's line coverage reads 84.4% where it read 63.2%.
-- A Rust module declared inside a macro is measured. hashbrown selects its SIMD implementation with `cfg_select! { ... mod neon; ... }`, and `cfg_if!` has the same shape; the declaration lives in the macro's token tree, so the module was never instrumented. On an Apple silicon Mac hashbrown's NEON group is compiled and executed, and cargo-llvm-cov reports it at 91%, where Supercov measured none of it.
-- A proc-macro crate's own code no longer reports 0%. The compiler loads it while building the crate under test and runs it there, so no test process executes a line of it: async-trait's six source files, 315 lines that cargo-llvm-cov reports at 90% and above, read as entirely untested. Their obligations are reported as unmeasured, with a limitation saying why.
-- The generated Rust runtime compiles into a crate that turns the prelude off. tracing's macro tests carry `#![no_implicit_prelude]` to prove their macros do not depend on it, and the runtime reached for `matches!`, `Ok`, `Err`, `drop`, `Sized`, `From`, `Ord`, `Iterator` and `IntoIterator` without importing them, so instrumenting that file failed the whole build.
-- A Rust measurement limitation is now reported where it applies and at its real severity. Every limitation carried the kind `rust-frontend-readiness`, which the report rendered as "(unknown)"; there was one record per kind for the whole project, at line 1 of whichever file merged first; and each one made the run read as "Instrumentation Incomplete". There is now one record per kind per file, at the first site it covers, naming what it covers, and a boundary of the denominator (a macro the compiler expands, a const context) no longer reads as a failure to measure what is inside it.
+- Found by checking Rust coverage per file against `cargo llvm-cov` over 26 crates: code that could never be covered was counted as uncovered. A module behind an off `#[cfg]` (memchr's 816 lines for other architectures), a `const fn` body, a `GlobalAlloc` impl and a proc-macro crate's own code are reported as unmeasured now. memchr reads 84.4%, was 63.2%.
+- A module declared inside `cfg_if!` or `cfg_select!` is measured; hashbrown's NEON group was invisible.
+- Instrumenting a crate that turns the prelude off, or an attributed macro statement, no longer breaks the build (tracing, hyper, tokio).
+- A limitation is reported at its own site and real severity: a boundary of the denominator no longer reads as "Instrumentation Incomplete".
 
-**Added**
+**Changed**
 
-- `supercov runs <run> file <path> --json` reports `totalLines` and `coveredLines`, so a file's line coverage can be compared with another tool's.
-- `SUPERCOV_PHASE_TIMING=1` breaks the Rust workspace phase into cache check, copy, metadata, discovery, instrumentation and runtime generation.
+- Preparing a Rust workspace parses each file once instead of twice.
 
 ## 0.0.41
 
