@@ -1451,10 +1451,6 @@ pub fn run_prepared_rust_tests(
 ) -> Result<RustFrontendRun, RustTestRunnerError> {
     let invocation = cargo_invocation(&project.workspace_root, command)?;
     let selection = rust_cargo_execution_selection(&invocation)?;
-    // The user's libtest filters, validated against the discovery contract.
-    // This was computed and never used: every artifact was listed bare, and
-    // Supercov ran tests plain Cargo had been told to skip.
-    let libtest_selection = rust_libtest_selection(&invocation)?;
     let build_started = Instant::now();
     // `cargo test --doc` alone builds nothing here: Cargo refuses `--no-run`
     // with `--doc`, and the doctest phase below builds what it runs.
@@ -1540,6 +1536,12 @@ pub fn run_prepared_rust_tests(
             execution_ms: execution_started.elapsed().as_secs_f64() * 1000.0,
         });
     }
+    // The user's libtest filters, validated against the discovery contract.
+    // This was computed and never used: every artifact was listed bare, and
+    // Supercov ran tests plain Cargo had been told to skip. It is read here,
+    // after the nextest branch: a nextest command carries no libtest
+    // selection to reconstruct, and nextest applies the user's filters itself.
+    let libtest_selection = rust_libtest_selection(&invocation)?;
     // An ignored test the user asked for with `--ignored` is listed, and must
     // then run: `--exact name` alone would report it ignored again.
     let ignored_mode = libtest_selection
