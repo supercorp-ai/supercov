@@ -982,12 +982,18 @@ fn build_test_artifacts(
     Ok(artifacts)
 }
 
+/// The tests an artifact would run for this invocation. `filters` are the
+/// user's libtest arguments that select tests -- a name, `--skip`, `--exact`,
+/// `--ignored` -- and libtest applies them to `--list` exactly as it applies
+/// them to a run, so the enumeration is the set plain Cargo would execute.
 fn list_tests(
     executable: &Path,
+    filters: &[String],
     environment: &[(&'static str, OsString)],
 ) -> Result<Vec<String>, RustTestRunnerError> {
     let output = Command::new(executable)
         .args(["--list", "--format", "terse"])
+        .args(filters)
         .envs(environment.iter().map(|(key, value)| (key, value)))
         .output()
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
@@ -1445,6 +1451,10 @@ pub fn run_prepared_rust_tests(
 ) -> Result<RustFrontendRun, RustTestRunnerError> {
     let invocation = cargo_invocation(&project.workspace_root, command)?;
     let selection = rust_cargo_execution_selection(&invocation)?;
+    // The user's libtest filters, validated against the discovery contract.
+    // This was computed and never used: every artifact was listed bare, and
+    // Supercov ran tests plain Cargo had been told to skip.
+    let libtest_selection = rust_libtest_selection(&invocation)?;
     let build_started = Instant::now();
     // `cargo test --doc` alone builds nothing here: Cargo refuses `--no-run`
     // with `--doc`, and the doctest phase below builds what it runs.
@@ -1479,6 +1489,11 @@ pub fn run_prepared_rust_tests(
         manifest,
         ..project.clone()
     };
+    // A signal that reaches the runner alone must not leave the test
+    // processes running: on 2026-09-07 an orphaned tokio test spun on two
+    // cores for an hour. The guard covers every child spawned below.
+    let _signal_guard = crate::child_signal_guard::ChildSignalGuard::install()
+        .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     let evidence_root = project
         .workspace_root
         .join(".supercov/rust-evidence")
@@ -1525,6 +1540,19 @@ pub fn run_prepared_rust_tests(
             execution_ms: execution_started.elapsed().as_secs_f64() * 1000.0,
         });
     }
+    // An ignored test the user asked for with `--ignored` is listed, and must
+    // then run: `--exact name` alone would report it ignored again.
+    let ignored_mode = libtest_selection
+        .list_arguments
+        .iter()
+        .filter(|argument| {
+            matches!(
+                argument.as_str(),
+                "--ignored" | "--include-ignored" | "--exclude-should-panic"
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     let mut tasks = Vec::new();
     let target_libdir = if artifacts.is_empty() {
         PathBuf::new()
@@ -1534,6 +1562,7 @@ pub fn run_prepared_rust_tests(
     for (artifact_index, artifact) in artifacts.iter().enumerate() {
         let tests = list_tests(
             &artifact.executable,
+            &libtest_selection.list_arguments,
             &dynamic_library_environment(&target_libdir, &artifact.executable),
         )?;
         let contexts = preflight_rust_test_contexts(tests.clone())
@@ -1567,41 +1596,43 @@ pub fn run_prepared_rust_tests(
                 loop {
                     let index = next.fetch_add(1, Ordering::Relaxed);
                     let Some(task) = tasks.get(index) else { break };
-                    let result = Command::new(&task.artifact.executable)
-                        // No --nocapture: libtest's in-memory capture is what
-                        // plain `cargo test` gives users, and it re-emits a
-                        // failing test's output, which `.output()` still
-                        // receives. Streaming instead turns every print in a
-                        // hot loop into an unbuffered stderr syscall: bytes'
-                        // advance_bytes_mut_remaining_capacity prints per
-                        // iteration, and --nocapture alone cost 6.9s of its
-                        // 14.4s (baseline 8.0s streamed vs 1.0s captured).
-                        .args(["--exact", &task.test])
-                        .current_dir(&task.artifact.package_directory)
-                        .envs(instrumented_stack_environment())
-                        .envs(dynamic_library_environment(
-                            &target_libdir,
-                            &task.artifact.executable,
-                        ))
-                        .env("SUPERCOV_RUST_EVIDENCE_DIR", &task.directory)
-                        .env(
-                            crate::rust_probe_transport::RUST_CONTEXT_ENV,
-                            format!("{:016x}", task.context_id),
-                        )
-                        .output()
-                        .map(|output| ProcessOutcome {
-                            task: ProcessTask {
-                                ordinal: task.ordinal,
-                                artifact_index: task.artifact_index,
-                                test_index: task.test_index,
-                                artifact: task.artifact.clone(),
-                                test: task.test.clone(),
-                                context_id: task.context_id,
-                                directory: task.directory.clone(),
-                            },
-                            output,
-                        })
-                        .map_err(|error| error.to_string());
+                    let result = crate::child_signal_guard::output(
+                        Command::new(&task.artifact.executable)
+                            // No --nocapture: libtest's in-memory capture is what
+                            // plain `cargo test` gives users, and it re-emits a
+                            // failing test's output, which `.output()` still
+                            // receives. Streaming instead turns every print in a
+                            // hot loop into an unbuffered stderr syscall: bytes'
+                            // advance_bytes_mut_remaining_capacity prints per
+                            // iteration, and --nocapture alone cost 6.9s of its
+                            // 14.4s (baseline 8.0s streamed vs 1.0s captured).
+                            .args(["--exact", &task.test])
+                            .args(&ignored_mode)
+                            .current_dir(&task.artifact.package_directory)
+                            .envs(instrumented_stack_environment())
+                            .envs(dynamic_library_environment(
+                                &target_libdir,
+                                &task.artifact.executable,
+                            ))
+                            .env("SUPERCOV_RUST_EVIDENCE_DIR", &task.directory)
+                            .env(
+                                crate::rust_probe_transport::RUST_CONTEXT_ENV,
+                                format!("{:016x}", task.context_id),
+                            ),
+                    )
+                    .map(|output| ProcessOutcome {
+                        task: ProcessTask {
+                            ordinal: task.ordinal,
+                            artifact_index: task.artifact_index,
+                            test_index: task.test_index,
+                            artifact: task.artifact.clone(),
+                            test: task.test.clone(),
+                            context_id: task.context_id,
+                            directory: task.directory.clone(),
+                        },
+                        output,
+                    })
+                    .map_err(|error| error.to_string());
                     outcomes
                         .lock()
                         .expect("Rust test result lock poisoned")
@@ -2293,6 +2324,104 @@ mod tests {
         // `value * 2` was checked; `value + 1` only ran.
         assert_eq!(level(3), "asserted");
         assert_eq!(level(6), "executed");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn libtest_filters_select_the_tests_plain_cargo_would_run() {
+        // The user's filters were parsed and never applied: every artifact
+        // was listed bare, so `--skip` and a name filter changed nothing and
+        // Supercov ran a test plain Cargo did not (tokio, 1414 against 1413).
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "supercov-rust-runner-filters-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname='fixture'\nversion='0.0.0'\nedition='2024'\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+pub fn value(flag: bool) -> i32 { if flag { 1 } else { 0 } }
+#[cfg(test)]
+mod tests {
+    #[test] fn alpha() { assert_eq!(super::value(true), 1); }
+    #[test] fn beta() { assert_eq!(super::value(false), 0); }
+    #[test] #[ignore] fn gamma_slow() { assert_eq!(super::value(true), 1); }
+}
+"#,
+        )
+        .unwrap();
+        let project = prepare_rust_project(&root).unwrap();
+        let names = |run: &str, command: &[&str]| {
+            let run = run_prepared_rust_tests(
+                &project,
+                &command
+                    .iter()
+                    .map(|word| (*word).into())
+                    .collect::<Vec<String>>(),
+                run,
+                "2026-08-26T00:00:00.000Z",
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(run.exit_code, 0, "{:?}", run.request.raw_results);
+            let mut names = run
+                .request
+                .raw_results
+                .iter()
+                .map(|result| {
+                    (
+                        result.test.rsplit("::").next().unwrap().to_owned(),
+                        result.status.clone().unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        };
+        // Everything: the ignored test is listed and reported skipped.
+        assert_eq!(
+            names("rust-fixture-filters-1", &["cargo", "test", "--lib"]),
+            [
+                ("alpha".to_owned(), "passed".to_owned()),
+                ("beta".to_owned(), "passed".to_owned()),
+                ("gamma_slow".to_owned(), "skipped".to_owned()),
+            ]
+        );
+        // A name filter and `--skip` narrow the enumeration as libtest does.
+        assert_eq!(
+            names(
+                "rust-fixture-filters-2",
+                &["cargo", "test", "--lib", "alpha"]
+            ),
+            [("alpha".to_owned(), "passed".to_owned())]
+        );
+        assert_eq!(
+            names(
+                "rust-fixture-filters-3",
+                &["cargo", "test", "--lib", "--", "--skip", "beta"]
+            ),
+            [
+                ("alpha".to_owned(), "passed".to_owned()),
+                ("gamma_slow".to_owned(), "skipped".to_owned()),
+            ]
+        );
+        // `--ignored` lists the ignored test, and then it has to RUN.
+        assert_eq!(
+            names(
+                "rust-fixture-filters-4",
+                &["cargo", "test", "--lib", "--", "--ignored"]
+            ),
+            [("gamma_slow".to_owned(), "passed".to_owned())]
+        );
         fs::remove_dir_all(&root).ok();
     }
 

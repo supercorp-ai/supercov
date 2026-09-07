@@ -202,8 +202,7 @@ pub(crate) fn run_nextest(
         run_arguments.push("--".into());
         run_arguments.extend(invocation.runner_arguments.iter().cloned());
     }
-    let status = cargo(&run_arguments)
-        .status()
+    let status = crate::child_signal_guard::status(&mut cargo(&run_arguments))
         .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     let exit_code = status.code().unwrap_or(1);
 

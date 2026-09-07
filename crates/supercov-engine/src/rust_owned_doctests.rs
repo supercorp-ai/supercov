@@ -154,16 +154,17 @@ pub(crate) fn run_doctests(
         .and_then(fs::canonicalize)
         .map_err(io_error)?;
     let real_rustdoc = real_rustdoc()?;
-    let output = Command::new(&invocation.program)
-        .args(&selection.doctest_arguments)
-        .current_dir(&project.workspace_root)
-        .env("CARGO_TARGET_DIR", &project.target_directory)
-        .env("RUSTFLAGS", capped_rustflags())
-        .env("RUSTDOC", &program)
-        .env(WRAPPER_ROOT_ENV, root)
-        .env(REAL_RUSTDOC_ENV, &real_rustdoc)
-        .output()
-        .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
+    let output = crate::child_signal_guard::output(
+        Command::new(&invocation.program)
+            .args(&selection.doctest_arguments)
+            .current_dir(&project.workspace_root)
+            .env("CARGO_TARGET_DIR", &project.target_directory)
+            .env("RUSTFLAGS", capped_rustflags())
+            .env("RUSTDOC", &program)
+            .env(WRAPPER_ROOT_ENV, root)
+            .env(REAL_RUSTDOC_ENV, &real_rustdoc),
+    )
+    .map_err(|error| RustTestRunnerError::Launch(error.to_string()))?;
     let exit = output.status.code().unwrap_or(1);
 
     let mut packages = Vec::new();

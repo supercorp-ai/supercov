@@ -4,6 +4,7 @@
 
 pub mod agent_json;
 pub mod build_cache;
+pub mod child_signal_guard;
 pub mod coverage_analysis;
 pub mod coverage_index;
 pub mod coverage_query;

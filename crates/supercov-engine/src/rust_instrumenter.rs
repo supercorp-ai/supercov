@@ -450,6 +450,19 @@ impl<'a> RustObligationCollector<'a> {
     }
 
     fn point(&mut self, range: TextRange, kind: PointKind, label: Option<String>) {
+        self.point_located(range, range, kind, label);
+    }
+
+    /// A point identified by `range` but reported at `location`: a function
+    /// is identified by its whole node, which begins at its doc comments and
+    /// attributes, and reported where the function itself starts.
+    fn point_located(
+        &mut self,
+        range: TextRange,
+        location: TextRange,
+        kind: PointKind,
+        label: Option<String>,
+    ) {
         let kind_name = match kind {
             PointKind::Statement => "statement",
             PointKind::Function => "function",
@@ -459,7 +472,7 @@ impl<'a> RustObligationCollector<'a> {
         if !self.point_ids.insert(id.clone()) {
             return;
         }
-        let Some((line, column, source)) = self.location_source(range) else {
+        let Some((line, column, source)) = self.location_source(location) else {
             return;
         };
         self.manifest.points.push(PointMeta {
@@ -698,7 +711,12 @@ impl<'a> RustObligationCollector<'a> {
                 continue;
             }
             let label = function.name().map(|name| name.text().to_string());
-            self.point(function.syntax().text_range(), PointKind::Function, label);
+            self.point_located(
+                function.syntax().text_range(),
+                item_range(function.syntax()),
+                PointKind::Function,
+                label,
+            );
         }
 
         for closure in root.descendants().filter_map(ast::ClosureExpr::cast) {
@@ -1260,6 +1278,20 @@ fn block_entry_offset(block: &ast::BlockExpr) -> Option<usize> {
 
 /// A node's range without its outer attributes: a wrapper placed here stays
 /// under the attributes, so `#[cfg]` governs the wrapper and the node alike.
+/// A node's range from its first real token: past the doc comments and
+/// attributes that lead it, which the syntax tree folds into the node.
+fn item_range(node: &ra_ap_syntax::SyntaxNode) -> TextRange {
+    let range = node.text_range();
+    node.children_with_tokens()
+        .find(|element| match element {
+            ra_ap_syntax::NodeOrToken::Token(token) => !token.kind().is_trivia(),
+            ra_ap_syntax::NodeOrToken::Node(child) => !ast::Attr::can_cast(child.kind()),
+        })
+        .map_or(range, |element| {
+            TextRange::new(element.text_range().start(), range.end())
+        })
+}
+
 fn range_after_attributes(node: &impl HasAttrs) -> TextRange {
     let range = node.syntax().text_range();
     node.attrs().last().map_or(range, |attribute| {
@@ -3563,6 +3595,33 @@ impl Tagged {
         assert!(
             measured.iter().any(|(_, line)| (6..=8).contains(line)),
             "the plain fn must stay measured: {measured:?}"
+        );
+    }
+
+    #[test]
+    fn a_documented_function_is_reported_where_it_starts() {
+        // itertools' `group_by` was reported at the line of its doc comment,
+        // three lines above the `fn`, because the node's range begins there.
+        let source = r#"/// Documented.
+/// Twice.
+#[inline]
+pub fn documented(value: i32) -> i32 {
+    value + 1
+}
+"#;
+        let manifest = build_rust_manifest("src/lib.rs", source).unwrap();
+        let point = manifest
+            .points
+            .iter()
+            .find(|point| {
+                point.kind == PointKind::Function && point.label.as_deref() == Some("documented")
+            })
+            .unwrap();
+        assert_eq!(point.line, 4, "{point:?}");
+        assert!(
+            point.source.starts_with("pub fn documented"),
+            "{}",
+            point.source
         );
     }
 
