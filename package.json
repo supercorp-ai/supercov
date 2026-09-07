@@ -65,6 +65,7 @@
     "release:check": "cargo clean && node scripts/sweep-target.mjs && npm run check && npm run test:engine && npm run test:fixture && npm run test:watchdog && npm run test:engine-contract && npm run test:agent && npm run test:child-attribution && npm run test:host-loader && npm run test:python-monitoring && npm run test:ruby-coverage && npm run test:rust-public-cargo && npm run test:packed-npx && npm run test:clang-mcdc && npm run benchmark:check",
     "release:bump": "node scripts/bump-version.mjs",
     "sweep": "node scripts/sweep-target.mjs",
+    "oracle:rust": "cargo build --release -p supercov && node scripts/rust-coverage-oracle.mjs",
     "prepack": "node scripts/package-preflight.mjs",
     "prepublishOnly": "npm run release:check",
     "test:child-attribution": "cargo build -p supercov && node scripts/rust-child-attribution-integration.mjs",

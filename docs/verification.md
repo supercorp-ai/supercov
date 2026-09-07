@@ -78,6 +78,18 @@ self-consistent calculation error does not pass unnoticed. Python and Ruby
 gates run real suites through their supported runners and assert the resulting
 coverage totals, test identity, and measurement limits.
 
+Rust numbers are also checked against an independent LLVM line-coverage
+oracle over real crates. `npm run oracle:rust` runs the same tests plain, under
+the oracle, and under Supercov on twenty-six crates from bytes to tokio,
+compares line coverage file by file, and fails if Supercov ran any suite
+differently from plain Cargo. The two tools count differently — the oracle
+counts every executable region after monomorphisation, Supercov the lines its
+own obligations sit on — so the per-file comparison is read by a person: a file
+at 0% in one and 70% in the other means lost evidence or a wrong denominator,
+and this check found five such defects before 0.0.42. It runs locally and
+costs no hosted minutes; `scripts/rust-coverage-oracle.mjs` documents what
+each flag means.
+
 These checks reduce risk; they do not replace reviewing the assertions and
 behavior protected by a new test.
 
