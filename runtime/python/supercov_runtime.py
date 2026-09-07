@@ -416,6 +416,7 @@ class Runtime:
         self.context = contextvars.ContextVar("supercov_python_context", default=0)
         self.identities: dict[int, dict] = {}
         self.next_context = 1
+        self.asserted: set[int] = set()
         self.seen_hits: set = set()
         self.seen_vectors: set = set()
         self.vector_counts: dict = {}
@@ -654,6 +655,27 @@ class Runtime:
 
     def current_identity(self) -> dict | None:
         return self.identities.get(self.context.get())
+
+    def assertion(self) -> bool:
+        """The first assertion of a call phase.
+
+        Every first sighting the phase recorded so far already carries its
+        context; the marker says they ran before an assertion, and the report
+        links them to it once the phase passes. Returns whether this call
+        wrote the marker: later assertions of the phase cost one set lookup.
+        """
+        context = self.context.get()
+        if context == 0 or context in self.asserted:
+            return False
+        with self.lock:
+            if context in self.asserted:
+                return False
+            identity = self.identities.get(context)
+            if identity is None or identity.get("phase") != "call":
+                return False
+            self.asserted.add(context)
+            self._record({"t": "assert", "ctx": context})
+        return True
 
     def child_environment(self) -> dict:
         """Environment additions that carry the current phase into a child

@@ -40,6 +40,53 @@ def _switch(item, phase: str) -> None:
     )
 
 
+def _own_rewrite_cache() -> None:
+    """Give Supercov's assertion rewrites a bytecode cache name of their own.
+
+    Supercov turns `enable_assertion_pass_hook` on through `PYTEST_ADDOPTS`,
+    and pytest only calls `pytest_assertion_pass` from modules rewritten with
+    it on -- but it caches rewritten modules by pytest version alone, so a
+    module a plain run had cached would keep its silent bytecode, and a
+    Supercov run would leave hook calls in the plain run's cache. The name
+    lives in pytest's private surface; when it is missing, plain `assert`
+    stays unlinked and the run says so.
+    """
+    if _runtime is None:
+        return
+    try:
+        from _pytest.assertion import rewrite
+
+        tail = rewrite.PYC_TAIL
+        if "-supercov" not in tail:
+            stem, extension = tail.rsplit(".", 1)
+            rewrite.PYC_TAIL = f"{stem}-supercov.{extension}"
+    except Exception as error:  # noqa: BLE001 - never break the user's test run
+        _runtime.limitation(
+            "python-pytest-assertion-hook-unavailable",
+            f"this pytest exposes no rewrite cache Supercov can name ({error!r}); plain assert statements are not linked to assertions",
+        )
+
+
+# At import, which `PYTEST_PLUGINS` places before any conftest is rewritten.
+_own_rewrite_cache()
+
+
+def pytest_assertion_pass(item, lineno, orig, expl):
+    del item, lineno, orig, expl
+    if _runtime is None or _xdist_controller:
+        return
+    if _runtime.assertion():
+        # The phase is sampled; the remaining assertions of this test need
+        # not build their explanation strings for a hook that ignores them.
+        # pytest arms the hook again for the next test.
+        try:
+            from _pytest.assertion import util
+
+            util._assertion_pass = None
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def pytest_configure(config):
     global _worker, _xdist_controller
     worker_input = getattr(config, "workerinput", None)

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+**Added**
+
+- Python and Ruby coverage says whether a test checked what it ran. Evidence a test recorded before its first assertion links to that assertion when the test passes: pytest `assert` statements, `unittest` assert methods, Minitest, RSpec expectations (in Cucumber steps too) and test-unit.
+- `npm run oracle:rust` compares Rust coverage per file against `cargo llvm-cov` over 26 crates and flags the differences.
+
+**Fixed**
+
+- Rust: `cargo test foo`, `-- --skip name`, `-- --exact name` and `-- --ignored` were parsed and never applied; Supercov ran every test. The oracle caught it on tokio.
+- A SIGTERM, SIGHUP or SIGINT to Supercov no longer leaves its current Rust test process running.
+- A Rust function's obligation is reported at its `fn` line, not at its doc comment.
+- Ruby test-unit: the adapter attached before test-unit had loaded `TestResult`, so its result hooks never installed — a failing test was reported as passed, and every run read Incomplete with a blocking limitation.
+
 ## 0.0.42
 
 **Added**

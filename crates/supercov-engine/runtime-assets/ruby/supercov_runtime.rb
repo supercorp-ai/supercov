@@ -355,6 +355,8 @@ module Supercov
       @arrivals = {}
       @limitations = {}
       @active_threads = {}
+      @asserted = {}
+      @assertion_hooks = {}
       @realpath_cache = {}
       @saw_file = false
       @matched_file = false
@@ -583,17 +585,8 @@ module Supercov
       @mutex.synchronize do
         thread = Thread.current
         ending = thread[:__supercov_context] || @context
-        overlapping = @active_threads.any? { |other, ctx| other != thread && ctx != 0 && other.alive? }
         settle_arrivals(ending)
-        if overlapping
-          limitation(
-            "ruby-concurrent-test-phases",
-            "tests ran concurrently in threads; line, branch and method observations made while phases overlapped are attributed to the run, not to a test (probe observations stay exact)",
-          )
-          collect_stdlib(0)
-        else
-          collect_stdlib(ending)
-        end
+        sample_stdlib(thread, ending)
         if identity.nil?
           @context = 0
           thread[:__supercov_context] = nil
@@ -611,8 +604,80 @@ module Supercov
           record({ "t" => "phase", "ctx" => @context, "at" => now_ms }.merge(stored))
           thread[:__supercov_context] = @context
           @active_threads[thread] = @context
+          hook_assertions if identity[:phase] == "call"
         end
         @context
+      end
+    end
+
+    # Flush the stdlib coverage delta into `context`. Stdlib counters are
+    # process-wide, so a delta collected while another thread is mid-phase
+    # belongs to no single test: it goes to the run's background and the run
+    # says so. Probe hits stay exact per thread.
+    def sample_stdlib(thread, context)
+      overlapping = @active_threads.any? { |other, ctx| other != thread && ctx != 0 && other.alive? }
+      if overlapping
+        limitation(
+          "ruby-concurrent-test-phases",
+          "tests ran concurrently in threads; line, branch and method observations made while phases overlapped are attributed to the run, not to a test (probe observations stay exact)",
+        )
+        collect_stdlib(0)
+      else
+        collect_stdlib(context)
+      end
+    end
+
+    # The first assertion of a call phase. The stdlib delta the phase has
+    # accumulated is sampled into it, then the marker says everything the
+    # phase recorded so far ran before an assertion; the report links it to
+    # that assertion once the phase passes. Sampling once keeps the cost to
+    # one `Coverage.result` per test: later assertions cost a hash lookup.
+    def assertion
+      context = current_context
+      return if context.zero? || @asserted[context]
+
+      @mutex.synchronize do
+        return if @asserted[context]
+
+        identity = @identities[context]
+        return if identity.nil? || identity["phase"] != "call"
+
+        @asserted[context] = true
+        sample_stdlib(Thread.current, context)
+        record("t" => "assert", "ctx" => context)
+      end
+    end
+
+    # Each assertion library reaches the runtime through one method: every
+    # Minitest assert_*/refute_* ends in `assert`, every RSpec expectation in
+    # `to`/`not_to`, every test-unit assertion runs inside `_wrap_assertion`.
+    # Prepending to the module reaches the classes that already include it.
+    ASSERTION_METHODS = {
+      "Minitest::Assertions" => %i[assert],
+      "RSpec::Expectations::ExpectationTarget" => %i[to not_to to_not],
+      "Test::Unit::Assertions" => %i[_wrap_assertion],
+    }.freeze
+
+    # Hooked when a call phase starts rather than at install, so a library
+    # loaded late -- Cucumber pulls rspec-expectations in with its World --
+    # is still caught; a hooked library costs one hash lookup per phase.
+    def hook_assertions
+      return if @assertion_hooks.size == ASSERTION_METHODS.size
+
+      ASSERTION_METHODS.each do |name, methods|
+        next if @assertion_hooks[name] || !Object.const_defined?(name)
+
+        runtime = self
+        hook = Module.new do
+          methods.each do |method_name|
+            define_method(method_name) do |*args, **options, &block|
+              runtime.assertion
+              super(*args, **options, &block)
+            end
+          end
+        end
+        Object.const_get(name).prepend(hook)
+        @assertion_hooks[name] = true
       end
     end
 

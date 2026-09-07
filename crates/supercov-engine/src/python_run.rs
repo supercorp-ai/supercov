@@ -141,6 +141,17 @@ fn environment(
     };
     let python_path = prepend_path_list(take("PYTHONPATH"), runtime_directory);
     let pytest_plugins = append_list(take("PYTEST_PLUGINS"), "supercov_pytest", ",");
+    // pytest calls its assertion-pass hook only from modules rewritten with
+    // this option on; the plugin gives those rewrites a cache name of their
+    // own. First in the list, so an explicit `-o` on the command line wins.
+    let pytest_addopts = {
+        let mut value = OsString::from("-o enable_assertion_pass_hook=true");
+        if let Some(existing) = take("PYTEST_ADDOPTS").filter(|existing| !existing.is_empty()) {
+            value.push(" ");
+            value.push(existing);
+        }
+        value
+    };
     for key in [
         "SUPERCOV_PYTHON_PLAN",
         "SUPERCOV_PYTHON_EVIDENCE_DIR",
@@ -154,6 +165,7 @@ fn environment(
     variables.extend([
         ("PYTHONPATH".into(), python_path),
         ("PYTEST_PLUGINS".into(), pytest_plugins),
+        ("PYTEST_ADDOPTS".into(), pytest_addopts),
         (
             "SUPERCOV_PYTHON_PLAN".into(),
             plan_path.as_os_str().to_owned(),

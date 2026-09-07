@@ -95,6 +95,11 @@ enum Record {
         v: String,
         o: u8,
     },
+    /// The first assertion of a call phase: what the context recorded before
+    /// this record is the assertion's evidence too.
+    Assert {
+        ctx: u64,
+    },
     Limitation {
         id: String,
         reason: String,
@@ -358,6 +363,9 @@ fn read_evidence_file(
         .filter(|pid| *pid != 0)
         .ok_or_else(|| invalid_transport("process id is missing"))?;
     let mut contexts = BTreeMap::<u64, Identity>::new();
+    // What each call phase recorded so far, kept until its first assertion
+    // marker moves it to the phase's assertion identity.
+    let mut before_assertion = BTreeMap::<u64, Observations>::new();
     let mut process_worker: Option<String> = None;
     let mut cursor = TRANSPORT_HEADER_SIZE;
     let mut record_index = 0;
@@ -466,6 +474,9 @@ fn read_evidence_file(
                 if test.trim().is_empty() || worker.trim().is_empty() {
                     return Err(invalid("phase identity must name a worker and test"));
                 }
+                if phase == "call" {
+                    before_assertion.insert(ctx, Observations::default());
+                }
                 contexts.insert(
                     ctx,
                     Identity {
@@ -511,6 +522,9 @@ fn read_evidence_file(
                     .push((phase, outcome, xfail));
             }
             Record::Hit { ctx, id } => {
+                if let Some(before) = before_assertion.get_mut(&ctx) {
+                    before.hits.insert(id.clone());
+                }
                 observations(
                     evidence,
                     &contexts,
@@ -537,6 +551,13 @@ fn read_evidence_file(
                         _ => Some(true),
                     })
                     .collect::<Vec<_>>();
+                if let Some(before) = before_assertion.get_mut(&ctx) {
+                    before
+                        .vectors
+                        .entry(id.clone())
+                        .or_default()
+                        .insert((values.clone(), o == 1));
+                }
                 observations(
                     evidence,
                     &contexts,
@@ -549,6 +570,31 @@ fn read_evidence_file(
                 .entry(id)
                 .or_default()
                 .insert((values, o == 1));
+            }
+            Record::Assert { ctx } => {
+                // Only the first marker of a call phase moves anything; a
+                // later one, or one outside a call phase, is inert.
+                if let Some(before) = before_assertion.remove(&ctx) {
+                    let identity =
+                        contexts
+                            .get(&ctx)
+                            .ok_or(PythonEvidenceError::UnknownContext {
+                                file: name.into(),
+                                line: line_number,
+                                context: ctx,
+                            })?;
+                    let asserted = evidence
+                        .per_identity
+                        .entry(Identity {
+                            phase: "assertion".into(),
+                            ..identity.clone()
+                        })
+                        .or_default();
+                    asserted.hits.extend(before.hits);
+                    for (id, vectors) in before.vectors {
+                        asserted.vectors.entry(id).or_default().extend(vectors);
+                    }
+                }
             }
             Record::Limitation {
                 id,
@@ -607,10 +653,11 @@ pub fn python_coverage_model() -> CoverageModelDeclaration {
             "match case selection and guards".into(),
             "try completion, handler selection and exception propagation".into(),
             "pytest and unittest worker, test, retry and setup/call/teardown phase identity".into(),
+            "evidence a test recorded before its first assertion, linked to that assertion when the test passes".into(),
         ],
         not_measured: vec![
             "zero-iteration executions of a loop after it has run and exited 16 times within one test phase on CPython 3.14".into(),
-            "causal linkage to individual actions or passing assertions".into(),
+            "causal linkage to individual actions, or to any assertion after a test's first".into(),
             "code compiled from strings at runtime".into(),
             "causal test context for raw _thread or native-extension-created threads".into(),
             "child coverage outside subprocess.Popen and multiprocessing adapters".into(),
@@ -866,7 +913,7 @@ pub fn build_python_frontend_run(
         let mut phases = Vec::new();
         let mut runtime = Vec::new();
         let mut observed_phases = BTreeSet::new();
-        for (position, (phase_name, outcome, _)) in outcomes.iter().enumerate() {
+        for (position, (phase_name, outcome, xfail)) in outcomes.iter().enumerate() {
             observed_phases.insert(phase_name.clone());
             let identity = Identity {
                 worker: worker.clone(),
@@ -897,6 +944,38 @@ pub fn build_python_frontend_run(
                 .iter()
                 .find(|(candidate, _)| candidate.phase == phase_name.as_str())
             {
+                runtime.push(snapshot(&index, observations, &id)?);
+            }
+            if phase_name != "call" {
+                continue;
+            }
+            // What the test recorded before its first assertion is that
+            // assertion's evidence, linked when the phase passed outright:
+            // a failed, skipped or expected-to-fail phase witnessed nothing.
+            if let Some((identity, observations)) = attempt_identities
+                .iter()
+                .find(|(candidate, _)| candidate.phase == "assertion")
+            {
+                observed_phases.insert("assertion".to_owned());
+                let id = phase_id(run_id, identity);
+                phases.push(CoveragePhase {
+                    id: id.clone(),
+                    kind: "assertion".into(),
+                    operation: format!("{runner} assertion"),
+                    source: Some(test.clone()),
+                    caused_by_phase_id: None,
+                    started_at_ms: position as i64 * 2 + 1,
+                    ended_at_ms: Some(position as i64 * 2 + 2),
+                    status: Some(
+                        if outcome == "passed" && !*xfail {
+                            "passed"
+                        } else {
+                            "failed"
+                        }
+                        .into(),
+                    ),
+                    error: None,
+                });
                 runtime.push(snapshot(&index, observations, &id)?);
             }
         }
@@ -1150,20 +1229,13 @@ pub fn build_python_frontend_run(
                         retry: AttributionPrecision::Exact,
                         phase: AttributionPrecision::Exact,
                         action: AttributionPrecision::Unavailable,
-                        assertion: AttributionPrecision::Unavailable,
+                        assertion: AttributionPrecision::Exact,
                     },
-                    limitations: vec![
-                        FrontendLimitation {
-                            id: "python-action-linkage".into(),
-                            scopes: vec![FrontendLimitationScope::Action],
-                            reason: format!("{runner} exposes no general action lifecycle"),
-                        },
-                        FrontendLimitation {
-                            id: "python-assertion-linkage".into(),
-                            scopes: vec![FrontendLimitationScope::Assertion],
-                            reason: format!("{runner} phase outcomes do not identify each passing assertion or the obligations caused by it"),
-                        },
-                    ],
+                    limitations: vec![FrontendLimitation {
+                        id: "python-action-linkage".into(),
+                        scopes: vec![FrontendLimitationScope::Action],
+                        reason: format!("{runner} exposes no general action lifecycle"),
+                    }],
                 })
                 .collect(),
             structural_limitations,
@@ -1236,6 +1308,89 @@ mod tests {
             cursor = align_transport(payload_end).unwrap();
         }
         fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn evidence_before_the_first_assertion_links_to_it_when_the_test_passes() {
+        // The runtime's marker says everything the call phase recorded so far
+        // ran before an assertion. That evidence carries an assertion phase
+        // that passed with the test; what ran after the marker, and all of a
+        // test that failed, stays execution only. A second marker is inert.
+        let source = "def f(a):\n    return a\n\n\ndef g(b):\n    return b\n";
+        let obligations = build_python_obligations("m.py", source).unwrap();
+        let before = &obligations.plan.statements[0].id;
+        let after = &obligations.plan.statements[1].id;
+        let run_with = |name: &str, outcome: &str| {
+            let lines = [
+                json!({"t":"process","v":1,"run":"run-1","pid":1,"worker":"main","python":"3.14.4","executable":"python","argv":["pytest"]}),
+                json!({"t":"phase","ctx":1,"at":5,"worker":"main","test":"tests/test_m.py::test_a","retry":0,"phase":"call"}),
+                json!({"t":"hit","ctx":1,"id":before}),
+                json!({"t":"assert","ctx":1}),
+                json!({"t":"assert","ctx":1}),
+                json!({"t":"hit","ctx":1,"id":after}),
+                json!({"t":"outcome","worker":"main","test":"tests/test_m.py::test_a","retry":0,"phase":"call","outcome":outcome,"xfail":false}),
+                json!({"t":"exit","at":9}),
+            ];
+            let directory = temporary(name);
+            write_transport(&directory.join("main.1.mmap"), &lines, 0);
+            let run =
+                build_python_frontend_run(&obligations.manifest, &directory, "run-1", "now", 0)
+                    .unwrap();
+            validate_frontend_report_request(&run.declaration, &run.request).unwrap();
+            fs::remove_dir_all(directory).unwrap();
+            run
+        };
+        let events_of = |result: &RawTestResult, phase: &str| -> BTreeSet<String> {
+            result
+                .runtime
+                .iter()
+                .flat_map(|snapshot| snapshot.events.iter())
+                .filter(|event| event.phase_id.as_deref() == Some(phase))
+                .map(|event| event.id.clone())
+                .collect()
+        };
+
+        let run = run_with("asserted-passed", "passed");
+        let passed = &run.request.raw_results[0];
+        assert_eq!(passed.test, "tests/test_m.py::test_a");
+        let assertion = passed
+            .phases
+            .iter()
+            .find(|phase| phase.kind == "assertion")
+            .expect("the asserting test carries an assertion phase");
+        assert_eq!(assertion.status.as_deref(), Some("passed"));
+        assert_eq!(
+            events_of(passed, &assertion.id),
+            BTreeSet::from([before.clone()]),
+            "only what ran before the marker is the assertion's evidence"
+        );
+        let test_phase = passed
+            .phases
+            .iter()
+            .find(|phase| phase.kind == "test")
+            .unwrap();
+        assert_eq!(
+            events_of(passed, &test_phase.id),
+            BTreeSet::from([before.clone(), after.clone()]),
+            "the test phase keeps everything it ran"
+        );
+        assert_eq!(
+            run.declaration.runners[0].attribution.assertion,
+            AttributionPrecision::Exact
+        );
+
+        let run = run_with("asserted-failed", "failed");
+        let failed = &run.request.raw_results[0];
+        let assertion = failed
+            .phases
+            .iter()
+            .find(|phase| phase.kind == "assertion")
+            .unwrap();
+        assert_eq!(
+            assertion.status.as_deref(),
+            Some("failed"),
+            "a failed test's assertion witnessed nothing"
+        );
     }
 
     #[test]

@@ -149,10 +149,19 @@ attribution.
 | pytest-rerunfailures | Exact per attempt; flaky tests are reported as such | |
 | `python -m unittest` | Exact test and setUp/test/tearDown phase identity | Serial in-process; skips and expected failures are recorded; subtest failures roll up to the parent test |
 
+Evidence a test records before its first assertion is linked to that assertion
+when the test passes, so a line reads "linked to a passing assertion" rather
+than "execution only". Under pytest this covers plain `assert` statements,
+through pytest's assertion-pass hook, which Supercov turns on for a rewrite
+cache of its own so plain runs keep theirs; every `unittest` `assert*` method
+counts under both runners. What a test runs after its first assertion is
+execution only.
+
 Supercov measures Python through CPython's own monitoring interface. Nothing is
 copied, rewritten, or compiled differently: the project runs in place with its
 own interpreter and virtual environment, and Supercov only adds a start-up hook
-through `PYTHONPATH`, a pytest plugin through `PYTEST_PLUGINS`, and a few
+through `PYTHONPATH`, a pytest plugin through `PYTEST_PLUGINS`, one pytest
+option (`enable_assertion_pass_hook`) through `PYTEST_ADDOPTS`, and a few
 `SUPERCOV_*` variables. Child interpreters started with `subprocess` or
 `multiprocessing` inherit the exact test identity; threads and thread pools
 carry it through `contextvars`.
@@ -187,6 +196,12 @@ npx supercov -- python -m unittest
 | parallel_tests, Rails process workers | Exact per worker process | Workers inherit the run through `RUBYOPT`; verified on a Rails app with bootsnap, Zeitwerk and two forked workers |
 | Thread-parallel Minitest (`parallelize_me!`, `parallelize(with: :threads)`) | Probe observations exact per test; line, method and simple-branch observations made while phases overlapped go to the run, declared | |
 | Cucumber | Exact scenario identity (`features/x.feature:LINE`), hook steps as setup/teardown | `cucumber`, `bundle exec cucumber` |
+
+Evidence a test records before its first assertion is linked to that assertion
+when the test passes: Minitest's `assert`/`refute` family, RSpec's
+`expect(...).to` and `not_to` (in Cucumber steps too) and test-unit's
+assertions all count. What a test runs after its first assertion is execution
+only.
 
 Supercov measures Ruby with Ruby's own `Coverage` module plus probe calls it
 splices into application files in memory as they load. Nothing on disk is

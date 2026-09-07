@@ -64,10 +64,15 @@ module Supercov
     def self.install(runtime)
       return if @runtime
 
+      # test-unit loads TestResult from its runner mediator, after TestCase
+      # has finished defining. Installing at the class end without it left
+      # the result hooks off, so no failure was ever noted, and declared a
+      # blocking limitation on every run.
+      require "test/unit/testresult"
+      ::Test::Unit::TestResult.prepend(ResultHooks)
+      ::Test::Unit::TestCase.prepend(TestCaseHooks)
       @runtime = runtime
       runtime.adapter_active = true
-      ::Test::Unit::TestCase.prepend(TestCaseHooks)
-      ::Test::Unit::TestResult.prepend(ResultHooks)
     end
 
     def self.identity(test)

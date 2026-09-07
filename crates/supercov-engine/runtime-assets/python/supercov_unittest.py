@@ -57,6 +57,25 @@ def install(runtime):
     wrap_phase("_callTestMethod", "call")
     wrap_phase("_callTearDown", "teardown")
 
+    # Every public assert* method marks the phase's first assertion. This
+    # stays active under pytest too: a TestCase pytest runs asserts through
+    # these methods, inside the call phase the pytest adapter entered.
+    def wrap_assertion(name):
+        original = getattr(unittest.case.TestCase, name)
+
+        def wrapper(self, *args, **kwargs):
+            if not runtime.closed:
+                runtime.assertion()
+            return original(self, *args, **kwargs)
+
+        wrapper.__name__ = name
+        wrapper.__doc__ = original.__doc__
+        setattr(unittest.case.TestCase, name, wrapper)
+
+    for name in dir(unittest.case.TestCase):
+        if name.startswith("assert") and not name.startswith("assert_") and callable(getattr(unittest.case.TestCase, name)):
+            wrap_assertion(name)
+
     def record(test, status, xfail=False):
         state = _active.get(id(test))
         if state is None or state.phase is None:
