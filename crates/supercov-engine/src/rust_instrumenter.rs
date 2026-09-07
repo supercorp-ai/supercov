@@ -3510,7 +3510,7 @@ fn main() {
         // `GlobalAlloc` implementation would probe the allocator its probe
         // allocates in. Both were declared and still counted, so smallvec's
         // `TaggedLen` -- four `const fn` methods -- read 0% covered where
-        // cargo-llvm-cov reads 89%.
+        // the independent LLVM coverage oracle reads 89%.
         let source = r#"pub struct Tagged(usize);
 impl Tagged {
     pub const fn new(len: usize, on_heap: bool) -> Self {
