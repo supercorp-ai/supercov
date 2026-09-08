@@ -125,6 +125,10 @@ if (runtime && evidenceDirectory && typeof beforeEach === "function" && typeof a
             browser: [],
             server: [],
         });
+        // One runtime state serves every test file a worker runs, so what this
+        // test recorded must not leak into the next file's module-setup
+        // snapshot (Vitest isolates files; Jest does not).
+        runtime.resetCoverage();
         runtime.activateCoverageScope();
     });
 }

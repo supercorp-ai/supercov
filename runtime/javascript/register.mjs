@@ -171,6 +171,17 @@ if (generatedVitestConfig && /\/vitest(?:\.m?js)?$/.test(entrypoint)) {
         });
     }
 }
+if ((isJestEntrypoint || process.env.JEST_WORKER_ID) && process.env.SUPERCOV_EVIDENCE_DIR) {
+    // Jest evaluates instrumented modules in its own module system, past the
+    // loader hook that imports the runtime on first use elsewhere, and
+    // jest-environment-node exposes to each test's sandbox only the globals
+    // the outer process held when that class loaded. The Jest process and
+    // each of its workers (JEST_WORKER_ID) therefore load the runtime first;
+    // without this, a suite with more than one test file failed on every
+    // instrumented module's first line inside the workers.
+    globalThis.__SUPERCOV_DIRECT_RUNTIME__ ??= await import("./runtime.mjs");
+    process.__SUPERCOV_DIRECT_RUNTIME__ ??= globalThis.__SUPERCOV_DIRECT_RUNTIME__;
+}
 if (isJestEntrypoint && process.env.SUPERCOV_EVIDENCE_DIR) {
     // Jest reads one configuration. Ours (jest.config.mjs) reads the user's
     // the way Jest would and adds the adapter and reporter; an explicit

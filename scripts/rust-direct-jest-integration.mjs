@@ -82,6 +82,25 @@ try {
       '',
     ].join('\n'),
   );
+  // `jest.retryTimes` re-runs the test with its hooks; Jest reports one
+  // result after the last attempt, so the reporter records the earlier
+  // attempts as the failures they were.
+  writeFileSync(
+    resolve(project, 'tests/flaky.test.js'),
+    [
+      "const { permission } = require('../src/permission');",
+      '',
+      'jest.retryTimes(1);',
+      '',
+      'let attempts = 0;',
+      "test('flaky', () => {",
+      '  attempts += 1;',
+      "  if (attempts === 1) throw new Error('first attempt fails');",
+      "  expect(permission(true, false)).toBe('allowed');",
+      '});',
+      '',
+    ].join('\n'),
+  );
   const install = spawnSync(windows ? 'npm.cmd' : 'npm', ['install', '--no-audit', '--no-fund', '--silent', 'jest@29'], {
     cwd: project,
     encoding: 'utf8',
@@ -102,14 +121,21 @@ try {
   // `valid` is the test command exiting 0; the failing test rules that out.
   assert.equal(all.data.valid, false);
   assert.deepEqual(all.data.diagnostics, [], 'every test with assertion phases also carries evidence');
-  assert.equal(all.data.tests, 7, `seven tests, two of them parameterized: ${JSON.stringify(all.data.testOutcomes)}`);
-  assert.equal(all.data.testOutcomes.passed, 6);
-  assert.equal(all.data.testOutcomes.failed, 1);
+  assert.equal(
+    all.data.tests,
+    8,
+    `eight tests, two of them parameterized and one flaky: ${JSON.stringify({ outcomes: all.data.testOutcomes, diagnostics: all.data.diagnostics, measurement: all.data.measurement, stale: all.data.staleReasons })}`,
+  );
+  assert.equal(all.data.testOutcomes.passed, 6, JSON.stringify(all.data.testOutcomes));
+  assert.equal(all.data.testOutcomes.failed, 1, JSON.stringify(all.data.testOutcomes));
+  assert.equal(all.data.testOutcomes.flaky, 1, `a retried test that then passed is flaky: ${JSON.stringify(all.data.testOutcomes)}`);
   assert.deepEqual(all.data.coverageByRunner.map((entry) => entry.runner), ['jest']);
   assert.equal(all.data.measurement.complete, true, JSON.stringify(all.data.measurement));
 
+  // The flaky test's passing attempt counts among the passed, its failing one
+  // among the failed: filters recalculate from attempts.
   const passed = query(run.runId, 'passed', 'summary');
-  assert.equal(passed.data.tests, 6);
+  assert.equal(passed.data.tests, 7, JSON.stringify(passed.data.testOutcomes));
   assert.ok(passed.data.confidence.lines.asserted >= 3, `global expect links the evidence before it: ${JSON.stringify(passed.data.confidence)}`);
 
   const allowed = query(run.runId, 'all', 'line', { file: 'src/permission.js', line: 3, offset: 0, limit: 20 });
@@ -119,7 +145,7 @@ try {
   assert.doesNotMatch(owners, /wrong/, 'the failing test never reached this line');
 
   const failed = query(run.runId, 'failed', 'summary');
-  assert.equal(failed.data.tests, 1);
+  assert.equal(failed.data.tests, 2, JSON.stringify(failed.data.testOutcomes));
 
   console.log('[rust-direct-jest] a Jest suite has exact per-test identity, reporter outcomes, its own setup file and assertion phases for the global expect');
 } finally {

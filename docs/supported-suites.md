@@ -247,12 +247,14 @@ TruffleRuby are not supported.
 The runtime loads through `RUBYOPT` before Bundler and requires only
 `coverage`, so it never activates a gem an application's Gemfile pins
 differently. Insertions are checked against Ruby itself by a sweep
-(`scripts/ruby-position-sweep.rb`) over Ruby's whole standard library and the
-Rails, Rack, RSpec, Minitest and Cucumber gems, about 3,000 files: every file
-is transformed and compiled, and every position Supercov expects is compared
-with what Ruby reports. With `--load` each file also runs twice, untouched and
-transformed, so the probes are proven to preserve behaviour and every method
-position is checked.
+(`scripts/ruby-corpus-sweep.sh`, which drives `scripts/ruby-position-sweep.rb`)
+over Ruby's whole standard library and the Rails, Rack, RSpec, Minitest,
+test-unit and Cucumber gems, about 4,300 files installed once into a stable
+corpus directory: every file is transformed and compiled with its line count
+intact, every branch key Ruby 3.3 reads is compared with what Ruby reports for
+the untouched source, and each file is loaded twice, untouched and
+transformed, so the probes are proven to preserve behaviour and define the
+same methods.
 
 A `begin` whose body ends in an expression that can `return` from inside
 itself has its handlers and propagation measured as usual, but its normal

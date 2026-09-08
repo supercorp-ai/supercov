@@ -38,27 +38,36 @@ export default class SupercovJestReporter {
         const testId = `jest:${digest(`${testFile}\0${result.fullName}`)}`;
         const retry = Math.max((result.invocations ?? 1) - 1, 0);
         const status = attemptStatus(result.status);
-        const payload = {
-            testId,
-            test: result.fullName,
-            testFile,
-            title: result.title,
-            retry,
-            status,
-            expectedStatus: "passed",
-            flaky: retry > 0 && status === "passed",
-            provenance: inferTestProvenance({
-                runner: "jest",
-                file: testFile,
-                explicitKind: process.env["SUPERCOV_TEST_KIND"],
-            }),
-            runtime: [],
-            browser: [],
-            server: [],
+        const provenance = inferTestProvenance({
+            runner: "jest",
+            file: testFile,
+            explicitKind: process.env["SUPERCOV_TEST_KIND"],
+        });
+        const record = (attempt, attemptStatus, flaky) => {
+            const payload = {
+                testId,
+                test: result.fullName,
+                testFile,
+                title: result.title,
+                retry: attempt,
+                status: attemptStatus,
+                expectedStatus: "passed",
+                flaky,
+                provenance,
+                runtime: [],
+                browser: [],
+                server: [],
+            };
+            const directory = resolve(process.cwd(), evidenceDirectory, `jest-${digest(testId)}-${attempt}-status`);
+            mkdirSync(directory, { recursive: true });
+            atomicWriteFileSync(resolve(directory, "mcdc.json"), `${JSON.stringify(payload)}\n`);
         };
-        const directory = resolve(process.cwd(), evidenceDirectory, `jest-${digest(testId)}-${retry}-status`);
-        mkdirSync(directory, { recursive: true });
-        atomicWriteFileSync(resolve(directory, "mcdc.json"), `${JSON.stringify(payload)}\n`);
+        // `jest.retryTimes` reports one result after the last attempt; every
+        // attempt before it failed, or there would have been no retry. The
+        // adapter wrote each attempt's coverage without an outcome.
+        for (let attempt = 0; attempt < retry; attempt += 1)
+            record(attempt, "failed", false);
+        record(retry, status, retry > 0 && status === "passed");
     }
     // Jest calls these on every reporter.
     onRunComplete() { }
