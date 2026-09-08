@@ -251,6 +251,24 @@ try {
   assert.equal(failedSubtestSummary.testOutcomes.failed, 1);
   assert.equal(failedSubtestSummary.measurement.complete, true, JSON.stringify(failedSubtestSummary.measurement));
 
+  // One failing and one passing test per runner, reported as such. Everything
+  // under `tests/` passes, so a runner whose failure path broke would look
+  // fine to the totals above; the Ruby gate found exactly that in test-unit.
+  for (const [runner, command] of [
+    ['pytest', ['python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'tests_extended/test_failing.py']],
+    ['unittest', ['python', '-m', 'unittest', '-q', 'tests_extended.test_unittest_failing']],
+  ]) {
+    const result = supercov(project, ['--', ...command], environment);
+    assert.equal(result.status, 1, `${runner}: the failing test must fail the command\n${result.stdout}\n${result.stderr}`);
+    const summary = query(project, ['runs', 'latest'], environment);
+    assert.deepEqual(
+      [summary.testOutcomes.passed, summary.testOutcomes.failed],
+      [1, 1],
+      `${runner} must report one passing and one failing test: ${JSON.stringify(summary.testOutcomes)}`,
+    );
+    assert.equal(summary.measurement.complete, true, `${runner}: ${JSON.stringify(summary.measurement)}`);
+  }
+
   successfulSupercov(
     project,
     [
