@@ -1429,6 +1429,26 @@ impl<'a> Collector<'a> {
             Some(true)
         } else if node.as_false_node().is_some() || node.as_nil_node().is_some() {
             Some(false)
+        } else if let Some(and) = node.as_and_node() {
+            // Ruby folds `x and false` the same way: the then arm is never
+            // compiled and reports no branch, while `x` still runs.
+            match (
+                self.literal_truth(and.left()),
+                self.literal_truth(and.right()),
+            ) {
+                (Some(false), _) | (_, Some(false)) => Some(false),
+                (Some(true), Some(true)) => Some(true),
+                _ => None,
+            }
+        } else if let Some(or) = node.as_or_node() {
+            match (
+                self.literal_truth(or.left()),
+                self.literal_truth(or.right()),
+            ) {
+                (Some(true), _) | (_, Some(true)) => Some(true),
+                (Some(false), Some(false)) => Some(false),
+                _ => None,
+            }
         } else {
             None
         }
@@ -3007,7 +3027,10 @@ impl<'pr> Visit<'pr> for Collector<'_> {
         if let Some(truthy) = self.literal_truth(node.predicate()) {
             // Ruby compiles only the live arm of `if false` / `if true` and
             // reports no branch for it; the dead arm is not code that can run.
+            // A folded `x and false` still evaluates `x`, whose own code is
+            // measured like any expression.
             self.depth += 1;
+            self.visit(&node.predicate());
             if truthy {
                 if let Some(statements) = node.statements() {
                     self.visit_statements_node(&statements);
@@ -3063,6 +3086,7 @@ impl<'pr> Visit<'pr> for Collector<'_> {
         }
         if let Some(truthy) = self.literal_truth(node.predicate()) {
             self.depth += 1;
+            self.visit(&node.predicate());
             if truthy {
                 if let Some(else_node) = node.else_clause()
                     && let Some(statements) = else_node.statements()
@@ -3934,6 +3958,34 @@ end
         assert!(
             line.contains(".pre(") && line.contains(".es("),
             "arrival form: {line}"
+        );
+    }
+
+    #[test]
+    fn a_predicate_ruby_folds_leaves_no_obligations_in_the_dead_arm() {
+        // optparse: `if Process.respond_to?(:fork) and false` -- Ruby never
+        // compiles the then arm and reports no branch for the ternary inside
+        // it, so neither is an obligation; the live operand still runs.
+        let source = "def f(x)\n  if x and false\n    x ? 1 : 2\n  end\n  if x or true\n    3\n  else\n    4\n  end\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/f.rb", source.as_bytes(), &mut probe).unwrap();
+        let manifest = &obligations.manifest;
+        assert!(
+            !manifest.decisions.iter().any(|d| d.kind == "ternary"),
+            "the dead arm's ternary is not an obligation"
+        );
+        assert!(
+            !manifest.decisions.iter().any(|d| d.kind == "if"),
+            "a folded predicate is no decision"
+        );
+        assert!(
+            !manifest.points.iter().any(|p| p.line == 8),
+            "the dead else arm holds no statement"
+        );
+        assert!(
+            manifest.points.iter().any(|p| p.line == 6),
+            "the live arm does"
         );
     }
 
