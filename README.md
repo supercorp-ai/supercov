@@ -150,7 +150,7 @@ Supercov uses exact per-test attribution where an adapter is available. For othe
 | --- | --- |
 | Playwright | Exact per test, worker, retry, outcome, action, and assertion phase |
 | Vitest | Exact per test, with setup execution kept separate |
-| Jest | Exact per test, including concurrent and parameterized tests |
+| Jest | Exact per test, including parameterized tests; `expect` assertions link the evidence they check |
 | `node:test` | Exact per test |
 | AVA and Mocha | Aggregate structural coverage |
 | Cargo's standard libtest runner | Exact test, attempt, and passing-assertion identity |

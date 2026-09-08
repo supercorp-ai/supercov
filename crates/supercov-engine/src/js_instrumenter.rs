@@ -781,6 +781,10 @@ struct NodeAssertionBindings {
     objects: HashMap<SymbolId, String>,
     direct: HashMap<SymbolId, String>,
     expects: HashSet<SymbolId>,
+    /// Jest (and Jasmine) inject `expect` as a global next to `test`, `it`
+    /// and `describe`: a file that reaches for all of those unresolved is a
+    /// test file whose bare `expect` is the assertion.
+    global_expect: bool,
 }
 
 fn bind_object(
@@ -917,6 +921,10 @@ fn node_assertion_bindings(
             .collect(),
     };
     collector.visit_program(program);
+    let unresolved = scoping.root_unresolved_references();
+    let uses = |name: &str| unresolved.contains_key(name);
+    collector.bindings.global_expect =
+        uses("expect") && (uses("test") || uses("it") || uses("describe"));
     collector.bindings
 }
 
@@ -979,11 +987,11 @@ fn expect_operation(
     let Expression::Identifier(identifier) = &expect_call.callee else {
         return None;
     };
-    let symbol = referenced_symbol(identifier, scoping)?;
-    bindings
-        .expects
-        .contains(&symbol)
-        .then(|| format!("expect.{}", matchers.join(".")))
+    let recognized = match referenced_symbol(identifier, scoping) {
+        Some(symbol) => bindings.expects.contains(&symbol),
+        None => bindings.global_expect && identifier.name == "expect",
+    };
+    recognized.then(|| format!("expect.{}", matchers.join(".")))
 }
 
 #[derive(Default)]
@@ -7223,6 +7231,22 @@ mod tests {
         let output = instrument_node_assertion_phases(source, "tests/value.test.mjs").unwrap();
         assert_eq!(output.assertions, 1);
         assert!(output.code.contains("expect.toBe"));
+    }
+
+    #[test]
+    fn jest_global_expect_is_attributed_next_to_its_test_globals() {
+        // Jest injects `expect`, `test`, `it` and `describe` into the test
+        // environment; none is imported. The bare `expect` is the assertion
+        // exactly when the file reaches for those test globals too.
+        let source = "test('value', () => expect(value()).toBe(1));\n";
+        let output = instrument_node_assertion_phases(source, "tests/value.test.js").unwrap();
+        assert_eq!(output.assertions, 1);
+        assert!(output.code.contains("expect.toBe"));
+        // A stray global `expect` in ordinary code is not one.
+        let plain = "const ok = expect(value()).toBe(1);\n";
+        let output = instrument_node_assertion_phases(plain, "src/value.js").unwrap();
+        assert_eq!(output.assertions, 0);
+        assert_eq!(output.code, plain);
     }
 
     #[test]

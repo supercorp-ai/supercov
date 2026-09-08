@@ -9,6 +9,7 @@ var __rewriteRelativeImportExtension = (this && this.__rewriteRelativeImportExte
 import Module, { register, syncBuiltinESMExports } from "node:module";
 import { closeSync, openSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { installLaunchSupervisor, wrapImportedCapability } from "./launchSupervisor.mjs";
 import { __supercovBindCapabilityWrapper } from "./capability.mjs";
 installLaunchSupervisor();
@@ -115,7 +116,6 @@ syncBuiltinESMExports();
 // without editing package scripts, Vitest configs, setup files, or test imports.
 const generatedVitestConfig = process.env.SUPERCOV_GENERATED_VITEST_CONFIG;
 const generatedPlaywrightConfig = process.env.SUPERCOV_GENERATED_PLAYWRIGHT_CONFIG;
-const generatedJestConfig = process.env.SUPERCOV_GENERATED_JEST_CONFIG;
 const entrypoint = process.argv[1]?.replaceAll("\\", "/") ?? "";
 const playwrightTarget = process.env.SUPERCOV_PLAYWRIGHT_MODULE;
 const projectRoot = process.env.SUPERCOV_PROJECT_ROOT?.replaceAll("\\", "/").replace(/\/$/, "");
@@ -171,19 +171,26 @@ if (generatedVitestConfig && /\/vitest(?:\.m?js)?$/.test(entrypoint)) {
         });
     }
 }
-if (generatedJestConfig && isJestEntrypoint) {
+if (isJestEntrypoint && process.env.SUPERCOV_EVIDENCE_DIR) {
+    // Jest reads one configuration. Ours (jest.config.mjs) reads the user's
+    // the way Jest would and adds the adapter and reporter; an explicit
+    // --config on the command line reaches it through the environment.
     for (let index = 2; index < process.argv.length; index += 1) {
         const argument = process.argv[index];
         if (argument === "--config" || argument === "-c") {
-            process.argv.splice(index, process.argv[index + 1] ? 2 : 1);
+            const value = process.argv[index + 1];
+            if (value)
+                process.env.SUPERCOV_ORIGINAL_JEST_CONFIG = resolve(value);
+            process.argv.splice(index, value ? 2 : 1);
             index -= 1;
         }
         else if (argument?.startsWith("--config=")) {
+            process.env.SUPERCOV_ORIGINAL_JEST_CONFIG = resolve(argument.slice("--config=".length));
             process.argv.splice(index, 1);
             index -= 1;
         }
     }
-    process.argv.push("--config", generatedJestConfig);
+    process.argv.push("--config", fileURLToPath(new URL("./jest.config.mjs", import.meta.url)));
 }
 if (generatedPlaywrightConfig &&
     isPlaywrightEntrypoint) {

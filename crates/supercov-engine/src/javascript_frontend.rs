@@ -32,6 +32,9 @@ const FRONTEND_CACHE_DIRECTORY: &str = ".supercov/frontend-cache-artifacts";
 const RUNTIME_FILES: &[&str] = &[
     "atomic.mjs",
     "capability.mjs",
+    "jest.cjs",
+    "jest.config.mjs",
+    "jestReporter.mjs",
     "launchSupervisor.mjs",
     "nodeAssert.mjs",
     "nodeAssertAdapter.mjs",
@@ -444,6 +447,13 @@ fn embedded_runtime(name: &str) -> Option<&'static [u8]> {
         "atomic.mjs" => Some(include_bytes!("../runtime-assets/javascript/atomic.mjs")),
         "capability.mjs" => Some(include_bytes!(
             "../runtime-assets/javascript/capability.mjs"
+        )),
+        "jest.cjs" => Some(include_bytes!("../runtime-assets/javascript/jest.cjs")),
+        "jest.config.mjs" => Some(include_bytes!(
+            "../runtime-assets/javascript/jest.config.mjs"
+        )),
+        "jestReporter.mjs" => Some(include_bytes!(
+            "../runtime-assets/javascript/jestReporter.mjs"
         )),
         "launchSupervisor.mjs" => Some(include_bytes!(
             "../runtime-assets/javascript/launchSupervisor.mjs"
