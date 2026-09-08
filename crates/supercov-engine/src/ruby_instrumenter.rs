@@ -5,14 +5,27 @@
 //! obligation is decided here, ahead of the run, from source alone.
 //!
 //! Alongside the shared [`CoverageManifest`] this module emits a *probe plan*
-//! for the stdlib-only Ruby runtime. Ruby's `Coverage` module already reports
-//! lines, `if`/`unless`/`case`/`&.` branches and method entry with byte
-//! columns, so those obligations are proven by matching its keys (shifted for
-//! the text the runtime inserts). What `Coverage` cannot see — the operands of
-//! `&&`/`||` for MC/DC, `||=`, loop entry, `rescue` flow and a second statement
-//! on a line — is proven by probe calls the runtime splices into the source in
-//! memory at load time. No insertion contains a newline, so line numbers,
-//! backtraces and the stdlib line table stay exact.
+//! for the stdlib-only Ruby runtime. The runtime reads Ruby's `Coverage`
+//! module for lines, and proves everything else two ways at once, so that
+//! either interpreter generation can pick its own:
+//!
+//! - **Ruby 3.4+** reads line events only. Asking `Coverage` for `branches`
+//!   and `methods` too made every sample rebuild both tables for every loaded
+//!   file (7 ms per sample with 550 files, five samples per test), which was
+//!   80% of the runtime's cost. Instead, the statement that starts a branch
+//!   body or a method body proves the branch, the method and the decision
+//!   outcome it witnesses (the `implied` map), and what has no such statement
+//!   — an else-less or modifier `if`, a ternary, `&.`, a `case` without
+//!   `else`, an empty body — gets a probe. Probes also prove what `Coverage`
+//!   never sees: the operands of `&&`/`||` for MC/DC, `||=`, loop entry,
+//!   `rescue` flow and a second statement on a line.
+//! - **Ruby 3.3** cannot apply the insertions (it does not cover code compiled
+//!   by a load hook), so it keeps asking `Coverage` for branches and methods
+//!   and proves those obligations by matching its keys in the untouched
+//!   source; the probe-only remainder is declared unmeasured.
+//!
+//! No insertion contains a newline, so line numbers, backtraces and the
+//! stdlib line table stay exact.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -209,6 +222,19 @@ pub struct MethodKeyPlan {
     pub id: String,
 }
 
+/// What observing one obligation also proves: the branch body it starts, the
+/// method it opens, the single-condition decision outcome it witnesses. Keyed
+/// by the statement (or decision outcome) whose hit implies the rest, so the
+/// runtime pays one hash lookup per first sighting and nothing per execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImpliedPlan {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hits: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<StdlibDecision>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CaseClausePlan {
@@ -319,6 +345,14 @@ pub enum ProbeTarget {
         short_circuit: String,
         evaluated: String,
     },
+    /// `n(k, receiver)` before `&.`: the receiver was nil, or the method was
+    /// called.
+    #[serde(rename_all = "camelCase")]
+    SafeNavigation { nil: String, called: String },
+    /// `hs(k)` where a branch body or method body would start when it has no
+    /// statement to observe: the alternatives (and method) it proves.
+    #[serde(rename_all = "camelCase")]
+    Hits { ids: Vec<String> },
     /// `ok(k, v)`/`ok0(k)` completion, `h(k, n)` handler entry, `p(k)`
     /// propagation, `hm(k, v)` rescue-modifier fallback.
     #[serde(rename_all = "camelCase")]
@@ -343,6 +377,9 @@ pub struct RubyFilePlan {
     pub branches: Vec<BranchKeyPlan>,
     pub methods: Vec<MethodKeyPlan>,
     pub cases: Vec<CasePlan>,
+    /// Obligation id -> what its observation implies (Ruby 3.4+ path).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub implied: BTreeMap<String, ImpliedPlan>,
     /// This file's share of [`RubyProbePlan::probe_obligations`], so a file
     /// the runtime fails to instrument can declare exactly its own.
     #[serde(default)]
@@ -365,10 +402,18 @@ pub struct RubyProbePlan {
 
 impl RubyProbePlan {
     /// Manifest obligations (points, decisions, branches) that only a probe
-    /// can prove. An interpreter that cannot apply the insertions reports
-    /// them as unmeasured.
+    /// can prove: the union of each file's, which already leaves out what
+    /// Ruby 3.3 still proves through Coverage's keys. An interpreter that
+    /// cannot apply the insertions reports them as unmeasured.
     pub fn probe_obligations(&self) -> Vec<String> {
-        probe_obligations_of(&self.probes)
+        let mut ids = self
+            .files
+            .values()
+            .flat_map(|file| file.probe_obligations.iter().cloned())
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        ids
     }
 }
 
@@ -407,6 +452,14 @@ fn probe_obligations_of(probes: &BTreeMap<u64, ProbeTarget>) -> Vec<String> {
                 ProbeTarget::Arrival { short_circuit, .. } => {
                     ids.insert(branch_of(short_circuit));
                 }
+                ProbeTarget::SafeNavigation { nil, .. } => {
+                    ids.insert(branch_of(nil));
+                }
+                ProbeTarget::Hits { ids: proven } => {
+                    for id in proven {
+                        ids.insert(obligation_of(id));
+                    }
+                }
                 ProbeTarget::Try { id, handlers, .. } => {
                     ids.insert(id.clone());
                     for handler in handlers {
@@ -426,6 +479,51 @@ fn branch_of(alternative: &str) -> String {
         .rsplit_once(':')
         .map(|(branch, _)| branch.to_owned())
         .unwrap_or_else(|| alternative.to_owned())
+}
+
+/// The manifest obligation an id names: a point (`rb:statement:<hash>`,
+/// `rb:function:<hash>`) is its own obligation; an alternative
+/// (`rb:branch:<hash>:selected`, `rb:decision:<hash>:outcome:true`) belongs
+/// to its branch.
+fn obligation_of(id: &str) -> String {
+    if id.matches(':').count() >= 3 {
+        branch_of(id)
+    } else {
+        id.to_owned()
+    }
+}
+
+/// Everything Ruby 3.3 proves by matching `Coverage`'s branch and method
+/// keys. A probe that proves one of these on 3.4+ is not a gap on 3.3.
+fn stdlib_provable(
+    branches: &[BranchKeyPlan],
+    cases: &[CasePlan],
+    methods: &[MethodKeyPlan],
+) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    for branch in branches {
+        for hit in &branch.hits {
+            ids.insert(obligation_of(hit));
+        }
+        if let Some(decision) = &branch.decision {
+            ids.insert(decision.id.clone());
+            ids.insert(obligation_of(&decision.outcome));
+        }
+    }
+    for case in cases {
+        for clause in &case.clauses {
+            ids.insert(obligation_of(&clause.missed));
+            ids.insert(obligation_of(&clause.selected));
+        }
+        if let Some(no_match) = &case.no_match {
+            ids.insert(obligation_of(&no_match.matched));
+            ids.insert(obligation_of(&no_match.unmatched));
+        }
+    }
+    for method in methods {
+        ids.insert(method.id.clone());
+    }
+    ids
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -469,6 +567,33 @@ struct PendingEdit {
     scope: usize,
 }
 
+/// How a statement that a stdlib branch key proves on Ruby 3.3 is proven on
+/// 3.4+, where no keys are read.
+#[derive(Debug, Clone)]
+enum KeyProof {
+    /// Like any statement: its own line when it owns one, else a probe.
+    Probe,
+    /// The body of a modifier (`x if c`, `x while c`): it runs exactly when
+    /// this decision outcome or loop alternative is observed, and its line
+    /// belongs to the modifier statement.
+    Implied(String),
+}
+
+#[derive(Debug, Clone)]
+struct KeyStatement {
+    index: usize,
+    proof: KeyProof,
+}
+
+/// The body statements whose execution witnesses each outcome of a
+/// single-condition decision. Both sides present: the decision is derived
+/// from lines; either side missing: the predicate is probed.
+#[derive(Debug, Default)]
+struct DecisionProof {
+    true_statements: Vec<String>,
+    false_statements: Vec<String>,
+}
+
 struct Collector<'a> {
     file: &'a str,
     source: &'a [u8],
@@ -479,6 +604,7 @@ struct Collector<'a> {
     branches: Vec<BranchKeyPlan>,
     methods: Vec<MethodKeyPlan>,
     cases: Vec<CasePlan>,
+    implied: BTreeMap<String, ImpliedPlan>,
     probes: BTreeMap<u64, ProbeTarget>,
     edits: Vec<PendingEdit>,
     next_probe: &'a mut u64,
@@ -486,9 +612,9 @@ struct Collector<'a> {
     decision_ids: BTreeSet<String>,
     branch_ids: BTreeSet<String>,
     claimed_lines: BTreeSet<usize>,
-    /// Statement start offsets proven by a stdlib branch key (index into
-    /// `branches`) instead of a line or a probe.
-    key_statements: BTreeMap<usize, usize>,
+    /// Statement start offsets a stdlib branch key proves on Ruby 3.3 (index
+    /// into `branches`), and how 3.4+ proves them instead.
+    key_statements: BTreeMap<usize, KeyStatement>,
     /// Start offsets of the body expressions of endless method definitions,
     /// which take a wrapped probe because `def m = s(k); expr` would end the
     /// definition at the probe.
@@ -533,6 +659,7 @@ impl<'a> Collector<'a> {
             branches: Vec::new(),
             methods: Vec::new(),
             cases: Vec::new(),
+            implied: BTreeMap::new(),
             probes: BTreeMap::new(),
             edits: Vec::new(),
             next_probe,
@@ -732,11 +859,20 @@ impl<'a> Collector<'a> {
         }
         self.push_point(&id, start, end, PointKind::Statement, None);
         let (line, _) = self.line_column(start);
-        if let Some(index) = self.key_statements.get(&start).copied() {
-            // The body of a modifier or one-line branch: the stdlib branch
-            // key that proves the branch proves this statement.
-            self.branches[index].hits.push(id);
-        } else if self.needs_probe(node) {
+        if let Some(key) = self.key_statements.get(&start).cloned() {
+            // The body of a modifier or one-line branch: on Ruby 3.3 the
+            // stdlib branch key that proves the branch proves this statement.
+            self.branches[key.index].hits.push(id.clone());
+            if let KeyProof::Implied(by) = key.proof {
+                // A modifier body shares its line with the modifier statement,
+                // so the line proves nothing about it; the decision outcome or
+                // loop entry that runs it does.
+                self.claimed_lines.insert(line);
+                self.implied.entry(by).or_default().hits.push(id);
+                return;
+            }
+        }
+        if self.needs_probe(node) {
             // No instruction carries this statement's first line: `x = begin`
             // starts executing inside the begin body.
             self.claimed_lines.insert(line);
@@ -802,10 +938,60 @@ impl<'a> Collector<'a> {
     }
 
     /// Register the first statement of a body as proven by a stdlib key.
-    fn key_body(&mut self, statements: Option<StatementsNode<'_>>, index: usize) {
+    fn key_body(&mut self, statements: Option<StatementsNode<'_>>, index: usize, proof: KeyProof) {
         if let Some(first) = statements.and_then(|statements| statements.body().iter().next()) {
-            self.key_statements
-                .insert(first.location().start_offset(), index);
+            self.key_statements.insert(
+                first.location().start_offset(),
+                KeyStatement { index, proof },
+            );
+        }
+    }
+
+    /// A clause header (`when 1 then`, `elsif b`, `else`) runs its test on
+    /// its own line whether or not its body follows, so a body statement
+    /// starting on that line proves nothing by the line and takes a probe.
+    fn claim_line_at(&mut self, offset: usize) {
+        let (line, _) = self.line_column(offset);
+        self.claimed_lines.insert(line);
+    }
+
+    /// The obligation id of a body's first statement, whose observation
+    /// (its own line, or a probe when it shares one) witnesses that the body
+    /// ran. `None` for an empty body.
+    fn first_statement_id(&self, statements: &Option<StatementsNode<'_>>) -> Option<String> {
+        let first = statements.as_ref()?.body().iter().next()?;
+        let location = first.location();
+        Some(stable_id(
+            self.file,
+            "statement",
+            location.start_offset(),
+            location.end_offset(),
+            "",
+        ))
+    }
+
+    /// Attach what running a body proves to its first statement, or, for a
+    /// body with no statement, to a `hs(k)` probe inserted where the body
+    /// would start (`before` and `after` supply the punctuation).
+    fn body_proves(
+        &mut self,
+        statements: &Option<StatementsNode<'_>>,
+        ids: Vec<String>,
+        offset: usize,
+        before: &str,
+        after: &str,
+    ) {
+        match self.first_statement_id(statements) {
+            Some(first) => self.implied.entry(first).or_default().hits.extend(ids),
+            None => {
+                let key = self.probe_key(ProbeTarget::Hits { ids });
+                self.edit(
+                    offset,
+                    EditRank::StatementProbe,
+                    format!("{before}{RUBY_PROBE_RECEIVER}.hs({key}){after}"),
+                    offset,
+                );
+            }
         }
     }
 
@@ -978,12 +1164,16 @@ impl<'a> Collector<'a> {
             format!("{RUBY_PROBE_RECEIVER}.{wrapper}({key}, ("),
         );
         self.depth += 1;
-        for (index, (leaf_start, leaf_end, _)) in leaves.iter().enumerate() {
-            self.wrap(
-                *leaf_start,
-                *leaf_end,
-                format!("{RUBY_PROBE_RECEIVER}.c({key}, {index}, ("),
-            );
+        // A lone condition's value is the outcome; the runtime reads it from
+        // the outcome probe, so it needs no wrapper of its own.
+        if leaves.len() > 1 {
+            for (index, (leaf_start, leaf_end, _)) in leaves.iter().enumerate() {
+                self.wrap(
+                    *leaf_start,
+                    *leaf_end,
+                    format!("{RUBY_PROBE_RECEIVER}.c({key}, {index}, ("),
+                );
+            }
         }
         self.depth -= 2;
         Some(key)
@@ -998,6 +1188,7 @@ impl<'a> Collector<'a> {
         then_index: usize,
         else_index: usize,
         then_is_true: bool,
+        proof: DecisionProof,
     ) {
         let location = predicate.location();
         let (start, end) = (location.start_offset(), location.end_offset());
@@ -1045,10 +1236,80 @@ impl<'a> Collector<'a> {
             outcome: format!("{outcome_id}:true"),
         });
         self.branches[false_index].decision = Some(StdlibDecision {
-            id,
+            id: id.clone(),
             value: false,
             outcome: format!("{outcome_id}:false"),
         });
+        // Ruby 3.4+ reads no branch keys. Both arms have a statement: each
+        // arm's first statement witnesses its outcome. Otherwise the
+        // predicate is probed -- one call per evaluation, no condition
+        // wrapper, because a lone condition's value is the outcome.
+        if !proof.true_statements.is_empty() && !proof.false_statements.is_empty() {
+            for (statements, value) in [
+                (&proof.true_statements, true),
+                (&proof.false_statements, false),
+            ] {
+                for statement in statements {
+                    self.implied
+                        .entry(statement.clone())
+                        .or_default()
+                        .decisions
+                        .push(StdlibDecision {
+                            id: id.clone(),
+                            value,
+                            outcome: format!("{outcome_id}:{value}"),
+                        });
+                }
+            }
+        } else {
+            let key = self.probe_key(ProbeTarget::Decision {
+                id,
+                width: 1,
+                not: vec![not % 2 == 1],
+                tree: ConditionTree::Leaf(0),
+                outcome_true: format!("{outcome_id}:true"),
+                outcome_false: format!("{outcome_id}:false"),
+                logical: Vec::new(),
+                loop_: None,
+            });
+            self.depth += 1;
+            self.wrap(start, end, format!("{RUBY_PROBE_RECEIVER}.d({key}, ("));
+            self.depth -= 1;
+        }
+    }
+
+    /// Outcome ids of a decision before it is registered, so a modifier body
+    /// can be tied to the outcome that runs it.
+    fn decision_outcomes(&self, predicate: &Node<'_>, kind: &str) -> (String, String) {
+        let location = predicate.location();
+        let id = stable_id(
+            self.file,
+            "decision",
+            location.start_offset(),
+            location.end_offset(),
+            kind,
+        );
+        (format!("{id}:outcome:true"), format!("{id}:outcome:false"))
+    }
+
+    /// The first statements of every arm after `subsequent` in an `if`
+    /// chain, which together witness the false outcome of the arm before
+    /// them; `None` when an arm is empty or the chain has no final `else`.
+    fn chain_false_statements(&self, subsequent: Option<Node<'_>>) -> Option<Vec<String>> {
+        let mut ids = Vec::new();
+        let mut current = subsequent;
+        loop {
+            let node = current?;
+            if let Some(elsif) = node.as_if_node() {
+                ids.push(self.first_statement_id(&elsif.statements())?);
+                current = elsif.subsequent();
+            } else if let Some(else_node) = node.as_else_node() {
+                ids.push(self.first_statement_id(&else_node.statements())?);
+                return Some(ids);
+            } else {
+                return None;
+            }
+        }
     }
 
     /// `Some(truthiness)` for a predicate Ruby folds at compile time: a
@@ -1100,11 +1361,19 @@ impl<'a> Collector<'a> {
         then_index: usize,
         else_index: usize,
         then_is_true: bool,
+        proof: DecisionProof,
     ) {
         if self.is_compound(predicate()) {
             self.probe_decision(predicate(), kind, None, "d");
         } else {
-            self.stdlib_decision(predicate(), kind, then_index, else_index, then_is_true);
+            self.stdlib_decision(
+                predicate(),
+                kind,
+                then_index,
+                else_index,
+                then_is_true,
+                proof,
+            );
         }
     }
 
@@ -1148,14 +1417,47 @@ impl<'a> Collector<'a> {
                     .insert(statements.location().start_offset());
             }
         } else {
-            self.key_body(node.statements(), then_index);
+            // `x if c`: the body precedes the keyword and shares its line
+            // with the modifier statement, so the true outcome proves it.
+            let modifier = node.statements().is_some_and(|statements| {
+                statements.location().start_offset() < node.predicate().location().start_offset()
+            });
+            let then_proof = if modifier {
+                KeyProof::Implied(self.decision_outcomes(&node.predicate(), kind).0)
+            } else {
+                KeyProof::Probe
+            };
+            self.claim_line_at(node.predicate().location().end_offset());
+            self.key_body(node.statements(), then_index, then_proof);
             if let Some(subsequent) = node.subsequent()
                 && let Some(else_node) = subsequent.as_else_node()
             {
-                self.key_body(else_node.statements(), else_index);
+                self.claim_line_at(else_node.else_keyword_loc().end_offset());
+                self.key_body(else_node.statements(), else_index, KeyProof::Probe);
             }
         }
-        self.predicate_decision(|| node.predicate(), kind, then_index, else_index, true);
+        let proof = if kind == "ternary" {
+            // Arms are expressions, not statements: nothing to derive from.
+            DecisionProof::default()
+        } else {
+            DecisionProof {
+                true_statements: self
+                    .first_statement_id(&node.statements())
+                    .into_iter()
+                    .collect(),
+                false_statements: self
+                    .chain_false_statements(node.subsequent())
+                    .unwrap_or_default(),
+            }
+        };
+        self.predicate_decision(
+            || node.predicate(),
+            kind,
+            then_index,
+            else_index,
+            true,
+            proof,
+        );
     }
 
     fn unless_node(&mut self, node: &UnlessNode<'_>) {
@@ -1177,12 +1479,40 @@ impl<'a> Collector<'a> {
         };
         let then_index = self.stdlib("unless", "then", then_span, then_kind, Vec::new());
         let else_index = self.stdlib("unless", "else", else_span, else_kind, Vec::new());
-        self.key_body(node.statements(), then_index);
+        let modifier = node.statements().is_some_and(|statements| {
+            statements.location().start_offset() < node.predicate().location().start_offset()
+        });
+        let then_proof = if modifier {
+            KeyProof::Implied(self.decision_outcomes(&node.predicate(), "unless").1)
+        } else {
+            KeyProof::Probe
+        };
+        self.claim_line_at(node.predicate().location().end_offset());
+        self.key_body(node.statements(), then_index, then_proof);
         if let Some(else_node) = node.else_clause() {
-            self.key_body(else_node.statements(), else_index);
+            self.claim_line_at(else_node.else_keyword_loc().end_offset());
+            self.key_body(else_node.statements(), else_index, KeyProof::Probe);
         }
         // `unless` runs `then` when the predicate is falsy.
-        self.predicate_decision(|| node.predicate(), "unless", then_index, else_index, false);
+        let proof = DecisionProof {
+            true_statements: node
+                .else_clause()
+                .and_then(|else_node| self.first_statement_id(&else_node.statements()))
+                .into_iter()
+                .collect(),
+            false_statements: self
+                .first_statement_id(&node.statements())
+                .into_iter()
+                .collect(),
+        };
+        self.predicate_decision(
+            || node.predicate(),
+            "unless",
+            then_index,
+            else_index,
+            false,
+            proof,
+        );
     }
 
     fn loop_node(
@@ -1195,11 +1525,6 @@ impl<'a> Collector<'a> {
     ) {
         let kind = if until { "until" } else { "while" };
         let (start, end) = (location.start_offset(), location.end_offset());
-        // The stdlib `body` key proves a same-offset modifier body statement.
-        if let Some(body_span) = self.statements_span(&statements) {
-            let index = self.stdlib(kind, "body", body_span, KeyKind::List, Vec::new());
-            self.key_body(statements, index);
-        }
         let loop_target = if begin_modifier {
             // `begin ... end while` always enters the body once.
             None
@@ -1217,6 +1542,21 @@ impl<'a> Collector<'a> {
                 until,
             })
         };
+        // The stdlib `body` key proves a same-offset modifier body statement
+        // on 3.3; on 3.4+ `x while c` runs its body exactly when the loop is
+        // entered, and any other body statement is proven like a statement.
+        if let Some(body_span) = self.statements_span(&statements) {
+            let index = self.stdlib(kind, "body", body_span, KeyKind::List, Vec::new());
+            let modifier = !begin_modifier
+                && statements.as_ref().is_some_and(|statements| {
+                    statements.location().start_offset() < predicate.location().start_offset()
+                });
+            let proof = match (&loop_target, modifier) {
+                (Some(target), true) => KeyProof::Implied(target.entered.clone()),
+                _ => KeyProof::Probe,
+            };
+            self.key_body(statements, index, proof);
+        }
         self.probe_decision(predicate, kind, loop_target, "w");
     }
 
@@ -1322,7 +1662,24 @@ impl<'a> Collector<'a> {
     fn case_node(&mut self, node: &CaseNode<'_>) {
         let node_span = self.location_span(&node.location());
         let (start, end) = (node.location().start_offset(), node.location().end_offset());
+        // Known up front so that every clause selection also proves "some
+        // clause matched" for a `case` without `else`.
+        let no_match_id = node
+            .else_clause()
+            .is_none()
+            .then(|| stable_id(self.file, "branch", start, end, "case-no-match"));
+        // An explicit `else` is missed whenever a clause before it is selected.
+        let else_id = node.else_clause().map(|else_node| {
+            stable_id(
+                self.file,
+                "branch",
+                else_node.location().start_offset(),
+                else_node.location().end_offset(),
+                "case-else",
+            )
+        });
         let mut clauses = Vec::new();
+        let mut clause_ids = Vec::new();
         for (index, condition) in node.conditions().iter().enumerate() {
             let Some(when) = condition.as_when_node() else {
                 continue;
@@ -1348,12 +1705,30 @@ impl<'a> Collector<'a> {
                 },
                 vec![format!("{id}:selected")],
             );
-            self.key_body(when.statements(), key_index);
+            self.key_body(when.statements(), key_index, KeyProof::Probe);
+            let proven =
+                self.clause_proof(&id, &clause_ids, no_match_id.as_deref(), else_id.as_deref());
+            // An empty body gets its probe after `then`, or as a `then` of
+            // its own after the last condition.
+            let (offset, before) = match when.then_keyword_loc() {
+                Some(then) => (then.end_offset(), " "),
+                None => (
+                    when.conditions()
+                        .iter()
+                        .last()
+                        .map(|condition| condition.location().end_offset())
+                        .unwrap_or_else(|| when.location().end_offset()),
+                    " then ",
+                ),
+            };
+            self.claim_line_at(offset);
+            self.body_proves(&when.statements(), proven, offset, before, "");
             clauses.push(CaseClausePlan {
                 key: self.branches[key_index].key.clone(),
                 missed: format!("{id}:missed"),
                 selected: format!("{id}:selected"),
             });
+            clause_ids.push(id);
         }
         let no_match = match node.else_clause() {
             Some(else_node) => {
@@ -1378,7 +1753,16 @@ impl<'a> Collector<'a> {
                     },
                     vec![format!("{id}:selected")],
                 );
-                self.key_body(else_node.statements(), key_index);
+                self.key_body(else_node.statements(), key_index, KeyProof::Probe);
+                let proven = self.clause_proof(&id, &clause_ids, None, None);
+                self.claim_line_at(else_node.else_keyword_loc().end_offset());
+                self.body_proves(
+                    &else_node.statements(),
+                    proven,
+                    else_node.else_keyword_loc().end_offset(),
+                    " ",
+                    "",
+                );
                 clauses.push(CaseClausePlan {
                     key: self.branches[key_index].key.clone(),
                     missed: format!("{id}:missed"),
@@ -1404,6 +1788,10 @@ impl<'a> Collector<'a> {
                         KeyKind::Node,
                         vec![format!("{id}:unmatched")],
                     );
+                    // Ruby 3.4+: an `else` of Supercov's own, whose only
+                    // statement is the probe, runs exactly when no clause
+                    // matched and leaves the value nil as before.
+                    self.no_match_probe(&id, &clause_ids, node.end_keyword_loc().start_offset());
                     CaseNoMatchPlan {
                         key: self.branches[key_index].key.clone(),
                         matched: format!("{id}:matched"),
@@ -1414,10 +1802,58 @@ impl<'a> Collector<'a> {
         self.cases.push(CasePlan { clauses, no_match });
     }
 
+    /// What selecting a clause proves: itself selected, every earlier clause
+    /// tested and missed, the explicit `else` missed, and for a `case`
+    /// without `else` that a clause matched.
+    fn clause_proof(
+        &self,
+        id: &str,
+        earlier: &[String],
+        no_match_id: Option<&str>,
+        else_id: Option<&str>,
+    ) -> Vec<String> {
+        let mut ids = vec![format!("{id}:selected")];
+        ids.extend(earlier.iter().map(|clause| format!("{clause}:missed")));
+        if let Some(no_match) = no_match_id {
+            ids.push(format!("{no_match}:matched"));
+        }
+        if let Some(else_id) = else_id {
+            ids.push(format!("{else_id}:missed"));
+        }
+        ids
+    }
+
+    fn no_match_probe(&mut self, id: &str, clauses: &[String], end_keyword: usize) {
+        let mut ids = vec![format!("{id}:unmatched")];
+        ids.extend(clauses.iter().map(|clause| format!("{clause}:missed")));
+        let key = self.probe_key(ProbeTarget::Hits { ids });
+        self.edit(
+            end_keyword,
+            EditRank::StatementProbe,
+            format!("else {RUBY_PROBE_RECEIVER}.hs({key}); "),
+            end_keyword,
+        );
+    }
+
     fn case_match_node(&mut self, node: &CaseMatchNode<'_>) {
         let node_span = self.location_span(&node.location());
         let (start, end) = (node.location().start_offset(), node.location().end_offset());
+        let no_match_id = node
+            .else_clause()
+            .is_none()
+            .then(|| stable_id(self.file, "branch", start, end, "case-no-match"));
+        // An explicit `else` is missed whenever a clause before it is selected.
+        let else_id = node.else_clause().map(|else_node| {
+            stable_id(
+                self.file,
+                "branch",
+                else_node.location().start_offset(),
+                else_node.location().end_offset(),
+                "case-else",
+            )
+        });
         let mut clauses = Vec::new();
+        let mut clause_ids = Vec::new();
         for (index, condition) in node.conditions().iter().enumerate() {
             let Some(in_node) = condition.as_in_node() else {
                 continue;
@@ -1443,12 +1879,21 @@ impl<'a> Collector<'a> {
                 },
                 vec![format!("{id}:selected")],
             );
-            self.key_body(in_node.statements(), key_index);
+            self.key_body(in_node.statements(), key_index, KeyProof::Probe);
+            let proven =
+                self.clause_proof(&id, &clause_ids, no_match_id.as_deref(), else_id.as_deref());
+            let (offset, before) = match in_node.then_loc() {
+                Some(then) => (then.end_offset(), " "),
+                None => (in_node.pattern().location().end_offset(), " then "),
+            };
+            self.claim_line_at(offset);
+            self.body_proves(&in_node.statements(), proven, offset, before, "");
             clauses.push(CaseClausePlan {
                 key: self.branches[key_index].key.clone(),
                 missed: format!("{id}:missed"),
                 selected: format!("{id}:selected"),
             });
+            clause_ids.push(id);
             // A guard is a decision of its own; Ruby reports no branch key
             // for it, so it is always probe-driven.
             let pattern = in_node.pattern();
@@ -1483,7 +1928,16 @@ impl<'a> Collector<'a> {
                     },
                     vec![format!("{id}:selected")],
                 );
-                self.key_body(else_node.statements(), key_index);
+                self.key_body(else_node.statements(), key_index, KeyProof::Probe);
+                let proven = self.clause_proof(&id, &clause_ids, None, None);
+                self.claim_line_at(else_node.else_keyword_loc().end_offset());
+                self.body_proves(
+                    &else_node.statements(),
+                    proven,
+                    else_node.else_keyword_loc().end_offset(),
+                    " ",
+                    "",
+                );
                 clauses.push(CaseClausePlan {
                     key: self.branches[key_index].key.clone(),
                     missed: format!("{id}:missed"),
@@ -1509,6 +1963,7 @@ impl<'a> Collector<'a> {
                         KeyKind::Node,
                         vec![format!("{id}:unmatched")],
                     );
+                    self.no_match_probe(&id, &clause_ids, node.end_keyword_loc().start_offset());
                     CaseNoMatchPlan {
                         key: self.branches[key_index].key.clone(),
                         matched: format!("{id}:matched"),
@@ -1556,6 +2011,21 @@ impl<'a> Collector<'a> {
             vec![format!("{id}:called")],
         );
         self.stdlib("&.", "else", span, KeyKind::Node, vec![format!("{id}:nil")]);
+        // Ruby 3.4+: the receiver's value decides, so the receiver is probed.
+        if let Some(receiver) = node.receiver() {
+            let key = self.probe_key(ProbeTarget::SafeNavigation {
+                nil: format!("{id}:nil"),
+                called: format!("{id}:called"),
+            });
+            let receiver = receiver.location();
+            self.depth += 1;
+            self.wrap(
+                receiver.start_offset(),
+                receiver.end_offset(),
+                format!("{RUBY_PROBE_RECEIVER}.n({key}, ("),
+            );
+            self.depth -= 1;
+        }
     }
 
     fn value_logical(&mut self, op: &str, left: &Node<'_>, node_start: usize, node_end: usize) {
@@ -2145,8 +2615,26 @@ impl<'a> Collector<'a> {
         self.methods.push(MethodKeyPlan {
             span,
             unshifted: span,
-            id,
+            id: id.clone(),
         });
+        // Ruby 3.4+: the body's first statement runs exactly when the method
+        // is entered; a body with none gets a probe after the signature.
+        let body_statements = node.body().and_then(|body| {
+            if let Some(statements) = body.as_statements_node() {
+                Some(statements)
+            } else {
+                body.as_begin_node().and_then(|begin| begin.statements())
+            }
+        });
+        let signature_end = node
+            .rparen_loc()
+            .map(|rparen| rparen.end_offset())
+            .or_else(|| {
+                node.parameters()
+                    .map(|parameters| parameters.location().end_offset())
+            })
+            .unwrap_or_else(|| node.name_loc().end_offset());
+        self.body_proves(&body_statements, vec![id], signature_end, "; ", "");
         if let Some(body) = node.body()
             && let Some(begin) = body.as_begin_node()
         {
@@ -2232,7 +2720,7 @@ impl<'a> Collector<'a> {
                 branch
             })
             .collect::<Vec<_>>();
-        let cases = std::mem::take(&mut self.cases)
+        let cases: Vec<CasePlan> = std::mem::take(&mut self.cases)
             .into_iter()
             .map(|mut case| {
                 for clause in &mut case.clauses {
@@ -2245,7 +2733,7 @@ impl<'a> Collector<'a> {
                 case
             })
             .collect();
-        let methods = std::mem::take(&mut self.methods)
+        let methods: Vec<MethodKeyPlan> = std::mem::take(&mut self.methods)
             .into_iter()
             .map(|mut method| {
                 method.span = self.shifted(method.span, KeyKind::Node, &pending);
@@ -2288,13 +2776,22 @@ impl<'a> Collector<'a> {
         RubyFileObligations {
             manifest: self.manifest,
             plan: RubyFilePlan {
-                probe_obligations: probe_obligations_of(&self.probes),
+                // What only a probe proves on 3.3: the probe-provable set
+                // minus what 3.3 still proves through Coverage's keys.
+                probe_obligations: {
+                    let keyed = stdlib_provable(&branches, &cases, &methods);
+                    probe_obligations_of(&self.probes)
+                        .into_iter()
+                        .filter(|id| !keyed.contains(id))
+                        .collect()
+                },
                 edits,
                 lines: self.lines,
                 statement_offsets: self.statement_offsets,
                 branches,
                 methods,
                 cases,
+                implied: self.implied,
             },
             probes: self.probes,
         }
@@ -2341,7 +2838,16 @@ impl<'pr> Visit<'pr> for Collector<'_> {
 
     fn visit_if_node(&mut self, node: &IfNode<'pr>) {
         let offset = node.location().start_offset();
-        if self.guard_nodes.contains(&offset) || self.elsif_nodes.contains(&offset) {
+        if self.guard_nodes.contains(&offset) {
+            // A `case/in` guard: Prism hands the guarded pattern over as the
+            // guard's statements, but a pattern is not a statement. Only the
+            // predicate holds code.
+            self.depth += 1;
+            self.visit(&node.predicate());
+            self.depth -= 1;
+            return;
+        }
+        if self.elsif_nodes.contains(&offset) {
             self.depth += 1;
             ruby_prism::visit_if_node(self, node);
             self.depth -= 1;
@@ -2400,7 +2906,7 @@ impl<'pr> Visit<'pr> for Collector<'_> {
     fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
         if self.guard_nodes.contains(&node.location().start_offset()) {
             self.depth += 1;
-            ruby_prism::visit_unless_node(self, node);
+            self.visit(&node.predicate());
             self.depth -= 1;
             return;
         }
@@ -3079,6 +3585,102 @@ end
             then_key.hits.len() == 1,
             "modifier body statement proven by the then key"
         );
+    }
+
+    #[test]
+    fn line_events_prove_bodies_and_probes_prove_the_rest() {
+        // Ruby 3.4+ reads no branch or method keys. A body's first statement
+        // implies the branch, the method and the decision outcome; an `if`
+        // without `else`, a `&.` and a `case` without `else` are probed; the
+        // ids Ruby 3.3 still proves through its keys are not declared as
+        // probe-only.
+        let source = "def both(a)\n  if a\n    1\n  else\n    2\n  end\nend\n\ndef guard(a)\n  return 0 if a\n  a&.size\nend\n\ndef pick(v)\n  case v\n  when 1 then :one\n  when 2\n    :two\n  end\nend\n\ndef short = 3\n\ndef empty; end\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/m.rb", source.as_bytes(), &mut probe).unwrap();
+        let plan = &obligations.plan;
+        let manifest = &obligations.manifest;
+        let function = |name: &str| {
+            manifest
+                .points
+                .iter()
+                .find(|point| {
+                    point.kind == PointKind::Function && point.label.as_deref() == Some(name)
+                })
+                .unwrap()
+                .id
+                .clone()
+        };
+        let statement_on = |line: usize| plan.lines.get(&line).cloned().unwrap();
+        let transformed = String::from_utf8(apply_edits(source.as_bytes(), &plan.edits)).unwrap();
+        assert_eq!(transformed.lines().count(), source.lines().count());
+
+        // `if a ... else ... end`: line 3 proves `both` and the true outcome,
+        // line 5 the false outcome; no predicate probe.
+        assert_eq!(
+            plan.implied[&statement_on(2)].hits,
+            [function("both")],
+            "the `if` statement opens the method"
+        );
+        let three = &plan.implied[&statement_on(3)];
+        assert!(three.hits.is_empty());
+        assert_eq!(three.decisions.len(), 1);
+        assert!(three.decisions[0].value);
+        let five = &plan.implied[&statement_on(5)];
+        assert!(!five.decisions[0].value);
+        assert!(!transformed.contains(".d(") || transformed.matches(".d(").count() == 1);
+
+        // `return 0 if a`: the predicate is probed (one `d`, no `c`), and the
+        // body is implied by the true outcome, not by its line.
+        let guard_decision = manifest
+            .decisions
+            .iter()
+            .find(|d| d.kind == "if" && d.conditions == ["a"] && d.line == 10)
+            .unwrap();
+        let outcome_true = format!("{}:outcome:true", guard_decision.id);
+        assert!(
+            plan.implied.contains_key(&outcome_true),
+            "modifier body implied by its outcome"
+        );
+        assert!(transformed.contains("return 0 if $__supercov.d("));
+        assert!(
+            !transformed.contains(".c("),
+            "a lone condition needs no wrapper"
+        );
+        // `a&.size`: the receiver is probed.
+        assert!(transformed.contains("$__supercov.n("));
+        // `case` without `else` gets an else of its own; the one-line `when`
+        // body is a probed statement.
+        assert!(transformed.contains("else $__supercov.hs("));
+        assert!(transformed.contains("when 1 then $__supercov.s("));
+        // Endless and empty methods.
+        assert!(transformed.contains("def short = ($__supercov.s("));
+        assert!(transformed.contains("def empty; $__supercov.hs("));
+        let empty_probe = plan
+            .edits
+            .iter()
+            .find(|edit| edit.text.contains(".hs(") && edit.text.starts_with("; "))
+            .unwrap();
+        assert!(empty_probe.text.contains("hs"));
+        // Everything 3.3 proves through keys stays out of the 3.3 declaration:
+        // the modifier body statement, the guard decision, the `&.` branch,
+        // the case alternatives and the methods.
+        for id in [
+            guard_decision.id.clone(),
+            function("empty"),
+            function("short"),
+        ] {
+            assert!(
+                !plan.probe_obligations.contains(&id),
+                "{id} is key-provable on 3.3"
+            );
+        }
+        let safe = manifest
+            .branches
+            .iter()
+            .find(|b| b.kind == "safe-navigation")
+            .unwrap();
+        assert!(!plan.probe_obligations.contains(&safe.id));
     }
 
     #[test]

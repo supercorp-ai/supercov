@@ -6,8 +6,13 @@
 # This file, loaded through RUBYOPT before any application code, does three
 # things and nothing else:
 #
-# 1. Starts Ruby's own Coverage module (lines, branches, methods) and turns
-#    its per-phase deltas into first-sighting hits by matching the plan's keys.
+# 1. Starts Ruby's own Coverage module and turns its per-phase deltas into
+#    first-sighting hits. On Ruby 3.4+ it asks for line events alone: a
+#    statement that starts a branch body or method body proves the branch,
+#    the method and the decision outcome (the plan's `implied` map), and the
+#    rest is probed. Asking for `branches` and `methods` too made every sample
+#    rebuild both tables for every loaded file -- 80% of the runtime's cost.
+#    Ruby 3.3 cannot apply probes, so it keeps matching the plan's keys.
 # 2. Installs a RubyVM::InstructionSequence.load_iseq hook that splices the
 #    plan's probe calls into application sources in memory as they load. The
 #    files on disk are never touched; no insertion contains a newline.
@@ -364,6 +369,9 @@ module Supercov
       # 3.3 does not, so it runs on stdlib coverage alone and declares every
       # probe-only obligation unmeasured.
       @probes_supported = (RUBY_VERSION.split(".").first(2).map(&:to_i) <=> [3, 4]) >= 0
+      # Coverage's branch and method keys are read only where probes cannot
+      # stand in for them.
+      @stdlib_keys = !@probes_supported
       compile_file_plans
     end
 
@@ -419,12 +427,14 @@ module Supercov
       @cases_by_file = {}
       @edits_by_file = {}
       @span_field_by_file = {}
+      @implied = {}
       @files.each do |relative, file_plan|
         absolute = File.join(@root, relative)
         @lines_by_file[absolute] = file_plan["lines"].transform_keys(&:to_i)
         @statement_offsets_by_file[absolute] = file_plan["statementOffsets"] || {}
         @cases_by_file[absolute] = file_plan["cases"]
         @edits_by_file[absolute] = file_plan["edits"]
+        (file_plan["implied"] || {}).each { |id, plan| @implied[id] = plan }
         index_file_keys(absolute, file_plan, @probes_supported ? "span" : "unshifted")
       end
     end
@@ -494,7 +504,45 @@ module Supercov
       (file_plan["probeObligations"] || []).each do |id|
         limitation("ruby-file-not-instrumented", reason, relative(absolute), id)
       end
+      # Ruby 3.4+ reads no branch or method keys, so what only a key proved
+      # in this file, and no line-owned statement implies, is declared too.
+      if @probes_supported
+        key_only_obligations(file_plan).each do |id|
+          limitation("ruby-file-not-instrumented", reason, relative(absolute), id)
+        end
+      end
       declare_uncountable_lines_for(absolute)
+    end
+
+    def key_only_obligations(file_plan)
+      keyed = []
+      file_plan["branches"].each do |branch|
+        keyed.concat(branch["hits"])
+        if (decision = branch["decision"])
+          keyed << decision["id"] << decision["outcome"]
+        end
+      end
+      file_plan["cases"].each do |case_plan|
+        case_plan["clauses"].each { |clause| keyed << clause["missed"] << clause["selected"] }
+        if (no_match = case_plan["noMatch"])
+          keyed << no_match["matched"] << no_match["unmatched"]
+        end
+      end
+      file_plan["methods"].each { |method| keyed << method["id"] }
+      # Implications whose statement Ruby's own line table observes still
+      # hold in an untouched file; those behind a probe do not.
+      line_owned = file_plan["lines"].values
+      implied = (file_plan["implied"] || {}).flat_map do |id, plan|
+        next [] unless line_owned.include?(id)
+
+        (plan["hits"] || []) + (plan["decisions"] || []).flat_map { |decision| [decision["id"], decision["outcome"]] }
+      end
+      (keyed - implied).map { |id| obligation_of(id) }.uniq
+    end
+
+    # A point is its own obligation; an alternative belongs to its branch.
+    def obligation_of(id)
+      id.count(":") >= 3 ? id.rpartition(":").first : id
     end
 
     # Ruby's own line table decides which lines can be counted. A statement
@@ -716,6 +764,8 @@ module Supercov
           id = lines[line]
           hit(context, id) if id
         end
+        next unless @stdlib_keys
+
         keys = @branch_keys_by_file[path]
         selected = {}
         (data[:branches] || {}).each do |group, branches|
@@ -788,6 +838,22 @@ module Supercov
         @seen_hits[key] = true
       end
       record("t" => "hit", "ctx" => context, "id" => id)
+      imply(context, id)
+    end
+
+    # What one observation proves besides itself: the branch alternatives and
+    # the method whose body starts with this statement, and the
+    # single-condition decision outcome it decides. One hash lookup per first
+    # sighting; nothing per execution.
+    def imply(context, id)
+      implied = @implied[id]
+      return if implied.nil?
+
+      (implied["hits"] || []).each { |other| hit(context, other) }
+      (implied["decisions"] || []).each do |decision|
+        vector(context, decision["id"], decision["value"] ? "2" : "1", decision["value"])
+        hit(context, decision["outcome"])
+      end
     end
 
     def vector(context, decision_id, digits, outcome)
@@ -839,8 +905,16 @@ module Supercov
       frame_key = [current_context, key]
       stack = @open[frame_key]
       frame = stack && stack.pop
-      values = frame ? frame[:values] : Array.new(target["width"])
       truthy = value ? true : false
+      values = if frame
+                 frame[:values]
+               elsif target["width"] == 1
+                 # A lone condition carries no c() wrapper: its value is the
+                 # outcome, read back through the condition's own negation.
+                 [target["not"][0] ? !truthy : truthy]
+               else
+                 Array.new(target["width"])
+               end
       finish_decision(target, values, truthy)
       value
     end
@@ -969,6 +1043,19 @@ module Supercov
       nil
     end
 
+    # `&.`: the receiver decides which alternative ran.
+    def probe_safe_navigation(key, value)
+      target = @probes[key]
+      hit(current_context, value.nil? ? target["nil"] : target["called"])
+      value
+    end
+
+    # Where a branch or method body would start when it has no statement.
+    def probe_hits(key)
+      @probes[key]["ids"].each { |id| hit(current_context, id) }
+      nil
+    end
+
     # rescue flow
     def probe_handler(key, index)
       target = @probes[key]
@@ -1078,6 +1165,8 @@ module Supercov
     def pre(key) = @runtime.probe_arrival(key)
     def es(key) = @runtime.probe_evaluation_started(key)
     def s(key) = @runtime.probe_statement(key)
+    def n(key, value) = @runtime.probe_safe_navigation(key, value)
+    def hs(key) = @runtime.probe_hits(key)
     def h(key, index) = @runtime.probe_handler(key, index)
     def hm(key, value) = @runtime.probe_rescue_modifier(key, value)
     def hm0(key) = @runtime.probe_rescue_modifier(key, nil)
@@ -1190,7 +1279,8 @@ module Supercov
       number = ENV["TEST_ENV_NUMBER"].to_s
       worker = number.empty? ? "main" : "worker-#{number}"
     end
-    Coverage.start(oneshot_lines: true, branches: true, methods: true)
+    keys = (RUBY_VERSION.split(".").first(2).map(&:to_i) <=> [3, 4]).negative?
+    Coverage.start(oneshot_lines: true, **(keys ? { branches: true, methods: true } : {}))
     runtime = Runtime.new(plan_path, evidence_dir, run_id, worker)
     $__supercov = Probe.new(runtime)
     RubyVM::InstructionSequence.singleton_class.prepend(Loader)

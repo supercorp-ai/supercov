@@ -225,6 +225,16 @@ instead of as a definition.
 A statement on a line Ruby's own line table never counts (`x = case`, a
 multi-line literal assignment, a bare `begin`, `if false`) gets a probe at load
 time instead.
+
+On Ruby 3.4 and newer, Supercov asks the `Coverage` module for line events
+alone. Each test phase is sampled from `Coverage`, and asking for its branch
+and method tables too made every sample rebuild both for every loaded file,
+gems included, which was most of what a Ruby test suite paid under Supercov.
+Instead, the statement that starts a branch body or a method body proves the
+branch, the method and the decision outcome it witnesses, and what has no such
+statement is probed: an `if` without `else`, a modifier `if`, a ternary, `&.`,
+a `case` without `else`, an empty body. Ruby 3.3 cannot apply probes and keeps
+reading `Coverage`'s branch and method keys.
 `if true`/`if false`/`if nil` and other literal predicates are folded the way
 Ruby folds them: no branch, and the dead arm is not an obligation. A Spring
 preloader started before the run has no hook and fails closed; JRuby and

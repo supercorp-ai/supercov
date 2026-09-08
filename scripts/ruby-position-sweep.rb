@@ -5,20 +5,17 @@
 # own load-time probes for lines this interpreter will not count, and checks
 # against Ruby itself that
 #   1. the transformed source compiles and keeps its line count,
-#   2. every stdlib branch key the plan expects exists where the plan says,
+#   2. every stdlib branch key the plan expects exists in the untouched
+#      source where the plan says (Ruby 3.3 reads the keys there; 3.4+ reads
+#      no keys at all, so the transformed positions are not checked),
 #   3. every statement the plan expects to prove by a line is either on a
 #      countable line or carries a load-time probe.
 #
 # With `--load` it also runs each file twice, once untouched and once
 # transformed, each in its own process, and checks that
 #   4. the transformation changed nothing: a file that loads untouched still
-#      loads with its probes, which exercises every wrapped expression,
-#   5. every method position Ruby reports for the untouched file moves, under
-#      the same rule the plan uses, to a position Ruby reports for the
-#      transformed one (definitions register only when they execute, so this
-#      is the only way to see method keys at all). Ruby reports a position per
-#      `define_method` block too, which Supercov measures as statements rather
-#      than as a definition, so the check is over positions, not the plan.
+#      loads with its probes, which exercises every wrapped expression, and
+#      defines the same number of methods.
 # Library files that cannot load outside their own dependency tree fail both
 # runs and are skipped.
 #
@@ -61,17 +58,17 @@ class SweptFile
 
   def shifted(span, kind) = Supercov::LoadTime.shift(span, kind, @index)
 
+  # The keys as Ruby 3.3 looks them up: positions in the untouched source. A
+  # key that proves nothing (an `if` whose decision is probed and whose arms
+  # own their lines) is not checked: Ruby folds some of those away entirely,
+  # `if x and false` for one, and nothing depends on them.
   def branch_keys
-    plan["branches"].map do |branch|
-      key = branch["key"]
-      ["branch", key["group"], key["branch"], *shifted(key["unshifted"], key["kind"]).flatten]
-    end
-  end
+    plan["branches"].filter_map do |branch|
+      next if branch["hits"].empty? && branch["decision"].nil?
 
-  # Where a method position in the untouched source lands once the insertions
-  # are in place.
-  def shifted_method_key(key)
-    shifted([[key[0], key[1]], [key[2], key[3]]], "node").flatten
+      key = branch["key"]
+      ["branch", key["group"], key["branch"], *key["unshifted"].flatten]
+    end
   end
 
   # Statements the plan proves by their first line, and whether that line is
@@ -100,6 +97,8 @@ class StubProbe
   def pre(_key) = nil
   def es(_key) = nil
   def s(_key) = nil
+  def n(_key, value) = value
+  def hs(_key) = nil
   def h(_key, _index) = nil
   def hm0(_key) = nil
   def p(_key) = nil
@@ -199,14 +198,19 @@ plans.each do |path, plan|
     failures += 1
     next
   end
-  reported = Coverage.result(stop: false, clear: true)[synthetic]
-  if reported.nil?
+  # The untouched source, compiled apart, is where Ruby 3.3 reads the keys.
+  plain_synthetic = "/supercov-sweep/#{files}/plain/#{File.basename(path)}"
+  RubyVM::InstructionSequence.compile(file.source.dup.force_encoding(Encoding::UTF_8), plain_synthetic, plain_synthetic, 1)
+  results = Coverage.result(stop: false, clear: true)
+  reported = results[synthetic]
+  plain_reported = results[plain_synthetic]
+  if reported.nil? || plain_reported.nil?
     puts "COVER  #{path}: Ruby reported no coverage for the compiled file"
     failures += 1
     next
   end
   ruby_keys = {}
-  reported[:branches].each do |group, branches|
+  plain_reported[:branches].each do |group, branches|
     branches.each_key do |branch|
       ruby_keys[["branch", group[0].to_s, branch[0].to_s, branch[2], branch[3], branch[4], branch[5]]] = true
     end
@@ -220,13 +224,6 @@ plans.each do |path, plan|
       if probed["status"] == "loaded"
         loaded += 1
         methods_seen += plain["methods"].length
-        after = probed["methods"].to_h { |name, *key| [[name, *key], true] }
-        plain["methods"].each do |name, *key|
-          expected = [name, *file.shifted_method_key(key)]
-          next if after[expected]
-
-          missing << "method #{name} at #{key.inspect} should move to #{expected[1..].inspect}"
-        end
         if plain["methods"].length != probed["methods"].length
           missing << "defines #{plain['methods'].length} method(s) untouched but #{probed['methods'].length} with probes"
         end

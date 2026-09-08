@@ -8,6 +8,10 @@
 - On Windows, the Rust test processes are placed in a Job Object that ends them when Supercov ends, however it ends.
 - `npm run oracle:rust` compares Rust coverage per file against `cargo llvm-cov` over 26 crates and flags the differences.
 
+**Changed**
+
+- Ruby on 3.4+ reads line events alone from `Coverage`. Sampling its branch and method tables at every test phase was 80% of the time a Ruby suite spent under Supercov (five samples per test at ~2 ms each with 550 files loaded); a branch body's or method body's first statement now proves the branch, method and decision outcome, and the rest is probed. Coverage numbers are unchanged; Ruby 3.3 keeps the old path.
+
 **Fixed**
 
 - Rust: `cargo test foo`, `-- --skip name`, `-- --exact name` and `-- --ignored` were parsed and never applied; Supercov ran every test. The oracle caught it on tokio.

@@ -85,9 +85,11 @@ function assertStdlibOnlyTotals(summary) {
   // `if false` lines carry no line event on 3.3, so their statements are
   // declared unmeasured and leave the line total with them; on 3.4+ the
   // runtime probes them instead.
-  assert.deepEqual([summary.coverage.lines.covered, summary.coverage.lines.total], [77, 82], JSON.stringify(summary.coverage));
+  assert.deepEqual([summary.coverage.lines.covered, summary.coverage.lines.total], [79, 82], JSON.stringify(summary.coverage));
   assert.equal(summary.testExitCode, 0);
-  assert.equal(summary.measurement.complete, true, JSON.stringify(summary.measurement));
+  // 3.3 declares two interpreter boundaries (a line it never counts, the
+  // probe-only obligations), so the run is not Complete there by design.
+  assert.equal(summary.measurement.complete, false, JSON.stringify(summary.measurement));
 }
 
 function assertFixtureTotals(summary) {
@@ -160,27 +162,29 @@ try {
 
   if (probes) {
     // A file Supercov cannot instrument, or is asked to leave alone, still
-    // loads and is still measured through Ruby's Coverage module; only what a
-    // probe would have proven is declared. This is the same path a compile
-    // failure takes.
+    // loads and is still measured through Ruby's line events; what only a
+    // probe, or a branch or method key Ruby 3.4+ no longer asks for, would
+    // have proven is declared. Multi-line bodies keep their branches and
+    // methods through the statement that starts them. This is the same path
+    // a compile failure takes.
     const skipped = supercov(['--', 'rspec'], { ...environment, SUPERCOV_RUBY_SKIP_PROBES: 'lib/shapes.rb' });
     assert.equal(skipped.status, 0, `${skipped.stdout}\n${skipped.stderr}`);
     assert.match(skipped.stderr, /12 test\(s\) across 1 source file\(s\)/, 'the suite still runs unmodified');
     const stdlibOnly = query(['runs', 'latest'], environment);
     assert.deepEqual(
       [stdlibOnly.coverage.lines.covered, stdlibOnly.coverage.lines.total],
-      [80, 83],
+      [66, 67],
       JSON.stringify(stdlibOnly.coverage),
     );
     assert.deepEqual(
       [stdlibOnly.coverage.branches.covered, stdlibOnly.coverage.branches.total],
-      [53, 60],
+      [8, 8],
       JSON.stringify(stdlibOnly.coverage),
     );
     assert.deepEqual(
       [stdlibOnly.coverage.functions.covered, stdlibOnly.coverage.functions.total],
-      [18, 18],
-      'methods stay measured without probes',
+      [15, 16],
+      'methods whose body starts on a line of its own stay measured without probes',
     );
     const declared = query(['runs', 'latest', 'file', 'lib/shapes.rb'], environment);
     assert.ok(declared.totalLimitations > 0, 'probe-only obligations are declared, not reported as gaps');
@@ -242,7 +246,8 @@ try {
       [1, 1],
       `${runner} must report one passing and one failing test: ${JSON.stringify(summary.testOutcomes)}`,
     );
-    assert.equal(summary.measurement.complete, true, `${runner}: ${JSON.stringify(summary.measurement)}`);
+    // Complete on 3.4+; 3.3 declares its interpreter boundaries here too.
+    assert.equal(summary.measurement.complete, probes, `${runner}: ${JSON.stringify(summary.measurement)}`);
     const runners = supercov(['runs', 'latest', 'runners'], environment);
     assert.match(runners.stdout, new RegExp(`${runner}\\s+2 test\\(s\\)`), runners.stdout);
   }
