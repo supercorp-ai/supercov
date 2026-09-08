@@ -236,7 +236,11 @@ statement is probed: an `if` without `else`, a modifier `if`, a ternary, `&.`,
 a `case` without `else`, an empty body. Ruby 3.3 cannot apply probes and keeps
 reading `Coverage`'s branch and method keys.
 `if true`/`if false`/`if nil` and other literal predicates are folded the way
-Ruby folds them: no branch, and the dead arm is not an obligation. A Spring
+Ruby folds them: no branch, and the dead arm is not an obligation. Code inside
+a `Ractor.new` block gets no probes: a non-main Ractor cannot read the probe
+receiver, so a probe there would raise where the untouched program ran. Its
+lines are still counted; what only a probe could have proven inside it is
+declared unmeasured at the block. A Spring
 preloader started before the run has no hook and fails closed; JRuby and
 TruffleRuby are not supported.
 

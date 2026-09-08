@@ -101,6 +101,11 @@ const ITERATORS: &[&[u8]] = &[
     b"step",
 ];
 pub const BEGIN_BODY_LIMITATION: &str = "ruby-begin-completion-unmeasured";
+/// A `Ractor.new` block cannot call the probes: a non-main Ractor cannot read
+/// the receiver global, so a probe there raises where the untouched program
+/// ran. Nothing is inserted inside one; what only a probe could prove there
+/// is unmeasured and declared at the block.
+pub const RACTOR_BLOCK_LIMITATION: &str = "ruby-ractor-block-unprobed";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RubyInstrumenterError {
@@ -384,6 +389,10 @@ pub struct RubyFilePlan {
     /// the runtime fails to instrument can declare exactly its own.
     #[serde(default)]
     pub probe_obligations: Vec<String>,
+    /// Byte ranges of `Ractor.new` blocks, where the runtime must not add
+    /// load-time probes either (see [`RACTOR_BLOCK_LIMITATION`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ractor_blocks: Vec<[usize; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,6 +478,78 @@ fn probe_obligations_of(probes: &BTreeMap<u64, ProbeTarget>) -> Vec<String> {
             }
         }
         ids.into_iter().collect()
+    }
+}
+
+/// The probe keys an insertion's text calls: every `<receiver>.<name>(<key>`.
+fn probe_keys_in(text: &str) -> Vec<u64> {
+    let mut keys = Vec::new();
+    let mut rest = text;
+    while let Some(position) = rest.find(RUBY_PROBE_RECEIVER) {
+        rest = &rest[position + RUBY_PROBE_RECEIVER.len()..];
+        let Some(open) = rest.find('(') else { break };
+        let digits: String = rest[open + 1..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        if let Ok(key) = digits.parse() {
+            keys.push(key);
+        }
+        rest = &rest[open + 1..];
+    }
+    keys
+}
+
+/// Every id a probe target names, so implications keyed by any of them can
+/// be found when the probe is dropped.
+fn target_ids(target: &ProbeTarget) -> Vec<String> {
+    match target {
+        ProbeTarget::Statement { id } => vec![id.clone()],
+        ProbeTarget::Decision {
+            id,
+            outcome_true,
+            outcome_false,
+            logical,
+            loop_,
+            ..
+        } => {
+            let mut ids = vec![id.clone(), outcome_true.clone(), outcome_false.clone()];
+            for derived in logical {
+                ids.push(derived.short_circuit.clone());
+                ids.push(derived.evaluated.clone());
+            }
+            if let Some(loop_) = loop_ {
+                ids.push(loop_.zero.clone());
+                ids.push(loop_.entered.clone());
+            }
+            ids
+        }
+        ProbeTarget::For { id, zero, entered } => vec![id.clone(), zero.clone(), entered.clone()],
+        ProbeTarget::Logical {
+            short_circuit,
+            evaluated,
+            ..
+        }
+        | ProbeTarget::Arrival {
+            short_circuit,
+            evaluated,
+        } => vec![short_circuit.clone(), evaluated.clone()],
+        ProbeTarget::Try {
+            id,
+            success,
+            raised,
+            handlers,
+        } => {
+            let mut ids = vec![id.clone(), success.clone(), raised.clone()];
+            for handler in handlers {
+                ids.push(handler.id.clone());
+                ids.push(handler.missed.clone());
+                ids.push(handler.selected.clone());
+            }
+            ids
+        }
+        ProbeTarget::SafeNavigation { nil, called } => vec![nil.clone(), called.clone()],
+        ProbeTarget::Hits { ids } => ids.clone(),
     }
 }
 
@@ -630,6 +711,8 @@ struct Collector<'a> {
     elsif_nodes: BTreeSet<usize>,
     depth: i64,
     begin_unmeasured: Vec<(String, usize)>,
+    /// Byte ranges of `Ractor.new` blocks; no insertion may land inside.
+    ractor_blocks: Vec<(usize, usize)>,
     error: Option<RubyInstrumenterError>,
 }
 
@@ -675,6 +758,7 @@ impl<'a> Collector<'a> {
             elsif_nodes: BTreeSet::new(),
             depth: 0,
             begin_unmeasured: Vec::new(),
+            ractor_blocks: Vec::new(),
             error: None,
         }
     }
@@ -2704,6 +2788,62 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// Remove every insertion inside a `Ractor.new` block. What those probes
+    /// alone would have proven -- and what their observations would have
+    /// implied -- leaves the denominator, declared at the block; lines stay.
+    fn drop_ractor_insertions(
+        &mut self,
+        pending: Vec<PendingEdit>,
+        blocks: &[(usize, usize)],
+    ) -> Vec<PendingEdit> {
+        let inside = |offset: usize| {
+            blocks
+                .iter()
+                .any(|(start, end)| offset >= *start && offset < *end)
+        };
+        let (dropped, kept): (Vec<_>, Vec<_>) =
+            pending.into_iter().partition(|edit| inside(edit.offset));
+        let mut keys = BTreeSet::new();
+        for edit in &dropped {
+            keys.extend(probe_keys_in(&edit.text));
+        }
+        let mut targets = BTreeMap::new();
+        for key in &keys {
+            if let Some(target) = self.probes.remove(key) {
+                targets.insert(*key, target);
+            }
+        }
+        let mut unmeasured = probe_obligations_of(&targets);
+        for target in targets.values() {
+            for named in target_ids(target) {
+                if let Some(implied) = self.implied.get(&named) {
+                    unmeasured.extend(implied.hits.iter().map(|id| obligation_of(id)));
+                    unmeasured.extend(implied.decisions.iter().map(|d| d.id.clone()));
+                }
+            }
+        }
+        unmeasured.sort();
+        unmeasured.dedup();
+        self.manifest.unmeasured.extend(unmeasured);
+        for (start, end) in blocks {
+            let (line, _) = self.line_column(*start);
+            let source = self
+                .text(*start, *end)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            self.manifest.limitations.push(limitation(
+                RACTOR_BLOCK_LIMITATION,
+                self.file,
+                line,
+                &source,
+                "a Ractor block cannot call Supercov's probes (a non-main Ractor cannot read the probe receiver), so what only a probe could prove inside it is unmeasured; its lines are still counted",
+            ));
+        }
+        kept
+    }
+
     fn finish(mut self) -> RubyFileObligations {
         let mut pending = std::mem::take(&mut self.edits);
         pending.sort_by(|left, right| {
@@ -2713,6 +2853,10 @@ impl<'a> Collector<'a> {
                 .then(left.order.cmp(&right.order))
                 .then(left.sequence.cmp(&right.sequence))
         });
+        let ractor_blocks = std::mem::take(&mut self.ractor_blocks);
+        if !ractor_blocks.is_empty() {
+            pending = self.drop_ractor_insertions(pending, &ractor_blocks);
+        }
         let branches = std::mem::take(&mut self.branches)
             .into_iter()
             .map(|mut branch| {
@@ -2776,6 +2920,10 @@ impl<'a> Collector<'a> {
         RubyFileObligations {
             manifest: self.manifest,
             plan: RubyFilePlan {
+                ractor_blocks: ractor_blocks
+                    .iter()
+                    .map(|(start, end)| [*start, *end])
+                    .collect(),
                 // What only a probe proves on 3.3: the probe-provable set
                 // minus what 3.3 still proves through Coverage's keys.
                 probe_obligations: {
@@ -3000,6 +3148,19 @@ impl<'pr> Visit<'pr> for Collector<'_> {
     }
 
     fn visit_call_node(&mut self, node: &CallNode<'pr>) {
+        if node.name().as_slice() == b"new"
+            && node.receiver().is_some_and(|receiver| {
+                receiver
+                    .as_constant_read_node()
+                    .is_some_and(|constant| constant.name().as_slice() == b"Ractor")
+            })
+            && let Some(block) = node.block()
+            && block.as_block_node().is_some()
+        {
+            let location = block.location();
+            self.ractor_blocks
+                .push((location.start_offset(), location.end_offset()));
+        }
         if node.is_safe_navigation() {
             self.safe_navigation(node);
         }
@@ -3681,6 +3842,49 @@ end
             .find(|b| b.kind == "safe-navigation")
             .unwrap();
         assert!(!plan.probe_obligations.contains(&safe.id));
+    }
+
+    #[test]
+    fn ractor_blocks_get_no_probes_and_declare_what_only_probes_could_prove() {
+        // A probe inside a Ractor reads a global the Ractor cannot see and
+        // raises where the untouched program ran. Nothing is inserted inside
+        // the block; the same shapes outside it are probed as ever.
+        let source = "def inside(a)\n  Ractor.new(a) { |v| v ? 1 : 2 }.take\nend\n\ndef outside(a)\n  a ? 1 : 2\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/r.rb", source.as_bytes(), &mut probe).unwrap();
+        let plan = &obligations.plan;
+        let manifest = &obligations.manifest;
+        let transformed = String::from_utf8(apply_edits(source.as_bytes(), &plan.edits)).unwrap();
+        let block_line = transformed.lines().nth(1).unwrap();
+        assert!(
+            !block_line.contains("$__supercov"),
+            "no probe inside the Ractor block: {block_line}"
+        );
+        assert!(
+            transformed
+                .lines()
+                .nth(5)
+                .unwrap()
+                .contains("$__supercov.d("),
+            "the ternary outside is probed"
+        );
+        let inside = manifest.decisions.iter().find(|d| d.line == 2).unwrap();
+        assert!(
+            manifest.unmeasured.contains(&inside.id),
+            "the block's ternary leaves the denominator"
+        );
+        let outside = manifest.decisions.iter().find(|d| d.line == 6).unwrap();
+        assert!(!manifest.unmeasured.contains(&outside.id));
+        assert_eq!(plan.ractor_blocks.len(), 1);
+        assert!(
+            manifest
+                .limitations
+                .iter()
+                .any(|l| l["id"] == RACTOR_BLOCK_LIMITATION && l["line"] == 2)
+        );
+        // Dropped probes are not in the plan either, so 3.3 declares nothing for them.
+        assert!(!plan.probe_obligations.contains(&inside.id));
     }
 
     #[test]

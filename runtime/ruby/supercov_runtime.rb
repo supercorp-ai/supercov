@@ -131,9 +131,12 @@ module Supercov
     # Probes for the plan's statements whose first line `stub` (Ruby's own
     # `Coverage.line_stub`) shows this interpreter will never count. Returns
     # the insertions and the probe targets they need, numbered from `first_key`.
-    def statement_probes(receiver, first_key, lines, statement_offsets, stub)
+    # `blocked` ranges (Ractor blocks, where no probe may run) get no probe;
+    # their statements come back in the third element for the caller to declare.
+    def statement_probes(receiver, first_key, lines, statement_offsets, stub, blocked = [])
       edits = []
       probes = {}
+      skipped = []
       key = first_key
       lines.each do |line, id|
         next unless stub[line - 1].nil?
@@ -141,11 +144,16 @@ module Supercov
         span = statement_offsets[id]
         next if span.nil?
 
+        if blocked.any? { |start, finish| span[0] >= start && span[0] < finish }
+          skipped << id
+          next
+        end
+
         probes[key] = { "kind" => "statement", "id" => id }
         edits << { "offset" => span[0], "text" => "#{receiver}.s(#{key}); ", "rank" => "statement", "scope" => span[1] }
         key += 1
       end
-      [edits, probes]
+      [edits, probes, skipped]
     end
 
     # Planned and load-time insertions in the order they are applied: where
@@ -560,7 +568,16 @@ module Supercov
       rescue StandardError
         return edits
       end
-      extra, probes = LoadTime.statement_probes(@receiver, @dynamic_key, lines, offsets, stub)
+      blocked = @files[relative(absolute)]["ractorBlocks"] || []
+      extra, probes, skipped = LoadTime.statement_probes(@receiver, @dynamic_key, lines, offsets, stub, blocked)
+      skipped.each do |id|
+        limitation(
+          "ruby-line-not-countable",
+          "Ruby #{RUBY_VERSION} records no line event for this statement's first line, and inside a Ractor block no probe can stand in for it",
+          relative(absolute),
+          id,
+        )
+      end
       return edits if extra.empty?
 
       @probes.merge!(probes)
