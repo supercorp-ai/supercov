@@ -87,6 +87,7 @@ function assertStdlibOnlyTotals(summary) {
   // runtime probes them instead.
   assert.deepEqual([summary.coverage.lines.covered, summary.coverage.lines.total], [77, 82], JSON.stringify(summary.coverage));
   assert.equal(summary.testExitCode, 0);
+  assert.equal(summary.measurement.complete, true, JSON.stringify(summary.measurement));
 }
 
 function assertFixtureTotals(summary) {
@@ -100,6 +101,7 @@ function assertFixtureTotals(summary) {
   assert.deepEqual([summary.coverage.branches.covered, summary.coverage.branches.total], [114, 132], JSON.stringify(summary.coverage));
   assert.deepEqual([summary.coverage.coveredConditions, summary.coverage.conditions], [13, 19], JSON.stringify(summary.coverage));
   assert.equal(summary.testExitCode, 0);
+  assert.equal(summary.measurement.complete, true, JSON.stringify(summary.measurement));
 }
 
 try {
@@ -220,6 +222,30 @@ try {
   assert.match(cucumberRunners.stdout, /cucumber\s+2 test\(s\)/);
   const countdown = query(['runs', 'latest', 'line', 'lib/shapes.rb:99'], environment);
   assert.match(JSON.stringify(countdown), /features\/shapes\.feature:7/, 'Cucumber scenario identity reaches the line');
+
+  // One failing test per runner, reported as one. Every leg above passes, so
+  // a runner whose failure path was broken looked fine: the test-unit
+  // adapter's result hooks never installed, and its failing tests were
+  // reported as passed, until a run with a failing test was tried by hand.
+  const failing = [
+    ['minitest', ['ruby', '-Itest', 'test/failing/shapes_failing_test.rb']],
+    ['test-unit', ['ruby', '-Itest', 'test/failing/unit_style_failing_test.rb']],
+    ['rspec', ['rspec', 'spec_failing/shapes_failing_spec.rb']],
+    ['cucumber', ['cucumber', '--publish-quiet', '-r', 'features', 'features_failing']],
+  ];
+  for (const [runner, command] of failing) {
+    const result = supercov(['--', ...command], environment);
+    assert.notEqual(result.status, 0, `${runner}: the failing test must fail the command\n${result.stdout}\n${result.stderr}`);
+    const summary = query(['runs', 'latest'], environment);
+    assert.deepEqual(
+      [summary.testOutcomes.passed, summary.testOutcomes.failed],
+      [1, 1],
+      `${runner} must report one passing and one failing test: ${JSON.stringify(summary.testOutcomes)}`,
+    );
+    assert.equal(summary.measurement.complete, true, `${runner}: ${JSON.stringify(summary.measurement)}`);
+    const runners = supercov(['runs', 'latest', 'runners'], environment);
+    assert.match(runners.stdout, new RegExp(`${runner}\\s+2 test\\(s\\)`), runners.stdout);
+  }
 
 
   // A suite stops a server it started by signalling it, and what a signalled

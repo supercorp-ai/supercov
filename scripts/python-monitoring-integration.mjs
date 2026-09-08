@@ -101,6 +101,7 @@ function decisionVectors(project, location, environment, filter = null) {
 
 function assertFixtureTotals(summary) {
   assert.equal(summary.model.variant, 'python-owned-monitoring');
+  assert.equal(summary.measurement.complete, true, JSON.stringify(summary.measurement));
   assert.deepEqual(
     [summary.coverage.lines.covered, summary.coverage.lines.total],
     [81, 82],
@@ -248,6 +249,7 @@ try {
   assert.equal(failedSubtest.status, 1, `${failedSubtest.stdout}\n${failedSubtest.stderr}`);
   const failedSubtestSummary = query(project, ['runs', 'latest'], environment);
   assert.equal(failedSubtestSummary.testOutcomes.failed, 1);
+  assert.equal(failedSubtestSummary.measurement.complete, true, JSON.stringify(failedSubtestSummary.measurement));
 
   successfulSupercov(
     project,

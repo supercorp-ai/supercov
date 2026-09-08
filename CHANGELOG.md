@@ -4,7 +4,8 @@
 
 **Added**
 
-- Python and Ruby coverage says whether a test checked what it ran. Evidence a test recorded before its first assertion links to that assertion when the test passes: pytest `assert` statements, `unittest` assert methods, Minitest, RSpec expectations (in Cucumber steps too) and test-unit.
+- Python and Ruby coverage says whether a test checked what it ran. Evidence a test recorded before its first assertion links to that assertion when the test passes: pytest `assert` statements, `pytest.raises`/`pytest.warns`, `unittest` assert methods, Minitest, RSpec expectations (in Cucumber steps too) and test-unit.
+- On Windows, the Rust test processes are placed in a Job Object that ends them when Supercov ends, however it ends.
 - `npm run oracle:rust` compares Rust coverage per file against `cargo llvm-cov` over 26 crates and flags the differences.
 
 **Fixed**

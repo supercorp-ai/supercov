@@ -6,6 +6,7 @@ assigns the exact worker, test, retry and setup/call/teardown identity before
 each phase runs and records pytest's phase outcomes. It computes no coverage.
 """
 
+import importlib
 import os
 
 import pytest
@@ -40,24 +41,31 @@ def _switch(item, phase: str) -> None:
     )
 
 
-def _own_rewrite_cache() -> None:
-    """Give Supercov's assertion rewrites a bytecode cache name of their own.
+@pytest.hookimpl(tryfirst=True)
+def pytest_load_initial_conftests(early_config, parser, args):
+    """Name the bytecode cache for rewrites made with the assertion-pass hook.
 
     Supercov turns `enable_assertion_pass_hook` on through `PYTEST_ADDOPTS`,
     and pytest only calls `pytest_assertion_pass` from modules rewritten with
     it on -- but it caches rewritten modules by pytest version alone, so a
     module a plain run had cached would keep its silent bytecode, and a
-    Supercov run would leave hook calls in the plain run's cache. The name
-    lives in pytest's private surface; when it is missing, plain `assert`
-    stays unlinked and the run says so.
+    Supercov run would leave hook calls in the plain run's cache. Rewrites
+    made with the hook on go under a name of their own; with the hook off
+    (the user's own `-o` wins) the bytecode is pytest's, and shares its
+    cache. This runs before pytest loads the first conftest, the first module
+    it rewrites, and after the options are parsed, so the effective value is
+    known. The name lives in pytest's private surface; when it is missing,
+    plain `assert` stays unlinked and the run says so.
     """
+    del parser, args
     if _runtime is None:
         return
     try:
+        enabled = bool(early_config.getini("enable_assertion_pass_hook"))
         from _pytest.assertion import rewrite
 
         tail = rewrite.PYC_TAIL
-        if "-supercov" not in tail:
+        if enabled and "-supercov" not in tail:
             stem, extension = tail.rsplit(".", 1)
             rewrite.PYC_TAIL = f"{stem}-supercov.{extension}"
     except Exception as error:  # noqa: BLE001 - never break the user's test run
@@ -67,8 +75,40 @@ def _own_rewrite_cache() -> None:
         )
 
 
-# At import, which `PYTEST_PLUGINS` places before any conftest is rewritten.
-_own_rewrite_cache()
+def _hook_expectation_contexts() -> None:
+    """Count `pytest.raises`, `pytest.warns` and `RaisesGroup` as assertions.
+
+    They check without an `assert` statement, so the assertion-pass hook
+    never sees them, and a test whose only check is an expected exception
+    would link nothing. Their `__exit__` returning normally is the check
+    passing; an unmatched exception propagates or fails through it.
+    """
+    if _runtime is None:
+        return
+    for module_name, class_name in (
+        ("_pytest.raises", "RaisesExc"),
+        ("_pytest.raises", "RaisesGroup"),
+        ("_pytest.python_api", "RaisesContext"),
+        ("_pytest.recwarn", "WarningsChecker"),
+    ):
+        try:
+            cls = getattr(importlib.import_module(module_name), class_name)
+            original = cls.__dict__["__exit__"]
+        except Exception:  # noqa: BLE001 - this pytest has no such class
+            continue
+
+        def exit_and_mark(self, exc_type, exc_val, exc_tb, _original=original):
+            __tracebackhide__ = True
+            result = _original(self, exc_type, exc_val, exc_tb)
+            if result is True or (result is None and exc_type is None):
+                _runtime.assertion()
+            return result
+
+        cls.__exit__ = exit_and_mark
+
+
+# At import, which `PYTEST_PLUGINS` places before any test runs.
+_hook_expectation_contexts()
 
 
 def pytest_assertion_pass(item, lineno, orig, expl):

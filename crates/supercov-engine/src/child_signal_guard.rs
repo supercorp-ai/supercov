@@ -14,7 +14,10 @@
 //! a fixed table of atomics and `kill(2)`, both of which are safe inside a
 //! signal handler.
 //!
-//! Windows has no equivalent signal path; the guard is a no-op there.
+//! Windows delivers no signal a process can catch, but the kernel closes
+//! every handle a dying process held: while a guard is installed, each
+//! registered child is placed in a Job Object that kills its members when its
+//! handle closes, so the test processes die with the runner however it ends.
 
 use std::io;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
@@ -62,6 +65,8 @@ pub fn register(child: &Child) -> RegisteredChild {
     let Ok(pid) = i32::try_from(child.id()) else {
         return RegisteredChild { slot: None };
     };
+    #[cfg(windows)]
+    windows_job::assign(child);
     for (index, slot) in CHILDREN.iter().enumerate() {
         if slot
             .compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst)
@@ -71,6 +76,43 @@ pub fn register(child: &Child) -> RegisteredChild {
         }
     }
     RegisteredChild { slot: None }
+}
+
+#[cfg(windows)]
+mod windows_job {
+    use std::process::Child;
+    use std::sync::Mutex;
+
+    use crate::process_supervision::JobHandle;
+
+    /// One job for the guard's lifetime; children assigned to it die when the
+    /// runner's handle closes, which the kernel does however the runner ends.
+    static JOB: Mutex<Option<JobHandle>> = Mutex::new(None);
+
+    fn job() -> std::sync::MutexGuard<'static, Option<JobHandle>> {
+        JOB.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn create() {
+        // Best effort: a runner that cannot create a job runs as it did.
+        if let Ok(handle) = JobHandle::new() {
+            *job() = Some(handle);
+        }
+    }
+
+    pub fn release() {
+        // Closing the handle kills whatever is still assigned; the runner has
+        // waited for every child by the time the outermost guard drops.
+        *job() = None;
+    }
+
+    pub fn assign(child: &Child) {
+        // A child already inside a job that forbids nesting stays outside
+        // ours; the runner behaves as it did before the guard existed.
+        if let Some(handle) = job().as_ref() {
+            let _ = handle.assign(child);
+        }
+    }
 }
 
 /// `Command::output()`, with the child registered while it runs: stdin
@@ -144,7 +186,10 @@ impl ChildSignalGuard {
         }
         #[cfg(not(unix))]
         {
-            GUARDS.fetch_add(1, Ordering::SeqCst);
+            if GUARDS.fetch_add(1, Ordering::SeqCst) == 0 {
+                #[cfg(windows)]
+                windows_job::create();
+            }
             Ok(Self {})
         }
     }
@@ -159,7 +204,13 @@ impl Drop for ChildSignalGuard {
                 libc::signal(signal, disposition);
             }
         }
-        GUARDS.fetch_sub(1, Ordering::SeqCst);
+        let outermost = GUARDS.fetch_sub(1, Ordering::SeqCst) == 1;
+        #[cfg(windows)]
+        if outermost {
+            windows_job::release();
+        }
+        #[cfg(not(windows))]
+        let _ = outermost;
     }
 }
 

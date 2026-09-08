@@ -8,9 +8,9 @@
 // too; and when cargo-nextest is on PATH, a test that fails its first attempt
 // runs again under `cargo nextest run --retries 1`.
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { resolve } from 'node:path';
+import { delimiter, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const repository = resolve(import.meta.dirname, '..');
@@ -58,13 +58,55 @@ function environment() {
   return { ...process.env, SUPERCOV_RUST_BINARY: binary };
 }
 
-function supercov(args) {
+function supercov(args, env = environment()) {
   return spawnSync(process.execPath, [launcher, ...args], {
     cwd: project,
     encoding: 'utf8',
-    env: environment(),
+    env,
     timeout: 900_000,
   });
+}
+
+// The runner's nextest contract is verified against 0.9.138 and 0.9.140. This
+// leg used to skip when cargo-nextest was not on PATH, which is how a runner
+// that refused every nextest command passed this gate locally while CI failed
+// (1c8bf35). A verified nextest on PATH is used; otherwise the pinned build is
+// fetched once into the temp directory. The leg never skips.
+const NEXTEST_VERSION = '0.9.140';
+const VERIFIED_NEXTEST = /cargo-nextest 0\.9\.(?:138|140)\b/;
+async function nextestEnvironment() {
+  const windows = process.platform === 'win32';
+  const probe = (env) => spawnSync('cargo', ['nextest', '--version'], { encoding: 'utf8', env, shell: windows });
+  const onPath = probe(environment());
+  if (onPath.status === 0 && VERIFIED_NEXTEST.test(onPath.stdout)) {
+    return { env: environment(), version: onPath.stdout.trim().split('\n')[0] };
+  }
+  const archive = {
+    darwin: 'mac',
+    linux: process.arch === 'arm64' ? 'linux-arm' : 'linux',
+    win32: process.arch === 'x64' ? 'windows-tar' : undefined,
+  }[process.platform];
+  assert.ok(
+    archive,
+    `no verified cargo-nextest on PATH (${onPath.stdout.trim() || onPath.stderr.trim() || 'absent'}) and no pinned build for ${process.platform}/${process.arch}: install cargo-nextest ${NEXTEST_VERSION}`,
+  );
+  const directory = resolve(realpathSync.native(tmpdir()), `supercov-cargo-nextest-${NEXTEST_VERSION}`);
+  const executable = resolve(directory, windows ? 'cargo-nextest.exe' : 'cargo-nextest');
+  if (!existsSync(executable)) {
+    mkdirSync(directory, { recursive: true });
+    const response = await fetch(`https://get.nexte.st/${NEXTEST_VERSION}/${archive}`);
+    assert.ok(response.ok, `fetching cargo-nextest ${NEXTEST_VERSION}: HTTP ${response.status}`);
+    const tarball = resolve(directory, 'cargo-nextest.tar.gz');
+    writeFileSync(tarball, Buffer.from(await response.arrayBuffer()));
+    const extracted = spawnSync('tar', ['xzf', tarball, '-C', directory], { encoding: 'utf8' });
+    assert.equal(extracted.status, 0, `extracting cargo-nextest: ${extracted.stderr}`);
+    rmSync(tarball, { force: true });
+  }
+  const env = { ...environment(), PATH: `${directory}${delimiter}${process.env.PATH}` };
+  const fetched = probe(env);
+  assert.equal(fetched.status, 0, `the fetched cargo-nextest does not run: ${fetched.stderr}`);
+  assert.match(fetched.stdout, VERIFIED_NEXTEST, fetched.stdout);
+  return { env, version: `${fetched.stdout.trim().split('\n')[0]} (fetched)` };
 }
 
 function query(args) {
@@ -166,20 +208,17 @@ try {
   assert.doesNotMatch(untaken, /classifies_|doubles_|greets_|passes_on_retry|\(line \d+\)/, `nothing reaches never_called: ${untaken}`);
 
   // nextest: the same crate, one test retried once.
-  const nextestVersion = spawnSync('cargo', ['nextest', '--version'], { encoding: 'utf8', shell: process.platform === 'win32' });
-  let nextestNote = 'cargo-nextest is not on PATH, so its leg did not run';
-  if (nextestVersion.status === 0) {
-    const retried = supercov(['--', 'cargo', 'nextest', 'run', '--retries', '1']);
-    assert.equal(retried.status, 0, `${retried.stdout}\n${retried.stderr}`);
-    // nextest colors its summary on CI; compare the plain text.
-    const plain = (retried.stdout + retried.stderr).replace(/\x1b\[[0-9;]*m/g, '');
-    assert.match(plain, /1 flaky/, `one test must have passed on its second attempt: ${plain}`);
-    // nextest runs the integration tests, not the doctest.
-    assert.match(retried.stderr, /\[supercov\] Rust coverage: 5 test\(s\)/, retried.stderr);
-    const retriedLine = JSON.stringify(query(['runs', 'latest', 'line', `src/lib.rs:${doubledLine}`]));
-    assert.match(retriedLine, /doubles_on_a_thread/, `attribution holds under nextest: ${retriedLine}`);
-    nextestNote = `${nextestVersion.stdout.trim().split('\n')[0]} retried one test once`;
-  }
+  const nextest = await nextestEnvironment();
+  const retried = supercov(['--', 'cargo', 'nextest', 'run', '--retries', '1'], nextest.env);
+  assert.equal(retried.status, 0, `${retried.stdout}\n${retried.stderr}`);
+  // nextest colors its summary on CI; compare the plain text.
+  const plain = (retried.stdout + retried.stderr).replace(/\x1b\[[0-9;]*m/g, '');
+  assert.match(plain, /1 flaky/, `one test must have passed on its second attempt: ${plain}`);
+  // nextest runs the integration tests, not the doctest.
+  assert.match(retried.stderr, /\[supercov\] Rust coverage: 5 test\(s\)/, retried.stderr);
+  const retriedLine = JSON.stringify(query(['runs', 'latest', 'line', `src/lib.rs:${doubledLine}`]));
+  assert.match(retriedLine, /doubles_on_a_thread/, `attribution holds under nextest: ${retriedLine}`);
+  const nextestNote = `${nextest.version} retried one test once`;
 
   console.log(
     `[rust-public-cargo] ${process.platform} ran the public cargo test path through the exact compiler chain; a spawned thread, a child process and a doctest kept their tests; ${nextestNote}`,

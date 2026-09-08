@@ -153,9 +153,9 @@ Evidence a test records before its first assertion is linked to that assertion
 when the test passes, so a line reads "linked to a passing assertion" rather
 than "execution only". Under pytest this covers plain `assert` statements,
 through pytest's assertion-pass hook, which Supercov turns on for a rewrite
-cache of its own so plain runs keep theirs; every `unittest` `assert*` method
-counts under both runners. What a test runs after its first assertion is
-execution only.
+cache of its own so plain runs keep theirs, and `pytest.raises` and
+`pytest.warns` blocks; every `unittest` `assert*` method counts under both
+runners. What a test runs after its first assertion is execution only.
 
 Supercov measures Python through CPython's own monitoring interface. Nothing is
 copied, rewritten, or compiled differently: the project runs in place with its
