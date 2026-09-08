@@ -1069,9 +1069,12 @@ impl<'a> Collector<'a> {
             Some(first) => self.implied.entry(first).or_default().hits.extend(ids),
             None => {
                 let key = self.probe_key(ProbeTarget::Hits { ids });
+                // Closer rank: a guard's `d(...)` wrapper closes at the very
+                // offset an empty `in` body starts, and the probe must follow
+                // that `))`, not split it.
                 self.edit(
                     offset,
-                    EditRank::StatementProbe,
+                    EditRank::Closer,
                     format!("{before}{RUBY_PROBE_RECEIVER}.hs({key}){after}"),
                     offset,
                 );
@@ -3277,7 +3280,11 @@ impl<'pr> Visit<'pr> for Collector<'_> {
             "or",
             location.start_offset(),
             location.end_offset(),
-            Some(node.name().as_slice()),
+            // Reading an uninitialized class variable raises (unlike an
+            // instance or global variable), so it cannot be re-read up front;
+            // the arrival form counts the skipped side instead. Found by the
+            // corpus sweep on railties' `@@extensions ||= {}`.
+            None,
             &value,
         );
         self.depth += 1;
@@ -3885,6 +3892,49 @@ end
         );
         // Dropped probes are not in the plan either, so 3.3 declares nothing for them.
         assert!(!plan.probe_obligations.contains(&inside.id));
+    }
+
+    #[test]
+    fn an_empty_guarded_in_body_takes_its_probe_after_the_guard_wrapper() {
+        // net-imap: `in Array if data.all? { ... }` with no body. The guard's
+        // decision wrapper closes exactly where the body would start; the
+        // body probe must come after it. Found by the corpus sweep.
+        let source = "def f(data)\n  case data\n  in String then data = 1\n  in Array if data.all? { _1 > 0 }\n  else\n    raise TypeError\n  end\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/g.rb", source.as_bytes(), &mut probe).unwrap();
+        let transformed =
+            String::from_utf8(apply_edits(source.as_bytes(), &obligations.plan.edits)).unwrap();
+        let guard_line = transformed.lines().nth(3).unwrap();
+        assert!(
+            guard_line.contains(")) then $__supercov.hs("),
+            "probe after the wrapper: {guard_line}"
+        );
+        assert!(
+            !guard_line.contains("then $__supercov.hs(")
+                || !guard_line.contains("hs(")
+                || guard_line.matches(')').count() == guard_line.matches('(').count(),
+            "balanced: {guard_line}"
+        );
+    }
+
+    #[test]
+    fn a_class_variable_or_assignment_is_never_read_before_it_exists() {
+        let source = "class C\n  def self.ext\n    @@ext ||= {}\n  end\nend\n";
+        let mut probe = 0;
+        let obligations =
+            build_ruby_obligations("lib/c.rb", source.as_bytes(), &mut probe).unwrap();
+        let transformed =
+            String::from_utf8(apply_edits(source.as_bytes(), &obligations.plan.edits)).unwrap();
+        let line = transformed.lines().nth(2).unwrap();
+        assert!(
+            !line.contains(".l("),
+            "no read of @@ext before the assignment: {line}"
+        );
+        assert!(
+            line.contains(".pre(") && line.contains(".es("),
+            "arrival form: {line}"
+        );
     }
 
     #[test]

@@ -242,8 +242,12 @@ module Supercov
 
     # Sources are read as bytes; Ruby's default source encoding is UTF-8 and a
     # magic comment in the file still overrides it when compiling.
+    # The result is UTF-8 whatever the bytes were read as, which is what Ruby
+    # assumes for a file it compiles itself; a magic comment in the source
+    # still wins. Returning the binary string for a file with no insertions
+    # made its literals and regexps ASCII-8BIT under measurement.
     def apply_edits(source, edits)
-      return source if edits.empty?
+      return source.dup.force_encoding(Encoding::UTF_8) if edits.empty?
 
       pieces = []
       cursor = 0
@@ -482,6 +486,10 @@ module Supercov
 
       source = File.binread(path)
       edits = probe_uncountable_lines(absolute, source, edits)
+      # Nothing to insert: Ruby's own loader compiles the untouched file, with
+      # whatever cache (bootsnap) it keeps, exactly as without Supercov.
+      return nil if edits.empty?
+
       transformed = LoadTime.apply_edits(source, edits)
       RubyVM::InstructionSequence.compile(transformed, path, path, 1)
     rescue SyntaxError, StandardError => error
