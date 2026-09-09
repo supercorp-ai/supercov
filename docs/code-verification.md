@@ -33,8 +33,7 @@ tell it which full suite to use.
 The agent should measure your existing tests, inspect a gap, add a test, and
 rerun the same suite. The rest of this page shows those steps using the files
 in our tutorial project. The test and output below come from a recorded Codex
-run with the same prompt and Supercov 0.0.42; your files, results, and output
-format may differ.
+run with the same prompt; your files, results, and output format may differ.
 
 ## 3. Review the gap
 
@@ -178,8 +177,7 @@ npm ci
 ```
 
 Then paste the same prompt from step 2. The starter contains the original
-function and two tests, pinned to Supercov 0.0.42. The completed test is not
-included in the download.
+function and two tests. The completed test is not included in the download.
 
 ### Check that the new test catches a regression
 
