@@ -18,6 +18,7 @@ pub mod integrity;
 pub mod javascript_frontend;
 pub mod javascript_run;
 pub mod js_instrumenter;
+pub mod js_sites;
 pub mod lifecycle;
 pub mod orchestration;
 pub mod probe_v2;

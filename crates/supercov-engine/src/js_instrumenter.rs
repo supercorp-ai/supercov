@@ -7019,7 +7019,7 @@ fn source_slice(source: &str, span: Span) -> &str {
     &source[span.start as usize..span.end as usize]
 }
 
-fn line_and_utf16_column(source: &str, offset: usize) -> (usize, usize) {
+pub(crate) fn line_and_utf16_column(source: &str, offset: usize) -> (usize, usize) {
     let prefix = &source[..offset];
     let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
     let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
