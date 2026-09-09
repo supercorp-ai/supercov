@@ -24,7 +24,7 @@ const HELP: &str = "Usage: supercov runs <run-id> assertions [--pragmas | --evid
 pub const AGENT_COMMAND: &str = "coverage.assertions";
 
 fn protocol() -> Value {
-    json!({"abi":1,"factsSchema":1,"rules":"source-linked-v3/archive-3","capabilities":["requiresTotal-v1", "assertion-witness-issues-v1", "assertion-hints-v1", "mock-observation-projections-v1", "assertion-comparison-relations-v2", "mock-count-lifetimes-v1", "mock-count-factories-v1", "mock-count-rows-v1"]})
+    json!({"abi":1,"factsSchema":1,"rules":"source-linked-v3/archive-3","capabilities":["requiresTotal-v1", "assertion-witness-issues-v1", "assertion-hints-v1", "mock-observation-projections-v1", "assertion-comparison-relations-v2", "process-exit-source-v1", "mock-count-lifetimes-v1", "mock-count-factories-v1", "mock-count-rows-v1"]})
 }
 #[derive(Default)]
 struct Options {

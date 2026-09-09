@@ -9,8 +9,8 @@ test('an exit-named event is not a native child exit', async () => {
   const emitter = new EventEmitter();
   const exited = new Promise((resolve) => {
     emitter.once('exit', (code, signal) => resolve({ code, signal }));
-    emitter.emit('exit', 1, null);
   });
+  emitter.emit('exit', 1, null);
   await completed;
   assert.equal((await exited).code, 1);
 });

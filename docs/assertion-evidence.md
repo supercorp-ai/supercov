@@ -83,6 +83,27 @@ The traversal is bounded, does not equate calls/getters or follow mutable aliase
 and does not infer independence when no shared input was found. It runs only
 during querying; the test-time instrumentation is unchanged.
 
+Child-exit observations retain `processExit` source evidence instead of assuming
+that every Promise containing an exit listener checks the covered process. The
+bounded `node-child-exit-source-v1` model follows const projections and simple
+local/imported function returns by declaration identity. It records helper call
+sites, the native spawn call, Promise, exit/close listener and selected field.
+An accepted `resolution` describes which event argument the callback passes to
+the resolver, directly or in a fresh plain object's field (`code` or `signal`).
+This is a source-checked resolver mapping under unmodified native Node APIs and
+global Promise semantics, not a checked end-to-end assertion link. Calls from
+project-defined Promise constructors, transformed fields, competing settlements,
+non-child emitters and unsupported shapes retain explicit reasons.
+
+In particular, the resolved object can be changed before the assertion, and a
+different child can run the same source. `processExit.status` therefore remains
+`unresolved`; even a source-checked `resolution` supplies no production-value,
+absence, control-flow or pragma credit. Relevant candidates report
+`limit:process-exit-link` unless a more specific existing limitation or known
+execution gap applies. Assertion witnesses remain visible. A bare `exit` channel
+without these source details is not an escape hatch for credit. This source
+analysis adds no test-time probes and makes no claim about complete pipe capture.
+
 Fallback native assertion locations prefixed `runtime-stack:` identify runtime
 stack coordinates, which a compiler or loader may have shifted. They are not
 original-source witnesses and cannot select a static test or validate a hint.

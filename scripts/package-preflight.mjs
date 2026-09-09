@@ -6,6 +6,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { releaseNotes } from "./release-notes.mjs";
 import { checkedIdentity } from "../analyzers/typescript/bin/identity.mjs";
+import { parseSync } from "@swc/core";
 
 const repository = resolve(import.meta.dirname, "..");
 const manifest = JSON.parse(
@@ -23,6 +24,47 @@ function sourceFiles(root, extension) {
     return entry.isFile() && entry.name.endsWith(extension) ? [path] : [];
   });
 }
+
+// Source analysis may compare an import specifier with this module name. That
+// is data, not a dependency. Permit only direct equality comparisons; imports,
+// require/import calls and other uses remain forbidden. This is a packaging
+// regression guard, not a sandbox against computed module names or eval.
+function assertNoChildProcessDependency(source, path) {
+  const tree = parseSync(source, { syntax: "ecmascript" });
+  function visit(node, parent) {
+    if (!node || typeof node !== "object") return;
+    if (
+      node.type === "StringLiteral" &&
+      /^(?:node:)?child_process$/.test(node.value)
+    ) {
+      assert(
+        parent?.type === "BinaryExpression" &&
+          ["===", "!==", "==", "!="].includes(parent.operator) &&
+          (parent.left === node || parent.right === node),
+        `${path} references child_process outside a source-name comparison`,
+      );
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach((item) => visit(item, node));
+      else if (value && typeof value === "object") visit(value, node);
+    }
+  }
+  visit(tree);
+}
+for (const source of [
+  'import { spawn } from "node:child_process";',
+  'export * from "child_process";',
+  'require("node:child_process");',
+  'import("child_process");',
+  'process.getBuiltinModule("child_process");',
+  'const dependency = "child_process";',
+]) {
+  assert.throws(() => assertNoChildProcessDependency(source, "guard fixture"));
+}
+assertNoChildProcessDependency(
+  'specifier === "node:child_process" || specifier === "child_process";',
+  "source-model fixture",
+);
 
 assert.deepEqual(manifest.files, [
   "bin",
@@ -171,7 +213,7 @@ for (const path of productSources) {
     // extracted analyzer. Reading that format is not invoking the lcov tool.
     // This exception is only for the query-only analyzer. Its TS7 frontend uses
     // the project's native compiler API; it never launches a coverage oracle.
-    assert.doesNotMatch(source, /["'](?:node:)?child_process["']/);
+    assertNoChildProcessDependency(source, path);
     source = source.replace(/\blcov\b/g, "internal-line-format");
   }
   assert.doesNotMatch(

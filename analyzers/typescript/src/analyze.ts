@@ -499,6 +499,24 @@ export function analyzeWithFrontend(
     mock?: MockProjection;
     /** Relation between both operands; strength alone cannot establish a value check. */
     comparison?: Comparison;
+    /** Resolver source facts are not a verified producer/consumer instance link. */
+    processExit?: ProcessExitEvidence;
+  }
+  interface ProcessExitEvidence {
+    model: "node-child-exit-source-v1";
+    status: "unresolved";
+    reason: string;
+    operand: string;
+    helperCalls: string[];
+    promise?: string;
+    spawn?: string;
+    event?: { source: string; name: string };
+    resolution?: {
+      status: "source-checked";
+      source: string;
+      field?: string;
+      eventArgument: "code" | "signal";
+    };
   }
   interface ComparisonOperand {
     source: string;
@@ -2262,6 +2280,299 @@ export function analyzeWithFrontend(
     return { target: o.kind.slice(5), kind, path };
   }
 
+  /** Follow source projections to a Promise, then check only its resolver mapping.
+   * This does not prove that the resolved object was not subsequently mutated,
+   * or that the selected child is the producer of every covered exit site. */
+  function childExitSource(
+    expr: ts.Expression,
+  ): ProcessExitEvidence | undefined {
+    const info: ProcessExitEvidence = {
+      model: "node-child-exit-source-v1",
+      status: "unresolved",
+      reason: "unsupported-promise-source",
+      operand: comparisonLocation(expr),
+      helperCalls: [],
+    };
+    const seen = new Set<ts.Node>();
+    const fail = (reason: string) => ({ ...info, reason });
+    const nativeSpawn = (call: ts.CallExpression) => {
+      const callee = comparisonExpression(call.expression);
+      if (!ts.isIdentifier(callee)) return false;
+      const raw = checker.getSymbolAtLocation(callee)?.declarations?.[0];
+      if (!raw || !ts.isImportSpecifier(raw)) return false;
+      const imported = raw.parent.parent.parent;
+      return (
+        (raw.propertyName ?? raw.name).text === "spawn" &&
+        ts.isStringLiteralLike(imported.moduleSpecifier) &&
+        (imported.moduleSpecifier.text === "node:child_process" ||
+          imported.moduleSpecifier.text === "child_process")
+      );
+    };
+    const property = (object: ts.ObjectLiteralExpression, key: string) => {
+      // No spreads, getters, computed keys, duplicates or inherited properties.
+      const entries = new Map<string, ts.Expression>();
+      for (const p of object.properties) {
+        if (
+          !(
+            ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)
+          ) ||
+          !(ts.isIdentifier(p.name) || ts.isStringLiteralLike(p.name))
+        )
+          return;
+        const name = p.name.text;
+        if (name === "__proto__" || name === "then" || entries.has(name))
+          return;
+        entries.set(name, ts.isPropertyAssignment(p) ? p.initializer : p.name);
+      }
+      return entries.get(key);
+    };
+    const trace = (
+      raw: ts.Expression,
+      path: string[],
+      awaitedPath?: string[],
+    ): ProcessExitEvidence | undefined => {
+      const e = comparisonExpression(raw);
+      if (seen.size >= 48 || seen.has(e)) return;
+      seen.add(e);
+      if (ts.isAwaitExpression(e)) return trace(e.expression, path, [...path]);
+      if (ts.isPropertyAccessExpression(e))
+        return trace(e.expression, [e.name.text, ...path], awaitedPath);
+      if (ts.isIdentifier(e)) {
+        const d = declOf(e);
+        if (
+          d &&
+          ts.isVariableDeclaration(d) &&
+          ts.isIdentifier(d.name) &&
+          d.initializer &&
+          ts.isVariableDeclarationList(d.parent) &&
+          d.parent.flags & ts.NodeFlags.Const
+        )
+          return trace(d.initializer, path, awaitedPath);
+        return;
+      }
+      if (ts.isObjectLiteralExpression(e)) {
+        const next = path.length ? property(e, path[0]) : undefined;
+        return next ? trace(next, path.slice(1), awaitedPath) : undefined;
+      }
+      if (
+        ts.isCallExpression(e) &&
+        ts.isIdentifier(comparisonExpression(e.expression))
+      ) {
+        const d = declOf(comparisonExpression(e.expression));
+        const fn = d && ts.isFunctionDeclaration(d) ? d : undefined;
+        if (!fn?.body || fn.getSourceFile().isDeclarationFile || seen.has(fn))
+          return;
+        seen.add(fn);
+        // Only one direct top-level return. Do not select the first branch or a
+        // nested callback's return, and do not treat a helper name as a contract.
+        const returns: ts.ReturnStatement[] = [];
+        let budget = 4096;
+        const scan = (n: ts.Node) => {
+          if (--budget < 0) return;
+          if (ts.isReturnStatement(n)) returns.push(n);
+          else if (!ts.isFunctionLike(n)) ts.forEachChild(n, scan);
+        };
+        scan(fn.body);
+        const [ret] = returns;
+        if (
+          budget < 0 ||
+          returns.length !== 1 ||
+          ret.parent !== fn.body ||
+          !ret.expression
+        )
+          return;
+        info.helperCalls.push(comparisonLocation(e));
+        return trace(ret.expression, path, awaitedPath);
+      }
+      if (
+        !ts.isNewExpression(e) ||
+        !ts.isIdentifier(e.expression) ||
+        e.expression.text !== "Promise"
+      )
+        return;
+      // Discovery is structural only. A Promise with no exit/close listener is
+      // not an exit observation, even if a comment contains listener-shaped text.
+      let hasEvent = false,
+        discoveryBudget = 4096;
+      const discover = (n: ts.Node) => {
+        if (--discoveryBudget < 0 || hasEvent) return;
+        if (
+          ts.isCallExpression(n) &&
+          ts.isPropertyAccessExpression(n.expression) &&
+          ["on", "once"].includes(n.expression.name.text) &&
+          n.arguments[0] &&
+          ts.isStringLiteralLike(n.arguments[0]) &&
+          ["exit", "close"].includes(n.arguments[0].text)
+        )
+          hasEvent = true;
+        ts.forEachChild(n, discover);
+      };
+      if (e.arguments?.[0]) discover(e.arguments[0]);
+      if (!hasEvent) return;
+      info.promise = comparisonLocation(e);
+      const promiseBinding = declOf(e.expression);
+      // Compiler sessions may omit standard libraries. As with the native mock
+      // model, global built-ins are assumed unmodified; a project declaration
+      // with this name is never accepted as that global.
+      if (promiseBinding && !promiseBinding.getSourceFile().isDeclarationFile)
+        return fail("native-promise-binding-unverified");
+      if (JSON.stringify(awaitedPath) !== JSON.stringify(path))
+        return fail("promise-result-not-awaited-before-projection");
+      const executor = e.arguments?.[0] && comparisonExpression(e.arguments[0]);
+      if (
+        e.arguments?.length !== 1 ||
+        !executor ||
+        !(ts.isArrowFunction(executor) || ts.isFunctionExpression(executor)) ||
+        !ts.isBlock(executor.body) ||
+        executor.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)
+      )
+        return fail("unsupported-promise-executor");
+      const [resolveParam, rejectParam] = executor.parameters;
+      if (
+        !resolveParam ||
+        executor.parameters.length > 2 ||
+        executor.parameters.some(
+          (p) => !ts.isIdentifier(p.name) || p.initializer || p.dotDotDotToken,
+        )
+      )
+        return fail("unsupported-resolver-binding");
+      let eventCall: ts.CallExpression | undefined;
+      for (const statement of executor.body.statements) {
+        if (
+          !ts.isExpressionStatement(statement) ||
+          !ts.isCallExpression(statement.expression)
+        )
+          return fail("unsupported-executor-statement");
+        const call = statement.expression;
+        if (
+          !ts.isPropertyAccessExpression(call.expression) ||
+          !["on", "once"].includes(call.expression.name.text) ||
+          call.arguments.length !== 2 ||
+          !ts.isStringLiteralLike(call.arguments[0])
+        )
+          return fail("competing-or-unsupported-settlement");
+        const event = call.arguments[0].text;
+        if (
+          event === "error" &&
+          rejectParam &&
+          declOf(comparisonExpression(call.arguments[1])) === rejectParam
+        )
+          continue;
+        if (!["exit", "close"].includes(event) || eventCall)
+          return fail("competing-or-unsupported-settlement");
+        eventCall = call;
+      }
+      if (!eventCall) return fail("missing-exit-listener");
+      const member = eventCall.expression as ts.PropertyAccessExpression;
+      const child = declOf(comparisonExpression(member.expression));
+      if (
+        !child ||
+        !ts.isVariableDeclaration(child) ||
+        !child.initializer ||
+        !ts.isVariableDeclarationList(child.parent) ||
+        !(child.parent.flags & ts.NodeFlags.Const)
+      )
+        return fail("child-binding-unverified");
+      const spawn = comparisonExpression(child.initializer);
+      if (!ts.isCallExpression(spawn) || !nativeSpawn(spawn))
+        return fail("native-child-spawn-unverified");
+      info.spawn = comparisonLocation(spawn);
+      info.event = {
+        source: comparisonLocation(eventCall),
+        name: (eventCall.arguments[0] as ts.StringLiteralLike).text,
+      };
+      const callback = comparisonExpression(eventCall.arguments[1]);
+      if (declOf(callback) === resolveParam) {
+        if (path.length) return fail("unsupported-exit-result-projection");
+        info.resolution = {
+          status: "source-checked",
+          source: comparisonLocation(callback),
+          eventArgument: "code",
+        };
+        return fail("producer-instance-link-unverified");
+      }
+      if (
+        !(ts.isArrowFunction(callback) || ts.isFunctionExpression(callback)) ||
+        callback.modifiers?.some(
+          (m) => m.kind === ts.SyntaxKind.AsyncKeyword,
+        ) ||
+        callback.parameters.length > 2 ||
+        callback.parameters.some(
+          (p) => !ts.isIdentifier(p.name) || p.initializer || p.dotDotDotToken,
+        )
+      )
+        return fail("unsupported-exit-callback");
+      let body: ts.Expression | undefined;
+      if (!ts.isBlock(callback.body)) body = callback.body;
+      else if (callback.body.statements.length === 1) {
+        const statement = callback.body.statements[0];
+        if (ts.isExpressionStatement(statement)) body = statement.expression;
+        else if (ts.isReturnStatement(statement)) body = statement.expression;
+      }
+      const call = body && comparisonExpression(body);
+      if (
+        !call ||
+        !ts.isCallExpression(call) ||
+        declOf(comparisonExpression(call.expression)) !== resolveParam ||
+        call.arguments.length !== 1
+      )
+        return fail("unsupported-exit-resolver");
+      let value = comparisonExpression(call.arguments[0]);
+      let field: string | undefined;
+      if (path.length) {
+        if (path.length !== 1 || !ts.isObjectLiteralExpression(value))
+          return fail("unsupported-exit-result-projection");
+        field = path[0];
+        for (const member of value.properties) {
+          if (!(
+            ts.isPropertyAssignment(member) ||
+            ts.isShorthandPropertyAssignment(member)
+          ))
+            return fail("unsupported-resolved-object");
+          const item = comparisonExpression(
+            ts.isPropertyAssignment(member) ? member.initializer : member.name,
+          );
+          if (
+            !(
+              ts.isIdentifier(item) &&
+              callback.parameters.some((p) => declOf(item) === p)
+            ) &&
+            !ts.isStringLiteralLike(item) &&
+            !ts.isNumericLiteral(item) &&
+            ![
+              ts.SyntaxKind.NullKeyword,
+              ts.SyntaxKind.TrueKeyword,
+              ts.SyntaxKind.FalseKeyword,
+            ].includes(item.kind)
+          )
+            return fail("transformed-or-constant-event-value");
+        }
+        const projected = property(value, field);
+        if (!projected) return fail("unsupported-resolved-object");
+        value = comparisonExpression(projected);
+      }
+      if (!ts.isIdentifier(value))
+        return fail("transformed-or-constant-event-value");
+      const index = callback.parameters.findIndex(
+        (p) =>
+          ts.isIdentifier(p.name) &&
+          !p.initializer &&
+          !p.dotDotDotToken &&
+          declOf(value) === p,
+      );
+      if (index !== 0 && index !== 1)
+        return fail("resolved-value-is-not-event-argument");
+      info.resolution = {
+        status: "source-checked",
+        source: comparisonLocation(call),
+        ...(field ? { field } : {}),
+        eventArgument: index === 0 ? "code" : "signal",
+      };
+      return fail("producer-instance-link-unverified");
+    };
+    return trace(expr, []);
+  }
+
   function originOf(expr: ts.Expression, depth = 0): Origin | undefined {
     // each property-access segment costs one level: `admin.rest.resources.Article.find.mock.calls.map(...)` read
     // through a local helper is 10 deep; runaway recursion through helpers is bounded by paramBindings instead
@@ -2628,13 +2939,6 @@ export function analyzeWithFrontend(
           scan(scope);
           if (fed) return { kind: fed, path: [] };
         }
-        // promise resolved from a child process 'close'/'exit' event carries the exit code
-        if (
-          ts.isNewExpression(init) &&
-          init.expression.getText() === "Promise" &&
-          /\.(once|on)\(\s*['"](close|exit)['"]/.test(init.getText())
-        )
-          return { kind: "proc-exit", path: [] };
         // Mutable scalar aliases need reaching definitions, not the initializer
         // or first assignment anywhere in the file. Container/stream cases above
         // retain their separate models.
@@ -2768,8 +3072,6 @@ export function analyzeWithFrontend(
         return [{ boundary: "stdout" }];
       case "proc-stderr":
         return [{ boundary: "stderr" }];
-      case "proc-exit":
-        return [{ boundary: "exit" }];
       case "sdk-client":
         if (has("sessionId"))
           return [{ boundary: "client-header", facet: "mcp-session-id" }];
@@ -3364,7 +3666,10 @@ export function analyzeWithFrontend(
             rejectsChain ||
             ["rejects", "throws", "toThrow", "toThrowError"].includes(method);
           for (const arg of actuals) {
-            const o = originOf(arg);
+            const exitSource = childExitSource(arg);
+            const o: Origin | undefined = exitSource
+              ? { kind: "process-exit-source", path: [] }
+              : originOf(arg);
             const unresolvedOperand = (shape: string) =>
               pending.push({
                 assertionSource: `${relative(root, sf.fileName)}:${sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1}:${sf.getLineAndCharacterOfPosition(node.getStart(sf)).character + 1}`,
@@ -3387,7 +3692,7 @@ export function analyzeWithFrontend(
             const facetPattern = o.facet?.startsWith("pattern:")
               ? o.facet.slice(8)
               : undefined;
-            const bs = boundariesOf(o);
+            const bs = exitSource ? [{ boundary: "exit" }] : boundariesOf(o);
             const mock = mockProjection(o);
             if (mock?.kind === "call-count")
               mock.countEvidence = mockCounts.checks.get(node) ?? {
@@ -3426,6 +3731,17 @@ export function analyzeWithFrontend(
                 assertionMethod: method,
                 ...(mock ? { mock } : {}),
                 ...(comparison ? { comparison } : {}),
+                ...(b.boundary === "exit"
+                  ? {
+                      processExit: exitSource ?? {
+                        model: "node-child-exit-source-v1" as const,
+                        status: "unresolved" as const,
+                        reason: "unverified-event-channel",
+                        operand: comparisonLocation(arg),
+                        helperCalls: [],
+                      },
+                    }
+                  : {}),
               };
               if (!mock && callList && b.boundary.startsWith("sink:"))
                 ob.callList = true;
@@ -4730,6 +5046,7 @@ export function analyzeWithFrontend(
     callList: ob.callList,
     mock: ob.mock,
     comparison: ob.comparison,
+    processExit: ob.processExit,
     weak: ob.weak,
     implicit: ob.implicit,
     runtime: ob.runtime,

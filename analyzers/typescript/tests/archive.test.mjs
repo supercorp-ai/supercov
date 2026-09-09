@@ -31,6 +31,12 @@ test("archive facts require the exact schema, rules, ABI and capabilities", () =
   for (const protocol of [
     {
       ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "process-exit-source-v1",
+      ),
+    },
+    {
+      ...PROTOCOL,
       capabilities: PROTOCOL.capabilities.map((cap) =>
         cap === "assertion-comparison-relations-v2"
           ? "assertion-comparison-relations-v1"

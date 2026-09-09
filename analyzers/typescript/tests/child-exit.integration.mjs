@@ -34,6 +34,10 @@ test(
       ["other-child", false],
       ["settled-first", false],
       ["not-a-child", false],
+      ["mutated-result", false],
+      ["wrong-await", false],
+      ["object-side-effect", false],
+      ["shadowed-promise", false],
     ]) {
       const root = mkdtempSync(resolve(tmpdir(), "supercov-child-exit-"));
       t.after(() => {
@@ -41,7 +45,9 @@ test(
           rmSync(root, { recursive: true, force: true });
       });
       cpSync(resolve(fixture, "package.json"), resolve(root, "package.json"));
-      cpSync(resolve(fixture, "src"), resolve(root, "src"), { recursive: true });
+      cpSync(resolve(fixture, "src"), resolve(root, "src"), {
+        recursive: true,
+      });
       cpSync(resolve(fixture, "tests"), resolve(root, "tests"), {
         recursive: true,
       });
@@ -72,14 +78,18 @@ test(
           maxBuffer: 16 * 1024 * 1024,
         });
         assert.equal(
-          result.error, undefined, `${name}: ${result.error?.message}`,
+          result.error,
+          undefined,
+          `${name}: ${result.error?.message}`,
         );
         assert.equal(result.signal, null, name);
         return { ...result, wallMs: performance.now() - start };
       };
       const ok = (result) => {
         assert.equal(
-          result.status, 0, `${name}\n${result.stdout}\n${result.stderr}`,
+          result.status,
+          0,
+          `${name}\n${result.stdout}\n${result.stderr}`,
         );
         return result.stdout;
       };
@@ -92,11 +102,13 @@ test(
       let mutant;
       try {
         writeFileSync(
-          source, original.replace("process.exit(1)", "process.exit(2)"),
+          source,
+          original.replace("process.exit(1)", "process.exit(2)"),
         );
         mutant = run(process.execPath, suite);
         assert.equal(
-          mutant.status, detectsChange ? 1 : 0,
+          mutant.status,
+          detectsChange ? 1 : 0,
           `${name}\n${mutant.stdout}\n${mutant.stderr}`,
         );
         if (detectsChange) assert.match(mutant.stdout, /ERR_ASSERTION/);
@@ -107,13 +119,14 @@ test(
       ok(run(binary, ["--", process.execPath, ...suite]));
       const [id] = readdirSync(resolve(root, ".supercov/runs"));
       const authored = readFileSync(
-        resolve(root, "tests/case.test.mjs"), "utf8",
+        resolve(root, "tests/case.test.mjs"),
+        "utf8",
       );
       const title = authored.match(/test\('([^']+)'/)[1];
       const assertionLine =
-        authored.split("\n").findIndex(
-          (line) => line.startsWith("  assert.equal("),
-        ) + 1;
+        authored
+          .split("\n")
+          .findIndex((line) => line.startsWith("  assert.equal(")) + 1;
       assert.ok(assertionLine > 0);
       const detail = JSON.parse(
         ok(run(binary, ["runs", id, "test", title, "--json"])),
@@ -123,9 +136,10 @@ test(
         detail.tests[0].phases.map((p) => [p.source, p.status]),
         [[`tests/case.test.mjs:${assertionLine}:3`, "passed"]],
       );
-      const query = (...args) => JSON.parse(
-        ok(run(binary, ["runs", id, "assertions", ...args, "--json"])),
-      ).data;
+      const query = (...args) =>
+        JSON.parse(
+          ok(run(binary, ["runs", id, "assertions", ...args, "--json"])),
+        ).data;
       const report = query("--file", "src/cli.mjs", "--limit", "100");
       assert.equal(report.pagination.hasMore, false);
       const site = report.sites.find((row) => row.site?.method === "exit");
@@ -137,21 +151,81 @@ test(
       const observations = evidence.items.flatMap(
         (item) => item.value.observations,
       );
+      const exits = observations.filter((ob) => ob.boundary === "exit");
+      assert.equal(exits.length, 1, name);
+      const exitSource = exits[0].processExit;
+      assert.equal(exitSource.model, "node-child-exit-source-v1", name);
+      assert.equal(exitSource.status, "unresolved", name);
+      assert.equal(site.candidate.status, "unresolved", name);
+      assert.equal(
+        site.candidate.reason.kind,
+        name === "wrong-await"
+          ? "limit:operand-shape"
+          : "limit:process-exit-link",
+        name,
+      );
+      if (
+        [
+          "imported",
+          "local-helper",
+          "direct",
+          "scalar",
+          "signal",
+          "other-child",
+          "mutated-result",
+        ].includes(name)
+      ) {
+        assert.ok(exitSource.resolution, JSON.stringify({ name, exitSource }));
+        assert.equal(exitSource.resolution.status, "source-checked", name);
+        assert.equal(
+          exitSource.resolution.eventArgument,
+          name === "signal" ? "signal" : "code",
+          name,
+        );
+        assert.equal(
+          exitSource.resolution.field,
+          name === "scalar" ? undefined : name === "signal" ? "signal" : "code",
+          name,
+        );
+        assert.ok(
+          exitSource.spawn && exitSource.promise && exitSource.event.source,
+          name,
+        );
+      } else assert.equal(exitSource.resolution, undefined, name);
+      if (["imported", "local-helper"].includes(name))
+        assert.equal(exitSource.helperCalls.length, 1, name);
+      const rejected = {
+        constant: "transformed-or-constant-event-value",
+        transformed: "transformed-or-constant-event-value",
+        "settled-first": "competing-or-unsupported-settlement",
+        "not-a-child": "native-child-spawn-unverified",
+        "wrong-await": "promise-result-not-awaited-before-projection",
+        "object-side-effect": "transformed-or-constant-event-value",
+        "shadowed-promise": "native-promise-binding-unverified",
+      };
+      if (rejected[name]) assert.equal(exitSource.reason, rejected[name], name);
+      if (name === "other-child") {
+        const [, start, end] = exitSource.spawn.split(":");
+        assert.match(authored.slice(Number(start), Number(end)), /\['-e'/);
+      }
       results.push({
-        name, detectsChange, nativeStatus: mutant.status,
+        name,
+        detectsChange,
+        nativeStatus: mutant.status,
         baselineMs: baseline.wallMs,
         mutantMs: mutant.wallMs,
         runId: id,
         candidate: site.candidate,
         observations,
       });
-      if (["constant", "other-child", "settled-first", "not-a-child"]
-        .includes(name)) {
+      if (
+        ["constant", "other-child", "settled-first", "not-a-child"].includes(
+          name,
+        )
+      ) {
         await t.test(
           `${name}: unrelated predicate supplies no producer-value credit`,
-          {
-            todo: "SG-ASSERT-016: event-shaped Promise recognition loses instance, field and resolver dependence",
-          },
+          {},
           () => {
             assert.equal(site.candidate.strength, undefined);
             assert.notEqual(site.candidate.status, "evident");

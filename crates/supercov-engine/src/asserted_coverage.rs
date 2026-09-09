@@ -164,6 +164,41 @@ pub struct ComparisonInput {
     pub awaits: Vec<String>,
 }
 
+/// Checked resolver syntax, not a checked runtime/producer instance relation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessExitEvidence {
+    pub model: String,
+    pub status: String,
+    pub reason: String,
+    pub operand: String,
+    pub helper_calls: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promise: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<ProcessExitEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<ProcessExitResolution>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessExitEvent {
+    pub source: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessExitResolution {
+    pub status: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    pub event_argument: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Comparison {
@@ -199,6 +234,8 @@ pub struct Observation {
     pub mock: Option<MockProjection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comparison: Option<Comparison>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_exit: Option<ProcessExitEvidence>,
     /// a whole-page render witnessed the site: it ran, but its output was not read
     #[serde(default)]
     pub weak: bool,
@@ -216,8 +253,11 @@ impl Observation {
     /// Reflexive comparisons do not constrain their stable value. Shared input
     /// through await may constrain something, but needs a separate dependence
     /// model before it can supply producer value, absence or pragma credit.
+    /// Exit channels additionally need a checked producer/result-instance link;
+    /// even accepted resolver source syntax is insufficient on its own.
     fn can_constrain_value(&self) -> bool {
         self.mock.is_none()
+            && self.boundary != "exit"
             && self.comparison.as_ref().is_none_or(|c| {
                 !matches!(
                     c.relation.as_str(),
@@ -685,6 +725,8 @@ pub enum ReasonKind {
     LimitAssertionWitness,
     #[serde(rename = "limit:predicate-dependence")]
     LimitPredicateDependence,
+    #[serde(rename = "limit:process-exit-link")]
+    LimitProcessExitLink,
 }
 
 impl ReasonKind {
@@ -696,6 +738,7 @@ impl ReasonKind {
                 | ReasonKind::LimitUndecidable
                 | ReasonKind::LimitAssertionWitness
                 | ReasonKind::LimitPredicateDependence
+                | ReasonKind::LimitProcessExitLink
         )
     }
 }
@@ -1080,7 +1123,10 @@ impl<'a> Join<'a> {
         if !seen.insert(site.id.clone()) {
             return false;
         }
-        if self.observation_hits(site, test, &self.bounds_for_test(site, test), ob) {
+        let bounds = self.bounds_for_test(site, test);
+        if self.observation_hits(site, test, &bounds, ob)
+            || (ob.boundary == "exit" && bounds.iter().any(|b| b.boundary == "exit"))
+        {
             return true;
         }
         let mut edges = site.reached.clone();
@@ -1137,6 +1183,23 @@ impl<'a> Join<'a> {
                 )
             })
         {
+            return result;
+        }
+        let exit_relevant = site
+            .covered_by
+            .iter()
+            .filter_map(|id| self.tests.get(id.as_str()))
+            .any(|test| {
+                test.observations.iter().any(|ob| {
+                    ob.boundary == "exit"
+                        && self.issue_reaches(site, test, ob, &mut BTreeSet::new())
+                })
+            });
+        if exit_relevant {
+            result.reason = Some(Reason {
+                kind: ReasonKind::LimitProcessExitLink,
+                detail: Some("A passing assertion has exit-related source evidence, but the selected child, resolved result history and production-site link are not jointly established. See processExit in test observations.".into()),
+            });
             return result;
         }
         let relevant = site
@@ -1649,6 +1712,7 @@ mod tests {
             call_list: false,
             mock: None,
             comparison: None,
+            process_exit: None,
             weak: false,
             log_sites: None,
             pattern_shared: false,
@@ -2050,6 +2114,83 @@ mod tests {
             missing.reason.as_ref().unwrap().kind,
             ReasonKind::LimitAssertionWitness
         );
+    }
+
+    #[test]
+    fn exit_resolver_source_facts_are_not_producer_value_or_pragma_evidence() {
+        let mut ob = observation("exit", Strength::Total);
+        ob.assertion_source = Some("tests/a.test.ts:7:3".into());
+        ob.assertion_method = Some("equal".into());
+        ob.process_exit = Some(
+            serde_json::from_value(serde_json::json!({
+                "model": "node-child-exit-source-v1", "status": "unresolved",
+                "reason": "producer-instance-link-unverified",
+                "operand": "tests/a.test.ts:30:50", "helperCalls": ["tests/a.test.ts:20:28"],
+                "promise": "tests/helper.ts:50:100", "spawn": "tests/helper.ts:10:40",
+                "event": {"source": "tests/helper.ts:60:90", "name": "exit"},
+                "resolution": {"status": "source-checked", "source": "tests/helper.ts:75:89",
+                    "field": "code", "eventArgument": "code"}
+            }))
+            .unwrap(),
+        );
+        let encoded = serde_json::to_value(&ob).unwrap();
+        assert_eq!(
+            encoded["processExit"]["resolution"]["eventArgument"],
+            "code"
+        );
+        assert_eq!(serde_json::from_value::<Observation>(encoded).unwrap(), ob);
+        let mut parent = site("parent", "return", vec![], &["T1"]);
+        parent.reached.push("S1".into());
+        let mut f = facts(
+            vec![
+                site("S1", "io-call", vec![boundary("exit")], &["T1"]),
+                parent,
+                site("unreached", "io-call", vec![boundary("exit")], &[]),
+                site(
+                    "independent",
+                    "return",
+                    vec![boundary("return:handler")],
+                    &["T1"],
+                ),
+            ],
+            vec![test(
+                "T1",
+                vec![ob.clone(), observation("return:handler", Strength::Total)],
+            )],
+        );
+        for legacy in [false, true] {
+            if legacy {
+                f.tests[0].observations[0].process_exit = None;
+            }
+            let rows = join(&f);
+            for row in &rows[..2] {
+                assert_eq!(row.status, Status::Unresolved);
+                assert_eq!(row.strength, None);
+                assert_eq!(
+                    row.reason.as_ref().unwrap().kind,
+                    ReasonKind::LimitProcessExitLink
+                );
+            }
+            assert_eq!(
+                rows[2].reason.as_ref().unwrap().kind,
+                ReasonKind::GapNotReached
+            );
+            assert_eq!(rows[3].status, Status::Evident);
+            assert_eq!(
+                check_pragma_hints(&f, &[pragma_hint()])[0].validation,
+                HintValidation::Unresolved
+            );
+        }
+        f.tests[0].observations.clear();
+        let mut issue = rejected(WitnessIssueKind::CallNotRecorded, Some("exit"));
+        issue.observation = Some(ob);
+        f.tests[0].witness_issues.push(issue);
+        let rows = join(&f);
+        assert_eq!(
+            rows[0].reason.as_ref().unwrap().kind,
+            ReasonKind::LimitAssertionWitness
+        );
+        assert_eq!(rows[0].witness_issues.len(), 1);
     }
 
     #[test]
