@@ -108,6 +108,23 @@ jobs:
       - name: Packed JS/TS assertion queries and source freshness
         if: matrix.packedInstall
         run: node scripts/asserted-packed-integration.mjs --binary target/${{ matrix.target }}/release/${{ matrix.executable }}
+      # Exercise musl selection and both compiler frontends in a real Alpine
+      # consumer, not by running the static binary on the glibc build host.
+      # The archive excludes host dependencies; the container installs its own.
+      - name: Packed JS/TS assertion queries on Alpine
+        if: matrix.musl
+        shell: bash
+        run: |
+          git archive HEAD | docker run --rm -i \
+            --mount "type=bind,source=$PWD/target/${{ matrix.target }}/release/${{ matrix.executable }},target=/supercov,readonly" \
+            node:24-alpine sh -ec '
+              mkdir /workspace
+              tar -xf - -C /workspace
+              cd /workspace
+              npm --prefix analyzers/typescript ci --ignore-scripts
+              npm run build:asserted-typescript
+              node scripts/asserted-packed-integration.mjs --binary /supercov
+            '
       - name: Stage native package
         run: node scripts/package-native.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --out native-dist
       - name: Pack native package
