@@ -6,9 +6,10 @@
 //! what each assertion reads and how strongly. This module decides only what those facts imply, which is
 //! the one part of the metric that is the same in every language.
 //!
-//! A site is **evident** when an assertion would fail if its behavior changed, **presence** when tests
-//! only witness that it ran, and otherwise carries a reason: a *gap* a test can close, or an *analysis
-//! limit* the frontend could not follow. A limit is never counted against a suite.
+//! **Evident** and **presence** are candidate classifications under the frontend's flow and observation
+//! rules, not formal proofs of arbitrary-change detection. Unresolved sites carry a reason: a *gap*
+//! a test can close, or an *analysis limit* the frontend could not follow. Limits remain visible and
+//! must not be silently removed from a reported accuracy denominator.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,8 +19,8 @@ use serde::{Deserialize, Serialize};
 // Strength
 // ---------------------------------------------------------------------------
 
-/// How completely an assertion pins what it reads. Only `Value` and `Total` prove that a changed value
-/// would be noticed; `Presence` says a value arrived.
+/// How strongly the modeled assertion checks what it reads. This classifies its predicate, not a
+/// formal proof of the complete source-to-assertion dependency; `Presence` says a value arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Strength {
@@ -75,6 +76,11 @@ pub struct Observation {
     pub strength: Strength,
     #[serde(default, rename = "where")]
     pub where_: Option<String>,
+    /// Exact authored call identity, retained for assertion-specific hint checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assertion_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assertion_method: Option<String>,
     /// `expect(x).not.toHaveBeenCalled()`: the assertion pins that something did *not* happen
     #[serde(default)]
     pub negative: bool,
@@ -155,6 +161,48 @@ pub struct TestFacts {
     /// components the test rendered, by owner name
     #[serde(default)]
     pub rendered: Vec<String>,
+    /// Rejected/unavailable witnesses are not observations. Legacy frontends
+    /// omit this field; the public JS adapter requires the versioned capability.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub witness_issues: Vec<WitnessIssue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WitnessIssueKind {
+    CaptureUnavailable,
+    CallNotRecorded,
+    CallIncomplete,
+    MixedCallOutcomes,
+    CallFailed,
+    UninstrumentedObservation,
+}
+
+impl WitnessIssueKind {
+    fn is_uncertain(self) -> bool {
+        self != Self::CallFailed
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WitnessIssue {
+    pub kind: WitnessIssueKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// A statically recognized but rejected observation. Used only to bound
+    /// uncertainty, NEVER to supply strength or evidence to a resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<Observation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestWitnessIssue {
+    pub test: String,
+    #[serde(flatten)]
+    pub issue: WitnessIssue,
 }
 
 /// Deserialize a field whose absence and whose explicit `null` mean different things: the field's own
@@ -218,6 +266,10 @@ pub struct Dependent {
     pub label: String,
     #[serde(default)]
     pub strength: Option<Strength>,
+    /// Candidate timer-cancellation dependency: active only when a callback site has total evidence.
+    /// Older prototype facts already filtered these candidates and omit this condition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_total: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,6 +332,195 @@ pub struct Facts {
     pub mocks_by_test_file: BTreeMap<String, BTreeMap<String, Vec<Boundary>>>,
 }
 
+/// A source suggestion, deliberately separate from observations and join inputs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PragmaHint {
+    pub id: String,
+    #[serde(rename = "where")]
+    pub where_: String,
+    pub raw: String,
+    pub target: Option<PragmaTarget>,
+    pub candidate_sites: Vec<String>,
+    pub issue: Option<String>,
+    pub test: Option<String>,
+    pub assertion_source: Option<String>,
+    pub assertion_method: Option<String>,
+    pub witness: String,
+    pub witness_issue: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PragmaTarget {
+    pub file: String,
+    pub function: String,
+    pub snippet: Option<String>,
+    /// Explanatory text only. Never interpreted as a verified dependency.
+    pub via: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HintValidation {
+    AnalyzerSupported,
+    Unresolved,
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PragmaCheck {
+    pub hint: PragmaHint,
+    pub origin: String,
+    pub validation: HintValidation,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strength: Option<Strength>,
+    /// Only the selected assertion's observations, never another assertion in its test.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub observations: Vec<Observation>,
+}
+
+/// Check source hints against existing facts, without modifying the normal join.
+/// Indexes are shared across hints; only the selected test's observations are copied.
+/// This bounded first pass supports effect boundaries/flow, not decision or internal
+/// derivation proofs. Unsupported paths remain unresolved, not contradicted.
+pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaCheck> {
+    if hints.is_empty() {
+        return vec![];
+    }
+    let engine = Join {
+        sites: facts.sites.iter().map(|s| (s.id.as_str(), s)).collect(),
+        tests: facts.tests.iter().map(|t| (t.id.as_str(), t)).collect(),
+        facts,
+        resolved: BTreeMap::new(),
+    };
+    let mut assertions: BTreeMap<(&str, &str, &str), Vec<&Observation>> = BTreeMap::new();
+    for test in &facts.tests {
+        for ob in &test.observations {
+            if let (Some(source), Some(method)) = (&ob.assertion_source, &ob.assertion_method)
+                && ob.boundary != "pragma"
+            {
+                assertions
+                    .entry((&test.id, source, method))
+                    .or_default()
+                    .push(ob);
+            }
+        }
+    }
+    hints
+        .iter()
+        .map(|hint| {
+            let mut result = PragmaCheck {
+                hint: hint.clone(),
+                origin: "user-suggested".into(),
+                validation: HintValidation::Unresolved,
+                reason: "connection-not-established".into(),
+                strength: None,
+                observations: vec![],
+            };
+            if let Some(issue) = &hint.issue {
+                result.reason = issue.clone();
+                // Missing inventory can mean an unsupported source construct,
+                // not a bad declaration. Do not call an analysis limit invalid.
+                if !matches!(
+                    issue.as_str(),
+                    "no-owning-passed-test" | "target-not-in-inventory"
+                ) {
+                    result.validation = HintValidation::Invalid;
+                }
+                return result;
+            }
+            let [id] = hint.candidate_sites.as_slice() else {
+                result.validation = HintValidation::Invalid;
+                result.reason = "target-not-unique".into();
+                return result;
+            };
+            let Some(site) = engine.sites.get(id.as_str()) else {
+                result.validation = HintValidation::Invalid;
+                result.reason = "target-not-found".into();
+                return result;
+            };
+            if hint
+                .target
+                .as_ref()
+                .is_none_or(|target| target.file != site.file)
+            {
+                result.validation = HintValidation::Invalid;
+                result.reason = "target-file-mismatch".into();
+                return result;
+            }
+            if hint.witness != "passed" || hint.witness_issue.is_some() {
+                result.reason = hint
+                    .witness_issue
+                    .clone()
+                    .unwrap_or_else(|| "missing-passed-witness".into());
+                return result;
+            }
+            let Some(test) = hint
+                .test
+                .as_ref()
+                .and_then(|id| engine.tests.get(id.as_str()))
+            else {
+                result.reason = "no-owning-passed-test".into();
+                return result;
+            };
+            if hint.assertion_source.as_ref().is_none_or(String::is_empty)
+                || hint.assertion_method.as_ref().is_none_or(String::is_empty)
+            {
+                result.reason = "missing-assertion-identity".into();
+                return result;
+            }
+            if !site.covered_by.contains(&test.id) {
+                result.reason = "target-not-reached-in-owning-test".into();
+                return result;
+            }
+            if site.kind != "effect" {
+                result.reason = "decision-hint-analysis-not-supported".into();
+                return result;
+            }
+            let selected = TestFacts {
+                id: test.id.clone(),
+                file: test.file.clone(),
+                observations: assertions
+                    .get(&(
+                        test.id.as_str(),
+                        hint.assertion_source.as_deref().unwrap(),
+                        hint.assertion_method.as_deref().unwrap(),
+                    ))
+                    .into_iter()
+                    .flatten()
+                    .map(|ob| (*ob).clone())
+                    .collect(),
+                sinks: test.sinks.clone(),
+                rendered: test.rendered.clone(),
+                witness_issues: vec![],
+            };
+            if selected.observations.is_empty() {
+                result.reason = "assertion-operand-not-modelled".into();
+                return result;
+            }
+            let resolution = engine.resolve_effect_for(site, vec![&selected]);
+            if resolution.strength.is_some() && resolution.tests.contains(&test.id) {
+                let bounds = engine.bounds_for_test(site, &selected);
+                result.observations = selected
+                    .observations
+                    .iter()
+                    .filter(|ob| {
+                        engine.observation_hits(site, &selected, &bounds, ob)
+                            && !(site.category == "log" && ob.pattern_shared)
+                    })
+                    .cloned()
+                    .collect();
+                result.validation = HintValidation::AnalyzerSupported;
+                result.reason = "existing-effect-rules-support-this-assertion-link".into();
+                result.strength = resolution.strength;
+            }
+            result
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Verdicts out
 // ---------------------------------------------------------------------------
@@ -312,6 +553,8 @@ pub enum ReasonKind {
     LimitInternalState,
     #[serde(rename = "limit:undecidable")]
     LimitUndecidable,
+    #[serde(rename = "limit:assertion-witness")]
+    LimitAssertionWitness,
 }
 
 impl ReasonKind {
@@ -321,6 +564,7 @@ impl ReasonKind {
             ReasonKind::LimitOperandShape
                 | ReasonKind::LimitInternalState
                 | ReasonKind::LimitUndecidable
+                | ReasonKind::LimitAssertionWitness
         )
     }
 }
@@ -356,6 +600,8 @@ pub struct Resolution {
     pub absence_needed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_observed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub witness_issues: Vec<TestWitnessIssue>,
 }
 
 // ---------------------------------------------------------------------------
@@ -405,7 +651,12 @@ pub fn join(facts: &Facts) -> Vec<Resolution> {
     facts
         .sites
         .iter()
-        .filter_map(|s| join.resolved.get(&s.id).cloned())
+        .filter_map(|s| {
+            join.resolved
+                .get(&s.id)
+                .cloned()
+                .map(|r| join.with_witness_issues(s, r))
+        })
         .collect()
 }
 
@@ -527,8 +778,12 @@ impl<'a> Join<'a> {
             .iter()
             .filter_map(|id| self.tests.get(id.as_str()).copied())
             .collect();
+        self.resolve_effect_for(site, covering)
+    }
+
+    fn resolve_effect_for(&self, site: &Site, covering: Vec<&TestFacts>) -> Resolution {
         // An effect with no boundary, reaching no other site and with no per-test extra, is internal:
-        // only a derivation or a pragma can resolve it.
+        // only a supported derivation can resolve it; comments are not evidence.
         let any_extra = covering
             .iter()
             .any(|t| self.bounds_for_test(site, t).len() > site.bounds.len());
@@ -548,6 +803,7 @@ impl<'a> Join<'a> {
                 stuck_false_caught: None,
                 absence_needed: None,
                 value_observed: None,
+                witness_issues: vec![],
             };
         }
         let mut best: Option<Strength> = None;
@@ -556,31 +812,7 @@ impl<'a> Join<'a> {
         for test in &covering {
             let bounds = self.bounds_for_test(site, test);
             for ob in &test.observations {
-                let mut hit = bounds.iter().any(|b| ob.matches(site, b));
-                // the value reached another site, and that site's boundary or sink is what the test reads
-                if !hit {
-                    for reached_id in &site.reached {
-                        let Some(reached) = self.sites.get(reached_id.as_str()) else {
-                            continue;
-                        };
-                        if !reached.covered_by.contains(&test.id) {
-                            continue;
-                        }
-                        let reached_bounds = self.with_mocks(reached, test, &reached.direct_bounds);
-                        if reached_bounds
-                            .iter()
-                            .any(|b| !b.internal() && ob.matches(reached, b))
-                            || self.sink_hit(test, reached, &reached_bounds, ob)
-                        {
-                            hit = true;
-                            break;
-                        }
-                    }
-                }
-                if !hit {
-                    hit = self.sink_hit(test, site, &site.bounds, ob);
-                }
-                if !hit {
+                if !self.observation_hits(site, test, &bounds, ob) {
                     continue;
                 }
                 // a regex several log sites could satisfy pins none of them individually
@@ -625,6 +857,7 @@ impl<'a> Join<'a> {
                 stuck_false_caught: None,
                 absence_needed: None,
                 value_observed: None,
+                witness_issues: vec![],
             };
         };
         // Returning one of several pre-built objects: downstream observations show that *a* value
@@ -651,7 +884,135 @@ impl<'a> Join<'a> {
             stuck_false_caught: None,
             absence_needed: None,
             value_observed: None,
+            witness_issues: vec![],
         }
+    }
+
+    /// The same boundary/instance rules used by positive observations. Reusing
+    /// them for limits must never turn a suppressed observation into credit.
+    fn observation_hits(
+        &self,
+        site: &Site,
+        test: &TestFacts,
+        bounds: &[Boundary],
+        ob: &Observation,
+    ) -> bool {
+        if bounds.iter().any(|b| ob.matches(site, b)) || self.sink_hit(test, site, &site.bounds, ob)
+        {
+            return true;
+        }
+        site.reached.iter().any(|id| {
+            let Some(reached) = self.sites.get(id.as_str()) else {
+                return false;
+            };
+            if !reached.covered_by.contains(&test.id) {
+                return false;
+            }
+            let bounds = self.with_mocks(reached, test, &reached.direct_bounds);
+            bounds
+                .iter()
+                .any(|b| !b.internal() && ob.matches(reached, b))
+                || self.sink_hit(test, reached, &bounds, ob)
+        })
+    }
+
+    /// Over-approximate which rejected observations could affect a candidate,
+    /// walking only its recorded flow/control/derivation edges. This explains
+    /// uncertainty; it is not a new proof of dependence. Root test ownership is
+    /// checked by the caller. No coverage requirement at a negative target:
+    /// an absence assertion can observe a branch whose effect never executed.
+    fn issue_reaches(
+        &self,
+        site: &Site,
+        test: &TestFacts,
+        ob: &Observation,
+        seen: &mut BTreeSet<String>,
+    ) -> bool {
+        if !seen.insert(site.id.clone()) {
+            return false;
+        }
+        if self.observation_hits(site, test, &self.bounds_for_test(site, test), ob) {
+            return true;
+        }
+        let mut edges = site.reached.clone();
+        for dep in &site.derive {
+            edges.push(dep.site.clone());
+            edges.extend(dep.requires_total.iter().flatten().cloned());
+        }
+        if let Some(d) = &site.decision {
+            edges.extend(d.carrier.iter().cloned());
+            for ids in [
+                &d.value_flow,
+                &d.then,
+                &d.early_exit_downstream,
+                &d.loop_body,
+            ] {
+                edges.extend(ids.iter().flatten().cloned());
+            }
+            edges.extend(d.else_.iter().flatten().flatten().cloned());
+            for entry in d.default_kept.iter().flatten() {
+                edges.push(entry.write.clone());
+                edges.extend(entry.dependents.iter().map(|d| d.site.clone()));
+            }
+            if let Some(o) = &d.object_valued {
+                edges.extend(o.only_a.iter().chain(&o.only_b).cloned());
+            }
+        }
+        edges.iter().any(|id| {
+            self.sites
+                .get(id.as_str())
+                .is_some_and(|s| self.issue_reaches(s, test, ob, seen))
+        })
+    }
+
+    /// Final reporting pass only: strengths, statuses, caught flags, evidence
+    /// test sets and the denominator are unchanged. Unknown evidence may replace
+    /// an assertion gap with a limit, but never a known execution gap.
+    fn with_witness_issues(&self, site: &Site, mut result: Resolution) -> Resolution {
+        for id in &site.covered_by {
+            let Some(test) = self.tests.get(id.as_str()) else {
+                continue;
+            };
+            for issue in &test.witness_issues {
+                let relevant = match &issue.observation {
+                    None => issue.kind == WitnessIssueKind::CaptureUnavailable,
+                    Some(ob) => self.issue_reaches(site, test, ob, &mut BTreeSet::new()),
+                };
+                if relevant {
+                    result.witness_issues.push(TestWitnessIssue {
+                        test: id.clone(),
+                        issue: issue.clone(),
+                    });
+                }
+            }
+        }
+        let untaken = site
+            .decision
+            .as_ref()
+            .and_then(|d| d.outcomes.as_ref())
+            .is_some_and(|o| {
+                (result.stuck_false_caught == Some(false) && o.true_.is_empty())
+                    || (result.stuck_true_caught == Some(false) && o.false_.is_empty())
+            });
+        if result.status != Status::Evident
+            && !untaken
+            && result.reason.as_ref().is_some_and(|reason| {
+                matches!(
+                    reason.kind,
+                    ReasonKind::GapNotAsserted
+                        | ReasonKind::GapOutcomeNotAsserted
+                        | ReasonKind::GapValueNotAsserted
+                )
+            })
+            && result
+                .witness_issues
+                .iter()
+                .any(|w| w.issue.kind.is_uncertain())
+        {
+            result.reason = Some(Reason {kind: ReasonKind::LimitAssertionWitness,
+                detail: Some("Assertion evidence is unavailable or inconclusive; see witnessIssues. This is not proof that the test lacks an assertion.".into())});
+        }
+        result
     }
 
     /// A witness for an outcome: a test that took it and pinned that an effect did not happen, either
@@ -699,6 +1060,7 @@ impl<'a> Join<'a> {
             stuck_false_caught: stuck.then_some(false),
             absence_needed: stuck.then_some(false),
             value_observed: None,
+            witness_issues: vec![],
         };
         // A ternary between two pre-built objects is distinguishable only through the sites just one of
         // them reaches.
@@ -718,6 +1080,7 @@ impl<'a> Join<'a> {
                     stuck_false_caught: Some(true),
                     absence_needed: Some(false),
                     value_observed: None,
+                    witness_issues: vec![],
                 };
             }
             return unresolved(
@@ -915,6 +1278,7 @@ impl<'a> Join<'a> {
             stuck_false_caught: Some(stuck_false_caught),
             absence_needed: Some(absence_needed),
             value_observed,
+            witness_issues: vec![],
         }
     }
 
@@ -925,6 +1289,15 @@ impl<'a> Join<'a> {
         let mut tests = BTreeSet::new();
         for dep in &site.derive {
             if dep.site == site.id {
+                continue;
+            }
+            if let Some(callbacks) = &dep.requires_total
+                && !callbacks.iter().any(|id| {
+                    self.resolved
+                        .get(id)
+                        .is_some_and(|r| r.strength == Some(Strength::Total))
+                })
+            {
                 continue;
             }
             let Some(dependent) = self.sites.get(dep.site.as_str()) else {
@@ -984,6 +1357,7 @@ impl<'a> Join<'a> {
             stuck_false_caught: None,
             absence_needed: None,
             value_observed: None,
+            witness_issues: vec![],
         })
     }
 }
@@ -1069,6 +1443,8 @@ mod tests {
             facet: None,
             strength,
             where_: None,
+            assertion_source: None,
+            assertion_method: None,
             negative: false,
             call_list: false,
             weak: false,
@@ -1084,6 +1460,7 @@ mod tests {
             observations,
             sinks: vec![],
             rendered: vec![],
+            witness_issues: vec![],
         }
     }
 
@@ -1094,6 +1471,345 @@ mod tests {
             tests,
             mocks_by_test_file: BTreeMap::new(),
         }
+    }
+
+    fn rejected(kind: WitnessIssueKind, target: Option<&str>) -> WitnessIssue {
+        WitnessIssue {
+            kind,
+            source: Some("tests/a.test.ts:7:3".into()),
+            operation: Some("equal".into()),
+            observation: target.map(|target| observation(target, Strength::Total)),
+        }
+    }
+
+    fn pragma_hint() -> PragmaHint {
+        PragmaHint {
+            id: "hint-1".into(),
+            where_: "tests/a.test.ts:6:3".into(),
+            raw: "// observes: src/a.ts#handler return value".into(),
+            target: Some(PragmaTarget {
+                file: "src/a.ts".into(),
+                function: "handler".into(),
+                snippet: Some("return value".into()),
+                via: None,
+            }),
+            candidate_sites: vec!["S1".into()],
+            issue: None,
+            test: Some("T1".into()),
+            assertion_source: Some("tests/a.test.ts:7:3".into()),
+            assertion_method: Some("equal".into()),
+            witness: "passed".into(),
+            witness_issue: None,
+        }
+    }
+
+    #[test]
+    fn pragma_hints_use_only_the_named_assertion_and_never_change_join_credit() {
+        let hint = pragma_hint();
+        let mut wanted = observation("return:handler", Strength::Value);
+        wanted.assertion_source = hint.assertion_source.clone();
+        wanted.assertion_method = hint.assertion_method.clone();
+        let mut other = wanted.clone();
+        other.assertion_source = Some("tests/a.test.ts:9:3".into());
+        let f = facts(
+            vec![site(
+                "S1",
+                "return",
+                vec![boundary("return:handler")],
+                &["T1"],
+            )],
+            vec![test("T1", vec![wanted.clone(), other.clone()])],
+        );
+        let before = join(&f);
+        let checked = check_pragma_hints(&f, std::slice::from_ref(&hint));
+        assert_eq!(checked[0].validation, HintValidation::AnalyzerSupported);
+        assert_eq!(checked[0].origin, "user-suggested");
+        assert_eq!(checked[0].strength, Some(Strength::Value));
+        assert_eq!(checked[0].observations, vec![wanted.clone()]);
+        assert_eq!(join(&f), before);
+
+        let mut unrelated = f.clone();
+        unrelated.tests[0].observations[0].boundary = "return:other".into();
+        assert_eq!(
+            join(&unrelated)[0].status,
+            Status::Evident,
+            "a different assertion still checks it"
+        );
+        assert_eq!(
+            check_pragma_hints(&unrelated, std::slice::from_ref(&hint))[0].validation,
+            HintValidation::Unresolved,
+            "cannot borrow that assertion's credit"
+        );
+
+        let mut other_test = f.clone();
+        other_test.sites[0].covered_by = vec!["T2".into()];
+        other_test.tests.push(test("T2", vec![wanted]));
+        assert_eq!(
+            check_pragma_hints(&other_test, std::slice::from_ref(&hint))[0].reason,
+            "target-not-reached-in-owning-test"
+        );
+
+        for issue in [
+            "call-failed",
+            "mixed-call-outcomes",
+            "call-incomplete",
+            "call-not-recorded",
+            "capture-unavailable",
+        ] {
+            let mut rejected = hint.clone();
+            rejected.witness_issue = Some(issue.into());
+            rejected.witness = "unavailable".into();
+            let check = check_pragma_hints(&f, &[rejected]).remove(0);
+            assert_eq!(check.validation, HintValidation::Unresolved);
+            assert_eq!(check.reason, issue);
+            assert_eq!(check.strength, None);
+        }
+        let mut ambiguous = hint.clone();
+        ambiguous.candidate_sites.push("S2".into());
+        assert_eq!(
+            check_pragma_hints(&f, &[ambiguous])[0].validation,
+            HintValidation::Invalid
+        );
+        let mut no_identity = hint;
+        no_identity.assertion_source = None;
+        assert_eq!(
+            check_pragma_hints(&f, &[no_identity])[0].reason,
+            "missing-assertion-identity"
+        );
+    }
+
+    #[test]
+    fn pragma_hints_preserve_presence_strength_and_do_not_derive_internal_credit() {
+        let hint = pragma_hint();
+        let mut ob = observation("return:handler", Strength::Presence);
+        ob.assertion_source = hint.assertion_source.clone();
+        ob.assertion_method = hint.assertion_method.clone();
+        let mut f = facts(
+            vec![site(
+                "S1",
+                "return",
+                vec![boundary("return:handler")],
+                &["T1"],
+            )],
+            vec![test("T1", vec![ob])],
+        );
+        let check = check_pragma_hints(&f, std::slice::from_ref(&hint)).remove(0);
+        assert_eq!(check.validation, HintValidation::AnalyzerSupported);
+        assert_eq!(check.strength, Some(Strength::Presence));
+        f.sites[0].bounds = vec![boundary("internal")];
+        assert_eq!(
+            check_pragma_hints(&f, std::slice::from_ref(&hint))[0].validation,
+            HintValidation::Unresolved
+        );
+        f.sites[0].kind = "decision".into();
+        assert_eq!(
+            check_pragma_hints(&f, &[hint])[0].reason,
+            "decision-hint-analysis-not-supported"
+        );
+    }
+
+    #[test]
+    fn unavailable_assertion_evidence_is_a_limit_without_changing_coverage_or_credit() {
+        let mut f = facts(
+            vec![site(
+                "S",
+                "return",
+                vec![boundary("return:handler")],
+                &["T"],
+            )],
+            vec![test("T", vec![])],
+        );
+        let before = join(&f)[0].clone();
+        f.tests[0]
+            .witness_issues
+            .push(rejected(WitnessIssueKind::CaptureUnavailable, None));
+        let after = &join(&f)[0];
+        assert_eq!(
+            after.reason.as_ref().unwrap().kind,
+            ReasonKind::LimitAssertionWitness
+        );
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.strength, before.strength);
+        assert_eq!(after.covered_by, before.covered_by);
+        assert_eq!(after.tests, before.tests);
+        assert_eq!(after.witness_issues[0].test, "T");
+        assert_eq!(summary(&f.sites, &join(&f)).limits, 1);
+        assert_eq!(summary(&f.sites, &join(&f)).gaps, 0);
+    }
+
+    #[test]
+    fn witness_limit_kinds_and_successful_evidence_are_not_conflated() {
+        for kind in [
+            WitnessIssueKind::CallNotRecorded,
+            WitnessIssueKind::CallIncomplete,
+            WitnessIssueKind::MixedCallOutcomes,
+            WitnessIssueKind::UninstrumentedObservation,
+            WitnessIssueKind::CallFailed,
+        ] {
+            let mut f = facts(
+                vec![site(
+                    "S",
+                    "return",
+                    vec![boundary("return:handler")],
+                    &["T"],
+                )],
+                vec![test("T", vec![])],
+            );
+            f.tests[0]
+                .witness_issues
+                .push(rejected(kind, Some("return:handler")));
+            let result = join(&f);
+            assert_eq!(
+                result[0].reason.as_ref().unwrap().kind,
+                if kind == WitnessIssueKind::CallFailed {
+                    ReasonKind::GapNotAsserted
+                } else {
+                    ReasonKind::LimitAssertionWitness
+                }
+            );
+            assert_eq!(result[0].witness_issues[0].issue.kind, kind);
+            assert!(result[0].strength.is_none());
+            f.tests[0]
+                .observations
+                .push(observation("return:handler", Strength::Value));
+            let result = join(&f);
+            assert_eq!(result[0].status, Status::Evident);
+            assert_eq!(result[0].strength, Some(Strength::Value));
+            assert!(result[0].reason.is_none());
+        }
+    }
+
+    #[test]
+    fn unrelated_tests_boundaries_and_known_execution_gaps_do_not_become_witness_limits() {
+        let mut f = facts(
+            vec![
+                site(
+                    "covered",
+                    "return",
+                    vec![boundary("return:handler")],
+                    &["T"],
+                ),
+                site("uncovered", "return", vec![boundary("return:other")], &[]),
+            ],
+            vec![test("T", vec![]), test("foreign", vec![])],
+        );
+        f.tests[0].witness_issues.push(rejected(
+            WitnessIssueKind::CallNotRecorded,
+            Some("return:unrelated"),
+        ));
+        f.tests[1]
+            .witness_issues
+            .push(rejected(WitnessIssueKind::CaptureUnavailable, None));
+        let r = join(&f);
+        assert_eq!(
+            r[0].reason.as_ref().unwrap().kind,
+            ReasonKind::GapNotAsserted
+        );
+        assert_eq!(
+            r[1].reason.as_ref().unwrap().kind,
+            ReasonKind::GapNotReached
+        );
+        assert!(r.iter().all(|r| r.witness_issues.is_empty()));
+    }
+
+    #[test]
+    fn decision_dependencies_retain_witness_uncertainty_without_inventing_taken_outcomes() {
+        let mut d = site("D", "condition", vec![], &["T"]);
+        d.kind = "decision".into();
+        d.decision = Some(DecisionFacts {
+            then: Some(vec!["S".into()]),
+            else_: Some(None),
+            outcomes: Some(Outcomes {
+                true_: vec!["T".into()],
+                false_: vec!["T".into()],
+            }),
+            ..Default::default()
+        });
+        let mut f = facts(
+            vec![
+                d,
+                site("S", "return", vec![boundary("return:handler")], &["T"]),
+            ],
+            vec![test("T", vec![])],
+        );
+        f.tests[0].witness_issues.push(rejected(
+            WitnessIssueKind::CallNotRecorded,
+            Some("return:handler"),
+        ));
+        let r = join(&f);
+        assert_eq!(
+            r[0].reason.as_ref().unwrap().kind,
+            ReasonKind::LimitAssertionWitness
+        );
+        assert_eq!(r[0].stuck_false_caught, Some(false));
+        assert_eq!(r[0].stuck_true_caught, Some(false));
+        f.sites[0]
+            .decision
+            .as_mut()
+            .unwrap()
+            .outcomes
+            .as_mut()
+            .unwrap()
+            .false_
+            .clear();
+        let r = join(&f);
+        assert_eq!(
+            r[0].reason.as_ref().unwrap().kind,
+            ReasonKind::GapOutcomeNotAsserted
+        );
+        assert!(!r[0].witness_issues.is_empty());
+    }
+
+    #[test]
+    fn witness_provenance_crosses_cyclic_derivations_without_supplying_strength() {
+        let mut s = site("S", "return", vec![boundary("return:start")], &["T"]);
+        s.derive.push(Dependent {
+            site: "end".into(),
+            label: "flow".into(),
+            strength: None,
+            requires_total: None,
+        });
+        let mut end = site("end", "return", vec![boundary("return:end")], &["T"]);
+        end.reached.push("S".into());
+        let mut f = facts(vec![s, end], vec![test("T", vec![])]);
+        f.tests[0].witness_issues.push(rejected(
+            WitnessIssueKind::CallIncomplete,
+            Some("return:end"),
+        ));
+        let result = join(&f);
+        assert!(
+            result
+                .iter()
+                .all(|r| r.reason.as_ref().unwrap().kind == ReasonKind::LimitAssertionWitness)
+        );
+        assert!(result.iter().all(|r| r.strength.is_none()));
+        f.tests[0].witness_issues[0]
+            .observation
+            .as_mut()
+            .unwrap()
+            .boundary = "return:unrelated".into();
+        assert!(join(&f).iter().all(|r| r.witness_issues.is_empty()));
+    }
+
+    #[test]
+    fn witness_issues_round_trip_and_reject_unknown_kinds() {
+        let issue = rejected(WitnessIssueKind::CallNotRecorded, Some("return:handler"));
+        let json = serde_json::to_value(&issue).unwrap();
+        assert_eq!(
+            serde_json::from_value::<WitnessIssue>(json.clone()).unwrap(),
+            issue
+        );
+        let mut invalid = json;
+        invalid["kind"] = serde_json::json!("invented-witness");
+        assert!(serde_json::from_value::<WitnessIssue>(invalid).is_err());
+        let mut legacy = serde_json::to_value(test("T", vec![])).unwrap();
+        legacy.as_object_mut().unwrap().remove("witnessIssues");
+        assert!(
+            serde_json::from_value::<TestFacts>(legacy)
+                .unwrap()
+                .witness_issues
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1408,12 +2124,72 @@ mod tests {
     }
 
     #[test]
+    fn a_timer_cancellation_candidate_requires_total_callback_evidence() {
+        for (callback_strength, expected) in [
+            (Strength::Presence, Status::Unresolved),
+            (Strength::Value, Status::Unresolved),
+            (Strength::Total, Status::Evident),
+        ] {
+            let mut cancel = site("cancel", "schedule", vec![boundary("internal")], &["T1"]);
+            cancel.derive = vec![Dependent {
+                site: "timer".into(),
+                label: "cancelled timer with total sink".into(),
+                strength: Some(Strength::Value),
+                requires_total: Some(vec!["callback".into()]),
+            }];
+            let f = facts(
+                vec![
+                    cancel,
+                    site("timer", "schedule", vec![boundary("internal")], &["T1"]),
+                    site(
+                        "callback",
+                        "return",
+                        vec![boundary("return:callback")],
+                        &["T1"],
+                    ),
+                ],
+                vec![test(
+                    "T1",
+                    vec![observation("return:callback", callback_strength)],
+                )],
+            );
+            let r = join(&f);
+            assert_eq!(
+                r.iter().find(|r| r.site == "cancel").unwrap().status,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn empty_or_unknown_timer_callback_candidates_do_not_supply_evidence() {
+        for callbacks in [vec![], vec!["missing".into()]] {
+            let mut cancel = site("cancel", "schedule", vec![boundary("internal")], &["T1"]);
+            cancel.derive = vec![Dependent {
+                site: "timer".into(),
+                label: "cancelled timer with total sink".into(),
+                strength: Some(Strength::Value),
+                requires_total: Some(callbacks),
+            }];
+            let f = facts(
+                vec![
+                    cancel,
+                    site("timer", "schedule", vec![boundary("internal")], &["T1"]),
+                ],
+                vec![test("T1", vec![])],
+            );
+            assert_eq!(join(&f)[0].status, Status::Unresolved);
+        }
+    }
+
+    #[test]
     fn an_internal_write_is_derived_through_its_dependent_capped_at_value() {
         let mut write = site("S1", "state-write", vec![boundary("internal")], &["T1"]);
         write.derive = vec![Dependent {
             site: "S2".into(),
             label: "read this.ready".into(),
             strength: None,
+            requires_total: None,
         }];
         let f = facts(
             vec![
@@ -1438,6 +2214,7 @@ mod tests {
             site: "S2".into(),
             label: "read this.ready".into(),
             strength: None,
+            requires_total: None,
         }];
         let f = facts(
             vec![

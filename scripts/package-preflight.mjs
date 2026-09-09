@@ -3,11 +3,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 import { releaseNotes } from "./release-notes.mjs";
+import { checkedIdentity } from "../analyzers/typescript/bin/identity.mjs";
 
 const repository = resolve(import.meta.dirname, "..");
-const manifest = JSON.parse(readFileSync(resolve(repository, "package.json"), "utf8"));
+const manifest = JSON.parse(
+  readFileSync(resolve(repository, "package.json"), "utf8"),
+);
 const launcher = readFileSync(resolve(repository, "bin/supercov.js"), "utf8");
 const runtime = resolve(repository, "runtime/javascript");
 const forbiddenProductOracle =
@@ -21,17 +24,53 @@ function sourceFiles(root, extension) {
   });
 }
 
-assert.deepEqual(manifest.files, ["bin", "runtime/javascript", "docs", "README.md"]);
-assert.equal(manifest.dependencies, undefined, "the npm launcher must have no engine dependencies");
-assert.equal(manifest.exports["./vite"], undefined, "the legacy Vite engine API must not ship");
+assert.deepEqual(manifest.files, [
+  "bin",
+  "runtime/javascript",
+  "docs/agent-loop.md",
+  "docs/assertion-evidence.md",
+  "analyzers/typescript/bin",
+  "analyzers/typescript/dist",
+  "analyzers/typescript/src",
+  "analyzers/typescript/package.json",
+  "analyzers/typescript/tsconfig.json",
+  "analyzers/typescript/README.md",
+  "README.md",
+]);
+checkedIdentity();
+assert.equal(
+  manifest.dependencies,
+  undefined,
+  "the npm launcher must have no engine dependencies",
+);
+assert.equal(
+  manifest.exports["./vite"],
+  undefined,
+  "the legacy Vite engine API must not ship",
+);
 assert.doesNotMatch(launcher, /SUPERCOV_ENGINE|dist\/cli|process\.execPath/);
 assert.match(launcher, /resolveNativeBinary/);
-assert.equal(existsSync(resolve(repository, "src")), false, "legacy TypeScript engine still exists");
-assert.equal(existsSync(resolve(repository, "dist")), false, "legacy compiled engine still exists");
-assert.equal(existsSync(resolve(repository, "tests/unit")), false, "legacy engine tests still exist");
+assert.equal(
+  existsSync(resolve(repository, "src")),
+  false,
+  "legacy TypeScript engine still exists",
+);
+assert.equal(
+  existsSync(resolve(repository, "dist")),
+  false,
+  "legacy compiled engine still exists",
+);
+assert.equal(
+  existsSync(resolve(repository, "tests/unit")),
+  false,
+  "legacy engine tests still exist",
+);
 assert.equal(existsSync(resolve(repository, "tsconfig.json")), false);
 assert.equal(existsSync(resolve(repository, "tsconfig.build.json")), false);
-assert.equal(existsSync(resolve(repository, "crates/supercov-engine/runtime")), false);
+assert.equal(
+  existsSync(resolve(repository, "crates/supercov-engine/runtime")),
+  false,
+);
 assert.equal(existsSync(resolve(runtime, "esmInterceptor.js")), false);
 
 const runtimeFiles = readdirSync(runtime)
@@ -41,11 +80,19 @@ assert(runtimeFiles.length > 0, "no JavaScript runtime shims were found");
 for (const name of runtimeFiles) {
   const path = resolve(runtime, name);
   const source = readFileSync(path, "utf8");
-  assert.doesNotMatch(source, /@babel\//, `${name} imports the removed Babel engine`);
+  assert.doesNotMatch(
+    source,
+    /@babel\//,
+    `${name} imports the removed Babel engine`,
+  );
   const checked = spawnSync(process.execPath, ["--check", path], {
     encoding: "utf8",
   });
-  assert.equal(checked.status, 0, `${name} is invalid JavaScript:\n${checked.stderr}`);
+  assert.equal(
+    checked.status,
+    0,
+    `${name} is invalid JavaScript:\n${checked.stderr}`,
+  );
 }
 
 // The Python frontend names coverage.py because it is differentially tested
@@ -58,9 +105,17 @@ function isOracleDifferential(path) {
   // that must hold for a Windows path has to split on either separator itself.
   return path.split(/[\\/]/).at(-1) === "python_frontend.rs";
 }
-assert(isOracleDifferential("D:\\a\\supercov\\crates\\supercov-engine\\src\\python_frontend.rs"));
-assert(isOracleDifferential("/w/crates/supercov-engine/src/python_frontend.rs"));
-assert(!isOracleDifferential("/w/crates/supercov-engine/src/python_project.rs"));
+assert(
+  isOracleDifferential(
+    "D:\\a\\supercov\\crates\\supercov-engine\\src\\python_frontend.rs",
+  ),
+);
+assert(
+  isOracleDifferential("/w/crates/supercov-engine/src/python_frontend.rs"),
+);
+assert(
+  !isOracleDifferential("/w/crates/supercov-engine/src/python_project.rs"),
+);
 
 // Independent coverage implementations are development oracles only. A user
 // run must never shell out to them or enable compiler-native coverage. Keep
@@ -70,18 +125,30 @@ assert(!isOracleDifferential("/w/crates/supercov-engine/src/python_project.rs"))
 const productSources = [
   resolve(repository, "bin/supercov.js"),
   ...runtimeFiles.map((name) => resolve(runtime, name)),
+  ...sourceFiles(resolve(repository, "analyzers/typescript/bin"), ".mjs"),
+  ...sourceFiles(resolve(repository, "analyzers/typescript/dist"), ".js"),
   ...sourceFiles(resolve(repository, "crates/supercov-cli/src"), ".rs"),
-  ...sourceFiles(resolve(repository, "crates/supercov-engine/src"), ".rs").filter(
-    (path) => !isOracleDifferential(path),
-  ),
+  ...sourceFiles(
+    resolve(repository, "crates/supercov-engine/src"),
+    ".rs",
+  ).filter((path) => !isOracleDifferential(path)),
   ...sourceFiles(
     resolve(repository, "crates/supercov-engine/runtime-assets"),
     ".rs",
   ),
 ];
 for (const path of productSources) {
+  let source = readFileSync(path, "utf8");
+  if (path.startsWith(resolve(repository, "analyzers/typescript") + sep)) {
+    // The archive adapter uses an in-memory LCOV-shaped line format for the
+    // extracted analyzer. Reading that format is not invoking the lcov tool.
+    // This exception is only for the query-only analyzer, which cannot spawn
+    // any subprocess; the remaining product-oracle checks still apply.
+    assert.doesNotMatch(source, /["'](?:node:)?child_process["']/);
+    source = source.replace(/\blcov\b/g, "internal-line-format");
+  }
   assert.doesNotMatch(
-    readFileSync(path, "utf8"),
+    source,
     forbiddenProductOracle,
     `${path} invokes or embeds a development-only coverage oracle`,
   );
@@ -105,9 +172,14 @@ assert.match(
 );
 
 for (const [subpath, path] of Object.entries(manifest.exports)) {
-  assert(existsSync(resolve(repository, path)), `missing npm export ${subpath}: ${path}`);
+  assert(
+    existsSync(resolve(repository, path)),
+    `missing npm export ${subpath}: ${path}`,
+  );
 }
-for (const [name, version] of Object.entries(manifest.optionalDependencies ?? {})) {
+for (const [name, version] of Object.entries(
+  manifest.optionalDependencies ?? {},
+)) {
   assert.match(name, /^@supercov\/cli-/);
   assert.equal(version, manifest.version);
 }
@@ -115,10 +187,16 @@ for (const [name, version] of Object.entries(manifest.optionalDependencies ?? {}
 // npm installs the tarball the lockfile names, not the version beside it. When
 // those disagree the launcher installs one release and refuses it as another,
 // which is how a plain `npm ci` ended up with 0.0.18 binaries under 0.0.38.
-const lockfile = JSON.parse(readFileSync(resolve(repository, "package-lock.json"), "utf8"));
+const lockfile = JSON.parse(
+  readFileSync(resolve(repository, "package-lock.json"), "utf8"),
+);
 for (const [name, entry] of Object.entries(lockfile.packages)) {
   if (!name.startsWith("node_modules/@supercov/cli-")) continue;
-  assert.equal(entry.version, manifest.version, `${name} version in package-lock.json`);
+  assert.equal(
+    entry.version,
+    manifest.version,
+    `${name} version in package-lock.json`,
+  );
   assert.equal(
     entry.resolved,
     `https://registry.npmjs.org/${name.replace("node_modules/", "")}/-/${name.split("/").at(-1)}-${manifest.version}.tgz`,
@@ -136,7 +214,10 @@ assert(
 );
 for (const line of notes.split("\n")) {
   assert(
-    line === "" || line.startsWith("- ") || /^\*\*[A-Z][a-z]+\*\*$/.test(line) || line.startsWith("  "),
+    line === "" ||
+      line.startsWith("- ") ||
+      /^\*\*[A-Z][a-z]+\*\*$/.test(line) ||
+      line.startsWith("  "),
     `unexpected changelog line for ${manifest.version}: ${JSON.stringify(line)}`,
   );
 }
@@ -148,8 +229,12 @@ const crlfNotes = releaseNotes(
   manifest.version,
   readFileSync(changelogPath, "utf8").replace(/\r?\n/g, "\r\n"),
 );
-assert.equal(crlfNotes, notes, "release notes must not depend on the checkout's line endings");
+assert.equal(
+  crlfNotes,
+  notes,
+  "release notes must not depend on the checkout's line endings",
+);
 
 console.log(
-  `[package-preflight] Rust-only launcher, ${runtimeFiles.length} target-language shims, no legacy engine or product-oracle dependencies`,
+  `[package-preflight] native launcher, ${runtimeFiles.length} target-language shims, checked post-run analyzer, no legacy engine or product-oracle dependencies`,
 );

@@ -16,7 +16,7 @@
 //! Without those variables it reports that it was skipped and passes, so CI stays green while the
 //! prototype still lives elsewhere.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 use supercov_engine::asserted_coverage::{Facts, Resolution, Status, Strength, join, summary};
@@ -39,6 +39,15 @@ struct PrototypeResolution {
     reason: Option<PrototypeReason>,
     #[serde(default)]
     tests: Option<Vec<String>>,
+    covered_by: usize,
+    #[serde(default)]
+    stuck_false_caught: Option<bool>,
+    #[serde(default)]
+    stuck_true_caught: Option<bool>,
+    #[serde(default)]
+    absence_needed: Option<bool>,
+    #[serde(default)]
+    value_observed: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,6 +86,18 @@ fn the_join_reproduces_the_prototype_verdicts() {
     .expect("resolution.json parses");
 
     let ours = join(&facts);
+    let expected_ids: BTreeSet<_> = expected.resolutions.iter().map(|r| &r.site).collect();
+    let actual_ids: BTreeSet<_> = ours.iter().map(|r| &r.site).collect();
+    assert_eq!(
+        expected_ids.len(),
+        expected.resolutions.len(),
+        "duplicate prototype site ids"
+    );
+    assert_eq!(actual_ids.len(), ours.len(), "duplicate engine site ids");
+    assert_eq!(
+        actual_ids, expected_ids,
+        "the complete site sets must agree"
+    );
     let by_id: BTreeMap<&str, &Resolution> = ours.iter().map(|r| (r.site.as_str(), r)).collect();
     let summary = summary(&facts.sites, &ours);
     eprintln!(
@@ -108,6 +129,31 @@ fn the_join_reproduces_the_prototype_verdicts() {
             continue;
         };
         compared += 1;
+        assert_eq!(
+            got.covered_by, want.covered_by,
+            "{}: covering-test count",
+            want.site
+        );
+        assert_eq!(
+            got.stuck_false_caught, want.stuck_false_caught,
+            "{}: stuck-false verdict",
+            want.site
+        );
+        assert_eq!(
+            got.stuck_true_caught, want.stuck_true_caught,
+            "{}: stuck-true verdict",
+            want.site
+        );
+        assert_eq!(
+            got.absence_needed, want.absence_needed,
+            "{}: absence requirement",
+            want.site
+        );
+        assert_eq!(
+            got.value_observed, want.value_observed,
+            "{}: value observation",
+            want.site
+        );
         if status_name(got.status) != want.status {
             status_mismatch.push(format!(
                 "{}: prototype {}, join {}",
@@ -140,9 +186,7 @@ fn the_join_reproduces_the_prototype_verdicts() {
         // the tests behind a verdict matter: the decision rules restrict evidence by outcome
         if let Some(want_tests) = &want.tests {
             let got_tests: Vec<&str> = got.tests.iter().map(String::as_str).collect();
-            if want_tests.iter().map(String::as_str).collect::<Vec<_>>() != got_tests
-                && !got.tests.is_empty()
-            {
+            if want_tests.iter().map(String::as_str).collect::<Vec<_>>() != got_tests {
                 tests_mismatch.push(format!(
                     "{}: prototype {:?}, join {:?}",
                     want.site, want_tests, got_tests
@@ -174,4 +218,61 @@ fn the_join_reproduces_the_prototype_verdicts() {
         reason_mismatch.len(),
         tests_mismatch.len(),
     );
+    // Optional current comparison: the old facts remain the oracle for the engine
+    // port, but stricter source analysis is deliberately NOT verdict-equivalent.
+    if let Ok(path) = std::env::var("SUPERCOV_ASSERTED_CURRENT_FACTS") {
+        let current: Facts = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let current_ids: BTreeSet<_> = current.sites.iter().map(|site| &site.id).collect();
+        assert_eq!(current_ids, expected_ids, "v2 must retain the denominator");
+        let current_results = join(&current);
+        let current_summary =
+            supercov_engine::asserted_coverage::summary(&current.sites, &current_results);
+        let mut without_issues = current.clone();
+        for test in &mut without_issues.tests {
+            test.witness_issues.clear();
+        }
+        let previous_results = join(&without_issues);
+        let mut changes = Vec::new();
+        for (before, after) in previous_results.iter().zip(&current_results) {
+            let mut projected = after.clone();
+            projected.reason = before.reason.clone();
+            projected.witness_issues.clear();
+            assert_eq!(
+                &projected, before,
+                "witness reporting must not change credit or coverage"
+            );
+            if before.reason != after.reason {
+                assert!(
+                    before
+                        .reason
+                        .as_ref()
+                        .is_some_and(|reason| !reason.kind.is_limit())
+                );
+                assert_eq!(
+                    after.reason.as_ref().unwrap().kind,
+                    supercov_engine::asserted_coverage::ReasonKind::LimitAssertionWitness
+                );
+                assert!(!after.witness_issues.is_empty());
+                changes.push(serde_json::json!({"site": after.site, "before": before.reason, "after": after.reason}));
+            }
+        }
+        let comparison = serde_json::json!({
+            "sites": current.sites.len(), "tests": current.tests.len(),
+            "before": supercov_engine::asserted_coverage::summary(&without_issues.sites, &previous_results),
+            "after": current_summary, "changedReasons": changes,
+            "sitesWithWitnessIssues": current_results.iter().filter(|r| !r.witness_issues.is_empty()).count(),
+            "unchangedCreditAndCoverage": true,
+        });
+        if let Ok(path) = std::env::var("SUPERCOV_ASSERTED_COMPARISON_OUTPUT") {
+            std::fs::write(path, serde_json::to_vec_pretty(&comparison).unwrap()).unwrap();
+        }
+        eprintln!(
+            "witness-reporting: {} reason changes; credit and coverage unchanged",
+            changes.len()
+        );
+        eprintln!(
+            "current-analyzer-candidates: {}",
+            serde_json::to_string(&current_summary).unwrap()
+        );
+    }
 }

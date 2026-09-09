@@ -1,0 +1,51 @@
+# JS/TS assertion release review — 2026-09-09
+
+## Scope and isolation
+
+The shared checkout remains on `codex/asserted-js-integration`. With user approval,
+the JS/TS changes were copied to a separate review snapshot based on `ccfd015`.
+Only the JS/TS `ServerRecord.statement_id` definition and propagation were taken
+from the mixed `coverage_report.rs` diff. No new Rust assertion modules, compiler
+identity experiments, Rust fixtures, spikes, `go.mod` or `m_test.go` were included.
+
+The three existing commits after main are the statement instrumentation, generic
+assertion join and JavaScript site inventory this feature depends on. Existing
+statement markers remain in the baseline; this review adds no test-time probes.
+
+## Checks and findings
+
+- Full `npm run check` passed in the shared checkout, including workspace format,
+  Clippy, Rust tests, runtime/assets, analyzer tests, ordinary archive integration,
+  packed consumer and native-install metadata checks.
+- The isolated snapshot compiled with only its selected JS/TS changes. It uses
+  its own dependency install and Cargo target directory; no shared binaries were
+  overwritten to perform this check.
+- **Parity reporting correction:** the earlier packaging record's Rust parity
+  invocation had not supplied external fixture paths, so that test returned
+  without comparing data. It should have been listed as an opt-in check, not a
+  completed frozen comparison. Enabled explicitly during this review, it now
+  passes against all **661 Supergateway sites** and **1,813 Essential SEO sites**.
+  This checks the join on frozen prototype facts. It does not validate all source
+  inferences or change the separate historical 84/100 mutation agreement.
+- The optional external TypeScript source-parity checks are still distinct from
+  normal CI; no skipped test is treated as positive calibration evidence.
+- Fresh dependency installation reported 13 existing development dependency
+  advisories. `npm audit --omit=dev --json` reported **zero** production advisories.
+  No dependency upgrade or audit fix was applied as part of this feature.
+- Docker is installed but its daemon is unavailable locally. Linux and Windows
+  execution therefore requires the authorized GitHub Actions branch run, not a
+  claim that local macOS tests proved those platforms.
+- TypeScript 7.0.2's new native API works on the small fixture, but it is not
+  compatible with the old API expected by this analyzer. See
+  [the source/API investigation](asserted-typescript7-investigation-2026-09-09.md).
+
+## Release preparation
+
+An experimental feature note was added under `CHANGELOG.md`'s existing Unreleased
+section. It preserves the TypeScript limit, candidate-only meaning and current
+instrumentation scope. The release version remains **0.0.42**; no tag, registry
+publication or GitHub release was requested or performed.
+
+The review branch and build-only workflows may be pushed/dispatched. The publish
+workflow must not be invoked. Platform results must be tied to the exact commit
+tested, with failing and unexecuted gates reported explicitly.

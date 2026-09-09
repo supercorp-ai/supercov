@@ -164,6 +164,9 @@ pub struct ServerRecord {
     pub timestamp_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase_id: Option<String>,
+    /// The producing test statement, under this record's exact execution scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<ExecutionScope>,
 }
@@ -1470,7 +1473,7 @@ fn create_coverage_view_with_model(
                 id: record_id,
                 vector: decision,
                 timestamp_ms,
-                statement_id: None,
+                statement_id: record.statement_id.clone(),
                 phase_id: record.phase_id.clone(),
                 environment: "server".into(),
             };
