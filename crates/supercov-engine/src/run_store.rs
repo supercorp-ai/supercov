@@ -223,6 +223,7 @@ pub(crate) fn create_analyzable_test_run(root: &Path, id: &str) -> PathBuf {
                 "branch:false".into(),
             ],
             events: vec![],
+            logicals: vec![],
         }],
         browser: vec![],
         server: vec![],

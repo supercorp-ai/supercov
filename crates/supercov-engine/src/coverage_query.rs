@@ -3269,6 +3269,7 @@ mod tests {
                 }],
                 hits: Vec::new(),
                 events: Vec::new(),
+                logicals: Vec::new(),
             }],
             browser: Vec::new(),
             server: Vec::new(),

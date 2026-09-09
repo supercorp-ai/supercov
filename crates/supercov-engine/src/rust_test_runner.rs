@@ -1169,6 +1169,7 @@ pub(crate) fn snapshot(
                             vector: record.vector,
                             timestamp_ms: record.sequence,
                             phase_id: Some(phase_id.clone()),
+                            statement_id: None,
                             environment: "server".into(),
                         });
                     }
@@ -1192,6 +1193,7 @@ pub(crate) fn snapshot(
             decisions: decision_snapshots,
             hits: hits.into_iter().collect(),
             events,
+            logicals: Vec::new(),
         },
         phases,
     })

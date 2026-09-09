@@ -3844,6 +3844,7 @@ mod tests {
                     }],
                     hits: vec!["point".into()],
                     events: Vec::new(),
+                    logicals: Vec::new(),
                 }],
                 browser: Vec::new(),
                 server: Vec::new(),

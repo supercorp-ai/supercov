@@ -98,7 +98,30 @@ pub struct RuntimeEvent {
     pub timestamp_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase_id: Option<String>,
+    /// Position ("file:line:column") of the test-file statement that was executing when the
+    /// event was recorded; set by the statement markers the assertion pass adds to test modules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement_id: Option<String>,
     pub environment: String,
+}
+
+/// One observed (side selected, result truthy) pair of a value-position logical expression.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LogicalVector {
+    /// The right operand was evaluated (the left did not short-circuit).
+    pub right: bool,
+    /// The selected result was truthy.
+    pub truthy: bool,
+}
+
+/// Distinct outcomes of one `logical-value` branch within a test; gives per-operand outcomes
+/// once combined with the operator recorded in the manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LogicalSnapshot {
+    pub id: String,
+    pub vectors: Vec<LogicalVector>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -110,6 +133,8 @@ pub struct RuntimeSnapshot {
     pub hits: Vec<String>,
     #[serde(default)]
     pub events: Vec<RuntimeEvent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logicals: Vec<LogicalSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1445,6 +1470,7 @@ fn create_coverage_view_with_model(
                 id: record_id,
                 vector: decision,
                 timestamp_ms,
+                statement_id: None,
                 phase_id: record.phase_id.clone(),
                 environment: "server".into(),
             };
@@ -2387,6 +2413,7 @@ mod tests {
                 decisions: vec![],
                 hits: hits.iter().map(|hit| (*hit).into()).collect(),
                 events: vec![],
+                logicals: vec![],
             }],
             browser: vec![],
             server: vec![],
@@ -2650,6 +2677,7 @@ mod tests {
             vector: None,
             timestamp_ms: 110,
             phase_id: None,
+            statement_id: None,
             environment: "server".into(),
         });
         let inferred = create_coverage_view(&manifest, &[attempt.clone()], "time").unwrap();

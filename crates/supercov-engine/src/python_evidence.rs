@@ -754,6 +754,7 @@ fn snapshot(
             vector: None,
             timestamp_ms: clock,
             phase_id: Some(phase.into()),
+            statement_id: None,
             environment: "python".into(),
         });
         clock += 1;
@@ -781,6 +782,7 @@ fn snapshot(
                 vector: Some(vector.clone()),
                 timestamp_ms: clock,
                 phase_id: Some(phase.into()),
+                statement_id: None,
                 environment: "python".into(),
             });
             clock += 1;
@@ -795,6 +797,7 @@ fn snapshot(
         decisions,
         hits: hits.into_iter().collect(),
         events,
+        logicals: Vec::new(),
     })
 }
 
