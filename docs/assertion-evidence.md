@@ -95,8 +95,18 @@ global Promise semantics, not a checked end-to-end assertion link. Calls from
 project-defined Promise constructors, transformed fields, competing settlements,
 non-child emitters and unsupported shapes retain explicit reasons.
 
-In particular, the resolved object can be changed before the assertion, and a
-different child can run the same source. `processExit.status` therefore remains
+The optional `consumer` check follows the selected read's local const bindings
+and checks their other uses, including nested closures. It can establish that
+the fresh resolver field reaches this read unchanged under the model's
+unmodified built-in/prototype assumptions. Aliases that escape, extra Promise
+consumers, mutations, reflective access and nonlocal result carriers remain
+unresolved. Simple discarded awaits (including native `Promise.race`) and
+independent arrow readers on a fresh helper return are supported. The traversal
+is bounded and happens after the test run. A source-checked consumer is not a
+claim that the assertion distinguishes every change, or that the event came
+from the covered producer.
+
+In particular, a different child can run the same source. `processExit.status` remains
 `unresolved`; even a source-checked `resolution` supplies no production-value,
 absence, control-flow or pragma credit. Relevant candidates report
 `limit:process-exit-link` unless a more specific existing limitation or known

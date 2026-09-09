@@ -18,6 +18,7 @@ export const PROTOCOL = {
     "mock-observation-projections-v1",
     "assertion-comparison-relations-v2",
     "process-exit-source-v1",
+    "process-exit-consumer-v1",
     "mock-count-lifetimes-v1",
     "mock-count-factories-v1",
     "mock-count-rows-v1",

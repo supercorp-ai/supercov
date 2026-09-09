@@ -38,6 +38,12 @@ test(
       ["wrong-await", false],
       ["object-side-effect", false],
       ["shadowed-promise", false],
+      ["retained-result", true],
+      ["then-mutation", false],
+      ["alias-mutation", false],
+      ["sibling-reader", true],
+      ["sibling-mutation", false],
+      ["reflective-mutation", false],
     ]) {
       const root = mkdtempSync(resolve(tmpdir(), "supercov-child-exit-"));
       t.after(() => {
@@ -173,10 +179,31 @@ test(
           "signal",
           "other-child",
           "mutated-result",
+          "retained-result",
+          "then-mutation",
+          "alias-mutation",
+          "sibling-reader",
+          "sibling-mutation",
+          "reflective-mutation",
         ].includes(name)
       ) {
         assert.ok(exitSource.resolution, JSON.stringify({ name, exitSource }));
         assert.equal(exitSource.resolution.status, "source-checked", name);
+        assert.equal(
+          exitSource.consumer.status,
+          [
+            "mutated-result",
+            "then-mutation",
+            "alias-mutation",
+            "sibling-mutation",
+            "reflective-mutation",
+          ].includes(name)
+            ? "unresolved"
+            : "source-checked",
+          name,
+        );
+        if (exitSource.consumer.status === "unresolved")
+          assert.ok(exitSource.consumer.blockedAt, name);
         assert.equal(
           exitSource.resolution.eventArgument,
           name === "signal" ? "signal" : "code",

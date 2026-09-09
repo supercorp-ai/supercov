@@ -517,6 +517,13 @@ export function analyzeWithFrontend(
       field?: string;
       eventArgument: "code" | "signal";
     };
+    consumer?: {
+      status: "source-checked" | "unresolved";
+      reason?: string;
+      bindings: string[];
+      read: string;
+      blockedAt?: string;
+    };
   }
   interface ComparisonOperand {
     source: string;
@@ -2294,6 +2301,9 @@ export function analyzeWithFrontend(
       helperCalls: [],
     };
     const seen = new Set<ts.Node>();
+    const carriers = new Map<ts.VariableDeclaration, Set<ts.Node>>();
+    const helperReturns = new Map<ts.CallExpression, ts.Expression>();
+    let openCarrier = false;
     const fail = (reason: string) => ({ ...info, reason });
     const nativeSpawn = (call: ts.CallExpression) => {
       const callee = comparisonExpression(call.expression);
@@ -2330,13 +2340,15 @@ export function analyzeWithFrontend(
       raw: ts.Expression,
       path: string[],
       awaitedPath?: string[],
+      scope = enclosingFunction(expr),
     ): ProcessExitEvidence | undefined => {
       const e = comparisonExpression(raw);
       if (seen.size >= 48 || seen.has(e)) return;
       seen.add(e);
-      if (ts.isAwaitExpression(e)) return trace(e.expression, path, [...path]);
+      if (ts.isAwaitExpression(e))
+        return trace(e.expression, path, [...path], scope);
       if (ts.isPropertyAccessExpression(e))
-        return trace(e.expression, [e.name.text, ...path], awaitedPath);
+        return trace(e.expression, [e.name.text, ...path], awaitedPath, scope);
       if (ts.isIdentifier(e)) {
         const d = declOf(e);
         if (
@@ -2346,13 +2358,20 @@ export function analyzeWithFrontend(
           d.initializer &&
           ts.isVariableDeclarationList(d.parent) &&
           d.parent.flags & ts.NodeFlags.Const
-        )
-          return trace(d.initializer, path, awaitedPath);
+        ) {
+          if (!scope || enclosingFunction(d) !== scope) openCarrier = true;
+          const uses = carriers.get(d) ?? new Set<ts.Node>();
+          uses.add(e);
+          carriers.set(d, uses);
+          return trace(d.initializer, path, awaitedPath, scope);
+        }
         return;
       }
       if (ts.isObjectLiteralExpression(e)) {
         const next = path.length ? property(e, path[0]) : undefined;
-        return next ? trace(next, path.slice(1), awaitedPath) : undefined;
+        return next
+          ? trace(next, path.slice(1), awaitedPath, scope)
+          : undefined;
       }
       if (
         ts.isCallExpression(e) &&
@@ -2360,7 +2379,13 @@ export function analyzeWithFrontend(
       ) {
         const d = declOf(comparisonExpression(e.expression));
         const fn = d && ts.isFunctionDeclaration(d) ? d : undefined;
-        if (!fn?.body || fn.getSourceFile().isDeclarationFile || seen.has(fn))
+        if (
+          !fn?.body ||
+          fn.getSourceFile().isDeclarationFile ||
+          seen.has(fn) ||
+          fn.asteriskToken ||
+          fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)
+        )
           return;
         seen.add(fn);
         // Only one direct top-level return. Do not select the first branch or a
@@ -2382,7 +2407,8 @@ export function analyzeWithFrontend(
         )
           return;
         info.helperCalls.push(comparisonLocation(e));
-        return trace(ret.expression, path, awaitedPath);
+        helperReturns.set(e, ret.expression);
+        return trace(ret.expression, path, awaitedPath, fn);
       }
       if (
         !ts.isNewExpression(e) ||
@@ -2570,7 +2596,128 @@ export function analyzeWithFrontend(
       };
       return fail("producer-instance-link-unverified");
     };
-    return trace(expr, []);
+    const result = trace(expr, []);
+    if (!result?.resolution) return result;
+
+    // The resolver's fresh object cannot change in transit if its Promise and
+    // every followed carrier stay closed to the selected read. Inspect all uses
+    // of each local binding, including closures, not just preceding statements.
+    // This proves preservation of the event argument, not its producer identity.
+    const consumer = {
+      status: "unresolved" as "source-checked" | "unresolved",
+      reason: "result-carrier-escapes-or-is-reused" as string | undefined,
+      bindings: [...carriers.keys()].map(comparisonLocation),
+      read: comparisonLocation(expr),
+      blockedAt: undefined as string | undefined,
+    };
+    result.consumer = consumer;
+    if (openCarrier) {
+      consumer.reason = "nonlocal-result-carrier";
+      return result;
+    }
+    const outer = (n: ts.Expression): ts.Expression => {
+      let p = n.parent;
+      while (
+        p &&
+        ts.isExpression(p) &&
+        comparisonExpression(p) === comparisonExpression(n)
+      ) {
+        n = p;
+        p = n.parent;
+      }
+      return n;
+    };
+    const discardedAwait = (n: ts.Expression) => {
+      const p = outer(n).parent;
+      return (
+        ts.isAwaitExpression(p) && ts.isExpressionStatement(outer(p).parent)
+      );
+    };
+    const discardedRace = (n: ts.Identifier) => {
+      const array = n.parent;
+      if (!ts.isArrayLiteralExpression(array)) return false;
+      const call = array.parent;
+      if (
+        !ts.isCallExpression(call) ||
+        call.arguments.length !== 1 ||
+        !ts.isPropertyAccessExpression(call.expression) ||
+        call.expression.name.text !== "race"
+      )
+        return false;
+      const ctor = call.expression.expression;
+      const binding = declOf(ctor);
+      return (
+        ts.isIdentifier(ctor) &&
+        ctor.text === "Promise" &&
+        (!binding || binding.getSourceFile().isDeclarationFile) &&
+        discardedAwait(call)
+      );
+    };
+    const siblingArrowRead = (n: ts.Identifier, d: ts.VariableDeclaration) => {
+      // A fresh helper return may also expose independent arrow readers, e.g.
+      // buffered stdout. Arrows cannot receive the carrier as their `this`.
+      // Any captured use of the result Promise is audited separately below.
+      const access = n.parent;
+      if (!ts.isPropertyAccessExpression(access) || access.expression !== n)
+        return false;
+      const call = access.parent;
+      if (
+        !ts.isCallExpression(call) ||
+        call.expression !== access ||
+        call.arguments.length
+      )
+        return false;
+      const init = d.initializer && comparisonExpression(d.initializer);
+      const value =
+        init && ts.isCallExpression(init) ? helperReturns.get(init) : init;
+      const object = value && comparisonExpression(value);
+      if (!object || !ts.isObjectLiteralExpression(object)) return false;
+      const member = property(object, access.name.text);
+      return !!member && ts.isArrowFunction(comparisonExpression(member));
+    };
+    let budget = 16384;
+    for (const [d, uses] of carriers) {
+      const scope = enclosingFunction(d);
+      if (!scope) return result;
+      let closed = true;
+      const scan = (n: ts.Node) => {
+        if (--budget < 0 || !closed) return;
+        const callee = ts.isCallExpression(n)
+          ? comparisonExpression(n.expression)
+          : undefined;
+        if (
+          ts.isWithStatement(n) ||
+          (callee && ts.isIdentifier(callee) && callee.text === "eval")
+        ) {
+          closed = false;
+          consumer.reason = "reflective-carrier-access";
+          consumer.blockedAt = comparisonLocation(n);
+          return;
+        }
+        if (
+          ts.isIdentifier(n) &&
+          n !== d.name &&
+          declOf(n) === d &&
+          !uses.has(n) &&
+          !discardedAwait(n) &&
+          !discardedRace(n) &&
+          !siblingArrowRead(n, d)
+        ) {
+          closed = false;
+          consumer.blockedAt = comparisonLocation(n);
+          return;
+        }
+        ts.forEachChild(n, scan);
+      };
+      scan(scope);
+      if (!closed || budget < 0) {
+        if (budget < 0) consumer.reason = "consumer-scan-budget";
+        return result;
+      }
+    }
+    consumer.status = "source-checked";
+    delete consumer.reason;
+    return result;
   }
 
   function originOf(expr: ts.Expression, depth = 0): Origin | undefined {

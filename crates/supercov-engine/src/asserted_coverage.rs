@@ -181,6 +181,20 @@ pub struct ProcessExitEvidence {
     pub event: Option<ProcessExitEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution: Option<ProcessExitResolution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer: Option<ProcessExitConsumer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessExitConsumer {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub bindings: Vec<String>,
+    pub read: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2129,7 +2143,9 @@ mod tests {
                 "promise": "tests/helper.ts:50:100", "spawn": "tests/helper.ts:10:40",
                 "event": {"source": "tests/helper.ts:60:90", "name": "exit"},
                 "resolution": {"status": "source-checked", "source": "tests/helper.ts:75:89",
-                    "field": "code", "eventArgument": "code"}
+                    "field": "code", "eventArgument": "code"},
+                "consumer": {"status": "source-checked", "bindings": ["tests/a.test.ts:10:28"],
+                    "read": "tests/a.test.ts:30:50"}
             }))
             .unwrap(),
         );
@@ -2137,6 +2153,10 @@ mod tests {
         assert_eq!(
             encoded["processExit"]["resolution"]["eventArgument"],
             "code"
+        );
+        assert_eq!(
+            encoded["processExit"]["consumer"]["status"],
+            "source-checked"
         );
         assert_eq!(serde_json::from_value::<Observation>(encoded).unwrap(), ob);
         let mut parent = site("parent", "return", vec![], &["T1"]);
