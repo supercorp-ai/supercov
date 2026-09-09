@@ -44,6 +44,10 @@ test(
       ["sibling-reader", true],
       ["sibling-mutation", false],
       ["reflective-mutation", false],
+      ["same-source-children", true],
+      ["alternate-cwd", false],
+      ["inherited-preload", false],
+      ["synthetic-exit", false],
     ]) {
       const root = mkdtempSync(resolve(tmpdir(), "supercov-child-exit-"));
       t.after(() => {
@@ -102,10 +106,24 @@ test(
       const suite = ["--test", "--test-concurrency=1", "tests/case.test.mjs"];
       const baseline = run(process.execPath, suite);
       ok(baseline);
+      // A standalone node:test file also runs directly, without the CLI's extra
+      // isolated worker. Price that cheaper native alternative on the new
+      // producer-law cases, using the same test source and assertions.
+      const priceProducer = [
+        "same-source-children",
+        "alternate-cwd",
+        "inherited-preload",
+        "synthetic-exit",
+      ].includes(name);
+      const directBaseline = priceProducer
+        ? run(process.execPath, ["tests/case.test.mjs"])
+        : undefined;
+      if (directBaseline) ok(directBaseline);
       const source = resolve(root, "src/cli.mjs");
       const original = readFileSync(source, "utf8");
       assert.equal(original.split("process.exit(1)").length, 2);
       let mutant;
+      let directMutant;
       try {
         writeFileSync(
           source,
@@ -118,6 +136,11 @@ test(
           `${name}\n${mutant.stdout}\n${mutant.stderr}`,
         );
         if (detectsChange) assert.match(mutant.stdout, /ERR_ASSERTION/);
+        if (priceProducer) {
+          directMutant = run(process.execPath, ["tests/case.test.mjs"]);
+          assert.equal(directMutant.status, mutant.status, name);
+          if (detectsChange) assert.match(directMutant.stdout, /ERR_ASSERTION/);
+        }
       } finally {
         writeFileSync(source, original);
       }
@@ -185,6 +208,10 @@ test(
           "sibling-reader",
           "sibling-mutation",
           "reflective-mutation",
+          "same-source-children",
+          "alternate-cwd",
+          "inherited-preload",
+          "synthetic-exit",
         ].includes(name)
       ) {
         assert.ok(exitSource.resolution, JSON.stringify({ name, exitSource }));
@@ -241,6 +268,12 @@ test(
         nativeStatus: mutant.status,
         baselineMs: baseline.wallMs,
         mutantMs: mutant.wallMs,
+        ...(directBaseline
+          ? {
+              directBaselineMs: directBaseline.wallMs,
+              directMutantMs: directMutant.wallMs,
+            }
+          : {}),
         runId: id,
         candidate: site.candidate,
         observations,
