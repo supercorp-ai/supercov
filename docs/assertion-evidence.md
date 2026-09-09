@@ -22,6 +22,15 @@ do not supply production-site credit or validate an observation hint until the
 mock lifetime, selected calls and source-site dependence are established. This
 currently remains an operand-shape limit, even when the count itself was checked.
 
+Native Node equality observations also retain both operand source locations and
+their comparison relation. Comparing a `const` value with itself, or with an
+immutable alias, checks no property of that returned value. Such a comparison
+cannot supply value credit or validate a hint; an independent assertion still
+can. Node's strict equality uses `Object.is`, so even `NaN` compared with itself
+passes. Repeated calls, property reads, mutable aliases and `await` are not
+assumed to be identical evaluations. This bounded source check needs no pragma,
+contract file or additional runtime probe; it is not general relational analysis.
+
 Fallback native assertion locations prefixed `runtime-stack:` identify runtime
 stack coordinates, which a compiler or loader may have shifted. They are not
 original-source witnesses and cannot select a static test or validate a hint.

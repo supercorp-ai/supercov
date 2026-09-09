@@ -491,6 +491,18 @@ export function analyzeWithFrontend(
     callList?: boolean;
     /** Source projection of a Node mock, not proof of production-site dependence. */
     mock?: MockProjection;
+    /** Relation between both operands; strength alone cannot establish a value check. */
+    comparison?: Comparison;
+  }
+  interface ComparisonOperand {
+    source: string;
+    binding?: string;
+  }
+  interface Comparison {
+    predicate: string;
+    actual: ComparisonOperand;
+    expected: ComparisonOperand;
+    relation: "same-immutable-binding" | "unresolved";
   }
   interface MockProjection {
     target: string;
@@ -2025,6 +2037,102 @@ export function analyzeWithFrontend(
   const staticTestKey = (file: string, line: number, name: string) =>
     JSON.stringify([file, line, name]);
 
+  // Unlike origin tracing, comparison identity must NOT erase await, calls,
+  // getters or transformations. Only syntax with no runtime operation is peeled.
+  function comparisonExpression(e: ts.Expression): ts.Expression {
+    while (
+      ts.isParenthesizedExpression(e) ||
+      ts.isNonNullExpression(e) ||
+      ts.isAsExpression(e) ||
+      ts.isTypeAssertionExpression(e) ||
+      ts.isSatisfiesExpression(e)
+    )
+      e = e.expression;
+    return e;
+  }
+
+  function comparisonLocation(n: ts.Node): string {
+    const sf = n.getSourceFile();
+    return `${rel(sf)}:${n.getStart(sf)}:${n.getEnd()}`;
+  }
+
+  function immutableBinding(
+    expr: ts.Expression,
+    seen = new Set<ts.Node>(),
+  ): string | undefined {
+    const e = comparisonExpression(expr);
+    if (!ts.isIdentifier(e) || seen.size >= 32) return undefined;
+    const d = declOf(e);
+    if (
+      !d ||
+      !ts.isVariableDeclaration(d) ||
+      !ts.isIdentifier(d.name) ||
+      !d.initializer ||
+      !ts.isVariableDeclarationList(d.parent) ||
+      !(d.parent.flags & ts.NodeFlags.Const) ||
+      seen.has(d)
+    )
+      return undefined;
+    seen.add(d);
+    // A copy of a mutable binding has its own identity, not a live alias.
+    return immutableBinding(d.initializer, seen) ?? comparisonLocation(d);
+  }
+
+  function nativeComparison(call: ts.CallExpression): Comparison | undefined {
+    const callee = comparisonExpression(call.expression);
+    if (!ts.isPropertyAccessExpression(callee) || call.arguments.length < 2)
+      return undefined;
+    const receiver = comparisonExpression(callee.expression);
+    if (!ts.isIdentifier(receiver)) return undefined;
+    // Read the import declaration itself, before resolving its module alias.
+    // A helper named `assert` is not the native assertion implementation.
+    const declaration =
+      checker.getSymbolAtLocation(receiver)?.declarations?.[0];
+    if (
+      !declaration ||
+      !(ts.isImportClause(declaration) || ts.isNamespaceImport(declaration))
+    )
+      return undefined;
+    const imported = ts.isImportClause(declaration)
+      ? declaration.parent
+      : declaration.parent.parent;
+    if (!ts.isStringLiteralLike(imported.moduleSpecifier)) return undefined;
+    const module = imported.moduleSpecifier.text;
+    if (
+      ![
+        "node:assert",
+        "node:assert/strict",
+        "assert",
+        "assert/strict",
+      ].includes(module)
+    )
+      return undefined;
+    const strict = module.endsWith("/strict");
+    const predicates: Record<string, string> = {
+      equal: strict ? "node-same-value" : "node-loose-equality",
+      strictEqual: "node-same-value",
+      deepEqual: strict ? "node-deep-strict-equality" : "node-deep-equality",
+      deepStrictEqual: "node-deep-strict-equality",
+    };
+    const predicate = predicates[callee.name.text];
+    if (!predicate) return undefined;
+    const operand = (arg: ts.Expression): ComparisonOperand => ({
+      source: comparisonLocation(arg),
+      binding: immutableBinding(arg),
+    });
+    const actual = operand(call.arguments[0]);
+    const expected = operand(call.arguments[1]);
+    return {
+      predicate,
+      actual,
+      expected,
+      relation:
+        actual.binding && actual.binding === expected.binding
+          ? "same-immutable-binding"
+          : "unresolved",
+    };
+  }
+
   function nativeContextMock(call: ts.CallExpression): boolean {
     const callee = unwrap(call.expression);
     if (!ts.isPropertyAccessExpression(callee)) return false;
@@ -3101,6 +3209,7 @@ export function analyzeWithFrontend(
         )
           strength = "value";
         if (method && strength) {
+          const comparison = nativeComparison(node);
           pragmaCollector.register(
             node,
             method,
@@ -3200,6 +3309,7 @@ export function analyzeWithFrontend(
                 assertionSource: `${relative(root, sf.fileName)}:${sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1}:${sf.getLineAndCharacterOfPosition(node.getStart(sf)).character + 1}`,
                 assertionMethod: method,
                 ...(mock ? { mock } : {}),
+                ...(comparison ? { comparison } : {}),
               };
               if (!mock && callList && b.boundary.startsWith("sink:"))
                 ob.callList = true;
@@ -4502,6 +4612,7 @@ export function analyzeWithFrontend(
     negative: ob.negative,
     callList: ob.callList,
     mock: ob.mock,
+    comparison: ob.comparison,
     weak: ob.weak,
     implicit: ob.implicit,
     runtime: ob.runtime,

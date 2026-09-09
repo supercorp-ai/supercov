@@ -76,6 +76,24 @@ pub struct MockProjection {
     pub path: Vec<String>,
 }
 
+/// Source identities of both operands. Equal source text is not binding identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComparisonOperand {
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Comparison {
+    pub predicate: String,
+    pub actual: ComparisonOperand,
+    pub expected: ComparisonOperand,
+    pub relation: String,
+}
+
 /// Predicate strength applies to the projected value, not automatically to the
 /// arguments or count of each production call contributing to a mock history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +118,8 @@ pub struct Observation {
     pub call_list: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mock: Option<MockProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<Comparison>,
     /// a whole-page render witnessed the site: it ran, but its output was not read
     #[serde(default)]
     pub weak: bool,
@@ -114,10 +134,20 @@ pub struct Observation {
 }
 
 impl Observation {
+    /// Passing a reflexive native comparison constrains no value of its stable
+    /// operand. Keep the witness visible, but never promote it to site credit.
+    fn can_constrain_value(&self) -> bool {
+        self.mock.is_none()
+            && self
+                .comparison
+                .as_ref()
+                .is_none_or(|c| c.relation != "same-immutable-binding")
+    }
+
     /// Does this observation read the given boundary of the given site? Dense channels need the message
     /// constraint checked, and a spy on one console method sees only that method's calls.
     fn matches(&self, site: &Site, at: &Boundary) -> bool {
-        if self.mock.is_some() {
+        if !self.can_constrain_value() {
             return false;
         }
         if at.boundary != self.boundary {
@@ -748,7 +778,7 @@ impl<'a> Join<'a> {
         bounds: &[Boundary],
         ob: &Observation,
     ) -> bool {
-        if ob.mock.is_some() {
+        if !ob.can_constrain_value() {
             return false;
         }
         for sink in &test.sinks {
@@ -1174,7 +1204,7 @@ impl<'a> Join<'a> {
                     witnessed = took.iter().any(|id| {
                         self.tests.get(id).is_some_and(|test| {
                             test.observations.iter().any(|ob| {
-                                ob.mock.is_none()
+                                ob.can_constrain_value()
                                     && !ob.negative
                                     && ob.boundary == format!("return:{}", site.owner)
                                     && ob.strength.caught()
@@ -1468,6 +1498,7 @@ mod tests {
             negative: false,
             call_list: false,
             mock: None,
+            comparison: None,
             weak: false,
             log_sites: None,
             pattern_shared: false,
@@ -1656,6 +1687,118 @@ mod tests {
         assert_eq!(after.witness_issues[0].test, "T");
         assert_eq!(summary(&f.sites, &join(&f)).limits, 1);
         assert_eq!(summary(&f.sites, &join(&f)).gaps, 0);
+    }
+
+    #[test]
+    fn self_comparisons_cannot_supply_value_absence_sink_pragma_or_early_exit_credit() {
+        for predicate in [
+            "node-same-value",
+            "node-loose-equality",
+            "node-deep-equality",
+            "node-deep-strict-equality",
+        ] {
+            let operand = ComparisonOperand {
+                source: "tests/a.test.ts:70:76".into(),
+                binding: Some("tests/a.test.ts:20:40".into()),
+            };
+            let mut ob = observation("return:handler", Strength::Total);
+            ob.comparison = Some(Comparison {
+                predicate: predicate.into(),
+                actual: operand.clone(),
+                expected: ComparisonOperand {
+                    source: "tests/a.test.ts:78:84".into(),
+                    ..operand
+                },
+                relation: "same-immutable-binding".into(),
+            });
+            ob.assertion_source = Some("tests/a.test.ts:7:3".into());
+            ob.assertion_method = Some("equal".into());
+            ob.call_list = true;
+            let mut negative = ob.clone();
+            negative.negative = true;
+            let mut sink_ob = ob.clone();
+            sink_ob.boundary = "sink:records".into();
+            let mut negative_sink = sink_ob.clone();
+            negative_sink.negative = true;
+            let mut t = test("T1", vec![ob.clone(), negative, sink_ob, negative_sink]);
+            t.sinks.push(SinkBinding {
+                sink: "sink:records".into(),
+                param: "writer".into(),
+                member: None,
+            });
+            let mut upstream = site("S2", "return", vec![boundary("internal")], &["T1"]);
+            upstream.reached = vec!["S1".into()];
+            let mut decision = site("D1", "condition", vec![], &["T1", "T2"]);
+            decision.kind = "decision".into();
+            decision.decision = Some(DecisionFacts {
+                then: Some(vec!["S4".into()]),
+                else_: Some(Some(vec!["S5".into()])),
+                early_exit_downstream: Some(vec!["S5".into()]),
+                outcomes: Some(Outcomes {
+                    true_: vec!["T1".into()],
+                    false_: vec!["T2".into()],
+                }),
+                ..Default::default()
+            });
+            let mut f = facts(
+                vec![
+                    site("S1", "return", vec![boundary("return:handler")], &["T1"]),
+                    upstream,
+                    site(
+                        "S3",
+                        "external-call",
+                        vec![boundary("callback:writer")],
+                        &["T1"],
+                    ),
+                    site("S4", "return", vec![boundary("internal")], &["T1"]),
+                    site("S5", "io-call", vec![boundary("client-message")], &["T2"]),
+                    decision,
+                ],
+                vec![
+                    t,
+                    test("T2", vec![observation("client-message", Strength::Total)]),
+                ],
+            );
+            let rows = join(&f);
+            assert!(
+                rows[..4]
+                    .iter()
+                    .all(|r| r.status == Status::Unresolved && r.strength.is_none()),
+                "{predicate}"
+            );
+            let d = rows.iter().find(|r| r.site == "D1").unwrap();
+            assert_eq!(d.status, Status::Partial);
+            assert_eq!(d.stuck_false_caught, Some(false));
+            assert_eq!(
+                check_pragma_hints(&f, &[pragma_hint()])[0].validation,
+                HintValidation::Unresolved
+            );
+            let joiner = Join {
+                sites: f.sites.iter().map(|s| (s.id.as_str(), s)).collect(),
+                tests: f.tests.iter().map(|t| (t.id.as_str(), t)).collect(),
+                facts: &f,
+                resolved: BTreeMap::new(),
+            };
+            assert!(!joiner.pinned(&BTreeSet::from(["T1"]), &["S1".into()]));
+            let bytes = serde_json::to_vec(&ob).unwrap();
+            assert_eq!(serde_json::from_slice::<Observation>(&bytes).unwrap(), ob);
+            f.tests[0]
+                .observations
+                .push(observation("return:handler", Strength::Value));
+            let rows = join(&f);
+            assert_eq!(
+                rows[0].status,
+                Status::Evident,
+                "independent evidence is preserved"
+            );
+            assert_eq!(
+                rows.iter()
+                    .find(|r| r.site == "D1")
+                    .unwrap()
+                    .stuck_false_caught,
+                Some(true)
+            );
+        }
     }
 
     #[test]

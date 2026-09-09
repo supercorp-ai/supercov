@@ -37,6 +37,12 @@ test("archive facts require the exact schema, rules, ABI and capabilities", () =
         (cap) => cap !== "mock-observation-projections-v1",
       ),
     },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "assertion-comparison-relations-v1",
+      ),
+    },
   ])
     assert.throws(
       () => analyzeArchive({ ...empty(), protocol }, ts),
