@@ -26,6 +26,11 @@ The current JS/TS adapter is exercised with Node's test runner and Vitest.
 Browser, background, merged, retried and ambiguously attributed records have
 explicit limitations; other language assertion analyzers are not enabled here.
 
+Assertion analysis requires a source file for every accepted passing test attempt.
+If the runner or a custom stack formatter prevents source attribution, the query
+fails rather than treating omitted tests as execution gaps. Restore attribution
+and recapture the suite; ordinary coverage queries remain available.
+
 The analyzed project must provide a TypeScript compiler API, **even for a
 JavaScript project**. For example, add TypeScript as a development dependency
 before recording the run. The analyzer uses that project's compiler, not a

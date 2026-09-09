@@ -53,21 +53,30 @@ export function runnerExecutionScope(identity) {
         attemptId: `${testKey}-${retry}`,
     };
 }
-export function callerLocation(ignored) {
-    const lines = new Error().stack?.split("\n").slice(2) ?? [];
-    for (const entry of lines) {
-        if (ignored.test(entry) || entry.includes("node:internal"))
-            continue;
-        const match = /(?:\(|at\s+)(file:\/\/[^:)]+|(?:[A-Za-z]:)?[^():]+):(\d+):(\d+)\)?$/.exec(entry.trim());
+export function callerLocation(boundary = callerLocation) {
+    // Omit the registration wrapper by identity. A user file may have the same
+    // basename as a runtime adapter. Parse the location suffix, not individual
+    // path segments: spaces, parentheses and Unicode are valid filenames.
+    try {
+        const error = {};
+        Error.captureStackTrace(error, boundary);
+        if (typeof error.stack !== "string")
+            return {};
+        const entry = error.stack.split("\n")[1]?.trim();
+        const match = entry && /(?:^at (?:async )?| \()((?:file:\/\/|\/|[A-Za-z]:[\\/]|\\\\).*):(\d+):(\d+)\)?$/.exec(entry);
         if (!match)
-            continue;
+            return {};
         return {
             file: match[1],
             line: Number(match[2]),
             column: Number(match[3]),
         };
     }
-    return {};
+    catch {
+        // Custom formatters must not prevent registration. Missing provenance
+        // is explicit, never replaced with an unrelated deeper caller.
+        return {};
+    }
 }
 export function readScopedServerEvidence(scope, evidencePath = serverEvidencePath(scope)) {
     try {

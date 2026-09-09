@@ -51,6 +51,45 @@ test("archive facts require the exact schema, rules, ABI and capabilities", () =
 test("empty or setup-only archives cannot silently look like successfully analyzed suites", () => {
   assert.throws(() => analyzeArchive(empty(), ts), /No uniquely attributed/);
 });
+test("passed attempts without source provenance cannot masquerade as execution gaps", () => {
+  const input = empty();
+  const record = {
+    test: "missing source",
+    testId: "test",
+    role: "test",
+    status: "passed",
+    scope: {
+      version: 1,
+      runId: input.runId,
+      workerId: "w",
+      testId: "test",
+      testKey: "k",
+      retry: 0,
+      attemptId: "a",
+    },
+    runtime: [],
+    browser: [],
+    server: [],
+    phases: [],
+  };
+  input.records.push(record);
+  assert.throws(() => analyzeArchive(input, ts), /passed test.*source file/i);
+  // A second usable record must not hide the missing attempt either. Ordinary
+  // coverage remains available; assertion gap claims require complete provenance.
+  input.records.push({
+    ...record,
+    testId: "other",
+    test: "exact return",
+    testFile: "tests/core.test.mjs",
+    scope: {
+      ...record.scope,
+      testId: "other",
+      testKey: "other",
+      attemptId: "other",
+    },
+  });
+  assert.throws(() => analyzeArchive(input, ts), /passed test.*source file/i);
+});
 test("server statement/phase records require the full matching attempt scope", () => {
   const input = empty();
   const scope = {

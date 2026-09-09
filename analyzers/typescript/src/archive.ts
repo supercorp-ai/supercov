@@ -290,8 +290,11 @@ function analyzeArchiveWithFrontend(
   for (const [i, r] of accepted.entries()) {
     const id = `A${i + 1}`;
     if (!r.testFile) {
-      limitations.add("A passed test has no source file.");
-      continue;
+      // Dropping even one passing attempt could turn its executed/asserted sites
+      // into apparently certain gaps. Ordinary coverage can still be queried.
+      throw new Error(
+        "A passed test has no source file; assertion analysis requires test-source provenance. Recapture with a supported runner and stack formatter.",
+      );
     }
     if (r.browser.length)
       limitations.add(

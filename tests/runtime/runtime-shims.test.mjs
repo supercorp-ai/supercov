@@ -11,6 +11,7 @@ import {
   encodeCoverageScope,
 } from "../../runtime/javascript/transport.mjs";
 import { inferTestProvenance } from "../../runtime/javascript/provenance.mjs";
+import { callerLocation } from "../../runtime/javascript/runnerEvidence.mjs";
 import {
   discoverWorkspaceMapping,
   guestCoverageEnvironment,
@@ -18,6 +19,34 @@ import {
   wrapCapabilityObject,
   wrapImportedCapability,
 } from "../../runtime/javascript/launchSupervisor.mjs";
+
+test("test registration parses whole paths and never substitutes a deeper stack frame", () => {
+  const original = Error.prepareStackTrace;
+  try {
+    for (const [frame, file] of [
+      ["at file:///project%20(ü)/tests/nodeTest.mjs:12:3", "file:///project%20(ü)/tests/nodeTest.mjs"],
+      ["at register (/project (ü)/tests/runnerEvidence.mjs:12:3)", "/project (ü)/tests/runnerEvidence.mjs"],
+      ["at async /project (ü)/tests/runtime.mjs:12:3", "/project (ü)/tests/runtime.mjs"],
+      ["at register (C:\\project (ü)\\tests\\nodeTest.cjs:12:3)", "C:\\project (ü)\\tests\\nodeTest.cjs"],
+      ["at register (\\\\server\\share (ü)\\tests\\nodeTest.cjs:12:3)", "\\\\server\\share (ü)\\tests\\nodeTest.cjs"],
+      ["at file://server/share%20(ü)/tests/nodeTest.mjs:12:3", "file://server/share%20(ü)/tests/nodeTest.mjs"],
+    ]) {
+      Error.prepareStackTrace = () => `Error\n    ${frame}\n    at /wrong/deeper.mjs:99:1`;
+      assert.deepEqual(callerLocation(), { file, line: 12, column: 3 });
+    }
+    for (const formatter of [
+      () => [],
+      () => "Error\n    at opaque\n    at /wrong/deeper.mjs:99:1",
+      () => { throw new Error("formatter"); },
+    ]) {
+      Error.prepareStackTrace = formatter;
+      assert.deepEqual(callerLocation(), {});
+      assert.equal(Error.prepareStackTrace, formatter);
+    }
+  } finally {
+    Error.prepareStackTrace = original;
+  }
+});
 
 test("native assertion fallback tolerates opaque or throwing stack formatters", () => {
   const adapter = pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/nodeAssertAdapter.mjs")).href;

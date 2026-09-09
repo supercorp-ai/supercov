@@ -92,7 +92,7 @@ function wrappedRegistration(original) {
         if (index < 0)
             return Reflect.apply(original, this, args);
         const callback = args[index];
-        const location = callerLocation(/(?:nodeTest|runnerEvidence)\.[cm]?[jt]s/);
+        const location = callerLocation(supercovNodeTest);
         const identity = {
             runner: "node:test",
             name: testName(args, callback),

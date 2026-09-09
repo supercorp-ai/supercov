@@ -22,7 +22,7 @@ test(
   { skip: !enabled },
   async (t) => {
     const root = mkdtempSync(
-      resolve(tmpdir(), "supercov-operand-regressions-"),
+      resolve(tmpdir(), "supercov operand (ü) regressions-"),
     );
     t.after(() => {
       if (!process.env.SUPERCOV_KEEP_ASSERTED_FIXTURE)
