@@ -4,7 +4,7 @@ Supercov has one command for measuring a suite and a small set of commands for
 reading the result. Text output is designed for people and coding agents. Add
 `--json` only when an integration needs a stable machine-readable response.
 
-```sh
+```sh supercov
 npx supercov --help
 ```
 
@@ -24,13 +24,13 @@ npx supercov --help
 
 ## Measure a test command
 
-```sh
+```sh supercov
 npx supercov -- <test command>
 ```
 
 Everything after `--` is passed to the test command:
 
-```sh
+```sh supercov
 npx supercov -- npm test
 npx supercov -- npx playwright test --project=chromium
 npx supercov -- cargo test
@@ -42,7 +42,7 @@ preserves the wrapped command's exit status, so it can remain a CI gate.
 
 ## List and select runs
 
-```sh
+```sh supercov
 npx supercov runs
 npx supercov runs --limit 5
 npx supercov runs latest
@@ -55,7 +55,7 @@ sessions.
 
 ## Query a run
 
-```sh
+```sh supercov
 npx supercov runs <run-id> [query] [options]
 ```
 
@@ -75,7 +75,7 @@ npx supercov runs <run-id> [query] [options]
 
 Common examples:
 
-```sh
+```sh supercov
 npx supercov runs latest gaps --limit 10
 npx supercov runs latest file app/routes/checkout.ts
 npx supercov runs latest decision app/routes/checkout.ts:42
@@ -85,7 +85,7 @@ npx supercov runs latest test "checkout retry"
 
 Run any query with `--help` to see only the options valid for that query:
 
-```sh
+```sh supercov
 npx supercov runs latest --help
 npx supercov runs latest file --help
 ```
@@ -105,14 +105,14 @@ Collection output includes a copyable command for the next page.
 
 For a large file, group and rank its decisions:
 
-```sh
+```sh supercov
 npx supercov runs latest file app/routes/checkout.ts \
   --group decision --sort missing
 ```
 
 ## Compare runs
 
-```sh
+```sh supercov
 npx supercov diff <older-run> <newer-run>
 ```
 
@@ -122,13 +122,13 @@ Neither input run is changed.
 
 The same filters can focus a comparison:
 
-```sh
+```sh supercov
 npx supercov diff <older-run> <newer-run> --kind e2e
 ```
 
 ## Find a smaller test set
 
-```sh
+```sh supercov
 npx supercov runs latest minimize
 npx supercov runs latest minimize --metric branches --target 90
 ```
@@ -140,7 +140,7 @@ selected metric.
 
 ## Combine shards
 
-```sh
+```sh supercov
 npx supercov merge <shard-a> <shard-b> <shard-c>
 ```
 
@@ -150,7 +150,7 @@ incompatible merge rather than publishing a misleading aggregate.
 
 ## Clean local data
 
-```sh
+```sh supercov
 npx supercov clean --dry-run
 npx supercov clean --keep 20
 npx supercov clean
@@ -162,7 +162,7 @@ storage.
 
 ## Read bundled documentation
 
-```sh
+```sh supercov
 npx supercov docs
 npx supercov docs getting-started
 npx supercov docs troubleshooting
@@ -180,7 +180,7 @@ terminal or offline environment after the package has been downloaded.
 
 Examples:
 
-```sh
+```sh supercov
 SUPERCOV_SOURCE_ROOTS=src,app npx supercov -- npm test
 SUPERCOV_TEST_KIND=e2e npx supercov -- npx playwright test
 ```

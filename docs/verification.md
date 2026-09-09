@@ -16,7 +16,7 @@ Before merging, check three things:
 3. **The test protects behavior.** It should make a meaningful assertion without
    weakening existing assertions or changing application code for the metric.
 
-```sh
+```sh supercov
 npx supercov diff <baseline-run> <new-run>
 npx supercov runs <new-run> test "new test name"
 ```
@@ -34,7 +34,7 @@ Supercov separates four states:
 - **stale** — the run is valid history but no longer describes the current
   workspace.
 
-```sh
+```sh supercov
 npx supercov runs latest
 npx supercov runs latest scope
 npx supercov runs latest gaps

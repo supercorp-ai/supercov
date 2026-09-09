@@ -6,7 +6,7 @@ the isolated build when the relevant inputs have not changed.
 
 ## See where the time went
 
-```sh
+```sh supercov
 npx supercov runs latest
 ```
 
@@ -42,7 +42,7 @@ possible mismatch triggers a fresh build rather than risking stale coverage.
 
 A narrow test command can shorten the inner loop:
 
-```sh
+```sh supercov
 npx supercov -- npx vitest run app/checkout/session.test.ts
 ```
 
@@ -54,7 +54,7 @@ baseline.
 
 Compare the original and wrapped command under similar cache conditions:
 
-```sh
+```sh supercov
 /usr/bin/time -p npm test
 /usr/bin/time -p npx supercov -- npm test
 ```
@@ -73,7 +73,7 @@ than stored as a full report for every filter.
 The isolated workspace may be larger because it can contain an instrumented
 build cache. Supercov does not delete history in the background.
 
-```sh
+```sh supercov
 npx supercov clean --dry-run
 npx supercov clean --keep 20
 npx supercov clean

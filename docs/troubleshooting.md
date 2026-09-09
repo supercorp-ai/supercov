@@ -3,7 +3,7 @@
 Start with the run summary. It usually tells you whether the problem is the test
 command, source discovery, runner attribution, or a measurement boundary.
 
-```sh
+```sh supercov
 npx supercov runs latest
 npx supercov runs latest scope
 npx supercov runs latest runners
@@ -28,13 +28,13 @@ would for another npm package.
 Run the same command from the repository root. If first-party code lives in an
 unusual directory, declare the source roots explicitly:
 
-```sh
+```sh supercov
 SUPERCOV_SOURCE_ROOTS=src,app npx supercov -- npm test
 ```
 
 Then inspect what Supercov included and excluded:
 
-```sh
+```sh supercov
 npx supercov runs latest scope
 ```
 
@@ -45,7 +45,7 @@ warning. The goal is an honest boundary around code the repository owns.
 
 First check runner and source scope:
 
-```sh
+```sh supercov
 npx supercov runs latest runners
 npx supercov runs latest scope
 npx supercov runs latest gaps
@@ -67,7 +67,7 @@ file that cannot be compiled with them is measured through Ruby's `Coverage`
 module alone rather than failing the run. To put a file on that path
 deliberately, name a fragment of its path:
 
-```sh
+```sh supercov
 SUPERCOV_RUBY_SKIP_PROBES=app/models/order.rb npx supercov -- bundle exec rspec
 ```
 
@@ -82,7 +82,7 @@ workspace after relevant source, tests, dependencies, configuration, or
 toolchain inputs change. Rerun the same complete command to create a current
 baseline:
 
-```sh
+```sh supercov
 npx supercov -- npm test
 ```
 
@@ -133,7 +133,7 @@ mode still match.
 
 Inspect the recorded phases with:
 
-```sh
+```sh supercov
 npx supercov runs latest
 ```
 
@@ -143,7 +143,7 @@ See [Speed and storage](performance.md) for practical ways to shorten a loop.
 
 Preview cleanup, then choose how much history to keep:
 
-```sh
+```sh supercov
 npx supercov clean --dry-run
 npx supercov clean --keep 20
 npx supercov clean

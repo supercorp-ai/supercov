@@ -17,7 +17,7 @@ runner boundary.
 Supercov keeps those states separate. It does not turn “unknown” into
 “uncovered,” and it does not round either one away to produce a reassuring 100%.
 
-```sh
+```sh supercov
 npx supercov runs latest
 npx supercov runs latest gaps
 npx supercov runs latest scope
@@ -39,7 +39,7 @@ The exact obligations depend on the language and source construct. You do not
 need to reason about all of them at once. Start with a file, then open a decision
 or line only when the missing behavior needs explanation:
 
-```sh
+```sh supercov
 npx supercov runs latest file app/checkout/session.ts
 npx supercov runs latest decision app/checkout/session.ts:64
 npx supercov runs latest line app/checkout/session.ts:64
@@ -92,7 +92,7 @@ each runner.
 
 The same stored run can answer different questions:
 
-```sh
+```sh supercov
 npx supercov runs latest --filter all
 npx supercov runs latest --filter passed
 npx supercov runs latest --filter failed
@@ -103,7 +103,7 @@ attempts. `failed` isolates failed attempts, including failed retries.
 
 You can also focus on a test level or runner:
 
-```sh
+```sh supercov
 npx supercov runs latest gaps --kind e2e
 npx supercov runs latest gaps --runner playwright
 ```
@@ -115,13 +115,13 @@ percentage that was computed from a different set of tests.
 
 If the summary reports ambiguous source scope, inspect it:
 
-```sh
+```sh supercov
 npx supercov runs latest scope
 ```
 
 When first-party source lives in unusual directories, declare it explicitly:
 
-```sh
+```sh supercov
 SUPERCOV_SOURCE_ROOTS=src,app npx supercov -- npm test
 ```
 
