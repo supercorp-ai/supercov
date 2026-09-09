@@ -2,6 +2,7 @@ import test from "node:test";
 import "./mock-projections.integration.mjs";
 import "./comparison-relations.integration.mjs";
 import "./mock-counts.integration.mjs";
+import "./awaited-assertions.integration.mjs";
 import assert from "node:assert/strict";
 import {
   cpSync,
@@ -85,14 +86,10 @@ test(
             index >= 14
           )
             return [];
-          const column =
-            line.includes("await") && line.includes(".strictEqual(")
-              ? line.indexOf("strictEqual(") + 1
-              : line.includes("await") && line.includes(".equal(")
-                ? line.indexOf("equal(") + 1
-                : 3;
+          const fallback = line.includes("instance.strictEqual(");
+          const column = fallback ? line.indexOf("strictEqual(") + 1 : 3;
           return [
-            `${line.includes("await") ? "runtime-stack:" : ""}tests/runtime.mjs:${index + 1}:${column}`,
+            `${fallback ? "runtime-stack:" : ""}tests/runtime.mjs:${index + 1}:${column}`,
           ];
         });
         assert.equal(phases.length, 4);
@@ -174,12 +171,16 @@ test(
         const stack = phases.filter((p) =>
           p.source?.startsWith("runtime-stack:"),
         );
-        assert.equal(stack.length, 3);
+        assert.equal(stack.length, 1);
         assert.ok(
           stack.every((p) => Number(p.source.split(":").at(-2)) > 200),
           JSON.stringify(stack),
         );
         assert.equal(phases.at(-1).source, "tests/runtime.mjs:13:3");
+        assert.deepEqual(
+          phases.slice(0, 2).map((p) => p.source),
+          ["tests/runtime.mjs:9:3", "tests/runtime.mjs:10:3"],
+        );
         const shiftedReport = queryRun(
           shifted,
           "assertions",

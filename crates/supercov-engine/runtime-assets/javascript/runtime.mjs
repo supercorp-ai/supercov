@@ -721,9 +721,11 @@ function withCoverageCarrier(carrier, callback) {
 function assertionPhaseState(scope) {
   const key = attemptKey(scope);
   const existing = state.assertionPhases.get(key);
-  if (existing)
+  if (existing) {
+    existing.phaseIds ??= new Set(existing.phases.filter(phase => phase.kind === "assertion").map(phase => phase.id));
     return existing;
-  const created = { counter: 0, phases: [] };
+  }
+  const created = { counter: 0, phases: [], phaseIds: new Set() };
   state.assertionPhases.set(key, created);
   return created;
 }
@@ -753,9 +755,13 @@ function withNodeAssertionPhase(operation, source, callback) {
   const scope = context.scope;
   if (!scope)
     return callback();
-  const existing = context.phaseId ? assertionPhaseState(scope).phases.find((phase2) => phase2.id === context.phaseId && phase2.kind === "assertion") : void 0;
+  const existing = context.phaseId && assertionPhaseState(scope).phaseIds.has(context.phaseId);
   if (existing)
     return callback();
+  // The adapter's stack is only a fallback. Avoid formatting it when a lexical
+  // probe already supplied the active phase's exact original-source identity.
+  if (typeof source === "function")
+    source = source();
   const bridged = (_a8 = runtimeGlobal.__SUPERCOV_ASSERTION_PHASE_BRIDGE__) == null ? void 0 : _a8.call(runtimeGlobal, operation, source, callback);
   if (bridged == null ? void 0 : bridged.handled)
     return bridged.value;
@@ -768,6 +774,7 @@ function withNodeAssertionPhase(operation, source, callback) {
     startedAtMs: Date.now()
   });
   attempt.phases.push(phase);
+  attempt.phaseIds.add(phase.id);
   try {
     const result = withCoverageCarrier({ version: 1, scope, phaseId: phase.id }, callback);
     if (result && typeof result.then === "function")
@@ -784,6 +791,16 @@ function withNodeAssertionPhase(operation, source, callback) {
     finishAssertionPhase(phase, error);
     throw cleanInstrumentationStack(error);
   }
+}
+// Resolve the target exactly once, before argument evaluation, just like a
+// native call reference. The closure carries only source identity and receiver;
+// it never captures an assertion phase or mutable current-statement state across
+// await. Rejected arguments therefore create no phase, and awaited producer work
+// is not retroactively attributed to the assertion invocation.
+function bindNodeAssertion(operation, source, receiver, method) {
+  const target = method === void 0 ? receiver : receiver[method];
+  const thisArgument = method === void 0 ? void 0 : receiver;
+  return (...args) => withNodeAssertionPhase(operation, source, () => Reflect.apply(target, thisArgument, args));
 }
 function takeNodeAssertionPhases(scope) {
   var _a8, _b;
@@ -1293,6 +1310,7 @@ const directRuntimeApi = {
   selectionEnd,
   selectionRight,
   takeNodeAssertionPhases,
+  bindNodeAssertion,
   testStatement,
   tryBegin,
   tryCatch,
@@ -1343,6 +1361,7 @@ export {
   selectionEnd,
   selectionRight,
   takeNodeAssertionPhases,
+  bindNodeAssertion,
   testStatement,
   tryBegin,
   tryCatch,

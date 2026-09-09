@@ -85,6 +85,86 @@ test("a phase is only honoured for the attempt that minted it", async () => {
   assert.equal(runtime.phaseBelongsToAttempt("attempt-a:phase:2", ""), false);
 });
 
+test("lexical native phases do not format an unused fallback stack or duplicate witnesses", () => {
+  const adapter = pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/nodeAssertAdapter.mjs")).href;
+  const runtime = pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/runtime.mjs")).href;
+  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+    import native from 'node:assert/strict';
+    import { createNodeAssertAdapter } from ${JSON.stringify(adapter)};
+    import { bindNodeAssertion, withCoverageCarrier, takeNodeAssertionPhases } from ${JSON.stringify(runtime)};
+    const assert = createNodeAssertAdapter(native, 'node:assert/strict');
+    const scope = { version: 1, runId: 'r', workerId: 'w', testId: 't', testKey: 'k', retry: 0, attemptId: 'a' };
+    let formatted = 0;
+    const original = Error.prepareStackTrace;
+    Error.prepareStackTrace = () => { formatted++; return 'opaque'; };
+    await withCoverageCarrier({ version: 1, scope }, async () => {
+      for (let n = 0; n < 100; n++)
+        bindNodeAssertion('node:assert/strict.equal', 'tests/a.mjs:1:1', assert, 'equal')(await Promise.resolve(4), 4);
+    });
+    Error.prepareStackTrace = original;
+    process.stdout.write(JSON.stringify({ formatted, phases: takeNodeAssertionPhases(scope) }));
+  `], { encoding: "utf8", timeout: 10000 });
+  assert.equal(child.status, 0, child.stderr);
+  const result = JSON.parse(child.stdout);
+  assert.equal(result.formatted, 0);
+  assert.equal(result.phases.length, 100);
+  assert.ok(result.phases.every(p => p.source === "tests/a.mjs:1:1" && p.status === "passed"));
+});
+
+test("awaited assertion binding preserves call-reference evaluation and attempt identity", () => {
+  const runtime = pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/runtime.mjs")).href;
+  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+    import { bindNodeAssertion, withCoverageCarrier, coverageCarrier, takeNodeAssertionPhases } from ${JSON.stringify(runtime)};
+    const scope = id => ({ version: 1, runId: 'r', workerId: 'w', testId: id, testKey: id, retry: 0, attemptId: id });
+    const a = scope('a'), b = scope('b');
+    const events = [];
+    const sentinel = new Error('target failure');
+    let gets = 0;
+    const receiver = { get equal() {
+      gets++;
+      events.push('get');
+      return function (value) {
+        if (this !== receiver || value !== 4) throw new Error('changed call reference');
+        events.push('invoke:' + coverageCarrier().scope.attemptId);
+        return undefined;
+      };
+    } };
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const pending = withCoverageCarrier({ version: 1, scope: a }, async () => {
+      const result = bindNodeAssertion('node:assert.equal', 'a:1:1', receiver, 'equal')(await gate);
+      if (result !== undefined) throw new Error('changed return value');
+    });
+    await withCoverageCarrier({ version: 1, scope: b }, async () => {
+      const value = await Promise.resolve(4);
+      if (coverageCarrier().phaseId) throw new Error('borrowed phase');
+      bindNodeAssertion('node:assert.equal', 'b:1:1', receiver, 'equal')(value);
+      try { bindNodeAssertion('node:assert.equal', 'b:2:1', () => { throw sentinel; })(value); }
+      catch (error) { if (error !== sentinel) throw error; }
+      try { bindNodeAssertion('node:assert.equal', 'b:3:1', receiver, 'equal')(await Promise.reject(sentinel)); }
+      catch (error) { if (error !== sentinel) throw error; }
+      // Calling a non-function evaluates its arguments before throwing TypeError.
+      try { bindNodeAssertion('node:assert.equal', 'b:4:1', { equal: 42 }, 'equal')(events.push('noncallable argument')); }
+      catch (error) { if (!(error instanceof TypeError)) throw error; }
+      // A throwing property access, in contrast, happens before the arguments.
+      try { bindNodeAssertion('node:assert.equal', 'b:5:1', { get equal() { throw sentinel; } }, 'equal')(events.push('forbidden argument')); }
+      catch (error) { if (error !== sentinel) throw error; }
+    });
+    Object.defineProperty(receiver, 'equal', { value: () => { throw new Error('target was re-read'); } });
+    release(4);
+    await pending;
+    if (gets !== 3) throw new Error('getter was not read exactly once per reference');
+    process.stdout.write(JSON.stringify({ events, a: takeNodeAssertionPhases(a), b: takeNodeAssertionPhases(b) }));
+  `], { encoding: "utf8", timeout: 10000 });
+  assert.equal(child.status, 0, child.stderr);
+  const result = JSON.parse(child.stdout);
+  assert.deepEqual(result.events, ["get", "get", "invoke:b", "get", "noncallable argument", "invoke:a"]);
+  assert.deepEqual(result.a.map(p => [p.source, p.status]), [["a:1:1", "passed"]]);
+  assert.deepEqual(result.b.map(p => [p.source, p.status]), [
+    ["b:1:1", "passed"], ["b:2:1", "failed"], ["b:4:1", "failed"],
+  ]);
+});
+
 test("coverage scopes round-trip without losing worker, retry, or phase identity", () => {
   const scope = {
     version: 1,

@@ -20,7 +20,7 @@ test(
   {
     skip: process.env.SUPERCOV_ASSERTED_INTEGRATION !== "1",
   },
-  (t) => {
+  async (t) => {
     const root = mkdtempSync(
       resolve(tmpdir(), "supercov-comparison-relations-"),
     );
@@ -131,6 +131,12 @@ test(
         "return 'checked'",
         "return 'wrong'",
         false,
+      ],
+      [
+        "awaited self comparison accepts another primitive",
+        "return 'awaited'",
+        "return 'another primitive'",
+        true,
       ],
       [
         "awaiting a value is not always identity",
@@ -285,14 +291,35 @@ test(
     );
     assert.ok(custom.length > 0);
     assert.ok(custom.every((ob) => !ob.comparison));
-    const awaitIssues = testPage.items
-      .flatMap((item) => item.value.witnessIssues ?? [])
-      .filter((issue) => issue.observation?.boundary === "return:awaitedSelf");
-    assert.ok(awaitIssues.length > 0);
-    assert.ok(
-      awaitIssues.every(
-        (issue) => issue.observation.comparison?.relation === "unresolved",
-      ),
+    // The awaited call now has an exact passing lexical witness. That fixes
+    // source identity, not the unresolved relationship between its operands.
+    const awaited = observations.filter(
+      (ob) => ob.boundary === "return:awaitedSelf",
+    );
+    // Both operands resolve to the same boundary, but there is one invocation.
+    assert.equal(awaited.length, 2);
+    assert.deepEqual(
+      [...new Set(awaited.map((ob) => ob.assertionSource))],
+      ["tests/core.test.mjs:49:3"],
+    );
+    assert.ok(awaited.every((ob) => ob.comparison?.relation === "unresolved"));
+    assert.equal(
+      rejectedObservations.filter((ob) => ob.boundary === "return:awaitedSelf")
+        .length,
+      0,
+    );
+    await t.test(
+      "awaited self comparison does not claim total return-value protection",
+      {
+        todo: "SG-ASSERT-015: the exact witness exposes unresolved operand dependence, not total value protection",
+      },
+      () => {
+        const site = report.sites.find(
+          (row) => row.site.owner === "awaitedSelf",
+        );
+        assert.ok(site);
+        assert.notEqual(site.candidate.strength, "total");
+      },
     );
     const hints = query("--pragmas");
     assert.equal(hints.summary.hints, 1);

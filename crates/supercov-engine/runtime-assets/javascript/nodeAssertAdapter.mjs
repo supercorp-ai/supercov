@@ -54,7 +54,7 @@ function assertionSource(boundary) {
 function wrapAssertion(original, operation) {
     return new Proxy(original, {
         apply: function assertionApply(target, thisArgument, argumentsList) {
-            return withNodeAssertionPhase(operation, assertionSource(assertionApply), () => Reflect.apply(target, thisArgument, argumentsList));
+            return withNodeAssertionPhase(operation, () => assertionSource(assertionApply), () => Reflect.apply(target, thisArgument, argumentsList));
         },
     });
 }

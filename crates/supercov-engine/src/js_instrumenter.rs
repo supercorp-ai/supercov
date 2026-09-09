@@ -936,7 +936,13 @@ struct NodeAssertionSiteCollector<'s> {
     file: &'s str,
     bindings: &'s NodeAssertionBindings,
     scoping: &'s oxc_semantic::Scoping,
-    sites: HashMap<SpanKey, (String, String)>,
+    sites: HashMap<SpanKey, NodeAssertionSite>,
+}
+
+struct NodeAssertionSite {
+    operation: String,
+    source: String,
+    bind_callee: bool,
 }
 
 fn referenced_symbol(
@@ -1000,6 +1006,7 @@ fn expect_operation(
 #[derive(Default)]
 struct AwaitYieldScanner {
     found: bool,
+    has_yield: bool,
 }
 
 impl<'a> Visit<'a> for AwaitYieldScanner {
@@ -1009,6 +1016,7 @@ impl<'a> Visit<'a> for AwaitYieldScanner {
 
     fn visit_yield_expression(&mut self, _expression: &oxc_ast::ast::YieldExpression<'a>) {
         self.found = true;
+        self.has_yield = true;
     }
 
     fn visit_function(&mut self, _function: &Function<'a>, _flags: ScopeFlags) {}
@@ -1050,14 +1058,34 @@ impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
             for argument in &call.arguments {
                 unsafe_argument.visit_argument(argument);
             }
-            if unsafe_argument.found {
+            // Binding the callee leaves awaited arguments in their original async
+            // function. Start the phase at invocation, not before suspension.
+            // Optional calls, generators, matchers and promise-returning assertion
+            // methods retain the adapter fallback until separately supported.
+            let bind_callee = unsafe_argument.found
+                && !unsafe_argument.has_yield
+                && operation.starts_with("node:assert")
+                && !operation.ends_with(".rejects")
+                && !operation.ends_with(".doesNotReject")
+                && !call.optional
+                && match &call.callee {
+                    Expression::Identifier(_) => true,
+                    Expression::StaticMemberExpression(member) => !member.optional,
+                    Expression::ComputedMemberExpression(member) => !member.optional,
+                    _ => false,
+                };
+            if unsafe_argument.found && !bind_callee {
                 walk::walk_call_expression(self, call);
                 return;
             }
             let (line, column) = line_and_utf16_column(self.source, call.span.start as usize);
             self.sites.insert(
                 span_key(call.span),
-                (operation, format!("{}:{line}:{column}", self.file)),
+                NodeAssertionSite {
+                    operation,
+                    source: format!("{}:{line}:{column}", self.file),
+                    bind_callee,
+                },
             );
         }
         walk::walk_call_expression(self, call);
@@ -1066,11 +1094,11 @@ impl<'a> Visit<'a> for NodeAssertionSiteCollector<'_> {
 
 struct NodeAssertionTransformer<'a> {
     ast: AstBuilder<'a>,
-    sites: HashMap<SpanKey, (String, String)>,
+    sites: HashMap<SpanKey, NodeAssertionSite>,
 }
 
 impl<'a> NodeAssertionTransformer<'a> {
-    fn wrap(&self, original: Expression<'a>, operation: &str, source: &str) -> Expression<'a> {
+    fn runtime_helper(&self, name: &str) -> Expression<'a> {
         let runtime = Expression::StaticMemberExpression(
             self.ast.alloc_static_member_expression(
                 Span::default(),
@@ -1083,15 +1111,57 @@ impl<'a> NodeAssertionTransformer<'a> {
                 false,
             ),
         );
-        let helper = Expression::StaticMemberExpression(
+        Expression::StaticMemberExpression(
             self.ast.alloc_static_member_expression(
                 Span::default(),
                 runtime,
                 self.ast
-                    .identifier_name(Span::default(), self.ast.ident("withNodeAssertionPhase")),
+                    .identifier_name(Span::default(), self.ast.ident(name)),
                 false,
             ),
-        );
+        )
+    }
+
+    fn bind_callee(&self, callee: Expression<'a>, operation: &str, source: &str) -> Expression<'a> {
+        let mut arguments = self.ast.vec_from_array([
+            Argument::from(self.ast.expression_string_literal(
+                Span::default(),
+                self.ast.str(operation),
+                None,
+            )),
+            Argument::from(self.ast.expression_string_literal(
+                Span::default(),
+                self.ast.str(source),
+                None,
+            )),
+        ]);
+        match callee {
+            Expression::StaticMemberExpression(member) => {
+                let member = member.unbox();
+                arguments.push(Argument::from(member.object));
+                arguments.push(Argument::from(self.ast.expression_string_literal(
+                    Span::default(),
+                    self.ast.str(member.property.name.as_str()),
+                    None,
+                )));
+            }
+            Expression::ComputedMemberExpression(member) => {
+                let member = member.unbox();
+                arguments.push(Argument::from(member.object));
+                arguments.push(Argument::from(member.expression));
+            }
+            callee => arguments.push(Argument::from(callee)),
+        }
+        self.ast.expression_call(
+            Span::default(),
+            self.runtime_helper("bindNodeAssertion"),
+            NONE,
+            arguments,
+            false,
+        )
+    }
+
+    fn wrap(&self, original: Expression<'a>, operation: &str, source: &str) -> Expression<'a> {
         let parameters = self.ast.alloc_formal_parameters(
             Span::default(),
             FormalParameterKind::ArrowFormalParameters,
@@ -1115,7 +1185,7 @@ impl<'a> NodeAssertionTransformer<'a> {
         );
         self.ast.expression_call(
             Span::default(),
-            helper,
+            self.runtime_helper("withNodeAssertionPhase"),
             NONE,
             self.ast.vec_from_array([
                 Argument::from(self.ast.expression_string_literal(
@@ -1139,16 +1209,24 @@ impl<'a> VisitMut<'a> for NodeAssertionTransformer<'a> {
     fn visit_expression(&mut self, expression: &mut Expression<'a>) {
         let key = span_key(expression.span());
         walk_mut::walk_expression(self, expression);
-        let Some((operation, source)) = self.sites.remove(&key) else {
+        let Some(site) = self.sites.remove(&key) else {
             return;
         };
+        if site.bind_callee {
+            if let Expression::CallExpression(call) = expression {
+                let callee = call.callee.take_in(self.ast.allocator);
+                call.callee = self.bind_callee(callee, &site.operation, &site.source);
+            }
+            return;
+        }
         let original = expression.take_in(self.ast.allocator);
-        *expression = self.wrap(original, &operation, &source);
+        *expression = self.wrap(original, &site.operation, &site.source);
     }
 }
 
 /// Attribute native node:assert and node:test expect calls by opening the
-/// assertion phase before argument evaluation. Lexical symbol identity avoids
+/// assertion phase before synchronous argument evaluation, or at invocation for
+/// supported native calls with awaited arguments. Lexical symbol identity avoids
 /// wrapping a shadowed or merely assert-shaped user binding.
 pub fn instrument_node_assertion_phases(
     source: &str,
@@ -7276,8 +7354,30 @@ mod tests {
             "export async function check() { assert.equal(await value(), 1); }\n",
         );
         let output = instrument_node_assertion_phases(source, "tests/value.test.mjs").unwrap();
-        assert_eq!(output.assertions, 0);
-        assert_eq!(output.code, source);
+        assert_eq!(output.assertions, 1);
+        assert!(output.code.contains("bindNodeAssertion"));
+        assert!(output.code.contains("tests/value.test.mjs:2:33"));
+        assert!(output.code.contains("await value()"));
+        assert!(!output.code.contains("withNodeAssertionPhase"));
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, &output.code, SourceType::mjs()).parse();
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    }
+
+    #[test]
+    fn awaited_assertion_bindings_leave_unsupported_calls_untouched() {
+        for source in [
+            "import assert from 'node:assert'; async function f() { assert?.equal(await value(), 1); }",
+            "import assert from 'node:assert'; async function f() { assert.equal?.(await value(), 1); }",
+            "import assert from 'node:assert'; function* f() { assert.equal(yield value(), 1); }",
+            "import assert from 'node:assert'; async function f() { assert.rejects(await value()); }",
+            "import assert from 'node:assert'; async function f(assert) { assert.equal(await value(), 1); }",
+            "import { expect } from 'vitest'; async function f() { expect(await value()).toBe(1); }",
+        ] {
+            let output = instrument_node_assertion_phases(source, "tests/value.test.mjs").unwrap();
+            assert_eq!(output.assertions, 0, "{source}");
+            assert_eq!(output.code, source);
+        }
     }
 
     #[test]

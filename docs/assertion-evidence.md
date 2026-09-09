@@ -74,6 +74,17 @@ stack coordinates, which a compiler or loader may have shifted. They are not
 original-source witnesses and cannot select a static test or validate a hint.
 Lexical assertion markers retain their exact original-source locations.
 
+For statically identified native Node assertions with awaited arguments, Supercov
+binds that source location to the call before evaluating the arguments. It
+records the phase only when the assertion is invoked: a rejected operand creates
+no assertion witness, and a caught assertion failure remains a failed witness.
+Earlier async work is not attributed to that invocation phase. This preserves
+the original `await` expressions without relying on a shared current-statement
+marker. Optional calls, generators, matcher calls with awaited operands, constructed
+`Assert` instances and awaited arguments to `rejects`/`doesNotReject` still use
+qualified runtime-stack fallback where the runner supports it. Exact source
+identity alone does not establish an operand's relationship to production code.
+
 ## Requirements
 
 Use the **npm Supercov launcher**, which supplies the installed analyzer assets.
