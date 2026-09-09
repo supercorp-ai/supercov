@@ -19,6 +19,31 @@ import {
   wrapImportedCapability,
 } from "../../runtime/javascript/launchSupervisor.mjs";
 
+test("native assertion fallback tolerates opaque or throwing stack formatters", () => {
+  const adapter = pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/nodeAssertAdapter.mjs")).href;
+  const runtime = pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/runtime.mjs")).href;
+  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+    import native from 'node:assert/strict';
+    import { createNodeAssertAdapter } from ${JSON.stringify(adapter)};
+    import { withCoverageCarrier, takeNodeAssertionPhases } from ${JSON.stringify(runtime)};
+    const assert = createNodeAssertAdapter(native, 'node:assert/strict');
+    const scope = { version: 1, runId: 'r', workerId: 'w', testId: 't', testKey: 'k', retry: 0, attemptId: 'a' };
+    const original = Error.prepareStackTrace;
+    const formatters = [() => [], () => 'opaque stack', () => { throw new Error('formatter'); }];
+    for (const formatter of formatters) {
+      Error.prepareStackTrace = formatter;
+      await withCoverageCarrier({ version: 1, scope }, async () => { assert.equal(await Promise.resolve(4), 4); });
+      if (Error.prepareStackTrace !== formatter) throw new Error('formatter was replaced');
+    }
+    Error.prepareStackTrace = original;
+    process.stdout.write(JSON.stringify(takeNodeAssertionPhases(scope)));
+  `], { encoding: "utf8", timeout: 10000 });
+  assert.equal(child.status, 0, child.stderr);
+  const phases = JSON.parse(child.stdout);
+  assert.equal(phases.length, 3);
+  assert.ok(phases.every(p => p.status === "passed" && p.source === undefined));
+});
+
 test("a phase is only honoured for the attempt that minted it", async () => {
   // A browser context shared by a whole worker keeps the previous test's last
   // phase in storage and in its cookie; tagging the next test's evidence with

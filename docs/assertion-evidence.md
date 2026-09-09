@@ -9,6 +9,16 @@ This is candidate evidence, not a proof that arbitrary changes are safe.
 `assertionScore` remains null. Execution-only links, test gaps and analysis limits
 are different things; do not interpret a passing assertion nearby as protection.
 
+An unsupported operand in a passing assertion can leave its relationship to
+code covered by that test unknown. Such sites report an operand-shape limit,
+not proof that an assertion is absent. This does not give those sites assertion
+credit or hide known execution gaps.
+
+Fallback native assertion locations prefixed `runtime-stack:` identify runtime
+stack coordinates, which a compiler or loader may have shifted. They are not
+original-source witnesses and cannot select a static test or validate a hint.
+Lexical assertion markers retain their exact original-source locations.
+
 ## Requirements
 
 Use the **npm Supercov launcher**, which supplies the installed analyzer assets.

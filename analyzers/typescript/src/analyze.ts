@@ -1336,6 +1336,8 @@ export function analyzeWithFrontend(
     pending: PendingOperand[];
   }
   interface PendingOperand {
+    assertionSource: string;
+    assertionMethod: string;
     /** "file:line:column" of the statements that compute the operand (its own statement and the
      *  declarations/assignments of the variables it reads) */
     statements: string[];
@@ -3052,6 +3054,8 @@ export function analyzeWithFrontend(
             const o = originOf(arg);
             const unresolvedOperand = (shape: string) =>
               pending.push({
+                assertionSource: `${relative(root, sf.fileName)}:${sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1}:${sf.getLineAndCharacterOfPosition(node.getStart(sf)).character + 1}`,
+                assertionMethod: method,
                 statements: definingStatements(arg),
                 strength: RANK[s] > RANK.value ? "value" : s,
                 negative: !!negative,
@@ -3623,19 +3627,35 @@ export function analyzeWithFrontend(
   }
 
   /**
-   * Was this site plausibly asserted through an operand whose shape the analysis could not trace? Statement
-   * attribution answers it: the operand's defining statements record which production functions were entered
-   * while they ran, so an operand that entered this site's owner may well read it. Returns the shapes to
-   * report, so "unresolved" can say "limit" instead of sending an agent to write a test that already exists.
+   * Unknown operand dependence is a limit, not proof of an absent assertion.
+   * Synchronous statement attribution can identify a possible relationship but
+   * cannot exclude one across an await, pipe capture, or another async boundary.
+   * A passing unmodeled assertion therefore leaves dependence unresolved for
+   * sites covered by that test. This only changes the reason for an unresolved
+   * candidate: it never supplies an observation, strength, or positive test link.
    */
   function unmodelledOperands(s: Site, covering: RuntimeTest[]): string[] {
     buildFunctionIndex();
     const shapes = new Set<string>();
     for (const rt of covering) {
       const byStatement = runtimeStatements.get(rt.id);
-      const st = byStatement ? staticFor(rt) : undefined;
-      if (!byStatement || !st) continue;
-      for (const p of st.pending)
+      const st = staticFor(rt);
+      if (!st) continue;
+      const phases = runtimePhases.get(rt.id);
+      for (const p of st.pending) {
+        if (phases) {
+          if (
+            !assertionWitnessIssue(phases, p.assertionSource, p.assertionMethod)
+          )
+            shapes.add(
+              `${p.where}: ${p.shape} (passing assertion in covering test ${rt.id}; operand dependence unresolved)`,
+            );
+          // A known failed, mixed, incomplete or unexecuted call cannot supply
+          // this passing-operand limit. Missing witness transport is separately
+          // reported by witnessIssues. Legacy statement evidence remains below.
+          continue;
+        }
+        if (!byStatement) continue;
         for (const pos of p.statements) {
           const attribution = byStatement[pos];
           if (!attribution) continue;
@@ -3646,6 +3666,7 @@ export function analyzeWithFrontend(
             (s.kind === "decision" && attribution.decs.some((d) => d === s.id));
           if (entered) shapes.add(p.shape);
         }
+      }
     }
     return [...shapes];
   }

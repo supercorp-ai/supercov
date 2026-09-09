@@ -1,4 +1,6 @@
 import { withNodeAssertionPhase } from "./runtime.mjs";
+import { relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 const ASSERTION_METHODS = new Set([
     "deepEqual",
     "deepStrictEqual",
@@ -19,18 +21,40 @@ const ASSERTION_METHODS = new Set([
     "strictEqual",
     "throws",
 ]);
-function assertionSource() {
-    const lines = new Error().stack?.split("\n").slice(2) ?? [];
-    const entry = lines.find((line) => !/(?:nodeAssert|nodeAssertion|runtime)\.[cm]?[jt]s/.test(line) &&
-        !line.includes("node:internal"));
-    if (!entry)
+function assertionSource(boundary) {
+    // Omit our own frames by function identity, not basename: a user's helper
+    // may itself be called runtime.mjs or nodeAssertAdapter.mjs. Never search
+    // deeper for a plausible-looking caller when the immediate frame is opaque.
+    // A loader may have transformed this file without composing source maps.
+    // Qualify stack coordinates so they cannot masquerade as the original
+    // source positions emitted by lexical probes and used for oracle matching.
+    try {
+        const error = {};
+        Error.captureStackTrace(error, boundary);
+        if (typeof error.stack !== "string")
+            return undefined;
+        const entry = error.stack.split("\n")[1]?.trim();
+        const match = entry && /(?:^at (?:async )?| \()((?:file:\/\/\/|\/|[A-Za-z]:[\\/]).*):(\d+):(\d+)\)?$/.exec(entry);
+        if (!match)
+            return undefined;
+        const file = match[1].startsWith("file:") ? fileURLToPath(match[1]) : match[1];
+        const roots = [process.env.SUPERCOV_PROJECT_ROOT, process.env.SUPERCOV_SOURCE_PROJECT_ROOT, process.cwd()].filter(Boolean);
+        for (const root of roots) {
+            const path = relative(root, file);
+            if (path !== ".." && !path.startsWith(`..${sep}`) && !/^(?:[A-Za-z]:|[\\/])/.test(path))
+                return `runtime-stack:${path.split(sep).join("/")}:${match[2]}:${match[3]}`;
+        }
+        return `runtime-stack:${file.split(sep).join("/")}:${match[2]}:${match[3]}`;
+    }
+    catch {
+        // Custom stack formatters must not change the user's assertion outcome.
         return undefined;
-    return entry.trim().replace(/^at\s+/, "");
+    }
 }
 function wrapAssertion(original, operation) {
     return new Proxy(original, {
-        apply(target, thisArgument, argumentsList) {
-            return withNodeAssertionPhase(operation, assertionSource(), () => Reflect.apply(target, thisArgument, argumentsList));
+        apply: function assertionApply(target, thisArgument, argumentsList) {
+            return withNodeAssertionPhase(operation, assertionSource(assertionApply), () => Reflect.apply(target, thisArgument, argumentsList));
         },
     });
 }
