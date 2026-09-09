@@ -38,6 +38,26 @@ assert.deepEqual(manifest.files, [
   "README.md",
 ]);
 checkedIdentity();
+const analyzerRoot = resolve(repository, "analyzers/typescript");
+const analyzerPackage = JSON.parse(
+  readFileSync(resolve(analyzerRoot, "package.json"), "utf8"),
+);
+assert.equal(analyzerPackage.private, true);
+assert.equal(
+  analyzerPackage.bin,
+  undefined,
+  "no standalone research CLI may ship",
+);
+assert.equal(
+  analyzerPackage.exports,
+  undefined,
+  "the analyzer is internal, not a separate SDK",
+);
+assert.deepEqual(
+  readdirSync(resolve(analyzerRoot, "bin")).sort(),
+  ["compiler-identity.mjs", "identity.mjs", "query.mjs"],
+  "only the product query transport and identity helpers may ship",
+);
 assert.equal(
   manifest.dependencies,
   undefined,

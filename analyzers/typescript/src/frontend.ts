@@ -45,11 +45,6 @@ export interface CompilerFrontend {
   limitations: Set<string>;
   openProgram(options: AnalyzeOptions): AnalysisProgram;
   parseSource(file: string, text: string): ts.SourceFile;
-  transpileSourceMap(
-    file: string,
-    text: string,
-    root: string,
-  ): string | undefined;
   close(): void;
 }
 
@@ -125,26 +120,6 @@ function legacyFrontend(compiler: typeof ts): CompilerFrontend {
     },
     parseSource: (file, text) =>
       compiler.createSourceFile(file, text, compiler.ScriptTarget.Latest, true),
-    transpileSourceMap(file, text, root) {
-      const cfg = compiler.readConfigFile(
-        resolve(root, "tsconfig.json"),
-        compiler.sys.readFile,
-      );
-      const opts = compiler.parseJsonConfigFileContent(
-        cfg.config,
-        compiler.sys,
-        root,
-      ).options;
-      return compiler.transpileModule(text, {
-        compilerOptions: {
-          ...opts,
-          sourceMap: true,
-          inlineSourceMap: false,
-          inlineSources: false,
-        },
-        fileName: file,
-      }).sourceMapText;
-    },
   };
 }
 

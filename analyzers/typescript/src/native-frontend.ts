@@ -180,11 +180,6 @@ export function nativeFrontend(
         );
       return source as ts.SourceFile;
     },
-    transpileSourceMap() {
-      throw new Error(
-        "TypeScript 7 requires original-source coverage; generated-line remapping is unavailable",
-      );
-    },
     openProgram(options) {
       const configPath = resolve(root, options.tsconfig ?? "tsconfig.json");
       const hasConfig = existsSync(configPath);

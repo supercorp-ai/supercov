@@ -1,24 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  mkdtempSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-  readdirSync,
-  rmSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { readFileSync, writeFileSync, readdirSync, rmSync } from "node:fs";
+import { resolve } from "node:path";
 import ts from "typescript";
 import { analyze } from "../dist/analyze.js";
-import { assertFactsParity } from "./facts-parity.mjs";
-
-const directory = dirname(fileURLToPath(import.meta.url));
-const projectRoot = resolve(directory, "fixtures/basic");
-const cli = resolve(directory, "../bin/analyze.mjs");
 const json = (file, data) => writeFileSync(file, JSON.stringify(data));
 import { input } from "./fixture-input.mjs";
 const run = (options) => analyze(options);
@@ -51,7 +36,13 @@ test("real source and assertion syntax produce facts, not verdicts", (t) => {
 test("JS-ASSERT-005: missing assertion witnesses must reach the join as an analysis limit", (t) => {
   const setup = input(t);
   const baseline = run(setup);
-  const result = run({ ...setup, runtimeObservations: false });
+  const evidenceFiles = Object.fromEntries(
+    Object.entries(setup.evidenceFiles).filter(
+      ([file]) =>
+        !file.endsWith(".phases.json") && !file.endsWith(".statements.json"),
+    ),
+  );
+  const result = run({ ...setup, evidenceFiles });
   assert.ok(result.diagnostics.suppressedObservations.length > 0);
   assert.equal(result.facts.tests[0].observations.length, 0);
   const site = result.facts.sites.find((site) => site.owner === "increment");
@@ -142,7 +133,15 @@ test("the caller may explicitly supply the compiler API", (t) => {
 
 test("invalid inputs fail rather than returning an empty successful analysis", (t) => {
   const setup = input(t);
-  assert.throws(() => run({}), /required strings/);
+  assert.throws(() => run({}), /in-memory evidenceFiles are required/);
+  assert.throws(
+    () =>
+      run({
+        projectRoot: setup.projectRoot,
+        inputDirectory: setup.inputDirectory,
+      }),
+    /in-memory evidenceFiles are required/,
+  );
   json(resolve(setup.inputDirectory, "inventory.json"), {});
   assert.throws(() => run(setup), /sites array/);
   json(resolve(setup.inputDirectory, "inventory.json"), { sites: [] });
@@ -150,45 +149,4 @@ test("invalid inputs fail rather than returning an empty successful analysis", (
     () => run({ ...setup, tsconfig: "missing.json" }),
     /Cannot read file/,
   );
-});
-
-test("CLI resolves config-relative paths from an unrelated working directory and refuses overwrites", (t) => {
-  const setup = input(t),
-    config = resolve(setup.inputDirectory, "analysis.json");
-  json(config, { projectRoot, inputDirectory: ".", coverageRunner: "vitest" });
-  const child = spawnSync(process.execPath, [cli, "--config", config], {
-    cwd: tmpdir(),
-    encoding: "utf8",
-  });
-  assert.equal(child.status, 0, child.stderr);
-  assert.equal(JSON.parse(child.stdout).sites.length, setup.sites.length);
-  assert.equal(JSON.parse(child.stderr).linkedTests, 6);
-  const output = resolve(setup.inputDirectory, "facts.json");
-  writeFileSync(output, "keep this");
-  const duplicate = spawnSync(
-    process.execPath,
-    [cli, "--config", config, "--output", output],
-    { encoding: "utf8" },
-  );
-  assert.equal(duplicate.status, 1);
-  assert.equal(readFileSync(output, "utf8"), "keep this");
-});
-
-test("facts parity rejects lost observations, dropped tests and modified dependency paths", (t) => {
-  const { facts } = run(input(t)),
-    resolutions = { resolutions: [] };
-  // This fixture has raw candidate facts; compare non-candidate sites here.
-  facts.sites = facts.sites.filter(
-    (s) => !s.derive?.some((d) => d.requiresTotal),
-  );
-  assert.doesNotThrow(() => assertFactsParity(facts, facts, resolutions));
-  for (const change of [
-    (f) => f.tests[0].observations.pop(),
-    (f) => f.tests.pop(),
-    (f) => f.sites[0].bounds.pop(),
-  ]) {
-    const changed = structuredClone(facts);
-    change(changed);
-    assert.throws(() => assertFactsParity(changed, facts, resolutions));
-  }
 });

@@ -2,6 +2,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
   rmSync,
 } from "node:fs";
@@ -127,7 +128,17 @@ export function input(
   return {
     projectRoot,
     inputDirectory: path,
-    coverageRunner: "vitest",
+    get evidenceFiles() {
+      return {
+        "inventory.json": readFileSync(resolve(path, "inventory.json"), "utf8"),
+        ...Object.fromEntries(
+          readdirSync(resolve(path, "cov")).map((file) => [
+            `cov/${file}`,
+            readFileSync(resolve(path, "cov", file), "utf8"),
+          ]),
+        ),
+      };
+    },
     sites,
     rows,
   };

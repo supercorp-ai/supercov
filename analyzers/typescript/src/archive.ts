@@ -424,7 +424,6 @@ function analyzeArchiveWithFrontend(
       testFiles: [
         ...new Set(accepted.flatMap((r) => (r.testFile ? [r.testFile] : []))),
       ],
-      coverageRunner: "vitest",
     },
     frontend,
   );

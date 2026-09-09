@@ -58,20 +58,6 @@ test(
   },
 );
 
-test(
-  "native frontend refuses legacy generated-line evidence instead of guessing positions",
-  { skip: !enabled },
-  (t) => {
-    const setup = input(t);
-    const frontend = nativeFrontend(entry, setup.projectRoot);
-    t.after(() => frontend.close());
-    assert.throws(
-      () => analyzeWithFrontend({ ...setup, coverageRunner: "node" }, frontend),
-      /original-source coverage/,
-    );
-  },
-);
-
 function project(t) {
   const root = mkdtempSync(resolve(tmpdir(), "supercov native ü-"));
   mkdirSync(resolve(root, "src"));

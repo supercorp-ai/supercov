@@ -96,6 +96,17 @@ try {
       `missing shipped analyzer input: ${file}`,
     );
   assert.ok(paths.has("docs/assertion-evidence.md"));
+  assert.deepEqual(
+    [...paths]
+      .filter((path) => path.startsWith("analyzers/typescript/bin/"))
+      .sort(),
+    [
+      "analyzers/typescript/bin/compiler-identity.mjs",
+      "analyzers/typescript/bin/identity.mjs",
+      "analyzers/typescript/bin/query.mjs",
+    ],
+    "the installed package must not contain research commands",
+  );
   assert.ok(
     ![...paths].some(
       (p) =>

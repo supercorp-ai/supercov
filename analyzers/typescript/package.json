@@ -7,15 +7,6 @@
   "engines": {
     "node": ">=22"
   },
-  "exports": {
-    ".": {
-      "types": "./dist/analyze.d.ts",
-      "default": "./dist/analyze.js"
-    }
-  },
-  "bin": {
-    "supercov-asserted-typescript": "./bin/analyze.mjs"
-  },
   "files": [
     "dist",
     "bin",
@@ -26,7 +17,6 @@
   "scripts": {
     "build": "node node_modules/typescript/bin/tsc -p tsconfig.json && node bin/identity.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
-    "test:parity": "npm run build && node --test tests/parity.test.mjs",
     "prepack": "npm run build"
   },
   "devDependencies": {

@@ -21,19 +21,14 @@ export interface Site {
 
 export interface AnalyzeOptions {
   projectRoot: string;
-  /** Directory containing inventory.json and cov/ from the evidence converter. Read only. */
-  inputDirectory?: string;
-  /** Internal archive adapter input; callers of analyzeArchive never create converted files. */
-  evidenceFiles?: Record<string, string>;
+  /** Query-local evidence supplied in memory by the archive adapter, using original-source positions. */
+  evidenceFiles: Record<string, string>;
   /** Exact files selected by the archive integration, including JS and nonstandard test directories. */
   sourceFiles?: string[];
   testFiles?: string[];
   sourceDir?: string;
   testDir?: string;
   tsconfig?: string;
-  /** The legacy node:test input uses transpiled V8 line numbers; archive input uses source lines. */
-  coverageRunner?: "node" | "vitest";
-  runtimeObservations?: boolean;
   /** Defaults to the compiler API installed in the project being analyzed. */
   typescript?: typeof import("typescript");
 }

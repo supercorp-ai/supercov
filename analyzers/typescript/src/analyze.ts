@@ -1,11 +1,9 @@
 /**
- * Source-faithful extraction of the observation and flow analyzers from the
- * asserted-coverage prototype at 7d838fa. No mutation runner, verdict engine,
- * prototype checkout, or process-global analysis state is required at runtime.
- * Known inference limits are preserved; extraction is not a soundness claim.
+ * Source observation and value-flow analysis for ordinary archive queries.
+ * Inputs are query-local evidence and matching project sources. Known inference
+ * limits remain explicit; these facts are not a soundness or safety proof.
  */
 import type ts from "typescript";
-import { existsSync, readFileSync } from "node:fs";
 import { relative as pathRelative, resolve } from "node:path";
 import { analysisPath } from "./compiler.js";
 import { createFrontend, type CompilerFrontend } from "./frontend.js";
@@ -34,9 +32,9 @@ export function analyze(options: AnalyzeOptions) {
   if (
     !options ||
     typeof options.projectRoot !== "string" ||
-    (typeof options.inputDirectory !== "string" && !options.evidenceFiles)
+    !options.evidenceFiles
   )
-    throw new Error("projectRoot and inputDirectory are required strings");
+    throw new Error("projectRoot and in-memory evidenceFiles are required");
   const frontend = createFrontend(options.projectRoot, options.typescript);
   try {
     return analyzeWithFrontend(options, frontend);
@@ -54,24 +52,15 @@ export function analyzeWithFrontend(
   const ts = frontend.syntax;
   const srcDir = (options.sourceDir ?? "src").replace(/\/$/, "");
   const testDir = (options.testDir ?? "tests").replace(/\/$/, "");
-  const outBase = resolve(options.inputDirectory ?? root);
-  const out = (p: string) => resolve(outBase, p);
+  const evidence = options.evidenceFiles;
   const readEvidence = (p: string): string => {
-    if (!options.evidenceFiles) return readFileSync(p, "utf8");
-    const value =
-      options.evidenceFiles[relative(outBase, p).replaceAll("\\", "/")];
+    const value = evidence[p];
     if (value === undefined)
       throw new Error(`Missing archive evidence input: ${p}`);
     return value;
   };
-  const hasEvidence = (p: string) =>
-    options.evidenceFiles
-      ? Object.hasOwn(
-          options.evidenceFiles,
-          relative(outBase, p).replaceAll("\\", "/"),
-        )
-      : existsSync(p);
-  const inventory = JSON.parse(readEvidence(out("inventory.json"))) as {
+  const hasEvidence = (p: string) => Object.hasOwn(evidence, p);
+  const inventory = JSON.parse(readEvidence("inventory.json")) as {
     sites: Site[];
   };
   if (!Array.isArray(inventory.sites))
@@ -98,87 +87,15 @@ export function analyzeWithFrontend(
     phaseLines?: number[];
   }
   const runtimeTests = (
-    JSON.parse(readEvidence(out("cov/index.json"))) as RuntimeTest[]
+    JSON.parse(readEvidence("cov/index.json")) as RuntimeTest[]
   ).filter((t) => t.ok);
-
-  // Tests that import src/ directly run it through ts-node in-process, and V8 reports
-  // coverage against the transpiled JavaScript line numbers. Rebuild that transpilation
-  // with a source map and translate generated lines back to TypeScript lines.
-  const inProcessTestFiles = new Set(
-    options.coverageRunner === "vitest"
-      ? []
-      : runtimeTests
-          .map((t) => t.file)
-          .filter((f) => {
-            try {
-              return new RegExp(`from\\s+['"](\\.\\.\\/)+${srcDir}\\/`).test(
-                readFileSync(resolve(root, f), "utf8"),
-              );
-            } catch {
-              return false;
-            }
-          }),
-  );
-  if (frontend.kind === "typescript-native-7" && inProcessTestFiles.size)
-    throw new Error(
-      "TypeScript 7 analysis requires original-source coverage; legacy ts-node/V8 generated-line remapping is not supported. Recapture with Supercov.",
-    );
-  const B64 =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  function decodeVlq(seg: string): number[] {
-    const out: number[] = [];
-    let value = 0,
-      shift = 0;
-    for (const ch of seg) {
-      const d = B64.indexOf(ch);
-      value += (d & 31) << shift;
-      if (d & 32) shift += 5;
-      else {
-        out.push(value & 1 ? -(value >> 1) : value >> 1);
-        value = 0;
-        shift = 0;
-      }
-    }
-    return out;
-  }
-  const jsToTsCache = new Map<string, Map<number, Set<number>>>();
-  function jsToTsLines(file: string): Map<number, Set<number>> {
-    let m = jsToTsCache.get(file);
-    if (m) return m;
-    m = new Map();
-    try {
-      const text = readFileSync(resolve(root, file), "utf8");
-      const map = JSON.parse(
-        frontend.transpileSourceMap(file, text, root) ?? "{}",
-      );
-      let srcLine = 0;
-      (map.mappings as string)
-        .split(";")
-        .forEach((lineSegs: string, genLine: number) => {
-          for (const seg of lineSegs.split(",")) {
-            if (!seg) continue;
-            const f = decodeVlq(seg);
-            if (f.length >= 4) {
-              srcLine += f[2];
-              if (!m!.has(genLine + 1)) m!.set(genLine + 1, new Set());
-              m!.get(genLine + 1)!.add(srcLine + 1);
-            }
-          }
-        });
-    } catch {
-      /* leave empty: no translation */
-    }
-    jsToTsCache.set(file, m);
-    return m;
-  }
 
   const coverage = new Map<string, Map<string, Set<number>>>();
   for (const t of runtimeTests) {
     const perFile = new Map<string, Set<number>>();
-    const translate = inProcessTestFiles.has(t.file);
     let current: Set<number> | undefined;
     let currentFile = "";
-    for (const line of readEvidence(out(`cov/${t.id}.lcov`)).split("\n")) {
+    for (const line of readEvidence(`cov/${t.id}.lcov`).split("\n")) {
       if (line.startsWith("SF:")) {
         const f = line.slice(3).trim();
         currentFile = f.startsWith("/") ? relative(root, f) : f;
@@ -187,11 +104,7 @@ export function analyzeWithFrontend(
       } else if (line.startsWith("DA:") && current) {
         const [ln, hits] = line.slice(3).split(",").map(Number);
         if (hits <= 0) continue;
-        if (translate && currentFile.startsWith("src/")) {
-          const mapped = jsToTsLines(currentFile).get(ln);
-          if (mapped) for (const l of mapped) current.add(l);
-          else current.add(ln);
-        } else current.add(ln);
+        current.add(ln);
       }
     }
     coverage.set(t.id, perFile);
@@ -203,7 +116,7 @@ export function analyzeWithFrontend(
    */
   const outcomes = new Map<string, Map<string, [number, number]>>();
   for (const t of runtimeTests) {
-    const p = out(`cov/${t.id}.outcomes.json`);
+    const p = `cov/${t.id}.outcomes.json`;
     if (!hasEvidence(p)) continue;
     const raw = JSON.parse(readEvidence(p)) as Record<string, [number, number]>;
     outcomes.set(t.id, new Map(Object.entries(raw)));
@@ -238,20 +151,19 @@ export function analyzeWithFrontend(
     string,
     Record<string, StatementAttribution>
   >();
-  if (options.runtimeObservations !== false)
-    for (const t of runtimeTests) {
-      const p = out(`cov/${t.id}.phases.json`);
-      if (hasEvidence(p))
-        runtimePhases.set(t.id, JSON.parse(readEvidence(p)) as RuntimePhase[]);
-      const sp = out(`cov/${t.id}.statements.json`);
-      if (hasEvidence(sp)) {
-        const parsed = JSON.parse(readEvidence(sp)) as Record<
-          string,
-          StatementAttribution
-        >;
-        if (Object.keys(parsed).length) runtimeStatements.set(t.id, parsed);
-      }
+  for (const t of runtimeTests) {
+    const p = `cov/${t.id}.phases.json`;
+    if (hasEvidence(p))
+      runtimePhases.set(t.id, JSON.parse(readEvidence(p)) as RuntimePhase[]);
+    const sp = `cov/${t.id}.statements.json`;
+    if (hasEvidence(sp)) {
+      const parsed = JSON.parse(readEvidence(sp)) as Record<
+        string,
+        StatementAttribution
+      >;
+      if (Object.keys(parsed).length) runtimeStatements.set(t.id, parsed);
     }
+  }
   /**
    * Outcome key of a decision atom: "<file>:<line>:<column>#<index>", where the position is the start
    * of the whole condition expression of the if/ternary/loop and the index is the atom's place among
@@ -376,7 +288,7 @@ export function analyzeWithFrontend(
   /** Module-setup coverage (imports, module-level statements) of the test's file: counts for module-level sites only. */
   const setupCoverage = new Map<string, Map<string, Set<number>>>();
   for (const t of runtimeTests) {
-    const p = out(`cov/${t.id}.setup.lcov`);
+    const p = `cov/${t.id}.setup.lcov`;
     if (!hasEvidence(p)) continue;
     const perFile = new Map<string, Set<number>>();
     let current: Set<number> | undefined;

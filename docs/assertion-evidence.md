@@ -32,10 +32,7 @@ unresolved helper-only specifiers remain visible as compiler limitations.
 Other native compiler versions are not enabled until separately calibrated.
 Do not downgrade an application's compiler just to improve an assertion report.
 
-The native and legacy frontends match case-by-case on the fixed 100-mutation
-Supergateway calibration (84 correct, four false-kill predictions, ten false
-survivals and two unresolved killed cases). This is a bounded historical
-calibration, **not 84% assertion coverage or proof of general correctness**.
+Compiler compatibility and regression checks do not prove general correctness.
 All candidates remain unverified and `assertionScore` remains null. Query-side
 native compiler work adds no test-time instrumentation.
 
