@@ -10,8 +10,8 @@ No account, config file, import, custom reporter, or hosted service is required.
 
 Supported by [Supercorp](https://supercorp.ai).
 
-[Try the worked example](https://supercov.com/docs/code-verification): find an
-untested session-expiry condition, run an additional test, and compare the results.
+[Tutorial](https://supercov.com/docs/code-verification): open the starter in your
+coding agent, paste a prompt, and review the test and coverage results.
 
 ## Start with the suite you already have
 

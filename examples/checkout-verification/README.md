@@ -1,74 +1,62 @@
-# Checkout verification
+# Checkout tutorial
 
-Use Supercov to find a missing test for an expired checkout session. The original
-tests have 100% line and branch coverage, but still pass if the expiry check is
-removed. The additional test checks that an expired session cannot check out.
+Source and recorded results for the [coding-agent tutorial](https://supercov.com/docs/code-verification).
 
-[Read the walkthrough](https://supercov.com/docs/code-verification).
+## Start the tutorial
 
-## Run it
+[Download the starter](https://supercov.com/downloads/supercov-tutorial.zip),
+extract it, and open the `supercov-tutorial` folder in your coding agent.
+Requires Node.js 22+ and npm.
 
-Requires Node.js 22+ and npm. From this directory:
+From that folder:
 
 ```sh
 npm ci
 ```
 
-The example uses Supercov 0.0.42 and Node's built-in test runner and assertion
-library. The additional test is included in a separate file, so you can compare
-the two stages without editing any files.
+Then paste this into the agent:
 
-Run only the original two tests, then inspect the result:
-
-```sh
-npx supercov -- node --test tests/session.test.js
-npx supercov runs latest
-npx supercov runs latest decision src/session.js:2
+```text
+Measure code coverage with npx supercov and write one missing test.
+Only change tests. Rerun the full test suite and show me the test you
+added and the before-and-after coverage.
 ```
 
-Keep the run ID printed in the summary. Now include the expired-session test:
-
-```sh
-npx supercov -- node --test tests/session.test.js tests/expired-session.test.js
-npx supercov runs latest
-npx supercov runs latest decision src/session.js:2
-```
-
-Compare the runs, replacing `<before-run-id>` with the ID you saved:
-
-```sh
-npx supercov diff <before-run-id> latest
-```
-
-The results stay in this example's `.supercov/` directory so you can query them
-later.
-
-| Measured result | Original tests | With the additional test |
-| --- | --- | --- |
-| Passing tests | 2 | 3 |
-| Lines | 100% (3/3) | 100% (3/3) |
-| Branches | 100% (2/2) | 100% (2/2) |
-| MC/DC conditions | 50% (1/2) | 100% (2/2) |
-| MC/DC conditions linked to passing assertions | 1/2 | 2/2 |
-
-The [walkthrough](https://supercov.com/docs/code-verification) explains each
-command and shows how to check that the new test fails if the expiry check is
-removed.
+The download contains only the original function and two tests. The completed
+test and recorded results are kept separately here, not in the starter.
 
 ## Files
 
-- `src/session.js`: the checkout function.
-- `tests/session.test.js`: the original two tests.
-- `tests/expired-session.test.js`: the additional test for an expired session.
-- `scripts/reproduce.mjs`: runs both suites, checks the coverage results, and
-  tests a separate copy with the expiry check removed.
-- [recorded/](recorded/): saved command output and test logs.
+- `starter/`: the unsolved project, pinned to Supercov 0.0.42.
+- [agent-run/](agent-run/): the recorded agent commands, completed test, and diff.
+- `scripts/verify-tutorial.mjs`: checks the starter, replays the agent's saved
+  test, and verifies that it catches removal of the expiry check.
+- `scripts/package-starter.py`: builds the download from an explicit five-file
+  list, excluding the solution, recordings, dependencies, and Git history.
+- `src/`, `tests/`, and `recorded/`: the original CLI-only example and its output.
 
-## Maintaining the example
+The [tutorial](https://supercov.com/docs/code-verification) explains the agent's
+commands, the missing condition, and the test it wrote.
 
-This repository also includes `npm run demo`, which automates the coverage and
-regression checks in temporary directories. It leaves your files unchanged and
-succeeds when the expired-session test catches the removed expiry check.
+## Maintaining the tutorial
 
-To update the recorded output, run `npm run record`. It verifies the same
-results before rewriting the files in `recorded/`.
+From this directory, install dependencies and verify both reproductions:
+
+```sh
+npm ci
+node scripts/verify-tutorial.mjs
+npm run demo
+```
+
+These checks use temporary directories and do not change the starter or saved
+recording. The agent's recorded result is two tests to three, with MC/DC from
+50% to 100% and line and branch coverage unchanged at 100%.
+
+Build the standalone download with Python 3:
+
+```sh
+python3 scripts/package-starter.py /tmp/supercov-tutorial.zip
+```
+
+`npm run record` updates the older CLI-only output in `recorded/`. It does not
+create a new agent run or overwrite `agent-run/`.
