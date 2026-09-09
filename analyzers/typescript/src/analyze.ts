@@ -3303,7 +3303,7 @@ export function analyzeWithFrontend(
             const mock = mockProjection(o);
             if (mock?.kind === "call-count")
               mock.countEvidence = mockCounts.checks.get(node) ?? {
-                model: "node-sync-console-count-v1",
+                model: "node-sync-console-count-v2",
                 status: "unresolved",
                 reason: mockCounts.limitation ?? "unsupported-count-projection",
               };

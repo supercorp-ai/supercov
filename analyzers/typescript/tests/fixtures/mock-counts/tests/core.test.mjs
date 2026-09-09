@@ -2,6 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as api from '../src/core.mjs';
 import { changed } from '../src/mutable.mjs';
+import { createLogger, createTagged, sharedLogger, fromModuleClosure, sideEffectArgs,
+  thisLogger, spreadLogger, inheritedLogger, conditionalClosure } from '../src/factories.mjs';
+import { effectful } from '../src/effectful.mjs';
+import { getterLogger } from '../src/getter.mjs';
 
 test('live', (t) => {
   const log = t.mock.method(console, 'log', () => {});
@@ -101,10 +105,101 @@ test('self count limit', (t) => {
   const count = log.mock.callCount();
   assert.equal(count, count);
 });
-test('opaque producer limit', (t) => {
+test('discarded fresh object', (t) => {
   const log = t.mock.method(console, 'log', () => {});
   api.opaque();
   assert.equal(log.mock.callCount(), 1);
+});
+test('fresh closure', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const logger = createLogger({ enabled: true, stream: 'log' });
+  logger.info('fresh payload');
+  assert.equal(log.mock.callCount(), 1);
+});
+test('fresh quiet branch', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const logger = createLogger({ enabled: false, stream: 'log' });
+  logger.info('quiet payload');
+  assert.equal(log.mock.callCount(), 0);
+});
+test('fresh receiver branch', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const error = t.mock.method(console, 'error', () => {});
+  const logger = createLogger({ enabled: true, stream: 'error' });
+  logger.info('error payload');
+  assert.equal(log.mock.callCount(), 0);
+  assert.equal(error.mock.callCount(), 1);
+});
+test('separate closure environments', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const first = createTagged('first');
+  const second = createTagged('second');
+  first.info('one');
+  second.info('two');
+  assert.equal(log.mock.callCount(), 2);
+});
+test('pure module factory closure', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  fromModuleClosure();
+  assert.equal(log.mock.callCount(), 1);
+});
+test('nested argument calls', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const logger = sideEffectArgs();
+  logger.info();
+  assert.equal(log.mock.callCount(), 2);
+});
+test('fresh array spread', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const logger = spreadLogger();
+  logger.info(['first', 'second']);
+  assert.equal(log.mock.callCount(), 1);
+});
+test('shared module object limit', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const logger = sharedLogger();
+  logger.info();
+  assert.equal(log.mock.callCount(), 0);
+});
+test('effectful module initialization limit', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  effectful();
+  assert.equal(log.mock.callCount(), 1);
+});
+test('getter initialization limit', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const logger = getterLogger();
+  logger.info();
+  assert.equal(log.mock.callCount(), 1);
+});
+test('receiver this limit', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const logger = thisLogger();
+  logger.info();
+  assert.equal(log.mock.callCount(), 1);
+});
+test('missing own property limit', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const logger = inheritedLogger({});
+  logger.info('default payload');
+  assert.equal(log.mock.callCount(), 1);
+});
+test('closure mutation limit', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const logger = createLogger({ enabled: true, stream: 'log' });
+  logger.info = () => {};
+  logger.info('ignored');
+  assert.equal(log.mock.callCount(), 0);
+});
+test('captured branch environments', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const enabled = conditionalClosure(true);
+  const disabled = conditionalClosure(false);
+  enabled();
+  assert.equal(log.mock.callCount(), 1);
+  log.mock.resetCalls();
+  disabled();
+  assert.equal(log.mock.callCount(), 0);
 });
 test('reassigned function limit', (t) => {
   const log = t.mock.method(console, 'log', () => {});

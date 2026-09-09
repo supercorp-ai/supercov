@@ -18,6 +18,7 @@ export const PROTOCOL = {
     "mock-observation-projections-v1",
     "assertion-comparison-relations-v1",
     "mock-count-lifetimes-v1",
+    "mock-count-factories-v1",
   ],
 };
 type Location = {

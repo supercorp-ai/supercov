@@ -3,7 +3,7 @@ import type ts from "typescript";
 import type { SyntaxAPI } from "./frontend.js";
 
 export interface MockCountEvidence {
-  model: "node-sync-console-count-v1";
+  model: "node-sync-console-count-v2";
   status: "source-checked" | "unresolved";
   reason?: string;
   instance?: string;
@@ -43,12 +43,34 @@ export function analyzeMockCounts(
     calls: Call[];
   };
   type Snapshot = { kind: "count" | "history"; evidence: MockCountEvidence };
-  type Value = Primitive | Mock | Snapshot | { kind: "context"; mock: Mock };
+  type FunctionNode =
+    | ts.FunctionDeclaration
+    | ts.ArrowFunction
+    | ts.FunctionExpression;
+  type Closure = {
+    kind: "closure";
+    node: FunctionNode;
+    environment: Map<ts.Declaration, Value>;
+  };
+  type Aggregate = {
+    kind: "object" | "array";
+    properties: Map<string, Value>;
+    moduleOwned: boolean;
+  };
+  type Value =
+    | Primitive
+    | Mock
+    | Snapshot
+    | Closure
+    | Aggregate
+    | { kind: "context"; mock: Mock };
   const checks = new Map<ts.CallExpression, MockCountEvidence>();
   const installed = new Map<string, Mock | undefined>();
-  const locals = new Map<ts.Declaration, Value>();
+  let locals = new Map<ts.Declaration, Value>();
   const moduleChecks = new Map<ts.SourceFile, boolean>();
-  const targetChecks = new Map<ts.Declaration, boolean>();
+  const modules = new Map<ts.SourceFile, Map<ts.Declaration, Value>>();
+  const loading = new Set<ts.SourceFile>();
+  let initializing = false;
   let budget = 4096;
   class Unsupported extends Error {}
   const fail = (node: ts.Node, why: string): never => {
@@ -74,7 +96,7 @@ export function analyzeMockCounts(
   ): Snapshot => ({
     kind,
     evidence: {
-      model: "node-sync-console-count-v1",
+      model: "node-sync-console-count-v2",
       status: "source-checked",
       instance: mock.source,
       createdAt: mock.source,
@@ -99,25 +121,10 @@ export function analyzeMockCounts(
   };
 
   function stableTarget(declaration: ts.Declaration): boolean {
-    const cached = targetChecks.get(declaration);
-    if (cached !== undefined) return cached;
     const sf = declaration.getSourceFile();
     let safeModule = moduleChecks.get(sf);
+    if (safeModule !== undefined) return safeModule;
     if (safeModule === undefined) {
-      const inertInitializer = (e: ts.Expression) => {
-        const n = peel(e);
-        return (
-          ts.isArrowFunction(n) ||
-          ts.isFunctionExpression(n) ||
-          ts.isStringLiteralLike(n) ||
-          ts.isNumericLiteral(n) ||
-          [
-            ts.SyntaxKind.TrueKeyword,
-            ts.SyntaxKind.FalseKeyword,
-            ts.SyntaxKind.NullKeyword,
-          ].includes(n.kind)
-        );
-      };
       safeModule = sf.statements.every(
         (s) =>
           ts.isImportDeclaration(s) ||
@@ -129,24 +136,15 @@ export function analyzeMockCounts(
           (ts.isVariableStatement(s) &&
             !!(s.declarationList.flags & ts.NodeFlags.Const) &&
             s.declarationList.declarations.every(
-              (d) =>
-                ts.isIdentifier(d.name) &&
-                !!d.initializer &&
-                inertInitializer(d.initializer),
+              (d) => ts.isIdentifier(d.name) && !!d.initializer,
             )),
       );
-      moduleChecks.set(sf, safeModule);
     }
     if (!safeModule) {
-      targetChecks.set(declaration, false);
+      moduleChecks.set(sf, false);
       return false;
     }
     let stable = true;
-    const writesTarget = (node: ts.Node) => {
-      if (ts.isIdentifier(node) && model.declaration(node) === declaration)
-        stable = false;
-      ts.forEachChild(node, writesTarget);
-    };
     const scan = (node: ts.Node) => {
       if (!stable) return;
       if (--budget < 0) {
@@ -158,7 +156,7 @@ export function analyzeMockCounts(
         node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
         node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
       )
-        writesTarget(node.left);
+        stable = false;
       if (
         (ts.isPrefixUnaryExpression(node) ||
           ts.isPostfixUnaryExpression(node)) &&
@@ -166,7 +164,8 @@ export function analyzeMockCounts(
           node.operator,
         )
       )
-        writesTarget(node.operand);
+        stable = false;
+      if (ts.isDeleteExpression(node)) stable = false;
       if (
         ts.isCallExpression(node) &&
         ts.isIdentifier(node.expression) &&
@@ -176,12 +175,181 @@ export function analyzeMockCounts(
       ts.forEachChild(node, scan);
     };
     scan(sf);
-    targetChecks.set(declaration, stable);
+    moduleChecks.set(sf, stable);
     return stable;
   }
 
+  // Initialization is evaluated with effects forbidden, never replayed as work
+  // performed under a test's mock. Objects allocated here stay shared/unknown:
+  // const prevents rebinding, not mutation by another caller or earlier test.
+  function moduleEnvironment(declaration: ts.Declaration, depth: number) {
+    const sf = declaration.getSourceFile();
+    if (loading.has(sf))
+      return fail(declaration, "cyclic-or-forward-module-binding");
+    const cached = modules.get(sf);
+    if (cached) return cached;
+    if (!stableTarget(declaration))
+      return fail(
+        declaration,
+        "mutable-target-or-unsupported-module-initialization",
+      );
+    const previous = locals,
+      wasInitializing = initializing;
+    locals = new Map();
+    initializing = true;
+    loading.add(sf);
+    modules.set(sf, locals);
+    try {
+      for (const statement of sf.statements)
+        if (ts.isFunctionDeclaration(statement))
+          locals.set(statement, {
+            kind: "closure",
+            node: statement,
+            environment: locals,
+          });
+      for (const statement of sf.statements)
+        if (ts.isVariableStatement(statement))
+          execute(statement, model.location(statement), depth + 1);
+      return locals;
+    } finally {
+      locals = previous;
+      initializing = wasInitializing;
+      loading.delete(sf);
+    }
+  }
+
+  function accessible(value: Value, node: ts.Node): Value {
+    if (
+      !initializing &&
+      !primitive(value) &&
+      (value.kind === "object" || value.kind === "array") &&
+      value.moduleOwned
+    )
+      return fail(node, "shared-module-object-history");
+    return value;
+  }
+
+  function sourceValue(value: Value): boolean {
+    if (--budget < 0) return fail(fn, "source-model-budget");
+    return (
+      primitive(value) ||
+      value.kind === "closure" ||
+      ((value.kind === "object" || value.kind === "array") &&
+        [...value.properties.values()].every(sourceValue))
+    );
+  }
+
+  function propertyName(node: ts.PropertyName): string {
+    if (
+      ts.isIdentifier(node) ||
+      ts.isStringLiteralLike(node) ||
+      ts.isNumericLiteral(node)
+    )
+      return node.text;
+    return fail(node, "computed-property-name");
+  }
+
+  function bind(
+    name: ts.BindingName,
+    declaration: ts.Declaration,
+    value: Value,
+    action: string,
+    depth: number,
+  ): void {
+    if (ts.isIdentifier(name)) {
+      locals.set(declaration, value);
+      return;
+    }
+    if (
+      !ts.isObjectBindingPattern(name) ||
+      primitive(value) ||
+      value.kind !== "object"
+    )
+      return fail(name, "unsupported-parameter-binding");
+    accessible(value, name);
+    for (const element of name.elements) {
+      if (element.dotDotDotToken || !ts.isIdentifier(element.name))
+        return fail(element, "unsupported-parameter-binding");
+      const key = propertyName(element.propertyName ?? element.name);
+      // Missing properties could be inherited. No prototype lookup is guessed.
+      if (!value.properties.has(key))
+        return fail(element, "missing-own-property");
+      let item = value.properties.get(key);
+      if (item === undefined && element.initializer)
+        item = evaluate(element.initializer, action, depth + 1);
+      bind(element.name, element, item, action, depth + 1);
+    }
+  }
+
+  function invoke(
+    closure: Closure,
+    args: Value[],
+    at: ts.Node,
+    action: string,
+    depth: number,
+  ): Value {
+    const target = closure.node;
+    if (
+      !target.body ||
+      !model.production(target) ||
+      target.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ||
+      ("asteriskToken" in target && target.asteriskToken)
+    )
+      return fail(at, "unsupported-call-target");
+    if (!stableTarget(target))
+      return fail(at, "mutable-target-or-unsupported-module-initialization");
+    if (args.some((arg) => !sourceValue(arg)))
+      return fail(at, "escaping-nonprimitive-argument");
+    const previous = locals;
+    locals = new Map(closure.environment);
+    try {
+      target.parameters.forEach((parameter, index) => {
+        let value: Value = args[index];
+        if (parameter.dotDotDotToken) {
+          value = {
+            kind: "array",
+            moduleOwned: initializing,
+            properties: new Map(
+              args.slice(index).map((v, i) => [String(i), v]),
+            ),
+          };
+        } else if (value === undefined && parameter.initializer)
+          value = evaluate(parameter.initializer, action, depth + 1);
+        bind(parameter.name, parameter, value, action, depth + 1);
+      });
+      if (!ts.isBlock(target.body))
+        return evaluate(target.body, action, depth + 1);
+      for (const statement of target.body.statements) {
+        const returned = execute(statement, action, depth + 1);
+        if (returned) return returned.value;
+      }
+      return undefined;
+    } finally {
+      locals = previous;
+    }
+  }
+
+  function argumentsOf(
+    call: ts.CallExpression,
+    action: string,
+    depth: number,
+  ): Value[] {
+    const result: Value[] = [];
+    for (const arg of call.arguments) {
+      if (ts.isSpreadElement(arg)) {
+        const value = evaluate(arg.expression, action, depth + 1);
+        if (primitive(value) || value.kind !== "array")
+          return fail(arg, "unsupported-spread");
+        accessible(value, arg);
+        result.push(...value.properties.values());
+      } else result.push(evaluate(arg, action, depth + 1));
+      if (result.length > 4096) return fail(call, "source-model-budget");
+    }
+    return result;
+  }
+
   function evaluate(raw: ts.Expression, action: string, depth: number): Value {
-    if (--budget < 0 || depth > 16) return fail(raw, "source-model-budget");
+    if (--budget < 0 || depth > 32) return fail(raw, "source-model-budget");
     const e = peel(raw);
     if (ts.isStringLiteralLike(e)) return e.text;
     if (ts.isNumericLiteral(e)) return Number(e.text);
@@ -190,8 +358,70 @@ export function analyzeMockCounts(
     if (e.kind === ts.SyntaxKind.NullKeyword) return null;
     if (ts.isIdentifier(e)) {
       const d = model.declaration(e);
-      if (d && locals.has(d)) return locals.get(d);
+      if (d && locals.has(d)) return accessible(locals.get(d), e);
+      if (d && model.production(d)) {
+        const environment = moduleEnvironment(d, depth);
+        if (environment.has(d)) return accessible(environment.get(d), e);
+      }
       return fail(e, "unresolved-value-binding");
+    }
+    if (ts.isArrowFunction(e) || ts.isFunctionExpression(e))
+      return { kind: "closure", node: e, environment: locals };
+    if (ts.isObjectLiteralExpression(e)) {
+      const properties = new Map<string, Value>();
+      for (const item of e.properties) {
+        if (
+          !(
+            ts.isPropertyAssignment(item) ||
+            ts.isShorthandPropertyAssignment(item)
+          )
+        )
+          return fail(item, "unsupported-object-member");
+        const key = propertyName(item.name);
+        if (key === "__proto__")
+          return fail(item, "unsupported-object-prototype");
+        properties.set(
+          key,
+          evaluate(
+            ts.isPropertyAssignment(item) ? item.initializer : item.name,
+            action,
+            depth + 1,
+          ),
+        );
+      }
+      return { kind: "object", properties, moduleOwned: initializing };
+    }
+    if (ts.isArrayLiteralExpression(e)) {
+      const properties = new Map<string, Value>();
+      for (const item of e.elements) {
+        if (ts.isOmittedExpression(item) || ts.isSpreadElement(item))
+          return fail(item, "unsupported-array-member");
+        properties.set(
+          String(properties.size),
+          evaluate(item, action, depth + 1),
+        );
+      }
+      return { kind: "array", properties, moduleOwned: initializing };
+    }
+    if (ts.isConditionalExpression(e)) {
+      const condition = evaluate(e.condition, action, depth + 1);
+      if (!primitive(condition)) return fail(e, "nonprimitive-condition");
+      return evaluate(condition ? e.whenTrue : e.whenFalse, action, depth + 1);
+    }
+    if (
+      ts.isBinaryExpression(e) &&
+      [
+        ts.SyntaxKind.EqualsEqualsEqualsToken,
+        ts.SyntaxKind.ExclamationEqualsEqualsToken,
+      ].includes(e.operatorToken.kind)
+    ) {
+      const left = evaluate(e.left, action, depth + 1),
+        right = evaluate(e.right, action, depth + 1);
+      if (!primitive(left) || !primitive(right))
+        return fail(e, "nonprimitive-comparison");
+      return e.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken
+        ? left === right
+        : left !== right;
     }
     if (ts.isPropertyAccessExpression(e)) {
       const base = evaluate(e.expression, action, depth + 1);
@@ -202,12 +432,20 @@ export function analyzeMockCounts(
           return snapshot(base.mock, e, "history");
         if (base.kind === "history" && e.name.text === "length")
           return { ...base, kind: "count" };
+        if (base.kind === "object" || base.kind === "array") {
+          accessible(base, e);
+          if (base.kind === "array" && e.name.text === "length")
+            return base.properties.size;
+          if (base.properties.has(e.name.text))
+            return accessible(base.properties.get(e.name.text), e);
+        }
       }
       return fail(e, "unsupported-property-read");
     }
     if (!ts.isCallExpression(e)) return fail(e, "unsupported-expression");
     const callee = peel(e.expression);
     if (model.nativeMock(e)) {
+      if (initializing) return fail(e, "effectful-module-initialization");
       const [receiver, method, replacement] = e.arguments;
       if (
         !ts.isPropertyAccessExpression(callee) ||
@@ -239,10 +477,13 @@ export function analyzeMockCounts(
       model.globalConsole(callee.expression) &&
       ["log", "error"].includes(callee.name.text)
     ) {
-      for (const arg of e.arguments)
-        if (!primitive(evaluate(arg, action, depth + 1)))
-          return fail(arg, "nonprimitive-console-argument");
-      record(installed.get(`console.${callee.name.text}`), e, action);
+      if (initializing) return fail(e, "effectful-module-initialization");
+      // JS resolves the callee before argument evaluation (which may itself call it).
+      const mock = installed.get(`console.${callee.name.text}`);
+      const args = argumentsOf(e, action, depth + 1);
+      if (args.some((arg) => !primitive(arg)))
+        return fail(e, "nonprimitive-console-argument");
+      record(mock, e, action);
       return undefined;
     }
     if (
@@ -262,6 +503,7 @@ export function analyzeMockCounts(
     }
     const predicate = model.nativePredicate(e);
     if (predicate) {
+      if (initializing) return fail(e, "effectful-module-initialization");
       if (e.arguments.length < 2 || e.arguments.length > 3)
         return fail(e, "unsupported-comparison-arity");
       const values = e.arguments.map((arg) => evaluate(arg, action, depth + 1));
@@ -298,63 +540,37 @@ export function analyzeMockCounts(
       record(saved, e, action);
       return undefined;
     }
-    const target =
-      declaration && ts.isVariableDeclaration(declaration)
-        ? declaration.initializer
-        : declaration;
     if (
       declaration &&
       ts.isVariableDeclaration(declaration) &&
       !(declaration.parent.flags & ts.NodeFlags.Const)
     )
       return fail(e, "mutable-call-target");
+    let target: Value;
+    // Namespace import access has a resolved source declaration rather than a
+    // modeled namespace object. Do not bypass a runtime receiver with a mere name.
     if (
-      !target ||
-      !(
-        ts.isFunctionDeclaration(target) ||
-        ts.isArrowFunction(target) ||
-        ts.isFunctionExpression(target)
-      ) ||
-      !target.body ||
-      !model.production(target) ||
-      target.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ||
-      ("asteriskToken" in target && target.asteriskToken)
+      declaration &&
+      model.production(declaration) &&
+      (ts.isFunctionDeclaration(declaration) ||
+        ts.isVariableDeclaration(declaration)) &&
+      !locals.has(declaration)
     )
+      target = moduleEnvironment(declaration, depth).get(declaration);
+    else target = evaluate(callee, action, depth + 1);
+    if (primitive(target) || target.kind !== "closure")
       return fail(e, "unsupported-call-target");
-    if (!declaration || !stableTarget(declaration))
-      return fail(e, "mutable-target-or-unsupported-module-initialization");
-    if (
-      target.parameters.some(
-        (p) => !ts.isIdentifier(p.name) || p.dotDotDotToken || p.initializer,
-      ) ||
-      e.arguments.length !== target.parameters.length
-    )
-      return fail(e, "unsupported-call-parameters");
-    const args = e.arguments.map((arg) => evaluate(arg, action, depth + 1));
-    if (args.some((arg) => !primitive(arg)))
-      return fail(e, "escaping-nonprimitive-argument");
-    const previous = new Map(locals);
-    target.parameters.forEach((parameter, index) =>
-      locals.set(parameter, args[index]),
+    return accessible(
+      invoke(target, argumentsOf(e, action, depth + 1), e, action, depth + 1),
+      e,
     );
-    try {
-      if (!ts.isBlock(target.body))
-        return evaluate(target.body, action, depth + 1);
-      for (const statement of target.body.statements) {
-        if (ts.isReturnStatement(statement))
-          return statement.expression
-            ? evaluate(statement.expression, action, depth + 1)
-            : undefined;
-        execute(statement, action, depth + 1);
-      }
-      return undefined;
-    } finally {
-      locals.clear();
-      for (const [key, value] of previous) locals.set(key, value);
-    }
   }
 
-  function execute(statement: ts.Statement, action: string, depth: number) {
+  function execute(
+    statement: ts.Statement,
+    action: string,
+    depth: number,
+  ): { value: Value } | undefined {
     if (--budget < 0) return fail(statement, "source-model-budget");
     if (
       ts.isVariableStatement(statement) &&
@@ -367,7 +583,26 @@ export function analyzeMockCounts(
       }
     } else if (ts.isExpressionStatement(statement))
       evaluate(statement.expression, action, depth + 1);
-    else if (!ts.isEmptyStatement(statement))
+    else if (ts.isReturnStatement(statement) && model.production(statement))
+      return {
+        value: statement.expression
+          ? evaluate(statement.expression, action, depth + 1)
+          : undefined,
+      };
+    else if (ts.isIfStatement(statement) && model.production(statement)) {
+      const condition = evaluate(statement.expression, action, depth + 1);
+      if (!primitive(condition))
+        return fail(statement, "nonprimitive-condition");
+      const branch = condition
+        ? statement.thenStatement
+        : statement.elseStatement;
+      if (branch) return execute(branch, action, depth + 1);
+    } else if (ts.isBlock(statement) && model.production(statement)) {
+      for (const child of statement.statements) {
+        const returned = execute(child, action, depth + 1);
+        if (returned) return returned;
+      }
+    } else if (!ts.isEmptyStatement(statement))
       fail(statement, "unsupported-statement");
   }
 
@@ -379,7 +614,7 @@ export function analyzeMockCounts(
       fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)
     )
       fail(fn, "unsupported-test-body");
-    // No branching, loops, async suspension, escaped mocks or opaque calls are
+    // No test branching, loops, async suspension, escaped mocks or opaque calls are
     // accepted before a checked assertion. A later unsupported statement does
     // not invalidate an earlier captured count.
     if (

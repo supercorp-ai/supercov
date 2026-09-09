@@ -57,10 +57,8 @@ test(
     };
     const suite = ["--test", "--test-concurrency=1", "tests/core.test.mjs"];
     ok(run(process.execPath, suite));
-    const core = resolve(root, "src/core.mjs"),
-      original = readFileSync(core, "utf8");
     const oracle = [];
-    for (const [name, before, after, survives] of [
+    for (const [name, before, after, survives, file = "core.mjs"] of [
       [
         "count ignores payload",
         "console.log('live');",
@@ -148,7 +146,86 @@ test(
         true,
       ],
       ["self count checks no number", "console.log('self count');", "", true],
+      [
+        "factory payload ignored",
+        "console.log(prefix, ...format(args))",
+        "console.log('different')",
+        true,
+        "factories.mjs",
+      ],
+      [
+        "factory call removed",
+        "console.log(prefix, ...format(args))",
+        "void 0",
+        false,
+        "factories.mjs",
+      ],
+      [
+        "factory call duplicated",
+        "console.log(prefix, ...format(args))",
+        "(console.log(prefix), console.log(...args))",
+        false,
+        "factories.mjs",
+      ],
+      [
+        "factory receiver changed",
+        "console.error(...args)",
+        "console.log(...args)",
+        false,
+        "factories.mjs",
+      ],
+      [
+        "factory quiet branch inverted",
+        "enabled === false",
+        "enabled === true",
+        false,
+        "factories.mjs",
+      ],
+      [
+        "module factory payload ignored",
+        "module closure payload",
+        "different module payload",
+        true,
+        "factories.mjs",
+      ],
+      [
+        "nested argument call removed",
+        "console.log(console.log('nested call'))",
+        "console.log('nested call')",
+        false,
+        "factories.mjs",
+      ],
+      [
+        "array contents not checked",
+        "console.log(...args)",
+        "console.log('different array')",
+        true,
+        "factories.mjs",
+      ],
+      [
+        "captured condition changed",
+        "if (enabled) console.log",
+        "if (!enabled) console.log",
+        false,
+        "factories.mjs",
+      ],
+      [
+        "initialization excluded from test mock",
+        "console.log('module initialization');",
+        "",
+        true,
+        "effectful.mjs",
+      ],
+      [
+        "post-initialization call checked natively",
+        "console.log('after initialization')",
+        "void 0",
+        false,
+        "effectful.mjs",
+      ],
     ]) {
+      const core = resolve(root, "src", file),
+        original = readFileSync(core, "utf8");
       assert.equal(original.split(before).length, 2, name);
       try {
         writeFileSync(core, original.replace(before, after));
@@ -171,11 +248,31 @@ test(
     const query = (...args) =>
       JSON.parse(ok(run(binary, ["runs", id, "assertions", ...args, "--json"])))
         .data;
-    const report = query("--limit", "1000"),
-      page = query("--evidence", "/tests", "--limit", "1000");
-    assert.equal(report.pagination.hasMore, false);
-    assert.equal(page.pagination.hasMore, false);
-    assert.equal(page.items.length, 19);
+    const complete = (key, ...args) => {
+      const first = query(...args, "--limit", "1000");
+      let current = first;
+      const items = [...first[key]];
+      while (current.pagination.hasMore) {
+        const offset = current.pagination.nextOffset;
+        assert.ok(
+          Number.isInteger(offset) && offset > current.pagination.offset,
+        );
+        current = query(
+          ...args,
+          "--limit",
+          "1000",
+          "--offset",
+          String(offset),
+          "--analysis",
+          first.analysisId,
+        );
+        items.push(...current[key]);
+      }
+      return { ...first, [key]: items };
+    };
+    const report = complete("sites"),
+      page = complete("items", "--evidence", "/tests");
+    assert.equal(page.items.length, 33);
     const sourceLines = readFileSync(
       resolve(root, "tests/core.test.mjs"),
       "utf8",
@@ -255,10 +352,15 @@ test(
       "async limit",
       "escape limit",
       "self count limit",
-      "opaque producer limit",
       "reassigned function limit",
       "replacement callback limit",
       "mutated snapshot limit",
+      "shared module object limit",
+      "effectful module initialization limit",
+      "getter initialization limit",
+      "receiver this limit",
+      "missing own property limit",
+      "closure mutation limit",
     ])
       assert.ok(
         claims(name).every((r) => r?.status === "unresolved" && r.reason),
@@ -267,10 +369,49 @@ test(
     for (const rows of grouped.values())
       for (const row of rows)
         if (row.status === "source-checked") {
-          assert.equal(row.model, "node-sync-console-count-v1");
+          assert.equal(row.model, "node-sync-console-count-v2");
           assert.equal(row.expectedCount, row.observedCount);
           assert.equal(row.calls.length, row.observedCount);
         }
+    for (const name of [
+      "discarded fresh object",
+      "fresh closure",
+      "fresh quiet branch",
+      "fresh receiver branch",
+      "separate closure environments",
+      "pure module factory closure",
+      "nested argument calls",
+      "fresh array spread",
+      "captured branch environments",
+    ])
+      checked(name);
+    assert.deepEqual(
+      checked("fresh receiver branch").map((r) => r.observedCount),
+      [0, 1],
+    );
+    assert.equal(checked("fresh quiet branch")[0].observedCount, 0);
+    assert.equal(checked("separate closure environments")[0].observedCount, 2);
+    assert.equal(checked("nested argument calls")[0].observedCount, 2);
+    assert.deepEqual(
+      checked("captured branch environments").map((r) => r.observedCount),
+      [1, 0],
+    );
+    assert.equal(checked("nested argument calls")[0].calls.length, 2);
+    const nested = checked("nested argument calls")[0].calls.map((r) =>
+      r.source.split(":").slice(-2).map(Number),
+    );
+    assert.ok(
+      nested[0][0] > nested[1][0] && nested[0][1] < nested[1][1],
+      "inner call occurs before outer call",
+    );
+    assert.match(
+      claims("shared module object limit")[0].reason,
+      /^shared-module-object-history/,
+    );
+    assert.match(
+      claims("effectful module initialization limit")[0].reason,
+      /^effectful-module-initialization/,
+    );
     assert.ok(
       report.sites.every((row) => row.candidate.status === "unresolved"),
       "count evidence is not general value protection",

@@ -30,12 +30,18 @@ resets. Instance locations are scoped to their owning test record. `calls` are
 reconstructed from checked source, not a new runtime call trace. The modeled
 count must match an independent integer comparison with a passing witness.
 
-`source-checked` means accepted by the versioned `node-sync-console-count-v1`
+`source-checked` means accepted by the versioned `node-sync-console-count-v2`
 model, not formally verified application behavior. The model assumes unmodified
-native Node assertion/mock APIs and the standard global console. It accepts
-empty console-mock replacements and source-resolved straight-line producers;
-opaque calls, escaped mocks, mutable call targets, unsupported module
-initialization, branches and async suspension leave explicit reasons. Evidence
+native Node assertion/mock APIs, standard JavaScript built-ins (including array
+iteration) and the standard global console. It accepts empty console-mock
+replacements and a bounded synchronous source subset: constant bindings,
+fresh plain objects/arrays, returned closures, primitive-input production branches,
+own-property parameter binding, defaults, rest parameters and fresh-array spreads.
+Module factories must be source-checked as pure: setup side effects are never
+replayed under the test's mock. Shared module objects remain unresolved because
+`const` does not rule out mutation by earlier callers. Opaque calls, escaped
+mocks, getters, missing own properties, mutable bindings, test branching,
+unsupported initialization and async suspension leave explicit reasons. Evidence
 inside a rejected assertion witness is not a passing observation.
 
 Count evidence does not grant general site, payload or pragma credit, even for
