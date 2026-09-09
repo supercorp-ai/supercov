@@ -57,3 +57,30 @@ publication or GitHub release was requested or performed.
 The review branch and build-only workflows may be pushed/dispatched. The publish
 workflow must not be invoked. Platform results must be tied to the exact commit
 tested, with failing and unexecuted gates reported explicitly.
+
+## Remote verification and release decision
+
+The authorized review branch is `codex/asserted-js-release-review`. Product code
+was pushed as `1668e3ae7d4ff971efb1420dea54adea775e3684`; follow-up `1cf6b31`
+contains only external-test corrections and research documentation/fixtures.
+The shipped files, Rust sources, packaging scripts and workflow inputs are
+unchanged between those commits. Both external source-parity tests were rerun
+successfully at the follow-up, with neither skipped.
+
+- [Full Linux CI](https://github.com/supercorp-ai/supercov/actions/runs/34375398993)
+  passed at `1668e3a`.
+- [Native artifact matrix](https://github.com/supercorp-ai/supercov/actions/runs/34375395031)
+  at the same commit has passed all four Linux targets and macOS arm64.
+- Both Windows targets failed the installed JS/TS assertion query despite
+  successfully installing the supported compiler. See REVIEW-004 in the
+  [bug log](supercov-bugs-release-review-2026-09-09.md). This is separate from
+  TypeScript 7's intentionally unsupported API.
+- Intel macOS was still building at 16:27 UTC. Its result is not claimed here.
+  The complete release set cannot be certified with the Windows failures.
+
+No publish workflow, tag, version bump, GitHub release or PR was created.
+The branch is available for review, **not ready for an all-platform release**.
+First resolve and rerun the Windows gate. Then choose whether to release the
+explicitly limited experimental analyzer or separately implement/calibrate the
+TypeScript 7 backend. Compiler compatibility work belongs in post-run analysis;
+it does not call for additional test-time probes.
