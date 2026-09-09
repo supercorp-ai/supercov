@@ -6,14 +6,10 @@ and checks what improved.
 
 ## Start with one test
 
-Open your own repository in your coding agent. Make sure it can run the tests,
-including any dependencies, environment variables, or local services they
-need. See [Getting started](getting-started.md) for installation and language
-requirements.
+Open your own repository in your coding agent and paste this prompt. You don't
+need to install Supercov first; the agent can handle that.
 
-Paste this into your agent's conversation:
-
-```text
+```text supercov-prompt
 Measure code coverage with npx supercov and write one missing test.
 Only change tests. Rerun the full test suite and show me the test you
 added and the before-and-after coverage.
@@ -31,7 +27,7 @@ conversation. Ask separately if you want a commit or pull request.
 The agent should run the suite, inspect a gap, write a test, then rerun the
 same suite and compare. These are the commands it can use:
 
-```sh
+```sh supercov-example
 # 1. Establish a baseline.
 npx supercov -- npm test
 
@@ -49,7 +45,7 @@ npx supercov diff <previous-run-id> latest
 ```
 
 Everything after `--` is your project's test command. Use your actual command
-in place of `npm test`, and your own file paths in the queries. For example,
+and file paths in place of the examples. For example,
 Rust projects can use `cargo test`, Python projects `pytest`, and Ruby projects
 `bundle exec rspec`. Keep the baseline and verification commands identical.
 
@@ -72,8 +68,9 @@ See [assertion evidence](assertion-evidence.md) for requirements and examples.
 
 ## Example
 
-Here's what the first prompt produced in a recorded Codex run. The files are
-from our checkout example; you don't need to add them to your project.
+Here's a recorded Codex run in a JavaScript project, using the first prompt.
+The files are from our checkout example; you don't need to add them to your
+project.
 
 [`src/session.js`](https://github.com/supercorp-ai/supercov/blob/main/examples/checkout-verification/starter/src/session.js)
 allows checkout only when the customer is signed in and their session has
@@ -153,7 +150,7 @@ take coverage to 100%.
 
 To try these exact files, [download the starter](https://supercov.com/downloads/supercov-tutorial.zip),
 extract it, open the `supercov-tutorial` folder in your agent, and run `npm ci`.
-Then paste the first prompt above. The completed test is not included in the
+Then use the JavaScript prompt above. The completed test is not included in the
 download. The [recorded run](https://github.com/supercorp-ai/supercov/tree/main/examples/checkout-verification/agent-run)
 includes the commands, full output, and completed test.
 
@@ -162,7 +159,7 @@ includes the commands, full output, and completed test.
 Once you've reviewed the first test, use this prompt to continue through
 useful gaps—for example, during an overnight run:
 
-```text
+```text supercov-prompt
 Use `npx supercov` to improve coverage. Only write tests. Keep going while
 useful gaps remain.
 
@@ -198,7 +195,7 @@ reason to manufacture a test.
 
 If the repository separates test levels, narrow the view:
 
-```sh
+```sh supercov
 npx supercov runs latest gaps --kind e2e --limit 10
 ```
 

@@ -4,7 +4,12 @@ Supercov turns the test suite you already have into a list of useful tests to
 write next. Run the suite once, inspect a coverage gap, add a focused test, and
 compare the result.
 
-```sh
+Using a coding agent? [Give it a prompt](agent-loop.md#start-with-one-test).
+It can set up Supercov and run the commands for you.
+
+To run it yourself:
+
+```sh supercov-example
 npx supercov -- npm test
 ```
 
@@ -17,7 +22,7 @@ You need:
 
 - macOS (arm64 or x64), Linux (arm64 or x64, glibc 2.28 or newer or musl), or
   Windows (arm64 or x64);
-- Node.js 22 or newer;
+- Node.js 22 or newer when using the npm package;
 - a test command that already works in the repository; and
 - for Rust, the Rust 1.95 toolchain;
 - for Python, CPython 3.12 or newer with pytest or unittest;
@@ -62,7 +67,7 @@ run.
 
 Open the newest run:
 
-```sh
+```sh supercov-example
 npx supercov runs latest
 ```
 
@@ -80,14 +85,14 @@ away a measurement limit.
 
 Ask for a short list, then inspect one file:
 
-```sh
+```sh supercov-example
 npx supercov runs latest gaps --limit 10
 npx supercov runs latest file app/checkout/session.ts
 ```
 
 Use the more specific queries when you need them:
 
-```sh
+```sh supercov-example
 npx supercov runs latest decision app/checkout/session.ts:64
 npx supercov runs latest line app/checkout/session.ts:64
 ```
@@ -101,7 +106,7 @@ with one source line.
 Write one focused test with a meaningful assertion. Then rerun the same complete
 command and compare the two runs:
 
-```sh
+```sh supercov-example
 npx supercov -- npm test
 npx supercov diff <previous-run-id> latest
 ```
@@ -114,7 +119,7 @@ without an unexplained loss elsewhere.
 
 Paste this into any coding agent that can run terminal commands:
 
-```text
+```text supercov-prompt
 Use `npx supercov` to improve coverage. Only write tests. Keep going while
 useful gaps remain.
 
@@ -129,7 +134,7 @@ Stop when no useful gap remains or Supercov reports a measurement limit instead
 of an ordinary gap.
 ```
 
-Replace `npm test` with the repository's real complete test command when needed.
+Use the repository's real complete test command in place of the example.
 
 ## Files and cleanup
 
@@ -138,7 +143,7 @@ workspace for instrumented builds. These files are local and ignored by Git.
 Supercov does not rewrite your source, tests, imports, runner configuration,
 dependencies, or ordinary build output.
 
-```sh
+```sh supercov
 npx supercov clean --dry-run   # preview what would be removed
 npx supercov clean --keep 20   # keep the 20 newest runs
 npx supercov clean             # remove all runs and the build cache

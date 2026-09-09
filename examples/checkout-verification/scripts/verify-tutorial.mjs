@@ -83,7 +83,7 @@ try {
     assert.ok(commands.some(command => command.exitCode === 0 && command.stdout === excerpt), `${name} must match the recorded output`);
   }
   const guide = readFileSync(join(root, '../../docs/agent-loop.md'), 'utf8');
-  const prompt = /```text\n([\s\S]*?)\n```/.exec(guide)?.[1];
+  const prompt = /```text(?: supercov-prompt)?\n([\s\S]*?)\n```/.exec(guide)?.[1];
   const example = guide.split('## Example\n')[1]?.split('\n## ')[0];
   assert.ok(example, 'The workflow must include the recorded example.');
   const blocks = [...example.matchAll(/```text\n([\s\S]*?)\n```/g)].map(match => match[1]);
