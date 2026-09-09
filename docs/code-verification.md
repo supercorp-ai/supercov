@@ -1,8 +1,8 @@
-# Find a missing test
+# Example
 
-The tests in this example cover every line and branch of a checkout function,
-but never check an expired session. Use Supercov to find that missing case,
-then check what changes when you add a test for it.
+This example measures coverage for a small checkout function. It includes the
+original tests, an additional test for an expired session, and commands for
+comparing the results.
 
 ## Before you start
 
