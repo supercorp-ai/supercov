@@ -489,6 +489,13 @@ export function analyzeWithFrontend(
     /** the assertion pins the sink's whole call list (a call count, or `mock.calls` compared as a whole or
      *  through a projection): it witnesses both that the pinned calls happened and that no other call did */
     callList?: boolean;
+    /** Source projection of a Node mock, not proof of production-site dependence. */
+    mock?: MockProjection;
+  }
+  interface MockProjection {
+    target: string;
+    kind: "call-count" | "call-arguments" | "call-history" | "projection";
+    path: string[];
   }
 
   /** Does a log site's message template (constant parts in order, placeholders as wildcards) fit an asserted literal? */
@@ -2018,6 +2025,59 @@ export function analyzeWithFrontend(
   const staticTestKey = (file: string, line: number, name: string) =>
     JSON.stringify([file, line, name]);
 
+  function nativeContextMock(call: ts.CallExpression): boolean {
+    const callee = unwrap(call.expression);
+    if (!ts.isPropertyAccessExpression(callee)) return false;
+    const tracker = unwrap(callee.expression);
+    if (!ts.isPropertyAccessExpression(tracker) || tracker.name.text !== "mock")
+      return false;
+    const context = declOf(unwrap(tracker.expression));
+    if (!context || !ts.isParameter(context)) return false;
+    const callback = context.parent;
+    if (
+      !(ts.isArrowFunction(callback) || ts.isFunctionExpression(callback)) ||
+      callback.parameters[0] !== context ||
+      !ts.isCallExpression(callback.parent)
+    )
+      return false;
+    const registration = unwrap(callback.parent.expression);
+    if (!ts.isIdentifier(registration)) return false;
+    const declaration =
+      checker.getSymbolAtLocation(registration)?.declarations?.[0];
+    if (
+      !declaration ||
+      !(ts.isImportSpecifier(declaration) || ts.isImportClause(declaration))
+    )
+      return false;
+    if (
+      ts.isImportSpecifier(declaration) &&
+      !["test", "it"].includes((declaration.propertyName ?? declaration.name).text)
+    )
+      return false;
+    const imported = ts.isImportSpecifier(declaration)
+      ? declaration.parent.parent.parent
+      : declaration.parent;
+    return (
+      ts.isStringLiteralLike(imported.moduleSpecifier) &&
+      imported.moduleSpecifier.text === "node:test"
+    );
+  }
+
+  function mockProjection(o: Origin): MockProjection | undefined {
+    if (!o.kind.startsWith("mock:console.")) return undefined;
+    const path = o.path;
+    const joined = path.join(".");
+    const kind =
+      joined === "mock.callCount()" || joined === "mock.calls.length"
+        ? "call-count"
+        : joined === "mock.calls"
+          ? "call-history"
+          : /(?:^|\.)arguments(?:\.\[\d+\])?$/.test(joined)
+            ? "call-arguments"
+            : "projection";
+    return { target: o.kind.slice(5), kind, path };
+  }
+
   function originOf(expr: ts.Expression, depth = 0): Origin | undefined {
     // each property-access segment costs one level: `admin.rest.resources.Article.find.mock.calls.map(...)` read
     // through a local helper is 10 deep; runaway recursion through helpers is bounded by paramBindings instead
@@ -2050,11 +2110,23 @@ export function analyzeWithFrontend(
         callee.expression.getText().endsWith(".mock") &&
         e.arguments.length >= 2 &&
         ts.isStringLiteralLike(e.arguments[1])
-      )
+      ) {
+        // Keep a same-named user helper out of the native mock model. Unsupported
+        // tracker/receiver aliases remain unknown rather than acquiring stream credit.
+        const receiver = unwrap(e.arguments[0]);
+        const declaration = declOf(receiver);
+        if (
+          !nativeContextMock(e) ||
+          !ts.isIdentifier(receiver) ||
+          receiver.text !== "console" ||
+          (declaration && !declaration.getSourceFile().isDeclarationFile)
+        )
+          return undefined;
         return {
           kind: `mock:${e.arguments[0].getText()}.${e.arguments[1].text}`,
           path: [],
         };
+      }
       if (ts.isIdentifier(callee)) {
         // Resolve the declaration below. A familiar helper name is not a
         // contract, nor does it identify the particular process/socket observed.
@@ -2097,10 +2169,14 @@ export function analyzeWithFrontend(
           visit(e.arguments[0]);
           if (hook) return hook;
         }
-        if (["String", "Number", "Boolean"].includes(callee.text))
-          return e.arguments[0]
+        if (["String", "Number", "Boolean"].includes(callee.text)) {
+          const base = e.arguments[0]
             ? originOf(e.arguments[0], depth + 1)
             : undefined;
+          return base?.kind.startsWith("mock:")
+            ? { ...base, path: [...base.path, `${callee.text}()`] }
+            : base;
+        }
         const d = declOf(callee);
         if (d && isProdFile(d.getSourceFile()))
           return { kind: "prod:" + declaredName(d, callee.text), path: [] };
@@ -2147,10 +2223,14 @@ export function analyzeWithFrontend(
       if (ts.isPropertyAccessExpression(callee)) {
         const name = callee.name.text;
         const objText = callee.expression.getText();
-        if (["JSON", "Object", "Array", "Promise"].includes(objText))
-          return e.arguments[0]
+        if (["JSON", "Object", "Array", "Promise"].includes(objText)) {
+          const base = e.arguments[0]
             ? originOf(e.arguments[0], depth + 1)
             : undefined;
+          return base?.kind.startsWith("mock:")
+            ? { ...base, path: [...base.path, `${objText}.${name}()`] }
+            : base;
+        }
         // vi.mocked(x) is x; vi.importActual('~/x') is the real module
         if (
           (objText === "vi" || objText === "jest") &&
@@ -2167,7 +2247,10 @@ export function analyzeWithFrontend(
           return moduleOrigin(e.arguments[0].text, e.getSourceFile());
         const base = originOf(callee.expression, depth + 1);
         if (!base) return undefined;
-        const o: Origin = { ...base, path: [...base.path, name + "()"] };
+        const step = base.kind.startsWith("mock:")
+          ? `${name}(${e.arguments.map((arg) => arg.getText()).join(", ")})`
+          : name + "()";
+        const o: Origin = { ...base, path: [...base.path, step] };
         // promise.catch(e => e) carries the rejection; promise.then(onOk, onErr) carries either
         if (name === "catch" && e.arguments[0]) o.thrown = "only";
         else if (name === "then" && e.arguments.length >= 2) o.thrown = "also";
@@ -2237,7 +2320,10 @@ export function analyzeWithFrontend(
     }
     if (ts.isElementAccessExpression(e)) {
       const b = originOf(e.expression, depth + 1);
-      return b ? { ...b, path: [...b.path, "[]"] } : undefined;
+      const step = b?.kind.startsWith("mock:")
+        ? `[${e.argumentExpression.getText()}]`
+        : "[]";
+      return b ? { ...b, path: [...b.path, step] } : undefined;
     }
     if (ts.isConditionalExpression(e)) return undefined; // selected branch needs value-flow evidence
     if (ts.isBinaryExpression(e)) {
@@ -2251,7 +2337,12 @@ export function analyzeWithFrontend(
       // from the first operand whose name can be resolved.
       return undefined;
     }
-    if (ts.isPrefixUnaryExpression(e)) return originOf(e.operand, depth + 1);
+    if (ts.isPrefixUnaryExpression(e)) {
+      const base = originOf(e.operand, depth + 1);
+      return base?.kind.startsWith("mock:")
+        ? { ...base, path: [...base.path, `unary:${e.operator}`] }
+        : base;
+    }
     if (ts.isIdentifier(e)) {
       // imports first, by their import declaration: alias resolution can fail on deep re-exports
       const raw = checker.getSymbolAtLocation(e)?.declarations?.[0];
@@ -2548,7 +2639,10 @@ export function analyzeWithFrontend(
         // t.mock.method(console, 'log'): a test-owned replacement of a stream sink
         if (o.kind.startsWith("mock:console."))
           return [
-            { boundary: o.kind.endsWith(".error") ? "stderr" : "stdout" },
+            {
+              boundary: /\.(error|warn)$/.test(o.kind) ? "stderr" : "stdout",
+              facet: o.kind.slice(5),
+            },
           ];
         return [];
     }
@@ -3075,6 +3169,11 @@ export function analyzeWithFrontend(
               ? o.facet.slice(8)
               : undefined;
             const bs = boundariesOf(o);
+            const mock = mockProjection(o);
+            if (mock)
+              unresolvedOperand(
+                `mock ${mock.kind}; production call identity and projection dependence unresolved`,
+              );
             if (!bs.length && o.kind !== "literal") {
               noteUnrecognized(arg, o.kind);
               unresolvedOperand(o.kind);
@@ -3100,8 +3199,9 @@ export function analyzeWithFrontend(
                 where: where(node, method),
                 assertionSource: `${relative(root, sf.fileName)}:${sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1}:${sf.getLineAndCharacterOfPosition(node.getStart(sf)).character + 1}`,
                 assertionMethod: method,
+                ...(mock ? { mock } : {}),
               };
-              if (callList && b.boundary.startsWith("sink:"))
+              if (!mock && callList && b.boundary.startsWith("sink:"))
                 ob.callList = true;
               if (pattern) ob.pattern = pattern;
               else if (facetPattern) ob.pattern = facetPattern;
@@ -4401,6 +4501,7 @@ export function analyzeWithFrontend(
     assertionMethod: ob.assertionMethod,
     negative: ob.negative,
     callList: ob.callList,
+    mock: ob.mock,
     weak: ob.weak,
     implicit: ob.implicit,
     runtime: ob.runtime,

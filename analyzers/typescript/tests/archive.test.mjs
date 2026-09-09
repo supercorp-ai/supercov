@@ -31,6 +31,12 @@ test("archive facts require the exact schema, rules, ABI and capabilities", () =
   for (const protocol of [
     { ...PROTOCOL, rules: "source-linked-v2/archive-2" },
     { ...PROTOCOL, capabilities: ["requiresTotal-v1"] },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "mock-observation-projections-v1",
+      ),
+    },
   ])
     assert.throws(
       () => analyzeArchive({ ...empty(), protocol }, ts),

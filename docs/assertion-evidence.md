@@ -14,6 +14,14 @@ code covered by that test unknown. Such sites report an operand-shape limit,
 not proof that an assertion is absent. This does not give those sites assertion
 credit or hide known execution gaps.
 
+Supported Node console-mock observations preserve the assertion's source projection:
+a call count, an argument, the whole history, or a slice or map. Their `mock` details
+retain the receiver and access path. Predicate strength applies to that projected
+value: equality of a count is not equality of the logged arguments. These records
+do not supply production-site credit or validate an observation hint until the
+mock lifetime, selected calls and source-site dependence are established. This
+currently remains an operand-shape limit, even when the count itself was checked.
+
 Fallback native assertion locations prefixed `runtime-stack:` identify runtime
 stack coordinates, which a compiler or loader may have shifted. They are not
 original-source witnesses and cannot select a static test or validate a hint.

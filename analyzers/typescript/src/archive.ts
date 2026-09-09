@@ -15,6 +15,7 @@ export const PROTOCOL = {
     "requiresTotal-v1",
     "assertion-witness-issues-v1",
     "assertion-hints-v1",
+    "mock-observation-projections-v1",
   ],
 };
 type Location = {

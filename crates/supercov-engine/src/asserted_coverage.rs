@@ -66,7 +66,18 @@ impl Boundary {
     }
 }
 
-/// What one assertion reads, as the frontend understood it.
+/// Which part of a mock's history a passing assertion reads. This is source
+/// evidence; relating a history element to a production site remains unresolved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MockProjection {
+    pub target: String,
+    pub kind: String,
+    pub path: Vec<String>,
+}
+
+/// Predicate strength applies to the projected value, not automatically to the
+/// arguments or count of each production call contributing to a mock history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Observation {
@@ -87,6 +98,8 @@ pub struct Observation {
     /// the assertion pins a sink's whole call list, so a spurious or missing call shows up
     #[serde(default)]
     pub call_list: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mock: Option<MockProjection>,
     /// a whole-page render witnessed the site: it ran, but its output was not read
     #[serde(default)]
     pub weak: bool,
@@ -104,6 +117,9 @@ impl Observation {
     /// Does this observation read the given boundary of the given site? Dense channels need the message
     /// constraint checked, and a spy on one console method sees only that method's calls.
     fn matches(&self, site: &Site, at: &Boundary) -> bool {
+        if self.mock.is_some() {
+            return false;
+        }
         if at.boundary != self.boundary {
             return false;
         }
@@ -732,6 +748,9 @@ impl<'a> Join<'a> {
         bounds: &[Boundary],
         ob: &Observation,
     ) -> bool {
+        if ob.mock.is_some() {
+            return false;
+        }
         for sink in &test.sinks {
             let injected = bounds.iter().any(|b| {
                 b.boundary == format!("callback:{}", sink.param)
@@ -1155,7 +1174,8 @@ impl<'a> Join<'a> {
                     witnessed = took.iter().any(|id| {
                         self.tests.get(id).is_some_and(|test| {
                             test.observations.iter().any(|ob| {
-                                !ob.negative
+                                ob.mock.is_none()
+                                    && !ob.negative
                                     && ob.boundary == format!("return:{}", site.owner)
                                     && ob.strength.caught()
                             })
@@ -1447,6 +1467,7 @@ mod tests {
             assertion_method: None,
             negative: false,
             call_list: false,
+            mock: None,
             weak: false,
             log_sites: None,
             pattern_shared: false,
@@ -1635,6 +1656,130 @@ mod tests {
         assert_eq!(after.witness_issues[0].test, "T");
         assert_eq!(summary(&f.sites, &join(&f)).limits, 1);
         assert_eq!(summary(&f.sites, &join(&f)).gaps, 0);
+    }
+
+    #[test]
+    fn mock_projections_cannot_supply_value_absence_sink_or_pragma_credit() {
+        let mut direct = site("S1", "log", vec![boundary("stdout")], &["T1"]);
+        direct.unmodelled_shapes = vec!["mock call identity unresolved".into()];
+        let mut upstream = site("S2", "return", vec![boundary("internal")], &["T1"]);
+        upstream.reached = vec!["S1".into()];
+        upstream.unmodelled_shapes = direct.unmodelled_shapes.clone();
+        let mut injected = site(
+            "S3",
+            "external-call",
+            vec![boundary("callback:writer")],
+            &["T1"],
+        );
+        injected.unmodelled_shapes = direct.unmodelled_shapes.clone();
+        for kind in [
+            "call-count",
+            "call-arguments",
+            "call-history",
+            "projection",
+            "future-kind",
+        ] {
+            let mut ob = observation("stdout", Strength::Total);
+            ob.mock = Some(MockProjection {
+                target: "console.log".into(),
+                kind: kind.into(),
+                path: vec!["mock".into(), "calls".into()],
+            });
+            // Even contradictory whole-list/negative flags cannot bypass the
+            // projection guard. A hint is not an escape hatch either.
+            ob.call_list = true;
+            ob.negative = true;
+            ob.assertion_source = Some("tests/a.test.ts:7:3".into());
+            ob.assertion_method = Some("equal".into());
+            let mut sink_ob = ob.clone();
+            sink_ob.boundary = "sink:records".into();
+            let mut positive = ob.clone();
+            positive.negative = false;
+            let mut positive_sink = sink_ob.clone();
+            positive_sink.negative = false;
+            let mut t = test("T1", vec![ob.clone(), positive, sink_ob, positive_sink]);
+            t.sinks.push(SinkBinding {
+                sink: "sink:records".into(),
+                param: "writer".into(),
+                member: None,
+            });
+            let mut f = facts(
+                vec![direct.clone(), upstream.clone(), injected.clone()],
+                vec![t],
+            );
+            assert!(
+                join(&f)
+                    .iter()
+                    .all(|r| r.status == Status::Unresolved && r.strength.is_none()),
+                "{kind}"
+            );
+            assert_eq!(
+                check_pragma_hints(&f, &[pragma_hint()])[0].validation,
+                HintValidation::Unresolved
+            );
+            let joiner = Join {
+                sites: f.sites.iter().map(|s| (s.id.as_str(), s)).collect(),
+                tests: f.tests.iter().map(|t| (t.id.as_str(), t)).collect(),
+                facts: &f,
+                resolved: BTreeMap::new(),
+            };
+            assert!(
+                !joiner.pinned(&BTreeSet::from(["T1"]), &["S1".into()]),
+                "{kind}"
+            );
+            let bytes = serde_json::to_vec(&ob).unwrap();
+            assert_eq!(serde_json::from_slice::<Observation>(&bytes).unwrap(), ob);
+            f.tests[0]
+                .observations
+                .push(observation("stdout", Strength::Value));
+            assert_eq!(
+                join(&f)[0].status,
+                Status::Evident,
+                "independent non-mock evidence is preserved"
+            );
+        }
+    }
+
+    #[test]
+    fn mock_projection_cannot_supply_the_early_return_decision_shortcut() {
+        let mut decision = site("D1", "condition", vec![], &["T1", "T2"]);
+        decision.kind = "decision".into();
+        decision.decision = Some(DecisionFacts {
+            then: Some(vec!["S1".into()]),
+            else_: Some(Some(vec!["S2".into()])),
+            early_exit_downstream: Some(vec!["S2".into()]),
+            outcomes: Some(Outcomes {
+                true_: vec!["T1".into()],
+                false_: vec!["T2".into()],
+            }),
+            ..Default::default()
+        });
+        let mut projected_return = observation("return:handler", Strength::Value);
+        projected_return.mock = Some(MockProjection {
+            target: "console.log".into(),
+            kind: "projection".into(),
+            path: vec!["mock".into(), "calls".into()],
+        });
+        let mut f = facts(
+            vec![
+                site("S1", "return", vec![boundary("internal")], &["T1"]),
+                site("S2", "io-call", vec![boundary("client-message")], &["T2"]),
+                decision,
+            ],
+            vec![
+                test("T1", vec![projected_return]),
+                test("T2", vec![observation("client-message", Strength::Total)]),
+            ],
+        );
+        let r = join(&f);
+        let d = r.iter().find(|r| r.site == "D1").unwrap();
+        assert_eq!(d.stuck_false_caught, Some(false));
+        assert_eq!(d.status, Status::Partial);
+        f.tests[0].observations[0].mock = None;
+        let r = join(&f);
+        let d = r.iter().find(|r| r.site == "D1").unwrap();
+        assert_eq!(d.stuck_false_caught, Some(true));
+        assert_eq!(d.status, Status::Evident);
     }
 
     #[test]

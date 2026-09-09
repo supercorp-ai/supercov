@@ -1,4 +1,5 @@
 import test from "node:test";
+import "./mock-projections.integration.mjs";
 import assert from "node:assert/strict";
 import {
   cpSync,
