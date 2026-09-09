@@ -1,28 +1,27 @@
-# Example
+# Tutorial
 
-This example measures coverage for a small checkout function. It includes the
-original tests, an additional test for an expired session, and commands for
-comparing the results.
+In this tutorial, you'll open a small JavaScript project in your coding agent,
+ask it to add one test, and review the result. Supercov measures coverage; the
+agent writes the test.
 
-## Before you start
+## 1. Open the starter project
 
-You need Node.js 22 or newer and npm. Clone the repository and install the
-example's dependencies:
+You need Node.js 22 or newer, npm, and a coding agent that can edit files and
+run terminal commands.
+
+[Download the starter project](https://supercov.com/downloads/supercov-tutorial.zip),
+extract it, and open the `supercov-tutorial` folder in your agent. Install its
+dependencies from that folder:
 
 ```sh
-git clone --depth 1 https://github.com/supercorp-ai/supercov.git
-cd supercov/examples/checkout-verification
 npm ci
 ```
 
-Run the commands below from this directory. The example uses Supercov 0.0.42
-and Node's built-in test runner. Both the original tests and the additional
-test are included. The first three steps do not require any file edits.
+The project uses Node's built-in test runner and Supercov 0.0.42. It contains
+one function and two tests. The completed test is not included in the download.
 
-## 1. Run the original tests
-
-In `src/session.js`, checkout is allowed only if the customer is signed in and
-their session has not expired:
+`src/session.js` allows checkout only when the customer is signed in and their
+session has not expired:
 
 ```js
 export function canCheckout(signedIn, expired) {
@@ -31,25 +30,42 @@ export function canCheckout(signedIn, expired) {
 }
 ```
 
-The two tests in `tests/session.test.js` check a valid session and a signed-out
-visitor:
+The tests cover a valid session and a signed-out visitor:
 
 ```js
 assert.equal(canCheckout(true, false), true);
 assert.equal(canCheckout(false, false), false);
 ```
 
-Run those tests through Supercov, then open the summary:
+## 2. Paste the prompt
+
+Start a conversation with your agent in the starter folder and paste:
+
+```text
+Measure code coverage with npx supercov and write one missing test.
+Only change tests. Rerun the full test suite and show me the test you
+added and the before-and-after coverage.
+```
+
+Let the agent run the commands and edit the tests. Approve those actions if
+your agent asks for permission.
+
+The test and output below come from a recorded Codex run with this starter and
+prompt. Your agent may choose different commands or name the test differently.
+
+## 3. Read what the agent found
+
+In the recorded run, the agent measured the full suite and opened the summary:
 
 ```sh
-npx supercov -- node --test tests/session.test.js
+npx supercov -- npm test
 npx supercov runs latest
 ```
 
-Everything after `--` is the test command Supercov runs. In your own project,
-use your existing test command there.
+Everything after `--` is the project's test command. Here, `npm test` runs
+`node --test`, which picks up the test files in the project.
 
-Both tests pass. The coverage section shows:
+Both tests passed. The summary showed:
 
 ```text
 Coverage
@@ -58,53 +74,52 @@ Coverage
   MC/DC      50.00% (1/2)
 ```
 
-Line and branch coverage are 100% because the tests reach both `return true`
-and `return false`. The MC/DC result shows there is still a condition to test.
-
-Keep the run ID printed at the top of the summary. You'll use it to compare
-this run with the next one.
-
-## 2. Inspect the missing condition
-
-Ask about the decision on line 2:
+The agent then listed the gaps and inspected `src/session.js`. You can open
+the same views with:
 
 ```sh
-npx supercov runs latest decision src/session.js:2
+npx supercov runs latest gaps
+npx supercov runs latest file src/session.js
 ```
+
+The file query explained what was missing:
 
 ```text
-signedIn && !expired
-C1 covered + asserted: signedIn
-C2 MISSING: !expired
-confidence asserted; asserted MC/DC 1/2
+ LINE  STATUS        SOURCE
+    2  PARTIAL       signedIn && !expired
+       Unobserved: no witness pair shows `!expired` independently changing the decision result
 ```
 
-MC/DC stands for Modified Condition/Decision Coverage. It checks whether each
-condition has independently affected the decision. The original tests show
-that changing `signedIn` changes the result, but neither test changes `expired`.
-That leaves one of two conditions covered: 50%.
+Both return paths had run, so line and branch coverage were 100%. But neither
+test checked an expired session. MC/DC checks whether each condition has been
+shown to affect the decision independently. Here, `signedIn` had; `!expired`
+had not.
 
-`C2 MISSING: !expired` points to the case to test: a customer who is still
-signed in, but whose session has expired. Checkout should be denied.
+If your agent stops at 100% line coverage, ask it to inspect the MC/DC gaps.
 
-## 3. Include the expired-session test
+## 4. Review the test it wrote
 
-`tests/expired-session.test.js` contains that test:
+The agent added this test to `tests/session.test.js`:
 
 ```js
-test('an expired session cannot check out', () => {
+test('a signed-in visitor with an expired session cannot check out', () => {
   assert.equal(canCheckout(true, true), false);
 });
 ```
 
-Run both test files and open the new summary:
+The customer is still signed in, but the session has expired. The assertion
+checks that checkout is denied. The original tests and application code were
+left unchanged.
+
+## 5. Check the result
+
+The agent reran the same full test command:
 
 ```sh
-npx supercov -- node --test tests/session.test.js tests/expired-session.test.js
-npx supercov runs latest
+npx supercov -- npm test
 ```
 
-All three tests pass:
+All three tests passed. The new run's summary showed:
 
 ```text
 Coverage
@@ -113,25 +128,14 @@ Coverage
   MC/DC      100.00% (2/2)
 ```
 
-Query the same decision again:
-
-```sh
-npx supercov runs latest decision src/session.js:2
-```
-
-The expiry condition is now covered. `asserted MC/DC 2/2` means both conditions
-have coverage evidence linked to passing assertions:
-
-```text
-C2 covered + asserted: !expired
-confidence asserted; asserted MC/DC 2/2
-```
-
-Compare the runs, replacing `<before-run-id>` with the ID you saved in step 1:
+It also compared the two runs. To inspect that comparison yourself, use the
+first run ID from your agent's output:
 
 ```sh
 npx supercov diff <before-run-id> latest
 ```
+
+The recorded comparison showed:
 
 ```text
 lines +0pp, branches +0pp, MC/DC +50pp
@@ -140,43 +144,35 @@ lost: 0 lines, 0 branches, 0 MC/DC conditions
 + MC/DC src/session.js:2 C2 !expired
 ```
 
-Line and branch coverage have not changed. The new test covers the missing
-expiry condition without changing application code.
+If the diff says the older run is stale because tests changed, that is expected.
+It still records the state before the edit.
 
-## 4. Check that the test catches a regression
+You now have a test-file change to review and a coverage comparison in the
+conversation. Ask your agent separately if you want it to commit the change or
+open a pull request.
 
-In this example only, temporarily remove the expiry check from `src/session.js`:
+## Check the test yourself
+
+To check that the new test catches a regression, temporarily remove
+`&& !expired` from `src/session.js` in this starter project:
 
 ```diff
 -  if (signedIn && !expired) return true;
 +  if (signedIn) return true;
 ```
 
-Run the original two tests against the changed function:
+Run the tests again:
 
 ```sh
-npx supercov -- node --test tests/session.test.js
+npx supercov -- npm test
 ```
 
-Then include the expired-session test:
-
-```sh
-npx supercov -- node --test tests/session.test.js tests/expired-session.test.js
-```
-
-| Tests run against the changed function | Result |
-| --- | --- |
-| Original two tests | Both pass. |
-| All three tests | The expired-session test fails; the other two pass. |
-
-The new test expects `false`, but the changed function returns `true`. The
-second command should fail: that is the test catching the removed expiry check.
-
-Restore `&& !expired` in `src/session.js` when you finish, then rerun all three
-tests with the same command. They should pass again.
+The new test should fail: the function now allows checkout when it should
+return `false`. Restore `&& !expired` and rerun the same command. All three
+tests should pass again.
 
 ## Next
 
-- [Full example and recorded output](https://github.com/supercorp-ai/supercov/tree/main/examples/checkout-verification) — source, tests, and the complete output excerpted above.
+- [Recorded agent run and completed test](https://github.com/supercorp-ai/supercov/tree/main/examples/checkout-verification/agent-run) — the prompt, command output, and file change used here.
+- [Agent workflow](agent-loop.md) — use this process with your own test suite.
 - [Understanding coverage](coverage-model.md) — what each metric measures and what 100% means.
-- [Agent workflow](agent-loop.md) — use the same run, inspect, test, and compare steps with a coding agent.

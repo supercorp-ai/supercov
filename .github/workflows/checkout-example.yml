@@ -34,3 +34,7 @@ jobs:
           cache-dependency-path: examples/checkout-verification/package-lock.json
       - run: npm ci
       - run: npm run demo
+      - run: node scripts/verify-tutorial.mjs
+      - name: Package the tutorial starter
+        if: runner.os == 'Linux'
+        run: python3 scripts/package-starter.py "$RUNNER_TEMP/supercov-tutorial.zip"
