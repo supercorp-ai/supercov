@@ -3,6 +3,7 @@
 //! are owned here.
 
 pub mod agent_json;
+pub mod asserted_coverage;
 pub mod build_cache;
 pub mod child_signal_guard;
 pub mod coverage_analysis;
