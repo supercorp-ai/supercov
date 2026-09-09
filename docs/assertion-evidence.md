@@ -69,6 +69,20 @@ passes. Repeated calls, property reads, mutable aliases and `await` are not
 assumed to be identical evaluations. This bounded source check needs no pragma,
 contract file or additional runtime probe; it is not general relational analysis.
 
+For native equality comparisons, bounded source analysis also follows `const`
+aliases and `await`. If both operands lead to the same stable input through an
+await, `comparison.relation` is `shared-input-through-await`; each operand's
+`input` records the binding and await source locations. This does **not** mean
+the resulting values are equal or the predicate is a tautology: a Promise differs
+from its resolved value, and a stateful thenable can resolve differently on two
+awaits. The passing witness remains visible, but this comparison alone cannot
+supply producer-value, absence, control-flow or pragma credit. A relevant site
+reports `limit:predicate-dependence` unless a more specific existing limitation
+or known execution gap applies. Independent assertions still contribute normally.
+The traversal is bounded, does not equate calls/getters or follow mutable aliases,
+and does not infer independence when no shared input was found. It runs only
+during querying; the test-time instrumentation is unchanged.
+
 Fallback native assertion locations prefixed `runtime-stack:` identify runtime
 stack coordinates, which a compiler or loader may have shifted. They are not
 original-source witnesses and cannot select a static test or validate a hint.

@@ -46,3 +46,17 @@ export function shadowed() {
 export function typedSelf() {
   return 'typed';
 }
+export function awaitedReverse() { return 'reverse'; }
+export function awaitedAlias() { return 'awaited alias'; }
+let thenableReads = 0;
+export function awaitedTwice() { return 'twice awaited'; }
+export function awaitedIndependent() { return 'independent awaited'; }
+export function awaitedChecked() { return 'checked awaited'; }
+export function awaitedMutable() { return 'mutable awaited'; }
+let awaitedCallsCount = 0;
+export function awaitedCalls() { return 'calls awaited'; }
+export function awaitedGetter() {
+  let reads = 0;
+  return { get value() { return 'getter awaited'; } };
+}
+export function awaitedTyped() { return 'typed awaited'; }

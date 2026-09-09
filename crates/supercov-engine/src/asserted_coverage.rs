@@ -152,6 +152,16 @@ pub struct ComparisonOperand {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<ComparisonInput>,
+}
+
+/// Input provenance through const aliases/await, not evaluated value identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComparisonInput {
+    pub binding: String,
+    pub awaits: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,14 +213,17 @@ pub struct Observation {
 }
 
 impl Observation {
-    /// Passing a reflexive native comparison constrains no value of its stable
-    /// operand. Keep the witness visible, but never promote it to site credit.
+    /// Reflexive comparisons do not constrain their stable value. Shared input
+    /// through await may constrain something, but needs a separate dependence
+    /// model before it can supply producer value, absence or pragma credit.
     fn can_constrain_value(&self) -> bool {
         self.mock.is_none()
-            && self
-                .comparison
-                .as_ref()
-                .is_none_or(|c| c.relation != "same-immutable-binding")
+            && self.comparison.as_ref().is_none_or(|c| {
+                !matches!(
+                    c.relation.as_str(),
+                    "same-immutable-binding" | "shared-input-through-await"
+                )
+            })
     }
 
     /// Does this observation read the given boundary of the given site? Dense channels need the message
@@ -670,6 +683,8 @@ pub enum ReasonKind {
     LimitUndecidable,
     #[serde(rename = "limit:assertion-witness")]
     LimitAssertionWitness,
+    #[serde(rename = "limit:predicate-dependence")]
+    LimitPredicateDependence,
 }
 
 impl ReasonKind {
@@ -680,6 +695,7 @@ impl ReasonKind {
                 | ReasonKind::LimitInternalState
                 | ReasonKind::LimitUndecidable
                 | ReasonKind::LimitAssertionWitness
+                | ReasonKind::LimitPredicateDependence
         )
     }
 }
@@ -770,7 +786,7 @@ pub fn join(facts: &Facts) -> Vec<Resolution> {
             join.resolved
                 .get(&s.id)
                 .cloned()
-                .map(|r| join.with_witness_issues(s, r))
+                .map(|r| join.with_witness_issues(s, join.with_comparison_limits(s, r)))
         })
         .collect()
 }
@@ -1046,6 +1062,21 @@ impl<'a> Join<'a> {
         ob: &Observation,
         seen: &mut BTreeSet<String>,
     ) -> bool {
+        // A dependent comparison may have a missing witness as well as an
+        // unresolved value relationship. Retain structural relevance for limit
+        // reporting only; the positive join always keeps its comparison guard.
+        let mut structural;
+        let ob = if ob
+            .comparison
+            .as_ref()
+            .is_some_and(|c| c.relation == "shared-input-through-await")
+        {
+            structural = ob.clone();
+            structural.comparison = None;
+            &structural
+        } else {
+            ob
+        };
         if !seen.insert(site.id.clone()) {
             return false;
         }
@@ -1081,6 +1112,56 @@ impl<'a> Join<'a> {
                 .get(id.as_str())
                 .is_some_and(|s| self.issue_reaches(s, test, ob, seen))
         })
+    }
+
+    /// Keep a passing dependent predicate visible as an analysis limit, not a
+    /// missing assertion. Structural relevance is used only to explain limits;
+    /// it never supplies a strength, caught flag or evidence test set.
+    fn with_comparison_limits(&self, site: &Site, mut result: Resolution) -> Resolution {
+        let untaken = site
+            .decision
+            .as_ref()
+            .and_then(|d| d.outcomes.as_ref())
+            .is_some_and(|o| {
+                (result.stuck_false_caught == Some(false) && o.true_.is_empty())
+                    || (result.stuck_true_caught == Some(false) && o.false_.is_empty())
+            });
+        if result.status == Status::Evident
+            || untaken
+            || !result.reason.as_ref().is_some_and(|r| {
+                matches!(
+                    r.kind,
+                    ReasonKind::GapNotAsserted
+                        | ReasonKind::GapOutcomeNotAsserted
+                        | ReasonKind::GapValueNotAsserted
+                )
+            })
+        {
+            return result;
+        }
+        let relevant = site
+            .covered_by
+            .iter()
+            .filter_map(|id| self.tests.get(id.as_str()))
+            .any(|test| {
+                test.observations.iter().any(|ob| {
+                    if ob
+                        .comparison
+                        .as_ref()
+                        .is_none_or(|c| c.relation != "shared-input-through-await")
+                    {
+                        return false;
+                    }
+                    self.issue_reaches(site, test, ob, &mut BTreeSet::new())
+                })
+            });
+        if relevant {
+            result.reason = Some(Reason {
+                kind: ReasonKind::LimitPredicateDependence,
+                detail: Some("A passing assertion compares values from the same immutable input through await; its constraints on the producer value are not established. See comparison operand inputs in test observations.".into()),
+            });
+        }
+        result
     }
 
     /// Final reporting pass only: strengths, statuses, caught flags, evidence
@@ -1760,15 +1841,24 @@ mod tests {
 
     #[test]
     fn self_comparisons_cannot_supply_value_absence_sink_pragma_or_early_exit_credit() {
-        for predicate in [
+        for (predicate, relation) in [
             "node-same-value",
             "node-loose-equality",
             "node-deep-equality",
             "node-deep-strict-equality",
-        ] {
+        ]
+        .into_iter()
+        .flat_map(|predicate| {
+            ["same-immutable-binding", "shared-input-through-await"]
+                .map(|relation| (predicate, relation))
+        }) {
             let operand = ComparisonOperand {
                 source: "tests/a.test.ts:70:76".into(),
                 binding: Some("tests/a.test.ts:20:40".into()),
+                input: (relation == "shared-input-through-await").then(|| ComparisonInput {
+                    binding: "tests/a.test.ts:20:40".into(),
+                    awaits: vec!["tests/a.test.ts:64:76".into()],
+                }),
             };
             let mut ob = observation("return:handler", Strength::Total);
             ob.comparison = Some(Comparison {
@@ -1778,7 +1868,7 @@ mod tests {
                     source: "tests/a.test.ts:78:84".into(),
                     ..operand
                 },
-                relation: "same-immutable-binding".into(),
+                relation: relation.into(),
             });
             ob.assertion_source = Some("tests/a.test.ts:7:3".into());
             ob.assertion_method = Some("equal".into());
@@ -1868,6 +1958,98 @@ mod tests {
                 Some(true)
             );
         }
+    }
+
+    #[test]
+    fn awaited_input_limits_preserve_execution_gaps_and_independent_evidence() {
+        let mut ob = observation("return:handler", Strength::Total);
+        ob.comparison = Some(Comparison {
+            predicate: "node-deep-strict-equality".into(),
+            actual: ComparisonOperand {
+                source: "tests/a:10:20".into(),
+                binding: None,
+                input: Some(ComparisonInput {
+                    binding: "tests/a:1:5".into(),
+                    awaits: vec!["tests/a:10:20".into()],
+                }),
+            },
+            expected: ComparisonOperand {
+                source: "tests/a:22:25".into(),
+                binding: Some("tests/a:1:5".into()),
+                input: Some(ComparisonInput {
+                    binding: "tests/a:1:5".into(),
+                    awaits: vec![],
+                }),
+            },
+            relation: "shared-input-through-await".into(),
+        });
+        let mut decision = site("D", "condition", vec![], &["T"]);
+        decision.kind = "decision".into();
+        decision.decision = Some(DecisionFacts {
+            then: Some(vec!["S".into()]),
+            else_: Some(Some(vec!["S".into()])),
+            outcomes: Some(Outcomes {
+                true_: vec!["T".into()],
+                false_: vec![],
+            }),
+            ..Default::default()
+        });
+        let mut f = facts(
+            vec![
+                site("S", "return", vec![boundary("return:handler")], &["T"]),
+                site("untested", "return", vec![boundary("return:handler")], &[]),
+                site(
+                    "unrelated",
+                    "return",
+                    vec![boundary("return:other")],
+                    &["T"],
+                ),
+                decision,
+            ],
+            vec![test("T", vec![ob.clone()])],
+        );
+        let rows = join(&f);
+        assert_eq!(rows[0].status, Status::Unresolved);
+        assert_eq!(rows[0].strength, None);
+        assert!(rows[0].tests.is_empty());
+        assert!(
+            rows[0].witness_issues.is_empty(),
+            "the witness is not rejected"
+        );
+        assert_eq!(
+            rows[0].reason.as_ref().unwrap().kind,
+            ReasonKind::LimitPredicateDependence
+        );
+        assert_eq!(
+            rows[1].reason.as_ref().unwrap().kind,
+            ReasonKind::GapNotReached
+        );
+        assert_eq!(
+            rows[2].reason.as_ref().unwrap().kind,
+            ReasonKind::GapNotAsserted
+        );
+        assert_eq!(
+            rows[3].reason.as_ref().unwrap().kind,
+            ReasonKind::GapOutcomeNotAsserted
+        );
+        assert_eq!(summary(&f.sites, &rows).limits, 1);
+        assert_eq!(f.tests[0].observations, vec![ob.clone()]);
+        f.tests[0]
+            .observations
+            .push(observation("return:handler", Strength::Total));
+        assert_eq!(join(&f)[0].status, Status::Evident);
+        f.tests[0].observations.clear();
+        let mut issue = rejected(WitnessIssueKind::CallNotRecorded, Some("return:handler"));
+        issue.observation = Some(ob);
+        f.tests[0].witness_issues.push(issue);
+        let missing = &join(&f)[0];
+        assert_eq!(missing.status, Status::Unresolved);
+        assert_eq!(missing.strength, None);
+        assert_eq!(missing.witness_issues.len(), 1);
+        assert_eq!(
+            missing.reason.as_ref().unwrap().kind,
+            ReasonKind::LimitAssertionWitness
+        );
     }
 
     #[test]

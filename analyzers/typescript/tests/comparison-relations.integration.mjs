@@ -65,6 +65,7 @@ test(
       "tests/core.test.mjs",
       "tests/loose.test.mjs",
       "tests/typed.test.mts",
+      "tests/awaited.test.mts",
     ];
     ok(run(process.execPath, suite));
     const core = resolve(root, "src/core.mjs"),
@@ -145,6 +146,66 @@ test(
         false,
       ],
       [
+        "reversed awaited comparison permits a changed primitive",
+        "return 'reverse'",
+        "return 'changed reverse'",
+        true,
+      ],
+      [
+        "awaited aliases share a changed primitive",
+        "return 'awaited alias'",
+        "return 'changed alias'",
+        true,
+      ],
+      [
+        "two awaits permit a changed primitive",
+        "return 'twice awaited'",
+        "return 'changed twice'",
+        true,
+      ],
+      [
+        "two awaits can differ for a stateful thenable",
+        "return 'twice awaited'",
+        "return { then(resolve) { resolve(++thenableReads); } }",
+        false,
+      ],
+      [
+        "an independent awaited comparison catches a changed value",
+        "return 'independent awaited'",
+        "return 'changed independent'",
+        false,
+      ],
+      [
+        "independent evidence beside dependent await still counts",
+        "return 'checked awaited'",
+        "return 'changed checked'",
+        false,
+      ],
+      [
+        "mutable copies across await are not shared stable inputs",
+        "return 'mutable awaited'",
+        "return 'changed mutable'",
+        false,
+      ],
+      [
+        "repeated awaited calls are not one stable input",
+        "return 'calls awaited'",
+        "return ++awaitedCallsCount",
+        false,
+      ],
+      [
+        "repeated awaited getters are not one stable input",
+        "return 'getter awaited'",
+        "return ++reads",
+        false,
+      ],
+      [
+        "erased TypeScript wrappers retain awaited input identity",
+        "return 'typed awaited'",
+        "return 'changed typed awaited'",
+        true,
+      ],
+      [
         "Node loose self equality accepts NaN",
         "return 'loose'",
         "return NaN",
@@ -223,7 +284,7 @@ test(
       assert.equal(row.candidate.status, "evident", row.site.owner);
     const testPage = query("--evidence", "/tests", "--limit", "1000");
     assert.equal(testPage.pagination.hasMore, false);
-    assert.equal(testPage.items.length, 15);
+    assert.equal(testPage.items.length, 24);
     const observations = testPage.items.flatMap(
       (item) => item.value.observations,
     );
@@ -302,7 +363,11 @@ test(
       [...new Set(awaited.map((ob) => ob.assertionSource))],
       ["tests/core.test.mjs:49:3"],
     );
-    assert.ok(awaited.every((ob) => ob.comparison?.relation === "unresolved"));
+    assert.ok(
+      awaited.every(
+        (ob) => ob.comparison?.relation === "shared-input-through-await",
+      ),
+    );
     assert.equal(
       rejectedObservations.filter((ob) => ob.boundary === "return:awaitedSelf")
         .length,
@@ -310,21 +375,88 @@ test(
     );
     await t.test(
       "awaited self comparison does not claim total return-value protection",
-      {
-        todo: "SG-ASSERT-015: the exact witness exposes unresolved operand dependence, not total value protection",
-      },
+      {},
       () => {
         const site = report.sites.find(
           (row) => row.site.owner === "awaitedSelf",
         );
         assert.ok(site);
-        assert.notEqual(site.candidate.strength, "total");
+        assert.equal(site.candidate.status, "unresolved");
+        assert.equal(site.candidate.strength, undefined);
+        assert.equal(site.candidate.reason.kind, "limit:predicate-dependence");
       },
     );
+    const dependent = [
+      "awaitedSelf",
+      "awaitedReverse",
+      "awaitedAlias",
+      "awaitedTwice",
+      "awaitedTyped",
+    ];
+    for (const owner of dependent) {
+      const obs = observations.filter(
+        (ob) => ob.boundary === `return:${owner}`,
+      );
+      assert.ok(obs.length > 0, owner);
+      for (const ob of obs) {
+        assert.equal(
+          ob.comparison.relation,
+          "shared-input-through-await",
+          owner,
+        );
+        assert.equal(
+          ob.comparison.actual.input.binding,
+          ob.comparison.expected.input.binding,
+        );
+        assert.ok(
+          ob.comparison.actual.input.awaits.length +
+            ob.comparison.expected.input.awaits.length >
+            0,
+        );
+      }
+      const site = report.sites.find((row) => row.site.owner === owner);
+      assert.equal(site.candidate.status, "unresolved", owner);
+      assert.equal(
+        site.candidate.reason.kind,
+        owner === "awaitedTyped"
+          ? "limit:operand-shape"
+          : "limit:predicate-dependence",
+        owner,
+      );
+    }
+    for (const owner of ["awaitedIndependent", "awaitedChecked"]) {
+      const site = report.sites.find((row) => row.site.owner === owner);
+      assert.equal(site.candidate.status, "evident", owner);
+    }
+    for (const owner of ["awaitedMutable", "awaitedCalls", "awaitedGetter"]) {
+      const obs = observations.filter(
+        (ob) => ob.boundary === `return:${owner}`,
+      );
+      const site = report.sites.find((row) => row.site.owner === owner);
+      assert.ok(site, owner);
+      // Mutable origin tracing may already be unresolved; do not manufacture
+      // input identity or upgrade that existing analysis limitation.
+      assert.ok(
+        obs.length > 0 || site.candidate.status === "unresolved",
+        owner,
+      );
+      assert.notEqual(
+        site.candidate.reason?.kind,
+        "limit:predicate-dependence",
+        owner,
+      );
+      assert.ok(
+        obs.every(
+          (ob) => ob.comparison?.relation !== "shared-input-through-await",
+        ),
+        owner,
+      );
+    }
     const hints = query("--pragmas");
-    assert.equal(hints.summary.hints, 1);
+    assert.equal(hints.summary.hints, 2);
     assert.equal(hints.summary.analyzerSupported, 0);
-    assert.equal(hints.pragmas[0].validation, "unresolved");
+    assert.ok(hints.pragmas.every((p) => p.hint.witness === "passed"));
+    assert.ok(hints.pragmas.every((p) => p.validation === "unresolved"));
     assert.equal(report.assertionScore, null);
     t.diagnostic(JSON.stringify({ id, oracle }));
   },

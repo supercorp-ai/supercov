@@ -16,7 +16,7 @@ export const PROTOCOL = {
     "assertion-witness-issues-v1",
     "assertion-hints-v1",
     "mock-observation-projections-v1",
-    "assertion-comparison-relations-v1",
+    "assertion-comparison-relations-v2",
     "mock-count-lifetimes-v1",
     "mock-count-factories-v1",
     "mock-count-rows-v1",

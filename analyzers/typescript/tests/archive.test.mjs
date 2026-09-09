@@ -29,6 +29,14 @@ const empty = () => ({
 test("archive facts require the exact schema, rules, ABI and capabilities", () => {
   // A previously compatible analyzer must not silently drop witness limits.
   for (const protocol of [
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.map((cap) =>
+        cap === "assertion-comparison-relations-v2"
+          ? "assertion-comparison-relations-v1"
+          : cap,
+      ),
+    },
     { ...PROTOCOL, rules: "source-linked-v2/archive-2" },
     { ...PROTOCOL, capabilities: ["requiresTotal-v1"] },
     {
@@ -40,7 +48,7 @@ test("archive facts require the exact schema, rules, ABI and capabilities", () =
     {
       ...PROTOCOL,
       capabilities: PROTOCOL.capabilities.filter(
-        (cap) => cap !== "assertion-comparison-relations-v1",
+        (cap) => cap !== "assertion-comparison-relations-v2",
       ),
     },
     {

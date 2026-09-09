@@ -503,12 +503,19 @@ export function analyzeWithFrontend(
   interface ComparisonOperand {
     source: string;
     binding?: string;
+    /** Shared input provenance, not equality of the evaluated operands. */
+    input?: ComparisonInput;
+  }
+  interface ComparisonInput {
+    binding: string;
+    awaits: string[];
   }
   interface Comparison {
     predicate: string;
     actual: ComparisonOperand;
     expected: ComparisonOperand;
-    relation: "same-immutable-binding" | "unresolved";
+    relation:
+      "same-immutable-binding" | "shared-input-through-await" | "unresolved";
   }
   interface MockProjection {
     target: string;
@@ -2086,6 +2093,48 @@ export function analyzeWithFrontend(
     return immutableBinding(d.initializer, seen) ?? comparisonLocation(d);
   }
 
+  // Trace only const aliases and await. Unlike immutableBinding, this describes
+  // an input dependency: awaiting a Promise or thenable need not preserve its
+  // value, nor do two awaits necessarily return the same result.
+  function comparisonInput(
+    expr: ts.Expression,
+    seen = new Set<ts.Node>(),
+  ): ComparisonInput | undefined {
+    const e = comparisonExpression(expr);
+    if (seen.size >= 32 || seen.has(e)) return undefined;
+    seen.add(e);
+    if (ts.isAwaitExpression(e)) {
+      const input = comparisonInput(e.expression, seen);
+      return (
+        input && {
+          binding: input.binding,
+          awaits: [comparisonLocation(e), ...input.awaits],
+        }
+      );
+    }
+    if (!ts.isIdentifier(e)) return undefined;
+    const d = declOf(e);
+    if (
+      !d ||
+      !ts.isVariableDeclaration(d) ||
+      !ts.isIdentifier(d.name) ||
+      !d.initializer ||
+      !ts.isVariableDeclarationList(d.parent) ||
+      !(d.parent.flags & ts.NodeFlags.Const) ||
+      seen.has(d)
+    )
+      return undefined;
+    seen.add(d);
+    // A copied mutable binding, call or property read anchors a fresh const
+    // input. Do not equate repeated calls/getters or follow mutable aliases.
+    return (
+      comparisonInput(d.initializer, seen) ?? {
+        binding: comparisonLocation(d),
+        awaits: [],
+      }
+    );
+  }
+
   function nativeComparison(call: ts.CallExpression): Comparison | undefined {
     const callee = comparisonExpression(call.expression);
     if (!ts.isPropertyAccessExpression(callee) || call.arguments.length < 2)
@@ -2130,13 +2179,26 @@ export function analyzeWithFrontend(
     });
     const actual = operand(call.arguments[0]);
     const expected = operand(call.arguments[1]);
+    const actualInput = comparisonInput(call.arguments[0]);
+    const expectedInput = comparisonInput(call.arguments[1]);
+    const sharedAwaitedInput =
+      actualInput &&
+      expectedInput &&
+      actualInput.binding === expectedInput.binding &&
+      actualInput.awaits.length + expectedInput.awaits.length > 0;
+    const sameBinding = actual.binding && actual.binding === expected.binding;
+    if (!sameBinding && sharedAwaitedInput) {
+      actual.input = actualInput;
+      expected.input = expectedInput;
+    }
     return {
       predicate,
       actual,
       expected,
-      relation:
-        actual.binding && actual.binding === expected.binding
-          ? "same-immutable-binding"
+      relation: sameBinding
+        ? "same-immutable-binding"
+        : sharedAwaitedInput
+          ? "shared-input-through-await"
           : "unresolved",
     };
   }
