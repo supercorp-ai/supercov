@@ -53,6 +53,9 @@ claimed; the existing runtime and statement/assertion probes are untouched.
 ## Explicit limits
 
 - Only native **7.0.2** is enabled. It needs Node 22.12+ and its platform package.
+- The native TypeScript frontend's installed-package checks cover Linux glibc,
+  macOS and Windows. They do not establish native TypeScript support on musl/Alpine;
+  the two musl successes in the earlier matrix concern the Supercov native binary.
 - Legacy ts-node/V8 generated-line remapping is not supported by the native
   frontend. Use original-source evidence from normal Supercov captures.
 - Native module resolution currently follows actual import/export references.
@@ -81,7 +84,45 @@ claimed; the existing runtime and statement/assertion probes are untouched.
   contains only explicitly allowed post-run analyzer, check or documentation
   changes. It exercises the current installed npm package with both compilers.
   Changes outside that allowlist require rebuilding the native matrix.
+- [Final CI run 34379745191](https://github.com/supercorp-ai/supercov/actions/runs/34379745191)
+  passed all **15 jobs** at frontend commit `09aa64785fd397c1c2427f782e5c39abb23de83e`:
+  eight compiler/API/identity jobs (Node 22 and 24 on Linux x64, macOS arm64,
+  Windows x64 and Windows arm64), six installed-package jobs (both architectures
+  on Linux glibc, macOS and Windows), and full Linux `npm run check`.
+  Each installed-package job exercised both 5.8.3 and 7.0.2 with 16 sites,
+  installed analyzer assets and no binary override in the consumer.
+- The native ordinary-archive adversarial check was rerun locally after the
+  frontend commit: 10 passed, zero skipped; all 14 real Node/Vitest mutation
+  outcomes retained. This native variant is a separately invoked calibration,
+  while the default full-suite archive check uses 5.8.3.
+- The final follow-up changes research documentation only. It does not change
+  the npm artifact, native binary, analyzer build or calibration identities.
 
-Next: finish Node 22/24 compiler and installed-package gates on Linux/macOS/Windows
-for the new frontend commit, then review the experimental release. No tag,
-version bump, publication or merge is authorized by the build-only review request.
+Next: review and merge the isolated JS/TS branch, then select and authorize an
+experimental release version. Full product release checks remain a separate
+prepublication step; these frontend gates do not claim that `release:check` or
+every unrelated language/integration suite ran. No tag, version bump, publication
+or merge is authorized by the build-only review request.
+
+## Reproduction commands
+
+Run these from this Supercov review checkout (not the sample checkout):
+
+```sh
+npm ci
+npm --prefix analyzers/typescript ci --ignore-scripts
+npm run check
+SUPERCOV_ASSERTED_INTEGRATION=1 SUPERCOV_ASSERTED_TEST_COMPILER=7.0.2 node --test analyzers/typescript/tests/archive.integration.test.mjs
+gh workflow run ci.yml --ref codex/asserted-js-release-review -f native-run-id=34377618812
+```
+
+The calibration artifacts record the exact external sample path, run id, cohort,
+compiler identity and working inputs. With that unchanged sample available:
+
+```sh
+node scripts/asserted-supergateway-recapture.mjs /path/to/asserted-coverage-prototype run_2e5d74892cf7c201 /path/to/new-legacy-result.json --check
+SUPERCOV_ASSERTED_CALIBRATION_COMPILER=7.0.2 node scripts/asserted-supergateway-recapture.mjs /path/to/asserted-coverage-prototype run_2e5d74892cf7c201 /path/to/new-native-result.json --check
+```
+
+Use fresh output names. The script validates the unchanged cohort and input
+hashes, does not run new Stryker mutants, and does not change the sample compiler.

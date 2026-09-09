@@ -5,7 +5,9 @@
 Reproduced and fixed in review commit `408a3f2`. Both Windows architectures
 reproduced EISDIR from `realpathSync` while resolving TypeScript from a `\\?\C:`
 path. File-URL lookup works on the same installation. Probe and product lookup
-regressions are in CI. Installed-package matrix verification remains required.
+regressions are in CI. The complete native matrix passed at `408a3f2`; subsequent
+installed-package checks with both compilers passed on both Windows architectures
+in [run 34379745191](https://github.com/supercorp-ai/supercov/actions/runs/34379745191).
 This is separate from the formerly unsupported TypeScript 7 API.
 
 ## TS7-002 — aliased compilers still compete for the same executable name

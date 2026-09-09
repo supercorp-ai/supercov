@@ -5,7 +5,11 @@ Follow-up: Windows compiler lookup was fixed in `408a3f2`, whose
 and [Linux CI](https://github.com/supercorp-ai/supercov/actions/runs/34377615575)
 passed. The original review below records earlier outcomes. See the
 [TypeScript 7 implementation record](asserted-typescript7-frontend-2026-09-09.md)
-for subsequent implementation, calibration and remaining verification.
+for subsequent implementation and calibration. Its final
+[15-job CI run](https://github.com/supercorp-ai/supercov/actions/runs/34379745191)
+passed at `09aa647`, including native 7.0.2 installed-package checks on six hosts.
+The earlier open Windows/TypeScript decision below is superseded; no release
+has been published, and the complete product prepublication suite is separate.
 
 ## Scope and isolation
 
