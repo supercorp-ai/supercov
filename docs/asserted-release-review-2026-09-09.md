@@ -20,6 +20,10 @@ statement markers remain in the baseline; this review adds no test-time probes.
 - The isolated snapshot compiled with only its selected JS/TS changes. It uses
   its own dependency install and Cargo target directory; no shared binaries were
   overwritten to perform this check.
+- Full `npm run check` also passed in that isolated snapshot. Replaying the fixed
+  cohort from its own binary and analyzer preserved 84/100 agreement (78 true
+  kills, four false kills, ten false-survival predictions and two unresolved
+  killed cases); the ordinary public query succeeded.
 - **Parity reporting correction:** the earlier packaging record's Rust parity
   invocation had not supplied external fixture paths, so that test returned
   without comparing data. It should have been listed as an opt-in check, not a
@@ -27,8 +31,12 @@ statement markers remain in the baseline; this review adds no test-time probes.
   passes against all **661 Supergateway sites** and **1,813 Essential SEO sites**.
   This checks the join on frozen prototype facts. It does not validate all source
   inferences or change the separate historical 84/100 mutation agreement.
-- The optional external TypeScript source-parity checks are still distinct from
-  normal CI; no skipped test is treated as positive calibration evidence.
+- Both optional external TypeScript source-parity checks were enabled in the
+  isolated snapshot. Essential SEO passed immediately. Supergateway exposed a
+  stale suppression counter (155 versus 153) after the two pragmas moved into
+  a separate hint list. The test now verifies that exact migration and both
+  samples pass. No model credit, site denominator or production rule changed.
+  See [the review bug log](supercov-bugs-release-review-2026-09-09.md).
 - Fresh dependency installation reported 13 existing development dependency
   advisories. `npm audit --omit=dev --json` reported **zero** production advisories.
   No dependency upgrade or audit fix was applied as part of this feature.

@@ -186,6 +186,34 @@ for (const name of ["supergateway", "essential-seo"]) {
       // Reviewed v2 calibration, not a soundness oracle. Supergateway's legacy
       // evidence has no phase files, so none of its assertions has an exact
       // runtime witness. Essential SEO does; removed facts are not new gaps.
+      if (!seo) {
+        // The two old pragma observations now live in the separate hint list,
+        // not in either real observations or the suppressed-observation count.
+        const legacyPragmas = expected.tests.flatMap((test) =>
+          test.observations
+            .filter((ob) => ob.boundary === "pragma")
+            .map((ob) => `${test.id}:${ob.where.replace(/ pragma$/, "")}`),
+        );
+        assert.equal(legacyPragmas.length, 2);
+        assert.deepEqual(
+          actual.pragmas
+            .map(
+              (hint) =>
+                `${hint.test}:${hint.assertionSource.replace(/:\d+$/, "")}`,
+            )
+            .sort(),
+          legacyPragmas.sort(),
+        );
+        for (const hint of actual.pragmas) {
+          assert.equal(hint.witness, "unavailable");
+          assert.equal(hint.witnessIssue, "capture-unavailable");
+        }
+        assert.ok(
+          actual.facts.tests.every((test) =>
+            test.observations.every((ob) => ob.boundary !== "pragma"),
+          ),
+        );
+      }
       assert.deepEqual(
         delta,
         seo
@@ -205,7 +233,7 @@ for (const name of ["supergateway", "essential-seo"]) {
               addedObservations: 0,
               changedTests: 80,
               changedSites: 2,
-              suppressedObservations: 155,
+              suppressedObservations: 153,
             },
       );
       assert.equal(actual.facts.sites.length, seo ? 1813 : 661);
@@ -283,9 +311,9 @@ for (const name of ["supergateway", "essential-seo"]) {
         }),
       );
       t.diagnostic(
-        reference.stdout
+        `Reference prototype only (not current analyzer): ${reference.stdout
           .split("\n")
-          .find((line) => line.startsWith("Agreement ")),
+          .find((line) => line.startsWith("Agreement "))}`,
       );
       t.diagnostic(engine.stderr);
     },

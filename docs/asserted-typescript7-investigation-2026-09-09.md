@@ -73,6 +73,20 @@ instead exposes `getSourceFileNames()`, individual reads and `project.checker`.
 Its synchronous interface talks to the native compiler process through a
 request/response channel. It is not all in-process JavaScript.
 
+The native checker was also exercised, not just queried for its method names:
+`project.checker.getTypeAtLocation` and `typeToString` returned the expected
+number-to-number signatures for `increment` and `wrapper`, the two string
+literals for `choose`, and a void-returning callback signature for `notify`.
+
+There is a concrete **semantic-default difference** even in this tiny fixture:
+the same `cleanup` source is `(timer: Timeout) => Timeout` under 5.8.3 and
+`(timer: number) => number` under the native 7.0.2 API. The native project did not
+load `@types/node`; this is consistent with the new default `types: []` described
+in [Microsoft's TypeScript 6 release notes](https://devblogs.microsoft.com/typescript/announcing-typescript-6-0/).
+This is a type-environment difference, not evidence that the runtime test changed
+behavior. It illustrates why importing a legacy compiler silently is not an
+accuracy-preserving substitute for using the project's compiler/configuration.
+
 ## Implications and next choice
 
 1. **Smallest compatibility investigation:** test Microsoft's TypeScript 6
