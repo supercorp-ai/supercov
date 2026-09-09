@@ -50,7 +50,7 @@ Rejected observations remain separate as `tests[].witnessIssues`; affected
 candidates expose their provenance under the same field. Missing or inconclusive
 evidence can produce `limit:assertion-witness`, never value credit. A recorded
 failure remains distinct from absent capture, and absence of a call record does
-not prove non-execution. See [the current fix and calibration record](../../docs/asserted-js-witness-limits-2026-09-09.md).
+not prove non-execution. See [the public limitations and calibration notes](../../docs/assertion-evidence.md).
 
 ## Build and use
 
@@ -121,9 +121,15 @@ All analysis state belongs to this call. Prototype environment variables are
 not consulted. The compiler API is loaded from the project being analyzed;
 callers may explicitly supply `typescript` as a compiler-API object. Failure to
 load a compiler is an error, never a silent substitution with another version.
-The development compiler is TypeScript 5.8.3; broader compiler-version
-compatibility has not been established. The installed TypeScript 7.0.2 compiler
-has a different API and is rejected, without substituting another compiler.
+The build compiler is explicitly pinned to TypeScript 5.8.3. Projects using
+TypeScript 7.0.2 select a separately calibrated native frontend: native syntax
+predicates and enum values, resolved symbol handles, an in-memory config overlay,
+and a compiler process closed after analysis (including failure). The compiler
+package, native binary and standard libraries participate in provenance checks.
+No compiler is substituted. Native analysis needs Node 22.12+ and original-source
+evidence; legacy generated-line remapping is rejected. Module specifiers without
+a resolvable actual import/export reference remain explicit limitations.
+Other native versions are not enabled until separately calibrated.
 
 ## Facts, not verdicts
 
@@ -217,5 +223,5 @@ reruns mutation testing, or establishes semantic soundness. The opt-in ordinary
 archive integration separately executes 14 concrete variants under native Node
 and Vitest. JS-ASSERT-005's former TODO now passes; other model limitations remain.
 
-See [the extraction record](../../docs/asserted-typescript-extraction.md) for
-scope, validation results and outstanding work.
+See [the public guide](../../docs/assertion-evidence.md) for scope, calibration
+and remaining limitations. Repository-only historical notes are not shipped.

@@ -21,11 +21,23 @@ JavaScript project**. For example, add TypeScript as a development dependency
 before recording the run. The analyzer uses that project's compiler, not a
 silently substituted global or bundled version. Installing it afterward changes
 the dependency fingerprint, so rerun the suite. Missing/incompatible compiler APIs
-produce an error. **TypeScript 5.8.3 is the tested compiler.** The installed
-TypeScript 7.0.2 package exposes a different API and is explicitly rejected;
-normal coverage still works. Broader compiler-version compatibility is not
-established. Do not downgrade an application's compiler just to improve an
-assertion report; unsupported compiler versions remain a tool limitation.
+produce an error. **TypeScript 5.8.3 and native 7.0.2 are tested.** Version 7.0.2
+uses its own native parser/checker, not a fallback to TypeScript 5. Install its
+platform-specific optional dependency too; the report hashes both the JS client
+and the native compiler package, including its standard libraries. This backend
+requires Node 22.12 or newer (Node 24 tested), and uses original-source evidence
+from ordinary Supercov archives, not legacy ts-node/V8 generated-line coverage.
+Native module resolution currently follows actual import/export references;
+unresolved helper-only specifiers remain visible as compiler limitations.
+Other native compiler versions are not enabled until separately calibrated.
+Do not downgrade an application's compiler just to improve an assertion report.
+
+The native and legacy frontends match case-by-case on the fixed 100-mutation
+Supergateway calibration (84 correct, four false-kill predictions, ten false
+survivals and two unresolved killed cases). This is a bounded historical
+calibration, **not 84% assertion coverage or proof of general correctness**.
+All candidates remain unverified and `assertionScore` remains null. Query-side
+native compiler work adds no test-time instrumentation.
 
 Standalone native/Python/Ruby distributions do not currently bundle this JS/TS
 analyzer. Use the npm launcher, or explicitly set `SUPERCOV_PACKAGE_ROOT` to an

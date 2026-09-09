@@ -1,5 +1,9 @@
 # Why TypeScript 7 does not work with this analyzer yet
 
+Historical investigation. The [subsequent native frontend implementation and
+calibration](asserted-typescript7-frontend-2026-09-09.md) supersede the open
+implementation decision below, while retaining the API incompatibility diagnosis.
+
 Investigated against the locally installed **7.0.2**, 2026-09-09. No application
 compiler was changed and no native-API adapter was implemented.
 

@@ -2,8 +2,9 @@
 import type ts from "typescript";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { analyze } from "./analyze.js";
-import { analysisPath, loadProjectCompiler } from "./compiler.js";
+import { analyzeWithFrontend } from "./analyze.js";
+import { analysisPath } from "./compiler.js";
+import { createFrontend, type CompilerFrontend } from "./frontend.js";
 import type { Site } from "./types.js";
 
 export const PROTOCOL = {
@@ -133,8 +134,21 @@ export interface ArchiveInput {
 
 export function analyzeArchive(
   input: ArchiveInput,
-  compiler = loadProjectCompiler(input.projectRoot),
+  suppliedCompiler?: typeof ts,
 ) {
+  const frontend = createFrontend(input.projectRoot, suppliedCompiler);
+  try {
+    return analyzeArchiveWithFrontend(input, frontend);
+  } finally {
+    frontend.close();
+  }
+}
+
+function analyzeArchiveWithFrontend(
+  input: ArchiveInput,
+  frontend: CompilerFrontend,
+) {
+  const compiler = frontend.syntax;
   if (
     input.protocol.abi !== PROTOCOL.abi ||
     input.protocol.factsSchema !== PROTOCOL.factsSchema ||
@@ -149,12 +163,7 @@ export function analyzeArchive(
   const sources = new Map(
     input.sourceFiles.map((file) => [
       file,
-      compiler.createSourceFile(
-        file,
-        readFileSync(resolve(root, file), "utf8"),
-        compiler.ScriptTarget.Latest,
-        true,
-      ),
+      frontend.parseSource(file, readFileSync(resolve(root, file), "utf8")),
     ]),
   );
   function offset(file: string, p: { line: number; column: number }) {
@@ -407,22 +416,24 @@ export function analyzeArchive(
       "Failed, flaky, retried, duplicate or unattributed test records were excluded; this is not whole-suite assertion coverage.",
     );
   files["cov/index.json"] = JSON.stringify(index);
-  const result = analyze({
-    projectRoot: root,
-    evidenceFiles: files,
-    sourceFiles: input.sourceFiles,
-    testFiles: [
-      ...new Set(accepted.flatMap((r) => (r.testFile ? [r.testFile] : []))),
-    ],
-    coverageRunner: "vitest",
-    typescript: compiler,
-  });
+  const result = analyzeWithFrontend(
+    {
+      projectRoot: root,
+      evidenceFiles: files,
+      sourceFiles: input.sourceFiles,
+      testFiles: [
+        ...new Set(accepted.flatMap((r) => (r.testFile ? [r.testFile] : []))),
+      ],
+      coverageRunner: "vitest",
+    },
+    frontend,
+  );
   return {
     protocol: PROTOCOL,
     ...result,
     inventory: sites,
     executionLinks,
     attempts,
-    limitations: [...limitations],
+    limitations: [...limitations, ...frontend.limitations].sort(),
   };
 }

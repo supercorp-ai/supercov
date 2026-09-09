@@ -24,13 +24,14 @@
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json && node bin/identity.mjs",
+    "build": "node node_modules/typescript/bin/tsc -p tsconfig.json && node bin/identity.mjs",
     "test": "npm run build && node --test tests/*.test.mjs",
     "test:parity": "npm run build && node --test tests/parity.test.mjs",
     "prepack": "npm run build"
   },
   "devDependencies": {
     "@types/node": "24.0.0",
-    "typescript": "5.8.3"
+    "typescript": "5.8.3",
+    "typescript-native": "npm:typescript@7.0.2"
   }
 }

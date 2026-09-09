@@ -57,7 +57,7 @@ export interface PragmaHint {
 
 /** Source hints are kept OUT of observations. A comment never adds a boundary. */
 export function collectPragmas(
-  compiler: typeof ts,
+  compiler: import("./frontend.js").SyntaxAPI,
   files: ts.SourceFile[],
   relativeFile: (file: ts.SourceFile) => string,
   sites: Site[],

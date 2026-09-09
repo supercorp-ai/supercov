@@ -33,7 +33,13 @@ test(
     });
     mkdirSync(resolve(root, "node_modules"));
     symlinkSync(
-      resolve(repository, "analyzers/typescript/node_modules/typescript"),
+      resolve(
+        repository,
+        "analyzers/typescript/node_modules",
+        process.env.SUPERCOV_ASSERTED_TEST_COMPILER === "7.0.2"
+          ? "typescript-native"
+          : "typescript",
+      ),
       resolve(root, "node_modules/typescript"),
     );
     symlinkSync(

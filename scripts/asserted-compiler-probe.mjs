@@ -9,10 +9,19 @@ import { pathToFileURL } from "node:url";
 const temporary = mkdtempSync(resolve(tmpdir(), "supercov-compiler-probe-"));
 try {
   mkdirSync(resolve(temporary, "node_modules"));
-  cpSync(resolve(import.meta.dirname, "../analyzers/typescript/node_modules/typescript"),
-    resolve(temporary, "node_modules/typescript"), { recursive: true });
+  cpSync(
+    resolve(
+      import.meta.dirname,
+      "../analyzers/typescript/node_modules/typescript",
+    ),
+    resolve(temporary, "node_modules/typescript"),
+    { recursive: true },
+  );
   const packageFile = resolve(temporary, "package.json");
-  writeFileSync(packageFile, JSON.stringify({ name: "compiler-probe", type: "module" }));
+  writeFileSync(
+    packageFile,
+    JSON.stringify({ name: "compiler-probe", type: "module" }),
+  );
   const forms = {
     ordinary: packageFile,
     namespaced: toNamespacedPath(packageFile),
@@ -22,14 +31,33 @@ try {
     try {
       const require = createRequire(file);
       const entry = require.resolve("typescript");
-      return { name, file: String(file), entry, version: require(entry).version };
+      return {
+        name,
+        file: String(file),
+        entry,
+        version: require(entry).version,
+      };
     } catch (error) {
-      return { name, file: String(file), error: { code: error.code, message: error.message, stack: error.stack } };
+      return {
+        name,
+        file: String(file),
+        error: { code: error.code, message: error.message, stack: error.stack },
+      };
     }
   });
-  console.log(JSON.stringify({ platform: process.platform, node: process.version, results }, null, 2));
+  console.log(
+    JSON.stringify(
+      { platform: process.platform, node: process.version, results },
+      null,
+      2,
+    ),
+  );
   assert.equal(results[0].version, "5.8.3");
-  assert.equal(results[2].version, "5.8.3", "file-URL compiler lookup must work");
+  assert.equal(
+    results[2].version,
+    "5.8.3",
+    "file-URL compiler lookup must work",
+  );
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }

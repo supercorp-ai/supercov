@@ -55,7 +55,7 @@ npx supercov runs latest asserted --evidence /tests --limit 5 --json
 
 This npm-only query uses the run archive and matching source; it adds no new
 test-time instrumentation. It requires a compatible project TypeScript compiler
-API (5.8.3 is tested; 7.0.2 is not supported). Results are candidates, not proof
+API (5.8.3 and native 7.0.2 are tested). Results are candidates, not proof
 that changes are safe or a verified assertion percentage. Follow
 [`assertion-evidence.md`](docs/assertion-evidence.md) for provenance, optional
 assertion hints, pagination, and limitations.

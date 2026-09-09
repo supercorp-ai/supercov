@@ -5,15 +5,17 @@
  * Known inference limits are preserved; extraction is not a soundness claim.
  */
 import type ts from "typescript";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, relative as pathRelative, resolve } from "node:path";
-import { analysisPath, loadProjectCompiler } from "./compiler.js";
+import { existsSync, readFileSync } from "node:fs";
+import { relative as pathRelative, resolve } from "node:path";
+import { analysisPath } from "./compiler.js";
+import { createFrontend, type CompilerFrontend } from "./frontend.js";
 import { assertionWitnessIssue, collectPragmas } from "./pragmas.js";
 import type { AnalyzeOptions, Site } from "./types.js";
 export type { AnalyzeOptions, Site } from "./types.js";
 
 // Archive/site/test identities use forward slashes on every host.
-const relative = (from: string, to: string) => pathRelative(from, to).replaceAll("\\", "/");
+const relative = (from: string, to: string) =>
+  pathRelative(from, to).replaceAll("\\", "/");
 
 export interface Boundary {
   boundary: string;
@@ -35,8 +37,21 @@ export function analyze(options: AnalyzeOptions) {
     (typeof options.inputDirectory !== "string" && !options.evidenceFiles)
   )
     throw new Error("projectRoot and inputDirectory are required strings");
+  const frontend = createFrontend(options.projectRoot, options.typescript);
+  try {
+    return analyzeWithFrontend(options, frontend);
+  } finally {
+    frontend.close();
+  }
+}
+
+/** Internal archive entry: one compiler session, closed by the archive caller. */
+export function analyzeWithFrontend(
+  options: AnalyzeOptions,
+  frontend: CompilerFrontend,
+) {
   const root = analysisPath(options.projectRoot);
-  const ts = options.typescript ?? loadProjectCompiler(root);
+  const ts = frontend.syntax;
   const srcDir = (options.sourceDir ?? "src").replace(/\/$/, "");
   const testDir = (options.testDir ?? "tests").replace(/\/$/, "");
   const outBase = resolve(options.inputDirectory ?? root);
@@ -55,7 +70,7 @@ export function analyze(options: AnalyzeOptions) {
           options.evidenceFiles,
           relative(outBase, p).replaceAll("\\", "/"),
         )
-      : ts.sys.fileExists(p);
+      : existsSync(p);
   const inventory = JSON.parse(readEvidence(out("inventory.json"))) as {
     sites: Site[];
   };
@@ -104,6 +119,10 @@ export function analyze(options: AnalyzeOptions) {
             }
           }),
   );
+  if (frontend.kind === "typescript-native-7" && inProcessTestFiles.size)
+    throw new Error(
+      "TypeScript 7 analysis requires original-source coverage; legacy ts-node/V8 generated-line remapping is not supported. Recapture with Supercov.",
+    );
   const B64 =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   function decodeVlq(seg: string): number[] {
@@ -129,25 +148,9 @@ export function analyze(options: AnalyzeOptions) {
     m = new Map();
     try {
       const text = readFileSync(resolve(root, file), "utf8");
-      const cfgRaw = ts.readConfigFile(
-        resolve(root, "tsconfig.json"),
-        ts.sys.readFile,
+      const map = JSON.parse(
+        frontend.transpileSourceMap(file, text, root) ?? "{}",
       );
-      const opts = ts.parseJsonConfigFileContent(
-        cfgRaw.config,
-        ts.sys,
-        root,
-      ).options;
-      const res = ts.transpileModule(text, {
-        compilerOptions: {
-          ...opts,
-          sourceMap: true,
-          inlineSourceMap: false,
-          inlineSources: false,
-        },
-        fileName: file,
-      });
-      const map = JSON.parse(res.sourceMapText ?? "{}");
       let srcLine = 0;
       (map.mappings as string)
         .split(";")
@@ -423,55 +426,11 @@ export function analyze(options: AnalyzeOptions) {
   // ---------------------------------------------------------------------------
   // Program over src + tests
   // ---------------------------------------------------------------------------
-  const configPath = resolve(root, options.tsconfig ?? "tsconfig.json");
-  const cfg =
-    options.sourceFiles && !existsSync(configPath)
-      ? { config: { compilerOptions: { allowJs: true, checkJs: true } } }
-      : ts.readConfigFile(configPath, ts.sys.readFile);
-  if (cfg.error)
-    throw new Error(
-      ts.flattenDiagnosticMessageText(cfg.error.messageText, "\n"),
-    );
-  const parsed = ts.parseJsonConfigFileContent(
-    cfg.config,
-    ts.sys,
-    dirname(configPath),
+  const program = frontend.openProgram(options);
+  const checker = program.checker;
+  const allFiles = program.files.filter(
+    (f) => !f.isDeclarationFile && !f.fileName.includes("/node_modules/"),
   );
-  function walkTs(dir: string, acc: string[] = []): string[] {
-    if (!existsSync(dir)) return acc;
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      if (e.name === "node_modules" || e.name.startsWith(".")) continue;
-      const p = resolve(dir, e.name);
-      if (e.isDirectory()) walkTs(p, acc);
-      else if (/\.(ts|tsx|mts)$/.test(e.name) && !e.name.endsWith(".d.ts"))
-        acc.push(p);
-    }
-    return acc;
-  }
-  const rootNames = options.sourceFiles
-    ? [...options.sourceFiles, ...(options.testFiles ?? [])].map((f) =>
-        resolve(root, f),
-      )
-    : options.sourceDir
-      ? [
-          ...walkTs(resolve(root, srcDir)),
-          ...walkTs(resolve(root, testDir)),
-          ...(existsSync(resolve(root, "env.d.ts"))
-            ? [resolve(root, "env.d.ts")]
-            : []),
-        ]
-      : parsed.fileNames;
-  const program = ts.createProgram(rootNames, {
-    ...parsed.options,
-    ...(options.sourceFiles ? { allowJs: true, checkJs: true } : {}),
-    noEmit: true,
-  });
-  const checker = program.getTypeChecker();
-  const allFiles = program
-    .getSourceFiles()
-    .filter(
-      (f) => !f.isDeclarationFile && !f.fileName.includes("/node_modules/"),
-    );
   const rel = (sf: ts.SourceFile) => relative(root, sf.fileName);
   const isProdFile = (sf: ts.SourceFile) =>
     options.sourceFiles
@@ -1762,8 +1721,7 @@ export function analyze(options: AnalyzeOptions) {
       : undefined;
   }
   function resolveSpec(spec: string, fromFile: string): string | undefined {
-    return ts.resolveModuleName(spec, fromFile, parsed.options, ts.sys)
-      .resolvedModule?.resolvedFileName;
+    return program.resolveModule(spec, fromFile);
   }
   function collectModuleMocks(sf: ts.SourceFile): ModuleMock[] {
     const mocks: ModuleMock[] = [];
@@ -4658,7 +4616,9 @@ export function analyze(options: AnalyzeOptions) {
         shape,
         count,
       })),
-      compilerVersion: ts.version,
+      compilerVersion: frontend.version,
+      compilerFrontend: frontend.kind,
+      compilerLimitations: [...frontend.limitations].sort(),
     },
   };
 }

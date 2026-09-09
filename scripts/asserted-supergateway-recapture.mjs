@@ -84,7 +84,15 @@ assert.deepEqual(
   "source/test snapshot differs from frozen replay",
 );
 const before = checkedIdentity();
-const { analyze } = await import("../analyzers/typescript/dist/analyze.js");
+const { analyze, analyzeWithFrontend } = await import(
+  "../analyzers/typescript/dist/analyze.js"
+);
+const compilerSelection =
+  process.env.SUPERCOV_ASSERTED_CALIBRATION_COMPILER ?? "project";
+assert.ok(
+  ["project", "7.0.2"].includes(compilerSelection),
+  "Select project or 7.0.2 for the calibration compiler",
+);
 const ts = createRequire(
   resolve(repository, "analyzers/typescript/package.json"),
 )("typescript");
@@ -151,11 +159,36 @@ for (const p of phases)
 const start = performance.now();
 // Supercov positions are already original-source positions. "vitest" is the
 // legacy option that disables V8/ts-node generated-line remapping for any runner.
-const analyzed = analyze({
+const analysisOptions = {
   projectRoot: root,
   inputDirectory: work,
   coverageRunner: "vitest",
-});
+};
+let analyzed;
+const { compilerIdentity, compilerIdentityFromEntry } = await import(
+  "../analyzers/typescript/bin/compiler-identity.mjs"
+);
+let selectedCompilerIdentity;
+if (compilerSelection === "7.0.2") {
+  const { nativeFrontend } = await import(
+    "../analyzers/typescript/dist/native-frontend.js"
+  );
+  const entry = createRequire(
+    resolve(repository, "analyzers/typescript/package.json"),
+  ).resolve("typescript-native");
+  const frontend = nativeFrontend(entry, root);
+  selectedCompilerIdentity = compilerIdentityFromEntry(entry);
+  try {
+    analyzed = analyzeWithFrontend(analysisOptions, frontend);
+  } finally {
+    frontend.close();
+  }
+  assert.deepEqual(compilerIdentityFromEntry(entry), selectedCompilerIdentity);
+} else {
+  selectedCompilerIdentity = compilerIdentity(root);
+  analyzed = analyze(analysisOptions);
+  assert.deepEqual(compilerIdentity(root), selectedCompilerIdentity);
+}
 const joined = JSON.parse(
   ok(
     execute(resolve(repository, "target/debug/examples/asserted_join"), [], {
@@ -296,6 +329,9 @@ const report = {
   project: root,
   work,
   analyzer: before,
+  compilerSelection,
+  selectedCompilerIdentity,
+  factsSha256: hash(JSON.stringify(analyzed.facts)),
   sourceAndTestFiles: sourceHash(),
   archiveSha256: hash(readFileSync(resolve(runDirectory, "evidence.raw.gz"))),
   run: read(resolve(runDirectory, "run.json")),
@@ -327,6 +363,7 @@ const report = {
     ]),
   ),
   publicQuery: {
+    compilerSelection: "project",
     status: publicQuery.status,
     response: publicResult,
     stderr: publicQuery.stderr,
@@ -334,6 +371,7 @@ const report = {
   },
   coverage,
   caveats: [
+    "An explicit 7.0.2 calibration compares the native post-run backend on the frozen source and capture; it does not recompile the sample or substitute its project compiler. Public queries here still use the project compiler; native public-query support is tested separately.",
     "Historical frozen Stryker oracle, not new mutant executions or global assertion accuracy.",
     "Legacy conversion retains embedded server records but does not join separately archived child/server streams; public archive adapter does.",
     "Full suite is captured, but this fixed 100-mutant oracle covers src/lib only. Unknowns remain in its denominator.",

@@ -50,7 +50,11 @@ inputs; this is not advertised as a self-contained generic CI calibration.
 
 ## REVIEW-004: installed assertion queries cannot resolve the compiler on Windows
 
-Status: reproduced on both Windows architectures; release blocker, not fixed.
+Status: fixed in `408a3f2`; both Windows targets and the complete native release
+set pass in [run 34377618812](https://github.com/supercorp-ai/supercov/actions/runs/34377618812).
+The original investigation below is retained. The confirmed cause was Node's
+`createRequire` handling of namespace-prefixed Windows paths; using file URLs
+and normalized source identities preserves compiler and freshness checks.
 
 The [native matrix at 1668e3a](https://github.com/supercorp-ai/supercov/actions/runs/34375395031)
 fails the packed JS/TS assertion check on x64 (job 102546796254, Node 24.19.0)
@@ -79,7 +83,8 @@ gate, substitute another compiler or claim Windows release validation passed.
 
 ## REVIEW-005: two internal README research links are outside the review snapshot
 
-Status: documentation-only gap, not fixed.
+Status: corrected in the TypeScript 7 follow-up by linking the present public
+guide instead of absent historical research files.
 
 `analyzers/typescript/README.md` links to
 `docs/asserted-js-witness-limits-2026-09-09.md` and

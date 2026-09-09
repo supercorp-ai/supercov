@@ -142,8 +142,8 @@ for (const path of productSources) {
   if (path.startsWith(resolve(repository, "analyzers/typescript") + sep)) {
     // The archive adapter uses an in-memory LCOV-shaped line format for the
     // extracted analyzer. Reading that format is not invoking the lcov tool.
-    // This exception is only for the query-only analyzer, which cannot spawn
-    // any subprocess; the remaining product-oracle checks still apply.
+    // This exception is only for the query-only analyzer. Its TS7 frontend uses
+    // the project's native compiler API; it never launches a coverage oracle.
     assert.doesNotMatch(source, /["'](?:node:)?child_process["']/);
     source = source.replace(/\blcov\b/g, "internal-line-format");
   }

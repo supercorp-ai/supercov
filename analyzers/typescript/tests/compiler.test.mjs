@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { resolve, toNamespacedPath } from "node:path";
 import { realpathSync } from "node:fs";
-import { analysisPath, loadProjectCompiler, projectCompilerPath } from "../dist/compiler.js";
+import {
+  analysisPath,
+  loadProjectCompiler,
+  projectCompilerPath,
+} from "../dist/compiler.js";
 
 test("project compiler lookup accepts native canonical Windows paths", () => {
   const root = realpathSync(resolve(import.meta.dirname, ".."));

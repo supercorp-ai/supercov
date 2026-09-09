@@ -2,26 +2,69 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      native-run-id:
+        description: Optional successful native matrix to reuse for query-only packed checks
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
+  packed-assertions:
+    if: inputs.native-run-id != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-15, artifact: supercov-cli-darwin-arm64 }
+          - { runner: macos-15-intel, artifact: supercov-cli-darwin-x64 }
+          - { runner: ubuntu-24.04-arm, artifact: supercov-cli-linux-arm64-gnu }
+          - { runner: ubuntu-24.04, artifact: supercov-cli-linux-x64-gnu }
+          - { runner: windows-latest, artifact: supercov-cli-win32-x64 }
+          - { runner: windows-11-arm, artifact: supercov-cli-win32-arm64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - run: npm ci --omit=optional
+      - run: npm --prefix analyzers/typescript ci --ignore-scripts
+      - run: npm run build:asserted-typescript
+      - uses: actions/download-artifact@v8
+        with:
+          run-id: ${{ inputs.native-run-id }}
+          github-token: ${{ github.token }}
+          name: ${{ matrix.artifact }}
+          path: .ci-native-inputs
+      - name: Verify native reuse and exercise the installed query package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUPERCOV_NATIVE_RUN: ${{ inputs.native-run-id }}
+          SUPERCOV_NATIVE_ARTIFACT: ${{ matrix.artifact }}
+        run: node scripts/asserted-reused-native.mjs
   compiler:
     strategy:
       fail-fast: false
       matrix:
         runner: [windows-latest, windows-11-arm, ubuntu-latest, macos-15]
+        node: [22, 24]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: "24"
+          node-version: ${{ matrix.node }}
       - run: npm --prefix analyzers/typescript ci --ignore-scripts
       - run: node scripts/asserted-compiler-probe.mjs
       - run: npm --prefix analyzers/typescript run build
-      - run: node --test analyzers/typescript/tests/compiler.test.mjs
+      - run: node --test analyzers/typescript/tests/compiler.test.mjs analyzers/typescript/tests/compiler-identity.test.mjs analyzers/typescript/tests/native-frontend.test.mjs
   check:
     runs-on: ubuntu-latest
     steps:

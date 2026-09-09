@@ -127,7 +127,10 @@ try {
     ...new Set(
       [
         resolve(repository, "analyzers/typescript/node_modules/typescript"),
-        resolve(repository, "node_modules/typescript"),
+        resolve(
+          repository,
+          "analyzers/typescript/node_modules/typescript-native",
+        ),
       ]
         .filter(existsSync)
         .map((path) => realpathSync(path)),
@@ -143,10 +146,29 @@ try {
     ),
     "Install the pinned analyzer toolchain: npm --prefix analyzers/typescript ci --ignore-scripts",
   );
+  assert.ok(
+    compilers.some(
+      (root) => json(resolve(root, "package.json")).version === "7.0.2",
+    ),
+    "Install the pinned native frontend calibration compiler",
+  );
   const results = [];
   for (const [index, compilerRoot] of compilers.entries()) {
     const compilerVersion = json(resolve(compilerRoot, "package.json")).version;
     const compiler = pack(compilerRoot);
+    const compilerDependencies = [];
+    if (compilerVersion === "7.0.2") {
+      const name = `@typescript/typescript-${process.platform}-${process.arch}`;
+      const nativeCompilerRoot = resolve(
+        createRequire(resolve(compilerRoot, "package.json")).resolve(
+          `${name}/package.json`,
+        ),
+        "..",
+      );
+      compilerDependencies.push(
+        `${name}@file:${pack(nativeCompilerRoot).file}`,
+      );
+    }
     const consumer = resolve(temporary, `consumer-${index}`);
     cpSync(
       resolve(repository, "analyzers/typescript/tests/fixtures/archive"),
@@ -225,6 +247,7 @@ try {
           "--no-audit",
           "--no-fund",
           `typescript@file:${compiler.file}`,
+          ...compilerDependencies,
         ],
         consumer,
       ),
@@ -240,21 +263,6 @@ try {
     );
     const runId = suite();
     assert.ok(read(["runs", runId, "--json"]).coverage.lines.total > 0);
-    if (compilerVersion === "7.0.2") {
-      const rejected = cli(["runs", runId, "asserted", "--json"]);
-      assert.notEqual(rejected.status, 0);
-      assert.match(
-        rejected.stdout,
-        /TypeScript 7's different API is not supported/,
-      );
-      results.push({
-        compilerVersion,
-        runId,
-        ordinaryCoverage: true,
-        assertionAnalysis: "rejected-incompatible-compiler",
-      });
-      continue;
-    }
     const result = read([
       "runs",
       runId,
@@ -265,6 +273,11 @@ try {
     ]);
     assert.equal(result.reportSchema, 2);
     assert.equal(result.assertionScore, null);
+    assert.equal(result.analyzer.compiler.version, compilerVersion);
+    if (compilerVersion === "7.0.2") {
+      assert.equal(result.analyzer.compiler.backend, "typescript-native-7");
+      assert.match(result.analyzer.compiler.nativeSha256, /^[a-f0-9]{64}$/);
+    }
     assert.equal(
       result.sites.find((r) => r.site?.owner === "exact").candidate.status,
       "evident",

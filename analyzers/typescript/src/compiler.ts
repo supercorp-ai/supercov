@@ -10,21 +10,24 @@ export function analysisPath(path: string): string {
 /** Use the project's semantics rather than silently substituting the analyzer's compiler version. */
 export function projectCompilerPath(projectRoot: string): string {
   try {
-    return createRequire(pathToFileURL(resolve(projectRoot, "package.json"))).resolve(
-      "typescript",
-    );
+    return createRequire(
+      pathToFileURL(resolve(projectRoot, "package.json")),
+    ).resolve("typescript");
   } catch (error) {
     throw new Error(
-      `Assertion analysis requires the project's TypeScript compiler API, including for JavaScript projects. TypeScript 5.8.3 is the tested compiler; install a compatible compiler in ${projectRoot}, rerun the tests, then query again.`,
+      `Assertion analysis requires the project's TypeScript compiler API, including for JavaScript projects. TypeScript 5.8.3 and native 7.0.2 are tested; install a compatible compiler in ${projectRoot}, rerun the tests, then query again.`,
       { cause: error },
     );
   }
 }
 
+/** Legacy API loader; createFrontend selects the separate native backend. */
 export function loadProjectCompiler(
   projectRoot: string,
 ): typeof import("typescript") {
-  const require = createRequire(pathToFileURL(resolve(projectRoot, "package.json")));
+  const require = createRequire(
+    pathToFileURL(resolve(projectRoot, "package.json")),
+  );
   let compiler: typeof import("typescript");
   try {
     compiler = require(projectCompilerPath(projectRoot));
