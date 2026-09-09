@@ -1,4 +1,4 @@
-# Assertion evidence (experimental JS/TS)
+# Assertion evidence (JS/TS)
 
 Supercov can analyze which source behaviors existing assertions appear to check,
 using an ordinary run archive, its matching source, and the existing statement
@@ -94,8 +94,8 @@ analyses if the compiler, analyzer, or derived results change. Use a fixed run i
 instead of `latest` while paging. Source/run freshness checks still run on every
 query. Derived results are not cached or written into the archive.
 
-The experimental report shape is `reportSchema: 2`; global evidence arrays from
-the earlier development view have moved to the evidence pointers above.
+JSON reports use `reportSchema: 2`. Shared evidence is accessed through the
+evidence pointers above.
 Success and error JSON envelopes identify this query as `coverage.assertions`.
 
 ## Optional assertion hints

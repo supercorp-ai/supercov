@@ -1,4 +1,4 @@
-/** Adapter for the exact experimental TypeScript 7.0.2 API, not a legacy compiler fallback. */
+/** Adapter for the exact TypeScript 7.0.2 API, not a legacy compiler fallback. */
 import type ts from "typescript";
 import { createRequire, isBuiltin } from "node:module";
 import { existsSync } from "node:fs";

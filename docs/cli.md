@@ -17,7 +17,7 @@ npx supercov --help
 | Read the newest run | `npx supercov runs latest` |
 | Find useful gaps | `npx supercov runs latest gaps` |
 | Inspect one file | `npx supercov runs latest file <path>` |
-| Inspect assertion evidence (experimental JS/TS) | `npx supercov runs latest assertions` |
+| Inspect assertion evidence (JS/TS) | `npx supercov runs latest assertions` |
 | Compare two runs | `npx supercov diff <older> <newer>` |
 | Combine shards | `npx supercov merge <id> <id> [...]` |
 | Remove local data | `npx supercov clean` |
@@ -72,7 +72,7 @@ npx supercov runs <run-id> [query] [options]
 | `kinds` | Group coverage by test level, such as unit or E2E |
 | `runners` | Group coverage by test runner |
 | `scope` | Review included, excluded, and ambiguous source files |
-| `assertions` | Analyze source-to-assertion evidence, gaps, and limits (experimental JS/TS) |
+| `assertions` | Analyze source-to-assertion evidence, gaps, and limits (JS/TS) |
 | `minimize` | Find a small test subset that preserves a coverage target |
 
 Common examples:

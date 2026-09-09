@@ -27,10 +27,16 @@ function sourceFiles(root, extension) {
 assert.deepEqual(manifest.files, [
   "bin",
   "runtime/javascript",
-  "docs/agent-loop.md",
-  "docs/assertion-evidence.md",
+  "docs",
   "analyzers/typescript/bin",
-  "analyzers/typescript/dist",
+  "analyzers/typescript/dist/analyze.js",
+  "analyzers/typescript/dist/archive.js",
+  "analyzers/typescript/dist/compiler.js",
+  "analyzers/typescript/dist/frontend.js",
+  "analyzers/typescript/dist/native-frontend.js",
+  "analyzers/typescript/dist/pragmas.js",
+  "analyzers/typescript/dist/types.js",
+  "analyzers/typescript/dist/build-identity.json",
   "analyzers/typescript/src",
   "analyzers/typescript/package.json",
   "analyzers/typescript/tsconfig.json",
@@ -234,10 +240,7 @@ assert(
 );
 for (const line of notes.split("\n")) {
   assert(
-    line === "" ||
-      line.startsWith("- ") ||
-      /^\*\*[A-Z][a-z]+\*\*$/.test(line) ||
-      line.startsWith("  "),
+    line === "" || line.startsWith("- ") || /^\*\*[A-Z][a-z]+\*\*$/.test(line) || line.startsWith("  "),
     `unexpected changelog line for ${manifest.version}: ${JSON.stringify(line)}`,
   );
 }

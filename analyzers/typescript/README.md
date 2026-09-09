@@ -25,6 +25,8 @@ There is no converted-input command, on-disk research input, V8 remapping,
 mutation runner or diagnostic-ablation option in the product interface.
 Source files ship to support build-identity verification; tests and research
 tools do not ship. Assertion candidates remain unverified, not safety proofs.
+Only executable JavaScript and its build identity ship from `dist`; there is no
+public SDK declaration surface or generated source-map payload.
 
 ## Build and test
 

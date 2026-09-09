@@ -97,6 +97,13 @@ try {
     );
   assert.ok(paths.has("docs/assertion-evidence.md"));
   assert.deepEqual(
+    [...paths].filter((path) => path.startsWith("analyzers/typescript/dist/")).sort(),
+    ["analyze.js", "archive.js", "build-identity.json", "compiler.js",
+      "frontend.js", "native-frontend.js", "pragmas.js", "types.js"]
+      .map((file) => `analyzers/typescript/dist/${file}`),
+    "the private analyzer ships only runtime outputs, not SDK declarations or maps",
+  );
+  assert.deepEqual(
     [...paths]
       .filter((path) => path.startsWith("analyzers/typescript/bin/"))
       .sort(),
@@ -218,16 +225,28 @@ try {
       assert.equal(envelope.ok, true);
       if (args[0] === "runs" && args[2] === "assertions")
         assert.equal(envelope.command, "coverage.assertions");
+      assert.equal(Object.hasOwn(envelope.data, "experimental"), false);
       return envelope.data;
     };
     assert.match(ok(cli(["runs", "latest", "--help"])), /\n  assertions /);
     const help = ok(cli(["runs", "latest", "assertions", "--help"]));
     assert.match(help, /Usage: supercov runs <run-id> assertions /);
     assert.match(help, /not a proven assertion score/);
+    assert.doesNotMatch(help, /experimental/i);
     const guide = ok(cli(["docs", "assertion-evidence"]));
     assert.equal(guide, readFileSync(resolve(installed, "docs/assertion-evidence.md"), "utf8"));
     assert.match(guide, /runs latest assertions/);
     assert.doesNotMatch(guide, /runs latest asserted/);
+    assert.doesNotMatch(guide, /experimental/i);
+    const topics = ok(cli(["docs"])).split(/\r?\n/)
+      .filter((line) => line.startsWith("  ")).map((line) => line.trim());
+    assert.ok(topics.includes("getting-started"));
+    assert.ok(topics.includes("assertion-evidence"));
+    for (const topic of topics) {
+      const file = `docs/${topic}.md`;
+      assert.ok(paths.has(file), `listed public guide must be shipped: ${file}`);
+      assert.equal(ok(cli(["docs", topic])), readFileSync(resolve(installed, file), "utf8"));
+    }
     const suite = () => {
       const before = new Set(
         existsSync(resolve(consumer, ".supercov/runs"))

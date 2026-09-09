@@ -2360,7 +2360,7 @@ export function analyzeWithFrontend(
           return { kind: "proc-exit", path: [] };
         // Mutable scalar aliases need reaching definitions, not the initializer
         // or first assignment anywhere in the file. Container/stream cases above
-        // retain their separate (still experimental) models.
+        // retain their separate models.
         if (!(d.parent.flags & ts.NodeFlags.Const)) return undefined;
         return originOf(initializer, depth + 1);
       }

@@ -237,6 +237,7 @@ test(
     assert.ok(result.sites.length >= 8);
     assert.equal(result.summary.sites, result.sites.length);
     assert.equal(result.assertionScore, null);
+    assert.equal(Object.hasOwn(result, "experimental"), false);
     assert.equal(result.summary.semanticallyVerifiedSites, 0);
     assert.ok(
       result.evidence.executionLinks.count > 0,

@@ -22,10 +22,12 @@ fn assertion_query_is_discoverable_without_a_run_or_compiler() {
         let listing = successful_text(&["runs", "latest", flag]);
         assert!(listing.contains("\n  assertions "));
         assert!(!listing.contains("\n  asserted "));
+        assert!(!listing.to_lowercase().contains("experimental"));
         let help = successful_text(&["runs", "latest", "assertions", flag]);
         assert!(help.starts_with("Usage: supercov runs <run-id> assertions "));
         assert!(help.contains("source behaviors"));
         assert!(help.contains("not a proven assertion score"));
+        assert!(!help.to_lowercase().contains("experimental"));
         for option in ["--pragmas", "--evidence", "--analysis", "--file", "--site"] {
             assert!(help.contains(option), "{option}");
         }

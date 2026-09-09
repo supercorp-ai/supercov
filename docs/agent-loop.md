@@ -66,7 +66,7 @@ npx supercov runs latest assertions --file app/checkout/session.ts --limit 5 --j
 npx supercov runs latest assertions --pragmas --json
 ```
 
-This experimental post-run query needs the matching source and a compatible
+This post-run query needs the matching source and a compatible
 project TypeScript API. An `evident` candidate is not a proof of safety; keep
 test gaps separate from analysis limits. Follow the returned evidence pointers
 and `pagination.nextOffset`, pinning `--analysis` and the run id while paging.

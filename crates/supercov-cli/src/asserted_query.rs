@@ -1,4 +1,4 @@
-//! Experimental, read-only JS/TS query. No assertion inference runs during tests.
+//! Read-only JS/TS query. No assertion inference runs during tests.
 #[path = "asserted_paging.rs"]
 mod paging;
 use serde_json::{Value, json};
@@ -20,7 +20,7 @@ use supercov_engine::{
     run_store::{StoredRun, discover_runs, select_run},
 };
 
-const HELP: &str = "Usage: supercov runs <run-id> assertions [--pragmas | --evidence <pointer>] [--file <path>] [--site <id>] [--offset <n>] [--limit <n>] [--analysis <sha256>] [--json]\n\nAnalyze which source behaviors are linked to test assertions, with evidence, gaps and analysis limits.\nExperimental JS/TS candidate evidence, not a proven assertion score.\nRuns after tests using the existing archive, statement markers and assertion phases.\nRequires a matching project, its TypeScript compiler API, and the packaged first-party analyzer.\n\n--pragmas  Page through user-suggested assertion links and their validation.\n           Leading assertion comments: // observes: <file>#<function> [snippet]\n           Targets must resolve to one site; comments never add assertion credit.\n           --file/--site filter the suggested production targets.\n--evidence Page a returned JSON pointer (for example /tests or /sites/0/facts).\n           Objects/arrays return items; string leaves return Unicode-scalar text chunks.\n           Cannot combine with --file, --site or --pragmas.\n--analysis Require the analysisId returned by the first page; prevents mixing analyses.\n\nPages adapt to the response budget. Follow pagination.nextOffset, not offset + limit.\nLarge records carry detailOnly and an evidence.pointer; all details remain readable.\n";
+const HELP: &str = "Usage: supercov runs <run-id> assertions [--pragmas | --evidence <pointer>] [--file <path>] [--site <id>] [--offset <n>] [--limit <n>] [--analysis <sha256>] [--json]\n\nAnalyze which source behaviors are linked to test assertions, with evidence, gaps and analysis limits.\nJS/TS candidate evidence, not a proven assertion score.\nRuns after tests using the existing archive, statement markers and assertion phases.\nRequires a matching project, its TypeScript compiler API, and the packaged first-party analyzer.\n\n--pragmas  Page through user-suggested assertion links and their validation.\n           Leading assertion comments: // observes: <file>#<function> [snippet]\n           Targets must resolve to one site; comments never add assertion credit.\n           --file/--site filter the suggested production targets.\n--evidence Page a returned JSON pointer (for example /tests or /sites/0/facts).\n           Objects/arrays return items; string leaves return Unicode-scalar text chunks.\n           Cannot combine with --file, --site or --pragmas.\n--analysis Require the analysisId returned by the first page; prevents mixing analyses.\n\nPages adapt to the response budget. Follow pagination.nextOffset, not offset + limit.\nLarge records carry detailOnly and an evidence.pointer; all details remain readable.\n";
 pub const AGENT_COMMAND: &str = "coverage.assertions";
 
 fn protocol() -> Value {
@@ -355,7 +355,7 @@ fn query(root: &Path, selector: &str, options: Options) -> Result<Value, String>
         .iter()
         .map(|(key, value)| (key.clone(), paging::reference(value, &format!("/{key}"))))
         .collect::<serde_json::Map<_, _>>();
-    let mut base = json!({"runId":run.id,"view":"sites","reportSchema":2,"experimental":true,
+    let mut base = json!({"runId":run.id,"view":"sites","reportSchema":2,
         "protocol":protocol(),"analyzer":result["analyzer"],"analysisId":analysis_id,
         "evidenceSha256":evidence_sha256,"runFingerprint":run.metadata.integrity.fingerprint,
         "sourceFreshness":"matching-run-fingerprints-before-and-after-query","assertionScore":null,
@@ -469,7 +469,7 @@ pub fn command(args: &[String]) -> ExitCode {
                 );
             } else {
                 println!(
-                    "Experimental assertion candidates for {} (not a proven assertion score)",
+                    "Assertion candidates for {} (not a proven assertion score)",
                     data["runId"].as_str().unwrap()
                 );
                 for row in data["sites"].as_array().unwrap() {

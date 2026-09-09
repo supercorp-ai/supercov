@@ -43,7 +43,7 @@ npx supercov -- python -m unittest
 npx supercov -- bundle exec rspec
 ```
 
-## Inspect assertion evidence (experimental JS/TS)
+## Inspect assertion evidence (JS/TS)
 
 After a run, inspect what existing assertions appear to check:
 

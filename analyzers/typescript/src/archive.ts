@@ -258,7 +258,7 @@ function analyzeArchiveWithFrontend(
   const attempts: object[] = [];
   const limitations = new Set(input.limitations);
   limitations.add(
-    "Experimental candidate analysis: no site has a checked semantic proof; no assertion percentage is reported.",
+    "Candidate analysis: no site has a checked semantic proof; no assertion percentage is reported.",
   );
   limitations.add(
     "Phase/statement execution is not data dependence. Candidate flow rules remain unverified; helper-name contracts and temporal value inference are disabled.",

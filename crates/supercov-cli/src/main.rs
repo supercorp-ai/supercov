@@ -66,7 +66,7 @@ Inspect a run with small, paginated answers:
   supercov runs latest gaps            files with unresolved obligations
   supercov runs latest gaps --kind e2e E2E gaps by origin
   supercov runs latest file <path>     gap lines in one file
-  supercov runs latest assertions      experimental JS/TS assertion evidence
+  supercov runs latest assertions      JS/TS assertion evidence
   supercov runs <id> --help            every run query
   supercov runs <run-id> [resource]    query one immutable run
 
