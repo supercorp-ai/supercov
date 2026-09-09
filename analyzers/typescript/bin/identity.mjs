@@ -12,6 +12,7 @@ const sources = [
   "src/native-frontend.ts",
   "src/types.ts",
   "src/pragmas.ts",
+  "src/mock-counts.ts",
   "bin/query.mjs",
   "bin/compiler-identity.mjs",
   "bin/identity.mjs",
@@ -28,6 +29,7 @@ const outputs = [
   "dist/native-frontend.js",
   "dist/types.js",
   "dist/pragmas.js",
+  "dist/mock-counts.js",
 ];
 function digest(files) {
   const hash = createHash("sha256");

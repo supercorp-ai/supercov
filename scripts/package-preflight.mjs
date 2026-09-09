@@ -30,6 +30,7 @@ assert.deepEqual(manifest.files, [
   "docs",
   "analyzers/typescript/bin",
   "analyzers/typescript/dist/analyze.js",
+  "analyzers/typescript/dist/mock-counts.js",
   "analyzers/typescript/dist/archive.js",
   "analyzers/typescript/dist/compiler.js",
   "analyzers/typescript/dist/frontend.js",

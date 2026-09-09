@@ -74,6 +74,43 @@ pub struct MockProjection {
     pub target: String,
     pub kind: String,
     pub path: Vec<String>,
+    /// A bounded source-model count, not argument protection or general site credit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count_evidence: Option<MockCountEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MockCountCall {
+    pub source: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MockCountEvidence {
+    pub model: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_at_read: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calls: Option<Vec<MockCountCall>>,
 }
 
 /// Source identities of both operands. Equal source text is not binding identity.
@@ -1827,6 +1864,13 @@ mod tests {
                 target: "console.log".into(),
                 kind: kind.into(),
                 path: vec!["mock".into(), "calls".into()],
+                count_evidence: Some(serde_json::from_value(serde_json::json!({
+                    "model": "node-sync-console-count-v1", "status": "source-checked",
+                    "instance": "tests/a.test.ts:2:3", "createdAt": "tests/a.test.ts:2:3",
+                    "readAt": "tests/a.test.ts:7:3", "installedAtRead": true,
+                    "expectedCount": 1, "observedCount": 1,
+                    "calls": [{"source":"src/a.ts:4:3", "action":"tests/a.test.ts:5:3", "site":"S1"}]
+                })).unwrap()),
             });
             // Even contradictory whole-list/negative flags cannot bypass the
             // projection guard. A hint is not an escape hatch either.
@@ -1902,6 +1946,13 @@ mod tests {
             target: "console.log".into(),
             kind: "projection".into(),
             path: vec!["mock".into(), "calls".into()],
+            count_evidence: Some(
+                serde_json::from_value(serde_json::json!({
+                    "model":"node-sync-console-count-v1", "status":"source-checked",
+                    "observedCount":0,"expectedCount":0,"calls":[]
+                }))
+                .unwrap(),
+            ),
         });
         let mut f = facts(
             vec![

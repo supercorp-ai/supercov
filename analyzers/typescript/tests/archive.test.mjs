@@ -43,6 +43,12 @@ test("archive facts require the exact schema, rules, ABI and capabilities", () =
         (cap) => cap !== "assertion-comparison-relations-v1",
       ),
     },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "mock-count-lifetimes-v1",
+      ),
+    },
   ])
     assert.throws(
       () => analyzeArchive({ ...empty(), protocol }, ts),
@@ -195,7 +201,12 @@ test("stale source and modified generated analyzers fail before producing facts"
       input: "{}",
       encoding: "utf8",
     });
-  for (const file of ["src/analyze.ts", "dist/analyze.js"]) {
+  for (const file of [
+    "src/analyze.ts",
+    "dist/analyze.js",
+    "src/mock-counts.ts",
+    "dist/mock-counts.js",
+  ]) {
     const path = resolve(root, file),
       before = readFileSync(path, "utf8");
     writeFileSync(path, before + "\n// modified\n");

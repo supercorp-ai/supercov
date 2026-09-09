@@ -8,6 +8,7 @@ import { relative as pathRelative, resolve } from "node:path";
 import { analysisPath } from "./compiler.js";
 import { createFrontend, type CompilerFrontend } from "./frontend.js";
 import { assertionWitnessIssue, collectPragmas } from "./pragmas.js";
+import { analyzeMockCounts, type MockCountEvidence } from "./mock-counts.js";
 import type { AnalyzeOptions, Site } from "./types.js";
 export type { AnalyzeOptions, Site } from "./types.js";
 
@@ -508,6 +509,7 @@ export function analyzeWithFrontend(
     target: string;
     kind: "call-count" | "call-arguments" | "call-history" | "projection";
     path: string[];
+    countEvidence?: MockCountEvidence;
   }
 
   /** Does a log site's message template (constant parts in order, placeholders as wildcards) fit an asserted literal? */
@@ -3060,6 +3062,26 @@ export function analyzeWithFrontend(
     name: string,
     inert = false,
   ): StaticTest {
+    const mockCounts = analyzeMockCounts(ts, fn, {
+      declaration: declOf,
+      location: comparisonLocation,
+      nativeMock: nativeContextMock,
+      nativePredicate: (call) => nativeComparison(call)?.predicate,
+      globalConsole: (expr) => {
+        const e = comparisonExpression(expr);
+        const d = declOf(e);
+        return (
+          ts.isIdentifier(e) &&
+          e.text === "console" &&
+          (!d || d.getSourceFile().isDeclarationFile)
+        );
+      },
+      production: (node) => isProdFile(node.getSourceFile()),
+      site: (call) =>
+        smallestSiteContaining(
+          rel(call.getSourceFile()), call.getStart(), call.getEnd(),
+        )?.id,
+    });
     const observations: Observation[] = [];
     const sinks: SinkBinding[] = [];
     const rendered = new Set<string>();
@@ -3279,6 +3301,12 @@ export function analyzeWithFrontend(
               : undefined;
             const bs = boundariesOf(o);
             const mock = mockProjection(o);
+            if (mock?.kind === "call-count")
+              mock.countEvidence = mockCounts.checks.get(node) ?? {
+                model: "node-sync-console-count-v1",
+                status: "unresolved",
+                reason: mockCounts.limitation ?? "unsupported-count-projection",
+              };
             if (mock)
               unresolvedOperand(
                 `mock ${mock.kind}; production call identity and projection dependence unresolved`,

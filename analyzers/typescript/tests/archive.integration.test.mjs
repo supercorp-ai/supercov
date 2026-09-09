@@ -1,6 +1,7 @@
 import test from "node:test";
 import "./mock-projections.integration.mjs";
 import "./comparison-relations.integration.mjs";
+import "./mock-counts.integration.mjs";
 import assert from "node:assert/strict";
 import {
   cpSync,

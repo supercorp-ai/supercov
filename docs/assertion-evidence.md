@@ -20,7 +20,28 @@ retain the receiver and access path. Predicate strength applies to that projecte
 value: equality of a count is not equality of the logged arguments. These records
 do not supply production-site credit or validate an observation hint until the
 mock lifetime, selected calls and source-site dependence are established. This
-currently remains an operand-shape limit, even when the count itself was checked.
+remains separate from establishing that the count itself was checked.
+
+For a bounded synchronous subset, `mock.countEvidence` now models the exact mock
+creation, reset boundary, read location and participating calls. It distinguishes
+the installed method from saved mock references, restores a previous instance,
+and preserves copied counts and call-history snapshots across later calls or
+resets. Instance locations are scoped to their owning test record. `calls` are
+reconstructed from checked source, not a new runtime call trace. The modeled
+count must match an independent integer comparison with a passing witness.
+
+`source-checked` means accepted by the versioned `node-sync-console-count-v1`
+model, not formally verified application behavior. The model assumes unmodified
+native Node assertion/mock APIs and the standard global console. It accepts
+empty console-mock replacements and source-resolved straight-line producers;
+opaque calls, escaped mocks, mutable call targets, unsupported module
+initialization, branches and async suspension leave explicit reasons. Evidence
+inside a rejected assertion witness is not a passing observation.
+
+Count evidence does not grant general site, payload or pragma credit, even for
+listed calls: an aggregate number does not pin each call's arguments or rule out
+compensating changes. Such value relationships remain operand-shape limits.
+This analysis is post-run and requires no new probes, pragmas or contract files.
 
 Native Node equality observations also retain both operand source locations and
 their comparison relation. Comparing a `const` value with itself, or with an
