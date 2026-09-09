@@ -1,7 +1,7 @@
 {
   "name": "supercov",
   "version": "0.0.42",
-  "description": "Zero-edit, runner-aware coverage completeness for JavaScript, TypeScript, Rust, Python, and Ruby test suites",
+  "description": "Coverage for coding agents and software factories 🌙",
   "license": "MIT",
   "repository": {
     "type": "git",

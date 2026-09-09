@@ -1,6 +1,6 @@
-![Supercov: Coverage for coding agents working overnight](https://raw.githubusercontent.com/supercorp-ai/supercov/main/supercov.jpg)
+![Coverage for coding agents and software factories 🌙](https://raw.githubusercontent.com/supercorp-ai/supercov/main/supercov.jpg)
 
-**Coverage for coding agents working overnight.**
+**Coverage for coding agents and software factories 🌙**
 
 **Supercov gives your coding agent the next useful test to write.** It runs the test command you already use, records local coverage evidence, and turns uncovered paths into small, actionable queries. Your agent writes a focused test, reruns the suite, proves what improved, and keeps going while useful gaps remain.
 
