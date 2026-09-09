@@ -10,7 +10,7 @@ No account, config file, import, custom reporter, or hosted service is required.
 
 Supported by [Supercorp](https://supercorp.ai).
 
-[Tutorial](https://supercov.com/docs/code-verification): ask your coding agent
+[Agent workflow](https://supercov.com/docs/agent-loop): ask your coding agent
 to add a test in your own project, with a recorded example to follow along.
 
 ## Start with the suite you already have
