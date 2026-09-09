@@ -17,7 +17,7 @@ npm ci
 
 Run the commands below from this directory. The example uses Supercov 0.0.42
 and Node's built-in test runner. Both the original tests and the additional
-test are included, so you can run each stage without editing any files.
+test are included. The first three steps do not require any file edits.
 
 ## 1. Run the original tests
 
@@ -45,6 +45,9 @@ Run those tests through Supercov, then open the summary:
 npx supercov -- node --test tests/session.test.js
 npx supercov runs latest
 ```
+
+Everything after `--` is the test command Supercov runs. In your own project,
+use your existing test command there.
 
 Both tests pass. The coverage section shows:
 
@@ -142,19 +145,23 @@ expiry condition without changing application code.
 
 ## 4. Check that the test catches a regression
 
-The example also includes a script that runs both stages and checks what
-happens if the expiry check is removed:
-
-```sh
-npm run demo
-```
-
-The script runs in temporary directories and leaves your files unchanged.
-After checking the coverage results, it makes a separate copy with this change:
+In this example only, temporarily remove the expiry check from `src/session.js`:
 
 ```diff
 -  if (signedIn && !expired) return true;
 +  if (signedIn) return true;
+```
+
+Run the original two tests against the changed function:
+
+```sh
+npx supercov -- node --test tests/session.test.js
+```
+
+Then include the expired-session test:
+
+```sh
+npx supercov -- node --test tests/session.test.js tests/expired-session.test.js
 ```
 
 | Tests run against the changed function | Result |
@@ -162,11 +169,11 @@ After checking the coverage results, it makes a separate copy with this change:
 | Original two tests | Both pass. |
 | All three tests | The expired-session test fails; the other two pass. |
 
-The new test expects `false`, but the changed function returns `true`. The demo
-expects this test to fail and succeeds when it observes that failure.
+The new test expects `false`, but the changed function returns `true`. The
+second command should fail: that is the test catching the removed expiry check.
 
-Removing the guard and checking for this failure is part of the example
-script, not something the Supercov coverage command does.
+Restore `&& !expired` in `src/session.js` when you finish, then rerun all three
+tests with the same command. They should pass again.
 
 ## Next
 
