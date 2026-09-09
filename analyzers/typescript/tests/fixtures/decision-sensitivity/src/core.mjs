@@ -21,3 +21,21 @@ export function masked(maskedFlag) {
     return 2;
   }
 }
+
+export function transformed(transformedFlag) {
+  if (transformedFlag) {
+    return -1;
+  } else {
+    return 1;
+  }
+}
+
+export function effectful(effectfulFlag, events) {
+  if (effectfulFlag) {
+    events.push("left");
+    return 7;
+  } else {
+    events.push("right");
+    return 7;
+  }
+}

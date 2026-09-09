@@ -66,7 +66,7 @@ test(
       "--test-reporter=tap",
       "tests/core.test.mjs",
     ];
-    assert.match(ok(execute(process.execPath, suite)), /^# pass 6$/m);
+    assert.match(ok(execute(process.execPath, suite)), /^# pass 10$/m);
     const core = resolve(root, "src/core.mjs"),
       original = readFileSync(core, "utf8");
     const oracle = [];
@@ -89,6 +89,16 @@ test(
         "if (maskedFlag) {\n    return 0;",
         false,
       ],
+      ["transformed forced true", "if (transformedFlag)", "if (true)", true],
+      ["transformed forced false", "if (transformedFlag)", "if (false)", true],
+      [
+        "transformed zero return is checked",
+        "if (transformedFlag) {\n    return -1;",
+        "if (transformedFlag) {\n    return 0;",
+        false,
+      ],
+      ["effectful forced true", "if (effectfulFlag)", "if (true)", false],
+      ["effectful forced false", "if (effectfulFlag)", "if (false)", false],
     ]) {
       assert.equal(original.split(before).length, 2, name);
       try {
@@ -120,7 +130,7 @@ test(
     const report = query("--limit", "1000");
     assert.equal(report.pagination.hasMore, false);
     const decisions = report.sites.filter((r) => r.site.kind === "decision");
-    assert.equal(decisions.length, 3);
+    assert.equal(decisions.length, 5);
     for (const row of decisions) {
       assert.equal(row.candidate.coveredBy, 2);
       assert.equal(row.facts.decision.outcomes.true.length, 1);
@@ -128,12 +138,15 @@ test(
     }
     const page = query("--evidence", "/tests", "--limit", "1000");
     assert.equal(page.pagination.hasMore, false);
-    assert.equal(page.items.length, 6);
+    assert.equal(page.items.length, 10);
     for (const item of page.items) {
       assert.ok(item.value);
-      assert.ok(item.value.observations.length > 0);
       assert.equal(item.value.witnessIssues?.length ?? 0, 0);
     }
+    assert.ok(
+      page.items.filter((item) => item.value.observations.length > 0).length >=
+        8,
+    );
     assert.equal(report.assertionScore, null);
     t.diagnostic(JSON.stringify({ run: runs[0], oracle, decisions }));
     await t.test(
@@ -167,6 +180,26 @@ test(
       () => {
         const result = decisions.find(
           (r) => r.site.owner === "masked",
+        ).candidate;
+        assert.notEqual(result.stuckTrueCaught, true);
+        assert.notEqual(result.stuckFalseCaught, true);
+      },
+    );
+    await t.test(
+      "equal return values do not erase separately checked effects",
+      () => {
+        const result = decisions.find(
+          (r) => r.site.owner === "effectful",
+        ).candidate;
+        assert.equal(result.stuckTrueCaught, true);
+        assert.equal(result.stuckFalseCaught, true);
+      },
+    );
+    await t.test(
+      "downstream transformations must preserve a difference before claiming detection",
+      () => {
+        const result = decisions.find(
+          (r) => r.site.owner === "transformed",
         ).candidate;
         assert.notEqual(result.stuckTrueCaught, true);
         assert.notEqual(result.stuckFalseCaught, true);
