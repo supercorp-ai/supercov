@@ -1,45 +1,24 @@
 # Tutorial
 
-In this tutorial, you'll open a small JavaScript project in your coding agent,
-ask it to add one test, and review the result. Supercov measures coverage; the
-agent writes the test.
+Ask your coding agent to find a gap in your project's tests and cover it.
+Supercov measures coverage; the agent writes the test. We'll use a small
+checkout example to show what that looks like as you follow along in your
+own project.
 
-## 1. Open the starter project
+## 1. Open your project
 
-You need Node.js 22 or newer, npm, and a coding agent that can edit files and
-run terminal commands.
+Open your repository in the coding agent you normally use. It needs to be able
+to edit files and run your existing test suite. Set up any dependencies,
+environment variables, or local services the tests normally need.
 
-[Download the starter project](https://supercov.com/downloads/supercov-tutorial.zip),
-extract it, and open the `supercov-tutorial` folder in your agent. Install its
-dependencies from that folder:
-
-```sh
-npm ci
-```
-
-The project uses Node's built-in test runner and Supercov 0.0.42. It contains
-one function and two tests. The completed test is not included in the download.
-
-`src/session.js` allows checkout only when the customer is signed in and their
-session has not expired:
-
-```js
-export function canCheckout(signedIn, expired) {
-  if (signedIn && !expired) return true;
-  return false;
-}
-```
-
-The tests cover a valid session and a signed-out visitor:
-
-```js
-assert.equal(canCheckout(true, false), true);
-assert.equal(canCheckout(false, false), false);
-```
+The prompt below uses `npx`, so you need Node.js 22 or newer and npm. See
+[Getting started](getting-started.md) for other installation options and
+language requirements. You don't need to copy the example files into your
+project.
 
 ## 2. Paste the prompt
 
-Start a conversation with your agent in the starter folder and paste:
+In your project's agent conversation, paste:
 
 ```text
 Measure code coverage with npx supercov and write one missing test.
@@ -48,22 +27,50 @@ added and the before-and-after coverage.
 ```
 
 Let the agent run the commands and edit the tests. Approve those actions if
-your agent asks for permission.
+your agent asks for permission. If your project has several test commands,
+tell it which full suite to use.
 
-The test and output below come from a recorded Codex run with this starter and
-prompt. Your agent may choose different commands or name the test differently.
+The agent should measure your existing tests, inspect a gap, add a test, and
+rerun the same suite. The rest of this page shows those steps using the files
+in our tutorial project. The test and output below come from a recorded Codex
+run with the same prompt and Supercov 0.0.42; your files, results, and output
+format may differ.
 
-## 3. Read what the agent found
+## 3. Review the gap
 
-In the recorded run, the agent measured the full suite and opened the summary:
+Look for the behavior your agent says is missing from your tests. Here's the
+gap it found in our example.
+
+[`src/session.js`](https://github.com/supercorp-ai/supercov/blob/main/examples/checkout-verification/starter/src/session.js)
+allows checkout only when the customer is signed in and their session has
+not expired:
+
+```js
+export function canCheckout(signedIn, expired) {
+  if (signedIn && !expired) return true;
+  return false;
+}
+```
+
+The two tests in
+[`tests/session.test.js`](https://github.com/supercorp-ai/supercov/blob/main/examples/checkout-verification/starter/tests/session.test.js)
+check a valid session and a signed-out visitor:
+
+```js
+assert.equal(canCheckout(true, false), true);
+assert.equal(canCheckout(false, false), false);
+```
+
+The agent measured this suite and opened the summary:
 
 ```sh
 npx supercov -- npm test
 npx supercov runs latest
 ```
 
-Everything after `--` is the project's test command. Here, `npm test` runs
-`node --test`, which picks up the test files in the project.
+Everything after `--` is the project's test command. This example's `npm test`
+runs `node --test`. In your project, the agent should use your actual test
+command instead.
 
 Both tests passed. The summary showed:
 
@@ -74,15 +81,15 @@ Coverage
   MC/DC      50.00% (1/2)
 ```
 
-The agent then listed the gaps and inspected `src/session.js`. You can open
-the same views with:
+The agent then listed the gaps and inspected the example's `src/session.js`:
 
 ```sh
 npx supercov runs latest gaps
 npx supercov runs latest file src/session.js
 ```
 
-The file query explained what was missing:
+In your project, the file query takes the path of the file your agent is
+investigating. For this example, it explained:
 
 ```text
  LINE  STATUS        SOURCE
@@ -96,10 +103,15 @@ shown to affect the decision independently. Here, `signedIn` had; `!expired`
 had not.
 
 If your agent stops at 100% line coverage, ask it to inspect the MC/DC gaps.
+If Supercov reports a measurement limit instead, check
+[Troubleshooting](troubleshooting.md) before treating it as a missing test.
 
 ## 4. Review the test it wrote
 
-The agent added this test to `tests/session.test.js`:
+Review your agent's change: does the assertion check the behavior it identified,
+and did it leave your application code and existing tests alone?
+
+In our example, it added this test to `tests/session.test.js`:
 
 ```js
 test('a signed-in visitor with an expired session cannot check out', () => {
@@ -113,13 +125,14 @@ left unchanged.
 
 ## 5. Check the result
 
-The agent reran the same full test command:
+Your agent should rerun the same full suite it measured at the start, not just
+the new test. In the example, that was:
 
 ```sh
 npx supercov -- npm test
 ```
 
-All three tests passed. The new run's summary showed:
+All three example tests passed. The new run's summary showed:
 
 ```text
 Coverage
@@ -147,14 +160,31 @@ lost: 0 lines, 0 branches, 0 MC/DC conditions
 If the diff says the older run is stale because tests changed, that is expected.
 It still records the state before the edit.
 
-You now have a test-file change to review and a coverage comparison in the
-conversation. Ask your agent separately if you want it to commit the change or
-open a pull request.
+In your project, look for a passing suite and evidence that the test covers the
+gap your agent chose. One test won't necessarily take coverage to 100%.
 
-## Check the test yourself
+The result is a change to your test files and a coverage comparison in the
+agent conversation. Ask separately if you want a commit or pull request.
 
-To check that the new test catches a regression, temporarily remove
-`&& !expired` from `src/session.js` in this starter project:
+## Try the example yourself
+
+If you'd rather follow along with the exact files shown here,
+[download the starter project](https://supercov.com/downloads/supercov-tutorial.zip),
+extract it, and open the `supercov-tutorial` folder in your agent. From that
+folder, install its dependencies:
+
+```sh
+npm ci
+```
+
+Then paste the same prompt from step 2. The starter contains the original
+function and two tests, pinned to Supercov 0.0.42. The completed test is not
+included in the download.
+
+### Check that the new test catches a regression
+
+After your agent adds the expiry test, you can check it in the downloaded
+starter. Temporarily remove `&& !expired` from its `src/session.js`:
 
 ```diff
 -  if (signedIn && !expired) return true;
@@ -174,5 +204,5 @@ tests should pass again.
 ## Next
 
 - [Recorded agent run and completed test](https://github.com/supercorp-ai/supercov/tree/main/examples/checkout-verification/agent-run) — the prompt, command output, and file change used here.
-- [Agent workflow](agent-loop.md) — use this process with your own test suite.
+- [Agent workflow](agent-loop.md) — prompts for continuing beyond one test.
 - [Understanding coverage](coverage-model.md) — what each metric measures and what 100% means.
