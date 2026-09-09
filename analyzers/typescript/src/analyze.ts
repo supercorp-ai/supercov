@@ -6,11 +6,14 @@
  */
 import type ts from "typescript";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
-import { loadProjectCompiler } from "./compiler.js";
+import { dirname, relative as pathRelative, resolve } from "node:path";
+import { analysisPath, loadProjectCompiler } from "./compiler.js";
 import { assertionWitnessIssue, collectPragmas } from "./pragmas.js";
 import type { AnalyzeOptions, Site } from "./types.js";
 export type { AnalyzeOptions, Site } from "./types.js";
+
+// Archive/site/test identities use forward slashes on every host.
+const relative = (from: string, to: string) => pathRelative(from, to).replaceAll("\\", "/");
 
 export interface Boundary {
   boundary: string;
@@ -32,7 +35,7 @@ export function analyze(options: AnalyzeOptions) {
     (typeof options.inputDirectory !== "string" && !options.evidenceFiles)
   )
     throw new Error("projectRoot and inputDirectory are required strings");
-  const root = resolve(options.projectRoot);
+  const root = analysisPath(options.projectRoot);
   const ts = options.typescript ?? loadProjectCompiler(root);
   const srcDir = (options.sourceDir ?? "src").replace(/\/$/, "");
   const testDir = (options.testDir ?? "tests").replace(/\/$/, "");

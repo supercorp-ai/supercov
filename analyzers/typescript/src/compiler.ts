@@ -1,10 +1,16 @@
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+/** Canonical Rust paths may carry a Windows namespace prefix. Node/compiler paths do not. */
+export function analysisPath(path: string): string {
+  return fileURLToPath(pathToFileURL(resolve(path)));
+}
 
 /** Use the project's semantics rather than silently substituting the analyzer's compiler version. */
 export function projectCompilerPath(projectRoot: string): string {
   try {
-    return createRequire(resolve(projectRoot, "package.json")).resolve(
+    return createRequire(pathToFileURL(resolve(projectRoot, "package.json"))).resolve(
       "typescript",
     );
   } catch (error) {
@@ -18,7 +24,7 @@ export function projectCompilerPath(projectRoot: string): string {
 export function loadProjectCompiler(
   projectRoot: string,
 ): typeof import("typescript") {
-  const require = createRequire(resolve(projectRoot, "package.json"));
+  const require = createRequire(pathToFileURL(resolve(projectRoot, "package.json")));
   let compiler: typeof import("typescript");
   try {
     compiler = require(projectCompilerPath(projectRoot));

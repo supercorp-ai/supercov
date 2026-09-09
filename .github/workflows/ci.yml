@@ -20,6 +20,8 @@ jobs:
           node-version: "24"
       - run: npm --prefix analyzers/typescript ci --ignore-scripts
       - run: node scripts/asserted-compiler-probe.mjs
+      - run: npm --prefix analyzers/typescript run build
+      - run: node --test analyzers/typescript/tests/compiler.test.mjs
   check:
     runs-on: ubuntu-latest
     steps:

@@ -3,7 +3,7 @@ import type ts from "typescript";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { analyze } from "./analyze.js";
-import { loadProjectCompiler } from "./compiler.js";
+import { analysisPath, loadProjectCompiler } from "./compiler.js";
 import type { Site } from "./types.js";
 
 export const PROTOCOL = {
@@ -145,7 +145,7 @@ export function analyzeArchive(
     throw new Error(
       "Unsupported assertion analyzer protocol/rule revision/capabilities",
     );
-  const root = input.projectRoot;
+  const root = analysisPath(input.projectRoot);
   const sources = new Map(
     input.sourceFiles.map((file) => [
       file,
