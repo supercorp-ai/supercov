@@ -10,9 +10,8 @@ No account, config file, import, custom reporter, or hosted service is required.
 
 Supported by [Supercorp](https://supercorp.ai).
 
-**See it in action:** [100% line and branch coverage. One missing test.](https://supercov.com/docs/code-verification)
-Run a small example where Supercov finds the untested expiry condition and one
-additional assertion catches a regression the original tests miss.
+[Try the worked example](https://supercov.com/docs/code-verification): find an
+untested session-expiry condition, run an additional test, and compare the results.
 
 ## Start with the suite you already have
 
