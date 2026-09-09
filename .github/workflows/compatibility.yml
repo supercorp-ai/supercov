@@ -30,6 +30,7 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
       - run: npm ci
+      - run: npm --prefix analyzers/typescript ci --ignore-scripts
       - run: npm run check
       - run: npm run build
       - run: node ../../../bin/supercov.js -- npm test
@@ -222,4 +223,3 @@ jobs:
       # an Alpine container on arm64 runners, and the image brings its own Node.
       - if: ${{ matrix.image }}
         run: docker run --rm -e SUPERCOV_EXPECTED_NATIVE=${{ matrix.native }} -v "$PWD:/work" -w /work ${{ matrix.image }} node scripts/released-binary-smoke.mjs
-

@@ -144,6 +144,12 @@ function createState() {
     decisions: /* @__PURE__ */ new Map(),
     hits: /* @__PURE__ */ new Set(),
     events: [],
+    // Position of the test-file statement currently executing ("file:line:column"), set by the
+    // instrumented test module; production hits recorded meanwhile are attributed to it.
+    testStatement: void 0,
+    // Per value-position logical expression (`a && b`, `a || b`, `a ?? b`): the distinct
+    // (right operand evaluated?, result truthy?) pairs seen, keyed by branch id.
+    logicals: /* @__PURE__ */ new Map(),
     eventKeys: /* @__PURE__ */ new Set(),
     bufferedAttempts: /* @__PURE__ */ new Set(),
     serverBuffers: /* @__PURE__ */ new Map(),
@@ -293,17 +299,26 @@ function decisionSnapshot() {
     vectors: [...decision.vectors.values()]
   }));
 }
+function logicalSnapshot() {
+  return [...state.logicals.entries()].map(([id, vectors]) => ({
+    id,
+    vectors: [...vectors.values()]
+  }));
+}
 function coverageSnapshot() {
   return {
     decisions: decisionSnapshot(),
     hits: [...state.hits],
-    events: state.events
+    events: state.events,
+    logicals: logicalSnapshot()
   };
 }
 function resetCoverage(testId2) {
   state.decisions.clear();
   state.hits.clear();
   state.events.length = 0;
+  state.testStatement = void 0;
+  state.logicals.clear();
   state.eventKeys.clear();
   state.probeV2ContextEpochs.clear();
   activateProbeV2Key(`reset\0${state.probeV2NextEpoch}`, true);
@@ -604,21 +619,22 @@ function appendServer(record) {
   var _a8, _b, _c, _d;
   if (state.runtimeSnapshots) {
     const timestampMs = (_a8 = record.timestampMs) != null ? _a8 : Date.now();
+    const statement = record.statementId ? { statementId: record.statementId } : {};
     if (record.type === "decision") {
-      recordBrowserEvent(__spreadProps(__spreadValues({
+      recordBrowserEvent(__spreadProps(__spreadValues(__spreadValues({
         type: "decision",
         id: record.meta.id,
         vector: record.vector,
         timestampMs
-      }, record.phaseId ? { phaseId: record.phaseId } : {}), {
+      }, record.phaseId ? { phaseId: record.phaseId } : {}), statement), {
         environment: "server"
       }));
     } else {
-      recordBrowserEvent(__spreadProps(__spreadValues({
+      recordBrowserEvent(__spreadProps(__spreadValues(__spreadValues({
         type: "hit",
         id: record.id,
         timestampMs
-      }, record.phaseId ? { phaseId: record.phaseId } : {}), {
+      }, record.phaseId ? { phaseId: record.phaseId } : {}), statement), {
         environment: "server"
       }));
     }
@@ -962,25 +978,31 @@ function recordBrowserEvent(event) {
   state.events.push(event);
   return true;
 }
+function testStatement(source) {
+  state.testStatement = typeof source === "string" && source.length > 0 ? source : void 0;
+}
+function statementFields() {
+  return state.testStatement ? { statementId: state.testStatement } : {};
+}
 function coverageHit(id) {
   state.hits.add(id);
   const timestampMs = Date.now();
   const phaseId = currentPhaseId();
   if (isBrowser) {
-    if (recordBrowserEvent(__spreadProps(__spreadValues({
+    if (recordBrowserEvent(__spreadProps(__spreadValues(__spreadValues({
       type: "hit",
       id,
       timestampMs
-    }, phaseId ? { phaseId } : {}), {
+    }, phaseId ? { phaseId } : {}), statementFields()), {
       environment: "browser"
     })))
       persistBrowser();
   } else {
-    appendServer(__spreadValues({
+    appendServer(__spreadValues(__spreadValues({
       type: "hit",
       id,
       timestampMs
-    }, phaseId ? { phaseId } : {}));
+    }, phaseId ? { phaseId } : {}), statementFields()));
   }
 }
 function registerProbeV2(definition) {
@@ -1113,6 +1135,20 @@ function selectionRight(frame, value, inferredName) {
 }
 function selectionEnd(frame, value) {
   coverageHit(frame.rightEvaluated ? frame.rightId : frame.shortId);
+  // Per-operand outcomes for the verifier: which side was selected and whether the result is
+  // truthy. With the operator (known from the manifest) this gives each operand's outcome.
+  const separator = frame.shortId.lastIndexOf(":");
+  if (separator > 0) {
+    const branchId = frame.shortId.slice(0, separator);
+    const right = frame.rightEvaluated;
+    const truthy = Boolean(value);
+    let vectors = state.logicals.get(branchId);
+    if (!vectors) {
+      vectors = /* @__PURE__ */ new Map();
+      state.logicals.set(branchId, vectors);
+    }
+    vectors.set(`${right ? "R" : "S"}${truthy ? "T" : "F"}`, { right, truthy });
+  }
   return value;
 }
 function optionalSelect(shortId, continuedId, value) {
@@ -1201,22 +1237,22 @@ function mcdcEnd(frame, value) {
   const timestampMs = Date.now();
   const phaseId = currentPhaseId();
   if (isBrowser) {
-    if (recordBrowserEvent(__spreadProps(__spreadValues({
+    if (recordBrowserEvent(__spreadProps(__spreadValues(__spreadValues({
       type: "decision",
       id: decision.meta.id,
       vector,
       timestampMs
-    }, phaseId ? { phaseId } : {}), {
+    }, phaseId ? { phaseId } : {}), statementFields()), {
       environment: "browser"
     })))
       persistBrowser();
   } else {
-    appendServer(__spreadValues({
+    appendServer(__spreadValues(__spreadValues({
       type: "decision",
       meta: decision.meta,
       vector,
       timestampMs
-    }, phaseId ? { phaseId } : {}));
+    }, phaseId ? { phaseId } : {}), statementFields()));
   }
   return value;
 }
@@ -1257,6 +1293,7 @@ const directRuntimeApi = {
   selectionEnd,
   selectionRight,
   takeNodeAssertionPhases,
+  testStatement,
   tryBegin,
   tryCatch,
   tryEnd,
@@ -1306,6 +1343,7 @@ export {
   selectionEnd,
   selectionRight,
   takeNodeAssertionPhases,
+  testStatement,
   tryBegin,
   tryCatch,
   tryEnd,

@@ -104,6 +104,7 @@ impl SnapshotBuilder {
             // phase identity, never this value, owns causal attribution.
             timestamp_ms,
             phase_id: phase_id.map(str::to_owned),
+            statement_id: None,
             environment: "rust".into(),
         });
     }
@@ -125,6 +126,7 @@ impl SnapshotBuilder {
             vector: Some(vector),
             timestamp_ms,
             phase_id: phase_id.map(str::to_owned),
+            statement_id: None,
             environment: "rust".into(),
         });
     }
@@ -147,6 +149,7 @@ impl SnapshotBuilder {
                 .collect(),
             hits: self.hits.into_iter().collect(),
             events: self.events,
+            logicals: Vec::new(),
         }
     }
 }

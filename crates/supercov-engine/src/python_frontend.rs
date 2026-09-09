@@ -498,6 +498,7 @@ fn snapshot_for_context(
             vector: None,
             timestamp_ms: index as i64 + 1,
             phase_id: Some(phase.into()),
+            statement_id: None,
             environment: "python".into(),
         })
         .collect();
@@ -505,6 +506,7 @@ fn snapshot_for_context(
         decisions: Vec::new(),
         hits: hits.into_iter().collect(),
         events,
+        logicals: Vec::new(),
     }
 }
 

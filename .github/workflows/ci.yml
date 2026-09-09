@@ -7,6 +7,21 @@ permissions:
   contents: read
 
 jobs:
+  compiler:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, windows-11-arm, ubuntu-latest, macos-15]
+        node: [22, 24]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm --prefix analyzers/typescript ci --ignore-scripts
+      - run: npm --prefix analyzers/typescript run build
+      - run: node --test analyzers/typescript/tests/compiler.test.mjs analyzers/typescript/tests/compiler-identity.test.mjs analyzers/typescript/tests/native-frontend.test.mjs
   check:
     runs-on: ubuntu-latest
     steps:
@@ -16,4 +31,5 @@ jobs:
           node-version: "24"
           cache: npm
       - run: npm ci
+      - run: npm --prefix analyzers/typescript ci --ignore-scripts
       - run: npm run check

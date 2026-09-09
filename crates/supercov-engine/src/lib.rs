@@ -3,6 +3,7 @@
 //! are owned here.
 
 pub mod agent_json;
+pub mod asserted_coverage;
 pub mod build_cache;
 pub mod child_signal_guard;
 pub mod coverage_analysis;
@@ -17,6 +18,7 @@ pub mod integrity;
 pub mod javascript_frontend;
 pub mod javascript_run;
 pub mod js_instrumenter;
+pub mod js_sites;
 pub mod lifecycle;
 pub mod orchestration;
 pub mod probe_v2;

@@ -522,6 +522,9 @@ pub struct NodeAssertionInstrumentation {
     pub code: String,
     pub assertions: usize,
     pub capability_imports: usize,
+    /// Test-file statements that received a `testStatement(...)` marker (0 when the
+    /// module has no assertions).
+    pub statements: usize,
 }
 
 const CAPABILITY_IMPORT_EXCLUSIONS: &[&str] =
@@ -1197,6 +1200,7 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
             code: source.into(),
             assertions: 0,
             capability_imports: 0,
+            statements: 0,
         });
     }
     let source_type = SourceType::from_path(Path::new(file))
@@ -1213,6 +1217,7 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
         ));
     }
     let mut assertions = 0;
+    let mut statements = 0;
     if assertion_candidate {
         let semantic = SemanticBuilder::new().build(&parsed.program).semantic;
         let bindings =
@@ -1232,6 +1237,18 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
                 sites: collector.sites,
             }
             .visit_program(&mut parsed.program);
+            // A module with assertions is a test module: mark every statement inside its
+            // functions so production hits recorded while it runs carry the statement's position
+            // (the operand of an assertion is usually computed by an earlier statement).
+            let mut markers = TestStatementTransformer {
+                ast: AstBuilder::new(&allocator),
+                source,
+                file,
+                depth: 0,
+                statements: 0,
+            };
+            markers.visit_program(&mut parsed.program);
+            statements = markers.statements;
         }
     }
     let capability_imports = capability_wrapper.map_or(0, |wrapper| {
@@ -1242,6 +1259,7 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
             code: source.into(),
             assertions: 0,
             capability_imports: 0,
+            statements: 0,
         });
     }
     let module_assertion_runtime = (assertions > 0 && parsed.program.source_type.is_module())
@@ -1277,7 +1295,108 @@ pub fn instrument_node_assertion_phases_with_runtime_imports(
         code,
         assertions,
         capability_imports,
+        statements,
     })
+}
+
+/// Inserts `globalThis.__SUPERCOV_DIRECT_RUNTIME__.testStatement("<file>:<line>:<column>")`
+/// before every statement that lives inside a function of a test module. The runtime keeps
+/// the last position and stamps it on every hit and decision event recorded meanwhile, so
+/// evidence can be attributed to the test statement that produced an assertion's operand.
+/// Module-level statements run at import time and are left alone.
+struct TestStatementTransformer<'a, 's> {
+    ast: AstBuilder<'a>,
+    source: &'s str,
+    file: &'s str,
+    depth: usize,
+    statements: usize,
+}
+
+impl<'a> TestStatementTransformer<'a, '_> {
+    fn marker(&self, statement: &Statement<'a>) -> Statement<'a> {
+        let (line, column) = line_and_utf16_column(self.source, statement.span().start as usize);
+        let runtime = Expression::StaticMemberExpression(
+            self.ast.alloc_static_member_expression(
+                Span::default(),
+                self.ast
+                    .expression_identifier(Span::default(), self.ast.ident("globalThis")),
+                self.ast.identifier_name(
+                    Span::default(),
+                    self.ast.ident("__SUPERCOV_DIRECT_RUNTIME__"),
+                ),
+                false,
+            ),
+        );
+        let helper = Expression::StaticMemberExpression(
+            self.ast.alloc_static_member_expression(
+                Span::default(),
+                runtime,
+                self.ast
+                    .identifier_name(Span::default(), self.ast.ident("testStatement")),
+                false,
+            ),
+        );
+        let position = format!("{}:{line}:{column}", self.file);
+        self.ast.statement_expression(
+            Span::default(),
+            self.ast.expression_call(
+                Span::default(),
+                helper,
+                NONE,
+                self.ast
+                    .vec1(Argument::from(self.ast.expression_string_literal(
+                        Span::default(),
+                        self.ast.str(&position),
+                        None,
+                    ))),
+                false,
+            ),
+        )
+    }
+}
+
+impl<'a> VisitMut<'a> for TestStatementTransformer<'a, '_> {
+    fn visit_statements(&mut self, statements: &mut oxc_allocator::Vec<'a, Statement<'a>>) {
+        if self.depth == 0 {
+            for statement in statements.iter_mut() {
+                self.visit_statement(statement);
+            }
+            return;
+        }
+        let original = statements.take_in(self.ast.allocator);
+        let mut instrumented = self.ast.vec_with_capacity(original.len() * 2);
+        for mut statement in original {
+            let marker = self.marker(&statement);
+            self.visit_statement(&mut statement);
+            instrumented.push(marker);
+            instrumented.push(statement);
+            self.statements += 1;
+        }
+        *statements = instrumented;
+    }
+
+    fn visit_function(&mut self, function: &mut Function<'a>, flags: ScopeFlags) {
+        self.depth += 1;
+        walk_mut::walk_function(self, function, flags);
+        self.depth -= 1;
+    }
+
+    fn visit_arrow_function_expression(&mut self, function: &mut ArrowFunctionExpression<'a>) {
+        if function.expression {
+            // `() => ({ ... })`: the body is one expression statement standing for the return
+            // value; a marker before it would turn the arrow into a block body returning
+            // undefined (every `vi.mock` factory is written this way). Nested block-bodied
+            // functions inside the expression are still marked.
+            let saved = self.depth;
+            self.depth = 0;
+            walk_mut::walk_arrow_function_expression(self, function);
+            self.depth = saved;
+            return;
+        }
+        self.depth += 1;
+        walk_mut::walk_arrow_function_expression(self, function);
+        self.depth -= 1;
+    }
 }
 
 type SpanKey = (u32, u32);
@@ -6900,7 +7019,7 @@ fn source_slice(source: &str, span: Span) -> &str {
     &source[span.start as usize..span.end as usize]
 }
 
-fn line_and_utf16_column(source: &str, offset: usize) -> (usize, usize) {
+pub(crate) fn line_and_utf16_column(source: &str, offset: usize) -> (usize, usize) {
     let prefix = &source[..offset];
     let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
     let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;

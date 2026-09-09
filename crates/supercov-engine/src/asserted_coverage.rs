@@ -1,0 +1,2273 @@
+//! The language-neutral join of asserted coverage: sites, evidence and observations in, a verdict per
+//! site out.
+//!
+//! Frontends contribute facts and never verdicts, so everything syntactic happens before this module:
+//! which boundaries a site's effect or value reaches, which sites each outcome of a decision controls,
+//! what each assertion reads and how strongly. This module decides only what those facts imply, which is
+//! the one part of the metric that is the same in every language.
+//!
+//! **Evident** and **presence** are candidate classifications under the frontend's flow and observation
+//! rules, not formal proofs of arbitrary-change detection. Unresolved sites carry a reason: a *gap*
+//! a test can close, or an *analysis limit* the frontend could not follow. Limits remain visible and
+//! must not be silently removed from a reported accuracy denominator.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// Strength
+// ---------------------------------------------------------------------------
+
+/// How strongly the modeled assertion checks what it reads. This classifies its predicate, not a
+/// formal proof of the complete source-to-assertion dependency; `Presence` says a value arrived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Strength {
+    Presence,
+    Value,
+    Total,
+}
+
+impl Strength {
+    /// Does this strength distinguish one value from another?
+    fn caught(self) -> bool {
+        self >= Strength::Value
+    }
+}
+
+fn stronger(a: Option<Strength>, b: Option<Strength>) -> Option<Strength> {
+    match (a, b) {
+        (None, x) | (x, None) => x,
+        (Some(x), Some(y)) => Some(x.max(y)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Facts in
+// ---------------------------------------------------------------------------
+
+/// A place a site's effect or value arrives, and which an assertion may read: a function's return or
+/// escape, a sink the test injected, a mocked module, an installed global, a process channel, rendered
+/// output, or `internal` for an effect that leaves no boundary at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Boundary {
+    pub boundary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub facet: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+}
+
+impl Boundary {
+    fn internal(&self) -> bool {
+        self.boundary == "internal"
+    }
+}
+
+/// What one assertion reads, as the frontend understood it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Observation {
+    pub boundary: String,
+    #[serde(default)]
+    pub facet: Option<String>,
+    pub strength: Strength,
+    #[serde(default, rename = "where")]
+    pub where_: Option<String>,
+    /// Exact authored call identity, retained for assertion-specific hint checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assertion_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assertion_method: Option<String>,
+    /// `expect(x).not.toHaveBeenCalled()`: the assertion pins that something did *not* happen
+    #[serde(default)]
+    pub negative: bool,
+    /// the assertion pins a sink's whole call list, so a spurious or missing call shows up
+    #[serde(default)]
+    pub call_list: bool,
+    /// a whole-page render witnessed the site: it ran, but its output was not read
+    #[serde(default)]
+    pub weak: bool,
+    /// log sites whose message this observation's pattern, literal or fragment admits; `None` when the
+    /// observation carries no message constraint and so admits every site on its channel
+    #[serde(default)]
+    pub log_sites: Option<Vec<String>>,
+    /// the observation matches on a regex that several log sites can satisfy, so it pins none of them
+    /// individually; a whole literal or a fragment does not carry that ambiguity
+    #[serde(default)]
+    pub pattern_shared: bool,
+}
+
+impl Observation {
+    /// Does this observation read the given boundary of the given site? Dense channels need the message
+    /// constraint checked, and a spy on one console method sees only that method's calls.
+    fn matches(&self, site: &Site, at: &Boundary) -> bool {
+        if at.boundary != self.boundary {
+            return false;
+        }
+        match at.boundary.as_str() {
+            "client-header" => match (at.facet.as_deref(), self.facet.as_deref()) {
+                (Some("*"), _) | (_, None) | (_, Some("*")) => true,
+                (a, b) => a == b,
+            },
+            "stderr" | "stdout" => {
+                if let (Some(facet), true) = (self.facet.as_deref(), site.category == "log")
+                    && let Some(method) = facet.strip_prefix("console.")
+                    && site.method.as_deref().is_some_and(|m| m != method)
+                {
+                    return false;
+                }
+                match &self.log_sites {
+                    // a message constraint pins only the sites whose template can produce it
+                    Some(admitted) => {
+                        if site.category == "log" {
+                            admitted.contains(&site.id)
+                        } else {
+                            at.facet.as_deref() != Some("log")
+                        }
+                    }
+                    None => true,
+                }
+            }
+            "client-message" => match at.facet.as_deref() {
+                Some(facet) => self.facet.as_deref().is_some_and(|f| f.contains(facet)),
+                None => true,
+            },
+            _ => true,
+        }
+    }
+}
+
+/// A test-owned object the test passed into production, and the parameter it arrived through.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SinkBinding {
+    pub sink: String,
+    pub param: String,
+    #[serde(default)]
+    pub member: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestFacts {
+    pub id: String,
+    pub file: String,
+    pub observations: Vec<Observation>,
+    #[serde(default)]
+    pub sinks: Vec<SinkBinding>,
+    /// components the test rendered, by owner name
+    #[serde(default)]
+    pub rendered: Vec<String>,
+    /// Rejected/unavailable witnesses are not observations. Legacy frontends
+    /// omit this field; the public JS adapter requires the versioned capability.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub witness_issues: Vec<WitnessIssue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WitnessIssueKind {
+    CaptureUnavailable,
+    CallNotRecorded,
+    CallIncomplete,
+    MixedCallOutcomes,
+    CallFailed,
+    UninstrumentedObservation,
+}
+
+impl WitnessIssueKind {
+    fn is_uncertain(self) -> bool {
+        self != Self::CallFailed
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WitnessIssue {
+    pub kind: WitnessIssueKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// A statically recognized but rejected observation. Used only to bound
+    /// uncertainty, NEVER to supply strength or evidence to a resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<Observation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestWitnessIssue {
+    pub test: String,
+    #[serde(flatten)]
+    pub issue: WitnessIssue,
+}
+
+/// Deserialize a field whose absence and whose explicit `null` mean different things: the field's own
+/// `Option` distinguishes "the key was there" from "it was not", so a present `null` becomes `Some(None)`
+/// instead of collapsing into the same `None` a missing key gives.
+fn present_option<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+/// The sites each outcome of a decision controls, and the site sets its witness rules ask about.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecisionFacts {
+    /// the site that carries the decision's value (a ternary inside a return, say)
+    #[serde(default)]
+    pub carrier: Option<String>,
+    /// a value-position expression not inside a site: the sites its value flows to
+    #[serde(default)]
+    pub value_flow: Option<Vec<String>>,
+    /// sites the true outcome controls
+    #[serde(default)]
+    pub then: Option<Vec<String>>,
+    /// Sites the false outcome controls. Three states, and they mean different things: absent when the
+    /// decision has no branches at all (a value-position operand), `Some(None)` when there is no else
+    /// branch (the absence case, where a spurious effect is what a test would notice), and `Some(sites)`
+    /// for a real else. An explicit JSON `null` has to survive as `Some(None)`, which is why this reads
+    /// the field itself rather than letting a missing key and a null one collapse together.
+    #[serde(default, rename = "else", deserialize_with = "present_option")]
+    pub else_: Option<Option<Vec<String>>>,
+    #[serde(default)]
+    pub early_exit_downstream: Option<Vec<String>>,
+    #[serde(default)]
+    pub loop_body: Option<Vec<String>>,
+    #[serde(default)]
+    pub default_kept: Option<Vec<DefaultKept>>,
+    #[serde(default)]
+    pub object_valued: Option<ObjectValued>,
+    /// tests that took each outcome; absent when the frontend has no per-test outcome data
+    #[serde(default)]
+    pub outcomes: Option<Outcomes>,
+    /// tests in which a value-position operand was the selected one
+    #[serde(default)]
+    pub selected: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultKept {
+    pub write: String,
+    pub dependents: Vec<Dependent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Dependent {
+    pub site: String,
+    pub label: String,
+    #[serde(default)]
+    pub strength: Option<Strength>,
+    /// Candidate timer-cancellation dependency: active only when a callback site has total evidence.
+    /// Older prototype facts already filtered these candidates and omit this condition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_total: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectValued {
+    pub only_a: Vec<String>,
+    pub only_b: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Outcomes {
+    #[serde(rename = "true")]
+    pub true_: Vec<String>,
+    #[serde(rename = "false")]
+    pub false_: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Site {
+    pub id: String,
+    pub file: String,
+    pub line: u32,
+    pub kind: String,
+    pub category: String,
+    pub classification: String,
+    pub owner: String,
+    #[serde(default)]
+    pub method: Option<String>,
+    pub bounds: Vec<Boundary>,
+    /// The site's own boundaries, without the flow that carries its value elsewhere. What another site's
+    /// value reaches here is read at these, since the carrying flow does not continue past this point.
+    #[serde(default)]
+    pub direct_bounds: Vec<Boundary>,
+    /// sites this site's value flows into
+    #[serde(default)]
+    pub reached: Vec<String>,
+    pub covered_by: Vec<String>,
+    #[serde(default)]
+    pub object_valued_return: bool,
+    /// operand shapes a covering test asserted that the frontend could not trace to a boundary
+    #[serde(default)]
+    pub unmodelled_shapes: Vec<String>,
+    #[serde(default)]
+    pub decision: Option<DecisionFacts>,
+    /// sites through which an internal effect becomes observable
+    #[serde(default)]
+    pub derive: Vec<Dependent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Facts {
+    pub schema: u32,
+    pub sites: Vec<Site>,
+    pub tests: Vec<TestFacts>,
+    /// `vi.mock` boundaries, which depend on the test file rather than the test: file → site → boundaries
+    #[serde(default)]
+    pub mocks_by_test_file: BTreeMap<String, BTreeMap<String, Vec<Boundary>>>,
+}
+
+/// A source suggestion, deliberately separate from observations and join inputs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PragmaHint {
+    pub id: String,
+    #[serde(rename = "where")]
+    pub where_: String,
+    pub raw: String,
+    pub target: Option<PragmaTarget>,
+    pub candidate_sites: Vec<String>,
+    pub issue: Option<String>,
+    pub test: Option<String>,
+    pub assertion_source: Option<String>,
+    pub assertion_method: Option<String>,
+    pub witness: String,
+    pub witness_issue: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PragmaTarget {
+    pub file: String,
+    pub function: String,
+    pub snippet: Option<String>,
+    /// Explanatory text only. Never interpreted as a verified dependency.
+    pub via: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HintValidation {
+    AnalyzerSupported,
+    Unresolved,
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PragmaCheck {
+    pub hint: PragmaHint,
+    pub origin: String,
+    pub validation: HintValidation,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strength: Option<Strength>,
+    /// Only the selected assertion's observations, never another assertion in its test.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub observations: Vec<Observation>,
+}
+
+/// Check source hints against existing facts, without modifying the normal join.
+/// Indexes are shared across hints; only the selected test's observations are copied.
+/// This bounded first pass supports effect boundaries/flow, not decision or internal
+/// derivation proofs. Unsupported paths remain unresolved, not contradicted.
+pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaCheck> {
+    if hints.is_empty() {
+        return vec![];
+    }
+    let engine = Join {
+        sites: facts.sites.iter().map(|s| (s.id.as_str(), s)).collect(),
+        tests: facts.tests.iter().map(|t| (t.id.as_str(), t)).collect(),
+        facts,
+        resolved: BTreeMap::new(),
+    };
+    let mut assertions: BTreeMap<(&str, &str, &str), Vec<&Observation>> = BTreeMap::new();
+    for test in &facts.tests {
+        for ob in &test.observations {
+            if let (Some(source), Some(method)) = (&ob.assertion_source, &ob.assertion_method)
+                && ob.boundary != "pragma"
+            {
+                assertions
+                    .entry((&test.id, source, method))
+                    .or_default()
+                    .push(ob);
+            }
+        }
+    }
+    hints
+        .iter()
+        .map(|hint| {
+            let mut result = PragmaCheck {
+                hint: hint.clone(),
+                origin: "user-suggested".into(),
+                validation: HintValidation::Unresolved,
+                reason: "connection-not-established".into(),
+                strength: None,
+                observations: vec![],
+            };
+            if let Some(issue) = &hint.issue {
+                result.reason = issue.clone();
+                // Missing inventory can mean an unsupported source construct,
+                // not a bad declaration. Do not call an analysis limit invalid.
+                if !matches!(
+                    issue.as_str(),
+                    "no-owning-passed-test" | "target-not-in-inventory"
+                ) {
+                    result.validation = HintValidation::Invalid;
+                }
+                return result;
+            }
+            let [id] = hint.candidate_sites.as_slice() else {
+                result.validation = HintValidation::Invalid;
+                result.reason = "target-not-unique".into();
+                return result;
+            };
+            let Some(site) = engine.sites.get(id.as_str()) else {
+                result.validation = HintValidation::Invalid;
+                result.reason = "target-not-found".into();
+                return result;
+            };
+            if hint
+                .target
+                .as_ref()
+                .is_none_or(|target| target.file != site.file)
+            {
+                result.validation = HintValidation::Invalid;
+                result.reason = "target-file-mismatch".into();
+                return result;
+            }
+            if hint.witness != "passed" || hint.witness_issue.is_some() {
+                result.reason = hint
+                    .witness_issue
+                    .clone()
+                    .unwrap_or_else(|| "missing-passed-witness".into());
+                return result;
+            }
+            let Some(test) = hint
+                .test
+                .as_ref()
+                .and_then(|id| engine.tests.get(id.as_str()))
+            else {
+                result.reason = "no-owning-passed-test".into();
+                return result;
+            };
+            if hint.assertion_source.as_ref().is_none_or(String::is_empty)
+                || hint.assertion_method.as_ref().is_none_or(String::is_empty)
+            {
+                result.reason = "missing-assertion-identity".into();
+                return result;
+            }
+            if !site.covered_by.contains(&test.id) {
+                result.reason = "target-not-reached-in-owning-test".into();
+                return result;
+            }
+            if site.kind != "effect" {
+                result.reason = "decision-hint-analysis-not-supported".into();
+                return result;
+            }
+            let selected = TestFacts {
+                id: test.id.clone(),
+                file: test.file.clone(),
+                observations: assertions
+                    .get(&(
+                        test.id.as_str(),
+                        hint.assertion_source.as_deref().unwrap(),
+                        hint.assertion_method.as_deref().unwrap(),
+                    ))
+                    .into_iter()
+                    .flatten()
+                    .map(|ob| (*ob).clone())
+                    .collect(),
+                sinks: test.sinks.clone(),
+                rendered: test.rendered.clone(),
+                witness_issues: vec![],
+            };
+            if selected.observations.is_empty() {
+                result.reason = "assertion-operand-not-modelled".into();
+                return result;
+            }
+            let resolution = engine.resolve_effect_for(site, vec![&selected]);
+            if resolution.strength.is_some() && resolution.tests.contains(&test.id) {
+                let bounds = engine.bounds_for_test(site, &selected);
+                result.observations = selected
+                    .observations
+                    .iter()
+                    .filter(|ob| {
+                        engine.observation_hits(site, &selected, &bounds, ob)
+                            && !(site.category == "log" && ob.pattern_shared)
+                    })
+                    .cloned()
+                    .collect();
+                result.validation = HintValidation::AnalyzerSupported;
+                result.reason = "existing-effect-rules-support-this-assertion-link".into();
+                result.strength = resolution.strength;
+            }
+            result
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Verdicts out
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    Evident,
+    Presence,
+    Partial,
+    Unresolved,
+}
+
+/// Why a site is not evident. A gap is closable by writing a test; a limit is something the frontend
+/// could not follow, and an agent that writes a test for one either wastes the effort or learns to
+/// satisfy the analyzer instead of the code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReasonKind {
+    #[serde(rename = "gap:not-reached")]
+    GapNotReached,
+    #[serde(rename = "gap:not-asserted")]
+    GapNotAsserted,
+    #[serde(rename = "gap:outcome-not-asserted")]
+    GapOutcomeNotAsserted,
+    #[serde(rename = "gap:value-not-asserted")]
+    GapValueNotAsserted,
+    #[serde(rename = "limit:operand-shape")]
+    LimitOperandShape,
+    #[serde(rename = "limit:internal-state")]
+    LimitInternalState,
+    #[serde(rename = "limit:undecidable")]
+    LimitUndecidable,
+    #[serde(rename = "limit:assertion-witness")]
+    LimitAssertionWitness,
+}
+
+impl ReasonKind {
+    pub fn is_limit(self) -> bool {
+        matches!(
+            self,
+            ReasonKind::LimitOperandShape
+                | ReasonKind::LimitInternalState
+                | ReasonKind::LimitUndecidable
+                | ReasonKind::LimitAssertionWitness
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Reason {
+    pub kind: ReasonKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Resolution {
+    pub site: String,
+    pub status: Status,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strength: Option<Strength>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<Reason>,
+    pub covered_by: usize,
+    /// tests whose observations produced the evidence
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub tests: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub weak_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck_true_caught: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck_false_caught: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absence_needed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_observed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub witness_issues: Vec<TestWitnessIssue>,
+}
+
+// ---------------------------------------------------------------------------
+// The join
+// ---------------------------------------------------------------------------
+
+struct Join<'a> {
+    sites: BTreeMap<&'a str, &'a Site>,
+    tests: BTreeMap<&'a str, &'a TestFacts>,
+    facts: &'a Facts,
+    resolved: BTreeMap<String, Resolution>,
+}
+
+/// Resolve every site. Effect sites first, since a decision's outcomes are judged by the strength of the
+/// sites they control; then decisions; then internal effects derived through their dependents, which can
+/// promote a site and so are followed by a second decision pass, exactly as the prototype does.
+pub fn join(facts: &Facts) -> Vec<Resolution> {
+    let mut join = Join {
+        sites: facts.sites.iter().map(|s| (s.id.as_str(), s)).collect(),
+        tests: facts.tests.iter().map(|t| (t.id.as_str(), t)).collect(),
+        facts,
+        resolved: BTreeMap::new(),
+    };
+    for site in &facts.sites {
+        if site.kind == "effect" {
+            let r = join.resolve_effect(site);
+            join.resolved.insert(site.id.clone(), r);
+        }
+    }
+    join.resolve_decisions();
+    for site in &facts.sites {
+        if site.kind != "effect" {
+            continue;
+        }
+        let unresolved = join
+            .resolved
+            .get(&site.id)
+            .is_some_and(|r| r.status == Status::Unresolved);
+        if !unresolved || site.derive.is_empty() {
+            continue;
+        }
+        if let Some(derived) = join.derive_internal(site) {
+            join.resolved.insert(site.id.clone(), derived);
+        }
+    }
+    join.resolve_decisions();
+    facts
+        .sites
+        .iter()
+        .filter_map(|s| {
+            join.resolved
+                .get(&s.id)
+                .cloned()
+                .map(|r| join.with_witness_issues(s, r))
+        })
+        .collect()
+}
+
+impl<'a> Join<'a> {
+    fn resolve_decisions(&mut self) {
+        for site in &self.facts.sites {
+            if site.kind == "decision" {
+                let r = self.resolve_decision(site);
+                self.resolved.insert(site.id.clone(), r);
+            }
+        }
+    }
+
+    /// The strongest strength among these sites, optionally restricted to sites whose evidence came from
+    /// one of `within`: with per-test outcomes known, only a test that took an outcome can have observed
+    /// the sites that outcome controls.
+    fn strength_of_sites(
+        &self,
+        ids: &[String],
+        within: Option<&BTreeSet<&str>>,
+    ) -> Option<Strength> {
+        let mut best = None;
+        for id in ids {
+            let Some(r) = self.resolved.get(id) else {
+                continue;
+            };
+            let Some(strength) = r.strength else {
+                continue;
+            };
+            if let Some(within) = within
+                && !r.tests.iter().any(|t| within.contains(t.as_str()))
+            {
+                continue;
+            }
+            best = stronger(best, Some(strength));
+        }
+        best
+    }
+
+    /// The given boundaries plus what the test file's module mocks bind at this site.
+    fn with_mocks(&self, site: &Site, test: &TestFacts, base: &[Boundary]) -> Vec<Boundary> {
+        let mut bounds = base.to_vec();
+        if let Some(per_site) = self.facts.mocks_by_test_file.get(&test.file)
+            && let Some(extra) = per_site.get(&site.id)
+        {
+            bounds.extend(extra.iter().cloned());
+        }
+        bounds
+    }
+
+    /// Boundaries of a site as one test sees them: its own, its module mocks, and the DOM when the test
+    /// rendered the component the site belongs to. The DOM applies to the site under judgement only: a
+    /// site merely reached by its value is not read through the page that rendered something else.
+    fn bounds_for_test(&self, site: &Site, test: &TestFacts) -> Vec<Boundary> {
+        let mut bounds = self.with_mocks(site, test, &site.bounds);
+        if (site.category == "return" || site.category == "callback-return")
+            && test.rendered.contains(&site.owner)
+        {
+            bounds.push(Boundary {
+                boundary: "dom".into(),
+                facet: None,
+                via: Some("rendered component".into()),
+            });
+        }
+        bounds
+    }
+
+    /// Does this observation read a sink the test wired into production at this site?
+    fn sink_hit(
+        &self,
+        test: &TestFacts,
+        site: &Site,
+        bounds: &[Boundary],
+        ob: &Observation,
+    ) -> bool {
+        for sink in &test.sinks {
+            let injected = bounds.iter().any(|b| {
+                b.boundary == format!("callback:{}", sink.param)
+                    && match (&sink.member, &b.facet) {
+                        (None, _) => true,
+                        (Some(_), None) => false,
+                        (Some(member), Some(facet)) => {
+                            facet == member
+                                || facet.starts_with(&format!("{member}."))
+                                || facet.starts_with('*')
+                        }
+                    }
+            });
+            let log_sink = site.category == "log"
+                && sink.param == "logger"
+                && sink
+                    .member
+                    .as_deref()
+                    .is_none_or(|m| Some(m) == site.method.as_deref());
+            // `expect(table.upsert)`: a leaf of the sink object pins only calls of that method
+            let leaf = ob
+                .boundary
+                .strip_prefix(&format!("{}.", sink.sink))
+                .and_then(|rest| rest.split('.').next_back());
+            let same_sink = ob.boundary == sink.sink
+                || leaf
+                    .is_some_and(|leaf| site.method.as_deref().is_none_or(|method| leaf == method));
+            // a sink on a dense channel still only pins the messages its constraint admits
+            let message_fits = site.category != "log"
+                || ob
+                    .log_sites
+                    .as_ref()
+                    .is_none_or(|admitted| admitted.contains(&site.id));
+            if (injected || log_sink) && same_sink && message_fits {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn resolve_effect(&self, site: &Site) -> Resolution {
+        let covering: Vec<&TestFacts> = site
+            .covered_by
+            .iter()
+            .filter_map(|id| self.tests.get(id.as_str()).copied())
+            .collect();
+        self.resolve_effect_for(site, covering)
+    }
+
+    fn resolve_effect_for(&self, site: &Site, covering: Vec<&TestFacts>) -> Resolution {
+        // An effect with no boundary, reaching no other site and with no per-test extra, is internal:
+        // only a supported derivation can resolve it; comments are not evidence.
+        let any_extra = covering
+            .iter()
+            .any(|t| self.bounds_for_test(site, t).len() > site.bounds.len());
+        if site.bounds.iter().all(Boundary::internal) && site.reached.is_empty() && !any_extra {
+            return Resolution {
+                site: site.id.clone(),
+                status: Status::Unresolved,
+                strength: None,
+                reason: Some(Reason {
+                    kind: ReasonKind::LimitInternalState,
+                    detail: None,
+                }),
+                covered_by: site.covered_by.len(),
+                tests: BTreeSet::new(),
+                weak_only: false,
+                stuck_true_caught: None,
+                stuck_false_caught: None,
+                absence_needed: None,
+                value_observed: None,
+                witness_issues: vec![],
+            };
+        }
+        let mut best: Option<Strength> = None;
+        let mut tests = BTreeSet::new();
+        let mut strong_hit = false;
+        for test in &covering {
+            let bounds = self.bounds_for_test(site, test);
+            for ob in &test.observations {
+                if !self.observation_hits(site, test, &bounds, ob) {
+                    continue;
+                }
+                // a regex several log sites could satisfy pins none of them individually
+                if site.category == "log" && ob.pattern_shared {
+                    continue;
+                }
+                best = stronger(best, Some(ob.strength));
+                tests.insert(test.id.clone());
+                if !ob.weak {
+                    strong_hit = true;
+                }
+            }
+        }
+        let Some(mut best) = best else {
+            let boundaries: BTreeSet<&str> =
+                site.bounds.iter().map(|b| b.boundary.as_str()).collect();
+            let reason = if site.covered_by.is_empty() {
+                Reason {
+                    kind: ReasonKind::GapNotReached,
+                    detail: None,
+                }
+            } else if !site.unmodelled_shapes.is_empty() {
+                Reason {
+                    kind: ReasonKind::LimitOperandShape,
+                    detail: Some(site.unmodelled_shapes.join("; ")),
+                }
+            } else {
+                Reason {
+                    kind: ReasonKind::GapNotAsserted,
+                    detail: Some(boundaries.into_iter().collect::<Vec<_>>().join("|")),
+                }
+            };
+            return Resolution {
+                site: site.id.clone(),
+                status: Status::Unresolved,
+                strength: None,
+                reason: Some(reason),
+                covered_by: site.covered_by.len(),
+                tests: BTreeSet::new(),
+                weak_only: false,
+                stuck_true_caught: None,
+                stuck_false_caught: None,
+                absence_needed: None,
+                value_observed: None,
+                witness_issues: vec![],
+            };
+        };
+        // Returning one of several pre-built objects: downstream observations show that *a* value
+        // arrived, not which one.
+        if site.object_valued_return {
+            best = Strength::Presence;
+        }
+        Resolution {
+            site: site.id.clone(),
+            status: if best == Strength::Presence {
+                Status::Presence
+            } else {
+                Status::Evident
+            },
+            strength: Some(best),
+            reason: (best == Strength::Presence).then_some(Reason {
+                kind: ReasonKind::GapValueNotAsserted,
+                detail: None,
+            }),
+            covered_by: site.covered_by.len(),
+            tests,
+            weak_only: !strong_hit,
+            stuck_true_caught: None,
+            stuck_false_caught: None,
+            absence_needed: None,
+            value_observed: None,
+            witness_issues: vec![],
+        }
+    }
+
+    /// The same boundary/instance rules used by positive observations. Reusing
+    /// them for limits must never turn a suppressed observation into credit.
+    fn observation_hits(
+        &self,
+        site: &Site,
+        test: &TestFacts,
+        bounds: &[Boundary],
+        ob: &Observation,
+    ) -> bool {
+        if bounds.iter().any(|b| ob.matches(site, b)) || self.sink_hit(test, site, &site.bounds, ob)
+        {
+            return true;
+        }
+        site.reached.iter().any(|id| {
+            let Some(reached) = self.sites.get(id.as_str()) else {
+                return false;
+            };
+            if !reached.covered_by.contains(&test.id) {
+                return false;
+            }
+            let bounds = self.with_mocks(reached, test, &reached.direct_bounds);
+            bounds
+                .iter()
+                .any(|b| !b.internal() && ob.matches(reached, b))
+                || self.sink_hit(test, reached, &bounds, ob)
+        })
+    }
+
+    /// Over-approximate which rejected observations could affect a candidate,
+    /// walking only its recorded flow/control/derivation edges. This explains
+    /// uncertainty; it is not a new proof of dependence. Root test ownership is
+    /// checked by the caller. No coverage requirement at a negative target:
+    /// an absence assertion can observe a branch whose effect never executed.
+    fn issue_reaches(
+        &self,
+        site: &Site,
+        test: &TestFacts,
+        ob: &Observation,
+        seen: &mut BTreeSet<String>,
+    ) -> bool {
+        if !seen.insert(site.id.clone()) {
+            return false;
+        }
+        if self.observation_hits(site, test, &self.bounds_for_test(site, test), ob) {
+            return true;
+        }
+        let mut edges = site.reached.clone();
+        for dep in &site.derive {
+            edges.push(dep.site.clone());
+            edges.extend(dep.requires_total.iter().flatten().cloned());
+        }
+        if let Some(d) = &site.decision {
+            edges.extend(d.carrier.iter().cloned());
+            for ids in [
+                &d.value_flow,
+                &d.then,
+                &d.early_exit_downstream,
+                &d.loop_body,
+            ] {
+                edges.extend(ids.iter().flatten().cloned());
+            }
+            edges.extend(d.else_.iter().flatten().flatten().cloned());
+            for entry in d.default_kept.iter().flatten() {
+                edges.push(entry.write.clone());
+                edges.extend(entry.dependents.iter().map(|d| d.site.clone()));
+            }
+            if let Some(o) = &d.object_valued {
+                edges.extend(o.only_a.iter().chain(&o.only_b).cloned());
+            }
+        }
+        edges.iter().any(|id| {
+            self.sites
+                .get(id.as_str())
+                .is_some_and(|s| self.issue_reaches(s, test, ob, seen))
+        })
+    }
+
+    /// Final reporting pass only: strengths, statuses, caught flags, evidence
+    /// test sets and the denominator are unchanged. Unknown evidence may replace
+    /// an assertion gap with a limit, but never a known execution gap.
+    fn with_witness_issues(&self, site: &Site, mut result: Resolution) -> Resolution {
+        for id in &site.covered_by {
+            let Some(test) = self.tests.get(id.as_str()) else {
+                continue;
+            };
+            for issue in &test.witness_issues {
+                let relevant = match &issue.observation {
+                    None => issue.kind == WitnessIssueKind::CaptureUnavailable,
+                    Some(ob) => self.issue_reaches(site, test, ob, &mut BTreeSet::new()),
+                };
+                if relevant {
+                    result.witness_issues.push(TestWitnessIssue {
+                        test: id.clone(),
+                        issue: issue.clone(),
+                    });
+                }
+            }
+        }
+        let untaken = site
+            .decision
+            .as_ref()
+            .and_then(|d| d.outcomes.as_ref())
+            .is_some_and(|o| {
+                (result.stuck_false_caught == Some(false) && o.true_.is_empty())
+                    || (result.stuck_true_caught == Some(false) && o.false_.is_empty())
+            });
+        if result.status != Status::Evident
+            && !untaken
+            && result.reason.as_ref().is_some_and(|reason| {
+                matches!(
+                    reason.kind,
+                    ReasonKind::GapNotAsserted
+                        | ReasonKind::GapOutcomeNotAsserted
+                        | ReasonKind::GapValueNotAsserted
+                )
+            })
+            && result
+                .witness_issues
+                .iter()
+                .any(|w| w.issue.kind.is_uncertain())
+        {
+            result.reason = Some(Reason {kind: ReasonKind::LimitAssertionWitness,
+                detail: Some("Assertion evidence is unavailable or inconclusive; see witnessIssues. This is not proof that the test lacks an assertion.".into())});
+        }
+        result
+    }
+
+    /// A witness for an outcome: a test that took it and pinned that an effect did not happen, either
+    /// with a negative assertion on its sink or by comparing the sink's whole call list.
+    fn pinned(&self, took: &BTreeSet<&str>, targets: &[String]) -> bool {
+        for id in took {
+            let Some(test) = self.tests.get(id).copied() else {
+                continue;
+            };
+            for ob in &test.observations {
+                if !ob.negative && !ob.call_list {
+                    continue;
+                }
+                for target_id in targets {
+                    let Some(target) = self.sites.get(target_id.as_str()) else {
+                        continue;
+                    };
+                    let bounds = self.with_mocks(target, test, &target.bounds);
+                    if bounds
+                        .iter()
+                        .any(|b| !b.internal() && ob.matches(target, b))
+                        || self.sink_hit(test, target, &bounds, ob)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn resolve_decision(&self, site: &Site) -> Resolution {
+        let covering = site.covered_by.len();
+        let empty = DecisionFacts::default();
+        let d = site.decision.as_ref().unwrap_or(&empty);
+        let unresolved = |reason: Reason, stuck: bool| Resolution {
+            site: site.id.clone(),
+            status: Status::Unresolved,
+            strength: None,
+            reason: Some(reason),
+            covered_by: covering,
+            tests: BTreeSet::new(),
+            weak_only: false,
+            stuck_true_caught: stuck.then_some(false),
+            stuck_false_caught: stuck.then_some(false),
+            absence_needed: stuck.then_some(false),
+            value_observed: None,
+            witness_issues: vec![],
+        };
+        // A ternary between two pre-built objects is distinguishable only through the sites just one of
+        // them reaches.
+        if let Some(object_valued) = &d.object_valued {
+            let only_a = self.strength_of_sites(&object_valued.only_a, None);
+            let only_b = self.strength_of_sites(&object_valued.only_b, None);
+            if only_a.is_some_and(Strength::caught) || only_b.is_some_and(Strength::caught) {
+                return Resolution {
+                    site: site.id.clone(),
+                    status: Status::Evident,
+                    strength: Some(Strength::Value),
+                    reason: None,
+                    covered_by: covering,
+                    tests: BTreeSet::new(),
+                    weak_only: false,
+                    stuck_true_caught: Some(true),
+                    stuck_false_caught: Some(true),
+                    absence_needed: Some(false),
+                    value_observed: None,
+                    witness_issues: vec![],
+                };
+            }
+            return unresolved(
+                Reason {
+                    kind: ReasonKind::LimitUndecidable,
+                    detail: Some("object-valued branches with no branch-specific site".into()),
+                },
+                true,
+            );
+        }
+        let has_shape = d.carrier.is_some()
+            || d.value_flow.is_some()
+            || d.then.is_some()
+            || d.object_valued.is_some();
+        if !has_shape {
+            return unresolved(
+                Reason {
+                    kind: ReasonKind::LimitUndecidable,
+                    detail: Some("decision context not found".into()),
+                },
+                false,
+            );
+        }
+        let t_true: Option<BTreeSet<&str>> = d
+            .outcomes
+            .as_ref()
+            .map(|o| o.true_.iter().map(String::as_str).collect());
+        let t_false: Option<BTreeSet<&str>> = d
+            .outcomes
+            .as_ref()
+            .map(|o| o.false_.iter().map(String::as_str).collect());
+        let selected: Option<BTreeSet<&str>> = d
+            .selected
+            .as_ref()
+            .map(|s| s.iter().map(String::as_str).collect());
+        let mut then_s;
+        let mut else_s = None;
+        let mut value_observed = None;
+        if let Some(carrier) = &d.carrier {
+            let ids = [carrier.clone()];
+            then_s = self.strength_of_sites(&ids, selected.as_ref().or(t_true.as_ref()));
+            else_s = self.strength_of_sites(&ids, selected.as_ref().or(t_false.as_ref()));
+            if selected.is_some() {
+                value_observed = Some(
+                    self.strength_of_sites(&ids, None)
+                        .is_some_and(Strength::caught),
+                );
+            }
+        } else if let Some(flow) = &d.value_flow {
+            then_s = self.strength_of_sites(flow, selected.as_ref().or(t_true.as_ref()));
+            else_s = self.strength_of_sites(flow, selected.as_ref().or(t_false.as_ref()));
+            if selected.is_some() {
+                value_observed = Some(
+                    self.strength_of_sites(flow, None)
+                        .is_some_and(Strength::caught),
+                );
+            }
+        } else {
+            let then_ids = d.then.clone().unwrap_or_default();
+            then_s = self.strength_of_sites(&then_ids, t_true.as_ref());
+            let else_ids = d.else_.clone().flatten();
+            if let Some(else_ids) = &else_ids {
+                else_s = self.strength_of_sites(else_ids, t_false.as_ref());
+            }
+            // An early exit is witnessed by a test that took it and asserted that a downstream effect of
+            // the same function did not happen, or that read the early return by value.
+            if !then_s.is_some_and(Strength::caught)
+                && let (Some(took), Some(downstream)) = (&t_true, &d.early_exit_downstream)
+            {
+                let mut witnessed = self.pinned(took, downstream);
+                if !witnessed {
+                    witnessed = took.iter().any(|id| {
+                        self.tests.get(id).is_some_and(|test| {
+                            test.observations.iter().any(|ob| {
+                                !ob.negative
+                                    && ob.boundary == format!("return:{}", site.owner)
+                                    && ob.strength.caught()
+                            })
+                        })
+                    });
+                }
+                if witnessed {
+                    then_s = Some(Strength::Value);
+                }
+            }
+            // Loop control decides which iterations run, which is visible only in the calls the body
+            // makes: a pinned call list would have changed had the decision gone the other way.
+            if let Some(body) = &d.loop_body {
+                if !then_s.is_some_and(Strength::caught)
+                    && let Some(took) = &t_true
+                    && self.pinned(took, body)
+                {
+                    then_s = Some(Strength::Value);
+                }
+                if !else_s.is_some_and(Strength::caught)
+                    && let Some(took) = &t_false
+                    && self.pinned(took, body)
+                {
+                    else_s = Some(Strength::Value);
+                }
+            }
+            // `if (opt) this.x = opt` with no else keeps the field's default when the condition is false:
+            // a test in which it was false, observing a dependent of the field by value, would have seen
+            // the write's value there had the condition been stuck true.
+            if else_ids.is_none()
+                && !else_s.is_some_and(Strength::caught)
+                && let (Some(t_false), Some(entries)) = (&t_false, &d.default_kept)
+                && !t_false.is_empty()
+            {
+                for entry in entries {
+                    let kept = entry.dependents.iter().any(|dep| {
+                        self.resolved.get(&dep.site).is_some_and(|r| {
+                            r.strength.is_some_and(Strength::caught)
+                                && r.tests.iter().any(|t| t_false.contains(t.as_str()))
+                        })
+                    });
+                    if kept {
+                        else_s = Some(Strength::Value);
+                        break;
+                    }
+                }
+            }
+        }
+        let absence_needed = d.carrier.is_none() && d.then.is_some() && d.else_ == Some(None);
+        let stuck_false_caught = then_s.is_some_and(Strength::caught);
+        // With no else branch, "this must not happen" is still pinned when the branch's effects are
+        // asserted with total equality: a spurious occurrence shows up. With outcome data that needs at
+        // least one test in which the condition really was false.
+        let absence_covered = absence_needed
+            && then_s == Some(Strength::Total)
+            && t_false.as_ref().is_none_or(|t| !t.is_empty());
+        let stuck_true_caught = else_s.is_some_and(Strength::caught) || absence_covered;
+        let status = match (stuck_false_caught, stuck_true_caught) {
+            (true, true) => Status::Evident,
+            (false, false) => Status::Unresolved,
+            _ => Status::Partial,
+        };
+        let weakest = match (then_s, else_s) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let reason = (status != Status::Evident).then(|| {
+            let mut missing = Vec::new();
+            if !stuck_false_caught {
+                missing.push("true");
+            }
+            if !stuck_true_caught {
+                missing.push("false");
+            }
+            let untaken: Vec<&str> = missing
+                .iter()
+                .copied()
+                .filter(|side| {
+                    let set = if *side == "true" { &t_true } else { &t_false };
+                    set.as_ref().is_some_and(|s| s.is_empty())
+                })
+                .collect();
+            if covering == 0 {
+                Reason {
+                    kind: ReasonKind::GapNotReached,
+                    detail: None,
+                }
+            } else if !untaken.is_empty() {
+                Reason {
+                    kind: ReasonKind::GapOutcomeNotAsserted,
+                    detail: Some(format!(
+                        "no test takes the {} outcome",
+                        untaken.join(" or ")
+                    )),
+                }
+            } else if !site.unmodelled_shapes.is_empty() {
+                Reason {
+                    kind: ReasonKind::LimitOperandShape,
+                    detail: Some(site.unmodelled_shapes.join("; ")),
+                }
+            } else {
+                Reason {
+                    kind: ReasonKind::GapOutcomeNotAsserted,
+                    detail: Some(format!(
+                        "the {} outcome is taken but nothing asserts its effects",
+                        missing.join(" and ")
+                    )),
+                }
+            }
+        });
+        Resolution {
+            site: site.id.clone(),
+            status,
+            strength: (status == Status::Evident).then_some(weakest).flatten(),
+            reason,
+            covered_by: covering,
+            tests: BTreeSet::new(),
+            weak_only: false,
+            stuck_true_caught: Some(stuck_true_caught),
+            stuck_false_caught: Some(stuck_false_caught),
+            absence_needed: Some(absence_needed),
+            value_observed,
+            witness_issues: vec![],
+        }
+    }
+
+    /// An internal effect is observed through the sites that depend on it, capped at value strength: the
+    /// dependent proves the state changed, not what it changed to. Needs a test covering both ends.
+    fn derive_internal(&self, site: &Site) -> Option<Resolution> {
+        let mut best = None;
+        let mut tests = BTreeSet::new();
+        for dep in &site.derive {
+            if dep.site == site.id {
+                continue;
+            }
+            if let Some(callbacks) = &dep.requires_total
+                && !callbacks.iter().any(|id| {
+                    self.resolved
+                        .get(id)
+                        .is_some_and(|r| r.strength == Some(Strength::Total))
+                })
+            {
+                continue;
+            }
+            let Some(dependent) = self.sites.get(dep.site.as_str()) else {
+                continue;
+            };
+            let strength = match dep.strength {
+                Some(strength) => Some(strength),
+                None => {
+                    let r = self.resolved.get(&dep.site);
+                    match r {
+                        // A decision the tests pin in either direction proves the state reached it, so
+                        // it witnesses the write at value strength whatever its own strength says.
+                        Some(r) if dependent.kind == "decision" => (r.status == Status::Evident
+                            || r.status == Status::Partial)
+                            .then_some(Strength::Value),
+                        Some(r) => r.strength,
+                        None => None,
+                    }
+                }
+            };
+            let Some(strength) = strength else {
+                continue;
+            };
+            let co_covered = site
+                .covered_by
+                .iter()
+                .any(|t| dependent.covered_by.contains(t));
+            if !co_covered {
+                continue;
+            }
+            best = stronger(best, Some(strength.min(Strength::Value)));
+            if let Some(r) = self.resolved.get(&dep.site) {
+                for t in &r.tests {
+                    if site.covered_by.contains(t) {
+                        tests.insert(t.clone());
+                    }
+                }
+            }
+        }
+        let best = best?;
+        Some(Resolution {
+            site: site.id.clone(),
+            status: if best == Strength::Presence {
+                Status::Presence
+            } else {
+                Status::Evident
+            },
+            strength: Some(best),
+            reason: (best == Strength::Presence).then_some(Reason {
+                kind: ReasonKind::GapValueNotAsserted,
+                detail: None,
+            }),
+            covered_by: site.covered_by.len(),
+            tests,
+            weak_only: false,
+            stuck_true_caught: None,
+            stuck_false_caught: None,
+            absence_needed: None,
+            value_observed: None,
+            witness_issues: vec![],
+        })
+    }
+}
+
+/// The metric: of the contractual sites, how many are evident.
+pub fn summary(sites: &[Site], resolutions: &[Resolution]) -> Summary {
+    let by_id: BTreeMap<&str, &Resolution> =
+        resolutions.iter().map(|r| (r.site.as_str(), r)).collect();
+    let mut summary = Summary::default();
+    for site in sites {
+        if site.classification != "contractual" {
+            continue;
+        }
+        let Some(r) = by_id.get(site.id.as_str()) else {
+            continue;
+        };
+        summary.contractual += 1;
+        match r.status {
+            Status::Evident => summary.evident += 1,
+            Status::Partial => summary.partial += 1,
+            Status::Presence => summary.presence += 1,
+            Status::Unresolved => summary.unresolved += 1,
+        }
+        if let Some(reason) = &r.reason {
+            if reason.kind.is_limit() {
+                summary.limits += 1;
+            } else if r.status != Status::Evident {
+                summary.gaps += 1;
+            }
+        }
+    }
+    summary
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Summary {
+    pub contractual: usize,
+    pub evident: usize,
+    pub partial: usize,
+    pub presence: usize,
+    pub unresolved: usize,
+    pub gaps: usize,
+    pub limits: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn site(id: &str, category: &str, bounds: Vec<Boundary>, covered: &[&str]) -> Site {
+        Site {
+            id: id.into(),
+            file: "src/a.ts".into(),
+            line: 1,
+            kind: "effect".into(),
+            category: category.into(),
+            classification: "contractual".into(),
+            owner: "handler".into(),
+            method: None,
+            bounds: bounds.clone(),
+            direct_bounds: bounds,
+            reached: vec![],
+            covered_by: covered.iter().map(|s| (*s).into()).collect(),
+            object_valued_return: false,
+            unmodelled_shapes: vec![],
+            decision: None,
+            derive: vec![],
+        }
+    }
+
+    fn boundary(name: &str) -> Boundary {
+        Boundary {
+            boundary: name.into(),
+            facet: None,
+            via: None,
+        }
+    }
+
+    fn observation(boundary: &str, strength: Strength) -> Observation {
+        Observation {
+            boundary: boundary.into(),
+            facet: None,
+            strength,
+            where_: None,
+            assertion_source: None,
+            assertion_method: None,
+            negative: false,
+            call_list: false,
+            weak: false,
+            log_sites: None,
+            pattern_shared: false,
+        }
+    }
+
+    fn test(id: &str, observations: Vec<Observation>) -> TestFacts {
+        TestFacts {
+            id: id.into(),
+            file: "tests/a.test.ts".into(),
+            observations,
+            sinks: vec![],
+            rendered: vec![],
+            witness_issues: vec![],
+        }
+    }
+
+    fn facts(sites: Vec<Site>, tests: Vec<TestFacts>) -> Facts {
+        Facts {
+            schema: 1,
+            sites,
+            tests,
+            mocks_by_test_file: BTreeMap::new(),
+        }
+    }
+
+    fn rejected(kind: WitnessIssueKind, target: Option<&str>) -> WitnessIssue {
+        WitnessIssue {
+            kind,
+            source: Some("tests/a.test.ts:7:3".into()),
+            operation: Some("equal".into()),
+            observation: target.map(|target| observation(target, Strength::Total)),
+        }
+    }
+
+    fn pragma_hint() -> PragmaHint {
+        PragmaHint {
+            id: "hint-1".into(),
+            where_: "tests/a.test.ts:6:3".into(),
+            raw: "// observes: src/a.ts#handler return value".into(),
+            target: Some(PragmaTarget {
+                file: "src/a.ts".into(),
+                function: "handler".into(),
+                snippet: Some("return value".into()),
+                via: None,
+            }),
+            candidate_sites: vec!["S1".into()],
+            issue: None,
+            test: Some("T1".into()),
+            assertion_source: Some("tests/a.test.ts:7:3".into()),
+            assertion_method: Some("equal".into()),
+            witness: "passed".into(),
+            witness_issue: None,
+        }
+    }
+
+    #[test]
+    fn pragma_hints_use_only_the_named_assertion_and_never_change_join_credit() {
+        let hint = pragma_hint();
+        let mut wanted = observation("return:handler", Strength::Value);
+        wanted.assertion_source = hint.assertion_source.clone();
+        wanted.assertion_method = hint.assertion_method.clone();
+        let mut other = wanted.clone();
+        other.assertion_source = Some("tests/a.test.ts:9:3".into());
+        let f = facts(
+            vec![site(
+                "S1",
+                "return",
+                vec![boundary("return:handler")],
+                &["T1"],
+            )],
+            vec![test("T1", vec![wanted.clone(), other.clone()])],
+        );
+        let before = join(&f);
+        let checked = check_pragma_hints(&f, std::slice::from_ref(&hint));
+        assert_eq!(checked[0].validation, HintValidation::AnalyzerSupported);
+        assert_eq!(checked[0].origin, "user-suggested");
+        assert_eq!(checked[0].strength, Some(Strength::Value));
+        assert_eq!(checked[0].observations, vec![wanted.clone()]);
+        assert_eq!(join(&f), before);
+
+        let mut unrelated = f.clone();
+        unrelated.tests[0].observations[0].boundary = "return:other".into();
+        assert_eq!(
+            join(&unrelated)[0].status,
+            Status::Evident,
+            "a different assertion still checks it"
+        );
+        assert_eq!(
+            check_pragma_hints(&unrelated, std::slice::from_ref(&hint))[0].validation,
+            HintValidation::Unresolved,
+            "cannot borrow that assertion's credit"
+        );
+
+        let mut other_test = f.clone();
+        other_test.sites[0].covered_by = vec!["T2".into()];
+        other_test.tests.push(test("T2", vec![wanted]));
+        assert_eq!(
+            check_pragma_hints(&other_test, std::slice::from_ref(&hint))[0].reason,
+            "target-not-reached-in-owning-test"
+        );
+
+        for issue in [
+            "call-failed",
+            "mixed-call-outcomes",
+            "call-incomplete",
+            "call-not-recorded",
+            "capture-unavailable",
+        ] {
+            let mut rejected = hint.clone();
+            rejected.witness_issue = Some(issue.into());
+            rejected.witness = "unavailable".into();
+            let check = check_pragma_hints(&f, &[rejected]).remove(0);
+            assert_eq!(check.validation, HintValidation::Unresolved);
+            assert_eq!(check.reason, issue);
+            assert_eq!(check.strength, None);
+        }
+        let mut ambiguous = hint.clone();
+        ambiguous.candidate_sites.push("S2".into());
+        assert_eq!(
+            check_pragma_hints(&f, &[ambiguous])[0].validation,
+            HintValidation::Invalid
+        );
+        let mut no_identity = hint;
+        no_identity.assertion_source = None;
+        assert_eq!(
+            check_pragma_hints(&f, &[no_identity])[0].reason,
+            "missing-assertion-identity"
+        );
+    }
+
+    #[test]
+    fn pragma_hints_preserve_presence_strength_and_do_not_derive_internal_credit() {
+        let hint = pragma_hint();
+        let mut ob = observation("return:handler", Strength::Presence);
+        ob.assertion_source = hint.assertion_source.clone();
+        ob.assertion_method = hint.assertion_method.clone();
+        let mut f = facts(
+            vec![site(
+                "S1",
+                "return",
+                vec![boundary("return:handler")],
+                &["T1"],
+            )],
+            vec![test("T1", vec![ob])],
+        );
+        let check = check_pragma_hints(&f, std::slice::from_ref(&hint)).remove(0);
+        assert_eq!(check.validation, HintValidation::AnalyzerSupported);
+        assert_eq!(check.strength, Some(Strength::Presence));
+        f.sites[0].bounds = vec![boundary("internal")];
+        assert_eq!(
+            check_pragma_hints(&f, std::slice::from_ref(&hint))[0].validation,
+            HintValidation::Unresolved
+        );
+        f.sites[0].kind = "decision".into();
+        assert_eq!(
+            check_pragma_hints(&f, &[hint])[0].reason,
+            "decision-hint-analysis-not-supported"
+        );
+    }
+
+    #[test]
+    fn unavailable_assertion_evidence_is_a_limit_without_changing_coverage_or_credit() {
+        let mut f = facts(
+            vec![site(
+                "S",
+                "return",
+                vec![boundary("return:handler")],
+                &["T"],
+            )],
+            vec![test("T", vec![])],
+        );
+        let before = join(&f)[0].clone();
+        f.tests[0]
+            .witness_issues
+            .push(rejected(WitnessIssueKind::CaptureUnavailable, None));
+        let after = &join(&f)[0];
+        assert_eq!(
+            after.reason.as_ref().unwrap().kind,
+            ReasonKind::LimitAssertionWitness
+        );
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.strength, before.strength);
+        assert_eq!(after.covered_by, before.covered_by);
+        assert_eq!(after.tests, before.tests);
+        assert_eq!(after.witness_issues[0].test, "T");
+        assert_eq!(summary(&f.sites, &join(&f)).limits, 1);
+        assert_eq!(summary(&f.sites, &join(&f)).gaps, 0);
+    }
+
+    #[test]
+    fn witness_limit_kinds_and_successful_evidence_are_not_conflated() {
+        for kind in [
+            WitnessIssueKind::CallNotRecorded,
+            WitnessIssueKind::CallIncomplete,
+            WitnessIssueKind::MixedCallOutcomes,
+            WitnessIssueKind::UninstrumentedObservation,
+            WitnessIssueKind::CallFailed,
+        ] {
+            let mut f = facts(
+                vec![site(
+                    "S",
+                    "return",
+                    vec![boundary("return:handler")],
+                    &["T"],
+                )],
+                vec![test("T", vec![])],
+            );
+            f.tests[0]
+                .witness_issues
+                .push(rejected(kind, Some("return:handler")));
+            let result = join(&f);
+            assert_eq!(
+                result[0].reason.as_ref().unwrap().kind,
+                if kind == WitnessIssueKind::CallFailed {
+                    ReasonKind::GapNotAsserted
+                } else {
+                    ReasonKind::LimitAssertionWitness
+                }
+            );
+            assert_eq!(result[0].witness_issues[0].issue.kind, kind);
+            assert!(result[0].strength.is_none());
+            f.tests[0]
+                .observations
+                .push(observation("return:handler", Strength::Value));
+            let result = join(&f);
+            assert_eq!(result[0].status, Status::Evident);
+            assert_eq!(result[0].strength, Some(Strength::Value));
+            assert!(result[0].reason.is_none());
+        }
+    }
+
+    #[test]
+    fn unrelated_tests_boundaries_and_known_execution_gaps_do_not_become_witness_limits() {
+        let mut f = facts(
+            vec![
+                site(
+                    "covered",
+                    "return",
+                    vec![boundary("return:handler")],
+                    &["T"],
+                ),
+                site("uncovered", "return", vec![boundary("return:other")], &[]),
+            ],
+            vec![test("T", vec![]), test("foreign", vec![])],
+        );
+        f.tests[0].witness_issues.push(rejected(
+            WitnessIssueKind::CallNotRecorded,
+            Some("return:unrelated"),
+        ));
+        f.tests[1]
+            .witness_issues
+            .push(rejected(WitnessIssueKind::CaptureUnavailable, None));
+        let r = join(&f);
+        assert_eq!(
+            r[0].reason.as_ref().unwrap().kind,
+            ReasonKind::GapNotAsserted
+        );
+        assert_eq!(
+            r[1].reason.as_ref().unwrap().kind,
+            ReasonKind::GapNotReached
+        );
+        assert!(r.iter().all(|r| r.witness_issues.is_empty()));
+    }
+
+    #[test]
+    fn decision_dependencies_retain_witness_uncertainty_without_inventing_taken_outcomes() {
+        let mut d = site("D", "condition", vec![], &["T"]);
+        d.kind = "decision".into();
+        d.decision = Some(DecisionFacts {
+            then: Some(vec!["S".into()]),
+            else_: Some(None),
+            outcomes: Some(Outcomes {
+                true_: vec!["T".into()],
+                false_: vec!["T".into()],
+            }),
+            ..Default::default()
+        });
+        let mut f = facts(
+            vec![
+                d,
+                site("S", "return", vec![boundary("return:handler")], &["T"]),
+            ],
+            vec![test("T", vec![])],
+        );
+        f.tests[0].witness_issues.push(rejected(
+            WitnessIssueKind::CallNotRecorded,
+            Some("return:handler"),
+        ));
+        let r = join(&f);
+        assert_eq!(
+            r[0].reason.as_ref().unwrap().kind,
+            ReasonKind::LimitAssertionWitness
+        );
+        assert_eq!(r[0].stuck_false_caught, Some(false));
+        assert_eq!(r[0].stuck_true_caught, Some(false));
+        f.sites[0]
+            .decision
+            .as_mut()
+            .unwrap()
+            .outcomes
+            .as_mut()
+            .unwrap()
+            .false_
+            .clear();
+        let r = join(&f);
+        assert_eq!(
+            r[0].reason.as_ref().unwrap().kind,
+            ReasonKind::GapOutcomeNotAsserted
+        );
+        assert!(!r[0].witness_issues.is_empty());
+    }
+
+    #[test]
+    fn witness_provenance_crosses_cyclic_derivations_without_supplying_strength() {
+        let mut s = site("S", "return", vec![boundary("return:start")], &["T"]);
+        s.derive.push(Dependent {
+            site: "end".into(),
+            label: "flow".into(),
+            strength: None,
+            requires_total: None,
+        });
+        let mut end = site("end", "return", vec![boundary("return:end")], &["T"]);
+        end.reached.push("S".into());
+        let mut f = facts(vec![s, end], vec![test("T", vec![])]);
+        f.tests[0].witness_issues.push(rejected(
+            WitnessIssueKind::CallIncomplete,
+            Some("return:end"),
+        ));
+        let result = join(&f);
+        assert!(
+            result
+                .iter()
+                .all(|r| r.reason.as_ref().unwrap().kind == ReasonKind::LimitAssertionWitness)
+        );
+        assert!(result.iter().all(|r| r.strength.is_none()));
+        f.tests[0].witness_issues[0]
+            .observation
+            .as_mut()
+            .unwrap()
+            .boundary = "return:unrelated".into();
+        assert!(join(&f).iter().all(|r| r.witness_issues.is_empty()));
+    }
+
+    #[test]
+    fn witness_issues_round_trip_and_reject_unknown_kinds() {
+        let issue = rejected(WitnessIssueKind::CallNotRecorded, Some("return:handler"));
+        let json = serde_json::to_value(&issue).unwrap();
+        assert_eq!(
+            serde_json::from_value::<WitnessIssue>(json.clone()).unwrap(),
+            issue
+        );
+        let mut invalid = json;
+        invalid["kind"] = serde_json::json!("invented-witness");
+        assert!(serde_json::from_value::<WitnessIssue>(invalid).is_err());
+        let mut legacy = serde_json::to_value(test("T", vec![])).unwrap();
+        legacy.as_object_mut().unwrap().remove("witnessIssues");
+        assert!(
+            serde_json::from_value::<TestFacts>(legacy)
+                .unwrap()
+                .witness_issues
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_assertion_on_the_return_makes_the_return_site_evident() {
+        let f = facts(
+            vec![site(
+                "S1",
+                "return",
+                vec![boundary("return:handler")],
+                &["T1"],
+            )],
+            vec![test(
+                "T1",
+                vec![observation("return:handler", Strength::Total)],
+            )],
+        );
+        let r = join(&f);
+        assert_eq!(r[0].status, Status::Evident);
+        assert_eq!(r[0].strength, Some(Strength::Total));
+        assert!(r[0].reason.is_none());
+    }
+
+    #[test]
+    fn a_site_no_test_reaches_is_a_gap_not_a_limit() {
+        let f = facts(
+            vec![site("S1", "return", vec![boundary("return:handler")], &[])],
+            vec![],
+        );
+        let r = join(&f);
+        assert_eq!(r[0].status, Status::Unresolved);
+        assert_eq!(
+            r[0].reason.as_ref().unwrap().kind,
+            ReasonKind::GapNotReached
+        );
+    }
+
+    #[test]
+    fn an_untraceable_operand_makes_it_a_limit_rather_than_a_gap() {
+        let mut s = site("S1", "return", vec![boundary("return:handler")], &["T1"]);
+        s.unmodelled_shapes = vec!["blogsTried(admin) [localfn:blogsTried]".into()];
+        let f = facts(vec![s], vec![test("T1", vec![])]);
+        let r = join(&f);
+        assert_eq!(
+            r[0].reason.as_ref().unwrap().kind,
+            ReasonKind::LimitOperandShape
+        );
+        assert!(r[0].reason.as_ref().unwrap().detail.is_some());
+    }
+
+    #[test]
+    fn an_effect_with_no_boundary_is_an_internal_state_limit() {
+        let f = facts(
+            vec![site(
+                "S1",
+                "state-write",
+                vec![boundary("internal")],
+                &["T1"],
+            )],
+            vec![test(
+                "T1",
+                vec![observation("return:handler", Strength::Total)],
+            )],
+        );
+        let r = join(&f);
+        assert_eq!(
+            r[0].reason.as_ref().unwrap().kind,
+            ReasonKind::LimitInternalState
+        );
+    }
+
+    #[test]
+    fn a_presence_only_observation_asks_for_a_stronger_matcher() {
+        let f = facts(
+            vec![site(
+                "S1",
+                "return",
+                vec![boundary("return:handler")],
+                &["T1"],
+            )],
+            vec![test(
+                "T1",
+                vec![observation("return:handler", Strength::Presence)],
+            )],
+        );
+        let r = join(&f);
+        assert_eq!(r[0].status, Status::Presence);
+        assert_eq!(
+            r[0].reason.as_ref().unwrap().kind,
+            ReasonKind::GapValueNotAsserted
+        );
+    }
+
+    #[test]
+    fn both_outcomes_asserted_makes_a_decision_evident_at_the_weaker_strength() {
+        let mut decision = site("D1", "condition", vec![], &["T1", "T2"]);
+        decision.kind = "decision".into();
+        decision.decision = Some(DecisionFacts {
+            then: Some(vec!["S1".into()]),
+            else_: Some(Some(vec!["S2".into()])),
+            outcomes: Some(Outcomes {
+                true_: vec!["T1".into()],
+                false_: vec!["T2".into()],
+            }),
+            ..Default::default()
+        });
+        let f = facts(
+            vec![
+                site("S1", "return", vec![boundary("return:handler")], &["T1"]),
+                site("S2", "return", vec![boundary("return:other")], &["T2"]),
+                decision,
+            ],
+            vec![
+                test("T1", vec![observation("return:handler", Strength::Total)]),
+                test("T2", vec![observation("return:other", Strength::Value)]),
+            ],
+        );
+        let r = join(&f);
+        let d = r.iter().find(|r| r.site == "D1").unwrap();
+        assert_eq!(d.status, Status::Evident);
+        assert_eq!(d.strength, Some(Strength::Value));
+    }
+
+    #[test]
+    fn an_outcome_no_test_takes_is_reported_as_that_gap() {
+        let mut decision = site("D1", "condition", vec![], &["T1"]);
+        decision.kind = "decision".into();
+        decision.decision = Some(DecisionFacts {
+            then: Some(vec!["S1".into()]),
+            else_: Some(Some(vec!["S2".into()])),
+            outcomes: Some(Outcomes {
+                true_: vec!["T1".into()],
+                false_: vec![],
+            }),
+            ..Default::default()
+        });
+        let f = facts(
+            vec![
+                site("S1", "return", vec![boundary("return:handler")], &["T1"]),
+                site("S2", "return", vec![boundary("return:other")], &[]),
+                decision,
+            ],
+            vec![test(
+                "T1",
+                vec![observation("return:handler", Strength::Total)],
+            )],
+        );
+        let r = join(&f);
+        let d = r.iter().find(|r| r.site == "D1").unwrap();
+        assert_eq!(d.status, Status::Partial);
+        let reason = d.reason.as_ref().unwrap();
+        assert_eq!(reason.kind, ReasonKind::GapOutcomeNotAsserted);
+        assert_eq!(
+            reason.detail.as_deref(),
+            Some("no test takes the false outcome")
+        );
+    }
+
+    #[test]
+    fn a_total_assertion_covers_the_absence_of_an_empty_else() {
+        let mut decision = site("D1", "condition", vec![], &["T1", "T2"]);
+        decision.kind = "decision".into();
+        decision.decision = Some(DecisionFacts {
+            then: Some(vec!["S1".into()]),
+            else_: Some(None),
+            outcomes: Some(Outcomes {
+                true_: vec!["T1".into()],
+                false_: vec!["T2".into()],
+            }),
+            ..Default::default()
+        });
+        let f = facts(
+            vec![
+                site("S1", "io-call", vec![boundary("client-message")], &["T1"]),
+                decision,
+            ],
+            vec![
+                test("T1", vec![observation("client-message", Strength::Total)]),
+                test("T2", vec![]),
+            ],
+        );
+        let r = join(&f);
+        let d = r.iter().find(|r| r.site == "D1").unwrap();
+        assert_eq!(d.status, Status::Evident);
+        assert_eq!(d.absence_needed, Some(true));
+    }
+
+    #[test]
+    fn an_empty_else_with_no_false_test_is_not_absence_covered() {
+        let mut decision = site("D1", "condition", vec![], &["T1"]);
+        decision.kind = "decision".into();
+        decision.decision = Some(DecisionFacts {
+            then: Some(vec!["S1".into()]),
+            else_: Some(None),
+            outcomes: Some(Outcomes {
+                true_: vec!["T1".into()],
+                false_: vec![],
+            }),
+            ..Default::default()
+        });
+        let f = facts(
+            vec![
+                site("S1", "io-call", vec![boundary("client-message")], &["T1"]),
+                decision,
+            ],
+            vec![test(
+                "T1",
+                vec![observation("client-message", Strength::Total)],
+            )],
+        );
+        let r = join(&f);
+        let d = r.iter().find(|r| r.site == "D1").unwrap();
+        assert_eq!(d.status, Status::Partial);
+    }
+
+    #[test]
+    fn a_negative_assertion_witnesses_an_early_exit() {
+        let mut decision = site("D1", "condition", vec![], &["T1", "T2"]);
+        decision.kind = "decision".into();
+        decision.decision = Some(DecisionFacts {
+            then: Some(vec!["S1".into()]),
+            else_: Some(Some(vec!["S2".into()])),
+            early_exit_downstream: Some(vec!["S2".into()]),
+            outcomes: Some(Outcomes {
+                true_: vec!["T1".into()],
+                false_: vec!["T2".into()],
+            }),
+            ..Default::default()
+        });
+        // the exit's own branch asserts nothing; the witness is T1 pinning that S2 did not happen
+        let mut negative = observation("client-message", Strength::Presence);
+        negative.negative = true;
+        let f = facts(
+            vec![
+                site("S1", "return", vec![boundary("internal")], &["T1"]),
+                site("S2", "io-call", vec![boundary("client-message")], &["T2"]),
+                decision,
+            ],
+            vec![
+                test("T1", vec![negative]),
+                test("T2", vec![observation("client-message", Strength::Total)]),
+            ],
+        );
+        let r = join(&f);
+        let d = r.iter().find(|r| r.site == "D1").unwrap();
+        assert_eq!(d.stuck_false_caught, Some(true));
+        assert_eq!(d.status, Status::Evident);
+    }
+
+    #[test]
+    fn a_call_list_assertion_witnesses_loop_control() {
+        let mut decision = site("D1", "condition", vec![], &["T1", "T2"]);
+        decision.kind = "decision".into();
+        decision.decision = Some(DecisionFacts {
+            then: Some(vec![]),
+            else_: Some(Some(vec![])),
+            loop_body: Some(vec!["S1".into()]),
+            outcomes: Some(Outcomes {
+                true_: vec!["T1".into()],
+                false_: vec!["T2".into()],
+            }),
+            ..Default::default()
+        });
+        let mut call_list = observation("callback:admin", Strength::Value);
+        call_list.call_list = true;
+        let f = facts(
+            vec![
+                site(
+                    "S1",
+                    "external-call",
+                    vec![boundary("callback:admin")],
+                    &["T1", "T2"],
+                ),
+                decision,
+            ],
+            vec![
+                test("T1", vec![call_list.clone()]),
+                test("T2", vec![call_list]),
+            ],
+        );
+        let r = join(&f);
+        let d = r.iter().find(|r| r.site == "D1").unwrap();
+        assert_eq!(d.status, Status::Evident);
+    }
+
+    #[test]
+    fn a_dense_channel_pattern_pins_only_the_sites_it_admits() {
+        let mut log_a = site("S1", "log", vec![boundary("stdout")], &["T1"]);
+        log_a.method = Some("log".into());
+        let mut log_b = site("S2", "log", vec![boundary("stdout")], &["T1"]);
+        log_b.method = Some("log".into());
+        let mut ob = observation("stdout", Strength::Value);
+        ob.log_sites = Some(vec!["S1".into()]);
+        let f = facts(vec![log_a, log_b], vec![test("T1", vec![ob])]);
+        let r = join(&f);
+        assert_eq!(r[0].status, Status::Evident);
+        assert_eq!(r[1].status, Status::Unresolved);
+    }
+
+    #[test]
+    fn a_pattern_several_log_sites_share_pins_none_of_them() {
+        let mut log_a = site("S1", "log", vec![boundary("stdout")], &["T1"]);
+        log_a.method = Some("log".into());
+        let mut log_b = site("S2", "log", vec![boundary("stdout")], &["T1"]);
+        log_b.method = Some("log".into());
+        let mut ob = observation("stdout", Strength::Value);
+        ob.log_sites = Some(vec!["S1".into(), "S2".into()]);
+        ob.pattern_shared = true;
+        let f = facts(vec![log_a, log_b], vec![test("T1", vec![ob])]);
+        let r = join(&f);
+        assert_eq!(r[0].status, Status::Unresolved);
+        assert_eq!(r[1].status, Status::Unresolved);
+    }
+
+    #[test]
+    fn a_timer_cancellation_candidate_requires_total_callback_evidence() {
+        for (callback_strength, expected) in [
+            (Strength::Presence, Status::Unresolved),
+            (Strength::Value, Status::Unresolved),
+            (Strength::Total, Status::Evident),
+        ] {
+            let mut cancel = site("cancel", "schedule", vec![boundary("internal")], &["T1"]);
+            cancel.derive = vec![Dependent {
+                site: "timer".into(),
+                label: "cancelled timer with total sink".into(),
+                strength: Some(Strength::Value),
+                requires_total: Some(vec!["callback".into()]),
+            }];
+            let f = facts(
+                vec![
+                    cancel,
+                    site("timer", "schedule", vec![boundary("internal")], &["T1"]),
+                    site(
+                        "callback",
+                        "return",
+                        vec![boundary("return:callback")],
+                        &["T1"],
+                    ),
+                ],
+                vec![test(
+                    "T1",
+                    vec![observation("return:callback", callback_strength)],
+                )],
+            );
+            let r = join(&f);
+            assert_eq!(
+                r.iter().find(|r| r.site == "cancel").unwrap().status,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn empty_or_unknown_timer_callback_candidates_do_not_supply_evidence() {
+        for callbacks in [vec![], vec!["missing".into()]] {
+            let mut cancel = site("cancel", "schedule", vec![boundary("internal")], &["T1"]);
+            cancel.derive = vec![Dependent {
+                site: "timer".into(),
+                label: "cancelled timer with total sink".into(),
+                strength: Some(Strength::Value),
+                requires_total: Some(callbacks),
+            }];
+            let f = facts(
+                vec![
+                    cancel,
+                    site("timer", "schedule", vec![boundary("internal")], &["T1"]),
+                ],
+                vec![test("T1", vec![])],
+            );
+            assert_eq!(join(&f)[0].status, Status::Unresolved);
+        }
+    }
+
+    #[test]
+    fn an_internal_write_is_derived_through_its_dependent_capped_at_value() {
+        let mut write = site("S1", "state-write", vec![boundary("internal")], &["T1"]);
+        write.derive = vec![Dependent {
+            site: "S2".into(),
+            label: "read this.ready".into(),
+            strength: None,
+            requires_total: None,
+        }];
+        let f = facts(
+            vec![
+                write,
+                site("S2", "return", vec![boundary("return:handler")], &["T1"]),
+            ],
+            vec![test(
+                "T1",
+                vec![observation("return:handler", Strength::Total)],
+            )],
+        );
+        let r = join(&f);
+        let derived = r.iter().find(|r| r.site == "S1").unwrap();
+        assert_eq!(derived.status, Status::Evident);
+        assert_eq!(derived.strength, Some(Strength::Value));
+    }
+
+    #[test]
+    fn a_dependent_no_shared_test_covers_derives_nothing() {
+        let mut write = site("S1", "state-write", vec![boundary("internal")], &["T1"]);
+        write.derive = vec![Dependent {
+            site: "S2".into(),
+            label: "read this.ready".into(),
+            strength: None,
+            requires_total: None,
+        }];
+        let f = facts(
+            vec![
+                write,
+                site("S2", "return", vec![boundary("return:handler")], &["T2"]),
+            ],
+            vec![
+                test("T1", vec![]),
+                test("T2", vec![observation("return:handler", Strength::Total)]),
+            ],
+        );
+        let r = join(&f);
+        let derived = r.iter().find(|r| r.site == "S1").unwrap();
+        assert_eq!(derived.status, Status::Unresolved);
+    }
+
+    #[test]
+    fn a_weak_render_observation_marks_the_resolution_weak() {
+        let mut ob = observation("dom", Strength::Presence);
+        ob.weak = true;
+        let f = facts(
+            vec![site("S1", "return", vec![boundary("dom")], &["T1"])],
+            vec![test("T1", vec![ob])],
+        );
+        let r = join(&f);
+        assert!(r[0].weak_only);
+    }
+
+    #[test]
+    fn an_explicit_null_else_survives_as_the_absence_case() {
+        // A missing `else` means the decision has no branches; a null one means it has no else branch,
+        // where a spurious effect is what a test would notice. The two must not collapse.
+        let absence: DecisionFacts =
+            serde_json::from_str(r#"{"then":["A"],"else":null}"#).expect("parses");
+        assert_eq!(absence.else_, Some(None));
+        let no_branches: DecisionFacts =
+            serde_json::from_str(r#"{"carrier":"A"}"#).expect("parses");
+        assert_eq!(no_branches.else_, None);
+        let real_else: DecisionFacts =
+            serde_json::from_str(r#"{"then":["A"],"else":["B"]}"#).expect("parses");
+        assert_eq!(real_else.else_, Some(Some(vec!["B".to_owned()])));
+    }
+
+    #[test]
+    fn the_summary_counts_limits_apart_from_gaps() {
+        let mut limited = site("S1", "state-write", vec![boundary("internal")], &["T1"]);
+        limited.classification = "contractual".into();
+        let gap = site("S2", "return", vec![boundary("return:handler")], &[]);
+        let f = facts(vec![limited, gap], vec![test("T1", vec![])]);
+        let r = join(&f);
+        let s = summary(&f.sites, &r);
+        assert_eq!(s.contractual, 2);
+        assert_eq!(s.gaps, 1);
+        assert_eq!(s.limits, 1);
+    }
+}

@@ -472,6 +472,7 @@ fn reconstruct_unit(
                                         vector: None,
                                         timestamp_ms,
                                         phase_id: None,
+                                        statement_id: None,
                                         environment: "rust-ctfe".into(),
                                     });
                                 }
@@ -485,6 +486,7 @@ fn reconstruct_unit(
                                 }),
                                 timestamp_ms,
                                 phase_id: None,
+                                statement_id: None,
                                 environment: "rust-ctfe".into(),
                             });
                         }
@@ -521,6 +523,7 @@ fn reconstruct_unit(
                     vector: None,
                     timestamp_ms,
                     phase_id: None,
+                    statement_id: None,
                     environment: "rust-ctfe".into(),
                 });
             }
@@ -548,6 +551,7 @@ fn reconstruct_unit(
                 .collect(),
             hits: hits.into_iter().collect(),
             events: runtime_events,
+            logicals: Vec::new(),
         },
         observations: events.len(),
     })

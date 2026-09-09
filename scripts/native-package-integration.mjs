@@ -96,10 +96,10 @@ try {
   );
 
   const mainRoot = resolve(temporary, "main");
-  cpSync(resolve(repository, "bin"), resolve(mainRoot, "bin"), { recursive: true });
-  cpSync(resolve(repository, "runtime"), resolve(mainRoot, "runtime"), { recursive: true });
-  for (const file of ["package.json", "README.md", "LICENSE"])
-    cpSync(resolve(repository, file), resolve(mainRoot, file));
+  // Stage exactly the primary package's allowlist, including the post-run analyzer.
+  const primary = JSON.parse(readFileSync(resolve(repository, "package.json"), "utf8"));
+  for (const file of [...primary.files, "package.json", "LICENSE"])
+    cpSync(resolve(repository, file), resolve(mainRoot, file), { recursive: true });
   const mainPack = JSON.parse(
     runNpm(["pack", "--ignore-scripts", "--json"], { cwd: mainRoot }),
   )[0].filename;
