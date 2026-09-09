@@ -3,6 +3,7 @@ import "./mock-projections.integration.mjs";
 import "./comparison-relations.integration.mjs";
 import "./mock-counts.integration.mjs";
 import "./awaited-assertions.integration.mjs";
+import "./child-exit.integration.mjs";
 import assert from "node:assert/strict";
 import {
   cpSync,
