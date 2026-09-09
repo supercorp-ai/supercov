@@ -1,71 +1,48 @@
 # Getting started
 
-Supercov turns the test suite you already have into a list of useful tests to
-write next. Run the suite once, inspect a coverage gap, add a focused test, and
-compare the result.
+Open your project in a coding agent that can run terminal commands, then paste
+this prompt:
 
-Using a coding agent? [Give it a prompt](agent-loop.md#start-with-one-test).
-It can set up Supercov and run the commands for you.
+```text supercov-prompt
+Measure code coverage with npx supercov and write one missing test.
+Only change tests. Rerun the full test suite and show me the test you
+added and the before-and-after coverage.
+```
 
-To run it yourself:
+Your agent can install Supercov if needed. It runs the commands and edits the
+tests; you don't need to do those steps yourself.
+
+When it finishes, review the test change and coverage comparison in your
+conversation. Ask separately if you want a commit or pull request.
+
+No account, config file, import, custom reporter, or hosted service is required.
+Supercov supports JavaScript, TypeScript, Rust, Python, and Ruby today.
+
+## What the agent does
+
+The commands below show how the agent measures coverage and checks its work.
+You can also run them yourself if you prefer using the terminal.
+
+### 1. Run your real test command
+
+The agent runs your repository's complete test suite through Supercov:
 
 ```sh supercov-example
 npx supercov -- npm test
 ```
 
-No account, config file, import, custom reporter, or hosted service is required.
-Supercov supports JavaScript, TypeScript, Rust, Python, and Ruby today.
-
-## Before you start
-
-You need:
-
-- macOS (arm64 or x64), Linux (arm64 or x64, glibc 2.28 or newer or musl), or
-  Windows (arm64 or x64);
-- Node.js 22 or newer when using the npm package;
-- a test command that already works in the repository; and
-- for Rust, the Rust 1.95 toolchain;
-- for Python, CPython 3.12 or newer with pytest or unittest;
-- for Ruby, Ruby 3.4 or newer with RSpec, Minitest, test-unit or Cucumber (3.3 measures lines, methods and simple branches only).
-
-The CLI is a native binary. `npx supercov` picks the build for your operating
-system and architecture, and nothing is compiled on install; the same binary is
-on PyPI as `supercov-cli` (`uvx --from supercov-cli supercov`) and on RubyGems
-as `supercov` (`gem install supercov`), at the same version, and the source is
-on crates.io (`cargo install supercov`). The first invocation may download
-Supercov from the registry. Supercov itself does not upload your source or
-coverage evidence to a Supercov service.
-
-## 1. Run your real test command
-
-Everything after `--` is the command Supercov measures. Start with the same
-complete command you trust before merging or deploying:
-
-```sh
-# JavaScript or TypeScript
-npx supercov -- npm test
-npx supercov -- npx playwright test
-npx supercov -- pnpm test:e2e
-
-# Rust
-npx supercov -- cargo test
-npx supercov -- cargo nextest run
-
-# Python
-npx supercov -- pytest
-
-# Ruby
-npx supercov -- rspec
-```
+Everything after `--` is the command Supercov measures. The agent should use
+the same complete command your project uses before merging or deploying.
+If the project has several suites, tell it which one to use.
 
 Supercov runs that command in an isolated, instrumented copy of the project.
 The command keeps its normal arguments, environment, output, and exit status.
 If one command launches several supported runners, their evidence lands in one
 run.
 
-## 2. Read the first result
+### 2. Read the first result
 
-Open the newest run:
+The agent reads the newest run:
 
 ```sh supercov-example
 npx supercov runs latest
@@ -81,16 +58,17 @@ An uncovered gap is a candidate for a test. A measurement limit is different:
 it means Supercov cannot honestly account for that code yet. Do not try to test
 away a measurement limit.
 
-## 3. Choose one useful gap
+### 3. Choose one useful gap
 
-Ask for a short list, then inspect one file:
+The agent asks for a short list of gaps, then inspects one file. It uses your
+project's file paths in place of the examples:
 
 ```sh supercov-example
 npx supercov runs latest gaps --limit 10
 npx supercov runs latest file app/checkout/session.ts
 ```
 
-Use the more specific queries when you need them:
+It can use more specific queries to understand the gap:
 
 ```sh supercov-example
 npx supercov runs latest decision app/checkout/session.ts:64
@@ -101,40 +79,45 @@ npx supercov runs latest line app/checkout/session.ts:64
 outcomes and MC/DC witnesses. `line` shows the obligations and tests associated
 with one source line.
 
-## 4. Add a test and prove the gain
+### 4. Add a test and prove the gain
 
-Write one focused test with a meaningful assertion. Then rerun the same complete
-command and compare the two runs:
+The agent writes one focused test with a meaningful assertion. It then reruns
+the same complete command and compares the two runs:
 
 ```sh supercov-example
 npx supercov -- npm test
 npx supercov diff <previous-run-id> latest
 ```
 
-For Rust, rerun the same `cargo test` or `cargo nextest run` command used for the
-baseline. A useful change leaves the suite passing and shows the expected gain
-without an unexplained loss elsewhere.
+A useful change leaves the suite passing and shows the expected gain without
+an unexplained loss elsewhere. Review what the new test actually checks, not
+just the percentage.
 
-## Give the loop to a coding agent
+For a recorded example and prompts for longer runs, see
+[Agent workflow](agent-loop.md).
 
-Paste this into any coding agent that can run terminal commands:
+## Environment requirements
 
-```text supercov-prompt
-Use `npx supercov` to improve coverage. Only write tests. Keep going while
-useful gaps remain.
+These requirements apply wherever the agent runs commands: your machine,
+a container, or a remote workspace. The agent can check them and tell you
+if anything is missing.
 
-Run the repository's complete test command through Supercov. Use
-`npx supercov runs latest gaps --limit 5` to choose one useful target. Inspect
-the target, write one focused test with meaningful assertions, rerun the same
-complete suite, and verify the gain with
-`npx supercov diff <previous-run-id> latest`.
+- macOS (arm64 or x64), Linux (arm64 or x64, glibc 2.28 or newer or musl), or
+  Windows (arm64 or x64);
+- Node.js 22 or newer when using the npm package;
+- a working test command, including its dependencies, environment variables,
+  and any local services;
+- for Rust, the Rust 1.95 toolchain;
+- for Python, CPython 3.12 or newer with pytest or unittest;
+- for Ruby, Ruby 3.4 or newer with RSpec, Minitest, test-unit or Cucumber (3.3 measures lines, methods and simple branches only).
 
-Never weaken assertions or change application code to make coverage easier.
-Stop when no useful gap remains or Supercov reports a measurement limit instead
-of an ordinary gap.
-```
-
-Use the repository's real complete test command in place of the example.
+The CLI is a native binary. `npx supercov` picks the build for your operating
+system and architecture, and nothing is compiled on install; the same binary is
+on PyPI as `supercov-cli` (`uvx --from supercov-cli supercov`) and on RubyGems
+as `supercov` (`gem install supercov`), at the same version, and the source is
+on crates.io (`cargo install supercov`). The first invocation may download
+Supercov from the registry. Supercov itself does not upload your source or
+coverage evidence to a Supercov service.
 
 ## Files and cleanup
 
