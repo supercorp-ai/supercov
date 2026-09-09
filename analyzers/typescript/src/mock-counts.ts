@@ -14,6 +14,221 @@ export interface MockCountEvidence {
   expectedCount?: number;
   observedCount?: number;
   calls?: { source: string; action: string; site?: string }[];
+  rowBinding?: MockCountRowBinding;
+}
+
+type RowValue = string | number | boolean | null;
+export interface MockCountRowBinding {
+  model: "node-test-for-of-v1";
+  status: "source-checked" | "unresolved";
+  reason?: string;
+  loop?: string;
+  table?: string;
+  row?: string;
+  rowIndex?: number;
+  title?: string;
+  bindings?: { declaration: string; name: string; value: RowValue }[];
+}
+interface BoundRow {
+  bindings: Map<ts.Declaration, RowValue>;
+  evidence: MockCountRowBinding;
+}
+
+/** A closed registration table, not title-prefix guessing or runtime-value inference. */
+export function sourceTestRows(
+  syntax: SyntaxAPI,
+  fn: ts.Node,
+  model: Pick<Model, "declaration" | "location"> & {
+    nativeTest(call: ts.CallExpression): boolean;
+  },
+): { rows: BoundRow[]; reason?: string } | undefined {
+  const ts = syntax;
+  let ancestor: ts.Node | undefined = fn.parent;
+  while (
+    ancestor &&
+    !ts.isForOfStatement(ancestor) &&
+    !ts.isSourceFile(ancestor)
+  )
+    ancestor = ancestor.parent;
+  if (!ancestor || !ts.isForOfStatement(ancestor)) return undefined;
+  const unsupported = (reason: string) => ({ rows: [], reason });
+  const loop = ancestor,
+    sf = fn.getSourceFile();
+  const registration = fn.parent;
+  if (
+    !ts.isSourceFile(loop.parent) ||
+    loop.awaitModifier ||
+    !ts.isBlock(loop.statement) ||
+    loop.statement.statements.length !== 1 ||
+    !ts.isCallExpression(registration) ||
+    registration.arguments.length !== 2 ||
+    registration.arguments[1] !== fn ||
+    !model.nativeTest(registration) ||
+    !ts.isExpressionStatement(registration.parent) ||
+    registration.parent !== loop.statement.statements[0]
+  )
+    return unsupported("unsupported-row-registration");
+  const peel = (raw: ts.Expression): ts.Expression => {
+    let e = raw;
+    while (
+      ts.isParenthesizedExpression(e) ||
+      ts.isAsExpression(e) ||
+      ts.isTypeAssertionExpression(e) ||
+      ts.isNonNullExpression(e) ||
+      ts.isSatisfiesExpression(e)
+    )
+      e = e.expression;
+    return e;
+  };
+  const iterable = peel(loop.expression);
+  if (!ts.isIdentifier(iterable)) return unsupported("unsupported-row-table");
+  const tableDeclaration = model.declaration(iterable);
+  if (
+    !tableDeclaration ||
+    !ts.isVariableDeclaration(tableDeclaration) ||
+    !ts.isIdentifier(tableDeclaration.name) ||
+    !tableDeclaration.initializer ||
+    !ts.isVariableDeclarationList(tableDeclaration.parent) ||
+    !(tableDeclaration.parent.flags & ts.NodeFlags.Const) ||
+    !ts.isVariableStatement(tableDeclaration.parent.parent) ||
+    tableDeclaration.parent.parent.parent !== sf ||
+    tableDeclaration.end >= loop.getStart(sf) ||
+    tableDeclaration.parent.parent.modifiers?.some(
+      (m) => m.kind === ts.SyntaxKind.ExportKeyword,
+    )
+  )
+    return unsupported("unsupported-row-table-binding");
+  const table = peel(tableDeclaration.initializer);
+  if (
+    !ts.isArrayLiteralExpression(table) ||
+    !table.elements.length ||
+    table.elements.length > 256
+  )
+    return unsupported("unsupported-row-table");
+  // The literal's sole read must be this loop. Alias creation, mutation, another
+  // consumer or direct eval makes a private const array insufficient evidence.
+  let exclusive = true,
+    budget = 16384;
+  const scan = (node: ts.Node) => {
+    if (!exclusive) return;
+    if (--budget < 0) {
+      exclusive = false;
+      return;
+    }
+    if (
+      ts.isIdentifier(node) &&
+      model.declaration(node) === tableDeclaration &&
+      node !== tableDeclaration.name &&
+      node !== iterable
+    )
+      exclusive = false;
+    if (ts.isIdentifier(node) && node.text === "eval") exclusive = false;
+    ts.forEachChild(node, scan);
+  };
+  scan(sf);
+  if (!exclusive) return unsupported("row-table-escapes-or-may-change");
+  if (
+    !ts.isVariableDeclarationList(loop.initializer) ||
+    !(loop.initializer.flags & ts.NodeFlags.Const) ||
+    loop.initializer.declarations.length !== 1
+  )
+    return unsupported("mutable-or-unsupported-row-bindings");
+  const binding = loop.initializer.declarations[0];
+  if (
+    !ts.isObjectBindingPattern(binding.name) ||
+    binding.initializer ||
+    binding.name.elements.some(
+      (e) =>
+        !ts.isIdentifier(e.name) ||
+        e.dotDotDotToken ||
+        e.initializer ||
+        (e.propertyName &&
+          !(
+            ts.isIdentifier(e.propertyName) ||
+            ts.isStringLiteralLike(e.propertyName)
+          )),
+    )
+  )
+    return unsupported("unsupported-row-destructuring");
+  const literal = (raw: ts.Expression): RowValue | undefined => {
+    const e = peel(raw);
+    if (ts.isStringLiteralLike(e)) return e.text;
+    if (ts.isNumericLiteral(e) && Number.isFinite(Number(e.text)))
+      return Number(e.text);
+    if (e.kind === ts.SyntaxKind.TrueKeyword) return true;
+    if (e.kind === ts.SyntaxKind.FalseKeyword) return false;
+    if (e.kind === ts.SyntaxKind.NullKeyword) return null;
+    return undefined;
+  };
+  const rows: BoundRow[] = [],
+    titles = new Set<string>();
+  for (const [rowIndex, raw] of table.elements.entries()) {
+    const row = peel(raw);
+    if (!ts.isObjectLiteralExpression(row))
+      return unsupported("unsupported-row-value");
+    const properties = new Map<string, RowValue>();
+    for (const member of row.properties) {
+      if (
+        !ts.isPropertyAssignment(member) ||
+        !(ts.isIdentifier(member.name) || ts.isStringLiteralLike(member.name))
+      )
+        return unsupported("unsupported-row-value");
+      const value = literal(member.initializer),
+        key = member.name.text;
+      if (value === undefined || key === "__proto__" || properties.has(key))
+        return unsupported("unsupported-row-value");
+      properties.set(key, value);
+    }
+    const bindings = new Map<ts.Declaration, RowValue>();
+    const evidenceBindings: NonNullable<MockCountRowBinding["bindings"]> = [];
+    for (const element of binding.name.elements) {
+      const key = (element.propertyName ?? element.name) as
+        | ts.Identifier
+        | ts.StringLiteralLike;
+      if (!properties.has(key.text))
+        return unsupported("missing-row-own-property");
+      const value = properties.get(key.text)!;
+      bindings.set(element, value);
+      evidenceBindings.push({
+        declaration: model.location(element),
+        name: (element.name as ts.Identifier).text,
+        value,
+      });
+    }
+    const name = peel(registration.arguments[0]);
+    let title: string;
+    if (ts.isStringLiteralLike(name)) title = name.text;
+    else if (ts.isTemplateExpression(name)) {
+      title = name.head.text;
+      for (const span of name.templateSpans) {
+        const expr = peel(span.expression),
+          declaration = model.declaration(expr);
+        if (
+          !ts.isIdentifier(expr) ||
+          !declaration ||
+          !bindings.has(declaration)
+        )
+          return unsupported("unsupported-row-title");
+        title += String(bindings.get(declaration)) + span.literal.text;
+      }
+    } else return unsupported("unsupported-row-title");
+    if (titles.has(title)) return unsupported("ambiguous-row-title");
+    titles.add(title);
+    rows.push({
+      bindings,
+      evidence: {
+        model: "node-test-for-of-v1",
+        status: "source-checked",
+        loop: model.location(loop),
+        table: model.location(table),
+        row: model.location(row),
+        rowIndex,
+        title,
+        bindings: evidenceBindings,
+      },
+    });
+  }
+  return { rows };
 }
 
 interface Model {
@@ -30,6 +245,7 @@ export function analyzeMockCounts(
   syntax: SyntaxAPI,
   fn: ts.Node,
   model: Model,
+  row?: BoundRow,
 ) {
   const ts = syntax;
   type Primitive = string | number | boolean | null | undefined;
@@ -66,7 +282,7 @@ export function analyzeMockCounts(
     | { kind: "context"; mock: Mock };
   const checks = new Map<ts.CallExpression, MockCountEvidence>();
   const installed = new Map<string, Mock | undefined>();
-  let locals = new Map<ts.Declaration, Value>();
+  let locals = new Map<ts.Declaration, Value>(row?.bindings);
   const moduleChecks = new Map<ts.SourceFile, boolean>();
   const modules = new Map<ts.SourceFile, Map<ts.Declaration, Value>>();
   const loading = new Set<ts.SourceFile>();
@@ -105,6 +321,7 @@ export function analyzeMockCounts(
       installedAtRead: installed.get(mock.target) === mock,
       observedCount: mock.calls.length,
       calls: mock.calls.map((call) => ({ ...call })),
+      ...(row ? { rowBinding: row.evidence } : {}),
     },
   });
   const record = (
@@ -166,12 +383,7 @@ export function analyzeMockCounts(
       )
         stable = false;
       if (ts.isDeleteExpression(node)) stable = false;
-      if (
-        ts.isCallExpression(node) &&
-        ts.isIdentifier(node.expression) &&
-        node.expression.text === "eval"
-      )
-        stable = false;
+      if (ts.isIdentifier(node) && node.text === "eval") stable = false;
       ts.forEachChild(node, scan);
     };
     scan(sf);

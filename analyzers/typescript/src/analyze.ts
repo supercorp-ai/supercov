@@ -8,7 +8,11 @@ import { relative as pathRelative, resolve } from "node:path";
 import { analysisPath } from "./compiler.js";
 import { createFrontend, type CompilerFrontend } from "./frontend.js";
 import { assertionWitnessIssue, collectPragmas } from "./pragmas.js";
-import { analyzeMockCounts, type MockCountEvidence } from "./mock-counts.js";
+import {
+  analyzeMockCounts,
+  sourceTestRows,
+  type MockCountEvidence,
+} from "./mock-counts.js";
 import type { AnalyzeOptions, Site } from "./types.js";
 export type { AnalyzeOptions, Site } from "./types.js";
 
@@ -86,6 +90,7 @@ export function analyzeWithFrontend(
     /** supercov runs carry no test line: the leaf title and the lines of the test's assertion phases link it instead */
     title?: string;
     phaseLines?: number[];
+    runner?: string;
   }
   const runtimeTests = (
     JSON.parse(readEvidence("cov/index.json")) as RuntimeTest[]
@@ -2030,6 +2035,7 @@ export function analyzeWithFrontend(
     doesNotReject: "presence",
   };
   const staticTests: StaticTest[] = [];
+  const mockBodies = new Map<StaticTest, ts.Node>();
   const pragmaCollector = collectPragmas(
     ts,
     allFiles.filter(isTestFile),
@@ -2150,7 +2156,11 @@ export function analyzeWithFrontend(
       !ts.isCallExpression(callback.parent)
     )
       return false;
-    const registration = unwrap(callback.parent.expression);
+    return nativeTestRegistration(callback.parent);
+  }
+
+  function nativeTestRegistration(call: ts.CallExpression): boolean {
+    const registration = comparisonExpression(call.expression);
     if (!ts.isIdentifier(registration)) return false;
     const declaration =
       checker.getSymbolAtLocation(registration)?.declarations?.[0];
@@ -2161,7 +2171,9 @@ export function analyzeWithFrontend(
       return false;
     if (
       ts.isImportSpecifier(declaration) &&
-      !["test", "it"].includes((declaration.propertyName ?? declaration.name).text)
+      !["test", "it"].includes(
+        (declaration.propertyName ?? declaration.name).text,
+      )
     )
       return false;
     const imported = ts.isImportSpecifier(declaration)
@@ -3055,6 +3067,39 @@ export function analyzeWithFrontend(
     unrecognized.set(key, (unrecognized.get(key) ?? 0) + 1);
   }
 
+  function countModel(
+    fn: ts.Node,
+    row?: Parameters<typeof analyzeMockCounts>[3],
+  ) {
+    return analyzeMockCounts(
+      ts,
+      fn,
+      {
+        declaration: declOf,
+        location: comparisonLocation,
+        nativeMock: nativeContextMock,
+        nativePredicate: (call) => nativeComparison(call)?.predicate,
+        globalConsole: (expr) => {
+          const e = comparisonExpression(expr);
+          const d = declOf(e);
+          return (
+            ts.isIdentifier(e) &&
+            e.text === "console" &&
+            (!d || d.getSourceFile().isDeclarationFile)
+          );
+        },
+        production: (node) => isProdFile(node.getSourceFile()),
+        site: (call) =>
+          smallestSiteContaining(
+            rel(call.getSourceFile()),
+            call.getStart(),
+            call.getEnd(),
+          )?.id,
+      },
+      row,
+    );
+  }
+
   function analyzeTestBody(
     fn: ts.Node,
     file: string,
@@ -3062,26 +3107,7 @@ export function analyzeWithFrontend(
     name: string,
     inert = false,
   ): StaticTest {
-    const mockCounts = analyzeMockCounts(ts, fn, {
-      declaration: declOf,
-      location: comparisonLocation,
-      nativeMock: nativeContextMock,
-      nativePredicate: (call) => nativeComparison(call)?.predicate,
-      globalConsole: (expr) => {
-        const e = comparisonExpression(expr);
-        const d = declOf(e);
-        return (
-          ts.isIdentifier(e) &&
-          e.text === "console" &&
-          (!d || d.getSourceFile().isDeclarationFile)
-        );
-      },
-      production: (node) => isProdFile(node.getSourceFile()),
-      site: (call) =>
-        smallestSiteContaining(
-          rel(call.getSourceFile()), call.getStart(), call.getEnd(),
-        )?.id,
-    });
+    const mockCounts = countModel(fn);
     const observations: Observation[] = [];
     const sinks: SinkBinding[] = [];
     const rendered = new Set<string>();
@@ -3578,6 +3604,7 @@ export function analyzeWithFrontend(
           ? arg0.text
           : arg0.getText(sf).replace(/^[`'"]|[`'"]$/g, "");
         staticTests.push(st);
+        mockBodies.set(st, decl.body);
       }
       ts.forEachChild(node, visit);
     };
@@ -4652,11 +4679,86 @@ export function analyzeWithFrontend(
           .length > 1
       : undefined,
   });
+  const rowPlans = new Map<ts.Node, ReturnType<typeof sourceTestRows>>();
+  const runtimeRowTitles = new Map<string, number>();
+  for (const rt of runtimeTests) {
+    const key = JSON.stringify([rt.file, rt.title]);
+    runtimeRowTitles.set(key, (runtimeRowTitles.get(key) ?? 0) + 1);
+  }
+  function runtimeCountObservations(
+    st: StaticTest,
+    rt: RuntimeTest,
+  ): Observation[] {
+    const body = mockBodies.get(st);
+    if (!body || !st.observations.some((ob) => ob.mock?.kind === "call-count"))
+      return st.observations;
+    if (!rowPlans.has(body))
+      rowPlans.set(
+        body,
+        sourceTestRows(ts, body, {
+          declaration: declOf,
+          location: comparisonLocation,
+          nativeTest: nativeTestRegistration,
+        }),
+      );
+    const plan = rowPlans.get(body);
+    if (!plan) return st.observations;
+    const row =
+      rt.title === undefined
+        ? undefined
+        : plan.rows.find((r) => r.evidence.title === rt.title);
+    const duplicate =
+      (runtimeRowTitles.get(JSON.stringify([rt.file, rt.title])) ?? 0) > 1;
+    const reason =
+      plan.reason ??
+      (rt.runner !== "node:test"
+        ? "unsupported-row-runtime-runner"
+        : !row
+          ? "runtime-title-does-not-identify-source-row"
+          : duplicate
+            ? "ambiguous-runtime-row-title"
+            : undefined);
+    const result = !reason && row ? countModel(body, row) : undefined;
+    const checks = new Map<string, MockCountEvidence>();
+    for (const [node, evidence] of result?.checks ?? []) {
+      const sf = node.getSourceFile(),
+        position = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+      checks.set(
+        `${rel(sf)}:${position.line + 1}:${position.character + 1}`,
+        evidence,
+      );
+    }
+    return st.observations.map((ob) =>
+      ob.mock?.kind !== "call-count"
+        ? ob
+        : {
+            ...ob,
+            mock: {
+              ...ob.mock,
+              countEvidence: checks.get(ob.assertionSource ?? "") ?? {
+                model: "node-sync-console-count-v2",
+                status: "unresolved",
+                reason:
+                  reason ??
+                  result?.limitation ??
+                  "unsupported-count-projection",
+                rowBinding: reason
+                  ? {
+                      model: "node-test-for-of-v1",
+                      status: "unresolved",
+                      reason,
+                    }
+                  : row!.evidence,
+              },
+            },
+          },
+    );
+  }
   const factTests = runtimeTests
     .map((rt) => {
       const st = staticFor(rt);
       if (!st) return undefined;
-      const checked = st.observations.map((ob) => ({
+      const checked = runtimeCountObservations(st, rt).map((ob) => ({
         ob,
         kind: witnessIssue(rt.id, ob),
       }));

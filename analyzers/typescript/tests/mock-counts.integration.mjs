@@ -20,8 +20,9 @@ test(
   {
     skip: process.env.SUPERCOV_ASSERTED_INTEGRATION !== "1",
   },
-  (t) => {
+  async (t) => {
     const root = mkdtempSync(resolve(tmpdir(), "supercov-mock-counts-"));
+    if (process.env.SUPERCOV_KEEP_ASSERTED_FIXTURE) t.diagnostic(root);
     t.after(() => {
       if (!process.env.SUPERCOV_KEEP_ASSERTED_FIXTURE)
         rmSync(root, { recursive: true, force: true });
@@ -55,8 +56,20 @@ test(
       assert.equal(result.status, 0, result.stderr || result.stdout);
       return result.stdout;
     };
-    const suite = ["--test", "--test-concurrency=1", "tests/core.test.mjs"];
-    ok(run(process.execPath, suite));
+    const suite = [
+      "--test",
+      "--test-concurrency=1",
+      "--test-reporter=tap",
+      "tests/core.test.mjs",
+      "tests/rows.test.mjs",
+      "tests/row-limits.test.mjs",
+      "tests/eval.test.mjs",
+    ];
+    const nativeOutput = ok(run(process.execPath, suite));
+    const nativeNames = [...nativeOutput.matchAll(/^# Subtest: (.+)$/gm)].map(
+      (match) => match[1],
+    );
+    assert.equal(nativeNames.length, 45);
     const oracle = [];
     for (const [name, before, after, survives, file = "core.mjs"] of [
       [
@@ -272,7 +285,37 @@ test(
     };
     const report = complete("sites"),
       page = complete("items", "--evidence", "/tests");
-    assert.equal(page.items.length, 33);
+    const attempts = complete("items", "--evidence", "/attempts");
+    const nativeOccurrences = new Map();
+    for (const name of nativeNames)
+      nativeOccurrences.set(name, (nativeOccurrences.get(name) ?? 0) + 1);
+    assert.ok(
+      attempts.items.every((item) => nativeOccurrences.has(item.value.name)),
+    );
+    for (const [name, count] of nativeOccurrences) {
+      const actual = attempts.items.filter(
+        (item) => item.value.name === name,
+      ).length;
+      if (count === 1)
+        assert.equal(actual, 1, `unique native attempt missing: ${name}`);
+      else assert.ok(actual >= 1 && actual <= count, name);
+    }
+    // Two native tests with the same title currently collapse in capture. Do not
+    // turn that loss into the expected denominator; retain the desired behavior.
+    await t.test(
+      "capture preserves both same-title row attempts",
+      {
+        todo: "Duplicate-title capture loses an attempt; row analysis must not guess its identity",
+      },
+      () =>
+        assert.equal(
+          attempts.items.filter(
+            (item) => item.value.name === "duplicate row same",
+          ).length,
+          2,
+        ),
+    );
+    assert.ok(page.items.length >= 44 && page.items.length <= 45);
     const sourceLines = readFileSync(
       resolve(root, "tests/core.test.mjs"),
       "utf8",
@@ -280,6 +323,7 @@ test(
     const grouped = new Map();
     for (const item of page.items) {
       assert.ok(item.value);
+      if (item.value.file !== "tests/core.test.mjs") continue;
       for (const ob of item.value.observations) {
         if (ob.mock?.kind !== "call-count") continue;
         const line = Number(ob.assertionSource.split(":").at(-2));
@@ -420,6 +464,72 @@ test(
     assert.equal(hints.summary.analyzerSupported, 0);
     assert.equal(hints.summary.unresolved, 1);
     assert.equal(report.assertionScore, null);
+    const countEvidence = (file) =>
+      page.items
+        .filter((item) => item.value.file === file)
+        .flatMap((item) =>
+          item.value.observations
+            .filter((ob) => ob.mock?.kind === "call-count")
+            .map((ob) => ob.mock.countEvidence),
+        );
+    const rows = countEvidence("tests/rows.test.mjs");
+    assert.equal(rows.length, 6);
+    for (const [index, label, counts] of [
+      [0, "c", [1, 0]],
+      [1, "a", [0, 0]],
+      [2, "b", [0, 1]],
+    ]) {
+      const claims = rows.filter((r) => r.rowBinding?.rowIndex === index);
+      assert.equal(claims.length, 2, JSON.stringify(rows));
+      assert.deepEqual(
+        claims.map((r) => r.observedCount),
+        counts,
+      );
+      for (const claim of claims) {
+        assert.equal(claim.status, "source-checked");
+        assert.equal(claim.expectedCount, claim.observedCount);
+        const binding = claim.rowBinding;
+        assert.equal(binding.status, "source-checked");
+        assert.equal(binding.model, "node-test-for-of-v1");
+        assert.equal(
+          binding.bindings.find((b) => b.name === "label").value,
+          label,
+        );
+        assert.ok(
+          binding.loop && binding.table && binding.row && binding.title,
+        );
+      }
+    }
+    const rowLimits = countEvidence("tests/row-limits.test.mjs");
+    assert.ok(rowLimits.length >= 5 && rowLimits.length <= 6);
+    assert.ok(
+      rowLimits.every(
+        (r) =>
+          r.status === "unresolved" && r.rowBinding.status === "unresolved",
+      ),
+    );
+    assert.deepEqual(
+      [...new Set(rowLimits.map((r) => r.reason))].sort(),
+      [
+        "row-table-escapes-or-may-change",
+        "ambiguous-row-title",
+        "unsupported-row-title",
+        "unsupported-row-registration",
+      ].sort(),
+    );
+    const evalLimits = countEvidence("tests/eval.test.mjs");
+    assert.equal(evalLimits.length, 2);
+    assert.ok(evalLimits.every((r) => r.status === "unresolved"));
+    assert.ok(
+      evalLimits.some((r) => r.reason === "row-table-escapes-or-may-change"),
+    );
+    assert.ok(
+      evalLimits.some((r) =>
+        r.reason.startsWith(
+          "mutable-target-or-unsupported-module-initialization",
+        ),
+      ),
+    );
     t.diagnostic(
       JSON.stringify({
         id,
@@ -427,6 +537,9 @@ test(
         checkedObservations: [...grouped.values()]
           .flat()
           .filter((r) => r.status === "source-checked").length,
+        sourceRowCheckedObservations: rows.length,
+        nativeTests: 45,
+        archivedTests: page.items.length,
       }),
     );
   },

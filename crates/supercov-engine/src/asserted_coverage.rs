@@ -111,6 +111,38 @@ pub struct MockCountEvidence {
     pub observed_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calls: Option<Vec<MockCountCall>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_binding: Option<MockCountRowBinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MockCountRowValue {
+    pub declaration: String,
+    pub name: String,
+    pub value: serde_json::Value,
+}
+
+/// Source-reproduced registration inputs; not a value-protection proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MockCountRowBinding {
+    pub model: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#loop: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bindings: Option<Vec<MockCountRowValue>>,
 }
 
 /// Source identities of both operands. Equal source text is not binding identity.
@@ -1865,11 +1897,14 @@ mod tests {
                 kind: kind.into(),
                 path: vec!["mock".into(), "calls".into()],
                 count_evidence: Some(serde_json::from_value(serde_json::json!({
-                    "model": "node-sync-console-count-v1", "status": "source-checked",
+                    "model": "node-sync-console-count-v2", "status": "source-checked",
                     "instance": "tests/a.test.ts:2:3", "createdAt": "tests/a.test.ts:2:3",
                     "readAt": "tests/a.test.ts:7:3", "installedAtRead": true,
                     "expectedCount": 1, "observedCount": 1,
-                    "calls": [{"source":"src/a.ts:4:3", "action":"tests/a.test.ts:5:3", "site":"S1"}]
+                    "calls": [{"source":"src/a.ts:4:3", "action":"tests/a.test.ts:5:3", "site":"S1"}],
+                    "rowBinding": {"model":"node-test-for-of-v1", "status":"source-checked", "rowIndex":0,
+                        "title":"row a", "loop":"tests/a.test.ts:1:1", "table":"tests/a.test.ts:1:10",
+                        "row":"tests/a.test.ts:1:12", "bindings":[{"declaration":"tests/a.test.ts:2:1", "name":"label", "value":"a"}]}
                 })).unwrap()),
             });
             // Even contradictory whole-list/negative flags cannot bypass the

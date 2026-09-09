@@ -19,6 +19,7 @@ export const PROTOCOL = {
     "assertion-comparison-relations-v1",
     "mock-count-lifetimes-v1",
     "mock-count-factories-v1",
+    "mock-count-rows-v1",
   ],
 };
 type Location = {
@@ -106,6 +107,7 @@ type RecordData = {
   status?: string;
   expectedStatus?: string;
   flaky?: boolean;
+  provenance?: { runner?: string };
   scope?: Scope;
   runtime: Snapshot[];
   browser: Snapshot[];
@@ -400,6 +402,7 @@ function analyzeArchiveWithFrontend(
       line: 0,
       ok: true,
       phaseLines,
+      runner: r.provenance?.runner,
     });
     attempts.push({
       id,

@@ -44,6 +44,17 @@ mocks, getters, missing own properties, mutable bindings, test branching,
 unsupported initialization and async suspension leave explicit reasons. Evidence
 inside a rejected assertion witness is not a passing observation.
 
+For a closed top-level `for (const { ... } of cases)` table using native
+`node:test`, `countEvidence.rowBinding` can retain the selected source row and
+its scalar bindings. The table must be a private literal with no aliases or
+other reads/writes. Supercov reproduces each registration title from the source
+values and requires a unique exact match to the archived title; it does not
+guess from title prefixes or record order. The existing original-source passing
+assertion witness is still required. Duplicate titles, transformed titles,
+mutable/escaping tables, custom registration helpers and unsupported loops stay
+unresolved. A source-checked row binding alone grants no count or value credit;
+for example, the producer's shared-object history may still be unknown.
+
 Count evidence does not grant general site, payload or pragma credit, even for
 listed calls: an aggregate number does not pin each call's arguments or rule out
 compensating changes. Such value relationships remain operand-shape limits.
