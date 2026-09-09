@@ -1,4 +1,5 @@
 //! Bounded views of a complete derived assertion document. References never discard data.
+use crate::asserted_query::AGENT_COMMAND;
 use serde_json::{Value, json};
 use supercov_engine::agent_json;
 
@@ -52,7 +53,7 @@ pub fn page(
             "byteLimited": returned < selected.len(),
             "itemLimited": selected.len() < limit.min(rows.len().saturating_sub(offset))});
         base[collection] = json!(&selected[..returned]);
-        agent_json::success("coverage.asserted", &base, None).is_ok()
+        agent_json::success(AGENT_COMMAND, &base, None).is_ok()
     };
     // Find a fitting prefix without serializing every successively shorter page.
     let mut low = 0;
@@ -177,7 +178,7 @@ mod tests {
                 usize::MAX,
             )
             .unwrap();
-            assert!(agent_json::success("coverage.asserted", &part, None).is_ok());
+            assert!(agent_json::success(AGENT_COMMAND, &part, None).is_ok());
             joined.push_str(part["text"].as_str().unwrap());
             let Some(next) = part["pagination"]["nextOffset"].as_u64() else {
                 break;
@@ -197,7 +198,7 @@ mod tests {
         let mut offset = 0;
         loop {
             let p = page(json!({}), "sites", &values, offset, 50).unwrap();
-            assert!(agent_json::success("coverage.asserted", &p, None).is_ok());
+            assert!(agent_json::success(AGENT_COMMAND, &p, None).is_ok());
             gathered.extend(p["sites"].as_array().unwrap().iter().cloned());
             let Some(next) = p["pagination"]["nextOffset"].as_u64() else {
                 break;

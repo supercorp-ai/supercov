@@ -101,8 +101,12 @@ test(
       ]),
     );
     const [runId] = readdirSync(resolve(root, ".supercov/runs"));
-    const args = ["runs", runId, "asserted", "--limit", "1000", "--json"];
-    const query = () => JSON.parse(ok(exec(args)).stdout).data;
+    const args = ["runs", runId, "assertions", "--limit", "1000", "--json"];
+    const query = () => {
+      const envelope = JSON.parse(ok(exec(args)).stdout);
+      assert.equal(envelope.command, "coverage.assertions");
+      return envelope.data;
+    };
     const result = query();
     const evidence = (id, pointer, analysisId, ...options) =>
       JSON.parse(
@@ -110,7 +114,7 @@ test(
           exec([
             "runs",
             id,
-            "asserted",
+            "assertions",
             "--evidence",
             pointer,
             "--analysis",
@@ -123,19 +127,19 @@ test(
     assert.equal(result.reportSchema, 2);
     assert.match(result.analysisId, /^[a-f0-9]{64}$/);
     assert.match(
-      exec(["runs", runId, "asserted", "--analysis", "0".repeat(64), "--json"])
+      exec(["runs", runId, "assertions", "--analysis", "0".repeat(64), "--json"])
         .stdout,
       /analysis changed/,
     );
     assert.match(
-      exec(["runs", runId, "asserted", "--evidence", "/absent", "--json"])
+      exec(["runs", runId, "assertions", "--evidence", "/absent", "--json"])
         .stdout,
       /pointer does not exist/,
     );
     const checkPragmas = (id) => {
       const readPragmas = (...options) =>
         JSON.parse(
-          ok(exec(["runs", id, "asserted", "--pragmas", "--json", ...options]))
+          ok(exec(["runs", id, "assertions", "--pragmas", "--json", ...options]))
             .stdout,
         ).data;
       const all = readPragmas();
@@ -193,7 +197,7 @@ test(
         ),
       );
       assert.match(
-        ok(exec(["runs", id, "asserted", "--pragmas"])).stdout,
+        ok(exec(["runs", id, "assertions", "--pragmas"])).stdout,
         /user-suggested; not formal proofs/,
       );
       return all;
@@ -281,7 +285,7 @@ test(
         exec([
           "runs",
           runId,
-          "asserted",
+          "assertions",
           "--site",
           exactSite.site.id,
           "--json",
@@ -419,7 +423,7 @@ test(
     writeFileSync(testPath, tests + "\n// changed test source\n");
     assert.match(exec(args).stdout, /tests changed/);
     assert.match(
-      exec(["runs", runId, "asserted", "--pragmas", "--json"]).stdout,
+      exec(["runs", runId, "assertions", "--pragmas", "--json"]).stdout,
       /tests changed/,
     );
     writeFileSync(testPath, tests);
@@ -474,7 +478,7 @@ test(
         );
         assert.ok(nodeRun);
         const nodeResult = JSON.parse(
-          ok(exec(["runs", nodeRun, "asserted", "--limit", "1000", "--json"]))
+          ok(exec(["runs", nodeRun, "assertions", "--limit", "1000", "--json"]))
             .stdout,
         ).data;
         checkWitnessReasons(nodeResult);
@@ -537,7 +541,7 @@ test(
           (id) => !before.has(id),
         );
         const response = ok(
-          exec(["runs", largeRun, "asserted", "--pragmas", "--json"]),
+          exec(["runs", largeRun, "assertions", "--pragmas", "--json"]),
         );
         assert.ok(Buffer.byteLength(response.stdout) <= 65_536);
         const large = JSON.parse(response.stdout).data;

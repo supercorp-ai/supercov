@@ -20,7 +20,9 @@ use supercov_engine::{
     run_store::{StoredRun, discover_runs, select_run},
 };
 
-const HELP: &str = "Usage: supercov runs <run-id> asserted [--pragmas | --evidence <pointer>] [--file <path>] [--site <id>] [--offset <n>] [--limit <n>] [--analysis <sha256>] [--json]\n\nExperimental JS/TS candidate evidence, not a proven assertion score.\nRuns after tests using the existing archive, statement markers and assertion phases.\nRequires a matching project, its TypeScript compiler API, and the packaged first-party analyzer.\n\n--pragmas  Page through user-suggested assertion links and their validation.\n           Leading assertion comments: // observes: <file>#<function> [snippet]\n           Targets must resolve to one site; comments never add assertion credit.\n           --file/--site filter the suggested production targets.\n--evidence Page a returned JSON pointer (for example /tests or /sites/0/facts).\n           Objects/arrays return items; string leaves return Unicode-scalar text chunks.\n           Cannot combine with --file, --site or --pragmas.\n--analysis Require the analysisId returned by the first page; prevents mixing analyses.\n\nPages adapt to the response budget. Follow pagination.nextOffset, not offset + limit.\nLarge records carry detailOnly and an evidence.pointer; all details remain readable.\n";
+const HELP: &str = "Usage: supercov runs <run-id> assertions [--pragmas | --evidence <pointer>] [--file <path>] [--site <id>] [--offset <n>] [--limit <n>] [--analysis <sha256>] [--json]\n\nAnalyze which source behaviors are linked to test assertions, with evidence, gaps and analysis limits.\nExperimental JS/TS candidate evidence, not a proven assertion score.\nRuns after tests using the existing archive, statement markers and assertion phases.\nRequires a matching project, its TypeScript compiler API, and the packaged first-party analyzer.\n\n--pragmas  Page through user-suggested assertion links and their validation.\n           Leading assertion comments: // observes: <file>#<function> [snippet]\n           Targets must resolve to one site; comments never add assertion credit.\n           --file/--site filter the suggested production targets.\n--evidence Page a returned JSON pointer (for example /tests or /sites/0/facts).\n           Objects/arrays return items; string leaves return Unicode-scalar text chunks.\n           Cannot combine with --file, --site or --pragmas.\n--analysis Require the analysisId returned by the first page; prevents mixing analyses.\n\nPages adapt to the response budget. Follow pagination.nextOffset, not offset + limit.\nLarge records carry detailOnly and an evidence.pointer; all details remain readable.\n";
+pub const AGENT_COMMAND: &str = "coverage.assertions";
+
 fn protocol() -> Value {
     json!({"abi":1,"factsSchema":1,"rules":"source-linked-v3/archive-3","capabilities":["requiresTotal-v1", "assertion-witness-issues-v1", "assertion-hints-v1"]})
 }
@@ -414,10 +416,10 @@ pub fn command(args: &[String]) -> ExitCode {
     match result {
         Ok(data) => {
             if json_output {
-                match supercov_engine::agent_json::success("coverage.asserted", &data, None) {
+                match supercov_engine::agent_json::success(AGENT_COMMAND, &data, None) {
                     Ok(json) => print!("{json}"),
                     Err(size) => {
-                        print!("{}", supercov_engine::agent_json::failure(Some("coverage.asserted"), &supercov_engine::agent_json::AgentError {
+                        print!("{}", supercov_engine::agent_json::failure(Some(AGENT_COMMAND), &supercov_engine::agent_json::AgentError {
                             code: supercov_engine::agent_json::ErrorCode::ResponseTooLarge,
                             message: "Assertion reference metadata exceeds the query budget; no evidence was discarded.".into(),
                             retryable: false, details: Some(json!({"actualBytes":size.actual_bytes,"maxBytes":size.max_bytes})),
@@ -504,7 +506,7 @@ pub fn command(args: &[String]) -> ExitCode {
                 println!(
                     "{}",
                     supercov_engine::agent_json::failure(
-                        Some("coverage.asserted"),
+                        Some(AGENT_COMMAND),
                         &supercov_engine::agent_json::AgentError {
                             code: supercov_engine::agent_json::ErrorCode::InvalidArgument,
                             message,

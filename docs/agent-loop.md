@@ -62,8 +62,8 @@ duplicate.
 For supported JS/TS projects, inspect assertion evidence before adding tests:
 
 ```sh
-npx supercov runs latest asserted --file app/checkout/session.ts --limit 5 --json
-npx supercov runs latest asserted --pragmas --json
+npx supercov runs latest assertions --file app/checkout/session.ts --limit 5 --json
+npx supercov runs latest assertions --pragmas --json
 ```
 
 This experimental post-run query needs the matching source and a compatible

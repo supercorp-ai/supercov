@@ -1,7 +1,7 @@
 # JS/TS assertion analyzer (internal)
 
 This private package is the post-run analysis component used by Supercov's
-`runs <run> asserted` command. It is bundled in the npm distribution, not
+`runs <run> assertions` command. It is bundled in the npm distribution, not
 published as a separate CLI or SDK.
 
 See [Assertion evidence](../../docs/assertion-evidence.md) for public commands,

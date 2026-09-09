@@ -216,8 +216,18 @@ try {
       );
       const envelope = JSON.parse(text);
       assert.equal(envelope.ok, true);
+      if (args[0] === "runs" && args[2] === "assertions")
+        assert.equal(envelope.command, "coverage.assertions");
       return envelope.data;
     };
+    assert.match(ok(cli(["runs", "latest", "--help"])), /\n  assertions /);
+    const help = ok(cli(["runs", "latest", "assertions", "--help"]));
+    assert.match(help, /Usage: supercov runs <run-id> assertions /);
+    assert.match(help, /not a proven assertion score/);
+    const guide = ok(cli(["docs", "assertion-evidence"]));
+    assert.equal(guide, readFileSync(resolve(installed, "docs/assertion-evidence.md"), "utf8"));
+    assert.match(guide, /runs latest assertions/);
+    assert.doesNotMatch(guide, /runs latest asserted/);
     const suite = () => {
       const before = new Set(
         existsSync(resolve(consumer, ".supercov/runs"))
@@ -246,7 +256,7 @@ try {
     );
     const noCompiler = suite();
     assert.match(
-      cli(["runs", noCompiler, "asserted", "--json"]).stdout,
+      cli(["runs", noCompiler, "assertions", "--json"]).stdout,
       /requires the project's TypeScript compiler API/,
     );
     ok(
@@ -264,7 +274,7 @@ try {
       ),
     );
     assert.match(
-      cli(["runs", noCompiler, "asserted", "--json"]).stdout,
+      cli(["runs", noCompiler, "assertions", "--json"]).stdout,
       /stale run/,
     );
     const compilerEntry = createRequire(packageFile).resolve("typescript");
@@ -277,7 +287,7 @@ try {
     const result = read([
       "runs",
       runId,
-      "asserted",
+      "assertions",
       "--limit",
       "1000",
       "--json",
@@ -297,7 +307,7 @@ try {
       read([
         "runs",
         runId,
-        "asserted",
+        "assertions",
         "--evidence",
         pointer,
         "--analysis",
@@ -312,12 +322,12 @@ try {
     assert.ok(evidence("/executionLinks", "--limit", "1").items.length === 1);
     assert.equal(evidence("/tests", "--limit", "1").pagination.nextOffset, 1);
     assert.equal(
-      read(["runs", runId, "asserted", "--pragmas", "--json"]).summary
+      read(["runs", runId, "assertions", "--pragmas", "--json"]).summary
         .analyzerSupported,
       2,
     );
     assert.match(
-      cli(["runs", runId, "asserted", "--analysis", "0".repeat(64), "--json"])
+      cli(["runs", runId, "assertions", "--analysis", "0".repeat(64), "--json"])
         .stdout,
       /analysis changed/,
     );
@@ -326,7 +336,7 @@ try {
       const original = readFileSync(path, "utf8");
       writeFileSync(path, original + "\n// changed installed analyzer\n");
       assert.match(
-        cli(["runs", runId, "asserted", "--json"]).stdout,
+        cli(["runs", runId, "assertions", "--json"]).stdout,
         /analyzer build is stale or modified/,
       );
       writeFileSync(path, original);
@@ -337,14 +347,14 @@ try {
       "// updated authored test source\n" + readFileSync(tests, "utf8"),
     );
     assert.match(
-      cli(["runs", runId, "asserted", "--json"]).stdout,
+      cli(["runs", runId, "assertions", "--json"]).stdout,
       /tests changed/,
     );
     const next = suite();
-    const refreshed = read(["runs", next, "asserted", "--json"]);
+    const refreshed = read(["runs", next, "assertions", "--json"]);
     assert.notEqual(refreshed.analysisId, result.analysisId);
     assert.equal(
-      read(["runs", next, "asserted", "--pragmas", "--json"]).summary
+      read(["runs", next, "assertions", "--pragmas", "--json"]).summary
         .analyzerSupported,
       2,
     );

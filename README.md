@@ -48,9 +48,9 @@ npx supercov -- bundle exec rspec
 After a run, inspect what existing assertions appear to check:
 
 ```sh
-npx supercov runs latest asserted --limit 5
-npx supercov runs latest asserted --pragmas --json
-npx supercov runs latest asserted --evidence /tests --limit 5 --json
+npx supercov runs latest assertions --limit 5
+npx supercov runs latest assertions --pragmas --json
+npx supercov runs latest assertions --evidence /tests --limit 5 --json
 ```
 
 This npm-only query uses the run archive and matching source; it adds no new

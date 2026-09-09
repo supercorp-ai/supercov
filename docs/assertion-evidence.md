@@ -42,11 +42,15 @@ installed npm package directory. Normal coverage commands are unaffected.
 
 ## Run, inspect, follow evidence
 
+`assertions` analyzes source behaviors and their assertion evidence; it does not
+just count or list assertion calls. Use `npx supercov docs assertion-evidence`
+to read this guide from the installed package.
+
 ```sh
 npx supercov -- npm test
-npx supercov runs latest asserted --limit 5
-npx supercov runs latest asserted --file src/core.ts --json
-npx supercov runs latest asserted --site '<site-id>' --json
+npx supercov runs latest assertions --limit 5
+npx supercov runs latest assertions --file src/core.ts --json
+npx supercov runs latest assertions --site '<site-id>' --json
 ```
 
 The summary reports candidate counts and the site denominator, without claiming
@@ -56,9 +60,9 @@ details. Global tests, attempts, execution links, diagnostics and source-scope
 limits are referenced under `evidence`, not repeated inside every site page.
 
 ```sh
-npx supercov runs latest asserted --evidence /tests --limit 5 --json
-npx supercov runs latest asserted --evidence /diagnostics --json
-npx supercov runs latest asserted --evidence /sites/0/facts --json
+npx supercov runs latest assertions --evidence /tests --limit 5 --json
+npx supercov runs latest assertions --evidence /diagnostics --json
+npx supercov runs latest assertions --evidence /sites/0/facts --json
 ```
 
 Pointers use JSON Pointer syntax: escape `/` in a property name as `~1` and `~`
@@ -80,7 +84,7 @@ return `text` chunks, with offsets/counts measured in Unicode scalar values,
 not bytes. This allows reading one large observation or diagnostic completely.
 
 ```sh
-npx supercov runs '<run-id>' asserted --evidence '<returned-pointer>' \
+npx supercov runs '<run-id>' assertions --evidence '<returned-pointer>' \
   --offset 0 --limit 4000 --analysis '<analysisId>' --json
 ```
 
@@ -92,6 +96,7 @@ query. Derived results are not cached or written into the archive.
 
 The experimental report shape is `reportSchema: 2`; global evidence arrays from
 the earlier development view have moved to the evidence pointers above.
+Success and error JSON envelopes identify this query as `coverage.assertions`.
 
 ## Optional assertion hints
 
@@ -105,7 +110,7 @@ The project-relative file, exact function/owner name, and optional literal sourc
 substring must select one inventory site. Optional `via ...` is explanation only.
 
 ```sh
-npx supercov runs latest asserted --pragmas --json
+npx supercov runs latest assertions --pragmas --json
 ```
 
 Origin is `user-suggested`; validation is separately `analyzer-supported`,

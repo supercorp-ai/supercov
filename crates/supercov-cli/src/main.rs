@@ -66,6 +66,7 @@ Inspect a run with small, paginated answers:
   supercov runs latest gaps            files with unresolved obligations
   supercov runs latest gaps --kind e2e E2E gaps by origin
   supercov runs latest file <path>     gap lines in one file
+  supercov runs latest assertions      experimental JS/TS assertion evidence
   supercov runs <id> --help            every run query
   supercov runs <run-id> [resource]    query one immutable run
 
@@ -82,6 +83,7 @@ Guides:
 const DOC_TOPICS: &[&str] = &[
     "getting-started",
     "agent-loop",
+    "assertion-evidence",
     "troubleshooting",
     "cli",
     "coverage-model",
@@ -2090,7 +2092,7 @@ fn execute_public_query(
 }
 
 fn public_query_command(command: &str, arguments: Vec<String>) -> ExitCode {
-    if command == "runs" && arguments.get(1).is_some_and(|a| a == "asserted") {
+    if command == "runs" && arguments.get(1).is_some_and(|a| a == "assertions") {
         return asserted_query::command(&arguments);
     }
     if let Some(help) = help_for(command, &arguments) {

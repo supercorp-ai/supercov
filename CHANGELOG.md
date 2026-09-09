@@ -4,7 +4,7 @@
 
 **Added**
 
-- Experimental npm-only JS/TS assertion queries: `runs <run> asserted`, pageable `--evidence`, and optional `--pragmas` with passing-assertion witnesses. Results remain unverified candidates, not a safety score. TypeScript 5.8.3 and a separately calibrated native 7.0.2 frontend are supported; native compiler/client identity is checked. Windows compiler lookup accepts canonical paths. Uses existing test-time probes.
+- Experimental npm-only JS/TS assertion queries: `runs <run> assertions`, pageable `--evidence`, and optional `--pragmas` with passing-assertion witnesses. Results remain unverified candidates, not a safety score. TypeScript 5.8.3 and a separately calibrated native 7.0.2 frontend are supported; native compiler/client identity is checked. Windows compiler lookup accepts canonical paths. Uses existing test-time probes.
 - Python and Ruby coverage says whether a test checked what it ran. Evidence a test recorded before its first assertion links to that assertion when the test passes: pytest `assert` statements, `pytest.raises`/`pytest.warns`, `unittest` assert methods, Minitest, RSpec expectations (in Cucumber steps too) and test-unit.
 - On Windows, the Rust test processes are placed in a Job Object that ends them when Supercov ends, however it ends.
 - `npm run oracle:rust` compares Rust coverage per file against `cargo llvm-cov` over 26 crates and flags the differences.
