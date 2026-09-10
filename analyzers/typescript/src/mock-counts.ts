@@ -248,11 +248,42 @@ interface Model {
   site(call: ts.CallExpression): string | undefined;
 }
 
+export interface CallOmissionEvidence {
+  model: "node-first-test-call-omission-v1";
+  status: "source-checked" | "unresolved";
+  reason?: string;
+  outcome?: "rejected" | "not-rejected";
+  scope?: "first-synchronous-test";
+  assertionSource?: string;
+  callSource?: string;
+  callbackSource?: string;
+  instance?: string;
+  expectedCount?: number;
+  originalCount?: number;
+  omittedCount?: number;
+}
+
+interface OmissionTrial {
+  assertion: ts.CallExpression;
+  module: ts.SourceFile;
+  omit?: ts.CallExpression;
+}
+
 export function analyzeMockCounts(
   syntax: SyntaxAPI,
   fn: ts.Node,
   model: Model,
   row?: BoundRow,
+) {
+  return runMockCounts(syntax, fn, model, row);
+}
+
+function runMockCounts(
+  syntax: SyntaxAPI,
+  fn: ts.Node,
+  model: Model,
+  row?: BoundRow,
+  trial?: OmissionTrial,
 ) {
   const ts = syntax;
   type Primitive = string | number | boolean | null | undefined;
@@ -298,6 +329,7 @@ export function analyzeMockCounts(
   let initializing = false;
   let budget = 4096;
   class Unsupported extends Error {}
+  class ReachedAssertion extends Error {}
   const fail = (node: ts.Node, why: string): never => {
     throw new Unsupported(`${why} at ${model.location(node)}`);
   };
@@ -405,6 +437,8 @@ export function analyzeMockCounts(
   // const prevents rebinding, not mutation by another caller or earlier test.
   function moduleEnvironment(declaration: ts.Declaration, depth: number) {
     const sf = declaration.getSourceFile();
+    if (trial && sf !== trial.module)
+      return fail(declaration, "omission-module-outside-checked-scope");
     if (loading.has(sf))
       return fail(declaration, "cyclic-or-forward-module-binding");
     const cached = modules.get(sf);
@@ -444,7 +478,8 @@ export function analyzeMockCounts(
       !initializing &&
       !primitive(value) &&
       (value.kind === "object" || value.kind === "array") &&
-      value.moduleOwned
+      value.moduleOwned &&
+      !trial
     )
       return fail(node, "shared-module-object-history");
     return value;
@@ -673,6 +708,10 @@ export function analyzeMockCounts(
       return fail(e, "unsupported-property-read");
     }
     if (!ts.isCallExpression(e)) return fail(e, "unsupported-expression");
+    // The checked edit replaces this expression-bodied arrow with () => undefined.
+    // Its original arguments inside the body are NOT evaluated by that edit.
+    // No source is executed and no test code is modified during this query.
+    if (trial?.omit === e) return undefined;
     const callee = peel(e.expression);
     if (
       ts.isPropertyAccessExpression(callee) &&
@@ -859,11 +898,15 @@ export function analyzeMockCounts(
           expected < 0
         )
           return fail(e, "count-expectation-not-independent-integer");
-        if (actual.evidence.observedCount !== expected)
+        if (
+          actual.evidence.observedCount !== expected &&
+          trial?.assertion !== e
+        )
           return fail(e, "source-count-disagrees-with-passing-assertion");
         checks.set(e, { ...actual.evidence, expectedCount: expected });
       } else if (!primitive(a) || !primitive(b))
         return fail(e, "unsupported-comparison-operand");
+      if (trial?.assertion === e) throw new ReachedAssertion();
       return undefined;
     }
     const declaration = model.declaration(callee);
@@ -959,8 +1002,220 @@ export function analyzeMockCounts(
       for (const statement of fn.body.statements)
         execute(statement, model.location(statement), 0);
   } catch (error) {
-    if (!(error instanceof Unsupported)) throw error;
-    limitation = error.message;
+    if (error instanceof Unsupported) limitation = error.message;
+    else if (!(error instanceof ReachedAssertion)) throw error;
   }
   return { checks, limitation };
+}
+
+/** A hint selects this small proof recipe, never permission to assume shared state safe.
+ * The first synchronous callback has no earlier caller of its imported module in
+ * this closed test file. Normal isolated Node test loading/scheduling and unmodified
+ * built-ins are model assumptions, not facts proved by the source inspection.
+ */
+export function analyzeFirstTestOmission(
+  syntax: SyntaxAPI,
+  fn: ts.Node,
+  assertion: ts.CallExpression,
+  call: ts.CallExpression,
+  model: Model & { nativeTest(call: ts.CallExpression): boolean },
+  row?: BoundRow,
+): CallOmissionEvidence {
+  const ts = syntax;
+  const base: CallOmissionEvidence = {
+    model: "node-first-test-call-omission-v1",
+    status: "unresolved",
+  };
+  const limit = (reason: string) => ({ ...base, reason });
+  const sf = fn.getSourceFile(),
+    production = call.getSourceFile();
+  const parent = call.parent;
+  if (
+    !ts.isArrowFunction(parent) ||
+    parent.body !== call ||
+    parent.modifiers?.length ||
+    parent.parameters.some((p) => !ts.isIdentifier(p.name) || p.initializer) ||
+    !ts.isPropertyAccessExpression(call.expression) ||
+    !model.globalConsole(call.expression.expression) ||
+    !["log", "error"].includes(call.expression.name.text) ||
+    !model.production(call)
+  )
+    return limit("omission-target-not-direct-console-callback");
+  if (
+    !ts.isArrowFunction(fn) ||
+    !ts.isBlock(fn.body) ||
+    fn.modifiers?.length ||
+    fn.parameters.length !== 1 ||
+    !ts.isIdentifier(fn.parameters[0].name) ||
+    fn.parameters[0].initializer ||
+    fn.parameters[0].dotDotDotToken ||
+    !ts.isExpressionStatement(assertion.parent) ||
+    assertion.parent.parent !== fn.body ||
+    !ts.isCallExpression(fn.parent) ||
+    !model.nativeTest(fn.parent) ||
+    fn.parent.arguments.length !== 2 ||
+    fn.parent.arguments[1] !== fn ||
+    model.nativePredicate(assertion) !== "node-same-value"
+  )
+    return limit("omission-requires-direct-synchronous-count-assertion");
+  const registration = fn.parent;
+  let registrationStatement: ts.Node = registration.parent;
+  while (registrationStatement.parent && registrationStatement.parent !== sf)
+    registrationStatement = registrationStatement.parent;
+  if (row && row.evidence.rowIndex !== 0)
+    return limit("omission-not-first-source-row");
+  if (
+    !row &&
+    (!ts.isExpressionStatement(registrationStatement) ||
+      registrationStatement.expression !== registration ||
+      !ts.isStringLiteralLike(registration.arguments[0]))
+  )
+    return limit("omission-unsupported-registration");
+
+  // Only native imports and the selected production module may initialize before
+  // registration. A type-only import is erased; an unrelated import is not inert.
+  const erasedImport = (s: ts.ImportDeclaration) => {
+    const clause = s.importClause;
+    if (!clause) return false;
+    if (clause.isTypeOnly) return true;
+    const bindings = clause.namedBindings;
+    return (
+      !clause.name &&
+      !!bindings &&
+      ts.isNamedImports(bindings) &&
+      bindings.elements.length > 0 &&
+      bindings.elements.every((e) => {
+        const d = model.declaration(e.name);
+        return (
+          e.isTypeOnly ||
+          (!!d &&
+            (ts.isInterfaceDeclaration(d) || ts.isTypeAliasDeclaration(d)))
+        );
+      })
+    );
+  };
+  const nativeImports = new Set([
+    "node:test",
+    "node:assert/strict",
+    "node:assert",
+    "assert/strict",
+    "assert",
+  ]);
+  let found = false;
+  for (const s of sf.statements) {
+    if (ts.isImportDeclaration(s)) {
+      if (erasedImport(s)) continue;
+      if (!ts.isStringLiteralLike(s.moduleSpecifier) || !s.importClause)
+        return limit("omission-test-import-outside-scope");
+      if (nativeImports.has(s.moduleSpecifier.text)) continue;
+      const c = s.importClause;
+      const names = [
+        c.name,
+        ...(c.namedBindings && ts.isNamedImports(c.namedBindings)
+          ? c.namedBindings.elements.map((e) => e.name)
+          : []),
+      ].filter((n) => n !== undefined);
+      if (
+        !names.length ||
+        (c.namedBindings && ts.isNamespaceImport(c.namedBindings)) ||
+        names.some((n) => model.declaration(n)?.getSourceFile() !== production)
+      )
+        return limit("omission-test-import-outside-scope");
+      continue;
+    }
+    if (
+      ts.isEmptyStatement(s) ||
+      ts.isInterfaceDeclaration(s) ||
+      ts.isTypeAliasDeclaration(s)
+    )
+      continue;
+    if (
+      row &&
+      ts.isVariableStatement(s) &&
+      ts.isForOfStatement(registrationStatement)
+    ) {
+      const iterable = registrationStatement.expression;
+      if (
+        s.declarationList.declarations.length === 1 &&
+        model.declaration(iterable) === s.declarationList.declarations[0]
+      )
+        continue;
+    }
+    if (s === registrationStatement) {
+      if (found) return limit("omission-not-first-test");
+      found = true;
+      continue;
+    }
+    // Later registrations cannot execute until this synchronous callback finishes.
+    // Hooks, options, top-level calls and arbitrary registration expressions are not accepted.
+    if (
+      found &&
+      ts.isExpressionStatement(s) &&
+      ts.isCallExpression(s.expression) &&
+      model.nativeTest(s.expression) &&
+      s.expression.arguments.length === 2 &&
+      ts.isStringLiteralLike(s.expression.arguments[0]) &&
+      ts.isArrowFunction(s.expression.arguments[1])
+    )
+      continue;
+    return limit("omission-test-setup-or-earlier-registration");
+  }
+  if (!found) return limit("omission-registration-not-in-module");
+  for (const s of production.statements) {
+    if (ts.isExportDeclaration(s)) return limit("omission-production-reexport");
+    if (
+      ts.isImportDeclaration(s) &&
+      !erasedImport(s) &&
+      !(
+        ts.isStringLiteralLike(s.moduleSpecifier) &&
+        s.moduleSpecifier.text === "node:util"
+      )
+    )
+      return limit("omission-production-import-outside-scope");
+  }
+  const original = runMockCounts(ts, fn, model, row, {
+    assertion,
+    module: production,
+  });
+  const before = original.checks.get(assertion);
+  if (
+    !before ||
+    original.limitation ||
+    before.observedCount !== before.expectedCount
+  )
+    return limit(
+      original.limitation ?? "omission-original-count-not-established",
+    );
+  const calleeSource = model.location(call);
+  if (!before.calls?.some((c) => c.source === calleeSource))
+    return limit("omission-target-not-in-selected-history");
+  const changed = runMockCounts(ts, fn, model, row, {
+    assertion,
+    module: production,
+    omit: call,
+  });
+  const after = changed.checks.get(assertion);
+  if (
+    !after ||
+    changed.limitation ||
+    after.instance !== before.instance ||
+    after.expectedCount !== before.expectedCount
+  )
+    return limit(
+      changed.limitation ?? "omission-changed-count-not-established",
+    );
+  return {
+    ...base,
+    status: "source-checked",
+    scope: "first-synchronous-test",
+    outcome:
+      after.observedCount === after.expectedCount ? "not-rejected" : "rejected",
+    assertionSource: model.location(assertion),
+    callSource: calleeSource,
+    callbackSource: model.location(parent),
+    instance: before.instance,
+    expectedCount: before.expectedCount,
+    originalCount: before.observedCount,
+    omittedCount: after.observedCount,
+  };
 }

@@ -601,6 +601,28 @@ pub struct PragmaHint {
     /// A checked source pattern, not a captured read or a passing assertion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub awaited_observation: Option<AwaitedObservationSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_omission: Option<CallOmissionEvidence>,
+}
+
+/// A bounded check of one specified edit, never general value or site credit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallOmissionEvidence {
+    pub model: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub outcome: Option<String>,
+    pub scope: Option<String>,
+    pub assertion_source: Option<String>,
+    pub call_source: Option<String>,
+    pub callback_source: Option<String>,
+    pub instance: Option<String>,
+    pub expected_count: Option<u64>,
+    pub original_count: Option<u64>,
+    pub omitted_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -746,6 +768,69 @@ pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaChec
             }
             if !site.covered_by.contains(&test.id) {
                 result.reason = "target-not-reached-in-owning-test".into();
+                return result;
+            }
+            if let Some(recipe) = &hint.check {
+                result.reason = "omission-check-unavailable".into();
+                let selected = assertions.get(&(
+                    test.id.as_str(),
+                    hint.assertion_source.as_deref().unwrap(),
+                    hint.assertion_method.as_deref().unwrap(),
+                ));
+                if selected.is_none_or(|observations| {
+                    !observations.iter().any(|ob| {
+                        ob.mock.as_ref().is_some_and(|m| m.kind == "call-count")
+                            && ob
+                                .comparison
+                                .as_ref()
+                                .is_some_and(|c| c.predicate == "node-same-value")
+                    })
+                }) {
+                    result.reason = "omission-count-assertion-not-modelled".into();
+                    return result;
+                }
+                let Some(check) = &hint.call_omission else {
+                    return result;
+                };
+                if recipe != "missing-call"
+                    || check.model != "node-first-test-call-omission-v1"
+                    || check.status != "source-checked"
+                    || check.reason.is_some()
+                    || check.scope.as_deref() != Some("first-synchronous-test")
+                    || check.assertion_source != hint.assertion_source
+                    || check
+                        .call_source
+                        .as_ref()
+                        .is_none_or(|s| !s.starts_with(&format!("{}:", site.file)))
+                    || check.callback_source.as_ref().is_none_or(String::is_empty)
+                    || check.instance.as_ref().is_none_or(String::is_empty)
+                    || site.kind != "effect"
+                {
+                    result.reason = check
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "unsupported-omission-evidence".into());
+                    return result;
+                }
+                let (Some(expected), Some(original), Some(omitted)) = (
+                    check.expected_count,
+                    check.original_count,
+                    check.omitted_count,
+                ) else {
+                    return result;
+                };
+                let outcome = if omitted != expected {
+                    "rejected"
+                } else {
+                    "not-rejected"
+                };
+                if original != expected || check.outcome.as_deref() != Some(outcome) {
+                    result.reason = "inconsistent-omission-counts".into();
+                    return result;
+                }
+                result.validation = HintValidation::AnalyzerSupported;
+                result.reason = format!("modeled-callback-omission-{outcome}");
+                // Do not promote ordinary observations, site strength, or the join.
                 return result;
             }
             if site.kind != "effect" {
@@ -2208,7 +2293,81 @@ mod tests {
             witness: "passed".into(),
             witness_issue: None,
             awaited_observation: None,
+            check: None,
+            call_omission: None,
         }
+    }
+
+    #[test]
+    fn omission_checks_require_own_count_witness_and_never_promote_the_site() {
+        let mut hint = pragma_hint();
+        hint.check = Some("missing-call".into());
+        hint.call_omission = Some(
+            serde_json::from_value(serde_json::json!({
+                "model": "node-first-test-call-omission-v1", "status":"source-checked",
+                "scope":"first-synchronous-test", "outcome":"rejected",
+                "assertionSource":"tests/a.test.ts:7:3", "callSource":"src/a.ts:4:3",
+                "callbackSource":"src/a.ts:3:3", "instance":"tests/a.test.ts:2:3",
+                "expectedCount":1, "originalCount":1, "omittedCount":0
+            }))
+            .unwrap(),
+        );
+        let mut ob = observation("stdout", Strength::Total);
+        ob.assertion_source = hint.assertion_source.clone();
+        ob.assertion_method = hint.assertion_method.clone();
+        ob.mock = Some(MockProjection {
+            target: "console.log".into(),
+            kind: "call-count".into(),
+            path: vec!["mock".into(), "callCount()".into()],
+            count_evidence: None,
+        });
+        ob.comparison = Some(
+            serde_json::from_value(serde_json::json!({
+                "predicate":"node-same-value", "relation":"distinct-or-unknown",
+                "actual":{"source":"tests/a.test.ts:7:16"}, "expected":{"source":"tests/a.test.ts:7:38"}
+            }))
+            .unwrap(),
+        );
+        let f = facts(
+            vec![site("S1", "log", vec![boundary("stdout")], &["T1"])],
+            vec![test("T1", vec![ob])],
+        );
+        let joined = serde_json::to_value(join(&f)).unwrap();
+        let positive = &check_pragma_hints(&f, &[hint.clone()])[0];
+        assert_eq!(positive.validation, HintValidation::AnalyzerSupported);
+        assert_eq!(positive.reason, "modeled-callback-omission-rejected");
+        assert_eq!(positive.strength, None);
+        assert_eq!(serde_json::to_value(join(&f)).unwrap(), joined);
+        for case in 0..9 {
+            let mut f = f.clone();
+            let mut h = hint.clone();
+            match case {
+                0 => h.witness = "unavailable".into(),
+                1 => h.assertion_source = Some("tests/a.test.ts:8:3".into()),
+                2 => f.tests[0].observations.clear(),
+                3 => h.call_omission.as_mut().unwrap().original_count = Some(2),
+                4 => h.call_omission.as_mut().unwrap().omitted_count = Some(1),
+                5 => h.call_omission.as_mut().unwrap().scope = Some("any-test".into()),
+                6 => h.call_omission.as_mut().unwrap().model = "unrecognized".into(),
+                7 => {
+                    h.call_omission.as_mut().unwrap().call_source = Some("src/other.ts:4:3".into())
+                }
+                8 => f.sites[0].covered_by.clear(),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                check_pragma_hints(&f, &[h])[0].validation,
+                HintValidation::Unresolved,
+                "case {case}"
+            );
+        }
+        let c = hint.call_omission.as_mut().unwrap();
+        c.omitted_count = Some(1);
+        c.outcome = Some("not-rejected".into());
+        let negative = &check_pragma_hints(&f, &[hint])[0];
+        assert_eq!(negative.validation, HintValidation::AnalyzerSupported);
+        assert_eq!(negative.reason, "modeled-callback-omission-not-rejected");
+        assert_eq!(negative.strength, None);
     }
 
     #[test]

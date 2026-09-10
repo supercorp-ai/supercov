@@ -1,6 +1,7 @@
 import type ts from "typescript";
 import type { Site } from "./types.js";
 import type { AwaitedObservationSource } from "./awaited-observations.js";
+import type { CallOmissionEvidence } from "./mock-counts.js";
 
 export type AssertionPhase = { source?: string; op: string; status?: string };
 export function assertionWitnessIssue(
@@ -42,6 +43,7 @@ interface Comment {
   candidateSites: string[];
   issue?: string;
   attachments: Attachment[];
+  check?: "missing-call";
 }
 export interface PragmaHint {
   id: string;
@@ -56,6 +58,8 @@ export interface PragmaHint {
   witness: "passed" | "unavailable";
   witnessIssue?: string;
   awaitedObservation?: AwaitedObservationSource;
+  check?: "missing-call";
+  callOmission?: CallOmissionEvidence;
 }
 
 /** Source hints are kept OUT of observations. A comment never adds a boundary. */
@@ -77,8 +81,15 @@ export function collectPragmas(
         const raw = sf.text.slice(range.pos, range.end);
         if (!/^\/\/\s*observes:/.test(raw) || comments.has(key(sf, range.pos)))
           continue;
+        const parts = raw.split(/;\s*check\s+/);
+        const check =
+          parts.length === 2 && parts[1].trim() === "missing call"
+            ? ("missing-call" as const)
+            : undefined;
+        const checkIssue =
+          parts.length > 1 && !check ? "unsupported-check-recipe" : undefined;
         const parsed = /^\/\/\s*observes:\s*(\S+?)#(\S+)(?:\s+(.+?))?\s*$/.exec(
-          raw,
+          parts[0],
         );
         const suffix = parsed?.[3]?.split(/(?:^|\s+)via\s+/);
         const target = parsed
@@ -100,6 +111,8 @@ export function collectPragmas(
               .filter(
                 (s) =>
                   s.file === target.file &&
+                  // The recipe selects the emission, not a containing callback-return site.
+                  (!check || s.category === "log") &&
                   (s.owner === target.function || s.fn === target.function) &&
                   (!target.snippet || s.text.includes(target.snippet)),
               )
@@ -110,16 +123,19 @@ export function collectPragmas(
           where: location(sf, range.pos),
           raw,
           target,
+          ...(check ? { check } : {}),
           candidateSites: candidates,
-          issue: !target
-            ? "invalid-syntax"
-            : !validPath
-              ? "invalid-target-path"
-              : !candidates.length
-                ? "target-not-in-inventory"
-                : candidates.length > 1
-                  ? "ambiguous-target"
-                  : undefined,
+          issue:
+            checkIssue ??
+            (!target
+              ? "invalid-syntax"
+              : !validPath
+                ? "invalid-target-path"
+                : !candidates.length
+                  ? "target-not-in-inventory"
+                  : candidates.length > 1
+                    ? "ambiguous-target"
+                    : undefined),
           attachments: [],
         });
       }

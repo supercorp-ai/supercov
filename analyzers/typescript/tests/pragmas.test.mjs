@@ -5,6 +5,14 @@ import { collectPragmas } from "../dist/pragmas.js";
 
 const sites = [
   {
+    id: "log",
+    file: "src/core.ts",
+    fn: "log",
+    owner: "log",
+    category: "log",
+    text: "console.log(value)",
+  },
+  {
     id: "one",
     file: "src/core.ts",
     fn: "compute",
@@ -149,4 +157,25 @@ test("pragma witnesses use exact position, operation and every call outcome", ()
     assert.equal(hint.witness, "unavailable", reason);
     assert.equal(hint.witnessIssue, reason);
   }
+});
+
+test("a missing-call recipe is explicit and does not reinterpret explanatory via text", () => {
+  const hint = collect(
+    "// observes: src/core.ts#log console.log; check missing call\nassert.equal(compute(), 4);",
+  )[0];
+  assert.equal(hint.check, "missing-call");
+  assert.equal(hint.target.snippet, "console.log");
+  assert.equal(hint.issue, undefined);
+  assert.equal(
+    collect(
+      "// observes: src/core.ts#compute via missing call\nassert.equal(compute(), 4);",
+    )[0].check,
+    undefined,
+  );
+  assert.equal(
+    collect(
+      "// observes: src/core.ts#compute; check anything\nassert.equal(compute(), 4);",
+    )[0].issue,
+    "unsupported-check-recipe",
+  );
 });

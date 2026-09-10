@@ -11,6 +11,7 @@ import { assertionWitnessIssue, collectPragmas } from "./pragmas.js";
 import { awaitedObservationSource } from "./awaited-observations.js";
 import {
   analyzeMockCounts,
+  analyzeFirstTestOmission,
   sourceTestRows,
   type MockCountEvidence,
 } from "./mock-counts.js";
@@ -3649,37 +3650,35 @@ export function analyzeWithFrontend(
     unrecognized.set(key, (unrecognized.get(key) ?? 0) + 1);
   }
 
+  const mockModel = {
+    declaration: declOf,
+    location: comparisonLocation,
+    nativeMock: nativeContextMock,
+    nativePredicate: (call: ts.CallExpression) =>
+      nativeComparison(call)?.predicate,
+    nativeTest: nativeTestRegistration,
+    globalConsole: (expr: ts.Expression) => {
+      const e = comparisonExpression(expr);
+      const d = declOf(e);
+      return (
+        ts.isIdentifier(e) &&
+        e.text === "console" &&
+        (!d || d.getSourceFile().isDeclarationFile)
+      );
+    },
+    production: (node: ts.Node) => isProdFile(node.getSourceFile()),
+    site: (call: ts.CallExpression) =>
+      smallestSiteContaining(
+        rel(call.getSourceFile()),
+        call.getStart(),
+        call.getEnd(),
+      )?.id,
+  };
   function countModel(
     fn: ts.Node,
     row?: Parameters<typeof analyzeMockCounts>[3],
   ) {
-    return analyzeMockCounts(
-      ts,
-      fn,
-      {
-        declaration: declOf,
-        location: comparisonLocation,
-        nativeMock: nativeContextMock,
-        nativePredicate: (call) => nativeComparison(call)?.predicate,
-        globalConsole: (expr) => {
-          const e = comparisonExpression(expr);
-          const d = declOf(e);
-          return (
-            ts.isIdentifier(e) &&
-            e.text === "console" &&
-            (!d || d.getSourceFile().isDeclarationFile)
-          );
-        },
-        production: (node) => isProdFile(node.getSourceFile()),
-        site: (call) =>
-          smallestSiteContaining(
-            rel(call.getSourceFile()),
-            call.getStart(),
-            call.getEnd(),
-          )?.id,
-      },
-      row,
-    );
+    return analyzeMockCounts(ts, fn, mockModel, row);
   }
 
   function analyzeTestBody(
@@ -5668,21 +5667,92 @@ export function analyzeWithFrontend(
     };
   });
 
+  const pragmas = pragmaCollector.finish(
+    runtimeTests.flatMap((rt) => {
+      const st = staticFor(rt);
+      return st
+        ? [
+            {
+              testKey: staticTestKey(st.file, st.line, st.name),
+              id: rt.id,
+              phases: runtimePhases.get(rt.id),
+            },
+          ]
+        : [];
+    }),
+  );
+  for (const hint of pragmas) {
+    if (
+      !hint.check ||
+      hint.issue ||
+      hint.witness !== "passed" ||
+      hint.candidateSites.length !== 1
+    )
+      continue;
+    const rt = runtimeTests.find((t) => t.id === hint.test);
+    const st = rt && staticFor(rt),
+      body = st && mockBodies.get(st);
+    const target = siteNodes.get(hint.candidateSites[0]);
+    hint.callOmission = {
+      model: "node-first-test-call-omission-v1",
+      status: "unresolved",
+      reason: "omission-source-or-runtime-unavailable",
+    };
+    if (!rt || rt.runner !== "node:test" || !body) {
+      hint.callOmission.reason = !rt
+        ? "omission-runtime-test-unavailable"
+        : rt.runner !== "node:test"
+          ? "omission-unsupported-runner"
+          : "omission-static-body-unavailable";
+      continue;
+    }
+    if (!target || !ts.isCallExpression(target)) {
+      hint.callOmission.reason = "omission-target-not-call-expression";
+      continue;
+    }
+    if (
+      (runtimeRowTitles.get(JSON.stringify([rt.file, rt.title])) ?? 0) !== 1
+    ) {
+      hint.callOmission.reason = "omission-ambiguous-runtime-title";
+      continue;
+    }
+    let assertion: ts.CallExpression | undefined;
+    const originalLocation = (n: ts.Node) => {
+      const sf = n.getSourceFile(),
+        p = sf.getLineAndCharacterOfPosition(n.getStart(sf));
+      return `${rel(sf)}:${p.line + 1}:${p.character + 1}`;
+    };
+    const visit = (n: ts.Node) => {
+      if (
+        ts.isCallExpression(n) &&
+        originalLocation(n) === hint.assertionSource
+      )
+        assertion = n;
+      ts.forEachChild(n, visit);
+    };
+    visit(body);
+    if (!assertion) {
+      hint.callOmission.reason = "omission-assertion-source-unavailable";
+      continue;
+    }
+    const plan = sourceTestRows(ts, body, mockModel);
+    const row = plan?.rows.find((r) => r.evidence.title === rt.title);
+    if (plan && (!row || plan.reason)) {
+      hint.callOmission.reason =
+        plan.reason ?? "omission-runtime-row-unavailable";
+      continue;
+    }
+    hint.callOmission = analyzeFirstTestOmission(
+      ts,
+      body,
+      assertion,
+      target,
+      { ...mockModel, location: originalLocation },
+      row,
+    );
+  }
   return {
-    pragmas: pragmaCollector.finish(
-      runtimeTests.flatMap((rt) => {
-        const st = staticFor(rt);
-        return st
-          ? [
-              {
-                testKey: staticTestKey(st.file, st.line, st.name),
-                id: rt.id,
-                phases: runtimePhases.get(rt.id),
-              },
-            ]
-          : [];
-      }),
-    ),
+    pragmas,
     facts: {
       schema: 1,
       root,

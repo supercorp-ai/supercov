@@ -303,6 +303,54 @@ coverage or remove sites from the denominator. Editing comments changes test
 source and requires a new run. Supported hints retain the analyzer's limitations;
 they are not formal proofs.
 
+### A checked missing-call question
+
+```ts
+// observes: src/logger.ts#stdout console.log; check missing call
+assert.equal(log.mock.callCount(), 1);
+```
+
+The optional `; check missing call` suffix selects a bounded source-analysis
+recipe. It targets a console emission, excluding a containing callback-return
+inventory entry. Existing `via` text remains explanatory, not executable guidance.
+The question is precise: replace the selected expression-bodied arrow callback
+with `() => undefined`. This removes its body on **every invocation**, not just
+one recorded call. It says nothing about changing argument values or arbitrary
+edits in the enclosing function.
+
+The `node-first-test-call-omission-v1` model checks a closed test-file prefix and
+the first synchronous native Node test (or first row of a checked registration
+table). Only native test/assert imports and the selected production module may
+initialize that test scope. The production module's initialization must be pure
+under the existing bounded source interpreter. The supported source prefix has
+no earlier registrations, hooks, async suspension, opaque operations or mutations.
+This is what allows the model to read the module's initial shared objects; a
+comment never disables the ordinary shared-history guard for other analysis.
+
+The model interprets the supported prefix twice after the run, with and without
+that callback body, through the selected independent integer count assertion.
+The original modeled count must match the expectation and the assertion must
+have its own exact passing witness. The named call must participate in the
+selected history. Wrong histories, resets that erase the evidence, later rows,
+unsupported source and absent witnesses stay unresolved. Source-driven helper,
+receiver and variable names are not fixed by this recipe.
+
+`--pragmas` returns `hint.callOmission` with the source locations, mock instance,
+original/omitted/expected counts and an outcome of `rejected` or `not-rejected`.
+A sliced history can hide an omitted call when another call fills its slot;
+`not-rejected` concerns **this assertion only**, never whole-suite survival.
+Support uses `validation: analyzer-supported`, with no site `strength` and no
+change to ordinary candidate verdicts or the global assertion score.
+
+These conclusions depend on normal isolated Node test-file loading and serial
+registration execution, the matching compiler, unmodified native assertion/mock
+APIs and built-ins, and finite ordinary execution. The source checker does not
+prove those environmental assumptions or implement arbitrary JavaScript semantics.
+Do not apply its result to custom preloads, non-isolated module histories or
+different scheduling contracts. The existing source-freshness checks still apply.
+No mutation is executed during querying and no new test-time probe is installed.
+Invalid or unsupported hints only affect analysis; they never fail a test.
+
 ### Awaited child-process capture helpers
 
 For a bounded Node `test` pattern, a hint can attach to an awaited helper that
