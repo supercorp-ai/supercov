@@ -123,10 +123,11 @@ test(
     ok(execute(binary, ["--", process.execPath, ...suite]));
     const runs = readdirSync(resolve(root, ".supercov/runs"));
     assert.equal(runs.length, 1);
-    const query = (...args) =>
+    const queryRun = (run, ...args) =>
       JSON.parse(
-        ok(execute(binary, ["runs", runs[0], "assertions", ...args, "--json"])),
+        ok(execute(binary, ["runs", run, "assertions", ...args, "--json"])),
       ).data;
+    const query = (...args) => queryRun(runs[0], ...args);
     const report = query("--limit", "1000");
     assert.equal(report.pagination.hasMore, false);
     const decisions = report.sites.filter((r) => r.site.kind === "decision");
@@ -205,5 +206,122 @@ test(
         assert.notEqual(result.stuckFalseCaught, true);
       },
     );
+
+    // Paired real captures: source and matching numeric expectations change,
+    // while the function shape and source locations stay the same. Do not reuse
+    // the original archive against changed source (freshness must remain valid).
+    const testPath = resolve(root, "tests/core.test.mjs");
+    const originalTest = readFileSync(testPath, "utf8");
+    const beforeReturn = "return 7;\n  } else {\n    return 7;";
+    const afterReturn = "return 7;\n  } else {\n    return 8;";
+    const beforeExpected = "assert.equal(identical(false), 7);";
+    const afterExpected = "assert.equal(identical(false), 8);";
+    assert.equal(original.split(beforeReturn).length, 2);
+    assert.equal(originalTest.split(beforeExpected).length, 2);
+    const alternateSource = original.replace(beforeReturn, afterReturn);
+    const alternateTest = originalTest.replace(beforeExpected, afterExpected);
+    const isolatedFacts = (report, evidence) => {
+      const sites = report.sites
+        .filter((r) => r.site.owner === "identical")
+        .map((r) => r.facts);
+      const tests = evidence.items
+        .map((item) => item.value)
+        .filter((row) =>
+          row.observations.some((ob) => ob.boundary === "return:identical"),
+        );
+      assert.equal(sites.length, 3);
+      assert.equal(tests.length, 2);
+      assert.ok(sites.every((site) => site.reached.length === 0));
+      assert.ok(tests.every((row) => row.observations.length === 1));
+      // Opaque ids may vary by capture. Preserve all semantic fields and only
+      // rename ids to their stable source locations; sort set-valued lists.
+      const ids = new Map([
+        ...sites.map((site) => [
+          site.id,
+          `${site.file}:${site.line}:${site.kind}`,
+        ]),
+        ...tests.map((row) => [row.id, row.observations[0].assertionSource]),
+      ]);
+      assert.equal(new Set(ids.values()).size, 5);
+      const sets = new Set([
+        "sites",
+        "tests",
+        "coveredBy",
+        "true",
+        "false",
+        "reached",
+      ]);
+      const normalize = (value, key) => {
+        if (typeof value === "string") return ids.get(value) ?? value;
+        if (Array.isArray(value)) {
+          const entries = value.map((v) => normalize(v));
+          return sets.has(key)
+            ? entries.sort((a, b) =>
+                JSON.stringify(a).localeCompare(JSON.stringify(b)),
+              )
+            : entries;
+        }
+        if (value && typeof value === "object")
+          return Object.fromEntries(
+            Object.entries(value)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([k, v]) => [k, normalize(v, k)]),
+          );
+        return value;
+      };
+      return normalize({ sites, tests });
+    };
+    try {
+      writeFileSync(core, alternateSource);
+      writeFileSync(testPath, alternateTest);
+      assert.match(ok(execute(process.execPath, suite)), /^# pass 10$/m);
+      for (const forced of ["true", "false"]) {
+        try {
+          writeFileSync(
+            core,
+            alternateSource.replace("if (sameFlag)", `if (${forced})`),
+          );
+          const result = execute(process.execPath, suite);
+          assert.equal(result.error, undefined);
+          assert.equal(result.signal, null);
+          assert.equal(result.status, 1, result.stdout + result.stderr);
+          assert.match(result.stdout, /ERR_ASSERTION/);
+        } finally {
+          writeFileSync(core, alternateSource);
+        }
+      }
+      ok(execute(binary, ["--", process.execPath, ...suite]));
+      const newRuns = readdirSync(resolve(root, ".supercov/runs")).filter(
+        (run) => !runs.includes(run),
+      );
+      assert.equal(newRuns.length, 1);
+      const alternateReport = queryRun(newRuns[0], "--limit", "1000");
+      const alternateEvidence = queryRun(
+        newRuns[0],
+        "--evidence",
+        "/tests",
+        "--limit",
+        "1000",
+      );
+      assert.equal(alternateReport.pagination.hasMore, false);
+      assert.equal(alternateEvidence.pagination.hasMore, false);
+      const beforeFacts = isolatedFacts(report, page);
+      const afterFacts = isolatedFacts(alternateReport, alternateEvidence);
+      t.diagnostic(
+        JSON.stringify({ comparisonRun: newRuns[0], beforeFacts, afterFacts }),
+      );
+      await t.test(
+        "engine facts retain distinctions needed for opposite sensitivity verdicts",
+        {
+          todo: "SG-ASSERT-017: source return values and numeric predicates are absent from join facts",
+        },
+        () => {
+          assert.notDeepEqual(beforeFacts, afterFacts);
+        },
+      );
+    } finally {
+      writeFileSync(core, original);
+      writeFileSync(testPath, originalTest);
+    }
   },
 );
