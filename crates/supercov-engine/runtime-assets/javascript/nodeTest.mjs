@@ -2,7 +2,7 @@ import * as native from "node:test";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { beginBufferedServerEvidence, flushBufferedServerEvidence, takeNodeAssertionPhases, withCoverageCarrier, } from "./runtime.mjs";
-import { callerLocation, runnerExecutionScope, writeRunnerEvidence, } from "./runnerEvidence.mjs";
+import { callerLocation, runnerExecutionScope, runnerTestId, writeRunnerEvidence, } from "./runnerEvidence.mjs";
 function callbackIndex(args) {
     for (let index = args.length - 1; index >= 0; index -= 1)
         if (typeof args[index] === "function")
@@ -86,7 +86,8 @@ function restoreUserError(error, depth = 0) {
     }
     return error;
 }
-function wrappedRegistration(original) {
+const registrationCounts = new Map();
+function wrappedRegistration(original, parentTestId) {
     const wrapped = function supercovNodeTest(...args) {
         const index = callbackIndex(args);
         if (index < 0)
@@ -96,6 +97,7 @@ function wrappedRegistration(original) {
         const identity = {
             runner: "node:test",
             name: testName(args, callback),
+            ...(parentTestId ? { parentTestId } : {}),
             ...location,
             // Source-map producers disagree about whether a call expression maps to
             // its first token or the first token on its source line. The line and
@@ -104,6 +106,12 @@ function wrappedRegistration(original) {
             // keeps one identity when esbuild, Babel, SWC, or TypeScript rewrites it.
             ...(location.line === undefined ? {} : { column: 1 }),
         };
+        // Allocate at registration, never callback completion: concurrent tests
+        // can finish in any order. Count each source/name within its parent.
+        const registrationKey = runnerTestId(identity);
+        const registrationOrdinal = registrationCounts.get(registrationKey) ?? 0;
+        registrationCounts.set(registrationKey, registrationOrdinal + 1);
+        identity.registrationOrdinal = registrationOrdinal;
         const scope = runnerExecutionScope(identity);
         const options = testOptions(args, index);
         const evidenceDirectory = process.env["SUPERCOV_EVIDENCE_DIR"];
@@ -129,7 +137,7 @@ function wrappedRegistration(original) {
                         };
                     }
                     if (property === "test" && typeof value === "function")
-                        return wrappedRegistration(value.bind(target));
+                        return wrappedRegistration(value.bind(target), scope.testId);
                     return typeof value === "function" ? value.bind(target) : value;
                 },
             });
@@ -192,7 +200,7 @@ function wrappedRegistration(original) {
             Object.defineProperty(wrapped, property, {
                 configurable: true,
                 enumerable: true,
-                value: wrappedRegistration(member),
+                value: wrappedRegistration(member, parentTestId),
             });
     }
     return wrapped;

@@ -9,6 +9,13 @@ This is candidate evidence, not a proof that arbitrary changes are safe.
 `assertionScore` remains null. Execution-only links, test gaps and analysis limits
 are different things; do not interpret a passing assertion nearby as protection.
 
+Repeated Node test registrations retain separate test and attempt identities,
+including same-name loop entries, nested `t.test` registrations and separate
+worker executions. This prevents one attempt from overwriting another; it does
+not prove which source-table row produced an ambiguous title. Such row guidance
+remains unresolved. Rerun suites to collect corrected evidence: already lost
+attempts cannot be recovered from an older archive.
+
 An unsupported operand in a passing assertion can leave its relationship to
 code covered by that test unknown. Such sites report an operand-shape limit,
 not proof that an assertion is absent. This does not give those sites assertion

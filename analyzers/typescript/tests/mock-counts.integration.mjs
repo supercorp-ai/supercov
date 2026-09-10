@@ -348,6 +348,19 @@ test(
     };
     const report = complete("sites"),
       page = complete("items", "--evidence", "/tests");
+    // Larger attempt identities can push a site's evidence over the inline
+    // budget. Follow its public pointer instead of assuming every row is inline.
+    for (const row of report.sites) {
+      if (!row.detailOnly) continue;
+      const detail = complete("items", "--evidence", `${row.evidence.pointer}/site`,
+        "--analysis", report.analysisId);
+      assert.ok(detail.items.every(item => Object.hasOwn(item, "value")));
+      row.site = Object.fromEntries(detail.items.map(item => [item.key, item.value]));
+      const status = query("--evidence", `${row.evidence.pointer}/candidate/status`,
+        "--analysis", report.analysisId);
+      assert.equal(status.pagination.hasMore, false);
+      row.candidate = { status: status.text };
+    }
     const attempts = complete("items", "--evidence", "/attempts");
     const nativeOccurrences = new Map();
     for (const name of nativeNames)
@@ -359,17 +372,10 @@ test(
       const actual = attempts.items.filter(
         (item) => item.value.name === name,
       ).length;
-      if (count === 1)
-        assert.equal(actual, 1, `unique native attempt missing: ${name}`);
-      else assert.ok(actual >= 1 && actual <= count, name);
+      assert.equal(actual, count, `native attempt missing: ${name}`);
     }
-    // Two native tests with the same title currently collapse in capture. Do not
-    // turn that loss into the expected denominator; retain the desired behavior.
     await t.test(
       "capture preserves both same-title row attempts",
-      {
-        todo: "Duplicate-title capture loses an attempt; row analysis must not guess its identity",
-      },
       () =>
         assert.equal(
           attempts.items.filter(
@@ -378,7 +384,8 @@ test(
           2,
         ),
     );
-    assert.ok(page.items.length >= 65 && page.items.length <= 66);
+    assert.equal(attempts.items.length, nativeNames.length);
+    assert.equal(page.items.length, nativeNames.length);
     const sourceLines = readFileSync(
       resolve(root, "tests/core.test.mjs"),
       "utf8",

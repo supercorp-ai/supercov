@@ -27,13 +27,20 @@ function localFile(file) {
     return relative(process.cwd(), absolute).split(sep).join("/");
 }
 export function runnerTestId(identity) {
-    const key = [
+    const parts = [
         identity.runner,
         localFile(identity.file) ?? "unknown",
         identity.line ?? 0,
         identity.column ?? 0,
         identity.name,
-    ].join("\0");
+    ];
+    // Preserve existing top-level, uniquely registered test IDs. Nested tests
+    // and repeated registrations need more than a shared source/name identity.
+    if (identity.parentTestId)
+        parts.push("parent", identity.parentTestId);
+    if (identity.registrationOrdinal)
+        parts.push("registration", identity.registrationOrdinal);
+    const key = parts.join("\0");
     return `${identity.runner}:${createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
 }
 export function runnerExecutionScope(identity) {
@@ -50,7 +57,9 @@ export function runnerExecutionScope(identity) {
         testId,
         testKey,
         retry,
-        attemptId: `${testKey}-${retry}`,
+        // Different processes/worker threads can execute the same registration.
+        // Their files must not collide even though the stable test ID is shared.
+        attemptId: `${testKey}-${retry}-${processInstanceToken()}`,
     };
 }
 export function callerLocation(boundary = callerLocation) {
