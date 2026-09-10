@@ -40,7 +40,11 @@ export function runnerTestId(identity) {
         parts.push("parent", identity.parentTestId);
     if (identity.registrationOrdinal)
         parts.push("registration", identity.registrationOrdinal);
-    const key = parts.join("\0");
+    // Titles can themselves contain separator text. Domain-separate and encode
+    // the extended identity structurally so it cannot alias a literal title.
+    const key = identity.parentTestId || identity.registrationOrdinal
+        ? JSON.stringify(["registration-v2", ...parts])
+        : parts.join("\0");
     return `${identity.runner}:${createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
 }
 export function runnerExecutionScope(identity) {

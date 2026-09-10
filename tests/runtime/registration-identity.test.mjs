@@ -14,6 +14,10 @@ test("registration identity preserves unique tests and keeps retries separate", 
   const variants = [identity, { ...identity, registrationOrdinal: 1 },
     { ...identity, parentTestId: "a" }, { ...identity, parentTestId: "b" }];
   assert.equal(new Set(variants.map(runnerTestId)).size, variants.length);
+  assert.notEqual(runnerTestId({ ...identity, registrationOrdinal: 1 }),
+    runnerTestId({ ...identity, name: "same\u0000registration\u00001" }));
+  assert.notEqual(runnerTestId({ ...identity, parentTestId: "a" }),
+    runnerTestId({ ...identity, name: "same\u0000parent\u0000a" }));
   const first = runnerExecutionScope(identity);
   const retry = runnerExecutionScope({ ...identity, retry: 1 });
   assert.equal(first.testId, retry.testId);
