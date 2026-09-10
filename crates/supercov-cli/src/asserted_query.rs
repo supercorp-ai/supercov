@@ -24,7 +24,7 @@ const HELP: &str = "Usage: supercov runs <run-id> assertions [--pragmas | --evid
 pub const AGENT_COMMAND: &str = "coverage.assertions";
 
 fn protocol() -> Value {
-    json!({"abi":1,"factsSchema":1,"rules":"source-linked-v3/archive-3","capabilities":["requiresTotal-v1", "assertion-witness-issues-v1", "assertion-hints-v1"]})
+    json!({"abi":1,"factsSchema":1,"rules":"source-linked-v3/archive-3","capabilities":["requiresTotal-v1", "assertion-witness-issues-v1", "complete-passed-test-inventory-v1", "witnessed-callback-scope-v1", "assertion-hints-v1", "awaited-observation-sources-v1", "first-test-call-omission-v1", "closed-count-sensitivity-v1", "closed-payload-sensitivity-v1", "payload-native-predicates-v1", "first-test-direct-return-v1", "mock-observation-projections-v1", "assertion-comparison-relations-v2", "process-exit-source-v1", "process-exit-consumer-v1", "mock-count-lifetimes-v1", "mock-count-factories-v1", "mock-count-rows-v1", "mock-count-array-projections-v1", "primitive-decision-sensitivity-v1"]})
 }
 #[derive(Default)]
 struct Options {
@@ -481,11 +481,15 @@ pub fn command(args: &[String]) -> ExitCode {
                         continue;
                     }
                     println!(
-                        "{}:{} {} — candidate {}; unverified",
+                        "{}:{} {} — candidate {}; unverified{}",
                         row["site"]["file"].as_str().unwrap(),
                         row["site"]["start"]["line"],
                         row["site"]["category"].as_str().unwrap(),
-                        row["candidate"]["status"].as_str().unwrap()
+                        row["candidate"]["status"].as_str().unwrap(),
+                        row["candidate"]["sensitivityBasis"]
+                            .as_str()
+                            .map(|basis| format!("; sensitivity: {basis}"))
+                            .unwrap_or_default()
                     );
                 }
                 println!("Use --json for evidence, limitations, freshness and analyzer identity.");

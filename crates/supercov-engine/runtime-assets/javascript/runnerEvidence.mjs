@@ -27,13 +27,24 @@ function localFile(file) {
     return relative(process.cwd(), absolute).split(sep).join("/");
 }
 export function runnerTestId(identity) {
-    const key = [
+    const parts = [
         identity.runner,
         localFile(identity.file) ?? "unknown",
         identity.line ?? 0,
         identity.column ?? 0,
         identity.name,
-    ].join("\0");
+    ];
+    // Preserve existing top-level, uniquely registered test IDs. Nested tests
+    // and repeated registrations need more than a shared source/name identity.
+    if (identity.parentTestId)
+        parts.push("parent", identity.parentTestId);
+    if (identity.registrationOrdinal)
+        parts.push("registration", identity.registrationOrdinal);
+    // Titles can themselves contain separator text. Domain-separate and encode
+    // the extended identity structurally so it cannot alias a literal title.
+    const key = identity.parentTestId || identity.registrationOrdinal
+        ? JSON.stringify(["registration-v2", ...parts])
+        : parts.join("\0");
     return `${identity.runner}:${createHash("sha256").update(key).digest("hex").slice(0, 24)}`;
 }
 export function runnerExecutionScope(identity) {
@@ -50,24 +61,35 @@ export function runnerExecutionScope(identity) {
         testId,
         testKey,
         retry,
-        attemptId: `${testKey}-${retry}`,
+        // Different processes/worker threads can execute the same registration.
+        // Their files must not collide even though the stable test ID is shared.
+        attemptId: `${testKey}-${retry}-${processInstanceToken()}`,
     };
 }
-export function callerLocation(ignored) {
-    const lines = new Error().stack?.split("\n").slice(2) ?? [];
-    for (const entry of lines) {
-        if (ignored.test(entry) || entry.includes("node:internal"))
-            continue;
-        const match = /(?:\(|at\s+)(file:\/\/[^:)]+|(?:[A-Za-z]:)?[^():]+):(\d+):(\d+)\)?$/.exec(entry.trim());
+export function callerLocation(boundary = callerLocation) {
+    // Omit the registration wrapper by identity. A user file may have the same
+    // basename as a runtime adapter. Parse the location suffix, not individual
+    // path segments: spaces, parentheses and Unicode are valid filenames.
+    try {
+        const error = {};
+        Error.captureStackTrace(error, boundary);
+        if (typeof error.stack !== "string")
+            return {};
+        const entry = error.stack.split("\n")[1]?.trim();
+        const match = entry && /(?:^at (?:async )?| \()((?:file:\/\/|\/|[A-Za-z]:[\\/]|\\\\).*):(\d+):(\d+)\)?$/.exec(entry);
         if (!match)
-            continue;
+            return {};
         return {
             file: match[1],
             line: Number(match[2]),
             column: Number(match[3]),
         };
     }
-    return {};
+    catch {
+        // Custom formatters must not prevent registration. Missing provenance
+        // is explicit, never replaced with an unrelated deeper caller.
+        return {};
+    }
 }
 export function readScopedServerEvidence(scope, evidencePath = serverEvidencePath(scope)) {
     try {

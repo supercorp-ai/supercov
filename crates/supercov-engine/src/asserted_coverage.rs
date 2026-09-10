@@ -66,7 +66,230 @@ impl Boundary {
     }
 }
 
-/// What one assertion reads, as the frontend understood it.
+/// Which part of a mock's history a passing assertion reads. This is source
+/// evidence; relating a history element to a production site remains unresolved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MockProjection {
+    pub target: String,
+    pub kind: String,
+    pub path: Vec<String>,
+    /// A bounded source-model count, not argument protection or general site credit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count_evidence: Option<MockCountEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MockCountCall {
+    pub source: String,
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MockCountEvidence {
+    pub model: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_at_read: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calls: Option<Vec<MockCountCall>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_selections: Option<Vec<MockHistorySelection>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_binding: Option<MockCountRowBinding>,
+}
+
+/// A bounded selection from a copied history, not a claim about the whole mock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MockHistorySelection {
+    pub source: String,
+    pub input_count: u64,
+    pub from: u64,
+    pub to: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MockCountRowValue {
+    pub declaration: String,
+    pub name: String,
+    pub value: serde_json::Value,
+}
+
+/// Source-reproduced registration inputs; not a value-protection proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MockCountRowBinding {
+    pub model: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#loop: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bindings: Option<Vec<MockCountRowValue>>,
+}
+
+/// Source identities of both operands. Equal source text is not binding identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComparisonOperand {
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<SourcePrimitive>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<ComparisonInput>,
+}
+
+/// Source literals, not sampled runtime values. Numeric text preserves -0.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "lowercase")]
+pub enum SourcePrimitive {
+    Number(String),
+    String(String),
+    Boolean(bool),
+    Null,
+}
+
+impl SourcePrimitive {
+    fn same_value(&self, other: &Self) -> Option<bool> {
+        let valid = |v: &Self| match v {
+            Self::Number(n) => n.parse::<f64>().ok().is_some_and(f64::is_finite),
+            _ => true,
+        };
+        if !valid(self) || !valid(other) {
+            return None;
+        }
+        Some(match (self, other) {
+            (Self::Number(a), Self::Number(b)) => {
+                a.parse::<f64>().ok()?.to_bits() == b.parse::<f64>().ok()?.to_bits()
+            }
+            (Self::String(a), Self::String(b)) => a == b,
+            (Self::Boolean(a), Self::Boolean(b)) => a == b,
+            (Self::Null, Self::Null) => true,
+            _ => false,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrimitiveDecisionCheck {
+    pub test: String,
+    pub assertion_source: String,
+    pub predicate: String,
+    pub expected: SourcePrimitive,
+    pub original_outcome: bool,
+}
+
+/// Bounded direct-call, side-effect-free literal branches checked by the frontend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrimitiveDecision {
+    pub model: String,
+    pub source: String,
+    pub when_true: SourcePrimitive,
+    pub when_false: SourcePrimitive,
+    pub checks: Vec<PrimitiveDecisionCheck>,
+}
+
+/// Input provenance through const aliases/await, not evaluated value identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComparisonInput {
+    pub binding: String,
+    pub awaits: Vec<String>,
+}
+
+/// Checked resolver syntax, not a checked runtime/producer instance relation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessExitEvidence {
+    pub model: String,
+    pub status: String,
+    pub reason: String,
+    pub operand: String,
+    pub helper_calls: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promise: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<ProcessExitEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<ProcessExitResolution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer: Option<ProcessExitConsumer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessExitConsumer {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub bindings: Vec<String>,
+    pub read: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessExitEvent {
+    pub source: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessExitResolution {
+    pub status: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    pub event_argument: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Comparison {
+    pub predicate: String,
+    pub actual: ComparisonOperand,
+    pub expected: ComparisonOperand,
+    pub relation: String,
+}
+
+/// Predicate strength applies to the projected value, not automatically to the
+/// arguments or count of each production call contributing to a mock history.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Observation {
@@ -87,6 +310,12 @@ pub struct Observation {
     /// the assertion pins a sink's whole call list, so a spurious or missing call shows up
     #[serde(default)]
     pub call_list: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mock: Option<MockProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<Comparison>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_exit: Option<ProcessExitEvidence>,
     /// a whole-page render witnessed the site: it ran, but its output was not read
     #[serde(default)]
     pub weak: bool,
@@ -101,9 +330,28 @@ pub struct Observation {
 }
 
 impl Observation {
+    /// Reflexive comparisons do not constrain their stable value. Shared input
+    /// through await may constrain something, but needs a separate dependence
+    /// model before it can supply producer value, absence or pragma credit.
+    /// Exit channels additionally need a checked producer/result-instance link;
+    /// even accepted resolver source syntax is insufficient on its own.
+    fn can_constrain_value(&self) -> bool {
+        self.mock.is_none()
+            && self.boundary != "exit"
+            && self.comparison.as_ref().is_none_or(|c| {
+                !matches!(
+                    c.relation.as_str(),
+                    "same-immutable-binding" | "shared-input-through-await"
+                )
+            })
+    }
+
     /// Does this observation read the given boundary of the given site? Dense channels need the message
     /// constraint checked, and a spy on one console method sees only that method's calls.
     fn matches(&self, site: &Site, at: &Boundary) -> bool {
+        if !self.can_constrain_value() {
+            return false;
+        }
         if at.boundary != self.boundary {
             return false;
         }
@@ -171,6 +419,12 @@ pub struct TestFacts {
 #[serde(rename_all = "kebab-case")]
 pub enum WitnessIssueKind {
     CaptureUnavailable,
+    /// Runtime attribution exists, but no source test body could be linked.
+    /// This is missing analysis, not evidence that the test contains no oracle.
+    TestSourceUnlinked,
+    /// Exact passing calls identify a callback, not its registrar, row inputs,
+    /// failure propagation, or the whole test's other observers.
+    TestRegistrationScopeUnverified,
     CallNotRecorded,
     CallIncomplete,
     MixedCallOutcomes,
@@ -179,6 +433,15 @@ pub enum WitnessIssueKind {
 }
 
 impl WitnessIssueKind {
+    fn applies_to_whole_test(self) -> bool {
+        matches!(
+            self,
+            Self::CaptureUnavailable
+                | Self::TestSourceUnlinked
+                | Self::TestRegistrationScopeUnverified
+        )
+    }
+
     fn is_uncertain(self) -> bool {
         self != Self::CallFailed
     }
@@ -220,6 +483,8 @@ where
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DecisionFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primitive: Option<PrimitiveDecision>,
     /// the site that carries the decision's value (a ternary inside a return, say)
     #[serde(default)]
     pub carrier: Option<String>,
@@ -348,6 +613,665 @@ pub struct PragmaHint {
     pub assertion_method: Option<String>,
     pub witness: String,
     pub witness_issue: Option<String>,
+    /// A checked source pattern, not a captured read or a passing assertion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaited_observation: Option<AwaitedObservationSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_omission: Option<CallOmissionEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count_sensitivity: Option<CountSensitivityEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_sensitivity: Option<PayloadSensitivityEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_return_sensitivity: Option<DirectReturnSensitivityEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_sensitivity: Option<CompletionSensitivityEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionSensitivityEvidence {
+    pub model: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub scope: Option<String>,
+    pub assertion_source: Option<String>,
+    pub target_source: Option<String>,
+    pub change_text: Option<String>,
+    pub change: Option<String>,
+    pub original: Option<CompletionCheck>,
+    pub omitted: Option<CompletionCheck>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionCheck {
+    pub method: String,
+    pub callback_source: String,
+    pub completion: String,
+    pub throw_source: Option<String>,
+    pub target_evaluations: u64,
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matcher: Option<CompletionMatcher>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_exception_diagnostic: Option<MissingExceptionDiagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<CompletionDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionMatcher {
+    pub source: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MissingExceptionDiagnostic {
+    pub name_basis: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<serde_json::Value>,
+    pub message: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionDiagnostic {
+    pub basis: String,
+    pub message: serde_json::Value,
+}
+
+fn completion_evidence_issue(
+    hint: &PragmaHint,
+    e: &CompletionSensitivityEvidence,
+    site: &Site,
+    test: &TestFacts,
+) -> Option<String> {
+    let location_in = |location: &str, file: &str| {
+        location
+            .strip_prefix(&format!("{file}:"))
+            .and_then(|rest| rest.split_once(':'))
+            .is_some_and(|(line, column)| {
+                line.parse::<u32>().is_ok_and(|n| n > 0)
+                    && column.parse::<u32>().is_ok_and(|n| n > 0)
+            })
+    };
+    if e.model != "node-first-test-completion-v1"
+        || e.status != "source-checked"
+        || e.reason.is_some()
+        || e.scope.as_deref() != Some("first-synchronous-test-prefix")
+        || e.assertion_source != hint.assertion_source
+        || e.assertion_source
+            .as_ref()
+            .is_none_or(|s| !location_in(s, &test.file))
+        || e.target_source.as_ref().is_none_or(|s| {
+            !location_in(s, &site.file) || !s.starts_with(&format!("{}:{}:", site.file, site.line))
+        })
+        || e.change_text.as_ref().is_none_or(String::is_empty)
+        || e.change.as_deref() != Some("statement-omitted")
+        || !matches!(site.category.as_str(), "return" | "throw")
+        || hint.call_omission.is_some()
+        || hint.count_sensitivity.is_some()
+        || hint.payload_sensitivity.is_some()
+        || hint.direct_return_sensitivity.is_some()
+        || test.witness_issues.iter().any(|issue| {
+            issue.kind.applies_to_whole_test()
+                || (issue.source.is_some() && issue.source == hint.assertion_source)
+        })
+    {
+        return Some(
+            e.reason
+                .clone()
+                .unwrap_or_else(|| "unsupported-completion-evidence".into()),
+        );
+    }
+    let valid_primitive = |value: &serde_json::Value| {
+        let mut budget = 16;
+        valid_payload(value, 0, &mut budget)
+            && matches!(
+                value["kind"].as_str(),
+                Some("undefined" | "null" | "string" | "number" | "boolean")
+            )
+    };
+    let valid = |c: &CompletionCheck, original: bool| {
+        let rejected = match (c.method.as_str(), c.completion.as_str()) {
+            ("throws", "normal") | ("doesNotThrow", "throw") => Some(true),
+            ("throws", "throw") | ("doesNotThrow", "normal") => Some(false),
+            _ => None,
+        };
+        let predicate_valid = if let Some(m) = &c.matcher {
+            c.method == "throws"
+                && location_in(&m.source, &test.file)
+                && matches!(
+                    m.kind.as_str(),
+                    "native-regexp"
+                        | "source-function"
+                        | "native-error-constructor"
+                        | "native-error"
+                        | "object"
+                        | "array"
+                        | "none"
+                        | "message-overload"
+                )
+                && c.diagnostic.is_none()
+                && if original {
+                    c.completion == "throw"
+                        && c.outcome == "witnessed-pass"
+                        && c.missing_exception_diagnostic.is_none()
+                } else {
+                    c.completion == "normal"
+                        && c.outcome == "rejected"
+                        && c.missing_exception_diagnostic.as_ref().is_some_and(|d| {
+                            valid_primitive(&d.message)
+                                && (m.kind != "message-overload" || d.message["kind"] == "string")
+                                && match (m.kind.as_str(), d.name_basis.as_str(), &d.name) {
+                                    (
+                                        "native-regexp" | "array" | "none" | "message-overload"
+                                        | "object",
+                                        "absent",
+                                        None,
+                                    ) => true,
+                                    ("source-function", "source-function-name", None) => true,
+                                    (
+                                        "native-error-constructor" | "native-error",
+                                        "native-error-name",
+                                        Some(name),
+                                    ) => {
+                                        valid_primitive(name)
+                                            && name["kind"] == "string"
+                                            && name["value"] == "Error"
+                                    }
+                                    ("object", "own-primitive-name", Some(name)) => {
+                                        valid_primitive(name)
+                                    }
+                                    _ => false,
+                                }
+                        })
+                }
+        } else {
+            c.missing_exception_diagnostic.is_none()
+                && rejected
+                    .is_some_and(|r| c.outcome == if r { "rejected" } else { "not-rejected" })
+        };
+        predicate_valid
+            && if c.method == "doesNotThrow" && c.completion == "throw" {
+                c.diagnostic.as_ref().is_some_and(|d| {
+                    let mut budget = 16;
+                    valid_payload(&d.message, 0, &mut budget)
+                        && match d.basis.as_str() {
+                            "native-error-message" => d.message["kind"] == "string",
+                            "absent-message" | "primitive-thrown-value" => {
+                                d.message["kind"] == "undefined"
+                            }
+                            "own-primitive-message" => matches!(
+                                d.message["kind"].as_str(),
+                                Some("undefined" | "null" | "string" | "number" | "boolean")
+                            ),
+                            _ => false,
+                        }
+                })
+            } else {
+                c.diagnostic.is_none()
+            }
+            && hint.assertion_method.as_deref() == Some(c.method.as_str())
+            && (location_in(&c.callback_source, &test.file)
+                || location_in(&c.callback_source, &site.file))
+            && (1..=4096).contains(&c.target_evaluations)
+            && match (c.completion.as_str(), &c.throw_source) {
+                ("normal", None) => true,
+                ("throw", Some(s)) => location_in(s, &test.file) || location_in(s, &site.file),
+                _ => false,
+            }
+    };
+    if e.original.as_ref().is_none_or(|c| {
+        !valid(c, true) || !matches!(c.outcome.as_str(), "not-rejected" | "witnessed-pass")
+    }) || e.omitted.as_ref().is_none_or(|c| !valid(c, false))
+    {
+        return Some("inconsistent-completion-predicate".into());
+    }
+    // A matcher-backed question cannot lose/change the argument's source or
+    // borrow a witness for a changed still-throwing callback. Kind may change
+    // only because the same source expression was evaluated along a new path.
+    if e.original
+        .as_ref()
+        .and_then(|c| c.matcher.as_ref())
+        .map(|m| &m.source)
+        != e.omitted
+            .as_ref()
+            .and_then(|c| c.matcher.as_ref())
+            .map(|m| &m.source)
+    {
+        return Some("inconsistent-completion-matcher-source".into());
+    }
+    None
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectReturnSensitivityEvidence {
+    pub model: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub scope: Option<String>,
+    pub assertion_source: Option<String>,
+    pub target_source: Option<String>,
+    pub change_source: Option<String>,
+    pub change_text: Option<String>,
+    pub original: Option<DirectReturnCheck>,
+    pub variants: Option<Vec<DirectReturnVariant>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectReturnCheck {
+    pub predicate: String,
+    pub actual: serde_json::Value,
+    pub expected: serde_json::Value,
+    pub call_source: String,
+    pub target_evaluations: u64,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectReturnVariant {
+    pub change: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub check: Option<DirectReturnCheck>,
+}
+
+fn direct_return_evidence_issue(
+    hint: &PragmaHint,
+    e: &DirectReturnSensitivityEvidence,
+    site: &Site,
+    test: &TestFacts,
+) -> Option<String> {
+    let test_file = test.file.as_str();
+    let location_in = |location: &str, file: &str| {
+        location
+            .strip_prefix(&format!("{file}:"))
+            .and_then(|rest| rest.split_once(':'))
+            .is_some_and(|(line, column)| {
+                line.parse::<u32>().is_ok_and(|n| n > 0)
+                    && column.parse::<u32>().is_ok_and(|n| n > 0)
+            })
+    };
+    if e.model != "node-first-test-direct-return-v1"
+        || e.status != "source-checked"
+        || e.reason.is_some()
+        || e.scope.as_deref() != Some("first-synchronous-test-prefix")
+        || e.assertion_source != hint.assertion_source
+        || e.assertion_source
+            .as_ref()
+            .is_none_or(|s| !location_in(s, test_file))
+        || e.target_source
+            .as_ref()
+            .is_none_or(|s| !location_in(s, &site.file))
+        || e.target_source
+            .as_ref()
+            .is_none_or(|s| !s.starts_with(&format!("{}:{}:", site.file, site.line)))
+        || e.change_source
+            .as_ref()
+            .is_none_or(|s| !location_in(s, &site.file))
+        || e.change_text.as_ref().is_none_or(String::is_empty)
+        || !(site.kind == "decision" || site.category == "return")
+        || hint.payload_sensitivity.is_some()
+        || test.witness_issues.iter().any(|issue| {
+            issue.kind.applies_to_whole_test()
+                || (issue.source.is_some() && issue.source == hint.assertion_source)
+        })
+    {
+        return Some(
+            e.reason
+                .clone()
+                .unwrap_or_else(|| "unsupported-direct-return-evidence".into()),
+        );
+    }
+    let (Some(original), Some(variants)) = (&e.original, &e.variants) else {
+        return Some("incomplete-direct-return-evidence".into());
+    };
+    // This model has no opaque strings or assumed original predicate results.
+    fn concrete(value: &serde_json::Value, depth: usize) -> bool {
+        if depth > 32 {
+            return false;
+        }
+        match value["kind"].as_str() {
+            Some("undefined" | "null" | "string" | "number" | "boolean") => true,
+            Some("array" | "object") => value["properties"]
+                .as_array()
+                .is_some_and(|ps| ps.iter().all(|p| concrete(&p["value"], depth + 1))),
+            _ => false,
+        }
+    }
+    let valid = |c: &DirectReturnCheck| {
+        let mut budget = 4096;
+        matches!(
+            c.predicate.as_str(),
+            "node-same-value" | "node-deep-strict-equality"
+        ) && location_in(&c.call_source, test_file)
+            && (1..=4096).contains(&c.target_evaluations)
+            && valid_payload(&c.actual, 0, &mut budget)
+            && valid_payload(&c.expected, 0, &mut budget)
+            && concrete(&c.actual, 0)
+            && concrete(&c.expected, 0)
+            && payload_equal(
+                &c.actual,
+                &c.expected,
+                c.predicate == "node-deep-strict-equality",
+            )
+            .is_some_and(|equal| c.outcome == if equal { "not-rejected" } else { "rejected" })
+    };
+    if !valid(original)
+        || original.outcome != "not-rejected"
+        || !matches!(
+            (
+                hint.assertion_method.as_deref(),
+                original.predicate.as_str()
+            ),
+            (Some("equal" | "strictEqual"), "node-same-value")
+                | (
+                    Some("deepEqual" | "deepStrictEqual"),
+                    "node-deep-strict-equality"
+                )
+        )
+    {
+        return Some("direct-return-assertion-not-modelled".into());
+    }
+    let mut names: Vec<_> = variants.iter().map(|v| v.change.as_str()).collect();
+    names.sort();
+    if !(names == ["boolean-literal-inverted"]
+        || names == ["condition-false", "condition-inverted", "condition-true"])
+        || (names == ["boolean-literal-inverted"]
+            && !matches!(e.change_text.as_deref(), Some("true" | "false")))
+        || variants.iter().any(|v| match v.status.as_str() {
+            "source-checked" => {
+                v.reason.is_some()
+                    || v.check.as_ref().is_none_or(|c| {
+                        !valid(c)
+                            || c.call_source != original.call_source
+                            || c.expected != original.expected
+                            || c.predicate != original.predicate
+                    })
+            }
+            "unresolved" => v.reason.as_ref().is_none_or(String::is_empty) || v.check.is_some(),
+            _ => true,
+        })
+    {
+        return Some("inconsistent-direct-return-variants".into());
+    }
+    if variants.iter().all(|v| v.status != "source-checked") {
+        return Some("direct-return-variants-unavailable".into());
+    }
+    None
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PayloadSensitivityEvidence {
+    pub model: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub scope: Option<String>,
+    pub assertion_source: Option<String>,
+    pub target_source: Option<String>,
+    pub change_source: Option<String>,
+    pub change_text: Option<String>,
+    pub allocations: Option<Vec<String>>,
+    pub original: Option<PayloadCheck>,
+    pub variants: Option<Vec<PayloadVariant>>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PayloadCheck {
+    pub predicate: String,
+    pub actual: serde_json::Value,
+    pub expected: serde_json::Value,
+    pub projection: PayloadProjection,
+    pub outcome: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PayloadProjection {
+    pub instance: String,
+    pub call_source: String,
+    pub call_index: u64,
+    pub argument_index: u64,
+    pub read_at: String,
+    pub history_selections: Option<Vec<MockHistorySelection>>,
+    pub coercion: Option<PayloadCoercion>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PayloadCoercion {
+    pub source: String,
+    pub rule: String,
+    pub input: serde_json::Value,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PayloadVariant {
+    pub change: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub check: Option<PayloadCheck>,
+}
+
+fn valid_payload(v: &serde_json::Value, depth: usize, budget: &mut usize) -> bool {
+    if depth > 32 || *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+    let Some(o) = v.as_object() else {
+        return false;
+    };
+    match v["kind"].as_str() {
+        Some("undefined" | "null" | "opaque-string") => o.len() == 1,
+        Some("string") => o.len() == 2 && v["value"].is_string(),
+        Some("quoted-string") => {
+            o.len() == 2
+                && v["value"].as_str().is_some_and(|s| {
+                    s.len() <= 64
+                        && s.bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || b" _-".contains(&c))
+                })
+        }
+        Some("substring-pattern") => {
+            o.len() == 2
+                && v["value"].as_str().is_some_and(|s| {
+                    !s.is_empty()
+                        && s.len() <= 80
+                        && s.bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || b" _:-".contains(&c))
+                })
+        }
+        Some("boolean") => o.len() == 2 && v["value"].is_boolean(),
+        Some("number") => {
+            o.len() == 2
+                && v["value"]
+                    .as_f64()
+                    .is_some_and(|n| n.is_finite() && !(n == 0.0 && n.is_sign_negative()))
+        }
+        Some(kind @ ("object" | "array")) => {
+            let Some(properties) = v["properties"].as_array() else {
+                return false;
+            };
+            let mut names = std::collections::HashSet::new();
+            o.len() == 2
+                && properties.iter().all(|p| {
+                    p.as_object().is_some_and(|o| o.len() == 2)
+                        && p["name"]
+                            .as_str()
+                            .is_some_and(|n| n != "__proto__" && names.insert(n))
+                        && valid_payload(&p["value"], depth + 1, budget)
+                })
+                && (kind != "array"
+                    || (0..properties.len()).all(|i| names.contains(i.to_string().as_str())))
+        }
+        _ => false,
+    }
+}
+
+// Both values have already passed bounded shape validation. Unknown string bytes
+// must never compare equal just because their abstract descriptions are equal.
+fn payload_equal(a: &serde_json::Value, b: &serde_json::Value, deep: bool) -> Option<bool> {
+    let (ak, bk) = (a["kind"].as_str()?, b["kind"].as_str()?);
+    if ak == "quoted-string" || bk == "quoted-string" {
+        let other = if ak == "quoted-string" { b } else { a };
+        return match other["kind"].as_str()? {
+            "string" => {
+                if other["value"].as_str()?.contains('\'') {
+                    None
+                } else {
+                    Some(false)
+                }
+            }
+            "quoted-string" | "opaque-string" => None,
+            _ => Some(false),
+        };
+    }
+    if ak == "opaque-string" || bk == "opaque-string" {
+        let other = if ak == "opaque-string" { bk } else { ak };
+        return if matches!(other, "string" | "opaque-string") {
+            None
+        } else {
+            Some(false)
+        };
+    }
+    if ak != bk {
+        return Some(false);
+    }
+    if matches!(ak, "object" | "array") {
+        if !deep {
+            return None;
+        }
+        let (ap, bp) = (a["properties"].as_array()?, b["properties"].as_array()?);
+        if ap.len() != bp.len() {
+            return Some(false);
+        }
+        let mut unknown = false;
+        for p in ap {
+            let Some(q) = bp.iter().find(|q| q["name"] == p["name"]) else {
+                return Some(false);
+            };
+            match payload_equal(&p["value"], &q["value"], true) {
+                Some(false) => return Some(false),
+                None => unknown = true,
+                _ => (),
+            }
+        }
+        return if unknown { None } else { Some(true) };
+    }
+    if ak == "number" {
+        return Some(a["value"].as_f64()? == b["value"].as_f64()?);
+    }
+    Some(a["value"] == b["value"])
+}
+
+fn payload_predicate(c: &PayloadCheck) -> Option<bool> {
+    if c.predicate == "node-literal-regexp" {
+        if c.expected["kind"] != "substring-pattern" || c.actual["kind"] != "string" {
+            return None;
+        }
+        return Some(
+            c.actual["value"]
+                .as_str()?
+                .contains(c.expected["value"].as_str()?),
+        );
+    }
+    payload_equal(
+        &c.actual,
+        &c.expected,
+        c.predicate == "node-deep-strict-equality",
+    )
+}
+
+fn valid_payload_coercion(c: &PayloadCheck) -> bool {
+    let Some(coercion) = &c.projection.coercion else {
+        return true;
+    };
+    if coercion.source != c.projection.read_at || !valid_payload(&coercion.input, 0, &mut 4096) {
+        return false;
+    }
+    match coercion.rule.as_str() {
+        "string-identity" => {
+            matches!(
+                coercion.input["kind"].as_str(),
+                Some("string" | "opaque-string" | "quoted-string")
+            ) && c.actual == coercion.input
+        }
+        "plain-object-default-string" => {
+            coercion.input["kind"] == "object"
+                && coercion.input["properties"].as_array().is_some_and(|p| {
+                    p.iter()
+                        .all(|p| !matches!(p["name"].as_str(), Some("toString" | "valueOf")))
+                })
+                && c.actual == serde_json::json!({"kind":"string","value":"[object Object]"})
+        }
+        _ => false,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CountSensitivityEvidence {
+    pub model: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub scope: Option<String>,
+    pub assertion_source: Option<String>,
+    pub target_source: Option<String>,
+    pub condition_source: Option<String>,
+    pub condition_text: Option<String>,
+    pub allocations: Option<Vec<String>>,
+    pub instance: Option<String>,
+    pub expected_count: Option<u64>,
+    pub original_count: Option<u64>,
+    pub variants: Option<Vec<CountSensitivityVariant>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CountSensitivityVariant {
+    pub change: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub count: Option<u64>,
+    pub outcome: Option<String>,
+}
+
+/// A bounded check of one specified edit, never general value or site credit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallOmissionEvidence {
+    pub model: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub outcome: Option<String>,
+    pub scope: Option<String>,
+    pub assertion_source: Option<String>,
+    pub call_source: Option<String>,
+    pub callback_source: Option<String>,
+    pub instance: Option<String>,
+    pub expected_count: Option<u64>,
+    pub original_count: Option<u64>,
+    pub omitted_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AwaitedObservationSource {
+    pub model: String,
+    pub factory_source: String,
+    pub predicate_source: String,
+    pub captures: Vec<ObservationCaptureSource>,
+    pub pattern: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservationCaptureSource {
+    pub stream: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -450,6 +1374,10 @@ pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaChec
                 result.reason = "target-file-mismatch".into();
                 return result;
             }
+            if hint.awaited_observation.is_some() {
+                result.reason = "observation-capture-unavailable".into();
+                return result;
+            }
             if hint.witness != "passed" || hint.witness_issue.is_some() {
                 result.reason = hint
                     .witness_issue
@@ -465,6 +1393,22 @@ pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaChec
                 result.reason = "no-owning-passed-test".into();
                 return result;
             };
+            if test
+                .witness_issues
+                .iter()
+                .any(|issue| issue.kind == WitnessIssueKind::TestSourceUnlinked)
+            {
+                result.reason = "test-source-unlinked".into();
+                return result;
+            }
+            if test
+                .witness_issues
+                .iter()
+                .any(|issue| issue.kind == WitnessIssueKind::TestRegistrationScopeUnverified)
+            {
+                result.reason = "test-registration-scope-unverified".into();
+                return result;
+            }
             if hint.assertion_source.as_ref().is_none_or(String::is_empty)
                 || hint.assertion_method.as_ref().is_none_or(String::is_empty)
             {
@@ -473,6 +1417,296 @@ pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaChec
             }
             if !site.covered_by.contains(&test.id) {
                 result.reason = "target-not-reached-in-owning-test".into();
+                return result;
+            }
+            if let Some(recipe) = &hint.check {
+                result.reason = "omission-check-unavailable".into();
+                let selected = assertions.get(&(
+                    test.id.as_str(),
+                    hint.assertion_source.as_deref().unwrap(),
+                    hint.assertion_method.as_deref().unwrap(),
+                ));
+                if recipe == "completion" {
+                    result.reason = "completion-sensitivity-unavailable".into();
+                    let Some(e) = &hint.completion_sensitivity else {
+                        return result;
+                    };
+                    if let Some(issue) = completion_evidence_issue(hint, e, site, test) {
+                        result.reason = issue;
+                        return result;
+                    }
+                    result.validation = HintValidation::AnalyzerSupported;
+                    result.reason = "modeled-completion-sensitivity".into();
+                    return result; // One exact omission/prefix, not general site or MC/DC credit.
+                }
+                if recipe == "value" {
+                    if let (Some(direct), Some(payload)) =
+                        (&hint.direct_return_sensitivity, &hint.payload_sensitivity)
+                        && (direct.status == "source-checked" || payload.status == "source-checked")
+                    {
+                        result.reason = "conflicting-value-models".into();
+                        return result;
+                    }
+                    if let Some(e) = &hint.direct_return_sensitivity
+                        && (hint.payload_sensitivity.is_none() || e.status == "source-checked")
+                    {
+                        if let Some(issue) = direct_return_evidence_issue(hint, e, site, test) {
+                            result.reason = issue;
+                            return result;
+                        }
+                        result.validation = HintValidation::AnalyzerSupported;
+                        result.reason = "modeled-direct-return-sensitivity".into();
+                        return result; // Exact predicate outcomes only, no site/MC-DC credit.
+                    }
+                    result.reason = "payload-sensitivity-unavailable".into();
+                    let Some(e) = &hint.payload_sensitivity else {
+                        return result;
+                    };
+                    let in_file = |s: &Option<String>| {
+                        s.as_ref()
+                            .is_some_and(|s| s.starts_with(&format!("{}:", site.file)))
+                    };
+                    if e.model != "node-closed-payload-sensitivity-v2"
+                        || e.status != "source-checked"
+                        || e.reason.is_some()
+                        || e.scope.as_deref() != Some("closed-synchronous-test-module")
+                        || e.assertion_source != hint.assertion_source
+                        || !in_file(&e.target_source)
+                        || !in_file(&e.change_source)
+                        || e.change_text.as_ref().is_none_or(String::is_empty)
+                        || e.allocations.as_ref().is_none_or(|a| {
+                            a.is_empty()
+                                || a.iter().any(|s| !s.starts_with(&format!("{}:", site.file)))
+                        })
+                        || !(site.kind == "decision" || site.category == "return")
+                    {
+                        result.reason = e
+                            .reason
+                            .clone()
+                            .unwrap_or_else(|| "unsupported-payload-sensitivity-evidence".into());
+                        return result;
+                    }
+                    let (Some(original), Some(variants)) = (&e.original, &e.variants) else {
+                        return result;
+                    };
+                    let valid_check = |c: &PayloadCheck, original_witness: bool| {
+                        let mut budget = 4096;
+                        let p = &c.projection;
+                        matches!(
+                            c.predicate.as_str(),
+                            "node-same-value" | "node-deep-strict-equality" | "node-literal-regexp"
+                        ) && p.instance.starts_with(&format!("{}:", test.file))
+                            && p.read_at.starts_with(&format!("{}:", test.file))
+                            && p.call_source.starts_with(&format!("{}:", site.file))
+                            && p.history_selections.as_ref().is_none_or(|ss| {
+                                ss.iter().all(|s| {
+                                    !s.source.is_empty() && s.from <= s.to && s.to <= s.input_count
+                                })
+                            })
+                            && valid_payload(&c.actual, 0, &mut budget)
+                            && valid_payload(&c.expected, 0, &mut budget)
+                            && valid_payload_coercion(c)
+                            && (c.predicate == "node-literal-regexp")
+                                == (c.expected["kind"] == "substring-pattern")
+                            && match payload_predicate(c) {
+                                Some(eq) => {
+                                    c.outcome == if eq { "not-rejected" } else { "rejected" }
+                                }
+                                None => {
+                                    original_witness
+                                        && c.outcome == "witnessed-pass"
+                                        && matches!(
+                                            c.actual["kind"].as_str(),
+                                            Some("opaque-string" | "quoted-string")
+                                        )
+                                        && matches!(
+                                            c.expected["kind"].as_str(),
+                                            Some("string" | "substring-pattern")
+                                        )
+                                }
+                            }
+                    };
+                    if !valid_check(original, true)
+                        || !matches!(original.outcome.as_str(), "not-rejected" | "witnessed-pass")
+                        || !matches!(
+                            (
+                                hint.assertion_method.as_deref(),
+                                original.predicate.as_str()
+                            ),
+                            (Some("equal" | "strictEqual"), "node-same-value")
+                                | (
+                                    Some("deepEqual" | "deepStrictEqual"),
+                                    "node-deep-strict-equality"
+                                )
+                                | (Some("match"), "node-literal-regexp")
+                        )
+                    {
+                        result.reason = "payload-assertion-not-modelled".into();
+                        return result;
+                    }
+                    // Unlike the legacy boundary heuristic, the source interpreter
+                    // derives the exact argument through history aliases. The owning
+                    // passing witness above remains mandatory; no observation is invented.
+                    let names: Vec<_> = variants.iter().map(|v| v.change.as_str()).collect();
+                    let mut sorted = names;
+                    sorted.sort();
+                    if !(sorted == ["map-callback-empty"]
+                        || sorted == ["condition-false", "condition-inverted", "condition-true"])
+                        || variants.iter().any(|v| match v.status.as_str() {
+                            "unresolved" => {
+                                v.reason.as_ref().is_none_or(String::is_empty) || v.check.is_some()
+                            }
+                            "source-checked" => {
+                                v.reason.is_some()
+                                    || v.check.as_ref().is_none_or(|c| {
+                                        !valid_check(c, false)
+                                            || c.expected != original.expected
+                                            || c.predicate != original.predicate
+                                            || c.projection.instance != original.projection.instance
+                                            || c.projection.argument_index
+                                                != original.projection.argument_index
+                                            || c.projection.read_at != original.projection.read_at
+                                    })
+                            }
+                            _ => true,
+                        })
+                    {
+                        result.reason = "inconsistent-payload-sensitivity-variants".into();
+                        return result;
+                    }
+                    if variants.iter().all(|v| v.status != "source-checked") {
+                        return result;
+                    }
+                    result.validation = HintValidation::AnalyzerSupported;
+                    result.reason = "modeled-payload-sensitivity".into();
+                    return result; // Explicit variant answers only; no general site credit.
+                }
+                if selected.is_none_or(|observations| {
+                    !observations.iter().any(|ob| {
+                        ob.mock.as_ref().is_some_and(|m| m.kind == "call-count")
+                            && ob
+                                .comparison
+                                .as_ref()
+                                .is_some_and(|c| c.predicate == "node-same-value")
+                    })
+                }) {
+                    result.reason = "omission-count-assertion-not-modelled".into();
+                    return result;
+                }
+                if recipe == "count" {
+                    result.reason = "count-sensitivity-unavailable".into();
+                    let Some(check) = &hint.count_sensitivity else {
+                        return result;
+                    };
+                    let in_file = |s: &Option<String>| {
+                        s.as_ref()
+                            .is_some_and(|s| s.starts_with(&format!("{}:", site.file)))
+                    };
+                    if check.model != "node-closed-count-sensitivity-v1"
+                        || check.status != "source-checked"
+                        || check.reason.is_some()
+                        || check.scope.as_deref() != Some("closed-synchronous-test-module")
+                        || check.assertion_source != hint.assertion_source
+                        || !in_file(&check.target_source)
+                        || !in_file(&check.condition_source)
+                        || check.condition_text.as_ref().is_none_or(String::is_empty)
+                        || check.instance.as_ref().is_none_or(String::is_empty)
+                        || check.allocations.as_ref().is_none_or(|a| {
+                            a.is_empty()
+                                || a.iter().any(|s| !s.starts_with(&format!("{}:", site.file)))
+                        })
+                        || !(site.kind == "decision" || site.category == "return")
+                    {
+                        result.reason = check
+                            .reason
+                            .clone()
+                            .unwrap_or_else(|| "unsupported-count-sensitivity-evidence".into());
+                        return result;
+                    }
+                    let (Some(expected), Some(original), Some(variants)) =
+                        (check.expected_count, check.original_count, &check.variants)
+                    else {
+                        return result;
+                    };
+                    let expected_changes =
+                        ["condition-true", "condition-false", "condition-inverted"];
+                    if expected != original
+                        || variants.len() != 3
+                        || !expected_changes
+                            .iter()
+                            .all(|name| variants.iter().filter(|v| v.change == *name).count() == 1)
+                        || variants.iter().any(|v| match v.status.as_str() {
+                            "source-checked" => {
+                                v.reason.is_some()
+                                    || v.count.is_none()
+                                    || v.outcome.as_deref()
+                                        != Some(if v.count == Some(expected) {
+                                            "not-rejected"
+                                        } else {
+                                            "rejected"
+                                        })
+                            }
+                            "unresolved" => {
+                                v.reason.as_ref().is_none_or(String::is_empty)
+                                    || v.count.is_some()
+                                    || v.outcome.is_some()
+                            }
+                            _ => true,
+                        })
+                    {
+                        result.reason = "inconsistent-count-sensitivity-variants".into();
+                        return result;
+                    }
+                    if variants.iter().all(|v| v.status != "source-checked") {
+                        return result;
+                    }
+                    result.validation = HintValidation::AnalyzerSupported;
+                    result.reason = "modeled-count-sensitivity".into();
+                    // Explicit per-variant answers only; no join/whole-site credit.
+                    return result;
+                }
+                let Some(check) = &hint.call_omission else {
+                    return result;
+                };
+                if recipe != "missing-call"
+                    || check.model != "node-first-test-call-omission-v1"
+                    || check.status != "source-checked"
+                    || check.reason.is_some()
+                    || check.scope.as_deref() != Some("first-synchronous-test")
+                    || check.assertion_source != hint.assertion_source
+                    || check
+                        .call_source
+                        .as_ref()
+                        .is_none_or(|s| !s.starts_with(&format!("{}:", site.file)))
+                    || check.callback_source.as_ref().is_none_or(String::is_empty)
+                    || check.instance.as_ref().is_none_or(String::is_empty)
+                    || site.kind != "effect"
+                {
+                    result.reason = check
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "unsupported-omission-evidence".into());
+                    return result;
+                }
+                let (Some(expected), Some(original), Some(omitted)) = (
+                    check.expected_count,
+                    check.original_count,
+                    check.omitted_count,
+                ) else {
+                    return result;
+                };
+                let outcome = if omitted != expected {
+                    "rejected"
+                } else {
+                    "not-rejected"
+                };
+                if original != expected || check.outcome.as_deref() != Some(outcome) {
+                    result.reason = "inconsistent-omission-counts".into();
+                    return result;
+                }
+                result.validation = HintValidation::AnalyzerSupported;
+                result.reason = format!("modeled-callback-omission-{outcome}");
+                // Do not promote ordinary observations, site strength, or the join.
                 return result;
             }
             if site.kind != "effect" {
@@ -555,6 +1789,10 @@ pub enum ReasonKind {
     LimitUndecidable,
     #[serde(rename = "limit:assertion-witness")]
     LimitAssertionWitness,
+    #[serde(rename = "limit:predicate-dependence")]
+    LimitPredicateDependence,
+    #[serde(rename = "limit:process-exit-link")]
+    LimitProcessExitLink,
 }
 
 impl ReasonKind {
@@ -565,6 +1803,8 @@ impl ReasonKind {
                 | ReasonKind::LimitInternalState
                 | ReasonKind::LimitUndecidable
                 | ReasonKind::LimitAssertionWitness
+                | ReasonKind::LimitPredicateDependence
+                | ReasonKind::LimitProcessExitLink
         )
     }
 }
@@ -592,6 +1832,9 @@ pub struct Resolution {
     pub tests: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub weak_only: bool,
+    /// Basis of the forced-outcome flags, not global semantic certainty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitivity_basis: Option<SensitivityBasis>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stuck_true_caught: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -602,6 +1845,14 @@ pub struct Resolution {
     pub value_observed: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub witness_issues: Vec<TestWitnessIssue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SensitivityBasis {
+    BoundedSourceModel,
+    BranchObservationHeuristic,
+    Unavailable,
 }
 
 // ---------------------------------------------------------------------------
@@ -652,10 +1903,24 @@ pub fn join(facts: &Facts) -> Vec<Resolution> {
         .sites
         .iter()
         .filter_map(|s| {
-            join.resolved
-                .get(&s.id)
-                .cloned()
-                .map(|r| join.with_witness_issues(s, r))
+            join.resolved.get(&s.id).cloned().map(|r| {
+                let mut r = join.with_witness_issues(s, join.with_comparison_limits(s, r));
+                if s.kind == "decision" {
+                    r.sensitivity_basis = Some(
+                        if r.stuck_true_caught.is_none() || r.stuck_false_caught.is_none() {
+                            SensitivityBasis::Unavailable
+                        } else if s.decision.as_ref().is_some_and(|d| d.primitive.is_some()) {
+                            // Only successful primitive_sensitivity checks produce flags
+                            // when a primitive model is present; invalid models do not fall
+                            // through to the heuristic path.
+                            SensitivityBasis::BoundedSourceModel
+                        } else {
+                            SensitivityBasis::BranchObservationHeuristic
+                        },
+                    );
+                }
+                r
+            })
         })
         .collect()
 }
@@ -732,6 +1997,9 @@ impl<'a> Join<'a> {
         bounds: &[Boundary],
         ob: &Observation,
     ) -> bool {
+        if !ob.can_constrain_value() {
+            return false;
+        }
         for sink in &test.sinks {
             let injected = bounds.iter().any(|b| {
                 b.boundary == format!("callback:{}", sink.param)
@@ -799,6 +2067,7 @@ impl<'a> Join<'a> {
                 covered_by: site.covered_by.len(),
                 tests: BTreeSet::new(),
                 weak_only: false,
+                sensitivity_basis: None,
                 stuck_true_caught: None,
                 stuck_false_caught: None,
                 absence_needed: None,
@@ -853,6 +2122,7 @@ impl<'a> Join<'a> {
                 covered_by: site.covered_by.len(),
                 tests: BTreeSet::new(),
                 weak_only: false,
+                sensitivity_basis: None,
                 stuck_true_caught: None,
                 stuck_false_caught: None,
                 absence_needed: None,
@@ -880,6 +2150,7 @@ impl<'a> Join<'a> {
             covered_by: site.covered_by.len(),
             tests,
             weak_only: !strong_hit,
+            sensitivity_basis: None,
             stuck_true_caught: None,
             stuck_false_caught: None,
             absence_needed: None,
@@ -928,10 +2199,28 @@ impl<'a> Join<'a> {
         ob: &Observation,
         seen: &mut BTreeSet<String>,
     ) -> bool {
+        // A dependent comparison may have a missing witness as well as an
+        // unresolved value relationship. Retain structural relevance for limit
+        // reporting only; the positive join always keeps its comparison guard.
+        let mut structural;
+        let ob = if ob
+            .comparison
+            .as_ref()
+            .is_some_and(|c| c.relation == "shared-input-through-await")
+        {
+            structural = ob.clone();
+            structural.comparison = None;
+            &structural
+        } else {
+            ob
+        };
         if !seen.insert(site.id.clone()) {
             return false;
         }
-        if self.observation_hits(site, test, &self.bounds_for_test(site, test), ob) {
+        let bounds = self.bounds_for_test(site, test);
+        if self.observation_hits(site, test, &bounds, ob)
+            || (ob.boundary == "exit" && bounds.iter().any(|b| b.boundary == "exit"))
+        {
             return true;
         }
         let mut edges = site.reached.clone();
@@ -965,6 +2254,73 @@ impl<'a> Join<'a> {
         })
     }
 
+    /// Keep a passing dependent predicate visible as an analysis limit, not a
+    /// missing assertion. Structural relevance is used only to explain limits;
+    /// it never supplies a strength, caught flag or evidence test set.
+    fn with_comparison_limits(&self, site: &Site, mut result: Resolution) -> Resolution {
+        let untaken = site
+            .decision
+            .as_ref()
+            .and_then(|d| d.outcomes.as_ref())
+            .is_some_and(|o| {
+                (result.stuck_false_caught == Some(false) && o.true_.is_empty())
+                    || (result.stuck_true_caught == Some(false) && o.false_.is_empty())
+            });
+        if result.status == Status::Evident
+            || untaken
+            || !result.reason.as_ref().is_some_and(|r| {
+                matches!(
+                    r.kind,
+                    ReasonKind::GapNotAsserted
+                        | ReasonKind::GapOutcomeNotAsserted
+                        | ReasonKind::GapValueNotAsserted
+                )
+            })
+        {
+            return result;
+        }
+        let exit_relevant = site
+            .covered_by
+            .iter()
+            .filter_map(|id| self.tests.get(id.as_str()))
+            .any(|test| {
+                test.observations.iter().any(|ob| {
+                    ob.boundary == "exit"
+                        && self.issue_reaches(site, test, ob, &mut BTreeSet::new())
+                })
+            });
+        if exit_relevant {
+            result.reason = Some(Reason {
+                kind: ReasonKind::LimitProcessExitLink,
+                detail: Some("A passing assertion has exit-related source evidence, but the selected child, resolved result history and production-site link are not jointly established. See processExit in test observations.".into()),
+            });
+            return result;
+        }
+        let relevant = site
+            .covered_by
+            .iter()
+            .filter_map(|id| self.tests.get(id.as_str()))
+            .any(|test| {
+                test.observations.iter().any(|ob| {
+                    if ob
+                        .comparison
+                        .as_ref()
+                        .is_none_or(|c| c.relation != "shared-input-through-await")
+                    {
+                        return false;
+                    }
+                    self.issue_reaches(site, test, ob, &mut BTreeSet::new())
+                })
+            });
+        if relevant {
+            result.reason = Some(Reason {
+                kind: ReasonKind::LimitPredicateDependence,
+                detail: Some("A passing assertion compares values from the same immutable input through await; its constraints on the producer value are not established. See comparison operand inputs in test observations.".into()),
+            });
+        }
+        result
+    }
+
     /// Final reporting pass only: strengths, statuses, caught flags, evidence
     /// test sets and the denominator are unchanged. Unknown evidence may replace
     /// an assertion gap with a limit, but never a known execution gap.
@@ -975,7 +2331,7 @@ impl<'a> Join<'a> {
             };
             for issue in &test.witness_issues {
                 let relevant = match &issue.observation {
-                    None => issue.kind == WitnessIssueKind::CaptureUnavailable,
+                    None => issue.kind.applies_to_whole_test(),
                     Some(ob) => self.issue_reaches(site, test, ob, &mut BTreeSet::new()),
                 };
                 if relevant {
@@ -1044,6 +2400,65 @@ impl<'a> Join<'a> {
         false
     }
 
+    fn primitive_sensitivity(
+        &self,
+        site: &Site,
+        d: &DecisionFacts,
+        p: &PrimitiveDecision,
+    ) -> Option<(bool, bool)> {
+        if p.model != "js-primitive-decision-v1" || p.source.is_empty() || p.checks.is_empty() {
+            return None;
+        }
+        let outcomes = d.outcomes.as_ref()?;
+        let covered: BTreeSet<_> = site.covered_by.iter().collect();
+        let checked: BTreeSet<_> = p.checks.iter().map(|c| &c.test).collect();
+        if covered != checked || checked.len() != p.checks.len() {
+            return None;
+        }
+        let mut stuck_true = false;
+        let mut stuck_false = false;
+        for c in &p.checks {
+            if outcomes.true_.contains(&c.test) != c.original_outcome
+                || outcomes.false_.contains(&c.test) == c.original_outcome
+            {
+                return None;
+            }
+            let test = self.tests.get(c.test.as_str())?;
+            if !test.witness_issues.is_empty() || test.observations.len() != 1 {
+                return None;
+            }
+            let ob = &test.observations[0];
+            let comparison = ob.comparison.as_ref()?;
+            if !ob.can_constrain_value()
+                || ob.weak
+                || ob.boundary != format!("return:{}", site.owner)
+                || ob.assertion_source.as_ref() != Some(&c.assertion_source)
+                || comparison.predicate != c.predicate
+                || comparison.expected.value.as_ref() != Some(&c.expected)
+            {
+                return None;
+            }
+            let accepts = |actual: &SourcePrimitive| -> Option<bool> {
+                let same = actual.same_value(&c.expected)?;
+                match c.predicate.as_str() {
+                    "node-same-value" => Some(same),
+                    "node-not-same-value" => Some(!same),
+                    _ => None,
+                }
+            };
+            if !accepts(if c.original_outcome {
+                &p.when_true
+            } else {
+                &p.when_false
+            })? {
+                return None;
+            }
+            stuck_true |= !accepts(&p.when_true)?;
+            stuck_false |= !accepts(&p.when_false)?;
+        }
+        Some((stuck_true, stuck_false))
+    }
+
     fn resolve_decision(&self, site: &Site) -> Resolution {
         let covering = site.covered_by.len();
         let empty = DecisionFacts::default();
@@ -1056,12 +2471,43 @@ impl<'a> Join<'a> {
             covered_by: covering,
             tests: BTreeSet::new(),
             weak_only: false,
+            sensitivity_basis: None,
             stuck_true_caught: stuck.then_some(false),
             stuck_false_caught: stuck.then_some(false),
             absence_needed: stuck.then_some(false),
             value_observed: None,
             witness_issues: vec![],
         };
+        if let Some(primitive) = &d.primitive {
+            let Some((stuck_true, stuck_false)) = self.primitive_sensitivity(site, d, primitive)
+            else {
+                return unresolved(
+                    Reason {
+                        kind: ReasonKind::LimitOperandShape,
+                        detail: Some("invalid or incomplete primitive decision evidence".into()),
+                    },
+                    false,
+                );
+            };
+            let status = match (stuck_true, stuck_false) {
+                (true, true) => Status::Evident,
+                (false, false) => Status::Unresolved,
+                _ => Status::Partial,
+            };
+            return Resolution {
+                site: site.id.clone(), status,
+                strength: (status == Status::Evident).then_some(Strength::Value),
+                reason: (status != Status::Evident).then(|| Reason {
+                    kind: ReasonKind::GapOutcomeNotAsserted,
+                    detail: Some(format!("source-checked primitive branches: forcing {} remains accepted by every modeled assertion",
+                        match (stuck_true, stuck_false) { (false, false) => "either outcome", (false, true) => "true", _ => "false" })),
+                }),
+                covered_by: covering, tests: BTreeSet::new(), weak_only: false,
+                sensitivity_basis: None,
+                stuck_true_caught: Some(stuck_true), stuck_false_caught: Some(stuck_false),
+                absence_needed: Some(false), value_observed: None, witness_issues: vec![],
+            };
+        }
         // A ternary between two pre-built objects is distinguishable only through the sites just one of
         // them reaches.
         if let Some(object_valued) = &d.object_valued {
@@ -1076,6 +2522,7 @@ impl<'a> Join<'a> {
                     covered_by: covering,
                     tests: BTreeSet::new(),
                     weak_only: false,
+                    sensitivity_basis: None,
                     stuck_true_caught: Some(true),
                     stuck_false_caught: Some(true),
                     absence_needed: Some(false),
@@ -1155,7 +2602,8 @@ impl<'a> Join<'a> {
                     witnessed = took.iter().any(|id| {
                         self.tests.get(id).is_some_and(|test| {
                             test.observations.iter().any(|ob| {
-                                !ob.negative
+                                ob.can_constrain_value()
+                                    && !ob.negative
                                     && ob.boundary == format!("return:{}", site.owner)
                                     && ob.strength.caught()
                             })
@@ -1274,6 +2722,7 @@ impl<'a> Join<'a> {
             covered_by: covering,
             tests: BTreeSet::new(),
             weak_only: false,
+            sensitivity_basis: None,
             stuck_true_caught: Some(stuck_true_caught),
             stuck_false_caught: Some(stuck_false_caught),
             absence_needed: Some(absence_needed),
@@ -1353,6 +2802,7 @@ impl<'a> Join<'a> {
             covered_by: site.covered_by.len(),
             tests,
             weak_only: false,
+            sensitivity_basis: None,
             stuck_true_caught: None,
             stuck_false_caught: None,
             absence_needed: None,
@@ -1447,6 +2897,9 @@ mod tests {
             assertion_method: None,
             negative: false,
             call_list: false,
+            mock: None,
+            comparison: None,
+            process_exit: None,
             weak: false,
             log_sites: None,
             pattern_shared: false,
@@ -1482,6 +2935,221 @@ mod tests {
         }
     }
 
+    fn primitive_fixture(
+        a: SourcePrimitive,
+        b: SourcePrimitive,
+        predicate: &str,
+        expected_a: SourcePrimitive,
+        expected_b: SourcePrimitive,
+    ) -> Facts {
+        let mut tests = vec![];
+        let mut checks = vec![];
+        for (id, outcome, expected) in [("T1", true, expected_a), ("T2", false, expected_b)] {
+            let source = format!("tests/a.test.ts:{id}:3");
+            let mut ob = observation("return:handler", Strength::Value);
+            ob.assertion_source = Some(source.clone());
+            ob.comparison = Some(Comparison {
+                predicate: predicate.into(),
+                relation: "unresolved".into(),
+                actual: ComparisonOperand {
+                    source: "tests/a:10:20".into(),
+                    binding: None,
+                    input: None,
+                    value: None,
+                },
+                expected: ComparisonOperand {
+                    source: "tests/a:22:23".into(),
+                    binding: None,
+                    input: None,
+                    value: Some(expected.clone()),
+                },
+            });
+            tests.push(test(id, vec![ob]));
+            checks.push(PrimitiveDecisionCheck {
+                test: id.into(),
+                assertion_source: source,
+                predicate: predicate.into(),
+                expected,
+                original_outcome: outcome,
+            });
+        }
+        let mut decision = site("D", "condition", vec![], &["T1", "T2"]);
+        decision.kind = "decision".into();
+        decision.decision = Some(DecisionFacts {
+            primitive: Some(PrimitiveDecision {
+                model: "js-primitive-decision-v1".into(),
+                source: "src/a:0:40".into(),
+                when_true: a,
+                when_false: b,
+                checks,
+            }),
+            else_: Some(Some(vec![])),
+            outcomes: Some(Outcomes {
+                true_: vec!["T1".into()],
+                false_: vec!["T2".into()],
+            }),
+            ..Default::default()
+        });
+        facts(vec![decision], tests)
+    }
+
+    #[test]
+    fn primitive_sensitivity_preserves_types_signed_zero_and_predicate_acceptance() {
+        let n = |v: &str| SourcePrimitive::Number(v.into());
+        for (a, b, predicate, x, y, caught) in [
+            (n("7"), n("7"), "node-same-value", n("7"), n("7"), false),
+            (n("1"), n("2"), "node-same-value", n("1"), n("2"), true),
+            (n("1"), n("2"), "node-not-same-value", n("0"), n("0"), false),
+            (n("-0"), n("0"), "node-same-value", n("-0"), n("0"), true),
+            (n("1e0"), n("1"), "node-same-value", n("1"), n("1"), false),
+            (
+                SourcePrimitive::String("1".into()),
+                n("1"),
+                "node-same-value",
+                SourcePrimitive::String("1".into()),
+                n("1"),
+                true,
+            ),
+            (
+                SourcePrimitive::Boolean(true),
+                SourcePrimitive::Boolean(false),
+                "node-same-value",
+                SourcePrimitive::Boolean(true),
+                SourcePrimitive::Boolean(false),
+                true,
+            ),
+            (
+                SourcePrimitive::Null,
+                SourcePrimitive::Null,
+                "node-same-value",
+                SourcePrimitive::Null,
+                SourcePrimitive::Null,
+                false,
+            ),
+        ] {
+            let f = primitive_fixture(a, b, predicate, x, y);
+            let encoded = serde_json::to_value(&f).unwrap();
+            let decoded: Facts = serde_json::from_value(encoded).unwrap();
+            assert_eq!(f, decoded);
+            let r = join(&decoded);
+            assert_eq!(
+                r[0].sensitivity_basis,
+                Some(SensitivityBasis::BoundedSourceModel)
+            );
+            assert_eq!(r[0].stuck_true_caught, Some(caught));
+            assert_eq!(r[0].stuck_false_caught, Some(caught));
+            assert_eq!(
+                r[0].status,
+                if caught {
+                    Status::Evident
+                } else {
+                    Status::Unresolved
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn primitive_sensitivity_rejects_incomplete_or_inconsistent_evidence() {
+        let n = |v: &str| SourcePrimitive::Number(v.into());
+        let base = primitive_fixture(n("1"), n("2"), "node-same-value", n("1"), n("2"));
+        for case in 0..10 {
+            let mut f = base.clone();
+            let d = f.sites[0].decision.as_mut().unwrap();
+            let p = d.primitive.as_mut().unwrap();
+            match case {
+                0 => {
+                    p.checks.pop();
+                }
+                1 => p.checks.push(p.checks[0].clone()),
+                2 => p.checks[0].assertion_source = "elsewhere".into(),
+                3 => p.checks[0].expected = n("42"),
+                4 => p.model = "unknown".into(),
+                5 => p.when_true = n("NaN"),
+                6 => p.when_false = n("Infinity"),
+                7 => d.outcomes.as_mut().unwrap().true_.clear(),
+                8 => f.tests[0]
+                    .witness_issues
+                    .push(rejected(WitnessIssueKind::CaptureUnavailable, None)),
+                9 => {
+                    p.checks[0].predicate = "node-loose-equality".into();
+                    f.tests[0].observations[0]
+                        .comparison
+                        .as_mut()
+                        .unwrap()
+                        .predicate = "node-loose-equality".into();
+                }
+                _ => unreachable!(),
+            }
+            let r = join(&f);
+            assert_eq!(r[0].status, Status::Unresolved, "case {case}");
+            assert_eq!(r[0].sensitivity_basis, Some(SensitivityBasis::Unavailable));
+            assert_eq!(
+                r[0].reason.as_ref().unwrap().kind,
+                ReasonKind::LimitOperandShape,
+                "case {case}"
+            );
+            // Rejected evidence establishes neither rejection nor survival.
+            assert_eq!(r[0].stuck_true_caught, None, "case {case}");
+            assert_eq!(r[0].stuck_false_caught, None, "case {case}");
+            let json = serde_json::to_value(&r[0]).unwrap();
+            assert!(json.get("stuckTrueCaught").is_none(), "case {case}");
+            assert!(json.get("stuckFalseCaught").is_none(), "case {case}");
+        }
+    }
+
+    #[test]
+    fn primitive_sensitivity_keeps_one_sided_rejection_distinct_from_unknown() {
+        let n = |v: &str| SourcePrimitive::Number(v.into());
+        // Both original tests pass: 1 != 0 and 2 != 1. Forcing true fails the
+        // second test; forcing false is accepted by both modeled assertions.
+        let f = primitive_fixture(n("1"), n("2"), "node-not-same-value", n("0"), n("1"));
+        let r = join(&f);
+        assert_eq!(r[0].status, Status::Partial);
+        assert_eq!(
+            r[0].sensitivity_basis,
+            Some(SensitivityBasis::BoundedSourceModel)
+        );
+        assert_eq!(r[0].stuck_true_caught, Some(true));
+        assert_eq!(r[0].stuck_false_caught, Some(false));
+        assert_eq!(
+            r[0].reason.as_ref().unwrap().kind,
+            ReasonKind::GapOutcomeNotAsserted
+        );
+    }
+
+    #[test]
+    fn sensitivity_basis_does_not_promote_legacy_decisions_or_effects() {
+        let mut d = site("D", "condition", vec![], &["T"]);
+        d.kind = "decision".into();
+        let mut f = facts(
+            vec![d, site("E", "return", vec![], &["T"])],
+            vec![test("T", vec![])],
+        );
+        let r = join(&f);
+        assert_eq!(r[0].sensitivity_basis, Some(SensitivityBasis::Unavailable));
+        assert!(r[1].sensitivity_basis.is_none());
+        assert!(
+            serde_json::to_value(&r[1])
+                .unwrap()
+                .get("sensitivityBasis")
+                .is_none()
+        );
+        f.sites[0].decision = Some(DecisionFacts {
+            then: Some(vec![]),
+            ..Default::default()
+        });
+        let r = join(&f);
+        assert_eq!(
+            r[0].sensitivity_basis,
+            Some(SensitivityBasis::BranchObservationHeuristic)
+        );
+        assert_eq!(
+            serde_json::to_value(&r[0]).unwrap()["sensitivityBasis"],
+            "branch-observation-heuristic"
+        );
+    }
+
     fn pragma_hint() -> PragmaHint {
         PragmaHint {
             id: "hint-1".into(),
@@ -1500,7 +3168,880 @@ mod tests {
             assertion_method: Some("equal".into()),
             witness: "passed".into(),
             witness_issue: None,
+            awaited_observation: None,
+            check: None,
+            call_omission: None,
+            count_sensitivity: None,
+            payload_sensitivity: None,
+            direct_return_sensitivity: None,
+            completion_sensitivity: None,
         }
+    }
+
+    #[test]
+    fn omission_checks_require_own_count_witness_and_never_promote_the_site() {
+        let mut hint = pragma_hint();
+        hint.check = Some("missing-call".into());
+        hint.call_omission = Some(
+            serde_json::from_value(serde_json::json!({
+                "model": "node-first-test-call-omission-v1", "status":"source-checked",
+                "scope":"first-synchronous-test", "outcome":"rejected",
+                "assertionSource":"tests/a.test.ts:7:3", "callSource":"src/a.ts:4:3",
+                "callbackSource":"src/a.ts:3:3", "instance":"tests/a.test.ts:2:3",
+                "expectedCount":1, "originalCount":1, "omittedCount":0
+            }))
+            .unwrap(),
+        );
+        let mut ob = observation("stdout", Strength::Total);
+        ob.assertion_source = hint.assertion_source.clone();
+        ob.assertion_method = hint.assertion_method.clone();
+        ob.mock = Some(MockProjection {
+            target: "console.log".into(),
+            kind: "call-count".into(),
+            path: vec!["mock".into(), "callCount()".into()],
+            count_evidence: None,
+        });
+        ob.comparison = Some(
+            serde_json::from_value(serde_json::json!({
+                "predicate":"node-same-value", "relation":"distinct-or-unknown",
+                "actual":{"source":"tests/a.test.ts:7:16"}, "expected":{"source":"tests/a.test.ts:7:38"}
+            }))
+            .unwrap(),
+        );
+        let f = facts(
+            vec![site("S1", "log", vec![boundary("stdout")], &["T1"])],
+            vec![test("T1", vec![ob])],
+        );
+        let joined = serde_json::to_value(join(&f)).unwrap();
+        let positive = &check_pragma_hints(&f, &[hint.clone()])[0];
+        assert_eq!(positive.validation, HintValidation::AnalyzerSupported);
+        assert_eq!(positive.reason, "modeled-callback-omission-rejected");
+        assert_eq!(positive.strength, None);
+        assert_eq!(serde_json::to_value(join(&f)).unwrap(), joined);
+        for case in 0..9 {
+            let mut f = f.clone();
+            let mut h = hint.clone();
+            match case {
+                0 => h.witness = "unavailable".into(),
+                1 => h.assertion_source = Some("tests/a.test.ts:8:3".into()),
+                2 => f.tests[0].observations.clear(),
+                3 => h.call_omission.as_mut().unwrap().original_count = Some(2),
+                4 => h.call_omission.as_mut().unwrap().omitted_count = Some(1),
+                5 => h.call_omission.as_mut().unwrap().scope = Some("any-test".into()),
+                6 => h.call_omission.as_mut().unwrap().model = "unrecognized".into(),
+                7 => {
+                    h.call_omission.as_mut().unwrap().call_source = Some("src/other.ts:4:3".into())
+                }
+                8 => f.sites[0].covered_by.clear(),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                check_pragma_hints(&f, &[h])[0].validation,
+                HintValidation::Unresolved,
+                "case {case}"
+            );
+        }
+        let c = hint.call_omission.as_mut().unwrap();
+        c.omitted_count = Some(1);
+        c.outcome = Some("not-rejected".into());
+        let negative = &check_pragma_hints(&f, &[hint])[0];
+        assert_eq!(negative.validation, HintValidation::AnalyzerSupported);
+        assert_eq!(negative.reason, "modeled-callback-omission-not-rejected");
+        assert_eq!(negative.strength, None);
+    }
+
+    #[test]
+    fn count_sensitivity_keeps_variant_scope_and_requires_own_witness() {
+        let mut hint = pragma_hint();
+        hint.check = Some("count".into());
+        hint.count_sensitivity = Some(serde_json::from_value(serde_json::json!({
+            "model":"node-closed-count-sensitivity-v1", "status":"source-checked",
+            "scope":"closed-synchronous-test-module", "assertionSource":"tests/a.test.ts:7:3",
+            "targetSource":"src/a.ts:4:3", "conditionSource":"src/a.ts:4:3", "conditionText":"mode === 'quiet'",
+            "allocations":["src/a.ts:2:3"], "instance":"tests/a.test.ts:2:3", "expectedCount":1, "originalCount":1,
+            "variants":[
+                {"change":"condition-true","status":"source-checked","count":0,"outcome":"rejected"},
+                {"change":"condition-false","status":"source-checked","count":1,"outcome":"not-rejected"},
+                {"change":"condition-inverted","status":"unresolved","reason":"unsupported-prefix"}
+            ]
+        })).unwrap());
+        let mut ob = observation("stdout", Strength::Total);
+        ob.assertion_source = hint.assertion_source.clone();
+        ob.assertion_method = hint.assertion_method.clone();
+        ob.mock = Some(MockProjection {
+            target: "console.log".into(),
+            kind: "call-count".into(),
+            path: vec!["mock".into(), "callCount()".into()],
+            count_evidence: None,
+        });
+        ob.comparison = Some(serde_json::from_value(serde_json::json!({
+            "predicate":"node-same-value", "relation":"distinct-or-unknown",
+            "actual":{"source":"tests/a.test.ts:7:16"},"expected":{"source":"tests/a.test.ts:7:38"}
+        })).unwrap());
+        let mut s = site("S1", "condition", vec![boundary("stdout")], &["T1"]);
+        s.kind = "decision".into();
+        let f = facts(vec![s], vec![test("T1", vec![ob])]);
+        let before = serde_json::to_value(join(&f)).unwrap();
+        let result = &check_pragma_hints(&f, &[hint.clone()])[0];
+        assert_eq!(result.validation, HintValidation::AnalyzerSupported);
+        assert_eq!(result.reason, "modeled-count-sensitivity");
+        assert_eq!(result.strength, None);
+        assert_eq!(serde_json::to_value(join(&f)).unwrap(), before);
+        for case in 0..12 {
+            let mut h = hint.clone();
+            let mut input = f.clone();
+            let e = h.count_sensitivity.as_mut().unwrap();
+            match case {
+                0 => h.witness = "unavailable".into(),
+                1 => h.assertion_source = Some("tests/a.test.ts:8:3".into()),
+                2 => input.tests[0].observations.clear(),
+                3 => e.original_count = Some(9),
+                4 => e.variants.as_mut().unwrap()[0].count = Some(1),
+                5 => e.variants.as_mut().unwrap()[2].outcome = Some("rejected".into()),
+                6 => e.variants.as_mut().unwrap()[0].change = "arbitrary-edit".into(),
+                7 => e.allocations = Some(vec![]),
+                8 => e.target_source = Some("src/other.ts:4:3".into()),
+                9 => e.scope = Some("whole-repository".into()),
+                10 => input.sites[0].covered_by.clear(),
+                11 => e.variants.as_mut().unwrap()[0].change = "condition-false".into(),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                check_pragma_hints(&input, &[h])[0].validation,
+                HintValidation::Unresolved,
+                "case {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_checks_keep_scope_and_predicate_consistency_without_promoting_sites() {
+        let mut hint = pragma_hint();
+        hint.check = Some("completion".into());
+        hint.assertion_method = Some("throws".into());
+        hint.completion_sensitivity = Some(serde_json::from_value(serde_json::json!({
+            "model":"node-first-test-completion-v1", "status":"source-checked",
+            "scope":"first-synchronous-test-prefix", "assertionSource":"tests/a.test.ts:7:3",
+            "targetSource":"src/a.ts:4:3", "changeText":"throw Error('boom');", "change":"statement-omitted",
+            "original":{"method":"throws", "callbackSource":"src/a.ts:3:1", "completion":"throw",
+                "throwSource":"src/a.ts:4:3", "targetEvaluations":1, "outcome":"not-rejected"},
+            "omitted":{"method":"throws", "callbackSource":"src/a.ts:3:1", "completion":"normal",
+                "targetEvaluations":1, "outcome":"rejected"}
+        })).unwrap());
+        let mut s = site("S1", "throw", vec![], &["T1"]);
+        s.line = 4;
+        let mut t = test("T1", vec![]);
+        t.file = "tests/a.test.ts".into();
+        let f = facts(vec![s], vec![t]);
+        let before = join(&f);
+        let result = check_pragma_hints(&f, &[hint.clone()]).remove(0);
+        assert_eq!(result.validation, HintValidation::AnalyzerSupported);
+        assert_eq!(result.reason, "modeled-completion-sensitivity");
+        assert!(result.strength.is_none());
+        assert!(result.observations.is_empty());
+        assert_eq!(join(&f), before);
+        for case in 0..20 {
+            let mut h = hint.clone();
+            let mut ff = f.clone();
+            let e = h.completion_sensitivity.as_mut().unwrap();
+            match case {
+                0 => h.witness = "unavailable".into(),
+                1 => h.assertion_source = Some("tests/a.test.ts:8:3".into()),
+                2 => e.original.as_mut().unwrap().outcome = "rejected".into(),
+                3 => e.omitted.as_mut().unwrap().outcome = "not-rejected".into(),
+                4 => e.original.as_mut().unwrap().throw_source = None,
+                5 => e.omitted.as_mut().unwrap().throw_source = Some("src/a.ts:4:3".into()),
+                6 => e.original.as_mut().unwrap().callback_source = "src/other.ts:3:1".into(),
+                7 => e.original.as_mut().unwrap().target_evaluations = 0,
+                8 => e.omitted.as_mut().unwrap().target_evaluations = 4097,
+                9 => e.scope = Some("whole-suite".into()),
+                10 => e.target_source = Some("src/a.ts:5:3".into()),
+                11 => h.assertion_method = Some("rejects".into()),
+                12 => e.change = Some("arbitrary-edit".into()),
+                13 => e.change_text = Some("".into()),
+                14 => e.original.as_mut().unwrap().completion = "rejection".into(),
+                15 => e.omitted.as_mut().unwrap().method = "doesNotThrow".into(),
+                16 => e.original.as_mut().unwrap().callback_source = "src/a.ts:0:0".into(),
+                17 => ff.tests[0]
+                    .witness_issues
+                    .push(rejected(WitnessIssueKind::CaptureUnavailable, None)),
+                18 => {
+                    let mut issue = rejected(WitnessIssueKind::CallFailed, None);
+                    issue.source = h.assertion_source.clone();
+                    ff.tests[0].witness_issues.push(issue);
+                }
+                19 => {
+                    h.payload_sensitivity = Some(
+                        serde_json::from_value(
+                            serde_json::json!({"model":"unused", "status":"unresolved"}),
+                        )
+                        .unwrap(),
+                    )
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                check_pragma_hints(&ff, &[h])[0].validation,
+                HintValidation::Unresolved,
+                "case {case}"
+            );
+        }
+        // An unchanged completion is also a checked answer for this one edit;
+        // it must not become whole-suite survival or ordinary assertion credit.
+        let e = hint.completion_sensitivity.as_mut().unwrap();
+        e.omitted = e.original.clone();
+        let local = check_pragma_hints(&f, &[hint.clone()]).remove(0);
+        assert_eq!(local.validation, HintValidation::AnalyzerSupported);
+        assert!(local.strength.is_none());
+        hint.assertion_method = Some("doesNotThrow".into());
+        let e = hint.completion_sensitivity.as_mut().unwrap();
+        for c in [&mut e.original, &mut e.omitted].into_iter().flatten() {
+            c.method = "doesNotThrow".into();
+            c.completion = "normal".into();
+            c.throw_source = None;
+        }
+        assert_eq!(
+            check_pragma_hints(&f, &[hint])[0].validation,
+            HintValidation::AnalyzerSupported
+        );
+    }
+
+    #[test]
+    fn completion_rejection_requires_safe_native_diagnostic_evidence() {
+        let mut hint = pragma_hint();
+        hint.check = Some("completion".into());
+        hint.assertion_method = Some("doesNotThrow".into());
+        hint.completion_sensitivity = Some(serde_json::from_value(serde_json::json!({
+            "model":"node-first-test-completion-v1", "status":"source-checked",
+            "scope":"first-synchronous-test-prefix", "assertionSource":"tests/a.test.ts:7:3",
+            "targetSource":"src/a.ts:4:3", "changeText":"return 101;", "change":"statement-omitted",
+            "original":{"method":"doesNotThrow", "callbackSource":"src/a.ts:3:1", "completion":"normal",
+                "targetEvaluations":1, "outcome":"not-rejected"},
+            "omitted":{"method":"doesNotThrow", "callbackSource":"src/a.ts:3:1", "completion":"throw",
+                "throwSource":"src/a.ts:5:3", "targetEvaluations":1, "outcome":"rejected"}
+        })).unwrap());
+        let mut s = site("S1", "return", vec![], &["T1"]);
+        s.line = 4;
+        let mut t = test("T1", vec![]);
+        t.file = "tests/a.test.ts".into();
+        let f = facts(vec![s], vec![t]);
+        let before = join(&f);
+        // Older evidence that equated any throw with rejection must not pass.
+        assert_eq!(
+            check_pragma_hints(&f, &[hint.clone()])[0].validation,
+            HintValidation::Unresolved
+        );
+        for value in [
+            serde_json::json!({"basis":"native-error-message", "message":{"kind":"string", "value":"boom"}}),
+            serde_json::json!({"basis":"absent-message", "message":{"kind":"undefined"}}),
+            serde_json::json!({"basis":"primitive-thrown-value", "message":{"kind":"undefined"}}),
+            serde_json::json!({"basis":"own-primitive-message", "message":{"kind":"undefined"}}),
+            serde_json::json!({"basis":"own-primitive-message", "message":{"kind":"null"}}),
+            serde_json::json!({"basis":"own-primitive-message", "message":{"kind":"number", "value":42}}),
+            serde_json::json!({"basis":"own-primitive-message", "message":{"kind":"boolean", "value":false}}),
+            serde_json::json!({"basis":"own-primitive-message", "message":{"kind":"string", "value":"boom"}}),
+        ] {
+            let mut h = hint.clone();
+            h.completion_sensitivity
+                .as_mut()
+                .unwrap()
+                .omitted
+                .as_mut()
+                .unwrap()
+                .diagnostic = Some(serde_json::from_value(value.clone()).unwrap());
+            let result = check_pragma_hints(&f, &[h]).remove(0);
+            assert_eq!(
+                result.validation,
+                HintValidation::AnalyzerSupported,
+                "{value}"
+            );
+            assert!(result.strength.is_none());
+            assert!(result.observations.is_empty());
+        }
+        for value in [
+            serde_json::json!({"basis":"assumed-safe", "message":{"kind":"undefined"}}),
+            serde_json::json!({"basis":"native-error-message", "message":{"kind":"number", "value":42}}),
+            serde_json::json!({"basis":"native-error-message", "message":{"kind":"string"}}),
+            serde_json::json!({"basis":"native-error-message", "message":{"kind":"string", "value":false}}),
+            serde_json::json!({"basis":"absent-message", "message":{"kind":"null"}}),
+            serde_json::json!({"basis":"primitive-thrown-value", "message":{"kind":"string", "value":"boom"}}),
+            serde_json::json!({"basis":"own-primitive-message", "message":{"kind":"object", "properties":[]}}),
+            serde_json::json!({"basis":"own-primitive-message", "message":{"kind":"opaque-string"}}),
+            serde_json::json!({"basis":"own-primitive-message", "message":{"kind":"undefined", "extra":true}}),
+        ] {
+            let mut h = hint.clone();
+            h.completion_sensitivity
+                .as_mut()
+                .unwrap()
+                .omitted
+                .as_mut()
+                .unwrap()
+                .diagnostic = Some(serde_json::from_value(value.clone()).unwrap());
+            assert_eq!(
+                check_pragma_hints(&f, &[h])[0].validation,
+                HintValidation::Unresolved,
+                "{value}"
+            );
+        }
+        let descriptor: CompletionDiagnostic = serde_json::from_value(serde_json::json!({
+            "basis":"native-error-message", "message":{"kind":"string", "value":"boom"}
+        }))
+        .unwrap();
+        for method in ["doesNotThrow", "throws"] {
+            let mut h = hint.clone();
+            h.assertion_method = Some(method.into());
+            let e = h.completion_sensitivity.as_mut().unwrap();
+            for c in [&mut e.original, &mut e.omitted].into_iter().flatten() {
+                c.method = method.into();
+                c.completion = if method == "throws" {
+                    "throw"
+                } else {
+                    "normal"
+                }
+                .into();
+                c.throw_source = (method == "throws").then(|| "src/a.ts:5:3".into());
+                c.outcome = "not-rejected".into();
+                c.diagnostic = Some(descriptor.clone());
+            }
+            // Do not accept diagnostics on paths whose predicate never reads them.
+            assert_eq!(
+                check_pragma_hints(&f, &[h])[0].validation,
+                HintValidation::Unresolved
+            );
+        }
+        assert_eq!(join(&f), before);
+    }
+
+    #[test]
+    fn completion_matcher_shortcut_uses_only_original_witness_and_safe_missing_diagnostic() {
+        let mut hint = pragma_hint();
+        hint.check = Some("completion".into());
+        hint.assertion_method = Some("throws".into());
+        hint.completion_sensitivity = Some(serde_json::from_value(serde_json::json!({
+            "model":"node-first-test-completion-v1", "status":"source-checked",
+            "scope":"first-synchronous-test-prefix", "assertionSource":"tests/a.test.ts:7:3",
+            "targetSource":"src/a.ts:4:3", "changeText":"throw Error('boom');", "change":"statement-omitted",
+            "original":{"method":"throws", "callbackSource":"src/a.ts:3:1", "completion":"throw",
+                "throwSource":"src/a.ts:4:3", "targetEvaluations":1, "outcome":"witnessed-pass",
+                "matcher":{"source":"tests/a.test.ts:7:28", "kind":"native-regexp"}},
+            "omitted":{"method":"throws", "callbackSource":"src/a.ts:3:1", "completion":"normal",
+                "targetEvaluations":1, "outcome":"rejected",
+                "matcher":{"source":"tests/a.test.ts:7:28", "kind":"native-regexp"},
+                "missingExceptionDiagnostic":{"nameBasis":"absent", "message":{"kind":"undefined"}}}
+        })).unwrap());
+        let mut s = site("S1", "throw", vec![], &["T1"]);
+        s.line = 4;
+        let mut t = test("T1", vec![]);
+        t.file = "tests/a.test.ts".into();
+        let f = facts(vec![s], vec![t]);
+        let before = join(&f);
+        for (kind, diagnostic) in [
+            (
+                "native-regexp",
+                serde_json::json!({"nameBasis":"absent", "message":{"kind":"undefined"}}),
+            ),
+            (
+                "source-function",
+                serde_json::json!({"nameBasis":"source-function-name", "message":{"kind":"string", "value":"required"}}),
+            ),
+            (
+                "native-error-constructor",
+                serde_json::json!({"nameBasis":"native-error-name", "name":{"kind":"string", "value":"Error"}, "message":{"kind":"undefined"}}),
+            ),
+            (
+                "native-error",
+                serde_json::json!({"nameBasis":"native-error-name", "name":{"kind":"string", "value":"Error"}, "message":{"kind":"undefined"}}),
+            ),
+            (
+                "object",
+                serde_json::json!({"nameBasis":"own-primitive-name", "name":{"kind":"string", "value":"Error"}, "message":{"kind":"number", "value":42}}),
+            ),
+            (
+                "object",
+                serde_json::json!({"nameBasis":"own-primitive-name", "name":{"kind":"null"}, "message":{"kind":"null"}}),
+            ),
+            (
+                "object",
+                serde_json::json!({"nameBasis":"absent", "message":{"kind":"undefined"}}),
+            ),
+            (
+                "array",
+                serde_json::json!({"nameBasis":"absent", "message":{"kind":"boolean", "value":false}}),
+            ),
+            (
+                "none",
+                serde_json::json!({"nameBasis":"absent", "message":{"kind":"undefined"}}),
+            ),
+            (
+                "message-overload",
+                serde_json::json!({"nameBasis":"absent", "message":{"kind":"string", "value":"required"}}),
+            ),
+        ] {
+            let mut h = hint.clone();
+            let e = h.completion_sensitivity.as_mut().unwrap();
+            for c in [&mut e.original, &mut e.omitted].into_iter().flatten() {
+                c.matcher.as_mut().unwrap().kind = kind.into();
+            }
+            e.omitted.as_mut().unwrap().missing_exception_diagnostic =
+                Some(serde_json::from_value(diagnostic).unwrap());
+            let result = check_pragma_hints(&f, &[h]).remove(0);
+            assert_eq!(
+                result.validation,
+                HintValidation::AnalyzerSupported,
+                "{kind}"
+            );
+            assert!(result.strength.is_none());
+            assert!(result.observations.is_empty());
+        }
+        for case in 0..20 {
+            let mut h = hint.clone();
+            let e = h.completion_sensitivity.as_mut().unwrap();
+            let original = e.original.as_mut().unwrap();
+            let omitted = e.omitted.as_mut().unwrap();
+            match case {
+                0 => h.witness = "unavailable".into(),
+                1 => original.outcome = "not-rejected".into(),
+                2 => omitted.outcome = "witnessed-pass".into(),
+                3 => {
+                    omitted.completion = "throw".into();
+                    omitted.throw_source = Some("src/a.ts:4:3".into());
+                }
+                4 => omitted.missing_exception_diagnostic = None,
+                5 => {
+                    original.missing_exception_diagnostic =
+                        omitted.missing_exception_diagnostic.clone()
+                }
+                6 => omitted.matcher = None,
+                7 => original.matcher = None,
+                8 => omitted.matcher.as_mut().unwrap().source = "tests/a.test.ts:8:28".into(),
+                9 => original.matcher.as_mut().unwrap().source = "tests/other.test.ts:7:28".into(),
+                10 => omitted.matcher.as_mut().unwrap().kind = "unknown".into(),
+                11 => {
+                    omitted
+                        .missing_exception_diagnostic
+                        .as_mut()
+                        .unwrap()
+                        .message = serde_json::json!({"kind":"object", "properties":[]})
+                }
+                12 => {
+                    omitted
+                        .missing_exception_diagnostic
+                        .as_mut()
+                        .unwrap()
+                        .name_basis = "source-function-name".into()
+                }
+                13 => {
+                    omitted.missing_exception_diagnostic.as_mut().unwrap().name =
+                        Some(serde_json::json!({"kind":"undefined"}))
+                }
+                14 => {
+                    omitted
+                        .missing_exception_diagnostic
+                        .as_mut()
+                        .unwrap()
+                        .message = serde_json::json!({"kind":"string", "value":42})
+                }
+                15 => omitted.matcher.as_mut().unwrap().kind = "message-overload".into(),
+                16 => {
+                    omitted.matcher.as_mut().unwrap().kind = "object".into();
+                    omitted
+                        .missing_exception_diagnostic
+                        .as_mut()
+                        .unwrap()
+                        .name_basis = "own-primitive-name".into();
+                    omitted.missing_exception_diagnostic.as_mut().unwrap().name =
+                        Some(serde_json::json!({"kind":"object", "properties":[]}));
+                }
+                17 => {
+                    omitted.matcher.as_mut().unwrap().kind = "native-error".into();
+                    omitted
+                        .missing_exception_diagnostic
+                        .as_mut()
+                        .unwrap()
+                        .name_basis = "native-error-name".into();
+                    omitted.missing_exception_diagnostic.as_mut().unwrap().name =
+                        Some(serde_json::json!({"kind":"string", "value":"Other"}));
+                }
+                18 => h.assertion_method = Some("doesNotThrow".into()),
+                19 => original.target_evaluations = 0,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                check_pragma_hints(&f, &[h])[0].validation,
+                HintValidation::Unresolved,
+                "case {case}"
+            );
+        }
+        assert_eq!(join(&f), before);
+    }
+
+    #[test]
+    fn direct_return_variants_require_exact_scope_witness_and_consistent_values() {
+        let mut hint = pragma_hint();
+        hint.check = Some("value".into());
+        let original = serde_json::json!({
+            "predicate":"node-same-value", "actual":{"kind":"string","value":"*"},
+            "expected":{"kind":"string","value":"*"}, "outcome":"not-rejected",
+            "callSource":"tests/a.test.ts:7:16", "targetEvaluations":1
+        });
+        let mut changed = original.clone();
+        changed["actual"] = serde_json::json!({"kind":"array","properties":[]});
+        changed["outcome"] = "rejected".into();
+        hint.direct_return_sensitivity = Some(serde_json::from_value(serde_json::json!({
+            "model":"node-first-test-direct-return-v1", "status":"source-checked",
+            "scope":"first-synchronous-test-prefix", "assertionSource":"tests/a.test.ts:7:3",
+            "targetSource":"src/a.ts:4:3", "changeSource":"src/a.ts:4:3", "changeText":"items.length === 0",
+            "original":original,
+            "variants":[
+                {"change":"condition-true","status":"source-checked","check":original},
+                {"change":"condition-false","status":"source-checked","check":changed},
+                {"change":"condition-inverted","status":"unresolved","reason":"not supported"}
+            ]
+        })).unwrap());
+        let mut s = site("S1", "condition", vec![], &["T1"]);
+        s.kind = "decision".into();
+        s.line = 4;
+        let mut t = test("T1", vec![]);
+        t.file = "tests/a.test.ts".into();
+        let f = facts(vec![s], vec![t]);
+        let before = join(&f);
+        let result = check_pragma_hints(&f, &[hint.clone()]).remove(0);
+        assert_eq!(result.validation, HintValidation::AnalyzerSupported);
+        assert!(result.strength.is_none());
+        assert!(result.observations.is_empty());
+        assert_eq!(join(&f), before);
+        for case in 0..18 {
+            let mut h = hint.clone();
+            let mut ff = f.clone();
+            let e = h.direct_return_sensitivity.as_mut().unwrap();
+            match case {
+                0 => h.witness = "unavailable".into(),
+                1 => h.assertion_source = Some("tests/a.test.ts:8:3".into()),
+                2 => e.original.as_mut().unwrap().outcome = "witnessed-pass".into(),
+                3 => {
+                    e.variants.as_mut().unwrap()[1]
+                        .check
+                        .as_mut()
+                        .unwrap()
+                        .outcome = "not-rejected".into()
+                }
+                4 => {
+                    e.variants.as_mut().unwrap()[1]
+                        .check
+                        .as_mut()
+                        .unwrap()
+                        .expected = serde_json::json!({"kind":"undefined"})
+                }
+                5 => e.original.as_mut().unwrap().call_source = "tests/other.ts:7:16".into(),
+                6 => e.original.as_mut().unwrap().target_evaluations = 0,
+                7 => e.scope = Some("whole-suite".into()),
+                8 => e.target_source = Some("src/a.ts:5:3".into()),
+                9 => h.assertion_method = Some("ok".into()),
+                10 => e.variants.as_mut().unwrap()[0].change = "arbitrary-edit".into(),
+                11 => {
+                    e.original.as_mut().unwrap().actual =
+                        serde_json::json!({"kind":"opaque-string"})
+                }
+                12 => {
+                    e.original.as_mut().unwrap().actual =
+                        serde_json::json!({"kind":"string","value":"*","extra":1})
+                }
+                13 => e.variants.as_mut().unwrap()[2].check = e.original.clone(),
+                14 => e.original.as_mut().unwrap().call_source = "tests/a.test.ts:0:0".into(),
+                15 => ff.tests[0]
+                    .witness_issues
+                    .push(rejected(WitnessIssueKind::CaptureUnavailable, None)),
+                16 => {
+                    let mut issue = rejected(WitnessIssueKind::CallFailed, None);
+                    issue.source = h.assertion_source.clone();
+                    ff.tests[0].witness_issues.push(issue);
+                }
+                17 => {
+                    h.payload_sensitivity = Some(
+                        serde_json::from_value(
+                            serde_json::json!({"model":"unused", "status":"unresolved"}),
+                        )
+                        .unwrap(),
+                    )
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                check_pragma_hints(&ff, &[h])[0].validation,
+                HintValidation::Unresolved,
+                "case {case}"
+            );
+        }
+        let e = hint.direct_return_sensitivity.as_mut().unwrap();
+        e.change_text = Some("false".into());
+        e.original = Some(
+            serde_json::from_value(serde_json::json!({
+                "predicate":"node-same-value", "actual":{"kind":"boolean","value":false},
+                "expected":{"kind":"boolean","value":false}, "outcome":"not-rejected",
+                "callSource":"tests/a.test.ts:7:16", "targetEvaluations":1
+            }))
+            .unwrap(),
+        );
+        let mut c = e.original.clone().unwrap();
+        c.actual = serde_json::json!({"kind":"boolean","value":true});
+        c.outcome = "rejected".into();
+        e.variants = Some(vec![DirectReturnVariant {
+            change: "boolean-literal-inverted".into(),
+            status: "source-checked".into(),
+            reason: None,
+            check: Some(c),
+        }]);
+        assert_eq!(
+            check_pragma_hints(&f, &[hint])[0].validation,
+            HintValidation::AnalyzerSupported
+        );
+    }
+
+    #[test]
+    fn payload_sensitivity_checks_values_and_own_witness_without_legacy_links() {
+        let mut hint = pragma_hint();
+        hint.check = Some("value".into());
+        let original = serde_json::json!({
+            "predicate":"node-same-value", "actual":{"kind":"string","value":"hello"},
+            "expected":{"kind":"string","value":"hello"}, "outcome":"not-rejected",
+            "projection":{"instance":"tests/a.test.ts:2:3", "callSource":"src/a.ts:4:3", "callIndex":0, "argumentIndex":1, "readAt":"tests/a.test.ts:7:16"}
+        });
+        let mut changed = original.clone();
+        changed["actual"] = serde_json::json!({"kind":"undefined"});
+        changed["outcome"] = "rejected".into();
+        hint.payload_sensitivity = Some(serde_json::from_value(serde_json::json!({
+            "model":"node-closed-payload-sensitivity-v2", "status":"source-checked",
+            "scope":"closed-synchronous-test-module", "assertionSource":"tests/a.test.ts:7:3",
+            "targetSource":"src/a.ts:4:3", "changeSource":"src/a.ts:4:12", "changeText":"{ return arg; }",
+            "allocations":["src/a.ts:2:3"], "original":original,
+            "variants":[{"change":"map-callback-empty","status":"source-checked","check":changed}]
+        })).unwrap());
+        let mut s = site("S1", "return", vec![], &["T1"]);
+        s.category = "return".into();
+        // Conditional history aliases need not have a legacy heuristic observation.
+        let mut t = test("T1", vec![]);
+        t.file = "tests/a.test.ts".into();
+        let f = facts(vec![s], vec![t]);
+        let before = serde_json::to_value(join(&f)).unwrap();
+        let result = check_pragma_hints(&f, &[hint.clone()]).remove(0);
+        assert_eq!(result.validation, HintValidation::AnalyzerSupported);
+        assert_eq!(result.strength, None);
+        assert_eq!(serde_json::to_value(join(&f)).unwrap(), before);
+        for case in 0..13 {
+            let mut h = hint.clone();
+            let e = h.payload_sensitivity.as_mut().unwrap();
+            match case {
+                0 => h.witness = "unavailable".into(),
+                1 => h.assertion_source = Some("tests/a.test.ts:9:3".into()),
+                2 => {
+                    e.variants.as_mut().unwrap()[0]
+                        .check
+                        .as_mut()
+                        .unwrap()
+                        .outcome = "not-rejected".into()
+                }
+                3 => {
+                    e.original.as_mut().unwrap().actual =
+                        serde_json::json!({"kind":"opaque-string"})
+                }
+                4 => {
+                    e.variants.as_mut().unwrap()[0]
+                        .check
+                        .as_mut()
+                        .unwrap()
+                        .expected = serde_json::json!({"kind":"undefined"})
+                }
+                5 => {
+                    e.variants.as_mut().unwrap()[0]
+                        .check
+                        .as_mut()
+                        .unwrap()
+                        .projection
+                        .argument_index = 9
+                }
+                6 => e.variants.as_mut().unwrap()[0].change = "arbitrary-edit".into(),
+                7 => e.allocations = Some(vec![]),
+                8 => e.original.as_mut().unwrap().projection.instance = "tests/other.ts:2:3".into(),
+                9 => h.assertion_method = Some("ok".into()),
+                10 => e.variants.as_mut().unwrap()[0].status = "unresolved".into(),
+                11 => e.scope = Some("whole-suite".into()),
+                12 => {
+                    e.original.as_mut().unwrap().actual =
+                        serde_json::json!({"kind":"string","value":"hello","invented":true})
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                check_pragma_hints(&f, &[h])[0].validation,
+                HintValidation::Unresolved,
+                "case {case}"
+            );
+        }
+        let object = serde_json::json!({"kind":"object","properties":[{"name":"a","value":{"kind":"number","value":1}}]});
+        let opaque = serde_json::json!({"kind":"opaque-string"});
+        assert_eq!(payload_equal(&opaque, &object, true), Some(false));
+        assert_eq!(payload_equal(&opaque, &opaque, true), None);
+        assert_eq!(payload_equal(&object, &object, false), None);
+        assert!(valid_payload(&object, 0, &mut 4096));
+        assert!(!valid_payload(
+            &serde_json::json!({"kind":"object","properties":[{"name":"x","value":{"kind":"null"}},{"name":"x","value":{"kind":"null"}}]}),
+            0,
+            &mut 4096
+        ));
+    }
+
+    #[test]
+    fn payload_native_predicates_keep_original_witness_separate_from_variant_proofs() {
+        let mut hint = pragma_hint();
+        hint.check = Some("value".into());
+        hint.assertion_method = Some("match".into());
+        let original = serde_json::json!({
+            "predicate":"node-literal-regexp", "actual":{"kind":"opaque-string"},
+            "expected":{"kind":"substring-pattern","value":"a: 1"}, "outcome":"witnessed-pass",
+            "projection":{"instance":"tests/a.test.ts:2:3", "callSource":"src/a.ts:4:3", "callIndex":0, "argumentIndex":2, "readAt":"tests/a.test.ts:7:16",
+                "coercion":{"source":"tests/a.test.ts:7:16", "rule":"string-identity", "input":{"kind":"opaque-string"}}}
+        });
+        let mut changed = original.clone();
+        changed["actual"] = serde_json::json!({"kind":"string","value":"[object Object]"});
+        changed["outcome"] = "rejected".into();
+        changed["projection"]["coercion"] = serde_json::json!({
+            "source":"tests/a.test.ts:7:16", "rule":"plain-object-default-string",
+            "input":{"kind":"object","properties":[{"name":"a","value":{"kind":"number","value":1}}]}
+        });
+        hint.payload_sensitivity = Some(serde_json::from_value(serde_json::json!({
+            "model":"node-closed-payload-sensitivity-v2", "status":"source-checked",
+            "scope":"closed-synchronous-test-module", "assertionSource":"tests/a.test.ts:7:3",
+            "targetSource":"src/a.ts:4:3", "changeSource":"src/a.ts:4:12", "changeText":"mode === 'verbose'",
+            "allocations":["src/a.ts:2:3"], "original":original,
+            "variants":[
+                {"change":"condition-false","status":"source-checked","check":changed},
+                {"change":"condition-true","status":"unresolved","reason":"opaque value"},
+                {"change":"condition-inverted","status":"unresolved","reason":"opaque value"}
+            ]
+        })).unwrap());
+        let mut s = site("S1", "return", vec![], &["T1"]);
+        s.category = "return".into();
+        let mut t = test("T1", vec![]);
+        t.file = "tests/a.test.ts".into();
+        let f = facts(vec![s], vec![t]);
+        assert_eq!(
+            check_pragma_hints(&f, &[hint.clone()])[0].validation,
+            HintValidation::AnalyzerSupported
+        );
+        for case in 0..11 {
+            let mut h = hint.clone();
+            let e = h.payload_sensitivity.as_mut().unwrap();
+            match case {
+                0 => h.witness = "unavailable".into(),
+                1 => h.assertion_source = Some("tests/a.test.ts:9:3".into()),
+                2 => e.original.as_mut().unwrap().outcome = "not-rejected".into(),
+                3 => e.variants.as_mut().unwrap()[0].check = e.original.clone(),
+                4 => {
+                    let o = e.original.as_mut().unwrap();
+                    o.actual = serde_json::json!({"kind":"string","value":"does not match"});
+                    o.projection.coercion = None;
+                }
+                5 => {
+                    e.variants.as_mut().unwrap()[0]
+                        .check
+                        .as_mut()
+                        .unwrap()
+                        .projection
+                        .coercion
+                        .as_mut()
+                        .unwrap()
+                        .rule = "guess".into()
+                }
+                6 => {
+                    e.variants.as_mut().unwrap()[0]
+                        .check
+                        .as_mut()
+                        .unwrap()
+                        .projection
+                        .coercion
+                        .as_mut()
+                        .unwrap()
+                        .source = "tests/a.test.ts:9:3".into()
+                }
+                7 => {
+                    e.variants.as_mut().unwrap()[0]
+                        .check
+                        .as_mut()
+                        .unwrap()
+                        .projection
+                        .coercion
+                        .as_mut()
+                        .unwrap()
+                        .input = serde_json::json!({"kind":"object","properties":[{"name":"toString","value":{"kind":"string","value":"a: 1"}}]})
+                }
+                8 => {
+                    e.original.as_mut().unwrap().expected =
+                        serde_json::json!({"kind":"substring-pattern","value":"a: [0-9]"})
+                }
+                9 => e.model = "node-closed-payload-sensitivity-v1".into(),
+                10 => h.assertion_method = Some("equal".into()),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                check_pragma_hints(&f, &[h])[0].validation,
+                HintValidation::Unresolved,
+                "case {case}"
+            );
+        }
+        let quoted = serde_json::json!({"kind":"quoted-string","value":"hello"});
+        assert_eq!(
+            payload_equal(
+                &quoted,
+                &serde_json::json!({"kind":"string","value":"hello"}),
+                false
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            payload_equal(
+                &quoted,
+                &serde_json::json!({"kind":"string","value":"'hello'"}),
+                false
+            ),
+            None
+        );
+        assert_eq!(payload_equal(&quoted, &quoted, false), None);
+        assert!(!valid_payload(
+            &serde_json::json!({"kind":"quoted-string","value":"hello!"}),
+            0,
+            &mut 4096
+        ));
+    }
+
+    #[test]
+    fn source_supported_await_does_not_borrow_a_passing_assertion_phase() {
+        let mut hint = pragma_hint();
+        hint.awaited_observation = Some(AwaitedObservationSource {
+            model: "node-child-capture-poll-v1".into(),
+            factory_source: "tests/process.mjs:4:1".into(),
+            predicate_source: "tests/process.mjs:21:38".into(),
+            captures: vec![ObservationCaptureSource {
+                stream: "stdout".into(),
+                source: "tests/process.mjs:8:58".into(),
+            }],
+            pattern: "/ready/".into(),
+        });
+        // Even a supplied 'passed' hint and matching ordinary observation are
+        // not a read receipt for an awaited source model.
+        let mut ob = observation("return:handler", Strength::Total);
+        ob.assertion_source = hint.assertion_source.clone();
+        ob.assertion_method = hint.assertion_method.clone();
+        let f = facts(
+            vec![site("S1", "return", vec![], &["T1"])],
+            vec![test("T1", vec![ob])],
+        );
+        let before = join(&f);
+        let checks = check_pragma_hints(&f, &[hint]);
+        assert_eq!(checks[0].validation, HintValidation::Unresolved);
+        assert_eq!(checks[0].reason, "observation-capture-unavailable");
+        assert!(checks[0].observations.is_empty());
+        assert!(checks[0].strength.is_none());
+        assert_eq!(join(&f), before);
     }
 
     #[test]
@@ -1635,6 +4176,550 @@ mod tests {
         assert_eq!(after.witness_issues[0].test, "T");
         assert_eq!(summary(&f.sites, &join(&f)).limits, 1);
         assert_eq!(summary(&f.sites, &join(&f)).gaps, 0);
+    }
+
+    #[test]
+    fn unlinked_test_source_is_not_an_assertion_gap_or_pragma_permission() {
+        let mut missing = test("T1", vec![]);
+        missing.witness_issues.push(WitnessIssue {
+            kind: WitnessIssueKind::TestSourceUnlinked,
+            source: None,
+            operation: None,
+            observation: None,
+        });
+        let mut f = facts(
+            vec![
+                site("S1", "return", vec![boundary("return:handler")], &["T1"]),
+                site("uncovered", "return", vec![boundary("return:handler")], &[]),
+                site(
+                    "unrelated",
+                    "return",
+                    vec![boundary("return:handler")],
+                    &["T2"],
+                ),
+            ],
+            vec![missing, test("T2", vec![])],
+        );
+        let rows = join(&f);
+        assert_eq!(
+            rows[0].reason.as_ref().unwrap().kind,
+            ReasonKind::LimitAssertionWitness
+        );
+        assert_eq!(
+            rows[0].witness_issues[0].issue.kind,
+            WitnessIssueKind::TestSourceUnlinked
+        );
+        assert_eq!(rows[0].strength, None);
+        assert_eq!(
+            rows[1].reason.as_ref().unwrap().kind,
+            ReasonKind::GapNotReached
+        );
+        assert_eq!(
+            rows[2].reason.as_ref().unwrap().kind,
+            ReasonKind::GapNotAsserted
+        );
+        let mut hint = pragma_hint();
+        hint.assertion_source = Some("tests/a.test.ts:7:3".into());
+        for recipe in [None, Some("value"), Some("count"), Some("missing-call")] {
+            hint.check = recipe.map(String::from);
+            let result = check_pragma_hints(&f, &[hint.clone()]).remove(0);
+            assert_eq!(result.validation, HintValidation::Unresolved);
+            assert_eq!(result.reason, "test-source-unlinked");
+        }
+        // An independent positive observation is not erased by an unlinked test.
+        f.sites[0].covered_by.push("T2".into());
+        f.tests[1]
+            .observations
+            .push(observation("return:handler", Strength::Total));
+        assert_eq!(join(&f)[0].status, Status::Evident);
+        assert_eq!(join(&f)[0].witness_issues.len(), 1);
+    }
+
+    #[test]
+    fn witnessed_callback_does_not_close_test_scope_or_validate_guidance() {
+        let mut t = test("T1", vec![]);
+        t.witness_issues.push(WitnessIssue {
+            kind: WitnessIssueKind::TestRegistrationScopeUnverified,
+            source: None,
+            operation: None,
+            observation: None,
+        });
+        let mut f = facts(
+            vec![site(
+                "S1",
+                "return",
+                vec![boundary("return:handler")],
+                &["T1"],
+            )],
+            vec![t],
+        );
+        assert_eq!(
+            join(&f)[0].reason.as_ref().unwrap().kind,
+            ReasonKind::LimitAssertionWitness
+        );
+        let mut hint = pragma_hint();
+        hint.assertion_source = Some("tests/a.test.ts:7:3".into());
+        for recipe in [None, Some("value"), Some("count"), Some("missing-call")] {
+            hint.check = recipe.map(String::from);
+            let result = check_pragma_hints(&f, &[hint.clone()]).remove(0);
+            assert_eq!(result.validation, HintValidation::Unresolved);
+            assert_eq!(result.reason, "test-registration-scope-unverified");
+        }
+        // Local observations remain candidate evidence, never scope closure.
+        f.tests[0]
+            .observations
+            .push(observation("return:handler", Strength::Total));
+        let row = join(&f).remove(0);
+        assert_eq!(row.status, Status::Evident);
+        assert_eq!(
+            row.witness_issues[0].issue.kind,
+            WitnessIssueKind::TestRegistrationScopeUnverified
+        );
+        assert_eq!(
+            check_pragma_hints(&f, &[hint]).remove(0).validation,
+            HintValidation::Unresolved
+        );
+    }
+
+    #[test]
+    fn self_comparisons_cannot_supply_value_absence_sink_pragma_or_early_exit_credit() {
+        for (predicate, relation) in [
+            "node-same-value",
+            "node-loose-equality",
+            "node-deep-equality",
+            "node-deep-strict-equality",
+        ]
+        .into_iter()
+        .flat_map(|predicate| {
+            ["same-immutable-binding", "shared-input-through-await"]
+                .map(|relation| (predicate, relation))
+        }) {
+            let operand = ComparisonOperand {
+                source: "tests/a.test.ts:70:76".into(),
+                value: None,
+                binding: Some("tests/a.test.ts:20:40".into()),
+                input: (relation == "shared-input-through-await").then(|| ComparisonInput {
+                    binding: "tests/a.test.ts:20:40".into(),
+                    awaits: vec!["tests/a.test.ts:64:76".into()],
+                }),
+            };
+            let mut ob = observation("return:handler", Strength::Total);
+            ob.comparison = Some(Comparison {
+                predicate: predicate.into(),
+                actual: operand.clone(),
+                expected: ComparisonOperand {
+                    source: "tests/a.test.ts:78:84".into(),
+                    ..operand
+                },
+                relation: relation.into(),
+            });
+            ob.assertion_source = Some("tests/a.test.ts:7:3".into());
+            ob.assertion_method = Some("equal".into());
+            ob.call_list = true;
+            let mut negative = ob.clone();
+            negative.negative = true;
+            let mut sink_ob = ob.clone();
+            sink_ob.boundary = "sink:records".into();
+            let mut negative_sink = sink_ob.clone();
+            negative_sink.negative = true;
+            let mut t = test("T1", vec![ob.clone(), negative, sink_ob, negative_sink]);
+            t.sinks.push(SinkBinding {
+                sink: "sink:records".into(),
+                param: "writer".into(),
+                member: None,
+            });
+            let mut upstream = site("S2", "return", vec![boundary("internal")], &["T1"]);
+            upstream.reached = vec!["S1".into()];
+            let mut decision = site("D1", "condition", vec![], &["T1", "T2"]);
+            decision.kind = "decision".into();
+            decision.decision = Some(DecisionFacts {
+                then: Some(vec!["S4".into()]),
+                else_: Some(Some(vec!["S5".into()])),
+                early_exit_downstream: Some(vec!["S5".into()]),
+                outcomes: Some(Outcomes {
+                    true_: vec!["T1".into()],
+                    false_: vec!["T2".into()],
+                }),
+                ..Default::default()
+            });
+            let mut f = facts(
+                vec![
+                    site("S1", "return", vec![boundary("return:handler")], &["T1"]),
+                    upstream,
+                    site(
+                        "S3",
+                        "external-call",
+                        vec![boundary("callback:writer")],
+                        &["T1"],
+                    ),
+                    site("S4", "return", vec![boundary("internal")], &["T1"]),
+                    site("S5", "io-call", vec![boundary("client-message")], &["T2"]),
+                    decision,
+                ],
+                vec![
+                    t,
+                    test("T2", vec![observation("client-message", Strength::Total)]),
+                ],
+            );
+            let rows = join(&f);
+            assert!(
+                rows[..4]
+                    .iter()
+                    .all(|r| r.status == Status::Unresolved && r.strength.is_none()),
+                "{predicate}"
+            );
+            let d = rows.iter().find(|r| r.site == "D1").unwrap();
+            assert_eq!(d.status, Status::Partial);
+            assert_eq!(d.stuck_false_caught, Some(false));
+            assert_eq!(
+                check_pragma_hints(&f, &[pragma_hint()])[0].validation,
+                HintValidation::Unresolved
+            );
+            let joiner = Join {
+                sites: f.sites.iter().map(|s| (s.id.as_str(), s)).collect(),
+                tests: f.tests.iter().map(|t| (t.id.as_str(), t)).collect(),
+                facts: &f,
+                resolved: BTreeMap::new(),
+            };
+            assert!(!joiner.pinned(&BTreeSet::from(["T1"]), &["S1".into()]));
+            let bytes = serde_json::to_vec(&ob).unwrap();
+            assert_eq!(serde_json::from_slice::<Observation>(&bytes).unwrap(), ob);
+            f.tests[0]
+                .observations
+                .push(observation("return:handler", Strength::Value));
+            let rows = join(&f);
+            assert_eq!(
+                rows[0].status,
+                Status::Evident,
+                "independent evidence is preserved"
+            );
+            assert_eq!(
+                rows.iter()
+                    .find(|r| r.site == "D1")
+                    .unwrap()
+                    .stuck_false_caught,
+                Some(true)
+            );
+        }
+    }
+
+    #[test]
+    fn awaited_input_limits_preserve_execution_gaps_and_independent_evidence() {
+        let mut ob = observation("return:handler", Strength::Total);
+        ob.comparison = Some(Comparison {
+            predicate: "node-deep-strict-equality".into(),
+            actual: ComparisonOperand {
+                source: "tests/a:10:20".into(),
+                value: None,
+                binding: None,
+                input: Some(ComparisonInput {
+                    binding: "tests/a:1:5".into(),
+                    awaits: vec!["tests/a:10:20".into()],
+                }),
+            },
+            expected: ComparisonOperand {
+                source: "tests/a:22:25".into(),
+                value: None,
+                binding: Some("tests/a:1:5".into()),
+                input: Some(ComparisonInput {
+                    binding: "tests/a:1:5".into(),
+                    awaits: vec![],
+                }),
+            },
+            relation: "shared-input-through-await".into(),
+        });
+        let mut decision = site("D", "condition", vec![], &["T"]);
+        decision.kind = "decision".into();
+        decision.decision = Some(DecisionFacts {
+            then: Some(vec!["S".into()]),
+            else_: Some(Some(vec!["S".into()])),
+            outcomes: Some(Outcomes {
+                true_: vec!["T".into()],
+                false_: vec![],
+            }),
+            ..Default::default()
+        });
+        let mut f = facts(
+            vec![
+                site("S", "return", vec![boundary("return:handler")], &["T"]),
+                site("untested", "return", vec![boundary("return:handler")], &[]),
+                site(
+                    "unrelated",
+                    "return",
+                    vec![boundary("return:other")],
+                    &["T"],
+                ),
+                decision,
+            ],
+            vec![test("T", vec![ob.clone()])],
+        );
+        let rows = join(&f);
+        assert_eq!(rows[0].status, Status::Unresolved);
+        assert_eq!(rows[0].strength, None);
+        assert!(rows[0].tests.is_empty());
+        assert!(
+            rows[0].witness_issues.is_empty(),
+            "the witness is not rejected"
+        );
+        assert_eq!(
+            rows[0].reason.as_ref().unwrap().kind,
+            ReasonKind::LimitPredicateDependence
+        );
+        assert_eq!(
+            rows[1].reason.as_ref().unwrap().kind,
+            ReasonKind::GapNotReached
+        );
+        assert_eq!(
+            rows[2].reason.as_ref().unwrap().kind,
+            ReasonKind::GapNotAsserted
+        );
+        assert_eq!(
+            rows[3].reason.as_ref().unwrap().kind,
+            ReasonKind::GapOutcomeNotAsserted
+        );
+        assert_eq!(summary(&f.sites, &rows).limits, 1);
+        assert_eq!(f.tests[0].observations, vec![ob.clone()]);
+        f.tests[0]
+            .observations
+            .push(observation("return:handler", Strength::Total));
+        assert_eq!(join(&f)[0].status, Status::Evident);
+        f.tests[0].observations.clear();
+        let mut issue = rejected(WitnessIssueKind::CallNotRecorded, Some("return:handler"));
+        issue.observation = Some(ob);
+        f.tests[0].witness_issues.push(issue);
+        let missing = &join(&f)[0];
+        assert_eq!(missing.status, Status::Unresolved);
+        assert_eq!(missing.strength, None);
+        assert_eq!(missing.witness_issues.len(), 1);
+        assert_eq!(
+            missing.reason.as_ref().unwrap().kind,
+            ReasonKind::LimitAssertionWitness
+        );
+    }
+
+    #[test]
+    fn exit_resolver_source_facts_are_not_producer_value_or_pragma_evidence() {
+        let mut ob = observation("exit", Strength::Total);
+        ob.assertion_source = Some("tests/a.test.ts:7:3".into());
+        ob.assertion_method = Some("equal".into());
+        ob.process_exit = Some(
+            serde_json::from_value(serde_json::json!({
+                "model": "node-child-exit-source-v1", "status": "unresolved",
+                "reason": "producer-instance-link-unverified",
+                "operand": "tests/a.test.ts:30:50", "helperCalls": ["tests/a.test.ts:20:28"],
+                "promise": "tests/helper.ts:50:100", "spawn": "tests/helper.ts:10:40",
+                "event": {"source": "tests/helper.ts:60:90", "name": "exit"},
+                "resolution": {"status": "source-checked", "source": "tests/helper.ts:75:89",
+                    "field": "code", "eventArgument": "code"},
+                "consumer": {"status": "source-checked", "bindings": ["tests/a.test.ts:10:28"],
+                    "read": "tests/a.test.ts:30:50"}
+            }))
+            .unwrap(),
+        );
+        let encoded = serde_json::to_value(&ob).unwrap();
+        assert_eq!(
+            encoded["processExit"]["resolution"]["eventArgument"],
+            "code"
+        );
+        assert_eq!(
+            encoded["processExit"]["consumer"]["status"],
+            "source-checked"
+        );
+        assert_eq!(serde_json::from_value::<Observation>(encoded).unwrap(), ob);
+        let mut parent = site("parent", "return", vec![], &["T1"]);
+        parent.reached.push("S1".into());
+        let mut f = facts(
+            vec![
+                site("S1", "io-call", vec![boundary("exit")], &["T1"]),
+                parent,
+                site("unreached", "io-call", vec![boundary("exit")], &[]),
+                site(
+                    "independent",
+                    "return",
+                    vec![boundary("return:handler")],
+                    &["T1"],
+                ),
+            ],
+            vec![test(
+                "T1",
+                vec![ob.clone(), observation("return:handler", Strength::Total)],
+            )],
+        );
+        for legacy in [false, true] {
+            if legacy {
+                f.tests[0].observations[0].process_exit = None;
+            }
+            let rows = join(&f);
+            for row in &rows[..2] {
+                assert_eq!(row.status, Status::Unresolved);
+                assert_eq!(row.strength, None);
+                assert_eq!(
+                    row.reason.as_ref().unwrap().kind,
+                    ReasonKind::LimitProcessExitLink
+                );
+            }
+            assert_eq!(
+                rows[2].reason.as_ref().unwrap().kind,
+                ReasonKind::GapNotReached
+            );
+            assert_eq!(rows[3].status, Status::Evident);
+            assert_eq!(
+                check_pragma_hints(&f, &[pragma_hint()])[0].validation,
+                HintValidation::Unresolved
+            );
+        }
+        f.tests[0].observations.clear();
+        let mut issue = rejected(WitnessIssueKind::CallNotRecorded, Some("exit"));
+        issue.observation = Some(ob);
+        f.tests[0].witness_issues.push(issue);
+        let rows = join(&f);
+        assert_eq!(
+            rows[0].reason.as_ref().unwrap().kind,
+            ReasonKind::LimitAssertionWitness
+        );
+        assert_eq!(rows[0].witness_issues.len(), 1);
+    }
+
+    #[test]
+    fn mock_projections_cannot_supply_value_absence_sink_or_pragma_credit() {
+        let mut direct = site("S1", "log", vec![boundary("stdout")], &["T1"]);
+        direct.unmodelled_shapes = vec!["mock call identity unresolved".into()];
+        let mut upstream = site("S2", "return", vec![boundary("internal")], &["T1"]);
+        upstream.reached = vec!["S1".into()];
+        upstream.unmodelled_shapes = direct.unmodelled_shapes.clone();
+        let mut injected = site(
+            "S3",
+            "external-call",
+            vec![boundary("callback:writer")],
+            &["T1"],
+        );
+        injected.unmodelled_shapes = direct.unmodelled_shapes.clone();
+        for kind in [
+            "call-count",
+            "call-arguments",
+            "call-history",
+            "projection",
+            "future-kind",
+        ] {
+            let mut ob = observation("stdout", Strength::Total);
+            ob.mock = Some(MockProjection {
+                target: "console.log".into(),
+                kind: kind.into(),
+                path: vec!["mock".into(), "calls".into()],
+                count_evidence: Some(serde_json::from_value(serde_json::json!({
+                    "model": "node-sync-console-count-v2", "status": "source-checked",
+                    "instance": "tests/a.test.ts:2:3", "createdAt": "tests/a.test.ts:2:3",
+                    "readAt": "tests/a.test.ts:7:3", "installedAtRead": true,
+                    "expectedCount": 1, "observedCount": 1,
+                    "calls": [{"source":"src/a.ts:4:3", "action":"tests/a.test.ts:5:3", "site":"S1"}],
+                    "historySelections": [{"source":"tests/a.test.ts:6:3", "inputCount":3, "from":1, "to":2}],
+                    "rowBinding": {"model":"node-test-for-of-v1", "status":"source-checked", "rowIndex":0,
+                        "title":"row a", "loop":"tests/a.test.ts:1:1", "table":"tests/a.test.ts:1:10",
+                        "row":"tests/a.test.ts:1:12", "bindings":[{"declaration":"tests/a.test.ts:2:1", "name":"label", "value":"a"}]}
+                })).unwrap()),
+            });
+            // Even contradictory whole-list/negative flags cannot bypass the
+            // projection guard. A hint is not an escape hatch either.
+            ob.call_list = true;
+            ob.negative = true;
+            ob.assertion_source = Some("tests/a.test.ts:7:3".into());
+            ob.assertion_method = Some("equal".into());
+            let mut sink_ob = ob.clone();
+            sink_ob.boundary = "sink:records".into();
+            let mut positive = ob.clone();
+            positive.negative = false;
+            let mut positive_sink = sink_ob.clone();
+            positive_sink.negative = false;
+            let mut t = test("T1", vec![ob.clone(), positive, sink_ob, positive_sink]);
+            t.sinks.push(SinkBinding {
+                sink: "sink:records".into(),
+                param: "writer".into(),
+                member: None,
+            });
+            let mut f = facts(
+                vec![direct.clone(), upstream.clone(), injected.clone()],
+                vec![t],
+            );
+            assert!(
+                join(&f)
+                    .iter()
+                    .all(|r| r.status == Status::Unresolved && r.strength.is_none()),
+                "{kind}"
+            );
+            assert_eq!(
+                check_pragma_hints(&f, &[pragma_hint()])[0].validation,
+                HintValidation::Unresolved
+            );
+            let joiner = Join {
+                sites: f.sites.iter().map(|s| (s.id.as_str(), s)).collect(),
+                tests: f.tests.iter().map(|t| (t.id.as_str(), t)).collect(),
+                facts: &f,
+                resolved: BTreeMap::new(),
+            };
+            assert!(
+                !joiner.pinned(&BTreeSet::from(["T1"]), &["S1".into()]),
+                "{kind}"
+            );
+            let bytes = serde_json::to_vec(&ob).unwrap();
+            assert_eq!(serde_json::from_slice::<Observation>(&bytes).unwrap(), ob);
+            f.tests[0]
+                .observations
+                .push(observation("stdout", Strength::Value));
+            assert_eq!(
+                join(&f)[0].status,
+                Status::Evident,
+                "independent non-mock evidence is preserved"
+            );
+        }
+    }
+
+    #[test]
+    fn mock_projection_cannot_supply_the_early_return_decision_shortcut() {
+        let mut decision = site("D1", "condition", vec![], &["T1", "T2"]);
+        decision.kind = "decision".into();
+        decision.decision = Some(DecisionFacts {
+            then: Some(vec!["S1".into()]),
+            else_: Some(Some(vec!["S2".into()])),
+            early_exit_downstream: Some(vec!["S2".into()]),
+            outcomes: Some(Outcomes {
+                true_: vec!["T1".into()],
+                false_: vec!["T2".into()],
+            }),
+            ..Default::default()
+        });
+        let mut projected_return = observation("return:handler", Strength::Value);
+        projected_return.mock = Some(MockProjection {
+            target: "console.log".into(),
+            kind: "projection".into(),
+            path: vec!["mock".into(), "calls".into()],
+            count_evidence: Some(
+                serde_json::from_value(serde_json::json!({
+                    "model":"node-sync-console-count-v1", "status":"source-checked",
+                    "observedCount":0,"expectedCount":0,"calls":[]
+                }))
+                .unwrap(),
+            ),
+        });
+        let mut f = facts(
+            vec![
+                site("S1", "return", vec![boundary("internal")], &["T1"]),
+                site("S2", "io-call", vec![boundary("client-message")], &["T2"]),
+                decision,
+            ],
+            vec![
+                test("T1", vec![projected_return]),
+                test("T2", vec![observation("client-message", Strength::Total)]),
+            ],
+        );
+        let r = join(&f);
+        let d = r.iter().find(|r| r.site == "D1").unwrap();
+        assert_eq!(d.stuck_false_caught, Some(false));
+        assert_eq!(d.status, Status::Partial);
+        f.tests[0].observations[0].mock = None;
+        let r = join(&f);
+        let d = r.iter().find(|r| r.site == "D1").unwrap();
+        assert_eq!(d.stuck_false_caught, Some(true));
+        assert_eq!(d.status, Status::Evident);
     }
 
     #[test]

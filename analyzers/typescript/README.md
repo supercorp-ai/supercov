@@ -18,6 +18,10 @@ pragma syntax, report interpretation and supported scope.
   ownership, then constructs query-local evidence in memory.
 - `src/analyze.ts` extracts source-flow facts and exact assertion witnesses.
   The Rust engine joins those facts into candidate classifications.
+- `src/mock-counts.ts` models bounded synchronous console-mock count histories,
+  keeping count evidence separate from general value-protection claims.
+- `src/awaited-observations.ts` recognizes bounded native child-capture/poll
+  source patterns for hint attachment, without manufacturing runtime witnesses.
 - `src/frontend.ts` and `src/native-frontend.ts` implement the legacy and native
   TypeScript compiler boundaries. `src/pragmas.ts` validates optional hints.
 

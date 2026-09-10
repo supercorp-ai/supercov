@@ -29,8 +29,94 @@ const empty = () => ({
 test("archive facts require the exact schema, rules, ABI and capabilities", () => {
   // A previously compatible analyzer must not silently drop witness limits.
   for (const protocol of [
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "witnessed-callback-scope-v1",
+      ),
+    },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "complete-passed-test-inventory-v1",
+      ),
+    },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "first-test-direct-return-v1",
+      ),
+    },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "awaited-observation-sources-v1",
+      ),
+    },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "primitive-decision-sensitivity-v1",
+      ),
+    },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "process-exit-consumer-v1",
+      ),
+    },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "process-exit-source-v1",
+      ),
+    },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.map((cap) =>
+        cap === "assertion-comparison-relations-v2"
+          ? "assertion-comparison-relations-v1"
+          : cap,
+      ),
+    },
     { ...PROTOCOL, rules: "source-linked-v2/archive-2" },
     { ...PROTOCOL, capabilities: ["requiresTotal-v1"] },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "mock-observation-projections-v1",
+      ),
+    },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "assertion-comparison-relations-v2",
+      ),
+    },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "mock-count-lifetimes-v1",
+      ),
+    },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "mock-count-factories-v1",
+      ),
+    },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "mock-count-rows-v1",
+      ),
+    },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "mock-count-array-projections-v1",
+      ),
+    },
   ])
     assert.throws(
       () => analyzeArchive({ ...empty(), protocol }, ts),
@@ -50,6 +136,45 @@ test("archive facts require the exact schema, rules, ABI and capabilities", () =
 });
 test("empty or setup-only archives cannot silently look like successfully analyzed suites", () => {
   assert.throws(() => analyzeArchive(empty(), ts), /No uniquely attributed/);
+});
+test("passed attempts without source provenance cannot masquerade as execution gaps", () => {
+  const input = empty();
+  const record = {
+    test: "missing source",
+    testId: "test",
+    role: "test",
+    status: "passed",
+    scope: {
+      version: 1,
+      runId: input.runId,
+      workerId: "w",
+      testId: "test",
+      testKey: "k",
+      retry: 0,
+      attemptId: "a",
+    },
+    runtime: [],
+    browser: [],
+    server: [],
+    phases: [],
+  };
+  input.records.push(record);
+  assert.throws(() => analyzeArchive(input, ts), /passed test.*source file/i);
+  // A second usable record must not hide the missing attempt either. Ordinary
+  // coverage remains available; assertion gap claims require complete provenance.
+  input.records.push({
+    ...record,
+    testId: "other",
+    test: "exact return",
+    testFile: "tests/core.test.mjs",
+    scope: {
+      ...record.scope,
+      testId: "other",
+      testKey: "other",
+      attemptId: "other",
+    },
+  });
+  assert.throws(() => analyzeArchive(input, ts), /passed test.*source file/i);
 });
 test("server statement/phase records require the full matching attempt scope", () => {
   const input = empty();
@@ -144,7 +269,12 @@ test("stale source and modified generated analyzers fail before producing facts"
       input: "{}",
       encoding: "utf8",
     });
-  for (const file of ["src/analyze.ts", "dist/analyze.js"]) {
+  for (const file of [
+    "src/analyze.ts",
+    "dist/analyze.js",
+    "src/mock-counts.ts",
+    "dist/mock-counts.js",
+  ]) {
     const path = resolve(root, file),
       before = readFileSync(path, "utf8");
     writeFileSync(path, before + "\n// modified\n");

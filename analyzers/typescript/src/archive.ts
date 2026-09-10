@@ -14,7 +14,24 @@ export const PROTOCOL = {
   capabilities: [
     "requiresTotal-v1",
     "assertion-witness-issues-v1",
+    "complete-passed-test-inventory-v1",
+    "witnessed-callback-scope-v1",
     "assertion-hints-v1",
+    "awaited-observation-sources-v1",
+    "first-test-call-omission-v1",
+    "closed-count-sensitivity-v1",
+    "closed-payload-sensitivity-v1",
+    "payload-native-predicates-v1",
+    "first-test-direct-return-v1",
+    "mock-observation-projections-v1",
+    "assertion-comparison-relations-v2",
+    "process-exit-source-v1",
+    "process-exit-consumer-v1",
+    "mock-count-lifetimes-v1",
+    "mock-count-factories-v1",
+    "mock-count-rows-v1",
+    "mock-count-array-projections-v1",
+    "primitive-decision-sensitivity-v1",
   ],
 };
 type Location = {
@@ -102,6 +119,7 @@ type RecordData = {
   status?: string;
   expectedStatus?: string;
   flaky?: boolean;
+  provenance?: { runner?: string };
   scope?: Scope;
   runtime: Snapshot[];
   browser: Snapshot[];
@@ -216,12 +234,23 @@ function analyzeArchiveWithFrontend(
     atoms.forEach((n, i) => {
       const begin = sf.getLineAndCharacterOfPosition(n.getStart(sf)),
         end = sf.getLineAndCharacterOfPosition(n.getEnd());
-      // The flow pass resolves the actual AST owner; this fallback is only for presentation.
+      // This owner also participates in source-hint selection. Named arrow
+      // bindings must not be mislabeled <module> merely because they are not
+      // function declarations.
       let parent: ts.Node | undefined = n.parent,
         owner = "<module>";
       while (parent) {
         if (compiler.isFunctionDeclaration(parent) && parent.name) {
           owner = parent.name.text;
+          break;
+        }
+        if (
+          (compiler.isArrowFunction(parent) ||
+            compiler.isFunctionExpression(parent)) &&
+          compiler.isVariableDeclaration(parent.parent) &&
+          compiler.isIdentifier(parent.parent.name)
+        ) {
+          owner = parent.parent.name.text;
           break;
         }
         parent = parent.parent;
@@ -290,8 +319,11 @@ function analyzeArchiveWithFrontend(
   for (const [i, r] of accepted.entries()) {
     const id = `A${i + 1}`;
     if (!r.testFile) {
-      limitations.add("A passed test has no source file.");
-      continue;
+      // Dropping even one passing attempt could turn its executed/asserted sites
+      // into apparently certain gaps. Ordinary coverage can still be queried.
+      throw new Error(
+        "A passed test has no source file; assertion analysis requires test-source provenance. Recapture with a supported runner and stack formatter.",
+      );
     }
     if (r.browser.length)
       limitations.add(
@@ -393,6 +425,7 @@ function analyzeArchiveWithFrontend(
       line: 0,
       ok: true,
       phaseLines,
+      runner: r.provenance?.runner,
     });
     attempts.push({
       id,

@@ -1,4 +1,21 @@
 import test from "node:test";
+import "./mock-projections.integration.mjs";
+import "./comparison-relations.integration.mjs";
+import "./mock-counts.integration.mjs";
+import "./count-sensitivity.integration.mjs";
+import "./payload-sensitivity.integration.mjs";
+import "./payload-native-predicates.integration.mjs";
+import "./direct-return.integration.mjs";
+import "./unlinked-tests.integration.mjs";
+import "./assertion-roles.integration.mjs";
+import "./exception-roles.integration.mjs";
+import "./exception-first-operand.integration.mjs";
+import "./completion.integration.mjs";
+import "./awaited-assertions.integration.mjs";
+import "./awaited-capture.integration.mjs";
+import "./call-omission.integration.mjs";
+import "./child-exit.integration.mjs";
+import "./decision-sensitivity.integration.mjs";
 import assert from "node:assert/strict";
 import {
   cpSync,
@@ -17,6 +34,190 @@ import { spawnSync } from "node:child_process";
 const repository = resolve(import.meta.dirname, "../../..");
 const binary = resolve(repository, "target/debug/supercov");
 const enabled = process.env.SUPERCOV_ASSERTED_INTEGRATION === "1";
+test(
+  "fallback assertion sources and opaque operands through a real subprocess archive",
+  { skip: !enabled },
+  async (t) => {
+    const root = mkdtempSync(
+      resolve(tmpdir(), "supercov operand (ü) regressions-"),
+    );
+    t.after(() => {
+      if (!process.env.SUPERCOV_KEEP_ASSERTED_FIXTURE)
+        rmSync(root, { recursive: true, force: true });
+    });
+    cpSync(resolve(import.meta.dirname, "fixtures/unknown-operands"), root, {
+      recursive: true,
+    });
+    mkdirSync(resolve(root, "node_modules"));
+    symlinkSync(
+      resolve(
+        repository,
+        "analyzers/typescript/node_modules",
+        process.env.SUPERCOV_ASSERTED_TEST_COMPILER === "7.0.2"
+          ? "typescript-native"
+          : "typescript",
+      ),
+      resolve(root, "node_modules/typescript"),
+    );
+    const env = { ...process.env, SUPERCOV_PACKAGE_ROOT: repository };
+    delete env.NODE_TEST_CONTEXT;
+    const exec = (command, args) => {
+      const result = spawnSync(command, args, {
+        cwd: root,
+        env,
+        encoding: "utf8",
+        timeout: 60000,
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+      return result.stdout;
+    };
+    const suite = ["--test", "--test-concurrency=1", "tests/runtime.mjs"];
+    exec(process.execPath, suite);
+    exec(binary, ["--", process.execPath, ...suite]);
+    const [run] = readdirSync(resolve(root, ".supercov/runs"));
+    const queryRun = (id, ...args) =>
+      JSON.parse(exec(binary, ["runs", id, ...args, "--json"])).data;
+    const query = (...args) => queryRun(run, ...args);
+    const report = query("assertions", "--limit", "1000");
+    await t.test(
+      "SG-ASSERT-001: awaited and constructed assertions name the user call, not an adapter",
+      () => {
+        const detail = query("test", "awaited native assertion sources");
+        const phases = detail.tests.flatMap((row) => row.phases);
+        const lines = readFileSync(
+          resolve(root, "tests/runtime.mjs"),
+          "utf8",
+        ).split("\n");
+        // Stack coordinates may be generated positions (for example with a TS
+        // loader), unlike the original-source positions of lexical probes.
+        const locations = lines.flatMap((line, index) => {
+          if (
+            !/^(  assert\.equal|  strictEqual|  instance\.strictEqual)/.test(
+              line,
+            ) ||
+            index >= 14
+          )
+            return [];
+          const fallback = line.includes("instance.strictEqual(");
+          const column = fallback ? line.indexOf("strictEqual(") + 1 : 3;
+          return [
+            `${fallback ? "runtime-stack:" : ""}tests/runtime.mjs:${index + 1}:${column}`,
+          ];
+        });
+        assert.equal(phases.length, 4);
+        assert.deepEqual(
+          phases.map((p) => p.source),
+          locations,
+        );
+        assert.ok(phases.every((p) => p.status === "passed"));
+      },
+    );
+    await t.test(
+      "SG-ASSERT-002: unmodeled passing operands are limits, scoped to their covering tests",
+      () => {
+        const rows = (owner) =>
+          report.sites.filter((row) => row.site.owner === owner);
+        const cli = report.sites.filter(
+          (row) => row.site.file === "src/cli.mjs",
+        );
+        assert.equal(cli.length, 2);
+        for (const row of cli) {
+          assert.ok(row.candidate.coveredBy > 0);
+          assert.equal(row.candidate.status, "unresolved");
+          assert.equal(row.candidate.reason.kind, "limit:operand-shape");
+        }
+        assert.ok(rows("opaque").length > 0);
+        assert.ok(
+          rows("opaque").every(
+            (row) => row.candidate.reason?.kind === "limit:operand-shape",
+          ),
+        );
+        for (const owner of ["smoke", "inactive", "failed", "mixed"]) {
+          assert.ok(rows(owner).length > 0);
+          assert.ok(
+            rows(owner).every(
+              (row) => row.candidate.reason?.kind === "gap:not-asserted",
+            ),
+            owner,
+          );
+        }
+        assert.ok(rows("never").length > 0);
+        assert.ok(
+          rows("never").every(
+            (row) => row.candidate.reason?.kind === "gap:not-reached",
+          ),
+        );
+        const decision = rows("choose").find(
+          (row) => row.site.kind === "decision",
+        );
+        assert.equal(
+          decision.candidate.reason.kind,
+          "gap:outcome-not-asserted",
+        );
+        assert.ok(
+          rows("exact").every((row) => row.candidate.status === "evident"),
+        );
+        assert.equal(report.summary.semanticallyVerifiedSites, 0);
+      },
+    );
+    await t.test(
+      "unmapped loader stack positions cannot relink a test or become exact assertion witnesses",
+      () => {
+        const before = new Set(readdirSync(resolve(root, ".supercov/runs")));
+        exec(binary, [
+          "--",
+          process.execPath,
+          "--loader",
+          "./tests/shift-loader.mjs",
+          ...suite,
+        ]);
+        const shifted = readdirSync(resolve(root, ".supercov/runs")).find(
+          (id) => !before.has(id),
+        );
+        assert.ok(shifted);
+        const phases = queryRun(
+          shifted,
+          "test",
+          "awaited native assertion sources",
+        ).tests.flatMap((row) => row.phases);
+        const stack = phases.filter((p) =>
+          p.source?.startsWith("runtime-stack:"),
+        );
+        assert.equal(stack.length, 1);
+        assert.ok(
+          stack.every((p) => Number(p.source.split(":").at(-2)) > 200),
+          JSON.stringify(stack),
+        );
+        assert.equal(phases.at(-1).source, "tests/runtime.mjs:13:3");
+        assert.deepEqual(
+          phases.slice(0, 2).map((p) => p.source),
+          ["tests/runtime.mjs:9:3", "tests/runtime.mjs:10:3"],
+        );
+        const shiftedReport = queryRun(
+          shifted,
+          "assertions",
+          "--limit",
+          "1000",
+        );
+        assert.deepEqual(shiftedReport.summary, report.summary);
+        assert.deepEqual(
+          shiftedReport.sites.map((row) => [
+            row.site.id,
+            row.candidate.status,
+            row.candidate.strength,
+          ]),
+          report.sites.map((row) => [
+            row.site.id,
+            row.candidate.status,
+            row.candidate.strength,
+          ]),
+        );
+      },
+    );
+    t.diagnostic(JSON.stringify({ root, run }));
+  },
+);
 test(
   "ordinary archive → matching JS source → public per-site query, with native counterexamples",
   { skip: !enabled },

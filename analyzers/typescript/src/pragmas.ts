@@ -1,5 +1,13 @@
 import type ts from "typescript";
 import type { Site } from "./types.js";
+import type { AwaitedObservationSource } from "./awaited-observations.js";
+import type {
+  CallOmissionEvidence,
+  CountSensitivityEvidence,
+  PayloadSensitivityEvidence,
+  DirectReturnSensitivityEvidence,
+  CompletionSensitivityEvidence,
+} from "./mock-counts.js";
 
 export type AssertionPhase = { source?: string; op: string; status?: string };
 export function assertionWitnessIssue(
@@ -31,6 +39,7 @@ interface Attachment {
   source: string;
   method: string;
   inert: boolean;
+  awaitedObservation?: AwaitedObservationSource;
 }
 interface Comment {
   id: string;
@@ -40,6 +49,7 @@ interface Comment {
   candidateSites: string[];
   issue?: string;
   attachments: Attachment[];
+  check?: "missing-call" | "count" | "value" | "completion";
 }
 export interface PragmaHint {
   id: string;
@@ -53,6 +63,13 @@ export interface PragmaHint {
   assertionMethod?: string;
   witness: "passed" | "unavailable";
   witnessIssue?: string;
+  awaitedObservation?: AwaitedObservationSource;
+  check?: "missing-call" | "count" | "value" | "completion";
+  callOmission?: CallOmissionEvidence;
+  countSensitivity?: CountSensitivityEvidence;
+  payloadSensitivity?: PayloadSensitivityEvidence;
+  directReturnSensitivity?: DirectReturnSensitivityEvidence;
+  completionSensitivity?: CompletionSensitivityEvidence;
 }
 
 /** Source hints are kept OUT of observations. A comment never adds a boundary. */
@@ -74,8 +91,21 @@ export function collectPragmas(
         const raw = sf.text.slice(range.pos, range.end);
         if (!/^\/\/\s*observes:/.test(raw) || comments.has(key(sf, range.pos)))
           continue;
+        const parts = raw.split(/;\s*check\s+/);
+        const check =
+          parts.length === 2 && parts[1].trim() === "missing call"
+            ? ("missing-call" as const)
+            : parts.length === 2 && parts[1].trim() === "count"
+              ? ("count" as const)
+              : parts.length === 2 && parts[1].trim() === "value"
+                ? ("value" as const)
+                : parts.length === 2 && parts[1].trim() === "completion"
+                  ? ("completion" as const)
+                  : undefined;
+        const checkIssue =
+          parts.length > 1 && !check ? "unsupported-check-recipe" : undefined;
         const parsed = /^\/\/\s*observes:\s*(\S+?)#(\S+)(?:\s+(.+?))?\s*$/.exec(
-          raw,
+          parts[0],
         );
         const suffix = parsed?.[3]?.split(/(?:^|\s+)via\s+/);
         const target = parsed
@@ -92,31 +122,51 @@ export function collectPragmas(
           target.file
             .split("/")
             .every((part) => part && part !== "." && part !== "..");
-        const candidates = validPath
-          ? sites
-              .filter(
-                (s) =>
-                  s.file === target.file &&
-                  (s.owner === target.function || s.fn === target.function) &&
-                  (!target.snippet || s.text.includes(target.snippet)),
-              )
-              .map((s) => s.id)
+        const matchingSites = validPath
+          ? sites.filter(
+              (s) =>
+                s.file === target.file &&
+                // The recipe selects the emission, not a containing callback-return site.
+                (!check ||
+                  (check === "missing-call"
+                    ? s.category === "log"
+                    : check === "completion"
+                      ? s.category === "return" || s.category === "throw"
+                      : s.kind === "decision" || s.category === "return")) &&
+                (s.owner === target.function || s.fn === target.function) &&
+                (!target.snippet || s.text.includes(target.snippet)),
+            )
           : [];
+        // An exact whole-site selector is more specific than a containing return
+        // whose display text happens to include that expression. Equal sibling
+        // sites remain ambiguous. This only selects a node; it proves no behavior.
+        const exact =
+          check && target?.snippet
+            ? matchingSites.filter(
+                (s) => s.text.trim() === target.snippet!.trim(),
+              )
+            : [];
+        const candidates = (exact.length ? exact : matchingSites).map(
+          (s) => s.id,
+        );
         comments.set(key(sf, range.pos), {
           id: location(sf, range.pos),
           where: location(sf, range.pos),
           raw,
           target,
+          ...(check ? { check } : {}),
           candidateSites: candidates,
-          issue: !target
-            ? "invalid-syntax"
-            : !validPath
-              ? "invalid-target-path"
-              : !candidates.length
-                ? "target-not-in-inventory"
-                : candidates.length > 1
-                  ? "ambiguous-target"
-                  : undefined,
+          issue:
+            checkIssue ??
+            (!target
+              ? "invalid-syntax"
+              : !validPath
+                ? "invalid-target-path"
+                : !candidates.length
+                  ? "target-not-in-inventory"
+                  : candidates.length > 1
+                    ? "ambiguous-target"
+                    : undefined),
           attachments: [],
         });
       }
@@ -129,11 +179,23 @@ export function collectPragmas(
     visit(sf);
   }
   return {
+    hasHint(node: ts.Node) {
+      let statement = node;
+      while (statement.parent && !compiler.isStatement(statement))
+        statement = statement.parent;
+      if (!compiler.isExpressionStatement(statement)) return false;
+      const sf = node.getSourceFile();
+      return (
+        compiler.getLeadingCommentRanges(sf.text, statement.getFullStart()) ??
+        []
+      ).some((range) => comments.has(key(sf, range.pos)));
+    },
     register(
       node: ts.CallExpression,
       method: string,
       testKey: string,
       inert: boolean,
+      awaitedObservation?: AwaitedObservationSource,
     ) {
       let statement: ts.Node = node;
       while (statement.parent && !compiler.isStatement(statement))
@@ -152,6 +214,7 @@ export function collectPragmas(
           source: location(sf, node.getStart(sf)),
           method,
           inert,
+          ...(awaitedObservation ? { awaitedObservation } : {}),
         };
         if (
           !comment.attachments.some(
@@ -193,11 +256,11 @@ export function collectPragmas(
               },
             ];
           return matched.map(({ a, b }) => {
-            const witnessIssue = assertionWitnessIssue(
-              b.phases,
-              a.source,
-              a.method,
-            );
+            // A source-checked poll is not an explicit assertion phase. Neither
+            // a matching phase name nor a passing test can supply its read receipt.
+            const witnessIssue = a.awaitedObservation
+              ? "observation-capture-unavailable"
+              : assertionWitnessIssue(b.phases, a.source, a.method);
             return {
               ...comment,
               id: `${comment.id}@${b.id}`,
@@ -205,6 +268,9 @@ export function collectPragmas(
               test: b.id,
               assertionSource: a.source,
               assertionMethod: a.method,
+              ...(a.awaitedObservation
+                ? { awaitedObservation: a.awaitedObservation }
+                : {}),
               witness: witnessIssue
                 ? ("unavailable" as const)
                 : ("passed" as const),

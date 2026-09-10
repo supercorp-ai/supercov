@@ -8,6 +8,17 @@ import { relative as pathRelative, resolve } from "node:path";
 import { analysisPath } from "./compiler.js";
 import { createFrontend, type CompilerFrontend } from "./frontend.js";
 import { assertionWitnessIssue, collectPragmas } from "./pragmas.js";
+import { awaitedObservationSource } from "./awaited-observations.js";
+import {
+  analyzeMockCounts,
+  analyzeFirstTestOmission,
+  analyzeCountSensitivity,
+  analyzePayloadSensitivity,
+  analyzeDirectReturnSensitivity,
+  analyzeCompletionSensitivity,
+  sourceTestRows,
+  type MockCountEvidence,
+} from "./mock-counts.js";
 import type { AnalyzeOptions, Site } from "./types.js";
 export type { AnalyzeOptions, Site } from "./types.js";
 
@@ -85,6 +96,7 @@ export function analyzeWithFrontend(
     /** supercov runs carry no test line: the leaf title and the lines of the test's assertion phases link it instead */
     title?: string;
     phaseLines?: number[];
+    runner?: string;
   }
   const runtimeTests = (
     JSON.parse(readEvidence("cov/index.json")) as RuntimeTest[]
@@ -489,6 +501,76 @@ export function analyzeWithFrontend(
     /** the assertion pins the sink's whole call list (a call count, or `mock.calls` compared as a whole or
      *  through a projection): it witnesses both that the pinned calls happened and that no other call did */
     callList?: boolean;
+    /** Source projection of a Node mock, not proof of production-site dependence. */
+    mock?: MockProjection;
+    /** Relation between both operands; strength alone cannot establish a value check. */
+    comparison?: Comparison;
+    /** Resolver source facts are not a verified producer/consumer instance link. */
+    processExit?: ProcessExitEvidence;
+  }
+  interface ProcessExitEvidence {
+    model: "node-child-exit-source-v1";
+    status: "unresolved";
+    reason: string;
+    operand: string;
+    helperCalls: string[];
+    promise?: string;
+    spawn?: string;
+    event?: { source: string; name: string };
+    resolution?: {
+      status: "source-checked";
+      source: string;
+      field?: string;
+      eventArgument: "code" | "signal";
+    };
+    consumer?: {
+      status: "source-checked" | "unresolved";
+      reason?: string;
+      bindings: string[];
+      read: string;
+      blockedAt?: string;
+    };
+  }
+  interface ComparisonOperand {
+    source: string;
+    binding?: string;
+    value?: SourcePrimitive;
+    /** Shared input provenance, not equality of the evaluated operands. */
+    input?: ComparisonInput;
+  }
+  interface ComparisonInput {
+    binding: string;
+    awaits: string[];
+  }
+  interface Comparison {
+    predicate: string;
+    actual: ComparisonOperand;
+    expected: ComparisonOperand;
+    relation:
+      "same-immutable-binding" | "shared-input-through-await" | "unresolved";
+  }
+  type SourcePrimitive =
+    | { kind: "number" | "string"; value: string }
+    | { kind: "boolean"; value: boolean }
+    | { kind: "null" };
+  interface PrimitiveDecision {
+    model: "js-primitive-decision-v1";
+    source: string;
+    whenTrue: SourcePrimitive;
+    whenFalse: SourcePrimitive;
+    checks: {
+      test: string;
+      assertionSource: string;
+      predicate: string;
+      expected: SourcePrimitive;
+      originalOutcome: boolean;
+    }[];
+  }
+  interface MockProjection {
+    target: string;
+    kind: "call-count" | "call-arguments" | "call-history" | "projection";
+    path: string[];
+    countEvidence?: MockCountEvidence;
   }
 
   /** Does a log site's message template (constant parts in order, placeholders as wildcards) fit an asserted literal? */
@@ -1336,6 +1418,8 @@ export function analyzeWithFrontend(
     pending: PendingOperand[];
   }
   interface PendingOperand {
+    assertionSource: string;
+    assertionMethod: string;
     /** "file:line:column" of the statements that compute the operand (its own statement and the
      *  declarations/assignments of the variables it reads) */
     statements: string[];
@@ -1352,14 +1436,12 @@ export function analyzeWithFrontend(
   // A path into such an object that ends at a mock is a sink: `sink:mocks.b.c`.
   // ---------------------------------------------------------------------------
   function returnedObject(fn: ts.Node): ts.ObjectLiteralExpression | undefined {
-    if (
-      !(
-        ts.isArrowFunction(fn) ||
-        ts.isFunctionExpression(fn) ||
-        ts.isMethodDeclaration(fn) ||
-        ts.isFunctionDeclaration(fn)
-      )
-    )
+    if (!(
+      ts.isArrowFunction(fn) ||
+      ts.isFunctionExpression(fn) ||
+      ts.isMethodDeclaration(fn) ||
+      ts.isFunctionDeclaration(fn)
+    ))
       return undefined;
     const body = fn.body;
     if (!body) return undefined;
@@ -1770,12 +1852,10 @@ export function analyzeWithFrontend(
     const mocks =
       moduleMocksByFile.get(relative(root, id.getSourceFile().fileName)) ?? [];
     for (const m of mocks) {
-      if (
-        !(
-          (m.resolved && imp.resolved && m.resolved === imp.resolved) ||
-          m.spec === imp.spec
-        )
-      )
+      if (!(
+        (m.resolved && imp.resolved && m.resolved === imp.resolved) ||
+        m.spec === imp.spec
+      ))
         continue;
       for (const b of m.exports)
         if (b.sink && b.path.length === 1 && b.path[0] === imp.importedName)
@@ -2007,6 +2087,7 @@ export function analyzeWithFrontend(
     doesNotReject: "presence",
   };
   const staticTests: StaticTest[] = [];
+  const mockBodies = new Map<StaticTest, ts.Node>();
   const pragmaCollector = collectPragmas(
     ts,
     allFiles.filter(isTestFile),
@@ -2015,6 +2096,778 @@ export function analyzeWithFrontend(
   );
   const staticTestKey = (file: string, line: number, name: string) =>
     JSON.stringify([file, line, name]);
+
+  // Unlike origin tracing, comparison identity must NOT erase await, calls,
+  // getters or transformations. Only syntax with no runtime operation is peeled.
+  function comparisonExpression(e: ts.Expression): ts.Expression {
+    while (
+      ts.isParenthesizedExpression(e) ||
+      ts.isNonNullExpression(e) ||
+      ts.isAsExpression(e) ||
+      ts.isTypeAssertionExpression(e) ||
+      ts.isSatisfiesExpression(e)
+    )
+      e = e.expression;
+    return e;
+  }
+
+  /** Native import identity, not the spelling of a local helper. Bare native
+   * assert and imported ok are the same truthiness operation in the recorder.
+   * Keep this canonicalization at discovery: the witness checker must not equate
+   * arbitrary operations named assert and ok or weaken its source/status check. */
+  function nativeAssertionIdentity(
+    call: ts.CallExpression,
+  ): { module: string; method: string } | undefined {
+    type Binding = {
+      module: string;
+      kind: "callable" | "namespace" | "method";
+      method?: string;
+    };
+    function binding(raw: ts.Expression): Binding | undefined {
+      const e = comparisonExpression(raw);
+      if (ts.isIdentifier(e)) {
+        const d = checker.getSymbolAtLocation(e)?.declarations?.[0];
+        if (!d) return;
+        let imported: ts.ImportDeclaration | ts.JSDocImportTag;
+        let kind: Binding["kind"];
+        let name: string | undefined;
+        if (ts.isImportClause(d) && !d.isTypeOnly) {
+          imported = d.parent;
+          kind = "callable";
+        } else if (ts.isNamespaceImport(d) && !d.parent.isTypeOnly) {
+          imported = d.parent.parent;
+          kind = "namespace";
+        } else if (
+          ts.isImportSpecifier(d) &&
+          !d.isTypeOnly &&
+          !d.parent.parent.isTypeOnly
+        ) {
+          imported = d.parent.parent.parent;
+          name = (d.propertyName ?? d.name).text;
+          kind =
+            name === "default" || name === "strict" ? "callable" : "method";
+        } else return;
+        if (
+          !ts.isImportDeclaration(imported) ||
+          !ts.isStringLiteralLike(imported.moduleSpecifier)
+        )
+          return;
+        const specifier = imported.moduleSpecifier.text;
+        if (
+          ![
+            "node:assert",
+            "node:assert/strict",
+            "assert",
+            "assert/strict",
+          ].includes(specifier)
+        )
+          return;
+        let module = specifier.startsWith("node:")
+          ? specifier
+          : `node:${specifier}`;
+        if (name === "strict") module = "node:assert/strict";
+        if (
+          kind === "method" &&
+          (!name || name === "assert" || !Object.hasOwn(ASSERT_STRENGTH, name))
+        )
+          return;
+        return { module, kind, method: kind === "method" ? name : undefined };
+      }
+      if (!ts.isPropertyAccessExpression(e)) return;
+      const receiver = binding(e.expression);
+      if (!receiver || receiver.kind === "method") return;
+      if (e.name.text === "strict")
+        return { module: "node:assert/strict", kind: "callable" };
+      if (e.name.text === "default" && receiver.kind === "namespace")
+        return { module: receiver.module, kind: "callable" };
+      if (
+        e.name.text === "assert" ||
+        !Object.hasOwn(ASSERT_STRENGTH, e.name.text)
+      )
+        return;
+      return { module: receiver.module, kind: "method", method: e.name.text };
+    }
+    const resolved = binding(call.expression);
+    if (!resolved || resolved.kind === "namespace") return;
+    return { module: resolved.module, method: resolved.method ?? "ok" };
+  }
+
+  function comparisonLocation(n: ts.Node): string {
+    const sf = n.getSourceFile();
+    return `${rel(sf)}:${n.getStart(sf)}:${n.getEnd()}`;
+  }
+
+  function immutableBinding(
+    expr: ts.Expression,
+    seen = new Set<ts.Node>(),
+  ): string | undefined {
+    const e = comparisonExpression(expr);
+    if (!ts.isIdentifier(e) || seen.size >= 32) return undefined;
+    const d = declOf(e);
+    if (
+      !d ||
+      !ts.isVariableDeclaration(d) ||
+      !ts.isIdentifier(d.name) ||
+      !d.initializer ||
+      !ts.isVariableDeclarationList(d.parent) ||
+      !(d.parent.flags & ts.NodeFlags.Const) ||
+      seen.has(d)
+    )
+      return undefined;
+    seen.add(d);
+    // A copy of a mutable binding has its own identity, not a live alias.
+    return immutableBinding(d.initializer, seen) ?? comparisonLocation(d);
+  }
+
+  // Trace only const aliases and await. Unlike immutableBinding, this describes
+  // an input dependency: awaiting a Promise or thenable need not preserve its
+  // value, nor do two awaits necessarily return the same result.
+  function comparisonInput(
+    expr: ts.Expression,
+    seen = new Set<ts.Node>(),
+  ): ComparisonInput | undefined {
+    const e = comparisonExpression(expr);
+    if (seen.size >= 32 || seen.has(e)) return undefined;
+    seen.add(e);
+    if (ts.isAwaitExpression(e)) {
+      const input = comparisonInput(e.expression, seen);
+      return (
+        input && {
+          binding: input.binding,
+          awaits: [comparisonLocation(e), ...input.awaits],
+        }
+      );
+    }
+    if (!ts.isIdentifier(e)) return undefined;
+    const d = declOf(e);
+    if (
+      !d ||
+      !ts.isVariableDeclaration(d) ||
+      !ts.isIdentifier(d.name) ||
+      !d.initializer ||
+      !ts.isVariableDeclarationList(d.parent) ||
+      !(d.parent.flags & ts.NodeFlags.Const) ||
+      seen.has(d)
+    )
+      return undefined;
+    seen.add(d);
+    // A copied mutable binding, call or property read anchors a fresh const
+    // input. Do not equate repeated calls/getters or follow mutable aliases.
+    return (
+      comparisonInput(d.initializer, seen) ?? {
+        binding: comparisonLocation(d),
+        awaits: [],
+      }
+    );
+  }
+
+  /** Literal syntax only: do not resolve globals, call code or lose signed zero. */
+  function sourcePrimitive(raw: ts.Expression): SourcePrimitive | undefined {
+    const e = comparisonExpression(raw);
+    if (ts.isStringLiteralLike(e)) {
+      // Rust strings cannot represent lone UTF-16 surrogates. Leave those and
+      // large literals unsupported instead of changing or truncating their value.
+      if (e.text.length > 4096) return;
+      for (const point of e.text)
+        if (
+          point.length === 1 &&
+          point.charCodeAt(0) >= 0xd800 &&
+          point.charCodeAt(0) <= 0xdfff
+        )
+          return;
+      return { kind: "string", value: e.text };
+    }
+    if (e.kind === ts.SyntaxKind.TrueKeyword)
+      return { kind: "boolean", value: true };
+    if (e.kind === ts.SyntaxKind.FalseKeyword)
+      return { kind: "boolean", value: false };
+    if (e.kind === ts.SyntaxKind.NullKeyword) return { kind: "null" };
+    let number: number;
+    if (ts.isNumericLiteral(e)) number = Number(e.text);
+    else if (
+      ts.isPrefixUnaryExpression(e) &&
+      [ts.SyntaxKind.MinusToken, ts.SyntaxKind.PlusToken].includes(
+        e.operator,
+      ) &&
+      ts.isNumericLiteral(e.operand)
+    )
+      number =
+        Number(e.operand.text) *
+        (e.operator === ts.SyntaxKind.MinusToken ? -1 : 1);
+    else return;
+    if (!Number.isFinite(number)) return;
+    return {
+      kind: "number",
+      value: Object.is(number, -0) ? "-0" : String(number),
+    };
+  }
+
+  function nativeComparison(call: ts.CallExpression): Comparison | undefined {
+    const callee = comparisonExpression(call.expression);
+    if (!ts.isPropertyAccessExpression(callee) || call.arguments.length < 2)
+      return undefined;
+    const receiver = comparisonExpression(callee.expression);
+    if (!ts.isIdentifier(receiver)) return undefined;
+    // Read the import declaration itself, before resolving its module alias.
+    // A helper named `assert` is not the native assertion implementation.
+    const declaration =
+      checker.getSymbolAtLocation(receiver)?.declarations?.[0];
+    if (
+      !declaration ||
+      !(ts.isImportClause(declaration) || ts.isNamespaceImport(declaration))
+    )
+      return undefined;
+    const imported = ts.isImportClause(declaration)
+      ? declaration.parent
+      : declaration.parent.parent;
+    if (!ts.isStringLiteralLike(imported.moduleSpecifier)) return undefined;
+    const module = imported.moduleSpecifier.text;
+    if (
+      ![
+        "node:assert",
+        "node:assert/strict",
+        "assert",
+        "assert/strict",
+      ].includes(module)
+    )
+      return undefined;
+    const strict = module.endsWith("/strict");
+    const predicates: Record<string, string> = {
+      equal: strict ? "node-same-value" : "node-loose-equality",
+      strictEqual: "node-same-value",
+      notEqual: strict ? "node-not-same-value" : "node-not-loose-equality",
+      notStrictEqual: "node-not-same-value",
+      deepEqual: strict ? "node-deep-strict-equality" : "node-deep-equality",
+      deepStrictEqual: "node-deep-strict-equality",
+    };
+    const predicate = predicates[callee.name.text];
+    if (!predicate) return undefined;
+    const operand = (arg: ts.Expression): ComparisonOperand => ({
+      source: comparisonLocation(arg),
+      binding: immutableBinding(arg),
+      value: sourcePrimitive(arg),
+    });
+    const actual = operand(call.arguments[0]);
+    const expected = operand(call.arguments[1]);
+    const actualInput = comparisonInput(call.arguments[0]);
+    const expectedInput = comparisonInput(call.arguments[1]);
+    const sharedAwaitedInput =
+      actualInput &&
+      expectedInput &&
+      actualInput.binding === expectedInput.binding &&
+      actualInput.awaits.length + expectedInput.awaits.length > 0;
+    const sameBinding = actual.binding && actual.binding === expected.binding;
+    if (!sameBinding && sharedAwaitedInput) {
+      actual.input = actualInput;
+      expected.input = expectedInput;
+    }
+    return {
+      predicate,
+      actual,
+      expected,
+      relation: sameBinding
+        ? "same-immutable-binding"
+        : sharedAwaitedInput
+          ? "shared-input-through-await"
+          : "unresolved",
+    };
+  }
+
+  function nativeContextMock(call: ts.CallExpression): boolean {
+    const callee = unwrap(call.expression);
+    if (!ts.isPropertyAccessExpression(callee)) return false;
+    const tracker = unwrap(callee.expression);
+    if (!ts.isPropertyAccessExpression(tracker) || tracker.name.text !== "mock")
+      return false;
+    const context = declOf(unwrap(tracker.expression));
+    if (!context || !ts.isParameter(context)) return false;
+    const callback = context.parent;
+    if (
+      !(ts.isArrowFunction(callback) || ts.isFunctionExpression(callback)) ||
+      callback.parameters[0] !== context ||
+      !ts.isCallExpression(callback.parent)
+    )
+      return false;
+    return nativeTestRegistration(callback.parent);
+  }
+
+  function nativeTestRegistration(call: ts.CallExpression): boolean {
+    const registration = comparisonExpression(call.expression);
+    if (!ts.isIdentifier(registration)) return false;
+    const declaration =
+      checker.getSymbolAtLocation(registration)?.declarations?.[0];
+    if (
+      !declaration ||
+      !(ts.isImportSpecifier(declaration) || ts.isImportClause(declaration))
+    )
+      return false;
+    if (
+      ts.isImportSpecifier(declaration) &&
+      !["test", "it"].includes(
+        (declaration.propertyName ?? declaration.name).text,
+      )
+    )
+      return false;
+    const imported = ts.isImportSpecifier(declaration)
+      ? declaration.parent.parent.parent
+      : declaration.parent;
+    return (
+      ts.isStringLiteralLike(imported.moduleSpecifier) &&
+      imported.moduleSpecifier.text === "node:test"
+    );
+  }
+
+  function mockProjection(o: Origin): MockProjection | undefined {
+    if (!o.kind.startsWith("mock:console.")) return undefined;
+    const path = o.path;
+    const joined = path.join(".");
+    const kind =
+      joined === "mock.callCount()" ||
+      (path[0] === "mock" &&
+        path[1] === "calls" &&
+        path[path.length - 1] === "length" &&
+        path.slice(2, -1).every((step) => /^slice\([\s\S]*\)$/.test(step)))
+        ? "call-count"
+        : joined === "mock.calls"
+          ? "call-history"
+          : /(?:^|\.)arguments(?:\.\[\d+\])?$/.test(joined)
+            ? "call-arguments"
+            : "projection";
+    return { target: o.kind.slice(5), kind, path };
+  }
+
+  /** Follow source projections to a Promise, then check only its resolver mapping.
+   * This does not prove that the resolved object was not subsequently mutated,
+   * or that the selected child is the producer of every covered exit site. */
+  function childExitSource(
+    expr: ts.Expression,
+  ): ProcessExitEvidence | undefined {
+    const info: ProcessExitEvidence = {
+      model: "node-child-exit-source-v1",
+      status: "unresolved",
+      reason: "unsupported-promise-source",
+      operand: comparisonLocation(expr),
+      helperCalls: [],
+    };
+    const seen = new Set<ts.Node>();
+    const carriers = new Map<ts.VariableDeclaration, Set<ts.Node>>();
+    const helperReturns = new Map<ts.CallExpression, ts.Expression>();
+    let openCarrier = false;
+    const fail = (reason: string) => ({ ...info, reason });
+    const nativeSpawn = (call: ts.CallExpression) => {
+      const callee = comparisonExpression(call.expression);
+      if (!ts.isIdentifier(callee)) return false;
+      const raw = checker.getSymbolAtLocation(callee)?.declarations?.[0];
+      if (!raw || !ts.isImportSpecifier(raw)) return false;
+      const imported = raw.parent.parent.parent;
+      return (
+        (raw.propertyName ?? raw.name).text === "spawn" &&
+        ts.isStringLiteralLike(imported.moduleSpecifier) &&
+        (imported.moduleSpecifier.text === "node:child_process" ||
+          imported.moduleSpecifier.text === "child_process")
+      );
+    };
+    const property = (object: ts.ObjectLiteralExpression, key: string) => {
+      // No spreads, getters, computed keys, duplicates or inherited properties.
+      const entries = new Map<string, ts.Expression>();
+      for (const p of object.properties) {
+        if (
+          !(
+            ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)
+          ) ||
+          !(ts.isIdentifier(p.name) || ts.isStringLiteralLike(p.name))
+        )
+          return;
+        const name = p.name.text;
+        if (name === "__proto__" || name === "then" || entries.has(name))
+          return;
+        entries.set(name, ts.isPropertyAssignment(p) ? p.initializer : p.name);
+      }
+      return entries.get(key);
+    };
+    const trace = (
+      raw: ts.Expression,
+      path: string[],
+      awaitedPath?: string[],
+      scope = enclosingFunction(expr),
+    ): ProcessExitEvidence | undefined => {
+      const e = comparisonExpression(raw);
+      if (seen.size >= 48 || seen.has(e)) return;
+      seen.add(e);
+      if (ts.isAwaitExpression(e))
+        return trace(e.expression, path, [...path], scope);
+      if (ts.isPropertyAccessExpression(e))
+        return trace(e.expression, [e.name.text, ...path], awaitedPath, scope);
+      if (ts.isIdentifier(e)) {
+        const d = declOf(e);
+        if (
+          d &&
+          ts.isVariableDeclaration(d) &&
+          ts.isIdentifier(d.name) &&
+          d.initializer &&
+          ts.isVariableDeclarationList(d.parent) &&
+          d.parent.flags & ts.NodeFlags.Const
+        ) {
+          if (!scope || enclosingFunction(d) !== scope) openCarrier = true;
+          const uses = carriers.get(d) ?? new Set<ts.Node>();
+          uses.add(e);
+          carriers.set(d, uses);
+          return trace(d.initializer, path, awaitedPath, scope);
+        }
+        return;
+      }
+      if (ts.isObjectLiteralExpression(e)) {
+        const next = path.length ? property(e, path[0]) : undefined;
+        return next
+          ? trace(next, path.slice(1), awaitedPath, scope)
+          : undefined;
+      }
+      if (
+        ts.isCallExpression(e) &&
+        ts.isIdentifier(comparisonExpression(e.expression))
+      ) {
+        const d = declOf(comparisonExpression(e.expression));
+        const fn = d && ts.isFunctionDeclaration(d) ? d : undefined;
+        if (
+          !fn?.body ||
+          fn.getSourceFile().isDeclarationFile ||
+          seen.has(fn) ||
+          fn.asteriskToken ||
+          fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)
+        )
+          return;
+        seen.add(fn);
+        // Only one direct top-level return. Do not select the first branch or a
+        // nested callback's return, and do not treat a helper name as a contract.
+        const returns: ts.ReturnStatement[] = [];
+        let budget = 4096;
+        const scan = (n: ts.Node) => {
+          if (--budget < 0) return;
+          if (ts.isReturnStatement(n)) returns.push(n);
+          else if (!ts.isFunctionLike(n)) ts.forEachChild(n, scan);
+        };
+        scan(fn.body);
+        const [ret] = returns;
+        if (
+          budget < 0 ||
+          returns.length !== 1 ||
+          ret.parent !== fn.body ||
+          !ret.expression
+        )
+          return;
+        info.helperCalls.push(comparisonLocation(e));
+        helperReturns.set(e, ret.expression);
+        return trace(ret.expression, path, awaitedPath, fn);
+      }
+      if (
+        !ts.isNewExpression(e) ||
+        !ts.isIdentifier(e.expression) ||
+        e.expression.text !== "Promise"
+      )
+        return;
+      // Discovery is structural only. A Promise with no exit/close listener is
+      // not an exit observation, even if a comment contains listener-shaped text.
+      let hasEvent = false,
+        discoveryBudget = 4096;
+      const discover = (n: ts.Node) => {
+        if (--discoveryBudget < 0 || hasEvent) return;
+        if (
+          ts.isCallExpression(n) &&
+          ts.isPropertyAccessExpression(n.expression) &&
+          ["on", "once"].includes(n.expression.name.text) &&
+          n.arguments[0] &&
+          ts.isStringLiteralLike(n.arguments[0]) &&
+          ["exit", "close"].includes(n.arguments[0].text)
+        )
+          hasEvent = true;
+        ts.forEachChild(n, discover);
+      };
+      if (e.arguments?.[0]) discover(e.arguments[0]);
+      if (!hasEvent) return;
+      info.promise = comparisonLocation(e);
+      const promiseBinding = declOf(e.expression);
+      // Compiler sessions may omit standard libraries. As with the native mock
+      // model, global built-ins are assumed unmodified; a project declaration
+      // with this name is never accepted as that global.
+      if (promiseBinding && !promiseBinding.getSourceFile().isDeclarationFile)
+        return fail("native-promise-binding-unverified");
+      if (JSON.stringify(awaitedPath) !== JSON.stringify(path))
+        return fail("promise-result-not-awaited-before-projection");
+      const executor = e.arguments?.[0] && comparisonExpression(e.arguments[0]);
+      if (
+        e.arguments?.length !== 1 ||
+        !executor ||
+        !(ts.isArrowFunction(executor) || ts.isFunctionExpression(executor)) ||
+        !ts.isBlock(executor.body) ||
+        executor.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)
+      )
+        return fail("unsupported-promise-executor");
+      const [resolveParam, rejectParam] = executor.parameters;
+      if (
+        !resolveParam ||
+        executor.parameters.length > 2 ||
+        executor.parameters.some(
+          (p) => !ts.isIdentifier(p.name) || p.initializer || p.dotDotDotToken,
+        )
+      )
+        return fail("unsupported-resolver-binding");
+      let eventCall: ts.CallExpression | undefined;
+      for (const statement of executor.body.statements) {
+        if (
+          !ts.isExpressionStatement(statement) ||
+          !ts.isCallExpression(statement.expression)
+        )
+          return fail("unsupported-executor-statement");
+        const call = statement.expression;
+        if (
+          !ts.isPropertyAccessExpression(call.expression) ||
+          !["on", "once"].includes(call.expression.name.text) ||
+          call.arguments.length !== 2 ||
+          !ts.isStringLiteralLike(call.arguments[0])
+        )
+          return fail("competing-or-unsupported-settlement");
+        const event = call.arguments[0].text;
+        if (
+          event === "error" &&
+          rejectParam &&
+          declOf(comparisonExpression(call.arguments[1])) === rejectParam
+        )
+          continue;
+        if (!["exit", "close"].includes(event) || eventCall)
+          return fail("competing-or-unsupported-settlement");
+        eventCall = call;
+      }
+      if (!eventCall) return fail("missing-exit-listener");
+      const member = eventCall.expression as ts.PropertyAccessExpression;
+      const child = declOf(comparisonExpression(member.expression));
+      if (
+        !child ||
+        !ts.isVariableDeclaration(child) ||
+        !child.initializer ||
+        !ts.isVariableDeclarationList(child.parent) ||
+        !(child.parent.flags & ts.NodeFlags.Const)
+      )
+        return fail("child-binding-unverified");
+      const spawn = comparisonExpression(child.initializer);
+      if (!ts.isCallExpression(spawn) || !nativeSpawn(spawn))
+        return fail("native-child-spawn-unverified");
+      info.spawn = comparisonLocation(spawn);
+      info.event = {
+        source: comparisonLocation(eventCall),
+        name: (eventCall.arguments[0] as ts.StringLiteralLike).text,
+      };
+      const callback = comparisonExpression(eventCall.arguments[1]);
+      if (declOf(callback) === resolveParam) {
+        if (path.length) return fail("unsupported-exit-result-projection");
+        info.resolution = {
+          status: "source-checked",
+          source: comparisonLocation(callback),
+          eventArgument: "code",
+        };
+        return fail("producer-instance-link-unverified");
+      }
+      if (
+        !(ts.isArrowFunction(callback) || ts.isFunctionExpression(callback)) ||
+        callback.modifiers?.some(
+          (m) => m.kind === ts.SyntaxKind.AsyncKeyword,
+        ) ||
+        callback.parameters.length > 2 ||
+        callback.parameters.some(
+          (p) => !ts.isIdentifier(p.name) || p.initializer || p.dotDotDotToken,
+        )
+      )
+        return fail("unsupported-exit-callback");
+      let body: ts.Expression | undefined;
+      if (!ts.isBlock(callback.body)) body = callback.body;
+      else if (callback.body.statements.length === 1) {
+        const statement = callback.body.statements[0];
+        if (ts.isExpressionStatement(statement)) body = statement.expression;
+        else if (ts.isReturnStatement(statement)) body = statement.expression;
+      }
+      const call = body && comparisonExpression(body);
+      if (
+        !call ||
+        !ts.isCallExpression(call) ||
+        declOf(comparisonExpression(call.expression)) !== resolveParam ||
+        call.arguments.length !== 1
+      )
+        return fail("unsupported-exit-resolver");
+      let value = comparisonExpression(call.arguments[0]);
+      let field: string | undefined;
+      if (path.length) {
+        if (path.length !== 1 || !ts.isObjectLiteralExpression(value))
+          return fail("unsupported-exit-result-projection");
+        field = path[0];
+        for (const member of value.properties) {
+          if (!(
+            ts.isPropertyAssignment(member) ||
+            ts.isShorthandPropertyAssignment(member)
+          ))
+            return fail("unsupported-resolved-object");
+          const item = comparisonExpression(
+            ts.isPropertyAssignment(member) ? member.initializer : member.name,
+          );
+          if (
+            !(
+              ts.isIdentifier(item) &&
+              callback.parameters.some((p) => declOf(item) === p)
+            ) &&
+            !ts.isStringLiteralLike(item) &&
+            !ts.isNumericLiteral(item) &&
+            ![
+              ts.SyntaxKind.NullKeyword,
+              ts.SyntaxKind.TrueKeyword,
+              ts.SyntaxKind.FalseKeyword,
+            ].includes(item.kind)
+          )
+            return fail("transformed-or-constant-event-value");
+        }
+        const projected = property(value, field);
+        if (!projected) return fail("unsupported-resolved-object");
+        value = comparisonExpression(projected);
+      }
+      if (!ts.isIdentifier(value))
+        return fail("transformed-or-constant-event-value");
+      const index = callback.parameters.findIndex(
+        (p) =>
+          ts.isIdentifier(p.name) &&
+          !p.initializer &&
+          !p.dotDotDotToken &&
+          declOf(value) === p,
+      );
+      if (index !== 0 && index !== 1)
+        return fail("resolved-value-is-not-event-argument");
+      info.resolution = {
+        status: "source-checked",
+        source: comparisonLocation(call),
+        ...(field ? { field } : {}),
+        eventArgument: index === 0 ? "code" : "signal",
+      };
+      return fail("producer-instance-link-unverified");
+    };
+    const result = trace(expr, []);
+    if (!result?.resolution) return result;
+
+    // The resolver's fresh object cannot change in transit if its Promise and
+    // every followed carrier stay closed to the selected read. Inspect all uses
+    // of each local binding, including closures, not just preceding statements.
+    // This proves preservation of the event argument, not its producer identity.
+    const consumer = {
+      status: "unresolved" as "source-checked" | "unresolved",
+      reason: "result-carrier-escapes-or-is-reused" as string | undefined,
+      bindings: [...carriers.keys()].map(comparisonLocation),
+      read: comparisonLocation(expr),
+      blockedAt: undefined as string | undefined,
+    };
+    result.consumer = consumer;
+    if (openCarrier) {
+      consumer.reason = "nonlocal-result-carrier";
+      return result;
+    }
+    const outer = (n: ts.Expression): ts.Expression => {
+      let p = n.parent;
+      while (
+        p &&
+        ts.isExpression(p) &&
+        comparisonExpression(p) === comparisonExpression(n)
+      ) {
+        n = p;
+        p = n.parent;
+      }
+      return n;
+    };
+    const discardedAwait = (n: ts.Expression) => {
+      const p = outer(n).parent;
+      return (
+        ts.isAwaitExpression(p) && ts.isExpressionStatement(outer(p).parent)
+      );
+    };
+    const discardedRace = (n: ts.Identifier) => {
+      const array = n.parent;
+      if (!ts.isArrayLiteralExpression(array)) return false;
+      const call = array.parent;
+      if (
+        !ts.isCallExpression(call) ||
+        call.arguments.length !== 1 ||
+        !ts.isPropertyAccessExpression(call.expression) ||
+        call.expression.name.text !== "race"
+      )
+        return false;
+      const ctor = call.expression.expression;
+      const binding = declOf(ctor);
+      return (
+        ts.isIdentifier(ctor) &&
+        ctor.text === "Promise" &&
+        (!binding || binding.getSourceFile().isDeclarationFile) &&
+        discardedAwait(call)
+      );
+    };
+    const siblingArrowRead = (n: ts.Identifier, d: ts.VariableDeclaration) => {
+      // A fresh helper return may also expose independent arrow readers, e.g.
+      // buffered stdout. Arrows cannot receive the carrier as their `this`.
+      // Any captured use of the result Promise is audited separately below.
+      const access = n.parent;
+      if (!ts.isPropertyAccessExpression(access) || access.expression !== n)
+        return false;
+      const call = access.parent;
+      if (
+        !ts.isCallExpression(call) ||
+        call.expression !== access ||
+        call.arguments.length
+      )
+        return false;
+      const init = d.initializer && comparisonExpression(d.initializer);
+      const value =
+        init && ts.isCallExpression(init) ? helperReturns.get(init) : init;
+      const object = value && comparisonExpression(value);
+      if (!object || !ts.isObjectLiteralExpression(object)) return false;
+      const member = property(object, access.name.text);
+      return !!member && ts.isArrowFunction(comparisonExpression(member));
+    };
+    let budget = 16384;
+    for (const [d, uses] of carriers) {
+      const scope = enclosingFunction(d);
+      if (!scope) return result;
+      let closed = true;
+      const scan = (n: ts.Node) => {
+        if (--budget < 0 || !closed) return;
+        const callee = ts.isCallExpression(n)
+          ? comparisonExpression(n.expression)
+          : undefined;
+        if (
+          ts.isWithStatement(n) ||
+          (callee && ts.isIdentifier(callee) && callee.text === "eval")
+        ) {
+          closed = false;
+          consumer.reason = "reflective-carrier-access";
+          consumer.blockedAt = comparisonLocation(n);
+          return;
+        }
+        if (
+          ts.isIdentifier(n) &&
+          n !== d.name &&
+          declOf(n) === d &&
+          !uses.has(n) &&
+          !discardedAwait(n) &&
+          !discardedRace(n) &&
+          !siblingArrowRead(n, d)
+        ) {
+          closed = false;
+          consumer.blockedAt = comparisonLocation(n);
+          return;
+        }
+        ts.forEachChild(n, scan);
+      };
+      scan(scope);
+      if (!closed || budget < 0) {
+        if (budget < 0) consumer.reason = "consumer-scan-budget";
+        return result;
+      }
+    }
+    consumer.status = "source-checked";
+    delete consumer.reason;
+    return result;
+  }
 
   function originOf(expr: ts.Expression, depth = 0): Origin | undefined {
     // each property-access segment costs one level: `admin.rest.resources.Article.find.mock.calls.map(...)` read
@@ -2048,11 +2901,23 @@ export function analyzeWithFrontend(
         callee.expression.getText().endsWith(".mock") &&
         e.arguments.length >= 2 &&
         ts.isStringLiteralLike(e.arguments[1])
-      )
+      ) {
+        // Keep a same-named user helper out of the native mock model. Unsupported
+        // tracker/receiver aliases remain unknown rather than acquiring stream credit.
+        const receiver = unwrap(e.arguments[0]);
+        const declaration = declOf(receiver);
+        if (
+          !nativeContextMock(e) ||
+          !ts.isIdentifier(receiver) ||
+          receiver.text !== "console" ||
+          (declaration && !declaration.getSourceFile().isDeclarationFile)
+        )
+          return undefined;
         return {
           kind: `mock:${e.arguments[0].getText()}.${e.arguments[1].text}`,
           path: [],
         };
+      }
       if (ts.isIdentifier(callee)) {
         // Resolve the declaration below. A familiar helper name is not a
         // contract, nor does it identify the particular process/socket observed.
@@ -2095,10 +2960,14 @@ export function analyzeWithFrontend(
           visit(e.arguments[0]);
           if (hook) return hook;
         }
-        if (["String", "Number", "Boolean"].includes(callee.text))
-          return e.arguments[0]
+        if (["String", "Number", "Boolean"].includes(callee.text)) {
+          const base = e.arguments[0]
             ? originOf(e.arguments[0], depth + 1)
             : undefined;
+          return base?.kind.startsWith("mock:")
+            ? { ...base, path: [...base.path, `${callee.text}()`] }
+            : base;
+        }
         const d = declOf(callee);
         if (d && isProdFile(d.getSourceFile()))
           return { kind: "prod:" + declaredName(d, callee.text), path: [] };
@@ -2145,10 +3014,14 @@ export function analyzeWithFrontend(
       if (ts.isPropertyAccessExpression(callee)) {
         const name = callee.name.text;
         const objText = callee.expression.getText();
-        if (["JSON", "Object", "Array", "Promise"].includes(objText))
-          return e.arguments[0]
+        if (["JSON", "Object", "Array", "Promise"].includes(objText)) {
+          const base = e.arguments[0]
             ? originOf(e.arguments[0], depth + 1)
             : undefined;
+          return base?.kind.startsWith("mock:")
+            ? { ...base, path: [...base.path, `${objText}.${name}()`] }
+            : base;
+        }
         // vi.mocked(x) is x; vi.importActual('~/x') is the real module
         if (
           (objText === "vi" || objText === "jest") &&
@@ -2165,7 +3038,10 @@ export function analyzeWithFrontend(
           return moduleOrigin(e.arguments[0].text, e.getSourceFile());
         const base = originOf(callee.expression, depth + 1);
         if (!base) return undefined;
-        const o: Origin = { ...base, path: [...base.path, name + "()"] };
+        const step = base.kind.startsWith("mock:")
+          ? `${name}(${e.arguments.map((arg) => arg.getText()).join(", ")})`
+          : name + "()";
+        const o: Origin = { ...base, path: [...base.path, step] };
         // promise.catch(e => e) carries the rejection; promise.then(onOk, onErr) carries either
         if (name === "catch" && e.arguments[0]) o.thrown = "only";
         else if (name === "then" && e.arguments.length >= 2) o.thrown = "also";
@@ -2235,7 +3111,10 @@ export function analyzeWithFrontend(
     }
     if (ts.isElementAccessExpression(e)) {
       const b = originOf(e.expression, depth + 1);
-      return b ? { ...b, path: [...b.path, "[]"] } : undefined;
+      const step = b?.kind.startsWith("mock:")
+        ? `[${e.argumentExpression.getText()}]`
+        : "[]";
+      return b ? { ...b, path: [...b.path, step] } : undefined;
     }
     if (ts.isConditionalExpression(e)) return undefined; // selected branch needs value-flow evidence
     if (ts.isBinaryExpression(e)) {
@@ -2249,7 +3128,12 @@ export function analyzeWithFrontend(
       // from the first operand whose name can be resolved.
       return undefined;
     }
-    if (ts.isPrefixUnaryExpression(e)) return originOf(e.operand, depth + 1);
+    if (ts.isPrefixUnaryExpression(e)) {
+      const base = originOf(e.operand, depth + 1);
+      return base?.kind.startsWith("mock:")
+        ? { ...base, path: [...base.path, `unary:${e.operator}`] }
+        : base;
+    }
     if (ts.isIdentifier(e)) {
       // imports first, by their import declaration: alias resolution can fail on deep re-exports
       const raw = checker.getSymbolAtLocation(e)?.declarations?.[0];
@@ -2351,13 +3235,6 @@ export function analyzeWithFrontend(
           scan(scope);
           if (fed) return { kind: fed, path: [] };
         }
-        // promise resolved from a child process 'close'/'exit' event carries the exit code
-        if (
-          ts.isNewExpression(init) &&
-          init.expression.getText() === "Promise" &&
-          /\.(once|on)\(\s*['"](close|exit)['"]/.test(init.getText())
-        )
-          return { kind: "proc-exit", path: [] };
         // Mutable scalar aliases need reaching definitions, not the initializer
         // or first assignment anywhere in the file. Container/stream cases above
         // retain their separate models.
@@ -2491,8 +3368,6 @@ export function analyzeWithFrontend(
         return [{ boundary: "stdout" }];
       case "proc-stderr":
         return [{ boundary: "stderr" }];
-      case "proc-exit":
-        return [{ boundary: "exit" }];
       case "sdk-client":
         if (has("sessionId"))
           return [{ boundary: "client-header", facet: "mcp-session-id" }];
@@ -2546,7 +3421,10 @@ export function analyzeWithFrontend(
         // t.mock.method(console, 'log'): a test-owned replacement of a stream sink
         if (o.kind.startsWith("mock:console."))
           return [
-            { boundary: o.kind.endsWith(".error") ? "stderr" : "stdout" },
+            {
+              boundary: /\.(error|warn)$/.test(o.kind) ? "stderr" : "stdout",
+              facet: o.kind.slice(5),
+            },
           ];
         return [];
     }
@@ -2849,6 +3727,99 @@ export function analyzeWithFrontend(
     unrecognized.set(key, (unrecognized.get(key) ?? 0) + 1);
   }
 
+  const nativeImportedMethod = (
+    call: ts.CallExpression,
+    module: string,
+    methods: string[],
+  ) => {
+    const callee = comparisonExpression(call.expression);
+    if (
+      !ts.isPropertyAccessExpression(callee) ||
+      !methods.includes(callee.name.text)
+    )
+      return false;
+    const receiver = comparisonExpression(callee.expression);
+    const d = checker.getSymbolAtLocation(receiver)?.declarations?.[0];
+    const imported =
+      d &&
+      (ts.isImportClause(d)
+        ? d.parent
+        : ts.isNamespaceImport(d)
+          ? d.parent.parent
+          : undefined);
+    return (
+      !!imported &&
+      ts.isStringLiteralLike(imported.moduleSpecifier) &&
+      imported.moduleSpecifier.text === module
+    );
+  };
+  const nativeGlobalValue = (expr: ts.Expression, name: string) => {
+    const e = comparisonExpression(expr),
+      d = declOf(e);
+    return (
+      ts.isIdentifier(e) &&
+      e.text === name &&
+      (!d || d.getSourceFile().isDeclarationFile)
+    );
+  };
+  const mockModel = {
+    declaration: declOf,
+    location: comparisonLocation,
+    nativeMock: nativeContextMock,
+    nativePredicate: (call: ts.CallExpression) =>
+      nativeComparison(call)?.predicate ??
+      (nativeImportedMethod(call, "node:assert/strict", ["match"])
+        ? "node-literal-regexp"
+        : undefined),
+    nativeException: (call: ts.CallExpression) => {
+      const method = nativeAssertionIdentity(call)?.method;
+      return method === "throws" || method === "doesNotThrow"
+        ? method
+        : undefined;
+    },
+    globalError: (expr: ts.Expression) => nativeGlobalValue(expr, "Error"),
+    nativeTest: nativeTestRegistration,
+    nativeInspect: (call: ts.CallExpression) =>
+      nativeImportedMethod(call, "node:util", ["inspect"]),
+    nativeTty: (expr: ts.Expression) =>
+      ts.isPropertyAccessExpression(expr) &&
+      expr.name.text === "isTTY" &&
+      ts.isPropertyAccessExpression(expr.expression) &&
+      expr.expression.name.text === "stderr" &&
+      nativeGlobalValue(expr.expression.expression, "process"),
+    nativeAssertion: (call: ts.CallExpression) =>
+      nativeImportedMethod(call, "node:assert/strict", [
+        "equal",
+        "strictEqual",
+        "deepEqual",
+        "deepStrictEqual",
+        "match",
+      ]),
+    globalString: (expr: ts.Expression) => nativeGlobalValue(expr, "String"),
+    globalConsole: (expr: ts.Expression) => {
+      const e = comparisonExpression(expr);
+      const d = declOf(e);
+      return (
+        ts.isIdentifier(e) &&
+        e.text === "console" &&
+        (!d || d.getSourceFile().isDeclarationFile)
+      );
+    },
+    production: (node: ts.Node) => isProdFile(node.getSourceFile()),
+    site: (call: ts.CallExpression) =>
+      smallestSiteContaining(
+        rel(call.getSourceFile()),
+        call.getStart(),
+        call.getEnd(),
+      )?.id,
+  };
+  function countModel(
+    fn: ts.Node,
+    row?: Parameters<typeof analyzeMockCounts>[3],
+  ) {
+    return analyzeMockCounts(ts, fn, mockModel, row);
+  }
+
   function analyzeTestBody(
     fn: ts.Node,
     file: string,
@@ -2856,6 +3827,7 @@ export function analyzeWithFrontend(
     name: string,
     inert = false,
   ): StaticTest {
+    const mockCounts = countModel(fn);
     const observations: Observation[] = [];
     const sinks: SinkBinding[] = [];
     const rendered = new Set<string>();
@@ -2953,7 +3925,9 @@ export function analyzeWithFrontend(
         let expected: ts.Expression | undefined;
         let negative = false;
         let rejectsChain = false;
-        if (
+        const nativeAssertion = nativeAssertionIdentity(node);
+        if (nativeAssertion) method = nativeAssertion.method;
+        else if (
           ts.isPropertyAccessExpression(callee) &&
           callee.expression.getText() === "assert"
         )
@@ -2962,8 +3936,19 @@ export function analyzeWithFrontend(
           method = "assert";
         if (method && ASSERT_STRENGTH[method]) {
           strength = ASSERT_STRENGTH[method];
-          actuals = node.arguments.slice(0, 2);
-          expected = node.arguments[1];
+          // On a passing native ok/doesNotThrow/doesNotReject call, only the
+          // first argument participates in the success predicate. The no-error
+          // methods return before inspecting their optional matcher/message.
+          // Argument evaluation can still have effects or throw. Do not apply
+          // this rule to throws/rejects: their matcher and string-ambiguity
+          // checks can inspect the second value even when an error occurred.
+          const firstOperandOnly =
+            nativeAssertion !== undefined &&
+            ["ok", "doesNotThrow", "doesNotReject"].includes(
+              nativeAssertion.method,
+            );
+          actuals = node.arguments.slice(0, firstOperandOnly ? 1 : 2);
+          expected = firstOperandOnly ? undefined : node.arguments[1];
           negative = method === "doesNotMatch";
         } else if (ts.isPropertyAccessExpression(callee)) {
           // vitest/jest style: expect(actual)[.not][.resolves|.rejects].matcher(expected)
@@ -3005,6 +3990,7 @@ export function analyzeWithFrontend(
         )
           strength = "value";
         if (method && strength) {
+          const comparison = nativeComparison(node);
           pragmaCollector.register(
             node,
             method,
@@ -3049,9 +4035,10 @@ export function analyzeWithFrontend(
             rejectsChain ||
             ["rejects", "throws", "toThrow", "toThrowError"].includes(method);
           for (const arg of actuals) {
-            const o = originOf(arg);
             const unresolvedOperand = (shape: string) =>
               pending.push({
+                assertionSource: `${relative(root, sf.fileName)}:${sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1}:${sf.getLineAndCharacterOfPosition(node.getStart(sf)).character + 1}`,
+                assertionMethod: method,
                 statements: definingStatements(arg),
                 strength: RANK[s] > RANK.value ? "value" : s,
                 negative: !!negative,
@@ -3059,6 +4046,40 @@ export function analyzeWithFrontend(
                 where: where(node, method),
                 shape: `${arg.getText().replace(/\s+/g, " ").slice(0, 40)} [${shape}]`,
               });
+            if (
+              nativeAssertion &&
+              arg === node.arguments[0] &&
+              ["throws", "rejects", "doesNotThrow", "doesNotReject"].includes(
+                nativeAssertion.method,
+              )
+            ) {
+              // The operand supplies a callback or promise, not the value a
+              // normal value assertion reads. `doesNotThrow(fn)` ignores fn's
+              // result; `throws(factory())` catches the returned callback's
+              // exception, not an exception thrown while evaluating factory().
+              // Async variants additionally distinguish synchronous invocation,
+              // promise validation and settlement. The ordinary origin/owner
+              // model cannot establish those invocation and completion paths.
+              // Retain the passing assertion as a limit, including when its
+              // callable's source is recognizable; never invent return credit
+              // or convert the operand producer's return into a caught throw.
+              const completion =
+                nativeAssertion.method === "throws"
+                  ? "synchronous throw"
+                  : nativeAssertion.method === "doesNotThrow"
+                    ? "synchronous normal"
+                    : nativeAssertion.method === "rejects"
+                      ? "asynchronous rejection"
+                      : "asynchronous fulfillment";
+              unresolvedOperand(
+                `${completion} completion; callback/promise producer and invocation path unresolved`,
+              );
+              continue;
+            }
+            const exitSource = childExitSource(arg);
+            const o: Origin | undefined = exitSource
+              ? { kind: "process-exit-source", path: [] }
+              : originOf(arg);
             if (!o) {
               noteUnrecognized(arg, "no origin");
               unresolvedOperand("no origin");
@@ -3070,13 +4091,26 @@ export function analyzeWithFrontend(
             const facetPattern = o.facet?.startsWith("pattern:")
               ? o.facet.slice(8)
               : undefined;
-            const bs = boundariesOf(o);
+            const bs = exitSource ? [{ boundary: "exit" }] : boundariesOf(o);
+            const mock = mockProjection(o);
+            if (mock?.kind === "call-count")
+              mock.countEvidence = mockCounts.checks.get(node) ?? {
+                model: "node-sync-console-count-v2",
+                status: "unresolved",
+                reason: mockCounts.limitation ?? "unsupported-count-projection",
+              };
+            if (mock)
+              unresolvedOperand(
+                `mock ${mock.kind}; production call identity and projection dependence unresolved`,
+              );
             if (!bs.length && o.kind !== "literal") {
               noteUnrecognized(arg, o.kind);
               unresolvedOperand(o.kind);
             }
-            // rejects/throws: the function's throw sites are observed as well as (or instead of) its return
-            if (observesThrow)
+            // Native first-operand completion was handled above. Its second
+            // operand supplies an expectation/diagnostic, not a caught operation.
+            // Non-native inference remains separate from the native model.
+            if (observesThrow && !nativeAssertion)
               for (const b of [...bs])
                 if (b.boundary.startsWith("return:"))
                   bs.push({ boundary: "throw:" + b.boundary.slice(7) });
@@ -3096,8 +4130,21 @@ export function analyzeWithFrontend(
                 where: where(node, method),
                 assertionSource: `${relative(root, sf.fileName)}:${sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1}:${sf.getLineAndCharacterOfPosition(node.getStart(sf)).character + 1}`,
                 assertionMethod: method,
+                ...(mock ? { mock } : {}),
+                ...(comparison ? { comparison } : {}),
+                ...(b.boundary === "exit"
+                  ? {
+                      processExit: exitSource ?? {
+                        model: "node-child-exit-source-v1" as const,
+                        status: "unresolved" as const,
+                        reason: "unverified-event-channel",
+                        operand: comparisonLocation(arg),
+                        helperCalls: [],
+                      },
+                    }
+                  : {}),
               };
-              if (callList && b.boundary.startsWith("sink:"))
+              if (!mock && callList && b.boundary.startsWith("sink:"))
                 ob.callList = true;
               if (pattern) ob.pattern = pattern;
               else if (facetPattern) ob.pattern = facetPattern;
@@ -3112,6 +4159,29 @@ export function analyzeWithFrontend(
         }
         // implicit oracles: awaited reads that throw or time out
         if (ts.isAwaitExpression(node.parent)) {
+          if (!(method && strength) && pragmaCollector.hasHint(node)) {
+            const source = awaitedObservationSource(
+              {
+                syntax: ts,
+                declaration: declOf,
+                rawDeclaration: (n) => {
+                  const symbol = checker.getSymbolAtLocation(n);
+                  return symbol?.valueDeclaration ?? symbol?.declarations?.[0];
+                },
+                relativeFile: rel,
+              },
+              fn,
+              node,
+            );
+            if (source && ts.isPropertyAccessExpression(node.expression))
+              pragmaCollector.register(
+                node,
+                node.expression.name.text,
+                staticTestKey(file, line, name),
+                inert,
+                source,
+              );
+          }
           const o = originOf(node);
           if (o) {
             const bs = boundariesOf(o);
@@ -3336,6 +4406,7 @@ export function analyzeWithFrontend(
           ? arg0.text
           : arg0.getText(sf).replace(/^[`'"]|[`'"]$/g, "");
         staticTests.push(st);
+        mockBodies.set(st, decl.body);
       }
       ts.forEachChild(node, visit);
     };
@@ -3401,7 +4472,10 @@ export function analyzeWithFrontend(
       runtimeLines.every((l) => statics.some((s) => s.line === l))
     )
       runtimeLines.forEach((l) =>
-        staticLink.set(`${file}:${l}`, statics.find((s) => s.line === l)!),
+        staticLink.set(
+          `${file}:${l}`,
+          statics.find((s) => s.line === l)!,
+        ),
       );
     else if (runtimeLines.length === statics.length)
       runtimeLines.forEach((l, i) =>
@@ -3422,6 +4496,91 @@ export function analyzeWithFrontend(
   }
   const staticFor = (rt: RuntimeTest) =>
     staticById.get(rt.id) ?? staticLink.get(`${rt.file}:${rt.line}`);
+
+  // A custom registrar's callback can be identified by actual assertion call
+  // points without proving the registrar or its captured row. Keep that weaker
+  // relationship explicit. In particular, a wrapper may change the title, call
+  // this same body with other inputs, catch failures, or run other callbacks.
+  // Do this AFTER legacy linking: recovered bodies must never be candidates for
+  // another attempt's title/rank/nearest-line fallback.
+  const witnessedBodies = new Map<
+    ts.Node,
+    {
+      call: ts.CallExpression;
+      operations: Map<string, string>;
+      st?: StaticTest;
+    }
+  >();
+  for (const sf of allFiles) {
+    if (!isTestFile(sf)) continue;
+    const visit = (node: ts.Node) => {
+      if (
+        ts.isCallExpression(node) &&
+        node.arguments.length >= 2 &&
+        !enclosingFunction(node) &&
+        !testDeclaration(node)
+      ) {
+        const body = node.arguments[node.arguments.length - 1];
+        if (ts.isArrowFunction(body) || ts.isFunctionExpression(body)) {
+          const operations = new Map<string, string>();
+          const assertion = (n: ts.Node) => {
+            if (n !== body && ts.isFunctionLike(n)) return;
+            if (ts.isCallExpression(n)) {
+              const nativeAssertion = nativeAssertionIdentity(n);
+              if (nativeAssertion) {
+                const p = sf.getLineAndCharacterOfPosition(n.getStart(sf));
+                operations.set(
+                  `${rel(sf)}:${p.line + 1}:${p.character + 1}`,
+                  `${nativeAssertion.module}.${nativeAssertion.method}`,
+                );
+              }
+            }
+            ts.forEachChild(n, assertion);
+          };
+          assertion(body);
+          if (operations.size)
+            witnessedBodies.set(body, { call: node, operations });
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+  }
+  const witnessedBodyLinks = new Map<
+    string,
+    { body: string; assertions: string[] }
+  >();
+  for (const rt of runtimeTests) {
+    if (staticFor(rt) || rt.runner !== "node:test") continue;
+    const phases = runtimePhases.get(rt.id);
+    if (!phases?.length || phases.some((p) => p.status !== "passed")) continue;
+    const matches = [...witnessedBodies].filter(
+      ([body, candidate]) =>
+        rel(body.getSourceFile()) === rt.file &&
+        phases.every((p) => candidate.operations.get(p.source) === p.op),
+    );
+    if (matches.length !== 1) continue;
+    const [body, candidate] = matches[0];
+    const sf = body.getSourceFile();
+    if (!candidate.st) {
+      const call = candidate.call;
+      candidate.st = analyzeTestBody(
+        body,
+        rel(sf),
+        sf.getLineAndCharacterOfPosition(call.getStart(sf)).line + 1,
+        call.arguments[0].getText(sf).slice(0, 60),
+      );
+      candidate.st.endLine =
+        sf.getLineAndCharacterOfPosition(call.getEnd()).line + 1;
+      staticTests.push(candidate.st);
+      mockBodies.set(candidate.st, body);
+    }
+    staticById.set(rt.id, candidate.st);
+    witnessedBodyLinks.set(rt.id, {
+      body: comparisonLocation(body),
+      assertions: [...new Set(phases.map((p) => p.source))],
+    });
+  }
 
   interface DecisionFacts {
     carrier?: string;
@@ -3623,19 +4782,35 @@ export function analyzeWithFrontend(
   }
 
   /**
-   * Was this site plausibly asserted through an operand whose shape the analysis could not trace? Statement
-   * attribution answers it: the operand's defining statements record which production functions were entered
-   * while they ran, so an operand that entered this site's owner may well read it. Returns the shapes to
-   * report, so "unresolved" can say "limit" instead of sending an agent to write a test that already exists.
+   * Unknown operand dependence is a limit, not proof of an absent assertion.
+   * Synchronous statement attribution can identify a possible relationship but
+   * cannot exclude one across an await, pipe capture, or another async boundary.
+   * A passing unmodeled assertion therefore leaves dependence unresolved for
+   * sites covered by that test. This only changes the reason for an unresolved
+   * candidate: it never supplies an observation, strength, or positive test link.
    */
   function unmodelledOperands(s: Site, covering: RuntimeTest[]): string[] {
     buildFunctionIndex();
     const shapes = new Set<string>();
     for (const rt of covering) {
       const byStatement = runtimeStatements.get(rt.id);
-      const st = byStatement ? staticFor(rt) : undefined;
-      if (!byStatement || !st) continue;
-      for (const p of st.pending)
+      const st = staticFor(rt);
+      if (!st) continue;
+      const phases = runtimePhases.get(rt.id);
+      for (const p of st.pending) {
+        if (phases) {
+          if (
+            !assertionWitnessIssue(phases, p.assertionSource, p.assertionMethod)
+          )
+            shapes.add(
+              `${p.where}: ${p.shape} (passing assertion in covering test ${rt.id}; operand dependence unresolved)`,
+            );
+          // A known failed, mixed, incomplete or unexecuted call cannot supply
+          // this passing-operand limit. Missing witness transport is separately
+          // reported by witnessIssues. Legacy statement evidence remains below.
+          continue;
+        }
+        if (!byStatement) continue;
         for (const pos of p.statements) {
           const attribution = byStatement[pos];
           if (!attribution) continue;
@@ -3646,6 +4821,7 @@ export function analyzeWithFrontend(
             (s.kind === "decision" && attribution.decs.some((d) => d === s.id));
           if (entered) shapes.add(p.shape);
         }
+      }
     }
     return [...shapes];
   }
@@ -4380,6 +5556,9 @@ export function analyzeWithFrontend(
     assertionMethod: ob.assertionMethod,
     negative: ob.negative,
     callList: ob.callList,
+    mock: ob.mock,
+    comparison: ob.comparison,
+    processExit: ob.processExit,
     weak: ob.weak,
     implicit: ob.implicit,
     runtime: ob.runtime,
@@ -4391,42 +5570,141 @@ export function analyzeWithFrontend(
           .length > 1
       : undefined,
   });
-  const factTests = runtimeTests
-    .map((rt) => {
-      const st = staticFor(rt);
-      if (!st) return undefined;
-      const checked = st.observations.map((ob) => ({
-        ob,
-        kind: witnessIssue(rt.id, ob),
-      }));
-      const observations = checked
-        .filter(({ kind }) => !kind)
-        .map(({ ob }) => factObservation(ob));
-      // Missing transport applies to the whole test, even when no operand could
-      // be modeled. An empty phase file is different from no phase file.
-      const witnessIssues = [
-        ...(!runtimePhases.has(rt.id)
-          ? [{ kind: "capture-unavailable" as const }]
-          : []),
-        ...checked
-          .filter(({ kind }) => kind && kind !== "capture-unavailable")
-          .map(({ ob, kind }) => ({
-            kind: kind!,
-            source: ob.assertionSource,
-            operation: ob.assertionMethod,
-            observation: factObservation(ob),
-          })),
-      ];
+  const rowPlans = new Map<ts.Node, ReturnType<typeof sourceTestRows>>();
+  const runtimeRowTitles = new Map<string, number>();
+  for (const rt of runtimeTests) {
+    const key = JSON.stringify([rt.file, rt.title]);
+    runtimeRowTitles.set(key, (runtimeRowTitles.get(key) ?? 0) + 1);
+  }
+  function runtimeCountObservations(
+    st: StaticTest,
+    rt: RuntimeTest,
+  ): Observation[] {
+    const body = mockBodies.get(st);
+    if (!body || !st.observations.some((ob) => ob.mock?.kind === "call-count"))
+      return st.observations;
+    if (!rowPlans.has(body))
+      rowPlans.set(
+        body,
+        sourceTestRows(ts, body, {
+          declaration: declOf,
+          location: comparisonLocation,
+          nativeTest: nativeTestRegistration,
+        }),
+      );
+    const plan = rowPlans.get(body);
+    if (!plan) return st.observations;
+    const row =
+      rt.title === undefined
+        ? undefined
+        : plan.rows.find((r) => r.evidence.title === rt.title);
+    const duplicate =
+      (runtimeRowTitles.get(JSON.stringify([rt.file, rt.title])) ?? 0) > 1;
+    const reason =
+      plan.reason ??
+      (rt.runner !== "node:test"
+        ? "unsupported-row-runtime-runner"
+        : !row
+          ? "runtime-title-does-not-identify-source-row"
+          : duplicate
+            ? "ambiguous-runtime-row-title"
+            : undefined);
+    const result = !reason && row ? countModel(body, row) : undefined;
+    const checks = new Map<string, MockCountEvidence>();
+    for (const [node, evidence] of result?.checks ?? []) {
+      const sf = node.getSourceFile(),
+        position = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+      checks.set(
+        `${rel(sf)}:${position.line + 1}:${position.character + 1}`,
+        evidence,
+      );
+    }
+    return st.observations.map((ob) =>
+      ob.mock?.kind !== "call-count"
+        ? ob
+        : {
+            ...ob,
+            mock: {
+              ...ob.mock,
+              countEvidence: checks.get(ob.assertionSource ?? "") ?? {
+                model: "node-sync-console-count-v2",
+                status: "unresolved",
+                reason:
+                  reason ??
+                  result?.limitation ??
+                  "unsupported-count-projection",
+                rowBinding: reason
+                  ? {
+                      model: "node-test-for-of-v1",
+                      status: "unresolved",
+                      reason,
+                    }
+                  : row!.evidence,
+              },
+            },
+          },
+    );
+  }
+  const unlinkedTests = runtimeTests
+    .filter((rt) => !staticFor(rt))
+    .map((rt) => ({
+      id: rt.id,
+      file: rt.file,
+      title: rt.title ?? rt.name,
+      reason: "test-source-unlinked" as const,
+    }));
+  const factTests = runtimeTests.map((rt) => {
+    const st = staticFor(rt);
+    // A passed runtime attempt stays in the inventory even when source
+    // registration discovery failed. It is NOT an assertion-free test.
+    if (!st)
       return {
         id: rt.id,
-        file: st.file,
-        observations,
-        ...(witnessIssues.length ? { witnessIssues } : {}),
-        sinks: st.sinks,
-        rendered: [...st.rendered],
+        file: rt.file,
+        observations: [] as ReturnType<typeof factObservation>[],
+        sinks: [] as SinkBinding[],
+        rendered: [] as string[],
+        witnessIssues: [
+          { kind: "test-source-unlinked" as const },
+          ...(!runtimePhases.has(rt.id)
+            ? [{ kind: "capture-unavailable" as const }]
+            : []),
+        ],
       };
-    })
-    .filter((t) => t !== undefined);
+    const checked = runtimeCountObservations(st, rt).map((ob) => ({
+      ob,
+      kind: witnessIssue(rt.id, ob),
+    }));
+    const observations = checked
+      .filter(({ kind }) => !kind)
+      .map(({ ob }) => factObservation(ob));
+    // Missing transport applies to the whole test, even when no operand could
+    // be modeled. An empty phase file is different from no phase file.
+    const witnessIssues = [
+      ...(witnessedBodyLinks.has(rt.id)
+        ? [{ kind: "test-registration-scope-unverified" as const }]
+        : []),
+      ...(!runtimePhases.has(rt.id)
+        ? [{ kind: "capture-unavailable" as const }]
+        : []),
+      ...checked
+        .filter(({ kind }) => kind && kind !== "capture-unavailable")
+        .map(({ ob, kind }) => ({
+          kind: kind!,
+          source: ob.assertionSource,
+          operation: ob.assertionMethod,
+          observation: factObservation(ob),
+        })),
+    ];
+    return {
+      id: rt.id,
+      file: st.file,
+      observations,
+      ...(witnessIssues.length ? { witnessIssues } : {}),
+      sinks: st.sinks,
+      rendered: [...st.rendered],
+    };
+  });
   // vi.mock boundaries depend on the test file, not the test: one entry per (file, site) pair that has any
   const mocksByTestFile: Record<string, Record<string, Boundary[]>> = {};
   for (const file of new Set(factTests.map((t) => t.file))) {
@@ -4436,6 +5714,198 @@ export function analyzeWithFrontend(
       if (bs.length) perSite[s.id] = bs;
     }
     if (Object.keys(perSite).length) mocksByTestFile[file] = perSite;
+  }
+  const primitiveModules = new Map<ts.SourceFile, boolean>();
+  function primitiveDecision(s: Site): PrimitiveDecision | undefined {
+    const condition = siteNodes.get(s.id);
+    if (
+      !condition ||
+      !ts.isIdentifier(condition) ||
+      !ts.isIfStatement(condition.parent) ||
+      condition.parent.expression !== condition
+    )
+      return;
+    const branch = condition.parent,
+      fn = enclosingFunction(branch);
+    if (
+      !fn ||
+      !ts.isFunctionDeclaration(fn) ||
+      !fn.name ||
+      !fn.body ||
+      fn.asteriskToken ||
+      fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ||
+      fn.body.statements.length !== 1 ||
+      fn.body.statements[0] !== branch ||
+      fn.parameters.length !== 1
+    )
+      return;
+    const parameter = fn.parameters[0];
+    if (
+      !ts.isIdentifier(parameter.name) ||
+      parameter.initializer ||
+      parameter.dotDotDotToken ||
+      declOf(condition) !== parameter
+    )
+      return;
+    const literalReturn = (statement: ts.Statement | undefined) => {
+      if (
+        !statement ||
+        !ts.isBlock(statement) ||
+        statement.statements.length !== 1
+      )
+        return;
+      const ret = statement.statements[0];
+      return ts.isReturnStatement(ret) && ret.expression
+        ? sourcePrimitive(ret.expression)
+        : undefined;
+    };
+    const whenTrue = literalReturn(branch.thenStatement),
+      whenFalse = literalReturn(branch.elseStatement);
+    if (!whenTrue || !whenFalse) return;
+    const sf = fn.getSourceFile();
+    if (fn.parent !== sf) return;
+    // A module of declarations only, with no binding writes or dynamic eval.
+    // Do not assume that an exported function declaration can never be replaced.
+    if (!primitiveModules.has(sf)) {
+      let safe = sf.statements.every(
+        (n) =>
+          ts.isFunctionDeclaration(n) ||
+          ts.isInterfaceDeclaration(n) ||
+          ts.isTypeAliasDeclaration(n) ||
+          ts.isEmptyStatement(n),
+      );
+      let budget = 16384;
+      const scan = (n: ts.Node) => {
+        if (!safe) return;
+        if (
+          --budget < 0 ||
+          (ts.isIdentifier(n) && n.text === "eval") ||
+          (ts.isBinaryExpression(n) &&
+            n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+            n.operatorToken.kind <= ts.SyntaxKind.LastAssignment) ||
+          ((ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
+            [
+              ts.SyntaxKind.PlusPlusToken,
+              ts.SyntaxKind.MinusMinusToken,
+            ].includes(n.operator))
+        ) {
+          safe = false;
+          return;
+        }
+        ts.forEachChild(n, scan);
+      };
+      scan(sf);
+      primitiveModules.set(sf, safe);
+    }
+    if (!primitiveModules.get(sf)) return;
+    const covered = runtimeTests.filter((rt) => covers(rt.id, s));
+    const trueTests = testsWithOutcome(s, true),
+      falseTests = testsWithOutcome(s, false);
+    if (!covered.length || !trueTests || !falseTests) return;
+    const checks: PrimitiveDecision["checks"] = [];
+    for (const rt of covered) {
+      const st = staticFor(rt),
+        body = st && mockBodies.get(st);
+      if (
+        !st ||
+        !body ||
+        !ts.isArrowFunction(body) ||
+        !ts.isBlock(body.body) ||
+        body.parameters.length ||
+        body.modifiers?.length ||
+        body.body.statements.length !== 1 ||
+        !ts.isCallExpression(body.parent) ||
+        !nativeTestRegistration(body.parent) ||
+        body.parent.arguments.length !== 2 ||
+        body.parent.arguments[1] !== body ||
+        !ts.isStringLiteralLike(body.parent.arguments[0]) ||
+        !ts.isExpressionStatement(body.parent.parent) ||
+        !ts.isSourceFile(body.parent.parent.parent) ||
+        rt.runner !== "node:test" ||
+        rt.title !== body.parent.arguments[0].text ||
+        (runtimeRowTitles.get(JSON.stringify([rt.file, rt.title])) ?? 0) !== 1
+      )
+        return;
+      // A top-level hook/setup call can replace imports or assertions before the
+      // callback. Such test modules require a separate environment model.
+      if (
+        !body
+          .getSourceFile()
+          .statements.every(
+            (statement) =>
+              ts.isImportDeclaration(statement) ||
+              ts.isEmptyStatement(statement) ||
+              (ts.isExpressionStatement(statement) &&
+                ts.isCallExpression(statement.expression) &&
+                nativeTestRegistration(statement.expression) &&
+                statement.expression.arguments.length === 2),
+          )
+      )
+        return;
+      const statement = body.body.statements[0];
+      if (
+        !ts.isExpressionStatement(statement) ||
+        !ts.isCallExpression(statement.expression)
+      )
+        return;
+      const assertion = statement.expression;
+      if (assertion.arguments.length !== 2) return;
+      const comparison = nativeComparison(assertion);
+      if (
+        !comparison ||
+        !["node-same-value", "node-not-same-value"].includes(
+          comparison.predicate,
+        )
+      )
+        return;
+      const actual = comparisonExpression(assertion.arguments[0]),
+        expected = sourcePrimitive(assertion.arguments[1]);
+      if (
+        !expected ||
+        !ts.isCallExpression(actual) ||
+        actual.questionDotToken ||
+        !ts.isIdentifier(actual.expression) ||
+        declOf(actual.expression) !== fn ||
+        actual.arguments.length !== 1
+      )
+        return;
+      const input = sourcePrimitive(actual.arguments[0]);
+      if (
+        !input ||
+        input.kind !== "boolean" ||
+        trueTests.has(rt.id) !== input.value ||
+        falseTests.has(rt.id) !== !input.value
+      )
+        return;
+      const pos = assertion
+        .getSourceFile()
+        .getLineAndCharacterOfPosition(assertion.getStart());
+      const assertionSource = `${rel(assertion.getSourceFile())}:${pos.line + 1}:${pos.character + 1}`;
+      const test = factTests.find((t) => t.id === rt.id);
+      if (
+        !test ||
+        test.witnessIssues?.length ||
+        test.observations.length !== 1 ||
+        test.observations[0].assertionSource !== assertionSource ||
+        test.observations[0].boundary !== `return:${fn.name.text}` ||
+        test.observations[0].comparison?.predicate !== comparison.predicate
+      )
+        return;
+      checks.push({
+        test: rt.id,
+        assertionSource,
+        predicate: comparison.predicate,
+        expected,
+        originalOutcome: input.value,
+      });
+    }
+    return {
+      model: "js-primitive-decision-v1",
+      source: comparisonLocation(branch),
+      whenTrue,
+      whenFalse,
+      checks,
+    };
   }
   const factSites = sites.map((s) => {
     const { bounds, reached } = allBoundaries(s);
@@ -4480,6 +5950,7 @@ export function analyzeWithFrontend(
         ? {
             decision: {
               ...(decisionFacts.get(s.id) ?? {}),
+              primitive: primitiveDecision(s),
               outcomes:
                 tTrue && tFalse
                   ? { true: [...tTrue], false: [...tFalse] }
@@ -4492,21 +5963,186 @@ export function analyzeWithFrontend(
     };
   });
 
+  const pragmas = pragmaCollector.finish(
+    runtimeTests.flatMap((rt) => {
+      const st = staticFor(rt);
+      return st
+        ? [
+            {
+              testKey: staticTestKey(st.file, st.line, st.name),
+              id: rt.id,
+              phases: runtimePhases.get(rt.id),
+            },
+          ]
+        : [];
+    }),
+  );
+  for (const hint of pragmas) {
+    if (
+      !hint.check ||
+      hint.issue ||
+      hint.witness !== "passed" ||
+      hint.candidateSites.length !== 1
+    )
+      continue;
+    const rt = runtimeTests.find((t) => t.id === hint.test);
+    const st = rt && staticFor(rt),
+      body = st && mockBodies.get(st);
+    const target = siteNodes.get(hint.candidateSites[0]);
+    if (
+      hint.check === "count" ||
+      hint.check === "value" ||
+      hint.check === "completion"
+    ) {
+      const limit = (reason: string) => {
+        if (hint.check === "completion")
+          hint.completionSensitivity = {
+            model: "node-first-test-completion-v1",
+            status: "unresolved",
+            reason,
+          };
+        else if (hint.check === "value")
+          hint.payloadSensitivity = {
+            model: "node-closed-payload-sensitivity-v2",
+            status: "unresolved",
+            reason,
+          };
+        else
+          hint.countSensitivity = {
+            model: "node-closed-count-sensitivity-v1",
+            status: "unresolved",
+            reason,
+          };
+      };
+      limit("sensitivity-source-or-runtime-unavailable");
+      if (
+        !rt ||
+        rt.runner !== "node:test" ||
+        !body ||
+        !target ||
+        (runtimeRowTitles.get(JSON.stringify([rt.file, rt.title])) ?? 0) !== 1
+      )
+        continue;
+      const location = (n: ts.Node) => {
+        const sf = n.getSourceFile(),
+          p = sf.getLineAndCharacterOfPosition(n.getStart(sf));
+        return `${rel(sf)}:${p.line + 1}:${p.character + 1}`;
+      };
+      let assertion: ts.CallExpression | undefined;
+      const find = (n: ts.Node) => {
+        if (ts.isCallExpression(n) && location(n) === hint.assertionSource)
+          assertion = n;
+        ts.forEachChild(n, find);
+      };
+      find(body);
+      if (!assertion) continue;
+      if (hint.check === "completion") {
+        hint.completionSensitivity = analyzeCompletionSensitivity(
+          ts,
+          body,
+          assertion,
+          target,
+          { ...mockModel, location },
+        );
+        continue;
+      }
+      const plan = sourceTestRows(ts, body, mockModel),
+        row = plan?.rows.find((r) => r.evidence.title === rt.title);
+      if (plan && (!row || plan.reason)) {
+        limit(plan.reason ?? "sensitivity-runtime-row-unavailable");
+        continue;
+      }
+      if (hint.check === "value") {
+        hint.payloadSensitivity = analyzePayloadSensitivity(
+          ts,
+          body,
+          assertion,
+          target,
+          { ...mockModel, location },
+          row,
+        );
+        if (hint.payloadSensitivity.status !== "source-checked" && !row) {
+          hint.directReturnSensitivity = analyzeDirectReturnSensitivity(
+            ts,
+            body,
+            assertion,
+            target,
+            { ...mockModel, location },
+          );
+          if (hint.directReturnSensitivity.status === "source-checked")
+            delete hint.payloadSensitivity;
+        }
+      } else
+        hint.countSensitivity = analyzeCountSensitivity(
+          ts,
+          body,
+          assertion,
+          target,
+          { ...mockModel, location },
+          row,
+        );
+      continue;
+    }
+    hint.callOmission = {
+      model: "node-first-test-call-omission-v1",
+      status: "unresolved",
+      reason: "omission-source-or-runtime-unavailable",
+    };
+    if (!rt || rt.runner !== "node:test" || !body) {
+      hint.callOmission.reason = !rt
+        ? "omission-runtime-test-unavailable"
+        : rt.runner !== "node:test"
+          ? "omission-unsupported-runner"
+          : "omission-static-body-unavailable";
+      continue;
+    }
+    if (!target || !ts.isCallExpression(target)) {
+      hint.callOmission.reason = "omission-target-not-call-expression";
+      continue;
+    }
+    if (
+      (runtimeRowTitles.get(JSON.stringify([rt.file, rt.title])) ?? 0) !== 1
+    ) {
+      hint.callOmission.reason = "omission-ambiguous-runtime-title";
+      continue;
+    }
+    let assertion: ts.CallExpression | undefined;
+    const originalLocation = (n: ts.Node) => {
+      const sf = n.getSourceFile(),
+        p = sf.getLineAndCharacterOfPosition(n.getStart(sf));
+      return `${rel(sf)}:${p.line + 1}:${p.character + 1}`;
+    };
+    const visit = (n: ts.Node) => {
+      if (
+        ts.isCallExpression(n) &&
+        originalLocation(n) === hint.assertionSource
+      )
+        assertion = n;
+      ts.forEachChild(n, visit);
+    };
+    visit(body);
+    if (!assertion) {
+      hint.callOmission.reason = "omission-assertion-source-unavailable";
+      continue;
+    }
+    const plan = sourceTestRows(ts, body, mockModel);
+    const row = plan?.rows.find((r) => r.evidence.title === rt.title);
+    if (plan && (!row || plan.reason)) {
+      hint.callOmission.reason =
+        plan.reason ?? "omission-runtime-row-unavailable";
+      continue;
+    }
+    hint.callOmission = analyzeFirstTestOmission(
+      ts,
+      body,
+      assertion,
+      target,
+      { ...mockModel, location: originalLocation },
+      row,
+    );
+  }
   return {
-    pragmas: pragmaCollector.finish(
-      runtimeTests.flatMap((rt) => {
-        const st = staticFor(rt);
-        return st
-          ? [
-              {
-                testKey: staticTestKey(st.file, st.line, st.name),
-                id: rt.id,
-                phases: runtimePhases.get(rt.id),
-              },
-            ]
-          : [];
-      }),
-    ),
+    pragmas,
     facts: {
       schema: 1,
       root,
@@ -4519,7 +6155,13 @@ export function analyzeWithFrontend(
       observationPolicy:
         "source-linked-v3: exact successful call witness; rejected witnesses retain typed provenance, not value credit",
       runtimeTests: runtimeTests.length,
-      linkedTests: factTests.length,
+      linkedTests: runtimeTests.length - unlinkedTests.length,
+      unlinkedTests,
+      witnessedBodyLinks: [...witnessedBodyLinks].map(([id, link]) => ({
+        id,
+        ...link,
+        reason: "test-registration-scope-unverified" as const,
+      })),
       staticTests: staticTests.length,
       linkedByAssertionLines: linkedByPhases,
       linkedByTitle,

@@ -4,10 +4,15 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve, sep } from "node:path";
+import { createRequire } from "node:module";
 import { releaseNotes } from "./release-notes.mjs";
 import { checkedIdentity } from "../analyzers/typescript/bin/identity.mjs";
 
 const repository = resolve(import.meta.dirname, "..");
+// Release installs omit optional packages (the unpublished native Supercov
+// packages included). SWC's optional platform binding is therefore unavailable.
+// The analyzer build already installs this pinned, pure-JavaScript compiler.
+const ts = createRequire(resolve(repository, "analyzers/typescript/package.json"))("typescript");
 const manifest = JSON.parse(
   readFileSync(resolve(repository, "package.json"), "utf8"),
 );
@@ -24,13 +29,55 @@ function sourceFiles(root, extension) {
   });
 }
 
+// Source analysis may compare an import specifier with this module name. That
+// is data, not a dependency. Permit only direct equality comparisons; imports,
+// require/import calls and other uses remain forbidden. This is a packaging
+// regression guard, not a sandbox against computed module names or eval.
+function assertNoChildProcessDependency(source, path) {
+  const tree = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  assert.equal(tree.parseDiagnostics.length, 0, `${path} must parse before dependency checking`);
+  function visit(node) {
+    const parent = node.parent;
+    if (
+      ts.isStringLiteral(node) &&
+      /^(?:node:)?child_process$/.test(node.text)
+    ) {
+      assert(
+        parent && ts.isBinaryExpression(parent) &&
+          [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken,
+            ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken].includes(parent.operatorToken.kind) &&
+          (parent.left === node || parent.right === node),
+        `${path} references child_process outside a source-name comparison`,
+      );
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(tree);
+}
+for (const source of [
+  'import { spawn } from "node:child_process";',
+  'export * from "child_process";',
+  'require("node:child_process");',
+  'import("child_process");',
+  'process.getBuiltinModule("child_process");',
+  'const dependency = "child_process";',
+]) {
+  assert.throws(() => assertNoChildProcessDependency(source, "guard fixture"));
+}
+assertNoChildProcessDependency(
+  'specifier === "node:child_process" || specifier === "child_process";',
+  "source-model fixture",
+);
+
 assert.deepEqual(manifest.files, [
   "bin",
   "runtime/javascript",
   "docs",
   "analyzers/typescript/bin",
   "analyzers/typescript/dist/analyze.js",
+  "analyzers/typescript/dist/mock-counts.js",
   "analyzers/typescript/dist/archive.js",
+  "analyzers/typescript/dist/awaited-observations.js",
   "analyzers/typescript/dist/compiler.js",
   "analyzers/typescript/dist/frontend.js",
   "analyzers/typescript/dist/native-frontend.js",
@@ -170,7 +217,7 @@ for (const path of productSources) {
     // extracted analyzer. Reading that format is not invoking the lcov tool.
     // This exception is only for the query-only analyzer. Its TS7 frontend uses
     // the project's native compiler API; it never launches a coverage oracle.
-    assert.doesNotMatch(source, /["'](?:node:)?child_process["']/);
+    assertNoChildProcessDependency(source, path);
     source = source.replace(/\blcov\b/g, "internal-line-format");
   }
   assert.doesNotMatch(
