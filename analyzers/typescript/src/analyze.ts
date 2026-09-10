@@ -528,6 +528,7 @@ export function analyzeWithFrontend(
   interface ComparisonOperand {
     source: string;
     binding?: string;
+    value?: SourcePrimitive;
     /** Shared input provenance, not equality of the evaluated operands. */
     input?: ComparisonInput;
   }
@@ -540,7 +541,26 @@ export function analyzeWithFrontend(
     actual: ComparisonOperand;
     expected: ComparisonOperand;
     relation:
-      "same-immutable-binding" | "shared-input-through-await" | "unresolved";
+      | "same-immutable-binding"
+      | "shared-input-through-await"
+      | "unresolved";
+  }
+  type SourcePrimitive =
+    | { kind: "number" | "string"; value: string }
+    | { kind: "boolean"; value: boolean }
+    | { kind: "null" };
+  interface PrimitiveDecision {
+    model: "js-primitive-decision-v1";
+    source: string;
+    whenTrue: SourcePrimitive;
+    whenFalse: SourcePrimitive;
+    checks: {
+      test: string;
+      assertionSource: string;
+      predicate: string;
+      expected: SourcePrimitive;
+      originalOutcome: boolean;
+    }[];
   }
   interface MockProjection {
     target: string;
@@ -2160,6 +2180,47 @@ export function analyzeWithFrontend(
     );
   }
 
+  /** Literal syntax only: do not resolve globals, call code or lose signed zero. */
+  function sourcePrimitive(raw: ts.Expression): SourcePrimitive | undefined {
+    const e = comparisonExpression(raw);
+    if (ts.isStringLiteralLike(e)) {
+      // Rust strings cannot represent lone UTF-16 surrogates. Leave those and
+      // large literals unsupported instead of changing or truncating their value.
+      if (e.text.length > 4096) return;
+      for (const point of e.text)
+        if (
+          point.length === 1 &&
+          point.charCodeAt(0) >= 0xd800 &&
+          point.charCodeAt(0) <= 0xdfff
+        )
+          return;
+      return { kind: "string", value: e.text };
+    }
+    if (e.kind === ts.SyntaxKind.TrueKeyword)
+      return { kind: "boolean", value: true };
+    if (e.kind === ts.SyntaxKind.FalseKeyword)
+      return { kind: "boolean", value: false };
+    if (e.kind === ts.SyntaxKind.NullKeyword) return { kind: "null" };
+    let number: number;
+    if (ts.isNumericLiteral(e)) number = Number(e.text);
+    else if (
+      ts.isPrefixUnaryExpression(e) &&
+      [ts.SyntaxKind.MinusToken, ts.SyntaxKind.PlusToken].includes(
+        e.operator,
+      ) &&
+      ts.isNumericLiteral(e.operand)
+    )
+      number =
+        Number(e.operand.text) *
+        (e.operator === ts.SyntaxKind.MinusToken ? -1 : 1);
+    else return;
+    if (!Number.isFinite(number)) return;
+    return {
+      kind: "number",
+      value: Object.is(number, -0) ? "-0" : String(number),
+    };
+  }
+
   function nativeComparison(call: ts.CallExpression): Comparison | undefined {
     const callee = comparisonExpression(call.expression);
     if (!ts.isPropertyAccessExpression(callee) || call.arguments.length < 2)
@@ -2193,6 +2254,8 @@ export function analyzeWithFrontend(
     const predicates: Record<string, string> = {
       equal: strict ? "node-same-value" : "node-loose-equality",
       strictEqual: "node-same-value",
+      notEqual: strict ? "node-not-same-value" : "node-not-loose-equality",
+      notStrictEqual: "node-not-same-value",
       deepEqual: strict ? "node-deep-strict-equality" : "node-deep-equality",
       deepStrictEqual: "node-deep-strict-equality",
     };
@@ -2201,6 +2264,7 @@ export function analyzeWithFrontend(
     const operand = (arg: ts.Expression): ComparisonOperand => ({
       source: comparisonLocation(arg),
       binding: immutableBinding(arg),
+      value: sourcePrimitive(arg),
     });
     const actual = operand(call.arguments[0]);
     const expected = operand(call.arguments[1]);
@@ -2550,10 +2614,12 @@ export function analyzeWithFrontend(
           return fail("unsupported-exit-result-projection");
         field = path[0];
         for (const member of value.properties) {
-          if (!(
-            ts.isPropertyAssignment(member) ||
-            ts.isShorthandPropertyAssignment(member)
-          ))
+          if (
+            !(
+              ts.isPropertyAssignment(member) ||
+              ts.isShorthandPropertyAssignment(member)
+            )
+          )
             return fail("unsupported-resolved-object");
           const item = comparisonExpression(
             ts.isPropertyAssignment(member) ? member.initializer : member.name,
@@ -5326,6 +5392,198 @@ export function analyzeWithFrontend(
     }
     if (Object.keys(perSite).length) mocksByTestFile[file] = perSite;
   }
+  const primitiveModules = new Map<ts.SourceFile, boolean>();
+  function primitiveDecision(s: Site): PrimitiveDecision | undefined {
+    const condition = siteNodes.get(s.id);
+    if (
+      !condition ||
+      !ts.isIdentifier(condition) ||
+      !ts.isIfStatement(condition.parent) ||
+      condition.parent.expression !== condition
+    )
+      return;
+    const branch = condition.parent,
+      fn = enclosingFunction(branch);
+    if (
+      !fn ||
+      !ts.isFunctionDeclaration(fn) ||
+      !fn.name ||
+      !fn.body ||
+      fn.asteriskToken ||
+      fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ||
+      fn.body.statements.length !== 1 ||
+      fn.body.statements[0] !== branch ||
+      fn.parameters.length !== 1
+    )
+      return;
+    const parameter = fn.parameters[0];
+    if (
+      !ts.isIdentifier(parameter.name) ||
+      parameter.initializer ||
+      parameter.dotDotDotToken ||
+      declOf(condition) !== parameter
+    )
+      return;
+    const literalReturn = (statement: ts.Statement | undefined) => {
+      if (
+        !statement ||
+        !ts.isBlock(statement) ||
+        statement.statements.length !== 1
+      )
+        return;
+      const ret = statement.statements[0];
+      return ts.isReturnStatement(ret) && ret.expression
+        ? sourcePrimitive(ret.expression)
+        : undefined;
+    };
+    const whenTrue = literalReturn(branch.thenStatement),
+      whenFalse = literalReturn(branch.elseStatement);
+    if (!whenTrue || !whenFalse) return;
+    const sf = fn.getSourceFile();
+    if (fn.parent !== sf) return;
+    // A module of declarations only, with no binding writes or dynamic eval.
+    // Do not assume that an exported function declaration can never be replaced.
+    if (!primitiveModules.has(sf)) {
+      let safe = sf.statements.every(
+        (n) =>
+          ts.isFunctionDeclaration(n) ||
+          ts.isInterfaceDeclaration(n) ||
+          ts.isTypeAliasDeclaration(n) ||
+          ts.isEmptyStatement(n),
+      );
+      let budget = 16384;
+      const scan = (n: ts.Node) => {
+        if (!safe) return;
+        if (
+          --budget < 0 ||
+          (ts.isIdentifier(n) && n.text === "eval") ||
+          (ts.isBinaryExpression(n) &&
+            n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+            n.operatorToken.kind <= ts.SyntaxKind.LastAssignment) ||
+          ((ts.isPrefixUnaryExpression(n) || ts.isPostfixUnaryExpression(n)) &&
+            [
+              ts.SyntaxKind.PlusPlusToken,
+              ts.SyntaxKind.MinusMinusToken,
+            ].includes(n.operator))
+        ) {
+          safe = false;
+          return;
+        }
+        ts.forEachChild(n, scan);
+      };
+      scan(sf);
+      primitiveModules.set(sf, safe);
+    }
+    if (!primitiveModules.get(sf)) return;
+    const covered = runtimeTests.filter((rt) => covers(rt.id, s));
+    const trueTests = testsWithOutcome(s, true),
+      falseTests = testsWithOutcome(s, false);
+    if (!covered.length || !trueTests || !falseTests) return;
+    const checks: PrimitiveDecision["checks"] = [];
+    for (const rt of covered) {
+      const st = staticFor(rt),
+        body = st && mockBodies.get(st);
+      if (
+        !st ||
+        !body ||
+        !ts.isArrowFunction(body) ||
+        !ts.isBlock(body.body) ||
+        body.parameters.length ||
+        body.modifiers?.length ||
+        body.body.statements.length !== 1 ||
+        !ts.isCallExpression(body.parent) ||
+        !nativeTestRegistration(body.parent) ||
+        body.parent.arguments.length !== 2 ||
+        body.parent.arguments[1] !== body ||
+        !ts.isStringLiteralLike(body.parent.arguments[0]) ||
+        !ts.isExpressionStatement(body.parent.parent) ||
+        !ts.isSourceFile(body.parent.parent.parent) ||
+        rt.runner !== "node:test" ||
+        rt.title !== body.parent.arguments[0].text ||
+        (runtimeRowTitles.get(JSON.stringify([rt.file, rt.title])) ?? 0) !== 1
+      )
+        return;
+      // A top-level hook/setup call can replace imports or assertions before the
+      // callback. Such test modules require a separate environment model.
+      if (
+        !body
+          .getSourceFile()
+          .statements.every(
+            (statement) =>
+              ts.isImportDeclaration(statement) ||
+              ts.isEmptyStatement(statement) ||
+              (ts.isExpressionStatement(statement) &&
+                ts.isCallExpression(statement.expression) &&
+                nativeTestRegistration(statement.expression) &&
+                statement.expression.arguments.length === 2),
+          )
+      )
+        return;
+      const statement = body.body.statements[0];
+      if (
+        !ts.isExpressionStatement(statement) ||
+        !ts.isCallExpression(statement.expression)
+      )
+        return;
+      const assertion = statement.expression;
+      if (assertion.arguments.length !== 2) return;
+      const comparison = nativeComparison(assertion);
+      if (
+        !comparison ||
+        !["node-same-value", "node-not-same-value"].includes(
+          comparison.predicate,
+        )
+      )
+        return;
+      const actual = comparisonExpression(assertion.arguments[0]),
+        expected = sourcePrimitive(assertion.arguments[1]);
+      if (
+        !expected ||
+        !ts.isCallExpression(actual) ||
+        actual.questionDotToken ||
+        !ts.isIdentifier(actual.expression) ||
+        declOf(actual.expression) !== fn ||
+        actual.arguments.length !== 1
+      )
+        return;
+      const input = sourcePrimitive(actual.arguments[0]);
+      if (
+        !input ||
+        input.kind !== "boolean" ||
+        trueTests.has(rt.id) !== input.value ||
+        falseTests.has(rt.id) !== !input.value
+      )
+        return;
+      const pos = assertion
+        .getSourceFile()
+        .getLineAndCharacterOfPosition(assertion.getStart());
+      const assertionSource = `${rel(assertion.getSourceFile())}:${pos.line + 1}:${pos.character + 1}`;
+      const test = factTests.find((t) => t.id === rt.id);
+      if (
+        !test ||
+        test.witnessIssues?.length ||
+        test.observations.length !== 1 ||
+        test.observations[0].assertionSource !== assertionSource ||
+        test.observations[0].boundary !== `return:${fn.name.text}` ||
+        test.observations[0].comparison?.predicate !== comparison.predicate
+      )
+        return;
+      checks.push({
+        test: rt.id,
+        assertionSource,
+        predicate: comparison.predicate,
+        expected,
+        originalOutcome: input.value,
+      });
+    }
+    return {
+      model: "js-primitive-decision-v1",
+      source: comparisonLocation(branch),
+      whenTrue,
+      whenFalse,
+      checks,
+    };
+  }
   const factSites = sites.map((s) => {
     const { bounds, reached } = allBoundaries(s);
     const tTrue = testsWithOutcome(s, true);
@@ -5369,6 +5627,7 @@ export function analyzeWithFrontend(
         ? {
             decision: {
               ...(decisionFacts.get(s.id) ?? {}),
+              primitive: primitiveDecision(s),
               outcomes:
                 tTrue && tFalse
                   ? { true: [...tTrue], false: [...tFalse] }

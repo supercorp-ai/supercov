@@ -151,9 +151,63 @@ pub struct MockCountRowBinding {
 pub struct ComparisonOperand {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<SourcePrimitive>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<ComparisonInput>,
+}
+
+/// Source literals, not sampled runtime values. Numeric text preserves -0.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "lowercase")]
+pub enum SourcePrimitive {
+    Number(String),
+    String(String),
+    Boolean(bool),
+    Null,
+}
+
+impl SourcePrimitive {
+    fn same_value(&self, other: &Self) -> Option<bool> {
+        let valid = |v: &Self| match v {
+            Self::Number(n) => n.parse::<f64>().ok().is_some_and(f64::is_finite),
+            _ => true,
+        };
+        if !valid(self) || !valid(other) {
+            return None;
+        }
+        Some(match (self, other) {
+            (Self::Number(a), Self::Number(b)) => {
+                a.parse::<f64>().ok()?.to_bits() == b.parse::<f64>().ok()?.to_bits()
+            }
+            (Self::String(a), Self::String(b)) => a == b,
+            (Self::Boolean(a), Self::Boolean(b)) => a == b,
+            (Self::Null, Self::Null) => true,
+            _ => false,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrimitiveDecisionCheck {
+    pub test: String,
+    pub assertion_source: String,
+    pub predicate: String,
+    pub expected: SourcePrimitive,
+    pub original_outcome: bool,
+}
+
+/// Bounded direct-call, side-effect-free literal branches checked by the frontend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrimitiveDecision {
+    pub model: String,
+    pub source: String,
+    pub when_true: SourcePrimitive,
+    pub when_false: SourcePrimitive,
+    pub checks: Vec<PrimitiveDecisionCheck>,
 }
 
 /// Input provenance through const aliases/await, not evaluated value identity.
@@ -402,6 +456,8 @@ where
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DecisionFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primitive: Option<PrimitiveDecision>,
     /// the site that carries the decision's value (a ternary inside a return, say)
     #[serde(default)]
     pub carrier: Option<String>,
@@ -1320,6 +1376,65 @@ impl<'a> Join<'a> {
         false
     }
 
+    fn primitive_sensitivity(
+        &self,
+        site: &Site,
+        d: &DecisionFacts,
+        p: &PrimitiveDecision,
+    ) -> Option<(bool, bool)> {
+        if p.model != "js-primitive-decision-v1" || p.source.is_empty() || p.checks.is_empty() {
+            return None;
+        }
+        let outcomes = d.outcomes.as_ref()?;
+        let covered: BTreeSet<_> = site.covered_by.iter().collect();
+        let checked: BTreeSet<_> = p.checks.iter().map(|c| &c.test).collect();
+        if covered != checked || checked.len() != p.checks.len() {
+            return None;
+        }
+        let mut stuck_true = false;
+        let mut stuck_false = false;
+        for c in &p.checks {
+            if outcomes.true_.contains(&c.test) != c.original_outcome
+                || outcomes.false_.contains(&c.test) == c.original_outcome
+            {
+                return None;
+            }
+            let test = self.tests.get(c.test.as_str())?;
+            if !test.witness_issues.is_empty() || test.observations.len() != 1 {
+                return None;
+            }
+            let ob = &test.observations[0];
+            let comparison = ob.comparison.as_ref()?;
+            if !ob.can_constrain_value()
+                || ob.weak
+                || ob.boundary != format!("return:{}", site.owner)
+                || ob.assertion_source.as_ref() != Some(&c.assertion_source)
+                || comparison.predicate != c.predicate
+                || comparison.expected.value.as_ref() != Some(&c.expected)
+            {
+                return None;
+            }
+            let accepts = |actual: &SourcePrimitive| -> Option<bool> {
+                let same = actual.same_value(&c.expected)?;
+                match c.predicate.as_str() {
+                    "node-same-value" => Some(same),
+                    "node-not-same-value" => Some(!same),
+                    _ => None,
+                }
+            };
+            if !accepts(if c.original_outcome {
+                &p.when_true
+            } else {
+                &p.when_false
+            })? {
+                return None;
+            }
+            stuck_true |= !accepts(&p.when_true)?;
+            stuck_false |= !accepts(&p.when_false)?;
+        }
+        Some((stuck_true, stuck_false))
+    }
+
     fn resolve_decision(&self, site: &Site) -> Resolution {
         let covering = site.covered_by.len();
         let empty = DecisionFacts::default();
@@ -1338,6 +1453,35 @@ impl<'a> Join<'a> {
             value_observed: None,
             witness_issues: vec![],
         };
+        if let Some(primitive) = &d.primitive {
+            let Some((stuck_true, stuck_false)) = self.primitive_sensitivity(site, d, primitive)
+            else {
+                return unresolved(
+                    Reason {
+                        kind: ReasonKind::LimitOperandShape,
+                        detail: Some("invalid or incomplete primitive decision evidence".into()),
+                    },
+                    true,
+                );
+            };
+            let status = match (stuck_true, stuck_false) {
+                (true, true) => Status::Evident,
+                (false, false) => Status::Unresolved,
+                _ => Status::Partial,
+            };
+            return Resolution {
+                site: site.id.clone(), status,
+                strength: (status == Status::Evident).then_some(Strength::Value),
+                reason: (status != Status::Evident).then(|| Reason {
+                    kind: ReasonKind::GapOutcomeNotAsserted,
+                    detail: Some(format!("source-checked primitive branches: forcing {} remains accepted by every modeled assertion",
+                        match (stuck_true, stuck_false) { (false, false) => "either outcome", (false, true) => "true", _ => "false" })),
+                }),
+                covered_by: covering, tests: BTreeSet::new(), weak_only: false,
+                stuck_true_caught: Some(stuck_true), stuck_false_caught: Some(stuck_false),
+                absence_needed: Some(false), value_observed: None, witness_issues: vec![],
+            };
+        }
         // A ternary between two pre-built objects is distinguishable only through the sites just one of
         // them reaches.
         if let Some(object_valued) = &d.object_valued {
@@ -1762,6 +1906,158 @@ mod tests {
         }
     }
 
+    fn primitive_fixture(
+        a: SourcePrimitive,
+        b: SourcePrimitive,
+        predicate: &str,
+        expected_a: SourcePrimitive,
+        expected_b: SourcePrimitive,
+    ) -> Facts {
+        let mut tests = vec![];
+        let mut checks = vec![];
+        for (id, outcome, expected) in [("T1", true, expected_a), ("T2", false, expected_b)] {
+            let source = format!("tests/a.test.ts:{id}:3");
+            let mut ob = observation("return:handler", Strength::Value);
+            ob.assertion_source = Some(source.clone());
+            ob.comparison = Some(Comparison {
+                predicate: predicate.into(),
+                relation: "unresolved".into(),
+                actual: ComparisonOperand {
+                    source: "tests/a:10:20".into(),
+                    binding: None,
+                    input: None,
+                    value: None,
+                },
+                expected: ComparisonOperand {
+                    source: "tests/a:22:23".into(),
+                    binding: None,
+                    input: None,
+                    value: Some(expected.clone()),
+                },
+            });
+            tests.push(test(id, vec![ob]));
+            checks.push(PrimitiveDecisionCheck {
+                test: id.into(),
+                assertion_source: source,
+                predicate: predicate.into(),
+                expected,
+                original_outcome: outcome,
+            });
+        }
+        let mut decision = site("D", "condition", vec![], &["T1", "T2"]);
+        decision.kind = "decision".into();
+        decision.decision = Some(DecisionFacts {
+            primitive: Some(PrimitiveDecision {
+                model: "js-primitive-decision-v1".into(),
+                source: "src/a:0:40".into(),
+                when_true: a,
+                when_false: b,
+                checks,
+            }),
+            else_: Some(Some(vec![])),
+            outcomes: Some(Outcomes {
+                true_: vec!["T1".into()],
+                false_: vec!["T2".into()],
+            }),
+            ..Default::default()
+        });
+        facts(vec![decision], tests)
+    }
+
+    #[test]
+    fn primitive_sensitivity_preserves_types_signed_zero_and_predicate_acceptance() {
+        let n = |v: &str| SourcePrimitive::Number(v.into());
+        for (a, b, predicate, x, y, caught) in [
+            (n("7"), n("7"), "node-same-value", n("7"), n("7"), false),
+            (n("1"), n("2"), "node-same-value", n("1"), n("2"), true),
+            (n("1"), n("2"), "node-not-same-value", n("0"), n("0"), false),
+            (n("-0"), n("0"), "node-same-value", n("-0"), n("0"), true),
+            (n("1e0"), n("1"), "node-same-value", n("1"), n("1"), false),
+            (
+                SourcePrimitive::String("1".into()),
+                n("1"),
+                "node-same-value",
+                SourcePrimitive::String("1".into()),
+                n("1"),
+                true,
+            ),
+            (
+                SourcePrimitive::Boolean(true),
+                SourcePrimitive::Boolean(false),
+                "node-same-value",
+                SourcePrimitive::Boolean(true),
+                SourcePrimitive::Boolean(false),
+                true,
+            ),
+            (
+                SourcePrimitive::Null,
+                SourcePrimitive::Null,
+                "node-same-value",
+                SourcePrimitive::Null,
+                SourcePrimitive::Null,
+                false,
+            ),
+        ] {
+            let f = primitive_fixture(a, b, predicate, x, y);
+            let encoded = serde_json::to_value(&f).unwrap();
+            let decoded: Facts = serde_json::from_value(encoded).unwrap();
+            assert_eq!(f, decoded);
+            let r = join(&decoded);
+            assert_eq!(r[0].stuck_true_caught, Some(caught));
+            assert_eq!(r[0].stuck_false_caught, Some(caught));
+            assert_eq!(
+                r[0].status,
+                if caught {
+                    Status::Evident
+                } else {
+                    Status::Unresolved
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn primitive_sensitivity_rejects_incomplete_or_inconsistent_evidence() {
+        let n = |v: &str| SourcePrimitive::Number(v.into());
+        let base = primitive_fixture(n("1"), n("2"), "node-same-value", n("1"), n("2"));
+        for case in 0..10 {
+            let mut f = base.clone();
+            let d = f.sites[0].decision.as_mut().unwrap();
+            let p = d.primitive.as_mut().unwrap();
+            match case {
+                0 => {
+                    p.checks.pop();
+                }
+                1 => p.checks.push(p.checks[0].clone()),
+                2 => p.checks[0].assertion_source = "elsewhere".into(),
+                3 => p.checks[0].expected = n("42"),
+                4 => p.model = "unknown".into(),
+                5 => p.when_true = n("NaN"),
+                6 => p.when_false = n("Infinity"),
+                7 => d.outcomes.as_mut().unwrap().true_.clear(),
+                8 => f.tests[0]
+                    .witness_issues
+                    .push(rejected(WitnessIssueKind::CaptureUnavailable, None)),
+                9 => {
+                    p.checks[0].predicate = "node-loose-equality".into();
+                    f.tests[0].observations[0]
+                        .comparison
+                        .as_mut()
+                        .unwrap()
+                        .predicate = "node-loose-equality".into();
+                }
+                _ => unreachable!(),
+            }
+            let r = join(&f);
+            assert_eq!(r[0].status, Status::Unresolved, "case {case}");
+            assert_eq!(
+                r[0].reason.as_ref().unwrap().kind,
+                ReasonKind::LimitOperandShape,
+                "case {case}"
+            );
+        }
+    }
+
     fn pragma_hint() -> PragmaHint {
         PragmaHint {
             id: "hint-1".into(),
@@ -1932,6 +2228,7 @@ mod tests {
         }) {
             let operand = ComparisonOperand {
                 source: "tests/a.test.ts:70:76".into(),
+                value: None,
                 binding: Some("tests/a.test.ts:20:40".into()),
                 input: (relation == "shared-input-through-await").then(|| ComparisonInput {
                     binding: "tests/a.test.ts:20:40".into(),
@@ -2045,6 +2342,7 @@ mod tests {
             predicate: "node-deep-strict-equality".into(),
             actual: ComparisonOperand {
                 source: "tests/a:10:20".into(),
+                value: None,
                 binding: None,
                 input: Some(ComparisonInput {
                     binding: "tests/a:1:5".into(),
@@ -2053,6 +2351,7 @@ mod tests {
             },
             expected: ComparisonOperand {
                 source: "tests/a:22:25".into(),
+                value: None,
                 binding: Some("tests/a:1:5".into()),
                 input: Some(ComparisonInput {
                     binding: "tests/a:1:5".into(),

@@ -66,7 +66,7 @@ test(
       "--test-reporter=tap",
       "tests/core.test.mjs",
     ];
-    assert.match(ok(execute(process.execPath, suite)), /^# pass 10$/m);
+    assert.match(ok(execute(process.execPath, suite)), /^# pass 18$/m);
     const core = resolve(root, "src/core.mjs"),
       original = readFileSync(core, "utf8");
     const oracle = [];
@@ -99,6 +99,10 @@ test(
       ],
       ["effectful forced true", "if (effectfulFlag)", "if (true)", false],
       ["effectful forced false", "if (effectfulFlag)", "if (false)", false],
+      ["negative zero forced true", "if (zeroFlag)", "if (true)", false],
+      ["negative zero forced false", "if (zeroFlag)", "if (false)", false],
+      ["typed forced true", "if (typedFlag)", "if (true)", false],
+      ["typed forced false", "if (typedFlag)", "if (false)", false],
     ]) {
       assert.equal(original.split(before).length, 2, name);
       try {
@@ -131,7 +135,7 @@ test(
     const report = query("--limit", "1000");
     assert.equal(report.pagination.hasMore, false);
     const decisions = report.sites.filter((r) => r.site.kind === "decision");
-    assert.equal(decisions.length, 5);
+    assert.equal(decisions.length, 9);
     for (const row of decisions) {
       assert.equal(row.candidate.coveredBy, 2);
       assert.equal(row.facts.decision.outcomes.true.length, 1);
@@ -139,16 +143,35 @@ test(
     }
     const page = query("--evidence", "/tests", "--limit", "1000");
     assert.equal(page.pagination.hasMore, false);
-    assert.equal(page.items.length, 10);
+    assert.equal(page.items.length, 18);
     for (const item of page.items) {
       assert.ok(item.value);
       assert.equal(item.value.witnessIssues?.length ?? 0, 0);
     }
     assert.ok(
       page.items.filter((item) => item.value.observations.length > 0).length >=
-        8,
+        16,
     );
     assert.equal(report.assertionScore, null);
+    for (const owner of ["identical", "distinct", "masked", "zero", "typed"]) {
+      assert.equal(
+        decisions.find((r) => r.site.owner === owner).facts.decision.primitive
+          .model,
+        "js-primitive-decision-v1",
+      );
+    }
+    for (const owner of ["transformed", "effectful", "lone", "mutableChoice"]) {
+      assert.equal(
+        decisions.find((r) => r.site.owner === owner).facts.decision.primitive,
+        undefined,
+        owner,
+      );
+    }
+    for (const owner of ["zero", "typed"]) {
+      const candidate = decisions.find((r) => r.site.owner === owner).candidate;
+      assert.equal(candidate.stuckTrueCaught, true, owner);
+      assert.equal(candidate.stuckFalseCaught, true, owner);
+    }
     t.diagnostic(JSON.stringify({ run: runs[0], oracle, decisions }));
     await t.test(
       "distinct branch outcomes retain their existing evidence",
@@ -162,9 +185,6 @@ test(
     );
     await t.test(
       "equal branch results do not prove that forcing either outcome is caught",
-      {
-        todo: "SG-ASSERT-017: outcome sensitivity needs more than passing return witnesses",
-      },
       () => {
         const result = decisions.find(
           (r) => r.site.owner === "identical",
@@ -175,9 +195,6 @@ test(
     );
     await t.test(
       "different results accepted by the same predicate do not prove outcome sensitivity",
-      {
-        todo: "SG-ASSERT-017: account for the actual assertion predicate",
-      },
       () => {
         const result = decisions.find(
           (r) => r.site.owner === "masked",
@@ -274,7 +291,7 @@ test(
     try {
       writeFileSync(core, alternateSource);
       writeFileSync(testPath, alternateTest);
-      assert.match(ok(execute(process.execPath, suite)), /^# pass 10$/m);
+      assert.match(ok(execute(process.execPath, suite)), /^# pass 18$/m);
       for (const forced of ["true", "false"]) {
         try {
           writeFileSync(
@@ -312,11 +329,17 @@ test(
       );
       await t.test(
         "engine facts retain distinctions needed for opposite sensitivity verdicts",
-        {
-          todo: "SG-ASSERT-017: source return values and numeric predicates are absent from join facts",
-        },
         () => {
           assert.notDeepEqual(beforeFacts, afterFacts);
+          const evidence = alternateReport.sites.find(
+            (r) => r.site.owner === "identical" && r.site.kind === "decision",
+          );
+          assert.deepEqual(evidence.facts.decision.primitive.whenFalse, {
+            kind: "number",
+            value: "8",
+          });
+          assert.equal(evidence.candidate.stuckTrueCaught, true);
+          assert.equal(evidence.candidate.stuckFalseCaught, true);
         },
       );
     } finally {

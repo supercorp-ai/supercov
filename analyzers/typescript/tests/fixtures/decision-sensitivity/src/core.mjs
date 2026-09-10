@@ -39,3 +39,27 @@ export function effectful(effectfulFlag, events) {
     return 7;
   }
 }
+
+export function zero(zeroFlag) {
+  if (zeroFlag) {
+    return -0;
+  } else {
+    return 0;
+  }
+}
+
+export function typed(typedFlag) {
+  if (typedFlag) {
+    return "1";
+  } else {
+    return 1;
+  }
+}
+
+export function lone(loneFlag) {
+  if (loneFlag) {
+    return "\ud800";
+  } else {
+    return "\ud800";
+  }
+}

@@ -83,6 +83,19 @@ The traversal is bounded, does not equate calls/getters or follow mutable aliase
 and does not infer independence when no shared input was found. It runs only
 during querying; the test-time instrumentation is unchanged.
 
+For a narrow direct-call shape, `decision.primitive` retains literal branch
+results and the witnessed native strict equality/inequality predicates. The
+`js-primitive-decision-v1` model checks whether forcing either outcome would
+still satisfy each modeled assertion. Both branches returning the same value,
+or different values both accepted by `notEqual`, do not establish decision
+sensitivity. Numeric values retain signed zero and remain distinct from strings.
+The model requires synchronous, literal-only branches and direct boolean-input
+calls in simple Node tests; it rejects transformations, effects and mutable
+function bindings. It assumes normal module loading and unmodified native
+assertion semantics. Unsupported shapes retain the existing candidate analysis,
+not a sensitivity proof. These query-time checks add no probes, and their
+bounded results remain unverified candidates, not a global assertion score.
+
 Child-exit observations retain `processExit` source evidence instead of assuming
 that every Promise containing an exit listener checks the covered process. The
 bounded `node-child-exit-source-v1` model follows const projections and simple
