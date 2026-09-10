@@ -1,41 +1,33 @@
 # Agent workflow
 
-Supercov works best as a small, repeatable loop: run the suite, choose one useful
-gap, write one test, rerun, and prove what improved.
+Use Supercov with your coding agent and the test suite you already have.
+Supercov reports coverage and gaps. Your agent writes a test, reruns the suite,
+and checks what improved.
 
-```text
-run the suite  →  choose a gap  →  write one test  →  rerun  →  compare
-      ↑                                                            |
-      └────────────────────────────────────────────────────────────┘
+## Start with one test
+
+Open your own repository in your coding agent and paste this prompt. You don't
+need to install Supercov first; the agent can handle that.
+
+```text supercov-prompt
+Measure code coverage with npx supercov and write one missing test.
+Only change tests. Rerun the full test suite and show me the test you
+added and the before-and-after coverage.
 ```
 
-Supercov supplies the coverage signal and evidence. Your coding agent writes
-the tests.
+If the project has several test commands, tell the agent which full suite to
+use. Let it run the commands and edit the tests, approving those actions if
+your agent asks.
 
-## Choose the job
-
-For one careful first pass, ask:
-
-```text
-Measure code coverage with `npx supercov` and write the first useful test based
-on coverage. Only edit tests. Rerun the complete suite and report what improved.
-```
-
-For an overnight run or leftover token budget, ask:
-
-```text
-Use `npx supercov` to improve coverage. Only write tests. Keep going while
-useful gaps remain. Never weaken assertions or change application code to make
-coverage easier. Stop at a measurement limit, unreachable behavior, or the end
-of the available time budget. Report the run ids compared and what improved.
-```
-
-The second prompt is intentionally open-ended, but 100% is a direction rather
-than permission to write meaningless tests or reshape application code.
+The result is a normal test-file change and a coverage comparison in the
+conversation. Ask separately if you want a commit or pull request.
 
 ## One safe pass
 
-```sh
+The agent should run the suite, inspect a gap, write a test, then rerun the
+same suite and compare. These are the commands it can use:
+
+```sh supercov-example
 # 1. Establish a baseline.
 npx supercov -- npm test
 
@@ -52,8 +44,10 @@ npx supercov -- npm test
 npx supercov diff <previous-run-id> latest
 ```
 
-For Rust, use `cargo test` or `cargo nextest run` in both runs. Keep the baseline
-and verification commands identical.
+Everything after `--` is your project's test command. Use your actual command
+and file paths in place of the examples. For example,
+Rust projects can use `cargo test`, Python projects `pytest`, and Ruby projects
+`bundle exec rspec`. Keep the baseline and verification commands identical.
 
 The `line` query is useful before writing a test because it shows which tests
 already reach that line. Extending a nearby test is often better than adding a
@@ -72,9 +66,100 @@ test gaps separate from analysis limits. Follow the returned evidence pointers
 and `pagination.nextOffset`, pinning `--analysis` and the run id while paging.
 See [assertion evidence](assertion-evidence.md) for requirements and examples.
 
-## A complete prompt for longer runs
+## Example
+
+Here's a recorded Codex run in a JavaScript project, using the first prompt.
+The files are from our checkout example; you don't need to add them to your
+project.
+
+[`src/session.js`](https://github.com/supercorp-ai/supercov/blob/main/examples/checkout-verification/starter/src/session.js)
+allows checkout only when the customer is signed in and their session has
+not expired:
+
+```js
+export function canCheckout(signedIn, expired) {
+  if (signedIn && !expired) return true;
+  return false;
+}
+```
+
+The two tests in
+[`tests/session.test.js`](https://github.com/supercorp-ai/supercov/blob/main/examples/checkout-verification/starter/tests/session.test.js)
+check a valid session and a signed-out visitor:
+
+```js
+assert.equal(canCheckout(true, false), true);
+assert.equal(canCheckout(false, false), false);
+```
+
+The agent ran `npx supercov -- npm test`. Both tests passed, and the summary
+from `npx supercov runs latest` showed:
 
 ```text
+Coverage
+  Lines      100.00% (3/3)
+  Branches   100.00% (2/2)
+  MC/DC      50.00% (1/2)
+```
+
+It listed the gaps and inspected the file. You can open those views with:
+
+```sh
+npx supercov runs latest gaps
+npx supercov runs latest file src/session.js
+```
+
+The file query explained the gap:
+
+```text
+ LINE  STATUS        SOURCE
+    2  PARTIAL       signedIn && !expired
+       Unobserved: no witness pair shows `!expired` independently changing the decision result
+```
+
+Both return paths had run, but neither test checked an expired session. MC/DC
+checks whether each condition has been shown to affect the decision
+independently. Here, `signedIn` had; `!expired` had not.
+
+The agent added one test to `tests/session.test.js`, leaving the application
+code and existing tests unchanged:
+
+```js
+test('a signed-in visitor with an expired session cannot check out', () => {
+  assert.equal(canCheckout(true, true), false);
+});
+```
+
+It reran the same full suite. All three tests passed, and MC/DC reached 100%.
+The comparison from `npx supercov diff <before-run-id> latest` showed:
+
+```text
+lines +0pp, branches +0pp, MC/DC +50pp
+gained: 0 lines, 0 branches, 1 MC/DC conditions
+lost: 0 lines, 0 branches, 0 MC/DC conditions
++ MC/DC src/session.js:2 C2 !expired
+```
+
+The new assertion checks that checkout is denied when a signed-in customer's
+session has expired. Removing the expiry check makes this test fail; the
+original two tests still pass.
+
+In your project, look for the same evidence: the test checks the behavior the
+agent identified, and the full suite passes. One useful test won't necessarily
+take coverage to 100%.
+
+To try these exact files, [download the starter](https://supercov.com/downloads/supercov-tutorial.zip),
+extract it, open the `supercov-tutorial` folder in your agent, and run `npm ci`.
+Then use the JavaScript prompt above. The completed test is not included in the
+download. The [recorded run](https://github.com/supercorp-ai/supercov/tree/main/examples/checkout-verification/agent-run)
+includes the commands, full output, and completed test.
+
+## A complete prompt for longer runs
+
+Once you've reviewed the first test, use this prompt to continue through
+useful gaps—for example, during an overnight run:
+
+```text supercov-prompt
 Use `npx supercov` to improve coverage. Only write tests. Keep going while
 useful gaps remain.
 
@@ -110,7 +195,7 @@ reason to manufacture a test.
 
 If the repository separates test levels, narrow the view:
 
-```sh
+```sh supercov
 npx supercov runs latest gaps --kind e2e --limit 10
 ```
 

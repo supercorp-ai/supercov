@@ -74,7 +74,7 @@ staging state. Completed runs remain immutable.
 
 Preview cleanup before removing anything:
 
-```sh
+```sh supercov
 npx supercov clean --dry-run
 npx supercov clean --keep 20
 npx supercov clean

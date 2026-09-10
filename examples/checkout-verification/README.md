@@ -1,8 +1,8 @@
-# Checkout tutorial
+# Checkout example
 
-Source and recorded results for the [coding-agent tutorial](https://supercov.com/docs/code-verification).
+Source and recorded results for the example in [Agent workflow](https://supercov.com/docs/agent-loop#example).
 
-## Start the tutorial
+## Run the example
 
 [Download the starter](https://supercov.com/downloads/supercov-tutorial.zip),
 extract it, and open the `supercov-tutorial` folder in your coding agent.
@@ -35,10 +35,10 @@ test and recorded results are kept separately here, not in the starter.
   list, excluding the solution, recordings, dependencies, and Git history.
 - `src/`, `tests/`, and `recorded/`: the original CLI-only example and its output.
 
-The [tutorial](https://supercov.com/docs/code-verification) explains the agent's
+The [Agent workflow guide](https://supercov.com/docs/agent-loop#example) explains the agent's
 commands, the missing condition, and the test it wrote.
 
-## Maintaining the tutorial
+## Maintaining the example
 
 From this directory, install dependencies and verify both reproductions:
 

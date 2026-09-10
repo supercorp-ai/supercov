@@ -6,7 +6,7 @@ without rerunning the tests.
 
 ## Find the run you want
 
-```sh
+```sh supercov
 npx supercov runs
 npx supercov runs --limit 10
 npx supercov runs latest
@@ -23,7 +23,7 @@ A run id is immutable. `latest` is only a convenient selector.
 
 ## Ask the same run different questions
 
-```sh
+```sh supercov
 npx supercov runs latest gaps --limit 10
 npx supercov runs latest file app/checkout/session.ts
 npx supercov runs latest line app/checkout/session.ts:64
@@ -45,7 +45,7 @@ new work from it.
 
 ## Focus on passed or failed attempts
 
-```sh
+```sh supercov
 npx supercov runs latest --filter all
 npx supercov runs latest --filter passed
 npx supercov runs latest --filter failed
@@ -60,7 +60,7 @@ reports that can drift apart.
 
 ## Compare before and after
 
-```sh
+```sh supercov
 npx supercov diff <older-run> <newer-run>
 ```
 
@@ -76,7 +76,7 @@ need to reproduce the result.
 
 ## Combine distributed shards
 
-```sh
+```sh supercov
 npx supercov merge <shard-a> <shard-b> <shard-c>
 ```
 
@@ -100,7 +100,7 @@ Completed runs live under `.supercov/runs/<run-id>/`. The isolated workspace and
 instrumented build cache may use more space than the compressed run itself.
 Nothing is pruned in the background.
 
-```sh
+```sh supercov
 npx supercov clean --dry-run
 npx supercov clean --keep 20
 npx supercov clean

@@ -82,16 +82,20 @@ try {
     const excerpt = readFileSync(join(recording, `${name}.txt`), 'utf8');
     assert.ok(commands.some(command => command.exitCode === 0 && command.stdout === excerpt), `${name} must match the recorded output`);
   }
-  const guide = readFileSync(join(root, '../../docs/code-verification.md'), 'utf8');
-  const blocks = [...guide.matchAll(/```text\n([\s\S]*?)\n```/g)].map(match => match[1]);
+  const guide = readFileSync(join(root, '../../docs/agent-loop.md'), 'utf8');
+  const prompt = /```text(?: supercov-prompt)?\n([\s\S]*?)\n```/.exec(guide)?.[1];
+  const example = guide.split('## Example\n')[1]?.split('\n## ')[0];
+  assert.ok(example, 'The workflow must include the recorded example.');
+  const blocks = [...example.matchAll(/```text\n([\s\S]*?)\n```/g)].map(match => match[1]);
   const normalize = value => value.replace(/\s+/g, ' ').trim();
-  assert.equal(normalize(blocks.shift()), normalize(metadata.prompt));
+  assert.equal(normalize(prompt), normalize(metadata.prompt));
+  assert.equal(blocks.length, 3, 'Keep the summary, gap, and comparison output.');
   for (const block of blocks) {
-    assert.ok(commands.some(command => command.stdout.includes(block)), 'Tutorial output must come from the recorded run.');
+    assert.ok(commands.some(command => command.stdout.includes(block)), 'Example output must come from the recorded run.');
   }
   const shownTest = /```js\n(test\('a signed-in visitor[\s\S]*?)\n```/.exec(guide)?.[1];
-  assert.ok(shownTest && completed.includes(shownTest), 'The tutorial must show the saved agent test.');
-  console.log('Tutorial verified: clean starter, saved agent test, MC/DC 50% → 100%, and regression detected.');
+  assert.ok(shownTest && completed.includes(shownTest), 'The workflow must show the saved agent test.');
+  console.log('Workflow example verified: clean starter, saved agent test, MC/DC 50% → 100%, and regression detected.');
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }
