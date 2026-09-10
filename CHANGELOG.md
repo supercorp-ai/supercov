@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.0.44
+
+**Fixed**
+
+- Repeated Node test registrations no longer overwrite one another's evidence. Same-name loop entries, nested subtests and worker executions retain distinct attempts. Rerun tests to collect evidence missing from older archives.
+- Preserve test provenance in paths containing parentheses and retain passed tests whose source registration cannot be resolved. Unsupported assertion operands report analysis limits instead of misleading missing-test claims.
+- Bind awaited native assertions to their own source witnesses. Resolve native assertion imports and distinguish checked operands from diagnostic arguments, self-comparisons and shared-input comparisons.
+
+**Added**
+
+- Query-time analysis of bounded console-mock histories, selected counts and payloads, primitive decisions, direct returns and synchronous exception completion. Inline `observes` hints can guide supported checks against an existing passing assertion; they do not change test outcomes or replace missing assertions.
+- Decision evidence distinguishes bounded source-model results from branch-observation heuristics. Unsupported cases remain unresolved; assertion evidence is not a global assertion score or a guarantee that arbitrary edits are safe.
+
 ## 0.0.43
 
 **Added**
