@@ -607,6 +607,129 @@ pub struct PragmaHint {
     pub call_omission: Option<CallOmissionEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count_sensitivity: Option<CountSensitivityEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_sensitivity: Option<PayloadSensitivityEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PayloadSensitivityEvidence {
+    pub model: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub scope: Option<String>,
+    pub assertion_source: Option<String>,
+    pub target_source: Option<String>,
+    pub change_source: Option<String>,
+    pub change_text: Option<String>,
+    pub allocations: Option<Vec<String>>,
+    pub original: Option<PayloadCheck>,
+    pub variants: Option<Vec<PayloadVariant>>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PayloadCheck {
+    pub predicate: String,
+    pub actual: serde_json::Value,
+    pub expected: serde_json::Value,
+    pub projection: PayloadProjection,
+    pub outcome: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PayloadProjection {
+    pub instance: String,
+    pub call_source: String,
+    pub call_index: u64,
+    pub argument_index: u64,
+    pub read_at: String,
+    pub history_selections: Option<Vec<MockHistorySelection>>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PayloadVariant {
+    pub change: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub check: Option<PayloadCheck>,
+}
+
+fn valid_payload(v: &serde_json::Value, depth: usize, budget: &mut usize) -> bool {
+    if depth > 32 || *budget == 0 {
+        return false;
+    }
+    *budget -= 1;
+    let Some(o) = v.as_object() else {
+        return false;
+    };
+    match v["kind"].as_str() {
+        Some("undefined" | "null" | "opaque-string") => o.len() == 1,
+        Some("string") => o.len() == 2 && v["value"].is_string(),
+        Some("boolean") => o.len() == 2 && v["value"].is_boolean(),
+        Some("number") => {
+            o.len() == 2
+                && v["value"]
+                    .as_f64()
+                    .is_some_and(|n| n.is_finite() && !(n == 0.0 && n.is_sign_negative()))
+        }
+        Some(kind @ ("object" | "array")) => {
+            let Some(properties) = v["properties"].as_array() else {
+                return false;
+            };
+            let mut names = std::collections::HashSet::new();
+            o.len() == 2
+                && properties.iter().all(|p| {
+                    p.as_object().is_some_and(|o| o.len() == 2)
+                        && p["name"]
+                            .as_str()
+                            .is_some_and(|n| n != "__proto__" && names.insert(n))
+                        && valid_payload(&p["value"], depth + 1, budget)
+                })
+                && (kind != "array"
+                    || (0..properties.len()).all(|i| names.contains(i.to_string().as_str())))
+        }
+        _ => false,
+    }
+}
+
+// Both values have already passed bounded shape validation. Unknown string bytes
+// must never compare equal just because their abstract descriptions are equal.
+fn payload_equal(a: &serde_json::Value, b: &serde_json::Value, deep: bool) -> Option<bool> {
+    let (ak, bk) = (a["kind"].as_str()?, b["kind"].as_str()?);
+    if ak == "opaque-string" || bk == "opaque-string" {
+        let other = if ak == "opaque-string" { bk } else { ak };
+        return if matches!(other, "string" | "opaque-string") {
+            None
+        } else {
+            Some(false)
+        };
+    }
+    if ak != bk {
+        return Some(false);
+    }
+    if matches!(ak, "object" | "array") {
+        if !deep {
+            return None;
+        }
+        let (ap, bp) = (a["properties"].as_array()?, b["properties"].as_array()?);
+        if ap.len() != bp.len() {
+            return Some(false);
+        }
+        let mut unknown = false;
+        for p in ap {
+            let Some(q) = bp.iter().find(|q| q["name"] == p["name"]) else {
+                return Some(false);
+            };
+            match payload_equal(&p["value"], &q["value"], true) {
+                Some(false) => return Some(false),
+                None => unknown = true,
+                _ => (),
+            }
+        }
+        return if unknown { None } else { Some(true) };
+    }
+    if ak == "number" {
+        return Some(a["value"].as_f64()? == b["value"].as_f64()?);
+    }
+    Some(a["value"] == b["value"])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -807,6 +930,117 @@ pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaChec
                     hint.assertion_source.as_deref().unwrap(),
                     hint.assertion_method.as_deref().unwrap(),
                 ));
+                if recipe == "value" {
+                    result.reason = "payload-sensitivity-unavailable".into();
+                    let Some(e) = &hint.payload_sensitivity else {
+                        return result;
+                    };
+                    let in_file = |s: &Option<String>| {
+                        s.as_ref()
+                            .is_some_and(|s| s.starts_with(&format!("{}:", site.file)))
+                    };
+                    if e.model != "node-closed-payload-sensitivity-v1"
+                        || e.status != "source-checked"
+                        || e.reason.is_some()
+                        || e.scope.as_deref() != Some("closed-synchronous-test-module")
+                        || e.assertion_source != hint.assertion_source
+                        || !in_file(&e.target_source)
+                        || !in_file(&e.change_source)
+                        || e.change_text.as_ref().is_none_or(String::is_empty)
+                        || e.allocations.as_ref().is_none_or(|a| {
+                            a.is_empty()
+                                || a.iter().any(|s| !s.starts_with(&format!("{}:", site.file)))
+                        })
+                        || !(site.kind == "decision" || site.category == "return")
+                    {
+                        result.reason = e
+                            .reason
+                            .clone()
+                            .unwrap_or_else(|| "unsupported-payload-sensitivity-evidence".into());
+                        return result;
+                    }
+                    let (Some(original), Some(variants)) = (&e.original, &e.variants) else {
+                        return result;
+                    };
+                    let valid_check = |c: &PayloadCheck| {
+                        let mut budget = 4096;
+                        let p = &c.projection;
+                        matches!(
+                            c.predicate.as_str(),
+                            "node-same-value" | "node-deep-strict-equality"
+                        ) && p.instance.starts_with(&format!("{}:", test.file))
+                            && p.read_at.starts_with(&format!("{}:", test.file))
+                            && p.call_source.starts_with(&format!("{}:", site.file))
+                            && p.history_selections.as_ref().is_none_or(|ss| {
+                                ss.iter().all(|s| {
+                                    !s.source.is_empty() && s.from <= s.to && s.to <= s.input_count
+                                })
+                            })
+                            && valid_payload(&c.actual, 0, &mut budget)
+                            && valid_payload(&c.expected, 0, &mut budget)
+                            && payload_equal(
+                                &c.actual,
+                                &c.expected,
+                                c.predicate == "node-deep-strict-equality",
+                            )
+                            .is_some_and(|eq| {
+                                c.outcome == if eq { "not-rejected" } else { "rejected" }
+                            })
+                    };
+                    if !valid_check(original)
+                        || original.outcome != "not-rejected"
+                        || !matches!(
+                            (
+                                hint.assertion_method.as_deref(),
+                                original.predicate.as_str()
+                            ),
+                            (Some("equal" | "strictEqual"), "node-same-value")
+                                | (
+                                    Some("deepEqual" | "deepStrictEqual"),
+                                    "node-deep-strict-equality"
+                                )
+                        )
+                    {
+                        result.reason = "payload-assertion-not-modelled".into();
+                        return result;
+                    }
+                    // Unlike the legacy boundary heuristic, the source interpreter
+                    // derives the exact argument through history aliases. The owning
+                    // passing witness above remains mandatory; no observation is invented.
+                    let names: Vec<_> = variants.iter().map(|v| v.change.as_str()).collect();
+                    let mut sorted = names;
+                    sorted.sort();
+                    if !(sorted == ["map-callback-empty"]
+                        || sorted == ["condition-false", "condition-inverted", "condition-true"])
+                        || variants.iter().any(|v| match v.status.as_str() {
+                            "unresolved" => {
+                                v.reason.as_ref().is_none_or(String::is_empty) || v.check.is_some()
+                            }
+                            "source-checked" => {
+                                v.reason.is_some()
+                                    || v.check.as_ref().is_none_or(|c| {
+                                        !valid_check(c)
+                                            || c.expected != original.expected
+                                            || c.predicate != original.predicate
+                                            || c.projection.instance != original.projection.instance
+                                            || c.projection.argument_index
+                                                != original.projection.argument_index
+                                            || c.projection.read_at != original.projection.read_at
+                                    })
+                            }
+                            _ => true,
+                        })
+                    {
+                        result.reason = "inconsistent-payload-sensitivity-variants".into();
+                        return result;
+                    }
+                    if variants.iter().all(|v| v.status != "source-checked") {
+                        return result;
+                    }
+                    result.validation = HintValidation::AnalyzerSupported;
+                    result.reason = "modeled-payload-sensitivity".into();
+                    return result; // Explicit variant answers only; no general site credit.
+                }
                 if selected.is_none_or(|observations| {
                     !observations.iter().any(|ob| {
                         ob.mock.as_ref().is_some_and(|m| m.kind == "call-count")
@@ -2398,6 +2632,7 @@ mod tests {
             check: None,
             call_omission: None,
             count_sensitivity: None,
+            payload_sensitivity: None,
         }
     }
 
@@ -2535,6 +2770,99 @@ mod tests {
                 "case {case}"
             );
         }
+    }
+
+    #[test]
+    fn payload_sensitivity_checks_values_and_own_witness_without_legacy_links() {
+        let mut hint = pragma_hint();
+        hint.check = Some("value".into());
+        let original = serde_json::json!({
+            "predicate":"node-same-value", "actual":{"kind":"string","value":"hello"},
+            "expected":{"kind":"string","value":"hello"}, "outcome":"not-rejected",
+            "projection":{"instance":"tests/a.test.ts:2:3", "callSource":"src/a.ts:4:3", "callIndex":0, "argumentIndex":1, "readAt":"tests/a.test.ts:7:16"}
+        });
+        let mut changed = original.clone();
+        changed["actual"] = serde_json::json!({"kind":"undefined"});
+        changed["outcome"] = "rejected".into();
+        hint.payload_sensitivity = Some(serde_json::from_value(serde_json::json!({
+            "model":"node-closed-payload-sensitivity-v1", "status":"source-checked",
+            "scope":"closed-synchronous-test-module", "assertionSource":"tests/a.test.ts:7:3",
+            "targetSource":"src/a.ts:4:3", "changeSource":"src/a.ts:4:12", "changeText":"{ return arg; }",
+            "allocations":["src/a.ts:2:3"], "original":original,
+            "variants":[{"change":"map-callback-empty","status":"source-checked","check":changed}]
+        })).unwrap());
+        let mut s = site("S1", "return", vec![], &["T1"]);
+        s.category = "return".into();
+        // Conditional history aliases need not have a legacy heuristic observation.
+        let mut t = test("T1", vec![]);
+        t.file = "tests/a.test.ts".into();
+        let f = facts(vec![s], vec![t]);
+        let before = serde_json::to_value(join(&f)).unwrap();
+        let result = check_pragma_hints(&f, &[hint.clone()]).remove(0);
+        assert_eq!(result.validation, HintValidation::AnalyzerSupported);
+        assert_eq!(result.strength, None);
+        assert_eq!(serde_json::to_value(join(&f)).unwrap(), before);
+        for case in 0..13 {
+            let mut h = hint.clone();
+            let e = h.payload_sensitivity.as_mut().unwrap();
+            match case {
+                0 => h.witness = "unavailable".into(),
+                1 => h.assertion_source = Some("tests/a.test.ts:9:3".into()),
+                2 => {
+                    e.variants.as_mut().unwrap()[0]
+                        .check
+                        .as_mut()
+                        .unwrap()
+                        .outcome = "not-rejected".into()
+                }
+                3 => {
+                    e.original.as_mut().unwrap().actual =
+                        serde_json::json!({"kind":"opaque-string"})
+                }
+                4 => {
+                    e.variants.as_mut().unwrap()[0]
+                        .check
+                        .as_mut()
+                        .unwrap()
+                        .expected = serde_json::json!({"kind":"undefined"})
+                }
+                5 => {
+                    e.variants.as_mut().unwrap()[0]
+                        .check
+                        .as_mut()
+                        .unwrap()
+                        .projection
+                        .argument_index = 9
+                }
+                6 => e.variants.as_mut().unwrap()[0].change = "arbitrary-edit".into(),
+                7 => e.allocations = Some(vec![]),
+                8 => e.original.as_mut().unwrap().projection.instance = "tests/other.ts:2:3".into(),
+                9 => h.assertion_method = Some("ok".into()),
+                10 => e.variants.as_mut().unwrap()[0].status = "unresolved".into(),
+                11 => e.scope = Some("whole-suite".into()),
+                12 => {
+                    e.original.as_mut().unwrap().actual =
+                        serde_json::json!({"kind":"string","value":"hello","invented":true})
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                check_pragma_hints(&f, &[h])[0].validation,
+                HintValidation::Unresolved,
+                "case {case}"
+            );
+        }
+        let object = serde_json::json!({"kind":"object","properties":[{"name":"a","value":{"kind":"number","value":1}}]});
+        let opaque = serde_json::json!({"kind":"opaque-string"});
+        assert_eq!(payload_equal(&opaque, &object, true), Some(false));
+        assert_eq!(payload_equal(&opaque, &opaque, true), None);
+        assert_eq!(payload_equal(&object, &object, false), None);
+        assert!(valid_payload(&object, 0, &mut 4096));
+        assert!(!valid_payload(
+            &serde_json::json!({"kind":"object","properties":[{"name":"x","value":{"kind":"null"}},{"name":"x","value":{"kind":"null"}}]}),
+            0,
+            &mut 4096
+        ));
     }
 
     #[test]

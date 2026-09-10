@@ -273,6 +273,37 @@ interface OmissionTrial {
   omit?: ts.CallExpression;
   allocations?: Set<ts.ObjectLiteralExpression>;
   condition?: { node: ts.Expression; value: boolean | "invert" };
+  payload?: boolean;
+  emptyMapCallback?: ts.ArrowFunction;
+}
+
+export interface PayloadValue {
+  kind:
+    | "undefined"
+    | "null"
+    | "string"
+    | "number"
+    | "boolean"
+    | "opaque-string"
+    | "object"
+    | "array";
+  value?: string | number | boolean;
+  properties?: { name: string; value: PayloadValue }[];
+}
+export interface PayloadProjection {
+  instance: string;
+  callSource: string;
+  callIndex: number;
+  argumentIndex: number;
+  readAt: string;
+  historySelections?: MockCountEvidence["historySelections"];
+}
+export interface PayloadCheck {
+  predicate: string;
+  actual: PayloadValue;
+  expected: PayloadValue;
+  projection: PayloadProjection;
+  outcome: "rejected" | "not-rejected";
 }
 
 export function analyzeMockCounts(
@@ -319,6 +350,7 @@ function runMockCounts(
     properties: Map<string, Value>;
     moduleOwned: boolean;
     allocation?: ts.ObjectLiteralExpression;
+    argumentSelection?: Omit<PayloadProjection, "argumentIndex" | "readAt">;
   };
   type Value =
     | Primitive
@@ -326,9 +358,23 @@ function runMockCounts(
     | Snapshot
     | Closure
     | Aggregate
+    | {
+        kind: "recorded-call";
+        args: Value[];
+        selection: Omit<PayloadProjection, "argumentIndex" | "readAt">;
+      }
     | { kind: "opaque-inspect-string" | "opaque-native-tty" }
     | { kind: "context"; mock: Mock };
   const checks = new Map<ts.CallExpression, MockCountEvidence>();
+  const payloadChecks = new Map<ts.CallExpression, PayloadCheck>();
+  const callArguments = new WeakMap<Call, Value[]>();
+  const payloadReads = new Map<ts.Expression, PayloadProjection>();
+  const copyCall = (call: Call): Call => {
+    const copy = { ...call };
+    const args = callArguments.get(call);
+    if (args) callArguments.set(copy, args);
+    return copy;
+  };
   const installed = new Map<string, Mock | undefined>();
   let locals = new Map<ts.Declaration, Value>(row?.bindings);
   const moduleChecks = new Map<ts.SourceFile, boolean>();
@@ -369,7 +415,7 @@ function runMockCounts(
       readAt: model.location(node),
       installedAtRead: installed.get(mock.target) === mock,
       observedCount: mock.calls.length,
-      calls: mock.calls.map((call) => ({ ...call })),
+      calls: mock.calls.map(copyCall),
       ...(row ? { rowBinding: row.evidence } : {}),
     },
   });
@@ -377,14 +423,96 @@ function runMockCounts(
     mock: Mock | undefined,
     node: ts.CallExpression,
     action: string,
+    args: Value[],
   ) => {
-    if (mock)
-      mock.calls.push({
+    if (mock) {
+      const call = {
         source: model.location(node),
         action,
         site: model.site(node),
-      });
+      };
+      mock.calls.push(call);
+      if (trial?.payload) callArguments.set(call, args);
+    }
   };
+
+  function describe(v: Value): PayloadValue {
+    if (--budget < 0) return fail(fn, "payload-budget");
+    if (v === undefined) return { kind: "undefined" };
+    if (v === null) return { kind: "null" };
+    if (typeof v === "string") return { kind: "string", value: v };
+    if (typeof v === "boolean") return { kind: "boolean", value: v };
+    if (typeof v === "number") {
+      if (!Number.isFinite(v) || Object.is(v, -0))
+        return fail(fn, "unsupported-payload-number");
+      return { kind: "number", value: v };
+    }
+    if (v.kind === "opaque-inspect-string") return { kind: "opaque-string" };
+    if (v.kind === "object" || v.kind === "array") {
+      accessible(v, fn);
+      return {
+        kind: v.kind,
+        properties: [...v.properties]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([name, value]) => ({ name, value: describe(value) })),
+      };
+    }
+    return fail(fn, "unsupported-payload-value");
+  }
+  function equalPayload(
+    a: PayloadValue,
+    b: PayloadValue,
+    deep: boolean,
+  ): boolean | undefined {
+    if (--budget < 0) return fail(fn, "payload-budget");
+    if (a.kind === "opaque-string" || b.kind === "opaque-string") {
+      const other = a.kind === "opaque-string" ? b : a;
+      return other.kind === "string" || other.kind === "opaque-string"
+        ? undefined
+        : false;
+    }
+    if (a.kind !== b.kind) return false;
+    if (a.kind === "object" || a.kind === "array") {
+      if (!deep) return undefined; // SameValue requires identity, not structural equality.
+      if (a.properties!.length !== b.properties!.length) return false;
+      let unknown = false;
+      for (let i = 0; i < a.properties!.length; i++) {
+        const x = a.properties![i],
+          y = b.properties![i];
+        if (x.name !== y.name) return false;
+        const eq = equalPayload(x.value, y.value, true);
+        if (eq === false) return false;
+        if (eq === undefined) unknown = true;
+      }
+      return unknown ? undefined : true;
+    }
+    return Object.is(a.value, b.value);
+  }
+  function independentLiteral(raw: ts.Expression): boolean {
+    if (--budget < 0) return false;
+    const e = peel(raw);
+    if (
+      ts.isStringLiteralLike(e) ||
+      ts.isNumericLiteral(e) ||
+      [
+        ts.SyntaxKind.NullKeyword,
+        ts.SyntaxKind.TrueKeyword,
+        ts.SyntaxKind.FalseKeyword,
+      ].includes(e.kind)
+    )
+      return true;
+    if (ts.isArrayLiteralExpression(e))
+      return e.elements.every(independentLiteral);
+    return (
+      ts.isObjectLiteralExpression(e) &&
+      e.properties.every(
+        (p) =>
+          ts.isPropertyAssignment(p) &&
+          !ts.isComputedPropertyName(p.name) &&
+          independentLiteral(p.initializer),
+      )
+    );
+  }
 
   function stableTarget(declaration: ts.Declaration): boolean {
     const sf = declaration.getSourceFile();
@@ -584,6 +712,7 @@ function runMockCounts(
           value = evaluate(parameter.initializer, action, depth + 1);
         bind(parameter.name, parameter, value, action, depth + 1);
       });
+      if (trial?.emptyMapCallback === target) return undefined;
       if (!ts.isBlock(target.body))
         return evaluate(target.body, action, depth + 1);
       for (const statement of target.body.statements) {
@@ -725,6 +854,17 @@ function runMockCounts(
     if (ts.isPropertyAccessExpression(e)) {
       const base = evaluate(e.expression, action, depth + 1);
       if (!primitive(base)) {
+        if (
+          trial?.payload &&
+          base.kind === "recorded-call" &&
+          e.name.text === "arguments"
+        )
+          return {
+            kind: "array",
+            moduleOwned: false,
+            properties: new Map(base.args.map((v, i) => [String(i), v])),
+            argumentSelection: base.selection,
+          };
         if (base.kind === "mock" && e.name.text === "mock")
           return { kind: "context", mock: base };
         if (base.kind === "context" && e.name.text === "calls")
@@ -740,6 +880,44 @@ function runMockCounts(
         }
       }
       return fail(e, "unsupported-property-read");
+    }
+    if (trial?.payload && ts.isElementAccessExpression(e)) {
+      const base = evaluate(e.expression, action, depth + 1);
+      const index = evaluate(e.argumentExpression, action, depth + 1);
+      if (
+        primitive(base) ||
+        typeof index !== "number" ||
+        !Number.isSafeInteger(index) ||
+        index < 0
+      )
+        return fail(e, "unsupported-payload-index");
+      if (base.kind === "history") {
+        const call = base.evidence.calls?.[index],
+          args = call && callArguments.get(call);
+        if (!call || !args || !base.evidence.instance)
+          return fail(e, "missing-selected-call");
+        return {
+          kind: "recorded-call",
+          args,
+          selection: {
+            instance: base.evidence.instance,
+            callSource: call.source,
+            callIndex: index,
+            historySelections: base.evidence.historySelections,
+          },
+        };
+      }
+      if (base.kind === "array" && base.argumentSelection) {
+        if (!base.properties.has(String(index)))
+          return fail(e, "missing-selected-argument");
+        payloadReads.set(e, {
+          ...base.argumentSelection,
+          argumentIndex: index,
+          readAt: model.location(e),
+        });
+        return accessible(base.properties.get(String(index)), e);
+      }
+      return fail(e, "unsupported-payload-projection");
     }
     if (!ts.isCallExpression(e)) return fail(e, "unsupported-expression");
     // The checked edit replaces this expression-bodied arrow with () => undefined.
@@ -855,9 +1033,7 @@ function runMockCounts(
         clamp((args[1] as number | undefined) ?? length),
       );
       if (base.kind === "history") {
-        const calls = base.evidence
-          .calls!.slice(from, to)
-          .map((call) => ({ ...call }));
+        const calls = base.evidence.calls!.slice(from, to).map(copyCall);
         return {
           kind: "history",
           evidence: {
@@ -924,7 +1100,7 @@ function runMockCounts(
       // that mock, native console formatting may execute user code.
       if (args.some((arg) => (mock ? !sourceValue(arg) : !primitive(arg))))
         return fail(e, "nonprimitive-console-argument");
-      record(mock, e, action);
+      record(mock, e, action, args);
       return undefined;
     }
     if (
@@ -945,7 +1121,11 @@ function runMockCounts(
     const predicate = model.nativePredicate(e);
     if (predicate) {
       if (initializing) return fail(e, "effectful-module-initialization");
-      if (trial && predicate !== "node-same-value")
+      if (
+        trial &&
+        predicate !== "node-same-value" &&
+        !(trial.payload && predicate === "node-deep-strict-equality")
+      )
         return fail(e, "unsupported-trial-predicate");
       if (e.arguments.length < 2 || e.arguments.length > 3)
         return fail(e, "unsupported-comparison-arity");
@@ -953,6 +1133,36 @@ function runMockCounts(
       if (values.length === 3 && !primitive(values[2]))
         return fail(e, "unsupported-assertion-message");
       const [a, b] = values;
+      if (
+        trial?.payload &&
+        !(!primitive(a) && a.kind === "count") &&
+        !(!primitive(b) && b.kind === "count")
+      ) {
+        const actualValue = describe(a),
+          expectedValue = describe(b);
+        const equal = equalPayload(
+          actualValue,
+          expectedValue,
+          predicate === "node-deep-strict-equality",
+        );
+        if (equal === undefined)
+          return fail(e, "payload-predicate-undecidable-in-model");
+        if (trial.assertion === e) {
+          const projection = payloadReads.get(peel(e.arguments[0]));
+          if (!projection || !independentLiteral(e.arguments[1]))
+            return fail(e, "payload-expectation-or-projection-not-independent");
+          payloadChecks.set(e, {
+            predicate,
+            actual: actualValue,
+            expected: expectedValue,
+            projection,
+            outcome: equal ? "not-rejected" : "rejected",
+          });
+          throw new ReachedAssertion();
+        }
+        if (!equal) return fail(e, "earlier-payload-assertion-rejects");
+        return undefined;
+      }
       const actual =
         !primitive(a) && a.kind === "count"
           ? a
@@ -983,10 +1193,10 @@ function runMockCounts(
     const declaration = model.declaration(callee);
     const saved = declaration && locals.get(declaration);
     if (saved && !primitive(saved) && saved.kind === "mock") {
-      for (const arg of e.arguments)
-        if (!sourceValue(evaluate(arg, action, depth + 1)))
-          return fail(arg, "nonprimitive-mock-argument");
-      record(saved, e, action);
+      const args = argumentsOf(e, action, depth + 1);
+      if (args.some((arg) => !sourceValue(arg)))
+        return fail(e, "nonprimitive-mock-argument");
+      record(saved, e, action, args);
       return undefined;
     }
     if (
@@ -1038,7 +1248,10 @@ function runMockCounts(
           ? evaluate(statement.expression, action, depth + 1)
           : undefined,
       };
-    else if (ts.isIfStatement(statement) && model.production(statement)) {
+    else if (
+      ts.isIfStatement(statement) &&
+      (model.production(statement) || trial?.payload)
+    ) {
       const condition = evaluate(statement.expression, action, depth + 1);
       if (!primitive(condition))
         return fail(statement, "nonprimitive-condition");
@@ -1046,7 +1259,10 @@ function runMockCounts(
         ? statement.thenStatement
         : statement.elseStatement;
       if (branch) return execute(branch, action, depth + 1);
-    } else if (ts.isBlock(statement) && model.production(statement)) {
+    } else if (
+      ts.isBlock(statement) &&
+      (model.production(statement) || trial?.payload)
+    ) {
       for (const child of statement.statements) {
         const returned = execute(child, action, depth + 1);
         if (returned) return returned;
@@ -1076,7 +1292,7 @@ function runMockCounts(
     if (error instanceof Unsupported) limitation = error.message;
     else if (!(error instanceof ReachedAssertion)) throw error;
   }
-  return { checks, limitation };
+  return { checks, payloadChecks, limitation };
 }
 
 /** A hint selects this small proof recipe, never permission to assume shared state safe.
@@ -1951,6 +2167,169 @@ export function analyzeCountSensitivity(
     instance: before.instance,
     expectedCount: before.expectedCount,
     originalCount: before.observedCount,
+    variants,
+  };
+}
+
+export interface PayloadSensitivityEvidence {
+  model: "node-closed-payload-sensitivity-v1";
+  status: "source-checked" | "unresolved";
+  reason?: string;
+  scope?: "closed-synchronous-test-module";
+  assertionSource?: string;
+  targetSource?: string;
+  changeSource?: string;
+  changeText?: string;
+  allocations?: string[];
+  original?: PayloadCheck;
+  variants?: {
+    change:
+      | "condition-true"
+      | "condition-false"
+      | "condition-inverted"
+      | "map-callback-empty";
+    status: "source-checked" | "unresolved";
+    reason?: string;
+    check?: PayloadCheck;
+  }[];
+}
+
+/** Specific control or native-map callback edits, evaluated only up to an
+ * existing selected-argument predicate. No runtime values or oracle labels enter. */
+export function analyzePayloadSensitivity(
+  ts: SyntaxAPI,
+  fn: ts.Node,
+  assertion: ts.CallExpression,
+  target: ts.Node,
+  model: ScopeModel,
+  row?: BoundRow,
+): PayloadSensitivityEvidence {
+  const base: PayloadSensitivityEvidence = {
+    model: "node-closed-payload-sensitivity-v1",
+    status: "unresolved",
+  };
+  const limit = (reason: string) => ({ ...base, reason });
+  if (
+    !model.production(target) ||
+    !ts.isArrowFunction(fn) ||
+    !ts.isBlock(fn.body) ||
+    !["node-same-value", "node-deep-strict-equality"].includes(
+      model.nativePredicate(assertion) ?? "",
+    )
+  )
+    return limit("payload-sensitivity-assertion-shape");
+  let ancestor: ts.Node = assertion.parent;
+  while (ancestor !== fn && !ts.isSourceFile(ancestor)) {
+    if (ts.isArrowFunction(ancestor) || ts.isFunctionExpression(ancestor))
+      return limit("payload-nested-assertion");
+    ancestor = ancestor.parent;
+  }
+  if (ancestor !== fn) return limit("payload-assertion-outside-test");
+  const scope = closedCountScope(
+    ts,
+    fn.getSourceFile(),
+    target.getSourceFile(),
+    model,
+  );
+  if (!scope.allocations || !scope.callbacks?.includes(fn))
+    return limit(scope.reason ?? "payload-sensitivity-scope");
+  let node = target;
+  if (ts.isReturnStatement(node) && node.expression) node = node.expression;
+  if (ts.isConditionalExpression(node)) node = node.condition;
+  const edits: {
+    change: NonNullable<
+      PayloadSensitivityEvidence["variants"]
+    >[number]["change"];
+    trial: Partial<OmissionTrial>;
+  }[] = [];
+  let changeNode: ts.Node = node;
+  if (
+    ts.isBinaryExpression(node) &&
+    [
+      ts.SyntaxKind.EqualsEqualsEqualsToken,
+      ts.SyntaxKind.ExclamationEqualsEqualsToken,
+    ].includes(node.operatorToken.kind) &&
+    [node.left, node.right].every(
+      (e) =>
+        ts.isIdentifier(e) ||
+        ts.isStringLiteralLike(e) ||
+        ts.isNumericLiteral(e),
+    )
+  ) {
+    for (const value of [true, false, "invert"] as const)
+      edits.push({
+        change:
+          value === true
+            ? "condition-true"
+            : value === false
+              ? "condition-false"
+              : "condition-inverted",
+        trial: { condition: { node, value } },
+      });
+  } else if (
+    ts.isCallExpression(node) &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    node.expression.name.text === "map" &&
+    node.arguments.length === 1 &&
+    ts.isArrowFunction(node.arguments[0]) &&
+    ts.isBlock(node.arguments[0].body)
+  ) {
+    // Native array origin is established by scope and the interpreter, not spelling.
+    changeNode = node.arguments[0].body;
+    edits.push({
+      change: "map-callback-empty",
+      trial: { emptyMapCallback: node.arguments[0] },
+    });
+  } else return limit("payload-sensitivity-target-shape");
+  const trial: OmissionTrial = {
+    assertion,
+    module: target.getSourceFile(),
+    allocations: scope.allocations,
+    payload: true,
+  };
+  const originalRun = runMockCounts(ts, fn, model, row, trial),
+    original = originalRun.payloadChecks.get(assertion);
+  if (
+    originalRun.limitation ||
+    !original ||
+    original.outcome !== "not-rejected"
+  )
+    return limit(
+      originalRun.limitation ?? "payload-original-predicate-unavailable",
+    );
+  const variants: NonNullable<PayloadSensitivityEvidence["variants"]> =
+    edits.map((edit) => {
+      const run = runMockCounts(ts, fn, model, row, {
+          ...trial,
+          ...edit.trial,
+        }),
+        check = run.payloadChecks.get(assertion);
+      if (
+        run.limitation ||
+        !check ||
+        check.predicate !== original.predicate ||
+        JSON.stringify(check.expected) !== JSON.stringify(original.expected) ||
+        check.projection.instance !== original.projection.instance ||
+        check.projection.argumentIndex !== original.projection.argumentIndex ||
+        check.projection.readAt !== original.projection.readAt
+      )
+        return {
+          change: edit.change,
+          status: "unresolved",
+          reason: run.limitation ?? "payload-changed-predicate-unavailable",
+        };
+      return { change: edit.change, status: "source-checked", check };
+    });
+  return {
+    ...base,
+    status: "source-checked",
+    scope: "closed-synchronous-test-module",
+    assertionSource: model.location(assertion),
+    targetSource: model.location(target),
+    changeSource: model.location(changeNode),
+    changeText: changeNode.getText(),
+    allocations: [...scope.allocations].map(model.location),
+    original,
     variants,
   };
 }

@@ -392,6 +392,51 @@ apply; this source checker is not a formally verified JavaScript semantics.
 Hints are inert comments. All additional work occurs during querying, with no
 new test-time probes or external user-maintained contract files.
 
+### A checked selected-argument question
+
+```ts
+// observes: src/logger.ts#formatData args.map; check value
+assert.equal(infoCalls[0].arguments[1], 'hello');
+
+// observes: src/logger.ts#selectLogger mode === 'verbose'; check value
+assert.deepEqual(infoCalls[0].arguments[2], { a: 1 });
+```
+
+`; check value` uses the same closed synchronous scope, but follows a selected
+mock call and argument to its existing native strict equality or deep-strict
+equality assertion. `hint.payloadSensitivity` retains the mock instance, ordered
+call index, emission source, history slices, argument index, original value,
+independent literal expectation and per-change outcome. A call index is relative
+to the selected history; recorded slices describe how that history was obtained.
+
+For a primitive equality target, the changes are force true, force false and
+invert. For a native `map` call with an inline block-bodied arrow callback, the
+single `map-callback-empty` change empties that callback body on every invocation;
+its parameters and the surrounding call still evaluate. Native array origin is
+checked, not inferred from a method name. This does not model arbitrary edits.
+
+The current value domain contains primitives, fresh plain objects/dense arrays,
+and opaque strings returned by the restricted native `util.inspect` summary.
+An opaque string can be distinguished from an expected object without guessing
+formatted bytes. Two opaque strings cannot be assumed equal, and comparing one
+with a fixed string stays unresolved. Coercion, substring matching, arbitrary
+transformations, identity comparisons between objects and nonliteral expected
+operands remain outside this recipe. Earlier rejecting or unsupported assertions
+stop a variant; they cannot provide credit to a later assertion.
+
+The bounded interpreter can derive a history-alias relationship that the older
+boundary analyzer did not recognize. Such a result does not require a legacy
+boundary observation, but still requires native assertion identity, a successful
+original source evaluation and the exact owning passing assertion witness.
+The engine checks value/outcome consistency and variant scope; the versioned
+source analyzer and documented native-environment assumptions remain trusted.
+This is not a formally verified JavaScript implementation or a general assertion
+score. `not-rejected` concerns only the selected predicate, not the suite.
+
+No comments create observations or promote ordinary site strength. No application
+execution, mutations, runtime value sampling or additional probes occur during
+the query. Invalid hints affect analysis only; they cannot fail native tests.
+
 ### Awaited child-process capture helpers
 
 For a bounded Node `test` pattern, a hint can attach to an awaited helper that

@@ -4,6 +4,7 @@ import type { AwaitedObservationSource } from "./awaited-observations.js";
 import type {
   CallOmissionEvidence,
   CountSensitivityEvidence,
+  PayloadSensitivityEvidence,
 } from "./mock-counts.js";
 
 export type AssertionPhase = { source?: string; op: string; status?: string };
@@ -46,7 +47,7 @@ interface Comment {
   candidateSites: string[];
   issue?: string;
   attachments: Attachment[];
-  check?: "missing-call" | "count";
+  check?: "missing-call" | "count" | "value";
 }
 export interface PragmaHint {
   id: string;
@@ -61,9 +62,10 @@ export interface PragmaHint {
   witness: "passed" | "unavailable";
   witnessIssue?: string;
   awaitedObservation?: AwaitedObservationSource;
-  check?: "missing-call" | "count";
+  check?: "missing-call" | "count" | "value";
   callOmission?: CallOmissionEvidence;
   countSensitivity?: CountSensitivityEvidence;
+  payloadSensitivity?: PayloadSensitivityEvidence;
 }
 
 /** Source hints are kept OUT of observations. A comment never adds a boundary. */
@@ -91,7 +93,9 @@ export function collectPragmas(
             ? ("missing-call" as const)
             : parts.length === 2 && parts[1].trim() === "count"
               ? ("count" as const)
-              : undefined;
+              : parts.length === 2 && parts[1].trim() === "value"
+                ? ("value" as const)
+                : undefined;
         const checkIssue =
           parts.length > 1 && !check ? "unsupported-check-recipe" : undefined;
         const parsed = /^\/\/\s*observes:\s*(\S+?)#(\S+)(?:\s+(.+?))?\s*$/.exec(

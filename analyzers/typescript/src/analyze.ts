@@ -13,6 +13,7 @@ import {
   analyzeMockCounts,
   analyzeFirstTestOmission,
   analyzeCountSensitivity,
+  analyzePayloadSensitivity,
   sourceTestRows,
   type MockCountEvidence,
 } from "./mock-counts.js";
@@ -5746,12 +5747,22 @@ export function analyzeWithFrontend(
     const st = rt && staticFor(rt),
       body = st && mockBodies.get(st);
     const target = siteNodes.get(hint.candidateSites[0]);
-    if (hint.check === "count") {
-      hint.countSensitivity = {
-        model: "node-closed-count-sensitivity-v1",
-        status: "unresolved",
-        reason: "count-sensitivity-source-or-runtime-unavailable",
+    if (hint.check === "count" || hint.check === "value") {
+      const limit = (reason: string) => {
+        if (hint.check === "value")
+          hint.payloadSensitivity = {
+            model: "node-closed-payload-sensitivity-v1",
+            status: "unresolved",
+            reason,
+          };
+        else
+          hint.countSensitivity = {
+            model: "node-closed-count-sensitivity-v1",
+            status: "unresolved",
+            reason,
+          };
       };
+      limit("sensitivity-source-or-runtime-unavailable");
       if (
         !rt ||
         rt.runner !== "node:test" ||
@@ -5776,18 +5787,27 @@ export function analyzeWithFrontend(
       const plan = sourceTestRows(ts, body, mockModel),
         row = plan?.rows.find((r) => r.evidence.title === rt.title);
       if (plan && (!row || plan.reason)) {
-        hint.countSensitivity.reason =
-          plan.reason ?? "count-sensitivity-runtime-row-unavailable";
+        limit(plan.reason ?? "sensitivity-runtime-row-unavailable");
         continue;
       }
-      hint.countSensitivity = analyzeCountSensitivity(
-        ts,
-        body,
-        assertion,
-        target,
-        { ...mockModel, location },
-        row,
-      );
+      if (hint.check === "value")
+        hint.payloadSensitivity = analyzePayloadSensitivity(
+          ts,
+          body,
+          assertion,
+          target,
+          { ...mockModel, location },
+          row,
+        );
+      else
+        hint.countSensitivity = analyzeCountSensitivity(
+          ts,
+          body,
+          assertion,
+          target,
+          { ...mockModel, location },
+          row,
+        );
       continue;
     }
     hint.callOmission = {
