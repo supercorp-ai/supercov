@@ -71,9 +71,8 @@ does not mean the product has no bugs, the assertions are meaningful, or every
 possible input was tested. Review test quality and user-visible behavior, not
 only the percentage.
 
-For JS/TS source-to-assertion analysis, see
-[Understanding assertions](assertions.md). It complements execution coverage;
-it does not turn 100% MC/DC into a guarantee that every behavior is checked.
+To review what your JavaScript and TypeScript tests actually check, see
+[Understanding assertions](assertions.md).
 
 If source cannot be measured safely, Supercov reports a measurement limit
 instead of claiming completeness.

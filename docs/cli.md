@@ -93,12 +93,11 @@ npx supercov runs latest file --help
 npx supercov runs latest assertions --help
 ```
 
-The npm-only `assertions` query runs after tests against matching source. It
-reports unverified candidates, not a proven assertion score or permission to
-change behavior. Its filters differ from the structural queries below; see
-[Understanding assertions](assertions.md) for the workflow and
-[assertion evidence](assertion-evidence.md) for requirements, pagination, and
-optional assertion hints. The reference is also bundled with the package:
+The JS/TS `assertions` query uses the npm package and requires source matching
+the recorded run. It has its own options; see
+[Understanding assertions](assertions.md) for an example and the
+[assertion reference](assertion-evidence.md) for requirements, pagination, and
+optional hints. You can also read the reference from the package:
 `npx supercov docs assertion-evidence`.
 
 ## Narrow a view
