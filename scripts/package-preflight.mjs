@@ -4,11 +4,15 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve, sep } from "node:path";
+import { createRequire } from "node:module";
 import { releaseNotes } from "./release-notes.mjs";
 import { checkedIdentity } from "../analyzers/typescript/bin/identity.mjs";
-import { parseSync } from "@swc/core";
 
 const repository = resolve(import.meta.dirname, "..");
+// Release installs omit optional packages (the unpublished native Supercov
+// packages included). SWC's optional platform binding is therefore unavailable.
+// The analyzer build already installs this pinned, pure-JavaScript compiler.
+const ts = createRequire(resolve(repository, "analyzers/typescript/package.json"))("typescript");
 const manifest = JSON.parse(
   readFileSync(resolve(repository, "package.json"), "utf8"),
 );
@@ -30,24 +34,23 @@ function sourceFiles(root, extension) {
 // require/import calls and other uses remain forbidden. This is a packaging
 // regression guard, not a sandbox against computed module names or eval.
 function assertNoChildProcessDependency(source, path) {
-  const tree = parseSync(source, { syntax: "ecmascript" });
-  function visit(node, parent) {
-    if (!node || typeof node !== "object") return;
+  const tree = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  assert.equal(tree.parseDiagnostics.length, 0, `${path} must parse before dependency checking`);
+  function visit(node) {
+    const parent = node.parent;
     if (
-      node.type === "StringLiteral" &&
-      /^(?:node:)?child_process$/.test(node.value)
+      ts.isStringLiteral(node) &&
+      /^(?:node:)?child_process$/.test(node.text)
     ) {
       assert(
-        parent?.type === "BinaryExpression" &&
-          ["===", "!==", "==", "!="].includes(parent.operator) &&
+        parent && ts.isBinaryExpression(parent) &&
+          [ts.SyntaxKind.EqualsEqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsEqualsToken,
+            ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.ExclamationEqualsToken].includes(parent.operatorToken.kind) &&
           (parent.left === node || parent.right === node),
         `${path} references child_process outside a source-name comparison`,
       );
     }
-    for (const value of Object.values(node)) {
-      if (Array.isArray(value)) value.forEach((item) => visit(item, node));
-      else if (value && typeof value === "object") visit(value, node);
-    }
+    ts.forEachChild(node, visit);
   }
   visit(tree);
 }
