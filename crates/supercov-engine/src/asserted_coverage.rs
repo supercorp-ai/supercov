@@ -654,6 +654,15 @@ pub struct CompletionCheck {
     pub throw_source: Option<String>,
     pub target_evaluations: u64,
     pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<CompletionDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionDiagnostic {
+    pub basis: String,
+    pub message: serde_json::Value,
 }
 
 fn completion_evidence_issue(
@@ -707,6 +716,25 @@ fn completion_evidence_issue(
             _ => None,
         };
         rejected.is_some_and(|r| c.outcome == if r { "rejected" } else { "not-rejected" })
+            && if c.method == "doesNotThrow" && c.completion == "throw" {
+                c.diagnostic.as_ref().is_some_and(|d| {
+                    let mut budget = 16;
+                    valid_payload(&d.message, 0, &mut budget)
+                        && match d.basis.as_str() {
+                            "native-error-message" => d.message["kind"] == "string",
+                            "absent-message" | "primitive-thrown-value" => {
+                                d.message["kind"] == "undefined"
+                            }
+                            "own-primitive-message" => matches!(
+                                d.message["kind"].as_str(),
+                                Some("undefined" | "null" | "string" | "number" | "boolean")
+                            ),
+                            _ => false,
+                        }
+                })
+            } else {
+                c.diagnostic.is_none()
+            }
             && hint.assertion_method.as_deref() == Some(c.method.as_str())
             && (location_in(&c.callback_source, &test.file)
                 || location_in(&c.callback_source, &site.file))
@@ -3281,6 +3309,112 @@ mod tests {
             check_pragma_hints(&f, &[hint])[0].validation,
             HintValidation::AnalyzerSupported
         );
+    }
+
+    #[test]
+    fn completion_rejection_requires_safe_native_diagnostic_evidence() {
+        let mut hint = pragma_hint();
+        hint.check = Some("completion".into());
+        hint.assertion_method = Some("doesNotThrow".into());
+        hint.completion_sensitivity = Some(serde_json::from_value(serde_json::json!({
+            "model":"node-first-test-completion-v1", "status":"source-checked",
+            "scope":"first-synchronous-test-prefix", "assertionSource":"tests/a.test.ts:7:3",
+            "targetSource":"src/a.ts:4:3", "changeText":"return 101;", "change":"statement-omitted",
+            "original":{"method":"doesNotThrow", "callbackSource":"src/a.ts:3:1", "completion":"normal",
+                "targetEvaluations":1, "outcome":"not-rejected"},
+            "omitted":{"method":"doesNotThrow", "callbackSource":"src/a.ts:3:1", "completion":"throw",
+                "throwSource":"src/a.ts:5:3", "targetEvaluations":1, "outcome":"rejected"}
+        })).unwrap());
+        let mut s = site("S1", "return", vec![], &["T1"]);
+        s.line = 4;
+        let mut t = test("T1", vec![]);
+        t.file = "tests/a.test.ts".into();
+        let f = facts(vec![s], vec![t]);
+        let before = join(&f);
+        // Older evidence that equated any throw with rejection must not pass.
+        assert_eq!(
+            check_pragma_hints(&f, &[hint.clone()])[0].validation,
+            HintValidation::Unresolved
+        );
+        for value in [
+            serde_json::json!({"basis":"native-error-message", "message":{"kind":"string", "value":"boom"}}),
+            serde_json::json!({"basis":"absent-message", "message":{"kind":"undefined"}}),
+            serde_json::json!({"basis":"primitive-thrown-value", "message":{"kind":"undefined"}}),
+            serde_json::json!({"basis":"own-primitive-message", "message":{"kind":"undefined"}}),
+            serde_json::json!({"basis":"own-primitive-message", "message":{"kind":"null"}}),
+            serde_json::json!({"basis":"own-primitive-message", "message":{"kind":"number", "value":42}}),
+            serde_json::json!({"basis":"own-primitive-message", "message":{"kind":"boolean", "value":false}}),
+            serde_json::json!({"basis":"own-primitive-message", "message":{"kind":"string", "value":"boom"}}),
+        ] {
+            let mut h = hint.clone();
+            h.completion_sensitivity
+                .as_mut()
+                .unwrap()
+                .omitted
+                .as_mut()
+                .unwrap()
+                .diagnostic = Some(serde_json::from_value(value.clone()).unwrap());
+            let result = check_pragma_hints(&f, &[h]).remove(0);
+            assert_eq!(
+                result.validation,
+                HintValidation::AnalyzerSupported,
+                "{value}"
+            );
+            assert!(result.strength.is_none());
+            assert!(result.observations.is_empty());
+        }
+        for value in [
+            serde_json::json!({"basis":"assumed-safe", "message":{"kind":"undefined"}}),
+            serde_json::json!({"basis":"native-error-message", "message":{"kind":"number", "value":42}}),
+            serde_json::json!({"basis":"native-error-message", "message":{"kind":"string"}}),
+            serde_json::json!({"basis":"native-error-message", "message":{"kind":"string", "value":false}}),
+            serde_json::json!({"basis":"absent-message", "message":{"kind":"null"}}),
+            serde_json::json!({"basis":"primitive-thrown-value", "message":{"kind":"string", "value":"boom"}}),
+            serde_json::json!({"basis":"own-primitive-message", "message":{"kind":"object", "properties":[]}}),
+            serde_json::json!({"basis":"own-primitive-message", "message":{"kind":"opaque-string"}}),
+            serde_json::json!({"basis":"own-primitive-message", "message":{"kind":"undefined", "extra":true}}),
+        ] {
+            let mut h = hint.clone();
+            h.completion_sensitivity
+                .as_mut()
+                .unwrap()
+                .omitted
+                .as_mut()
+                .unwrap()
+                .diagnostic = Some(serde_json::from_value(value.clone()).unwrap());
+            assert_eq!(
+                check_pragma_hints(&f, &[h])[0].validation,
+                HintValidation::Unresolved,
+                "{value}"
+            );
+        }
+        let descriptor: CompletionDiagnostic = serde_json::from_value(serde_json::json!({
+            "basis":"native-error-message", "message":{"kind":"string", "value":"boom"}
+        }))
+        .unwrap();
+        for method in ["doesNotThrow", "throws"] {
+            let mut h = hint.clone();
+            h.assertion_method = Some(method.into());
+            let e = h.completion_sensitivity.as_mut().unwrap();
+            for c in [&mut e.original, &mut e.omitted].into_iter().flatten() {
+                c.method = method.into();
+                c.completion = if method == "throws" {
+                    "throw"
+                } else {
+                    "normal"
+                }
+                .into();
+                c.throw_source = (method == "throws").then(|| "src/a.ts:5:3".into());
+                c.outcome = "not-rejected".into();
+                c.diagnostic = Some(descriptor.clone());
+            }
+            // Do not accept diagnostics on paths whose predicate never reads them.
+            assert_eq!(
+                check_pragma_hints(&f, &[h])[0].validation,
+                HintValidation::Unresolved
+            );
+        }
+        assert_eq!(join(&f), before);
     }
 
     #[test]

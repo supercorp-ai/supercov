@@ -290,6 +290,14 @@ export interface CompletionCheck {
   throwSource?: string;
   targetEvaluations: number;
   outcome: "rejected" | "not-rejected";
+  diagnostic?: {
+    basis:
+      | "native-error-message"
+      | "own-primitive-message"
+      | "absent-message"
+      | "primitive-thrown-value";
+    message: PayloadValue;
+  };
 }
 
 export interface CompletionSensitivityEvidence {
@@ -428,7 +436,7 @@ function runMockCounts(
         selection: Omit<PayloadProjection, "argumentIndex" | "readAt">;
       }
     | { kind: "opaque-inspect-string" | "opaque-native-tty" }
-    | { kind: "native-error" }
+    | { kind: "native-error"; message: string }
     | { kind: "quoted-string" | "substring-pattern"; value: string }
     | { kind: "context"; mock: Mock };
   const checks = new Map<ts.CallExpression, MockCountEvidence>();
@@ -851,13 +859,20 @@ function runMockCounts(
       model.globalError?.(e.expression)
     ) {
       // No custom constructor, options/cause object, coercion hooks or stack
-      // inspection. With no error matcher, only abrupt completion is observed.
+      // inspection. Preserve the primitive-derived message for the native
+      // doesNotThrow failure diagnostic, not arbitrary Error property access.
       if (e.arguments && e.arguments.length > 1)
         return fail(e, "unsupported-error-constructor-options");
-      for (const arg of e.arguments ?? [])
-        if (!primitive(evaluate(arg, action, depth + 1)))
+      let message: Value = undefined;
+      for (const arg of e.arguments ?? []) {
+        message = evaluate(arg, action, depth + 1);
+        if (!primitive(message))
           return fail(e, "unsupported-error-message-coercion");
-      return { kind: "native-error" };
+      }
+      return {
+        kind: "native-error",
+        message: message === undefined ? "" : String(message),
+      };
     }
     if (trial?.directReturn?.target === e && activeDirectCalls > 0)
       directTargetEvaluations++;
@@ -1329,6 +1344,45 @@ function runMockCounts(
         if (!(error instanceof ProgramThrow)) throw error;
         thrown = error;
       }
+      let diagnostic: CompletionCheck["diagnostic"];
+      if (exceptionMethod === "doesNotThrow" && thrown) {
+        // Native expectsNoError formats `${actual?.message}` before throwing its
+        // AssertionError. An object/function conversion here can run arbitrary
+        // application code, exit successfully or never return. Abrupt callback
+        // completion alone is therefore insufficient proof of rejection.
+        const value = thrown.value;
+        if (primitive(value))
+          diagnostic = {
+            basis: "primitive-thrown-value",
+            message: describe(undefined),
+          };
+        else if (value.kind === "native-error")
+          diagnostic = {
+            basis: "native-error-message",
+            message: describe(value.message),
+          };
+        else if (value.kind === "closure")
+          diagnostic = {
+            basis: "absent-message",
+            message: describe(undefined),
+          };
+        else if (value.kind === "object" || value.kind === "array") {
+          // Accepted aggregates are fresh own-data-property objects/arrays with
+          // pristine prototypes; accessors and prototype mutation are outside
+          // this source model. Do not generalize this to arbitrary JS objects.
+          accessible(value, e);
+          const message = value.properties.get("message");
+          if (!primitive(message))
+            return fail(e, "completion-diagnostic-message-coercion-unresolved");
+          diagnostic = {
+            basis: value.properties.has("message")
+              ? "own-primitive-message"
+              : "absent-message",
+            message: describe(message),
+          };
+        } else
+          return fail(e, "completion-diagnostic-message-access-unresolved");
+      }
       const rejected = exceptionMethod === "throws" ? !thrown : !!thrown;
       if (trial.assertion === e) {
         completionChecks.set(e, {
@@ -1336,6 +1390,7 @@ function runMockCounts(
           callbackSource: model.location(callback.node),
           completion: thrown ? "throw" : "normal",
           ...(thrown ? { throwSource: thrown.source } : {}),
+          ...(diagnostic ? { diagnostic } : {}),
           targetEvaluations: completionTargetEvaluations,
           outcome: rejected ? "rejected" : "not-rejected",
         });

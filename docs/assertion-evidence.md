@@ -578,20 +578,33 @@ callback invocation happens inside it. The evaluator follows source `try`,
 that a catch or finally return can conceal.
 
 Unshadowed `Error` construction accepts at most one primitive message and no
-options. Only the fact of construction is represented, not properties, stack,
-formatting or matcher semantics. Unsupported operations on an original or
-changed path remain unresolved. A changed path that no longer supplies a source
+options. The model retains its primitive-derived message for native failure
+diagnostics, not general properties, stack or matcher semantics. Unsupported
+operations on an original or changed path remain unresolved. A changed path that no longer supplies a source
 callback also remains unresolved; no callable is invented to finish the proof.
 Native assertion semantics, pristine builtins and isolated serial Node loading
 remain explicit model assumptions. This is not a formally verified JavaScript
 implementation, a general proof for every runtime, or an independently checked
 certificate of the entire source interpreter.
 
+An escaping exception alone does not prove that `doesNotThrow` reports failure:
+Node reads and formats the thrown value's `message` first. That access or
+conversion can run application code, including code that exits successfully.
+The model therefore requires a safe diagnostic path: a native Error's derived
+string message, a fresh own primitive data property, or an absent message on an
+accepted value under the pristine-prototype assumption. Nonprimitive messages
+and unsupported accessors remain analysis limitations even if a native control
+happens to fail. `throws` without a matcher does not inspect that message and
+does not require this additional evidence.
+
 The original and omitted paths each record callback location, `normal` or
 `throw` completion, the escaping throw's source where applicable, target visit
 count, and `rejected` or `not-rejected`. The original must agree with its passing
-witness. Rust validates scope, source identities and completion/predicate
-consistency. A caught inner throw can therefore receive a checked `not-rejected`
+witness. A rejecting `doesNotThrow` path also records a `diagnostic` descriptor
+with its basis and primitive message. Rust rejects missing or inconsistent
+descriptors, including older unconditional throw-to-rejection claims. Rust
+validates scope, source identities and completion/predicate consistency. A caught
+inner throw can therefore receive a checked `not-rejected`
 answer even when another throw in the same function supplies the assertion's
 witness. A no-error assertion can ignore a normal return value, yet reject an
 omission that exposes a later throw.

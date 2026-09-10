@@ -33,6 +33,120 @@ const cases = [
     target: "return 101;",
     assertion: "assert.doesNotThrow(operation)",
     rejected: true,
+    diagnostic: {
+      basis: "native-error-message",
+      message: { kind: "string", value: "later" },
+    },
+  },
+  ...[
+    [
+      "primitive-derived Error message",
+      "Error(42)",
+      "native-error-message",
+      { kind: "string", value: "42" },
+    ],
+    [
+      "default Error message",
+      "new Error()",
+      "native-error-message",
+      { kind: "string", value: "" },
+    ],
+    [
+      "own string message",
+      "{ message: 'boom', toString: () => process.exit(0) }",
+      "own-primitive-message",
+      { kind: "string", value: "boom" },
+    ],
+    [
+      "own numeric message",
+      "{ message: 42 }",
+      "own-primitive-message",
+      { kind: "number", value: 42 },
+    ],
+    [
+      "own boolean message",
+      "{ message: false }",
+      "own-primitive-message",
+      { kind: "boolean", value: false },
+    ],
+    [
+      "own null message",
+      "{ message: null }",
+      "own-primitive-message",
+      { kind: "null" },
+    ],
+    [
+      "own undefined message",
+      "{ message: undefined }",
+      "own-primitive-message",
+      { kind: "undefined" },
+    ],
+    [
+      "absent object message",
+      "{ toString: () => process.exit(0) }",
+      "absent-message",
+      { kind: "undefined" },
+    ],
+    [
+      "absent array message",
+      "[() => process.exit(0)]",
+      "absent-message",
+      { kind: "undefined" },
+    ],
+    [
+      "absent function message",
+      "() => process.exit(0)",
+      "absent-message",
+      { kind: "undefined" },
+    ],
+    ...["undefined", "null", "42", "false", "'boom'"].map((value) => [
+      `thrown primitive ${value}`,
+      value,
+      "primitive-thrown-value",
+      { kind: "undefined" },
+    ]),
+  ].map(([name, value, basis, message]) => ({
+    name: `safe native failure diagnostic: ${name}`,
+    source: `export function run() { return 101; throw ${value}; }`,
+    target: "return 101;",
+    assertion: "assert.doesNotThrow(operation)",
+    rejected: true,
+    diagnostic: { basis, message },
+  })),
+  {
+    name: "throwing assertion does not coerce the caught value's message",
+    source:
+      "export function run() { throw { message: { toString: () => process.exit(0) } }; }",
+    target: "throw { message: { toString: () => process.exit(0) } };",
+    assertion: "assert.throws(operation)",
+    rejected: true,
+  },
+  {
+    name: "failure message coercion can exit successfully before assertion rejection",
+    source:
+      "export function run() { return 101; throw { message: { toString: () => process.exit(0) } }; }",
+    target: "return 101;",
+    assertion: "assert.doesNotThrow(operation)",
+    unsupported: /completion-diagnostic-message-coercion-unresolved/,
+    nativeOmission: { status: 0, reachedAfterAssertion: false },
+  },
+  {
+    name: "benign nonprimitive diagnostic also needs a coercion proof",
+    source:
+      "export function run() { return 101; throw { message: { toString: () => 'boom' } }; }",
+    target: "return 101;",
+    assertion: "assert.doesNotThrow(operation)",
+    unsupported: /completion-diagnostic-message-coercion-unresolved/,
+    nativeOmission: { status: 1, reachedAfterAssertion: false },
+  },
+  {
+    name: "diagnostic getter is not assumed to be a data property",
+    source:
+      "export function run() { return 101; throw { get message() { process.exit(0); } }; }",
+    target: "return 101;",
+    assertion: "assert.doesNotThrow(operation)",
+    unsupported: /unsupported-object-member/,
+    nativeOmission: { status: 0, reachedAfterAssertion: false },
   },
   {
     name: "a caught inner exception is not required",
@@ -244,6 +358,7 @@ test('checked completion', () => {
   ${c.setup ?? ""}
   // observes: src/core.mjs#run ${c.target}; check completion
   ${c.assertion};
+  console.log('AFTER_ASSERTION');
 });
 ${c.nativeFail ? "test('passing companion', () => assert.ok(true));" : ""}`;
         writeFileSync(resolve(root, "tests/core.test.mjs"), suite);
@@ -273,7 +388,12 @@ ${c.nativeFail ? "test('passing companion', () => assert.ok(true));" : ""}`;
           "--test-reporter=tap",
           "tests/core.test.mjs",
         ];
-        run(process.execPath, args, c.nativeFail ? 1 : 0);
+        const checkAfterAssertion = (output, reached) =>
+          assert.equal(output.includes("AFTER_ASSERTION"), reached, output);
+        checkAfterAssertion(
+          run(process.execPath, args, c.nativeFail ? 1 : 0),
+          !c.nativeFail,
+        );
         const binary = resolve(repository, "target/debug/supercov");
         run(binary, ["--", process.execPath, ...args], c.nativeFail ? 1 : 0);
         const [runId] = readdirSync(resolve(root, ".supercov/runs"));
@@ -284,6 +404,23 @@ ${c.nativeFail ? "test('passing companion', () => assert.ok(true));" : ""}`;
         const report = query(["--pragmas"]);
         assert.equal(report.pragmas.length, 1, JSON.stringify(report));
         const p = report.pragmas[0];
+        const checkNativeOmission = ({ status, reachedAfterAssertion }) => {
+          assert.equal(c.source.split(c.target).length, 2);
+          writeFileSync(sourcePath, c.source.replace(c.target, ";"));
+          checkAfterAssertion(
+            run(process.execPath, args, status),
+            reachedAfterAssertion,
+          );
+          // Comments must never be responsible for a native result.
+          writeFileSync(
+            resolve(root, "tests/core.test.mjs"),
+            suite.replace(/^.*\/\/ observes:.*$/m, ""),
+          );
+          checkAfterAssertion(
+            run(process.execPath, args, status),
+            reachedAfterAssertion,
+          );
+        };
         if (c.nativeFail) {
           assert.notEqual(p.hint.witness, "passed");
           assert.notEqual(p.validation, "analyzer-supported");
@@ -296,6 +433,7 @@ ${c.nativeFail ? "test('passing companion', () => assert.ok(true));" : ""}`;
             p.hint.completionSensitivity?.reason ?? p.reason,
             c.unsupported,
           );
+          if (c.nativeOmission) checkNativeOmission(c.nativeOmission);
           return;
         }
         assert.equal(p.validation, "analyzer-supported", JSON.stringify(p));
@@ -310,6 +448,8 @@ ${c.nativeFail ? "test('passing companion', () => assert.ok(true));" : ""}`;
         );
         assert.equal(e.original.targetEvaluations, 1);
         assert.equal(e.omitted.targetEvaluations, 1);
+        assert.equal(e.original.diagnostic, undefined);
+        assert.deepEqual(e.omitted.diagnostic, c.diagnostic);
         // A checked exact edit remains separate from automatic per-site credit.
         const ordinary = query([
           "--analysis",
@@ -323,15 +463,10 @@ ${c.nativeFail ? "test('passing companion', () => assert.ok(true));" : ""}`;
         );
         assert.equal(selected.candidate.status, "unresolved");
         assert.equal(selected.candidate.reason.kind, "limit:operand-shape");
-        assert.equal(c.source.split(c.target).length, 2);
-        writeFileSync(sourcePath, c.source.replace(c.target, ";"));
-        run(process.execPath, args, c.rejected ? 1 : 0);
-        // Remove the comment too: it cannot be what made the native control fail.
-        writeFileSync(
-          resolve(root, "tests/core.test.mjs"),
-          suite.replace(/^.*\/\/ observes:.*$/m, ""),
-        );
-        run(process.execPath, args, c.rejected ? 1 : 0);
+        checkNativeOmission({
+          status: c.rejected ? 1 : 0,
+          reachedAfterAssertion: !c.rejected,
+        });
       });
   },
 );
