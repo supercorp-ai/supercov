@@ -17,3 +17,6 @@ export function escape(_mock) {}
 export function escaped() { console.log('escaped'); }
 export function selfCount() { console.log('self count'); }
 export function opaque() { const object = {}; console.log('opaque'); return object; }
+export function objectPayload() { console.log({ payload: ['object payload', { n: 1 }] }); }
+export function payloadAfterCall() { console.log('object argument side effect'); return { n: 1 }; }
+export function nestedObjectPayload() { console.log(payloadAfterCall()); }

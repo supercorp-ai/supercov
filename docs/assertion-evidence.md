@@ -37,6 +37,12 @@ iteration) and the standard global console. It accepts empty console-mock
 replacements and a bounded synchronous source subset: constant bindings,
 fresh plain objects/arrays, returned closures, primitive-input production branches,
 own-property parameter binding, defaults, rest parameters and fresh-array spreads.
+An installed empty mock, or a saved reference to it, can also count calls carrying
+source-modeled plain objects, arrays or closures without inspecting their payload.
+Argument-evaluation calls still participate in the history in evaluation order.
+This does not pin payload fields or grant production-value credit. Unmocked
+console calls with nonprimitive arguments remain unsupported because formatting
+can invoke user code; getter-bearing or otherwise opaque payloads remain limits.
 Module factories must be source-checked as pure: setup side effects are never
 replayed under the test's mock. Shared module objects remain unresolved because
 `const` does not rule out mutation by earlier callers. Opaque calls, escaped

@@ -69,7 +69,7 @@ test(
     const nativeNames = [...nativeOutput.matchAll(/^# Subtest: (.+)$/gm)].map(
       (match) => match[1],
     );
-    assert.equal(nativeNames.length, 45);
+    assert.equal(nativeNames.length, 51);
     const oracle = [];
     for (const [name, before, after, survives, file = "core.mjs"] of [
       [
@@ -79,6 +79,24 @@ test(
         true,
       ],
       ["count detects missing call", "console.log('live');", "", false],
+      [
+        "object payload remains unchecked",
+        "'object payload'",
+        "'different object payload'",
+        true,
+      ],
+      [
+        "object payload call removal detected",
+        "console.log({ payload: ['object payload', { n: 1 }] });",
+        "",
+        false,
+      ],
+      [
+        "object argument side effect removal detected",
+        "console.log('object argument side effect');",
+        "",
+        false,
+      ],
       [
         "count detects extra call",
         "console.log('live');",
@@ -315,7 +333,7 @@ test(
           2,
         ),
     );
-    assert.ok(page.items.length >= 44 && page.items.length <= 45);
+    assert.ok(page.items.length >= 50 && page.items.length <= 51);
     const sourceLines = readFileSync(
       resolve(root, "tests/core.test.mjs"),
       "utf8",
@@ -391,6 +409,23 @@ test(
       ...checked("repeated occurrence")[0].calls.map((c) => c.action),
     );
     assert.deepEqual(owners(checked("parameter")[0]), ["parameter"]);
+    assert.deepEqual(owners(checked("object payload count")[0]), [
+      "objectPayload",
+    ]);
+    assert.equal(checked("object payload count")[0].observedCount, 1);
+    assert.equal(checked("saved object payload count")[0].observedCount, 1);
+    assert.deepEqual(
+      checked("closure payload is not invoked").map((r) => r.observedCount),
+      [1, 0],
+    );
+    assert.equal(
+      checked("saved object payload count")[0].installedAtRead,
+      false,
+    );
+    assert.deepEqual(
+      owners(checked("object argument side effects counted")[0]),
+      ["payloadAfterCall", "nestedObjectPayload"],
+    );
     for (const name of [
       "conditional limit",
       "async limit",
@@ -405,6 +440,8 @@ test(
       "receiver this limit",
       "missing own property limit",
       "closure mutation limit",
+      "unmocked object payload limit",
+      "getter payload remains unsupported",
     ])
       assert.ok(
         claims(name).every((r) => r?.status === "unresolved" && r.reason),
@@ -538,7 +575,7 @@ test(
           .flat()
           .filter((r) => r.status === "source-checked").length,
         sourceRowCheckedObservations: rows.length,
-        nativeTests: 45,
+        nativeTests: 51,
         archivedTests: page.items.length,
       }),
     );

@@ -82,6 +82,41 @@ test('parameter', (t) => {
   api.parameter(value);
   assert.equal(log.mock.callCount(), 1);
 });
+test('object payload count', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  api.objectPayload();
+  assert.equal(log.mock.callCount(), 1);
+});
+test('saved object payload count', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const saved = log;
+  log.mock.restore();
+  saved({ payload: [1, 2] });
+  assert.equal(log.mock.callCount(), 1);
+});
+test('object argument side effects counted', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  api.nestedObjectPayload();
+  assert.equal(log.mock.callCount(), 2);
+});
+test('closure payload is not invoked', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const error = t.mock.method(console, 'error', () => {});
+  api.parameter(() => console.error('must not be invoked'));
+  assert.equal(log.mock.callCount(), 1);
+  assert.equal(error.mock.callCount(), 0);
+});
+test('unmocked object payload limit', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  log.mock.restore();
+  api.objectPayload();
+  assert.equal(log.mock.callCount(), 0);
+});
+test('getter payload remains unsupported', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  console.log({ get value() { throw new Error('must not be inspected'); } });
+  assert.equal(log.mock.callCount(), 1);
+});
 test('conditional limit', (t) => {
   const log = t.mock.method(console, 'log', () => {});
   if (true) api.conditional();

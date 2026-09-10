@@ -693,7 +693,11 @@ export function analyzeMockCounts(
       // JS resolves the callee before argument evaluation (which may itself call it).
       const mock = installed.get(`console.${callee.name.text}`);
       const args = argumentsOf(e, action, depth + 1);
-      if (args.some((arg) => !primitive(arg)))
+      // An accepted installed mock has an empty replacement: Node records the
+      // argument references but does not format/inspect them. This establishes
+      // a call count only, not argument identity or value protection. Without
+      // that mock, native console formatting may execute user code.
+      if (args.some((arg) => (mock ? !sourceValue(arg) : !primitive(arg))))
         return fail(e, "nonprimitive-console-argument");
       record(mock, e, action);
       return undefined;
@@ -747,7 +751,7 @@ export function analyzeMockCounts(
     const saved = declaration && locals.get(declaration);
     if (saved && !primitive(saved) && saved.kind === "mock") {
       for (const arg of e.arguments)
-        if (!primitive(evaluate(arg, action, depth + 1)))
+        if (!sourceValue(evaluate(arg, action, depth + 1)))
           return fail(arg, "nonprimitive-mock-argument");
       record(saved, e, action);
       return undefined;
