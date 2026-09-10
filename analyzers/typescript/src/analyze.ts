@@ -14,6 +14,7 @@ import {
   analyzeFirstTestOmission,
   analyzeCountSensitivity,
   analyzePayloadSensitivity,
+  analyzeDirectReturnSensitivity,
   sourceTestRows,
   type MockCountEvidence,
 } from "./mock-counts.js";
@@ -5793,7 +5794,7 @@ export function analyzeWithFrontend(
         limit(plan.reason ?? "sensitivity-runtime-row-unavailable");
         continue;
       }
-      if (hint.check === "value")
+      if (hint.check === "value") {
         hint.payloadSensitivity = analyzePayloadSensitivity(
           ts,
           body,
@@ -5802,7 +5803,18 @@ export function analyzeWithFrontend(
           { ...mockModel, location },
           row,
         );
-      else
+        if (hint.payloadSensitivity.status !== "source-checked" && !row) {
+          hint.directReturnSensitivity = analyzeDirectReturnSensitivity(
+            ts,
+            body,
+            assertion,
+            target,
+            { ...mockModel, location },
+          );
+          if (hint.directReturnSensitivity.status === "source-checked")
+            delete hint.payloadSensitivity;
+        }
+      } else
         hint.countSensitivity = analyzeCountSensitivity(
           ts,
           body,

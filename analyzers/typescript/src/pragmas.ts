@@ -5,6 +5,7 @@ import type {
   CallOmissionEvidence,
   CountSensitivityEvidence,
   PayloadSensitivityEvidence,
+  DirectReturnSensitivityEvidence,
 } from "./mock-counts.js";
 
 export type AssertionPhase = { source?: string; op: string; status?: string };
@@ -66,6 +67,7 @@ export interface PragmaHint {
   callOmission?: CallOmissionEvidence;
   countSensitivity?: CountSensitivityEvidence;
   payloadSensitivity?: PayloadSensitivityEvidence;
+  directReturnSensitivity?: DirectReturnSensitivityEvidence;
 }
 
 /** Source hints are kept OUT of observations. A comment never adds a boundary. */

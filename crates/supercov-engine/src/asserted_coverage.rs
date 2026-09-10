@@ -609,6 +609,167 @@ pub struct PragmaHint {
     pub count_sensitivity: Option<CountSensitivityEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload_sensitivity: Option<PayloadSensitivityEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_return_sensitivity: Option<DirectReturnSensitivityEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectReturnSensitivityEvidence {
+    pub model: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub scope: Option<String>,
+    pub assertion_source: Option<String>,
+    pub target_source: Option<String>,
+    pub change_source: Option<String>,
+    pub change_text: Option<String>,
+    pub original: Option<DirectReturnCheck>,
+    pub variants: Option<Vec<DirectReturnVariant>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectReturnCheck {
+    pub predicate: String,
+    pub actual: serde_json::Value,
+    pub expected: serde_json::Value,
+    pub call_source: String,
+    pub target_evaluations: u64,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectReturnVariant {
+    pub change: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub check: Option<DirectReturnCheck>,
+}
+
+fn direct_return_evidence_issue(
+    hint: &PragmaHint,
+    e: &DirectReturnSensitivityEvidence,
+    site: &Site,
+    test: &TestFacts,
+) -> Option<String> {
+    let test_file = test.file.as_str();
+    let location_in = |location: &str, file: &str| {
+        location
+            .strip_prefix(&format!("{file}:"))
+            .and_then(|rest| rest.split_once(':'))
+            .is_some_and(|(line, column)| {
+                line.parse::<u32>().is_ok_and(|n| n > 0)
+                    && column.parse::<u32>().is_ok_and(|n| n > 0)
+            })
+    };
+    if e.model != "node-first-test-direct-return-v1"
+        || e.status != "source-checked"
+        || e.reason.is_some()
+        || e.scope.as_deref() != Some("first-synchronous-test-prefix")
+        || e.assertion_source != hint.assertion_source
+        || e.assertion_source
+            .as_ref()
+            .is_none_or(|s| !location_in(s, test_file))
+        || e.target_source
+            .as_ref()
+            .is_none_or(|s| !location_in(s, &site.file))
+        || e.target_source
+            .as_ref()
+            .is_none_or(|s| !s.starts_with(&format!("{}:{}:", site.file, site.line)))
+        || e.change_source
+            .as_ref()
+            .is_none_or(|s| !location_in(s, &site.file))
+        || e.change_text.as_ref().is_none_or(String::is_empty)
+        || !(site.kind == "decision" || site.category == "return")
+        || hint.payload_sensitivity.is_some()
+        || test.witness_issues.iter().any(|issue| {
+            issue.kind == WitnessIssueKind::CaptureUnavailable
+                || (issue.source.is_some() && issue.source == hint.assertion_source)
+        })
+    {
+        return Some(
+            e.reason
+                .clone()
+                .unwrap_or_else(|| "unsupported-direct-return-evidence".into()),
+        );
+    }
+    let (Some(original), Some(variants)) = (&e.original, &e.variants) else {
+        return Some("incomplete-direct-return-evidence".into());
+    };
+    // This model has no opaque strings or assumed original predicate results.
+    fn concrete(value: &serde_json::Value, depth: usize) -> bool {
+        if depth > 32 {
+            return false;
+        }
+        match value["kind"].as_str() {
+            Some("undefined" | "null" | "string" | "number" | "boolean") => true,
+            Some("array" | "object") => value["properties"]
+                .as_array()
+                .is_some_and(|ps| ps.iter().all(|p| concrete(&p["value"], depth + 1))),
+            _ => false,
+        }
+    }
+    let valid = |c: &DirectReturnCheck| {
+        let mut budget = 4096;
+        matches!(
+            c.predicate.as_str(),
+            "node-same-value" | "node-deep-strict-equality"
+        ) && location_in(&c.call_source, test_file)
+            && (1..=4096).contains(&c.target_evaluations)
+            && valid_payload(&c.actual, 0, &mut budget)
+            && valid_payload(&c.expected, 0, &mut budget)
+            && concrete(&c.actual, 0)
+            && concrete(&c.expected, 0)
+            && payload_equal(
+                &c.actual,
+                &c.expected,
+                c.predicate == "node-deep-strict-equality",
+            )
+            .is_some_and(|equal| c.outcome == if equal { "not-rejected" } else { "rejected" })
+    };
+    if !valid(original)
+        || original.outcome != "not-rejected"
+        || !matches!(
+            (
+                hint.assertion_method.as_deref(),
+                original.predicate.as_str()
+            ),
+            (Some("equal" | "strictEqual"), "node-same-value")
+                | (
+                    Some("deepEqual" | "deepStrictEqual"),
+                    "node-deep-strict-equality"
+                )
+        )
+    {
+        return Some("direct-return-assertion-not-modelled".into());
+    }
+    let mut names: Vec<_> = variants.iter().map(|v| v.change.as_str()).collect();
+    names.sort();
+    if !(names == ["boolean-literal-inverted"]
+        || names == ["condition-false", "condition-inverted", "condition-true"])
+        || (names == ["boolean-literal-inverted"]
+            && !matches!(e.change_text.as_deref(), Some("true" | "false")))
+        || variants.iter().any(|v| match v.status.as_str() {
+            "source-checked" => {
+                v.reason.is_some()
+                    || v.check.as_ref().is_none_or(|c| {
+                        !valid(c)
+                            || c.call_source != original.call_source
+                            || c.expected != original.expected
+                            || c.predicate != original.predicate
+                    })
+            }
+            "unresolved" => v.reason.as_ref().is_none_or(String::is_empty) || v.check.is_some(),
+            _ => true,
+        })
+    {
+        return Some("inconsistent-direct-return-variants".into());
+    }
+    if variants.iter().all(|v| v.status != "source-checked") {
+        return Some("direct-return-variants-unavailable".into());
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1013,6 +1174,24 @@ pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaChec
                     hint.assertion_method.as_deref().unwrap(),
                 ));
                 if recipe == "value" {
+                    if let (Some(direct), Some(payload)) =
+                        (&hint.direct_return_sensitivity, &hint.payload_sensitivity)
+                        && (direct.status == "source-checked" || payload.status == "source-checked")
+                    {
+                        result.reason = "conflicting-value-models".into();
+                        return result;
+                    }
+                    if let Some(e) = &hint.direct_return_sensitivity
+                        && (hint.payload_sensitivity.is_none() || e.status == "source-checked")
+                    {
+                        if let Some(issue) = direct_return_evidence_issue(hint, e, site, test) {
+                            result.reason = issue;
+                            return result;
+                        }
+                        result.validation = HintValidation::AnalyzerSupported;
+                        result.reason = "modeled-direct-return-sensitivity".into();
+                        return result; // Exact predicate outcomes only, no site/MC-DC credit.
+                    }
                     result.reason = "payload-sensitivity-unavailable".into();
                     let Some(e) = &hint.payload_sensitivity else {
                         return result;
@@ -2728,6 +2907,7 @@ mod tests {
             call_omission: None,
             count_sensitivity: None,
             payload_sensitivity: None,
+            direct_return_sensitivity: None,
         }
     }
 
@@ -2865,6 +3045,128 @@ mod tests {
                 "case {case}"
             );
         }
+    }
+
+    #[test]
+    fn direct_return_variants_require_exact_scope_witness_and_consistent_values() {
+        let mut hint = pragma_hint();
+        hint.check = Some("value".into());
+        let original = serde_json::json!({
+            "predicate":"node-same-value", "actual":{"kind":"string","value":"*"},
+            "expected":{"kind":"string","value":"*"}, "outcome":"not-rejected",
+            "callSource":"tests/a.test.ts:7:16", "targetEvaluations":1
+        });
+        let mut changed = original.clone();
+        changed["actual"] = serde_json::json!({"kind":"array","properties":[]});
+        changed["outcome"] = "rejected".into();
+        hint.direct_return_sensitivity = Some(serde_json::from_value(serde_json::json!({
+            "model":"node-first-test-direct-return-v1", "status":"source-checked",
+            "scope":"first-synchronous-test-prefix", "assertionSource":"tests/a.test.ts:7:3",
+            "targetSource":"src/a.ts:4:3", "changeSource":"src/a.ts:4:3", "changeText":"items.length === 0",
+            "original":original,
+            "variants":[
+                {"change":"condition-true","status":"source-checked","check":original},
+                {"change":"condition-false","status":"source-checked","check":changed},
+                {"change":"condition-inverted","status":"unresolved","reason":"not supported"}
+            ]
+        })).unwrap());
+        let mut s = site("S1", "condition", vec![], &["T1"]);
+        s.kind = "decision".into();
+        s.line = 4;
+        let mut t = test("T1", vec![]);
+        t.file = "tests/a.test.ts".into();
+        let f = facts(vec![s], vec![t]);
+        let before = join(&f);
+        let result = check_pragma_hints(&f, &[hint.clone()]).remove(0);
+        assert_eq!(result.validation, HintValidation::AnalyzerSupported);
+        assert!(result.strength.is_none());
+        assert!(result.observations.is_empty());
+        assert_eq!(join(&f), before);
+        for case in 0..18 {
+            let mut h = hint.clone();
+            let mut ff = f.clone();
+            let e = h.direct_return_sensitivity.as_mut().unwrap();
+            match case {
+                0 => h.witness = "unavailable".into(),
+                1 => h.assertion_source = Some("tests/a.test.ts:8:3".into()),
+                2 => e.original.as_mut().unwrap().outcome = "witnessed-pass".into(),
+                3 => {
+                    e.variants.as_mut().unwrap()[1]
+                        .check
+                        .as_mut()
+                        .unwrap()
+                        .outcome = "not-rejected".into()
+                }
+                4 => {
+                    e.variants.as_mut().unwrap()[1]
+                        .check
+                        .as_mut()
+                        .unwrap()
+                        .expected = serde_json::json!({"kind":"undefined"})
+                }
+                5 => e.original.as_mut().unwrap().call_source = "tests/other.ts:7:16".into(),
+                6 => e.original.as_mut().unwrap().target_evaluations = 0,
+                7 => e.scope = Some("whole-suite".into()),
+                8 => e.target_source = Some("src/a.ts:5:3".into()),
+                9 => h.assertion_method = Some("ok".into()),
+                10 => e.variants.as_mut().unwrap()[0].change = "arbitrary-edit".into(),
+                11 => {
+                    e.original.as_mut().unwrap().actual =
+                        serde_json::json!({"kind":"opaque-string"})
+                }
+                12 => {
+                    e.original.as_mut().unwrap().actual =
+                        serde_json::json!({"kind":"string","value":"*","extra":1})
+                }
+                13 => e.variants.as_mut().unwrap()[2].check = e.original.clone(),
+                14 => e.original.as_mut().unwrap().call_source = "tests/a.test.ts:0:0".into(),
+                15 => ff.tests[0]
+                    .witness_issues
+                    .push(rejected(WitnessIssueKind::CaptureUnavailable, None)),
+                16 => {
+                    let mut issue = rejected(WitnessIssueKind::CallFailed, None);
+                    issue.source = h.assertion_source.clone();
+                    ff.tests[0].witness_issues.push(issue);
+                }
+                17 => {
+                    h.payload_sensitivity = Some(
+                        serde_json::from_value(
+                            serde_json::json!({"model":"unused", "status":"unresolved"}),
+                        )
+                        .unwrap(),
+                    )
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                check_pragma_hints(&ff, &[h])[0].validation,
+                HintValidation::Unresolved,
+                "case {case}"
+            );
+        }
+        let e = hint.direct_return_sensitivity.as_mut().unwrap();
+        e.change_text = Some("false".into());
+        e.original = Some(
+            serde_json::from_value(serde_json::json!({
+                "predicate":"node-same-value", "actual":{"kind":"boolean","value":false},
+                "expected":{"kind":"boolean","value":false}, "outcome":"not-rejected",
+                "callSource":"tests/a.test.ts:7:16", "targetEvaluations":1
+            }))
+            .unwrap(),
+        );
+        let mut c = e.original.clone().unwrap();
+        c.actual = serde_json::json!({"kind":"boolean","value":true});
+        c.outcome = "rejected".into();
+        e.variants = Some(vec![DirectReturnVariant {
+            change: "boolean-literal-inverted".into(),
+            status: "source-checked".into(),
+            reason: None,
+            check: Some(c),
+        }]);
+        assert_eq!(
+            check_pragma_hints(&f, &[hint])[0].validation,
+            HintValidation::AnalyzerSupported
+        );
     }
 
     #[test]

@@ -460,6 +460,48 @@ No comments create observations or promote ordinary site strength. No applicatio
 execution, mutations, runtime value sampling or additional probes occur during
 the query. Invalid hints affect analysis only; they cannot fail native tests.
 
+### Checked direct return values
+
+The same `; check value` recipe also supports direct source-call results:
+
+```ts
+// observes: src/options.ts#select return false; check value
+assert.equal(select({ items: undefined }), false);
+
+// observes: src/options.ts#select items.length === 0; check value
+assert.equal(select({ items: [] }), "*");
+```
+
+`hint.directReturnSensitivity` uses `node-first-test-direct-return-v1`, separate
+from mock argument/history evidence. It checks the first synchronous native Node
+test prefix, a production module containing only function declarations or
+constant arrow functions, and a direct call or immutable local aliases leading
+to the selected strict/deep-strict equality. The expected operand must be an
+independent literal. The original predicate must agree with the source-calculated
+value and have its own exact passing assertion witness.
+
+The target must be evaluated inside that selected call. An earlier call reaching
+the same source cannot lend it a relationship. Unsupported earlier operations,
+getters, missing own properties, transformed/discarded results, setup and imported
+initializers remain limits. The model may finish an earlier prefix without
+evaluating operations in unexecuted bodies; it does not assume those operations
+are pure. Native APIs, pristine builtins, the matching compiler and isolated,
+serial Node test loading remain explicit model assumptions.
+
+For a strict equality expression, the questions are force true, force false and
+invert. For a Boolean literal, the question is `boolean-literal-inverted`, not
+an MC/DC decision. Each result carries its call source, target evaluation count,
+actual and expected values, and `rejected` or `not-rejected` predicate outcome.
+Earlier rejecting assertions stop a variant and are not attributed to the selected
+later assertion. Unknown variants remain visible even when another is supported.
+
+Rust validates the evidence scope, source locations, owning witness and value/
+outcome consistency. The source analyzer remains trusted; this is not a formally
+verified JavaScript implementation. Support never changes ordinary candidate
+strength, marks an MC/DC outcome executed, or supplies a global assertion score.
+`not-rejected` is local to the selected predicate, not whole-suite survival.
+All new work occurs after the run; hints remain inert comments.
+
 ### Awaited child-process capture helpers
 
 For a bounded Node `test` pattern, a hint can attach to an awaited helper that
