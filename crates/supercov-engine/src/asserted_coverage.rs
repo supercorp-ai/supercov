@@ -598,6 +598,25 @@ pub struct PragmaHint {
     pub assertion_method: Option<String>,
     pub witness: String,
     pub witness_issue: Option<String>,
+    /// A checked source pattern, not a captured read or a passing assertion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaited_observation: Option<AwaitedObservationSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AwaitedObservationSource {
+    pub model: String,
+    pub factory_source: String,
+    pub predicate_source: String,
+    pub captures: Vec<ObservationCaptureSource>,
+    pub pattern: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservationCaptureSource {
+    pub stream: String,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -698,6 +717,10 @@ pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaChec
             {
                 result.validation = HintValidation::Invalid;
                 result.reason = "target-file-mismatch".into();
+                return result;
+            }
+            if hint.awaited_observation.is_some() {
+                result.reason = "observation-capture-unavailable".into();
                 return result;
             }
             if hint.witness != "passed" || hint.witness_issue.is_some() {
@@ -2184,7 +2207,39 @@ mod tests {
             assertion_method: Some("equal".into()),
             witness: "passed".into(),
             witness_issue: None,
+            awaited_observation: None,
         }
+    }
+
+    #[test]
+    fn source_supported_await_does_not_borrow_a_passing_assertion_phase() {
+        let mut hint = pragma_hint();
+        hint.awaited_observation = Some(AwaitedObservationSource {
+            model: "node-child-capture-poll-v1".into(),
+            factory_source: "tests/process.mjs:4:1".into(),
+            predicate_source: "tests/process.mjs:21:38".into(),
+            captures: vec![ObservationCaptureSource {
+                stream: "stdout".into(),
+                source: "tests/process.mjs:8:58".into(),
+            }],
+            pattern: "/ready/".into(),
+        });
+        // Even a supplied 'passed' hint and matching ordinary observation are
+        // not a read receipt for an awaited source model.
+        let mut ob = observation("return:handler", Strength::Total);
+        ob.assertion_source = hint.assertion_source.clone();
+        ob.assertion_method = hint.assertion_method.clone();
+        let f = facts(
+            vec![site("S1", "return", vec![], &["T1"])],
+            vec![test("T1", vec![ob])],
+        );
+        let before = join(&f);
+        let checks = check_pragma_hints(&f, &[hint]);
+        assert_eq!(checks[0].validation, HintValidation::Unresolved);
+        assert_eq!(checks[0].reason, "observation-capture-unavailable");
+        assert!(checks[0].observations.is_empty());
+        assert!(checks[0].strength.is_none());
+        assert_eq!(join(&f), before);
     }
 
     #[test]

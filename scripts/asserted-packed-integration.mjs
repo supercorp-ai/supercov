@@ -83,10 +83,12 @@ try {
     "bin/query.mjs",
     "bin/identity.mjs",
     "src/analyze.ts",
+    "src/awaited-observations.ts",
     "src/mock-counts.ts",
     "src/pragmas.ts",
     "src/compiler.ts",
     "dist/analyze.js",
+    "dist/awaited-observations.js",
     "dist/mock-counts.js",
     "dist/pragmas.js",
     "dist/build-identity.json",
@@ -100,7 +102,7 @@ try {
   assert.ok(paths.has("docs/assertion-evidence.md"));
   assert.deepEqual(
     [...paths].filter((path) => path.startsWith("analyzers/typescript/dist/")).sort(),
-    ["analyze.js", "archive.js", "build-identity.json", "compiler.js",
+    ["analyze.js", "archive.js", "awaited-observations.js", "build-identity.json", "compiler.js",
       "frontend.js", "mock-counts.js", "native-frontend.js", "pragmas.js", "types.js"]
       .map((file) => `analyzers/typescript/dist/${file}`),
     "the private analyzer ships only runtime outputs, not SDK declarations or maps",
@@ -352,7 +354,7 @@ try {
         .stdout,
       /analysis changed/,
     );
-    for (const file of ["src/pragmas.ts", "dist/pragmas.js", "src/mock-counts.ts", "dist/mock-counts.js"]) {
+    for (const file of ["src/pragmas.ts", "dist/pragmas.js", "src/mock-counts.ts", "dist/mock-counts.js", "src/awaited-observations.ts", "dist/awaited-observations.js"]) {
       const path = resolve(installed, "analyzers/typescript", file);
       const original = readFileSync(path, "utf8");
       writeFileSync(path, original + "\n// changed installed analyzer\n");

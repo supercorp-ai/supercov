@@ -8,6 +8,7 @@ import { relative as pathRelative, resolve } from "node:path";
 import { analysisPath } from "./compiler.js";
 import { createFrontend, type CompilerFrontend } from "./frontend.js";
 import { assertionWitnessIssue, collectPragmas } from "./pragmas.js";
+import { awaitedObservationSource } from "./awaited-observations.js";
 import {
   analyzeMockCounts,
   sourceTestRows,
@@ -3975,6 +3976,29 @@ export function analyzeWithFrontend(
         }
         // implicit oracles: awaited reads that throw or time out
         if (ts.isAwaitExpression(node.parent)) {
+          if (!(method && strength) && pragmaCollector.hasHint(node)) {
+            const source = awaitedObservationSource(
+              {
+                syntax: ts,
+                declaration: declOf,
+                rawDeclaration: (n) => {
+                  const symbol = checker.getSymbolAtLocation(n);
+                  return symbol?.valueDeclaration ?? symbol?.declarations?.[0];
+                },
+                relativeFile: rel,
+              },
+              fn,
+              node,
+            );
+            if (source && ts.isPropertyAccessExpression(node.expression))
+              pragmaCollector.register(
+                node,
+                node.expression.name.text,
+                staticTestKey(file, line, name),
+                inert,
+                source,
+              );
+          }
           const o = originOf(node);
           if (o) {
             const bs = boundariesOf(o);

@@ -32,6 +32,12 @@ test("archive facts require the exact schema, rules, ABI and capabilities", () =
     {
       ...PROTOCOL,
       capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "awaited-observation-sources-v1",
+      ),
+    },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
         (cap) => cap !== "primitive-decision-sensitivity-v1",
       ),
     },

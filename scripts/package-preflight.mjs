@@ -74,6 +74,7 @@ assert.deepEqual(manifest.files, [
   "analyzers/typescript/dist/analyze.js",
   "analyzers/typescript/dist/mock-counts.js",
   "analyzers/typescript/dist/archive.js",
+  "analyzers/typescript/dist/awaited-observations.js",
   "analyzers/typescript/dist/compiler.js",
   "analyzers/typescript/dist/frontend.js",
   "analyzers/typescript/dist/native-frontend.js",

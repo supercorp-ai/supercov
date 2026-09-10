@@ -1,5 +1,6 @@
 import type ts from "typescript";
 import type { Site } from "./types.js";
+import type { AwaitedObservationSource } from "./awaited-observations.js";
 
 export type AssertionPhase = { source?: string; op: string; status?: string };
 export function assertionWitnessIssue(
@@ -31,6 +32,7 @@ interface Attachment {
   source: string;
   method: string;
   inert: boolean;
+  awaitedObservation?: AwaitedObservationSource;
 }
 interface Comment {
   id: string;
@@ -53,6 +55,7 @@ export interface PragmaHint {
   assertionMethod?: string;
   witness: "passed" | "unavailable";
   witnessIssue?: string;
+  awaitedObservation?: AwaitedObservationSource;
 }
 
 /** Source hints are kept OUT of observations. A comment never adds a boundary. */
@@ -129,11 +132,23 @@ export function collectPragmas(
     visit(sf);
   }
   return {
+    hasHint(node: ts.Node) {
+      let statement = node;
+      while (statement.parent && !compiler.isStatement(statement))
+        statement = statement.parent;
+      if (!compiler.isExpressionStatement(statement)) return false;
+      const sf = node.getSourceFile();
+      return (
+        compiler.getLeadingCommentRanges(sf.text, statement.getFullStart()) ??
+        []
+      ).some((range) => comments.has(key(sf, range.pos)));
+    },
     register(
       node: ts.CallExpression,
       method: string,
       testKey: string,
       inert: boolean,
+      awaitedObservation?: AwaitedObservationSource,
     ) {
       let statement: ts.Node = node;
       while (statement.parent && !compiler.isStatement(statement))
@@ -152,6 +167,7 @@ export function collectPragmas(
           source: location(sf, node.getStart(sf)),
           method,
           inert,
+          ...(awaitedObservation ? { awaitedObservation } : {}),
         };
         if (
           !comment.attachments.some(
@@ -193,11 +209,11 @@ export function collectPragmas(
               },
             ];
           return matched.map(({ a, b }) => {
-            const witnessIssue = assertionWitnessIssue(
-              b.phases,
-              a.source,
-              a.method,
-            );
+            // A source-checked poll is not an explicit assertion phase. Neither
+            // a matching phase name nor a passing test can supply its read receipt.
+            const witnessIssue = a.awaitedObservation
+              ? "observation-capture-unavailable"
+              : assertionWitnessIssue(b.phases, a.source, a.method);
             return {
               ...comment,
               id: `${comment.id}@${b.id}`,
@@ -205,6 +221,9 @@ export function collectPragmas(
               test: b.id,
               assertionSource: a.source,
               assertionMethod: a.method,
+              ...(a.awaitedObservation
+                ? { awaitedObservation: a.awaitedObservation }
+                : {}),
               witness: witnessIssue
                 ? ("unavailable" as const)
                 : ("passed" as const),

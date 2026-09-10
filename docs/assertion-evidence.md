@@ -282,7 +282,8 @@ Success and error JSON envelopes identify this query as `coverage.assertions`.
 assert.equal(compute(), 4);
 ```
 
-The comment must precede a statement containing exactly one recognized assertion.
+The comment must precede a statement containing exactly one recognized assertion
+or a supported directly awaited observation helper.
 The project-relative file, exact function/owner name, and optional literal source
 substring must select one inventory site. Optional `via ...` is explanation only.
 
@@ -301,6 +302,28 @@ Hints cannot inject observations, borrow another assertion's evidence, inflate
 coverage or remove sites from the denominator. Editing comments changes test
 source and requires a new run. Supported hints retain the analyzer's limitations;
 they are not formal proofs.
+
+### Awaited child-process capture helpers
+
+For a bounded Node `test` pattern, a hint can attach to an awaited helper that
+polls a regex over append-only UTF-8 child-process output and throws on exit or
+timeout. Supercov checks the actual imports, bindings, capture callbacks,
+predicate and polling loop—not a method name such as `ready`. The receiver must
+be a local `const`, with one factory launch immediately followed by the awaited
+call. Escaped receivers, transformed buffers, stateful regexes, caught polling
+failures and unsupported control flow do not satisfy this source model.
+
+`--pragmas` reports recognized source structure in `hint.awaitedObservation`,
+including the factory, capture and predicate locations and the regex literal.
+This is **source support, not a recorded read**. The result remains `unresolved`
+with reason `observation-capture-unavailable` and `witness: unavailable`: current
+archives do not supply a supported read receipt for this model. A passing test
+or similarly named assertion phase cannot substitute for that receipt.
+
+This query-only analysis adds no probes, changes no test result and supplies no
+presence, value or whole-site assertion credit. A bad or unsupported pragma never
+adds a test failure. Native API behavior and no external monkey-patching remain
+model assumptions; source recognition does not prove end-to-end pipe provenance.
 
 ## Agent workflow
 

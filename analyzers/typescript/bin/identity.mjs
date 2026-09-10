@@ -7,6 +7,7 @@ const root = resolve(import.meta.dirname, "..");
 const sources = [
   "src/analyze.ts",
   "src/archive.ts",
+  "src/awaited-observations.ts",
   "src/compiler.ts",
   "src/frontend.ts",
   "src/native-frontend.ts",
@@ -24,6 +25,7 @@ const sources = [
 const outputs = [
   "dist/analyze.js",
   "dist/archive.js",
+  "dist/awaited-observations.js",
   "dist/compiler.js",
   "dist/frontend.js",
   "dist/native-frontend.js",
