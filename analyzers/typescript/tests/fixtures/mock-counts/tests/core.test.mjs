@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { nativeSharedLogger } from '../src/native-methods.mjs';
+import * as arrays from '../src/arrays.mjs';
 import * as api from '../src/core.mjs';
 import { changed } from '../src/mutable.mjs';
 import { createLogger, createTagged, sharedLogger, fromModuleClosure, sideEffectArgs,
@@ -196,6 +197,96 @@ test('native factory method mutates shared receiver', (t) => {
   const logger = nativeSharedLogger();
   logger.info('hello');
   assert.equal(log.mock.callCount(), 0);
+});
+test('array map counts callback effects', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  arrays.mappedCalls();
+  assert.equal(log.mock.callCount(), 2);
+});
+test('array map routes callback effects', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const error = t.mock.method(console, 'error', () => {});
+  arrays.mappedRoutes();
+  assert.equal(log.mock.callCount(), 1);
+  assert.equal(error.mock.callCount(), 1);
+});
+test('array map output payload is not pinned', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  arrays.mappedOutput();
+  assert.equal(log.mock.callCount(), 1);
+});
+test('array map evaluation order', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  arrays.mappedEvaluation();
+  assert.equal(log.mock.callCount(), 4);
+});
+test('own map method is not array map', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const error = t.mock.method(console, 'error', () => {});
+  arrays.ownMap();
+  assert.equal(log.mock.callCount(), 0);
+  assert.equal(error.mock.callCount(), 1);
+});
+test('sliced history survives reset', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  api.beforeHistory();
+  api.afterHistory();
+  const tail = log.mock.calls.slice(1);
+  log.mock.resetCalls();
+  api.live();
+  assert.equal(tail.length, 1);
+  assert.equal(log.mock.callCount(), 1);
+});
+test('negative sliced history index', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  api.beforeHistory();
+  api.afterHistory();
+  const tail = log.mock.calls.slice(-1);
+  assert.equal(tail.length, 1);
+});
+test('nested and empty sliced history', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  api.beforeHistory();
+  api.afterHistory();
+  api.live();
+  const selected = log.mock.calls.slice(1).slice(0, 1);
+  const empty = log.mock.calls.slice(9);
+  assert.equal(selected.length, 1);
+  assert.equal(empty.length, 0);
+});
+test('slice snapshots before argument effects', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  api.live();
+  const selected = log.mock.calls.slice(arrays.sliceIndex());
+  assert.equal(selected.length, 1);
+  assert.equal(log.mock.callCount(), 2);
+});
+test('fresh array slice spreads selected values', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  arrays.slicedArray();
+  assert.equal(log.mock.callCount(), 1);
+});
+test('sparse array map limit', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  arrays.sparseMap();
+  assert.equal(log.mock.callCount(), 1);
+});
+test('mutating array map limit', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  arrays.mutatingMap();
+  assert.equal(log.mock.callCount(), 1);
+});
+test('array map this argument limit', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  arrays.mapWithThis();
+  assert.equal(log.mock.callCount(), 1);
+});
+test('coercing slice index limit', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  api.beforeHistory();
+  api.afterHistory();
+  const selected = log.mock.calls.slice('1');
+  assert.equal(selected.length, 1);
 });
 test('shared module object limit', (t) => {
   const log = t.mock.method(console, 'log', () => {});

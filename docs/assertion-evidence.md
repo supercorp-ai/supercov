@@ -40,6 +40,17 @@ own-property parameter binding, defaults, rest parameters and fresh-array spread
 An installed empty mock, or a saved reference to it, can also count calls carrying
 source-modeled plain objects, arrays or closures without inspecting their payload.
 Argument-evaluation calls still participate in the history in evaluation order.
+Fresh dense arrays support source-defined synchronous `map` callbacks, including
+their element, index and array parameters. Receiver and callback expressions are
+evaluated before callback invocations. Own source methods named `map` or `slice`
+are evaluated as those methods, not treated as native array operations. Sparse
+arrays, callback mutation, opaque callbacks and a `map` this-argument remain limits.
+Fresh arrays and native mock-history snapshots also support `slice` with bounded
+integer indices. History slices retain `historySelections`: each selection's
+source location, input count and effective half-open `[from, to)` range. Selected
+calls remain tied to the original instance and snapshot across later resets;
+index-argument effects occur after the snapshot is taken. An empty selection is
+not evidence that the original mock had no calls. Coercing indices remain limits.
 This does not pin payload fields or grant production-value credit. Unmocked
 console calls with nonprimitive arguments remain unsupported because formatting
 can invoke user code; getter-bearing or otherwise opaque payloads remain limits.

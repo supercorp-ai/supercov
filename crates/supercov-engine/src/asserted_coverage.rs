@@ -112,7 +112,19 @@ pub struct MockCountEvidence {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calls: Option<Vec<MockCountCall>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_selections: Option<Vec<MockHistorySelection>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub row_binding: Option<MockCountRowBinding>,
+}
+
+/// A bounded selection from a copied history, not a claim about the whole mock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MockHistorySelection {
+    pub source: String,
+    pub input_count: u64,
+    pub from: u64,
+    pub to: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2640,6 +2652,7 @@ mod tests {
                     "readAt": "tests/a.test.ts:7:3", "installedAtRead": true,
                     "expectedCount": 1, "observedCount": 1,
                     "calls": [{"source":"src/a.ts:4:3", "action":"tests/a.test.ts:5:3", "site":"S1"}],
+                    "historySelections": [{"source":"tests/a.test.ts:6:3", "inputCount":3, "from":1, "to":2}],
                     "rowBinding": {"model":"node-test-for-of-v1", "status":"source-checked", "rowIndex":0,
                         "title":"row a", "loop":"tests/a.test.ts:1:1", "table":"tests/a.test.ts:1:10",
                         "row":"tests/a.test.ts:1:12", "bindings":[{"declaration":"tests/a.test.ts:2:1", "name":"label", "value":"a"}]}

@@ -22,6 +22,7 @@ export const PROTOCOL = {
     "mock-count-lifetimes-v1",
     "mock-count-factories-v1",
     "mock-count-rows-v1",
+    "mock-count-array-projections-v1",
     "primitive-decision-sensitivity-v1",
   ],
 };

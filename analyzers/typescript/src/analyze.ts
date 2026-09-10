@@ -2341,7 +2341,11 @@ export function analyzeWithFrontend(
     const path = o.path;
     const joined = path.join(".");
     const kind =
-      joined === "mock.callCount()" || joined === "mock.calls.length"
+      joined === "mock.callCount()" ||
+      (path[0] === "mock" &&
+        path[1] === "calls" &&
+        path[path.length - 1] === "length" &&
+        path.slice(2, -1).every((step) => /^slice\([\s\S]*\)$/.test(step)))
         ? "call-count"
         : joined === "mock.calls"
           ? "call-history"

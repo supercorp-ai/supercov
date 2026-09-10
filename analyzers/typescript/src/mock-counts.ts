@@ -14,6 +14,13 @@ export interface MockCountEvidence {
   expectedCount?: number;
   observedCount?: number;
   calls?: { source: string; action: string; site?: string }[];
+  /** Selection of copied history; an empty selection is not an empty mock. */
+  historySelections?: {
+    source: string;
+    inputCount: number;
+    from: number;
+    to: number;
+  }[];
   rowBinding?: MockCountRowBinding;
 }
 
@@ -258,7 +265,9 @@ export function analyzeMockCounts(
     resetAt?: string;
     calls: Call[];
   };
-  type Snapshot = { kind: "count" | "history"; evidence: MockCountEvidence };
+  type Snapshot =
+    | { kind: "count"; evidence: MockCountEvidence }
+    | { kind: "history"; evidence: MockCountEvidence };
   type FunctionNode =
     | ts.FunctionDeclaration
     | ts.ArrowFunction
@@ -565,6 +574,15 @@ export function analyzeMockCounts(
     const e = peel(raw);
     if (ts.isStringLiteralLike(e)) return e.text;
     if (ts.isNumericLiteral(e)) return Number(e.text);
+    if (
+      ts.isPrefixUnaryExpression(e) &&
+      e.operator === ts.SyntaxKind.MinusToken
+    ) {
+      const operand = evaluate(e.operand, action, depth + 1);
+      if (typeof operand !== "number" || !Number.isFinite(operand))
+        return fail(e, "unsupported-unary-operand");
+      return -operand;
+    }
     if (e.kind === ts.SyntaxKind.TrueKeyword) return true;
     if (e.kind === ts.SyntaxKind.FalseKeyword) return false;
     if (e.kind === ts.SyntaxKind.NullKeyword) return null;
@@ -656,6 +674,107 @@ export function analyzeMockCounts(
     }
     if (!ts.isCallExpression(e)) return fail(e, "unsupported-expression");
     const callee = peel(e.expression);
+    if (
+      ts.isPropertyAccessExpression(callee) &&
+      ["map", "slice"].includes(callee.name.text)
+    ) {
+      // Resolve the receiver once, before evaluating arguments. A factory call
+      // here can itself log; history getters also snapshot before index effects.
+      const base = evaluate(callee.expression, action, depth + 1);
+      if (primitive(base)) return fail(callee, "unsupported-array-receiver");
+      if (base.kind === "object") {
+        accessible(base, callee);
+        const target = base.properties.get(callee.name.text);
+        if (!target || primitive(target) || target.kind !== "closure")
+          return fail(callee, "unsupported-array-receiver");
+        // A source method named map/slice is not the native array operation.
+        return accessible(
+          invoke(
+            target,
+            argumentsOf(e, action, depth + 1),
+            e,
+            action,
+            depth + 1,
+          ),
+          e,
+        );
+      }
+      if (base.kind !== "array" && base.kind !== "history")
+        return fail(callee, "unsupported-array-receiver");
+      if (base.kind === "array") accessible(base, callee);
+      const args = argumentsOf(e, action, depth + 1);
+      if (callee.name.text === "map") {
+        if (
+          base.kind !== "array" ||
+          args.length !== 1 ||
+          primitive(args[0]) ||
+          args[0].kind !== "closure"
+        )
+          return fail(e, "unsupported-array-map-callback");
+        const properties = new Map<string, Value>();
+        // All admitted arrays are fresh, dense arrays with native prototypes.
+        // Mutation/escape in a callback remains unsupported by invoke/evaluate.
+        const length = base.properties.size;
+        for (let index = 0; index < length; index++)
+          properties.set(
+            String(index),
+            invoke(
+              args[0],
+              [base.properties.get(String(index)), index, base],
+              e,
+              action,
+              depth + 1,
+            ),
+          );
+        return { kind: "array", properties, moduleOwned: initializing };
+      }
+      if (
+        args.length > 2 ||
+        args.some(
+          (value) =>
+            value !== undefined &&
+            (typeof value !== "number" || !Number.isSafeInteger(value)),
+        )
+      )
+        return fail(e, "unsupported-slice-index");
+      const length =
+        base.kind === "history"
+          ? base.evidence.calls!.length
+          : base.properties.size;
+      const clamp = (n: number) =>
+        n < 0 ? Math.max(length + n, 0) : Math.min(n, length);
+      const from = clamp((args[0] as number | undefined) ?? 0);
+      const to = Math.max(
+        from,
+        clamp((args[1] as number | undefined) ?? length),
+      );
+      if (base.kind === "history") {
+        const calls = base.evidence
+          .calls!.slice(from, to)
+          .map((call) => ({ ...call }));
+        return {
+          kind: "history",
+          evidence: {
+            ...base.evidence,
+            calls,
+            observedCount: calls.length,
+            historySelections: [
+              ...(base.evidence.historySelections ?? []),
+              { source: model.location(e), inputCount: length, from, to },
+            ],
+          },
+        };
+      }
+      return {
+        kind: "array",
+        moduleOwned: initializing,
+        properties: new Map(
+          [...base.properties.values()]
+            .slice(from, to)
+            .map((value, index) => [String(index), value]),
+        ),
+      };
+    }
     if (model.nativeMock(e)) {
       if (initializing) return fail(e, "effectful-module-initialization");
       const [receiver, method, replacement] = e.arguments;

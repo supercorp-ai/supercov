@@ -69,7 +69,7 @@ test(
     const nativeNames = [...nativeOutput.matchAll(/^# Subtest: (.+)$/gm)].map(
       (match) => match[1],
     );
-    assert.equal(nativeNames.length, 52);
+    assert.equal(nativeNames.length, 66);
     // Verify the native side effect separately from the captured count-only
     // fixture: adding a value assertion there would introduce another oracle.
     const nativeReceiverMutation = JSON.parse(
@@ -96,6 +96,34 @@ test(
         true,
       ],
       ["count detects missing call", "console.log('live');", "", false],
+      [
+        "map payload remains unchecked",
+        "'mapped payload'",
+        "'different mapped payload'",
+        true,
+        "arrays.mjs",
+      ],
+      [
+        "map callback effect removal detected",
+        "console.log(value, index, array.length);",
+        "",
+        false,
+        "arrays.mjs",
+      ],
+      [
+        "map callback evaluation removal detected",
+        "console.log('callback evaluated');",
+        "",
+        false,
+        "arrays.mjs",
+      ],
+      [
+        "slice value remains unchecked",
+        "'selected'",
+        "'different selected value'",
+        true,
+        "arrays.mjs",
+      ],
       [
         "object payload remains unchecked",
         "'object payload'",
@@ -350,7 +378,7 @@ test(
           2,
         ),
     );
-    assert.ok(page.items.length >= 51 && page.items.length <= 52);
+    assert.ok(page.items.length >= 65 && page.items.length <= 66);
     const sourceLines = readFileSync(
       resolve(root, "tests/core.test.mjs"),
       "utf8",
@@ -443,6 +471,62 @@ test(
       owners(checked("object argument side effects counted")[0]),
       ["payloadAfterCall", "nestedObjectPayload"],
     );
+    assert.equal(
+      checked("array map counts callback effects")[0].observedCount,
+      2,
+    );
+    assert.deepEqual(
+      checked("array map routes callback effects").map((r) => r.observedCount),
+      [1, 1],
+    );
+    assert.equal(
+      checked("array map output payload is not pinned")[0].observedCount,
+      1,
+    );
+    const ordered = checked("array map evaluation order")[0];
+    assert.equal(ordered.observedCount, 4);
+    assert.notEqual(ordered.calls[0].source, ordered.calls[1].source);
+    assert.equal(ordered.calls[2].source, ordered.calls[3].source);
+    assert.deepEqual(
+      checked("own map method is not array map").map((r) => r.observedCount),
+      [0, 1],
+    );
+    const sliced = checked("sliced history survives reset");
+    assert.deepEqual(
+      sliced.map((r) => r.observedCount),
+      [1, 1],
+    );
+    assert.deepEqual(owners(sliced[0]), ["afterHistory"]);
+    assert.deepEqual(
+      sliced[0].historySelections.map(({ inputCount, from, to }) => ({
+        inputCount,
+        from,
+        to,
+      })),
+      [{ inputCount: 2, from: 1, to: 2 }],
+    );
+    assert.deepEqual(owners(checked("negative sliced history index")[0]), [
+      "afterHistory",
+    ]);
+    const selections = checked("nested and empty sliced history");
+    assert.equal(selections[0].historySelections.length, 2);
+    assert.deepEqual(owners(selections[0]), ["afterHistory"]);
+    assert.equal(selections[1].observedCount, 0);
+    assert.equal(selections[1].historySelections[0].inputCount, 3);
+    assert.deepEqual(
+      checked("slice snapshots before argument effects").map(
+        (r) => r.observedCount,
+      ),
+      [1, 2],
+    );
+    assert.deepEqual(
+      owners(checked("slice snapshots before argument effects")[0]),
+      ["live"],
+    );
+    assert.equal(
+      checked("fresh array slice spreads selected values")[0].observedCount,
+      1,
+    );
     for (const name of [
       "conditional limit",
       "async limit",
@@ -453,6 +537,10 @@ test(
       "mutated snapshot limit",
       "shared module object limit",
       "native factory method mutates shared receiver",
+      "sparse array map limit",
+      "mutating array map limit",
+      "array map this argument limit",
+      "coercing slice index limit",
       "effectful module initialization limit",
       "getter initialization limit",
       "receiver this limit",
@@ -593,7 +681,7 @@ test(
           .flat()
           .filter((r) => r.status === "source-checked").length,
         sourceRowCheckedObservations: rows.length,
-        nativeTests: 52,
+        nativeTests: 66,
         archivedTests: page.items.length,
       }),
     );
