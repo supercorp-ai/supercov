@@ -19,6 +19,7 @@ export const PROTOCOL = {
     "first-test-call-omission-v1",
     "closed-count-sensitivity-v1",
     "closed-payload-sensitivity-v1",
+    "payload-native-predicates-v1",
     "mock-observation-projections-v1",
     "assertion-comparison-relations-v2",
     "process-exit-source-v1",

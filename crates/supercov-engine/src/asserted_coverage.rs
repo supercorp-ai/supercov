@@ -643,6 +643,13 @@ pub struct PayloadProjection {
     pub argument_index: u64,
     pub read_at: String,
     pub history_selections: Option<Vec<MockHistorySelection>>,
+    pub coercion: Option<PayloadCoercion>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PayloadCoercion {
+    pub source: String,
+    pub rule: String,
+    pub input: serde_json::Value,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PayloadVariant {
@@ -663,6 +670,23 @@ fn valid_payload(v: &serde_json::Value, depth: usize, budget: &mut usize) -> boo
     match v["kind"].as_str() {
         Some("undefined" | "null" | "opaque-string") => o.len() == 1,
         Some("string") => o.len() == 2 && v["value"].is_string(),
+        Some("quoted-string") => {
+            o.len() == 2
+                && v["value"].as_str().is_some_and(|s| {
+                    s.len() <= 64
+                        && s.bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || b" _-".contains(&c))
+                })
+        }
+        Some("substring-pattern") => {
+            o.len() == 2
+                && v["value"].as_str().is_some_and(|s| {
+                    !s.is_empty()
+                        && s.len() <= 80
+                        && s.bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || b" _:-".contains(&c))
+                })
+        }
         Some("boolean") => o.len() == 2 && v["value"].is_boolean(),
         Some("number") => {
             o.len() == 2
@@ -694,6 +718,20 @@ fn valid_payload(v: &serde_json::Value, depth: usize, budget: &mut usize) -> boo
 // must never compare equal just because their abstract descriptions are equal.
 fn payload_equal(a: &serde_json::Value, b: &serde_json::Value, deep: bool) -> Option<bool> {
     let (ak, bk) = (a["kind"].as_str()?, b["kind"].as_str()?);
+    if ak == "quoted-string" || bk == "quoted-string" {
+        let other = if ak == "quoted-string" { b } else { a };
+        return match other["kind"].as_str()? {
+            "string" => {
+                if other["value"].as_str()?.contains('\'') {
+                    None
+                } else {
+                    Some(false)
+                }
+            }
+            "quoted-string" | "opaque-string" => None,
+            _ => Some(false),
+        };
+    }
     if ak == "opaque-string" || bk == "opaque-string" {
         let other = if ak == "opaque-string" { bk } else { ak };
         return if matches!(other, "string" | "opaque-string") {
@@ -730,6 +768,50 @@ fn payload_equal(a: &serde_json::Value, b: &serde_json::Value, deep: bool) -> Op
         return Some(a["value"].as_f64()? == b["value"].as_f64()?);
     }
     Some(a["value"] == b["value"])
+}
+
+fn payload_predicate(c: &PayloadCheck) -> Option<bool> {
+    if c.predicate == "node-literal-regexp" {
+        if c.expected["kind"] != "substring-pattern" || c.actual["kind"] != "string" {
+            return None;
+        }
+        return Some(
+            c.actual["value"]
+                .as_str()?
+                .contains(c.expected["value"].as_str()?),
+        );
+    }
+    payload_equal(
+        &c.actual,
+        &c.expected,
+        c.predicate == "node-deep-strict-equality",
+    )
+}
+
+fn valid_payload_coercion(c: &PayloadCheck) -> bool {
+    let Some(coercion) = &c.projection.coercion else {
+        return true;
+    };
+    if coercion.source != c.projection.read_at || !valid_payload(&coercion.input, 0, &mut 4096) {
+        return false;
+    }
+    match coercion.rule.as_str() {
+        "string-identity" => {
+            matches!(
+                coercion.input["kind"].as_str(),
+                Some("string" | "opaque-string" | "quoted-string")
+            ) && c.actual == coercion.input
+        }
+        "plain-object-default-string" => {
+            coercion.input["kind"] == "object"
+                && coercion.input["properties"].as_array().is_some_and(|p| {
+                    p.iter()
+                        .all(|p| !matches!(p["name"].as_str(), Some("toString" | "valueOf")))
+                })
+                && c.actual == serde_json::json!({"kind":"string","value":"[object Object]"})
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -939,7 +1021,7 @@ pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaChec
                         s.as_ref()
                             .is_some_and(|s| s.starts_with(&format!("{}:", site.file)))
                     };
-                    if e.model != "node-closed-payload-sensitivity-v1"
+                    if e.model != "node-closed-payload-sensitivity-v2"
                         || e.status != "source-checked"
                         || e.reason.is_some()
                         || e.scope.as_deref() != Some("closed-synchronous-test-module")
@@ -962,12 +1044,12 @@ pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaChec
                     let (Some(original), Some(variants)) = (&e.original, &e.variants) else {
                         return result;
                     };
-                    let valid_check = |c: &PayloadCheck| {
+                    let valid_check = |c: &PayloadCheck, original_witness: bool| {
                         let mut budget = 4096;
                         let p = &c.projection;
                         matches!(
                             c.predicate.as_str(),
-                            "node-same-value" | "node-deep-strict-equality"
+                            "node-same-value" | "node-deep-strict-equality" | "node-literal-regexp"
                         ) && p.instance.starts_with(&format!("{}:", test.file))
                             && p.read_at.starts_with(&format!("{}:", test.file))
                             && p.call_source.starts_with(&format!("{}:", site.file))
@@ -978,17 +1060,29 @@ pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaChec
                             })
                             && valid_payload(&c.actual, 0, &mut budget)
                             && valid_payload(&c.expected, 0, &mut budget)
-                            && payload_equal(
-                                &c.actual,
-                                &c.expected,
-                                c.predicate == "node-deep-strict-equality",
-                            )
-                            .is_some_and(|eq| {
-                                c.outcome == if eq { "not-rejected" } else { "rejected" }
-                            })
+                            && valid_payload_coercion(c)
+                            && (c.predicate == "node-literal-regexp")
+                                == (c.expected["kind"] == "substring-pattern")
+                            && match payload_predicate(c) {
+                                Some(eq) => {
+                                    c.outcome == if eq { "not-rejected" } else { "rejected" }
+                                }
+                                None => {
+                                    original_witness
+                                        && c.outcome == "witnessed-pass"
+                                        && matches!(
+                                            c.actual["kind"].as_str(),
+                                            Some("opaque-string" | "quoted-string")
+                                        )
+                                        && matches!(
+                                            c.expected["kind"].as_str(),
+                                            Some("string" | "substring-pattern")
+                                        )
+                                }
+                            }
                     };
-                    if !valid_check(original)
-                        || original.outcome != "not-rejected"
+                    if !valid_check(original, true)
+                        || !matches!(original.outcome.as_str(), "not-rejected" | "witnessed-pass")
                         || !matches!(
                             (
                                 hint.assertion_method.as_deref(),
@@ -999,6 +1093,7 @@ pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaChec
                                     Some("deepEqual" | "deepStrictEqual"),
                                     "node-deep-strict-equality"
                                 )
+                                | (Some("match"), "node-literal-regexp")
                         )
                     {
                         result.reason = "payload-assertion-not-modelled".into();
@@ -1019,7 +1114,7 @@ pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaChec
                             "source-checked" => {
                                 v.reason.is_some()
                                     || v.check.as_ref().is_none_or(|c| {
-                                        !valid_check(c)
+                                        !valid_check(c, false)
                                             || c.expected != original.expected
                                             || c.predicate != original.predicate
                                             || c.projection.instance != original.projection.instance
@@ -2785,7 +2880,7 @@ mod tests {
         changed["actual"] = serde_json::json!({"kind":"undefined"});
         changed["outcome"] = "rejected".into();
         hint.payload_sensitivity = Some(serde_json::from_value(serde_json::json!({
-            "model":"node-closed-payload-sensitivity-v1", "status":"source-checked",
+            "model":"node-closed-payload-sensitivity-v2", "status":"source-checked",
             "scope":"closed-synchronous-test-module", "assertionSource":"tests/a.test.ts:7:3",
             "targetSource":"src/a.ts:4:3", "changeSource":"src/a.ts:4:12", "changeText":"{ return arg; }",
             "allocations":["src/a.ts:2:3"], "original":original,
@@ -2860,6 +2955,129 @@ mod tests {
         assert!(valid_payload(&object, 0, &mut 4096));
         assert!(!valid_payload(
             &serde_json::json!({"kind":"object","properties":[{"name":"x","value":{"kind":"null"}},{"name":"x","value":{"kind":"null"}}]}),
+            0,
+            &mut 4096
+        ));
+    }
+
+    #[test]
+    fn payload_native_predicates_keep_original_witness_separate_from_variant_proofs() {
+        let mut hint = pragma_hint();
+        hint.check = Some("value".into());
+        hint.assertion_method = Some("match".into());
+        let original = serde_json::json!({
+            "predicate":"node-literal-regexp", "actual":{"kind":"opaque-string"},
+            "expected":{"kind":"substring-pattern","value":"a: 1"}, "outcome":"witnessed-pass",
+            "projection":{"instance":"tests/a.test.ts:2:3", "callSource":"src/a.ts:4:3", "callIndex":0, "argumentIndex":2, "readAt":"tests/a.test.ts:7:16",
+                "coercion":{"source":"tests/a.test.ts:7:16", "rule":"string-identity", "input":{"kind":"opaque-string"}}}
+        });
+        let mut changed = original.clone();
+        changed["actual"] = serde_json::json!({"kind":"string","value":"[object Object]"});
+        changed["outcome"] = "rejected".into();
+        changed["projection"]["coercion"] = serde_json::json!({
+            "source":"tests/a.test.ts:7:16", "rule":"plain-object-default-string",
+            "input":{"kind":"object","properties":[{"name":"a","value":{"kind":"number","value":1}}]}
+        });
+        hint.payload_sensitivity = Some(serde_json::from_value(serde_json::json!({
+            "model":"node-closed-payload-sensitivity-v2", "status":"source-checked",
+            "scope":"closed-synchronous-test-module", "assertionSource":"tests/a.test.ts:7:3",
+            "targetSource":"src/a.ts:4:3", "changeSource":"src/a.ts:4:12", "changeText":"mode === 'verbose'",
+            "allocations":["src/a.ts:2:3"], "original":original,
+            "variants":[
+                {"change":"condition-false","status":"source-checked","check":changed},
+                {"change":"condition-true","status":"unresolved","reason":"opaque value"},
+                {"change":"condition-inverted","status":"unresolved","reason":"opaque value"}
+            ]
+        })).unwrap());
+        let mut s = site("S1", "return", vec![], &["T1"]);
+        s.category = "return".into();
+        let mut t = test("T1", vec![]);
+        t.file = "tests/a.test.ts".into();
+        let f = facts(vec![s], vec![t]);
+        assert_eq!(
+            check_pragma_hints(&f, &[hint.clone()])[0].validation,
+            HintValidation::AnalyzerSupported
+        );
+        for case in 0..11 {
+            let mut h = hint.clone();
+            let e = h.payload_sensitivity.as_mut().unwrap();
+            match case {
+                0 => h.witness = "unavailable".into(),
+                1 => h.assertion_source = Some("tests/a.test.ts:9:3".into()),
+                2 => e.original.as_mut().unwrap().outcome = "not-rejected".into(),
+                3 => e.variants.as_mut().unwrap()[0].check = e.original.clone(),
+                4 => {
+                    let o = e.original.as_mut().unwrap();
+                    o.actual = serde_json::json!({"kind":"string","value":"does not match"});
+                    o.projection.coercion = None;
+                }
+                5 => {
+                    e.variants.as_mut().unwrap()[0]
+                        .check
+                        .as_mut()
+                        .unwrap()
+                        .projection
+                        .coercion
+                        .as_mut()
+                        .unwrap()
+                        .rule = "guess".into()
+                }
+                6 => {
+                    e.variants.as_mut().unwrap()[0]
+                        .check
+                        .as_mut()
+                        .unwrap()
+                        .projection
+                        .coercion
+                        .as_mut()
+                        .unwrap()
+                        .source = "tests/a.test.ts:9:3".into()
+                }
+                7 => {
+                    e.variants.as_mut().unwrap()[0]
+                        .check
+                        .as_mut()
+                        .unwrap()
+                        .projection
+                        .coercion
+                        .as_mut()
+                        .unwrap()
+                        .input = serde_json::json!({"kind":"object","properties":[{"name":"toString","value":{"kind":"string","value":"a: 1"}}]})
+                }
+                8 => {
+                    e.original.as_mut().unwrap().expected =
+                        serde_json::json!({"kind":"substring-pattern","value":"a: [0-9]"})
+                }
+                9 => e.model = "node-closed-payload-sensitivity-v1".into(),
+                10 => h.assertion_method = Some("equal".into()),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                check_pragma_hints(&f, &[h])[0].validation,
+                HintValidation::Unresolved,
+                "case {case}"
+            );
+        }
+        let quoted = serde_json::json!({"kind":"quoted-string","value":"hello"});
+        assert_eq!(
+            payload_equal(
+                &quoted,
+                &serde_json::json!({"kind":"string","value":"hello"}),
+                false
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            payload_equal(
+                &quoted,
+                &serde_json::json!({"kind":"string","value":"'hello'"}),
+                false
+            ),
+            None
+        );
+        assert_eq!(payload_equal(&quoted, &quoted, false), None);
+        assert!(!valid_payload(
+            &serde_json::json!({"kind":"quoted-string","value":"hello!"}),
             0,
             &mut 4096
         ));

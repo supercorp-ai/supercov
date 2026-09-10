@@ -34,14 +34,14 @@ const sites = [
     text: "return 2;",
   },
 ];
-function collect(source, phases) {
+function collect(source, phases, inventory = sites) {
   const sf = ts.createSourceFile(
     "tests/core.test.ts",
     source,
     ts.ScriptTarget.Latest,
     true,
   );
-  const collector = collectPragmas(ts, [sf], (s) => s.fileName, sites);
+  const collector = collectPragmas(ts, [sf], (s) => s.fileName, inventory);
   const calls = [];
   const visit = (node) => {
     if (
@@ -63,6 +63,38 @@ function collect(source, phases) {
     { id: "runtime-T", testKey: "T", phases: phases ? phases(calls) : calls },
   ]);
 }
+
+test("checked selectors prefer the complete site but never guess between equal siblings", () => {
+  const source =
+    "// observes: src/core.ts#format typeof arg === 'object'; check value\nassert.equal(value, 'hello');";
+  const condition = {
+    id: "condition",
+    file: "src/core.ts",
+    owner: "format",
+    kind: "decision",
+    category: "condition",
+    text: "typeof arg === 'object'",
+  };
+  const outer = {
+    ...condition,
+    id: "outer",
+    kind: "effect",
+    category: "return",
+    text: "args.map(arg => { if (typeof arg === 'object') return inspect(arg); return arg; })",
+  };
+  assert.deepEqual(
+    collect(source, undefined, [outer, condition])[0].candidateSites,
+    ["condition"],
+  );
+  assert.equal(
+    collect(source, undefined, [
+      outer,
+      condition,
+      { ...condition, id: "sibling" },
+    ])[0].issue,
+    "ambiguous-target",
+  );
+});
 
 test("pragma targets are unique, local and explicit; via is explanatory only", () => {
   const hint = collect(

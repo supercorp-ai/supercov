@@ -3692,7 +3692,10 @@ export function analyzeWithFrontend(
     location: comparisonLocation,
     nativeMock: nativeContextMock,
     nativePredicate: (call: ts.CallExpression) =>
-      nativeComparison(call)?.predicate,
+      nativeComparison(call)?.predicate ??
+      (nativeImportedMethod(call, "node:assert/strict", ["match"])
+        ? "node-literal-regexp"
+        : undefined),
     nativeTest: nativeTestRegistration,
     nativeInspect: (call: ts.CallExpression) =>
       nativeImportedMethod(call, "node:util", ["inspect"]),
@@ -5751,7 +5754,7 @@ export function analyzeWithFrontend(
       const limit = (reason: string) => {
         if (hint.check === "value")
           hint.payloadSensitivity = {
-            model: "node-closed-payload-sensitivity-v1",
+            model: "node-closed-payload-sensitivity-v2",
             status: "unresolved",
             reason,
           };

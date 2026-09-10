@@ -116,21 +116,31 @@ export function collectPragmas(
           target.file
             .split("/")
             .every((part) => part && part !== "." && part !== "..");
-        const candidates = validPath
-          ? sites
-              .filter(
-                (s) =>
-                  s.file === target.file &&
-                  // The recipe selects the emission, not a containing callback-return site.
-                  (!check ||
-                    (check === "missing-call"
-                      ? s.category === "log"
-                      : s.kind === "decision" || s.category === "return")) &&
-                  (s.owner === target.function || s.fn === target.function) &&
-                  (!target.snippet || s.text.includes(target.snippet)),
-              )
-              .map((s) => s.id)
+        const matchingSites = validPath
+          ? sites.filter(
+              (s) =>
+                s.file === target.file &&
+                // The recipe selects the emission, not a containing callback-return site.
+                (!check ||
+                  (check === "missing-call"
+                    ? s.category === "log"
+                    : s.kind === "decision" || s.category === "return")) &&
+                (s.owner === target.function || s.fn === target.function) &&
+                (!target.snippet || s.text.includes(target.snippet)),
+            )
           : [];
+        // An exact whole-site selector is more specific than a containing return
+        // whose display text happens to include that expression. Equal sibling
+        // sites remain ambiguous. This only selects a node; it proves no behavior.
+        const exact =
+          check && target?.snippet
+            ? matchingSites.filter(
+                (s) => s.text.trim() === target.snippet!.trim(),
+              )
+            : [];
+        const candidates = (exact.length ? exact : matchingSites).map(
+          (s) => s.id,
+        );
         comments.set(key(sf, range.pos), {
           id: location(sf, range.pos),
           where: location(sf, range.pos),
