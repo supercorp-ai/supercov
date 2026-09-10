@@ -24,6 +24,15 @@ instead of treating missing analysis as an absent assertion. Known execution
 gaps and independently supported assertions remain separate. An inline hint
 cannot bypass a missing owning source link.
 
+For some custom Node registrations, exact recorded passing assertion locations
+and native assertion import bindings identify a callback body. These partial
+links appear in `diagnostics.witnessedBodyLinks`, with the source assertions,
+and carry `test-registration-scope-unverified` in the test's witness issues.
+The body observations are candidates, not proof of the wrapper's behavior,
+captured loop values, failure propagation or all observers in the test. Pragma
+checking remains unresolved until that scope is supported. No title matching,
+extra test instrumentation or user declaration supplies the missing premise.
+
 Supported Node console-mock observations preserve the assertion's source projection:
 a call count, an argument, the whole history, or a slice or map. Their `mock` details
 retain the receiver and access path. Predicate strength applies to that projected

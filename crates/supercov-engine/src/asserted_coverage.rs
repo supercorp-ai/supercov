@@ -422,6 +422,9 @@ pub enum WitnessIssueKind {
     /// Runtime attribution exists, but no source test body could be linked.
     /// This is missing analysis, not evidence that the test contains no oracle.
     TestSourceUnlinked,
+    /// Exact passing calls identify a callback, not its registrar, row inputs,
+    /// failure propagation, or the whole test's other observers.
+    TestRegistrationScopeUnverified,
     CallNotRecorded,
     CallIncomplete,
     MixedCallOutcomes,
@@ -431,7 +434,12 @@ pub enum WitnessIssueKind {
 
 impl WitnessIssueKind {
     fn applies_to_whole_test(self) -> bool {
-        matches!(self, Self::CaptureUnavailable | Self::TestSourceUnlinked)
+        matches!(
+            self,
+            Self::CaptureUnavailable
+                | Self::TestSourceUnlinked
+                | Self::TestRegistrationScopeUnverified
+        )
     }
 
     fn is_uncertain(self) -> bool {
@@ -1169,6 +1177,14 @@ pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaChec
                 .any(|issue| issue.kind == WitnessIssueKind::TestSourceUnlinked)
             {
                 result.reason = "test-source-unlinked".into();
+                return result;
+            }
+            if test
+                .witness_issues
+                .iter()
+                .any(|issue| issue.kind == WitnessIssueKind::TestRegistrationScopeUnverified)
+            {
+                result.reason = "test-registration-scope-unverified".into();
                 return result;
             }
             if hint.assertion_source.as_ref().is_none_or(String::is_empty)
@@ -3620,6 +3636,52 @@ mod tests {
             .push(observation("return:handler", Strength::Total));
         assert_eq!(join(&f)[0].status, Status::Evident);
         assert_eq!(join(&f)[0].witness_issues.len(), 1);
+    }
+
+    #[test]
+    fn witnessed_callback_does_not_close_test_scope_or_validate_guidance() {
+        let mut t = test("T1", vec![]);
+        t.witness_issues.push(WitnessIssue {
+            kind: WitnessIssueKind::TestRegistrationScopeUnverified,
+            source: None,
+            operation: None,
+            observation: None,
+        });
+        let mut f = facts(
+            vec![site(
+                "S1",
+                "return",
+                vec![boundary("return:handler")],
+                &["T1"],
+            )],
+            vec![t],
+        );
+        assert_eq!(
+            join(&f)[0].reason.as_ref().unwrap().kind,
+            ReasonKind::LimitAssertionWitness
+        );
+        let mut hint = pragma_hint();
+        hint.assertion_source = Some("tests/a.test.ts:7:3".into());
+        for recipe in [None, Some("value"), Some("count"), Some("missing-call")] {
+            hint.check = recipe.map(String::from);
+            let result = check_pragma_hints(&f, &[hint.clone()]).remove(0);
+            assert_eq!(result.validation, HintValidation::Unresolved);
+            assert_eq!(result.reason, "test-registration-scope-unverified");
+        }
+        // Local observations remain candidate evidence, never scope closure.
+        f.tests[0]
+            .observations
+            .push(observation("return:handler", Strength::Total));
+        let row = join(&f).remove(0);
+        assert_eq!(row.status, Status::Evident);
+        assert_eq!(
+            row.witness_issues[0].issue.kind,
+            WitnessIssueKind::TestRegistrationScopeUnverified
+        );
+        assert_eq!(
+            check_pragma_hints(&f, &[hint]).remove(0).validation,
+            HintValidation::Unresolved
+        );
     }
 
     #[test]

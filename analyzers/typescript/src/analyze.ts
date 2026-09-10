@@ -4368,6 +4368,96 @@ export function analyzeWithFrontend(
   const staticFor = (rt: RuntimeTest) =>
     staticById.get(rt.id) ?? staticLink.get(`${rt.file}:${rt.line}`);
 
+  // A custom registrar's callback can be identified by actual assertion call
+  // points without proving the registrar or its captured row. Keep that weaker
+  // relationship explicit. In particular, a wrapper may change the title, call
+  // this same body with other inputs, catch failures, or run other callbacks.
+  // Do this AFTER legacy linking: recovered bodies must never be candidates for
+  // another attempt's title/rank/nearest-line fallback.
+  const witnessedBodies = new Map<
+    ts.Node,
+    {
+      call: ts.CallExpression;
+      operations: Map<string, string>;
+      st?: StaticTest;
+    }
+  >();
+  for (const sf of allFiles) {
+    if (!isTestFile(sf)) continue;
+    const visit = (node: ts.Node) => {
+      if (
+        ts.isCallExpression(node) &&
+        node.arguments.length >= 2 &&
+        !enclosingFunction(node) &&
+        !testDeclaration(node)
+      ) {
+        const body = node.arguments[node.arguments.length - 1];
+        if (ts.isArrowFunction(body) || ts.isFunctionExpression(body)) {
+          const operations = new Map<string, string>();
+          const assertion = (n: ts.Node) => {
+            if (n !== body && ts.isFunctionLike(n)) return;
+            if (ts.isCallExpression(n)) {
+              const module = ["node:assert/strict", "node:assert"].find((m) =>
+                nativeImportedMethod(n, m, Object.keys(ASSERT_STRENGTH)),
+              );
+              if (module) {
+                const callee = comparisonExpression(
+                  n.expression,
+                ) as ts.PropertyAccessExpression;
+                const p = sf.getLineAndCharacterOfPosition(n.getStart(sf));
+                operations.set(
+                  `${rel(sf)}:${p.line + 1}:${p.character + 1}`,
+                  `${module}.${callee.name.text}`,
+                );
+              }
+            }
+            ts.forEachChild(n, assertion);
+          };
+          assertion(body);
+          if (operations.size)
+            witnessedBodies.set(body, { call: node, operations });
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+  }
+  const witnessedBodyLinks = new Map<
+    string,
+    { body: string; assertions: string[] }
+  >();
+  for (const rt of runtimeTests) {
+    if (staticFor(rt) || rt.runner !== "node:test") continue;
+    const phases = runtimePhases.get(rt.id);
+    if (!phases?.length || phases.some((p) => p.status !== "passed")) continue;
+    const matches = [...witnessedBodies].filter(
+      ([body, candidate]) =>
+        rel(body.getSourceFile()) === rt.file &&
+        phases.every((p) => candidate.operations.get(p.source) === p.op),
+    );
+    if (matches.length !== 1) continue;
+    const [body, candidate] = matches[0];
+    const sf = body.getSourceFile();
+    if (!candidate.st) {
+      const call = candidate.call;
+      candidate.st = analyzeTestBody(
+        body,
+        rel(sf),
+        sf.getLineAndCharacterOfPosition(call.getStart(sf)).line + 1,
+        call.arguments[0].getText(sf).slice(0, 60),
+      );
+      candidate.st.endLine =
+        sf.getLineAndCharacterOfPosition(call.getEnd()).line + 1;
+      staticTests.push(candidate.st);
+      mockBodies.set(candidate.st, body);
+    }
+    staticById.set(rt.id, candidate.st);
+    witnessedBodyLinks.set(rt.id, {
+      body: comparisonLocation(body),
+      assertions: [...new Set(phases.map((p) => p.source))],
+    });
+  }
+
   interface DecisionFacts {
     carrier?: string;
     /** value-position expression not inside a site: the sites its value flows to */
@@ -5467,6 +5557,9 @@ export function analyzeWithFrontend(
     // Missing transport applies to the whole test, even when no operand could
     // be modeled. An empty phase file is different from no phase file.
     const witnessIssues = [
+      ...(witnessedBodyLinks.has(rt.id)
+        ? [{ kind: "test-registration-scope-unverified" as const }]
+        : []),
       ...(!runtimePhases.has(rt.id)
         ? [{ kind: "capture-unavailable" as const }]
         : []),
@@ -5920,6 +6013,11 @@ export function analyzeWithFrontend(
       runtimeTests: runtimeTests.length,
       linkedTests: runtimeTests.length - unlinkedTests.length,
       unlinkedTests,
+      witnessedBodyLinks: [...witnessedBodyLinks].map(([id, link]) => ({
+        id,
+        ...link,
+        reason: "test-registration-scope-unverified" as const,
+      })),
       staticTests: staticTests.length,
       linkedByAssertionLines: linkedByPhases,
       linkedByTitle,
