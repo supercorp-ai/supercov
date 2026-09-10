@@ -153,7 +153,21 @@ test(
         16,
     );
     assert.equal(report.assertionScore, null);
+    assert.ok(
+      report.sites.every((row) => row.analysisCertainty === "unverified"),
+    );
+    assert.ok(
+      report.sites
+        .filter((row) => row.site.kind !== "decision")
+        .every((row) => row.candidate.sensitivityBasis === undefined),
+    );
     for (const owner of ["identical", "distinct", "masked", "zero", "typed"]) {
+      const row = decisions.find((r) => r.site.owner === owner);
+      assert.equal(
+        row.candidate.sensitivityBasis,
+        "bounded-source-model",
+        owner,
+      );
       assert.equal(
         decisions.find((r) => r.site.owner === owner).facts.decision.primitive
           .model,
@@ -161,12 +175,40 @@ test(
       );
     }
     for (const owner of ["transformed", "effectful", "lone", "mutableChoice"]) {
+      const row = decisions.find((r) => r.site.owner === owner);
+      assert.notEqual(
+        row.candidate.sensitivityBasis,
+        "bounded-source-model",
+        owner,
+      );
       assert.equal(
         decisions.find((r) => r.site.owner === owner).facts.decision.primitive,
         undefined,
         owner,
       );
     }
+    assert.equal(
+      decisions.find((r) => r.site.owner === "effectful").candidate
+        .sensitivityBasis,
+      "branch-observation-heuristic",
+    );
+    const distinctId = decisions.find((r) => r.site.owner === "distinct").site
+      .id;
+    const distinctRow = report.sites.find((r) => r.site.id === distinctId);
+    const basisEvidence = query(
+      "--evidence",
+      `${distinctRow.evidence.pointer}/candidate/sensitivityBasis`,
+      "--analysis",
+      report.analysisId,
+    );
+    assert.equal(basisEvidence.text, "bounded-source-model");
+    assert.equal(basisEvidence.analysisId, report.analysisId);
+    assert.match(
+      ok(
+        execute(binary, ["runs", runs[0], "assertions", "--site", distinctId]),
+      ),
+      /sensitivity: bounded-source-model/,
+    );
     for (const owner of ["zero", "typed"]) {
       const candidate = decisions.find((r) => r.site.owner === owner).candidate;
       assert.equal(candidate.stuckTrueCaught, true, owner);

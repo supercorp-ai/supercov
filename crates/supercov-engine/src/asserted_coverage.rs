@@ -836,6 +836,9 @@ pub struct Resolution {
     pub tests: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub weak_only: bool,
+    /// Basis of the forced-outcome flags, not global semantic certainty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensitivity_basis: Option<SensitivityBasis>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stuck_true_caught: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -846,6 +849,14 @@ pub struct Resolution {
     pub value_observed: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub witness_issues: Vec<TestWitnessIssue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SensitivityBasis {
+    BoundedSourceModel,
+    BranchObservationHeuristic,
+    Unavailable,
 }
 
 // ---------------------------------------------------------------------------
@@ -896,10 +907,24 @@ pub fn join(facts: &Facts) -> Vec<Resolution> {
         .sites
         .iter()
         .filter_map(|s| {
-            join.resolved
-                .get(&s.id)
-                .cloned()
-                .map(|r| join.with_witness_issues(s, join.with_comparison_limits(s, r)))
+            join.resolved.get(&s.id).cloned().map(|r| {
+                let mut r = join.with_witness_issues(s, join.with_comparison_limits(s, r));
+                if s.kind == "decision" {
+                    r.sensitivity_basis = Some(
+                        if r.stuck_true_caught.is_none() || r.stuck_false_caught.is_none() {
+                            SensitivityBasis::Unavailable
+                        } else if s.decision.as_ref().is_some_and(|d| d.primitive.is_some()) {
+                            // Only successful primitive_sensitivity checks produce flags
+                            // when a primitive model is present; invalid models do not fall
+                            // through to the heuristic path.
+                            SensitivityBasis::BoundedSourceModel
+                        } else {
+                            SensitivityBasis::BranchObservationHeuristic
+                        },
+                    );
+                }
+                r
+            })
         })
         .collect()
 }
@@ -1046,6 +1071,7 @@ impl<'a> Join<'a> {
                 covered_by: site.covered_by.len(),
                 tests: BTreeSet::new(),
                 weak_only: false,
+                sensitivity_basis: None,
                 stuck_true_caught: None,
                 stuck_false_caught: None,
                 absence_needed: None,
@@ -1100,6 +1126,7 @@ impl<'a> Join<'a> {
                 covered_by: site.covered_by.len(),
                 tests: BTreeSet::new(),
                 weak_only: false,
+                sensitivity_basis: None,
                 stuck_true_caught: None,
                 stuck_false_caught: None,
                 absence_needed: None,
@@ -1127,6 +1154,7 @@ impl<'a> Join<'a> {
             covered_by: site.covered_by.len(),
             tests,
             weak_only: !strong_hit,
+            sensitivity_basis: None,
             stuck_true_caught: None,
             stuck_false_caught: None,
             absence_needed: None,
@@ -1447,6 +1475,7 @@ impl<'a> Join<'a> {
             covered_by: covering,
             tests: BTreeSet::new(),
             weak_only: false,
+            sensitivity_basis: None,
             stuck_true_caught: stuck.then_some(false),
             stuck_false_caught: stuck.then_some(false),
             absence_needed: stuck.then_some(false),
@@ -1478,6 +1507,7 @@ impl<'a> Join<'a> {
                         match (stuck_true, stuck_false) { (false, false) => "either outcome", (false, true) => "true", _ => "false" })),
                 }),
                 covered_by: covering, tests: BTreeSet::new(), weak_only: false,
+                sensitivity_basis: None,
                 stuck_true_caught: Some(stuck_true), stuck_false_caught: Some(stuck_false),
                 absence_needed: Some(false), value_observed: None, witness_issues: vec![],
             };
@@ -1496,6 +1526,7 @@ impl<'a> Join<'a> {
                     covered_by: covering,
                     tests: BTreeSet::new(),
                     weak_only: false,
+                    sensitivity_basis: None,
                     stuck_true_caught: Some(true),
                     stuck_false_caught: Some(true),
                     absence_needed: Some(false),
@@ -1695,6 +1726,7 @@ impl<'a> Join<'a> {
             covered_by: covering,
             tests: BTreeSet::new(),
             weak_only: false,
+            sensitivity_basis: None,
             stuck_true_caught: Some(stuck_true_caught),
             stuck_false_caught: Some(stuck_false_caught),
             absence_needed: Some(absence_needed),
@@ -1774,6 +1806,7 @@ impl<'a> Join<'a> {
             covered_by: site.covered_by.len(),
             tests,
             weak_only: false,
+            sensitivity_basis: None,
             stuck_true_caught: None,
             stuck_false_caught: None,
             absence_needed: None,
@@ -2003,6 +2036,10 @@ mod tests {
             let decoded: Facts = serde_json::from_value(encoded).unwrap();
             assert_eq!(f, decoded);
             let r = join(&decoded);
+            assert_eq!(
+                r[0].sensitivity_basis,
+                Some(SensitivityBasis::BoundedSourceModel)
+            );
             assert_eq!(r[0].stuck_true_caught, Some(caught));
             assert_eq!(r[0].stuck_false_caught, Some(caught));
             assert_eq!(
@@ -2050,6 +2087,7 @@ mod tests {
             }
             let r = join(&f);
             assert_eq!(r[0].status, Status::Unresolved, "case {case}");
+            assert_eq!(r[0].sensitivity_basis, Some(SensitivityBasis::Unavailable));
             assert_eq!(
                 r[0].reason.as_ref().unwrap().kind,
                 ReasonKind::LimitOperandShape,
@@ -2072,11 +2110,47 @@ mod tests {
         let f = primitive_fixture(n("1"), n("2"), "node-not-same-value", n("0"), n("1"));
         let r = join(&f);
         assert_eq!(r[0].status, Status::Partial);
+        assert_eq!(
+            r[0].sensitivity_basis,
+            Some(SensitivityBasis::BoundedSourceModel)
+        );
         assert_eq!(r[0].stuck_true_caught, Some(true));
         assert_eq!(r[0].stuck_false_caught, Some(false));
         assert_eq!(
             r[0].reason.as_ref().unwrap().kind,
             ReasonKind::GapOutcomeNotAsserted
+        );
+    }
+
+    #[test]
+    fn sensitivity_basis_does_not_promote_legacy_decisions_or_effects() {
+        let mut d = site("D", "condition", vec![], &["T"]);
+        d.kind = "decision".into();
+        let mut f = facts(
+            vec![d, site("E", "return", vec![], &["T"])],
+            vec![test("T", vec![])],
+        );
+        let r = join(&f);
+        assert_eq!(r[0].sensitivity_basis, Some(SensitivityBasis::Unavailable));
+        assert!(r[1].sensitivity_basis.is_none());
+        assert!(
+            serde_json::to_value(&r[1])
+                .unwrap()
+                .get("sensitivityBasis")
+                .is_none()
+        );
+        f.sites[0].decision = Some(DecisionFacts {
+            then: Some(vec![]),
+            ..Default::default()
+        });
+        let r = join(&f);
+        assert_eq!(
+            r[0].sensitivity_basis,
+            Some(SensitivityBasis::BranchObservationHeuristic)
+        );
+        assert_eq!(
+            serde_json::to_value(&r[0]).unwrap()["sensitivityBasis"],
+            "branch-observation-heuristic"
         );
     }
 

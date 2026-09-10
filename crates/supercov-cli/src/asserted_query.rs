@@ -481,11 +481,15 @@ pub fn command(args: &[String]) -> ExitCode {
                         continue;
                     }
                     println!(
-                        "{}:{} {} — candidate {}; unverified",
+                        "{}:{} {} — candidate {}; unverified{}",
                         row["site"]["file"].as_str().unwrap(),
                         row["site"]["start"]["line"],
                         row["site"]["category"].as_str().unwrap(),
-                        row["candidate"]["status"].as_str().unwrap()
+                        row["candidate"]["status"].as_str().unwrap(),
+                        row["candidate"]["sensitivityBasis"]
+                            .as_str()
+                            .map(|basis| format!("; sensitivity: {basis}"))
+                            .unwrap_or_default()
                     );
                 }
                 println!("Use --json for evidence, limitations, freshness and analyzer identity.");

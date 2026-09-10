@@ -102,6 +102,21 @@ model, the same fields are legacy branch-observation heuristics, not checked
 counterfactuals. Neither form predicts arbitrary edits such as changing a regex
 anchor or a comparison boundary merely because the containing site is `evident`.
 
+Decision candidates expose `sensitivityBasis` in JSON and as `sensitivity:` in
+text output:
+
+- `bounded-source-model`: the supported source model evaluated both forced
+  outcomes against the witnessed predicates, within its stated assumptions.
+- `branch-observation-heuristic`: the flags come from observed branch evidence,
+  not evaluation of the alternative behavior. Do not use them as verified
+  change-detection results.
+- `unavailable`: forced-outcome results are not available. Missing flags are not
+  `false` and must not be counted as known non-rejections.
+
+Effect candidates omit this decision-only field. These labels describe the
+analysis method, not accuracy percentages or global safety; `analysisCertainty`
+stays `unverified`. Evidence pagination preserves the same labels.
+
 Child-exit observations retain `processExit` source evidence instead of assuming
 that every Promise containing an exit listener checks the covered process. The
 bounded `node-child-exit-source-v1` model follows const projections and simple
