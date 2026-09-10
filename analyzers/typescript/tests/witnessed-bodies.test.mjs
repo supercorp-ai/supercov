@@ -107,6 +107,37 @@ test("body recovery requires complete exact native call evidence in one callback
   ]);
 });
 
+test("callable native assertions recover bodies using their recorded ok identity", (t) => {
+  const { f, source, sourcePath } = setup(t);
+  writeFileSync(
+    sourcePath,
+    source.replace("assert.equal(increment(1), 2)", "assert(increment(1))"),
+  );
+  const path = resolve(f.inputDirectory, "cov/T1.phases.json");
+  const [phase] = JSON.parse(readFileSync(path, "utf8"));
+  const witness = { ...phase, op: "node:assert/strict.ok" };
+  json(path, [witness]);
+  const result = analyze(f).facts.tests[0];
+  assert.deepEqual(result.witnessIssues, [
+    { kind: "test-registration-scope-unverified" },
+  ]);
+  assert.equal(result.observations.length, 1);
+  assert.equal(result.observations[0].boundary, "return:increment");
+  assert.equal(result.observations[0].assertionMethod, "ok");
+  for (const phases of [
+    [],
+    [{ ...witness, op: "node:assert/strict.assert" }],
+    [{ ...witness, op: "unrelated.ok" }],
+    [{ ...witness, status: "failed" }],
+    [witness, { ...witness, status: "failed" }],
+  ]) {
+    json(path, phases);
+    const rejected = analyze(f).facts.tests[0];
+    assert.equal(rejected.observations.length, 0);
+    assert.deepEqual(rejected.witnessIssues, [{ kind: "test-source-unlinked" }]);
+  }
+});
+
 test("identifier spelling, other runners and nested functions cannot supply a body link", (t) => {
   const { f, source, sourcePath, rows } = setup(t);
   for (const replacement of [

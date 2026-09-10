@@ -7,6 +7,7 @@ import "./payload-sensitivity.integration.mjs";
 import "./payload-native-predicates.integration.mjs";
 import "./direct-return.integration.mjs";
 import "./unlinked-tests.integration.mjs";
+import "./assertion-roles.integration.mjs";
 import "./awaited-assertions.integration.mjs";
 import "./awaited-capture.integration.mjs";
 import "./call-omission.integration.mjs";

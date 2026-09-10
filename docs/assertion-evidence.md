@@ -14,6 +14,15 @@ code covered by that test unknown. Such sites report an operand-shape limit,
 not proof that an assertion is absent. This does not give those sites assertion
 credit or hide known execution gaps.
 
+Native Node `assert(value)` and `assert.ok(value)` use the same recorded `ok`
+operation. Discovery resolves native import bindings, including renamed imports;
+an unrelated helper named `assert` does not acquire that identity. The optional
+failure message is not a truthiness-predicate operand and gives its returned value
+no assertion credit. Evaluating that message can still throw or have side effects:
+excluding its return value does not establish that removing the call is safe.
+Passing witnesses still require the exact source location and consistent passed
+outcomes; caught failed assertions and mixed outcomes do not supply them.
+
 Every passed archived test remains in the analysis inventory, including tests
 whose custom or aliased registration cannot be linked to a source body.
 Those entries have no invented observations and carry

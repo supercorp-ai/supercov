@@ -2116,6 +2116,81 @@ export function analyzeWithFrontend(
     return e;
   }
 
+  /** Native import identity, not the spelling of a local helper. Bare native
+   * assert and imported ok are the same truthiness operation in the recorder.
+   * Keep this canonicalization at discovery: the witness checker must not equate
+   * arbitrary operations named assert and ok or weaken its source/status check. */
+  function nativeAssertionIdentity(
+    call: ts.CallExpression,
+  ): { module: string; method: string } | undefined {
+    type Binding = {
+      module: string;
+      kind: "callable" | "namespace" | "method";
+      method?: string;
+    };
+    function binding(raw: ts.Expression): Binding | undefined {
+      const e = comparisonExpression(raw);
+      if (ts.isIdentifier(e)) {
+        const d = checker.getSymbolAtLocation(e)?.declarations?.[0];
+        if (!d) return;
+        let imported: ts.ImportDeclaration | ts.JSDocImportTag;
+        let kind: Binding["kind"];
+        let name: string | undefined;
+        if (ts.isImportClause(d) && !d.isTypeOnly) {
+          imported = d.parent;
+          kind = "callable";
+        } else if (ts.isNamespaceImport(d) && !d.parent.isTypeOnly) {
+          imported = d.parent.parent;
+          kind = "namespace";
+        } else if (
+          ts.isImportSpecifier(d) &&
+          !d.isTypeOnly &&
+          !d.parent.parent.isTypeOnly
+        ) {
+          imported = d.parent.parent.parent;
+          name = (d.propertyName ?? d.name).text;
+          kind =
+            name === "default" || name === "strict" ? "callable" : "method";
+        } else return;
+        if (
+          !ts.isImportDeclaration(imported) ||
+          !ts.isStringLiteralLike(imported.moduleSpecifier)
+        )
+          return;
+        const specifier = imported.moduleSpecifier.text;
+        if (
+          !["node:assert", "node:assert/strict", "assert", "assert/strict"].includes(
+            specifier,
+          )
+        )
+          return;
+        let module = specifier.startsWith("node:")
+          ? specifier
+          : `node:${specifier}`;
+        if (name === "strict") module = "node:assert/strict";
+        if (
+          kind === "method" &&
+          (!name || name === "assert" || !Object.hasOwn(ASSERT_STRENGTH, name))
+        )
+          return;
+        return { module, kind, method: kind === "method" ? name : undefined };
+      }
+      if (!ts.isPropertyAccessExpression(e)) return;
+      const receiver = binding(e.expression);
+      if (!receiver || receiver.kind === "method") return;
+      if (e.name.text === "strict")
+        return { module: "node:assert/strict", kind: "callable" };
+      if (e.name.text === "default" && receiver.kind === "namespace")
+        return { module: receiver.module, kind: "callable" };
+      if (e.name.text === "assert" || !Object.hasOwn(ASSERT_STRENGTH, e.name.text))
+        return;
+      return { module: receiver.module, kind: "method", method: e.name.text };
+    }
+    const resolved = binding(call.expression);
+    if (!resolved || resolved.kind === "namespace") return;
+    return { module: resolved.module, method: resolved.method ?? "ok" };
+  }
+
   function comparisonLocation(n: ts.Node): string {
     const sf = n.getSourceFile();
     return `${rel(sf)}:${n.getStart(sf)}:${n.getEnd()}`;
@@ -3844,7 +3919,9 @@ export function analyzeWithFrontend(
         let expected: ts.Expression | undefined;
         let negative = false;
         let rejectsChain = false;
-        if (
+        const nativeAssertion = nativeAssertionIdentity(node);
+        if (nativeAssertion) method = nativeAssertion.method;
+        else if (
           ts.isPropertyAccessExpression(callee) &&
           callee.expression.getText() === "assert"
         )
@@ -3853,8 +3930,13 @@ export function analyzeWithFrontend(
           method = "assert";
         if (method && ASSERT_STRENGTH[method]) {
           strength = ASSERT_STRENGTH[method];
-          actuals = node.arguments.slice(0, 2);
-          expected = node.arguments[1];
+          // Unary native assertions inspect only their first argument. Their
+          // message is evaluated, but its returned value is not the predicate.
+          // This does not erase effects/throws from argument evaluation or
+          // assume the overload roles of exception assertions.
+          const unary = nativeAssertion?.method === "ok";
+          actuals = node.arguments.slice(0, unary ? 1 : 2);
+          expected = unary ? undefined : node.arguments[1];
           negative = method === "doesNotMatch";
         } else if (ts.isPropertyAccessExpression(callee)) {
           // vitest/jest style: expect(actual)[.not][.resolves|.rejects].matcher(expected)
@@ -4397,17 +4479,12 @@ export function analyzeWithFrontend(
           const assertion = (n: ts.Node) => {
             if (n !== body && ts.isFunctionLike(n)) return;
             if (ts.isCallExpression(n)) {
-              const module = ["node:assert/strict", "node:assert"].find((m) =>
-                nativeImportedMethod(n, m, Object.keys(ASSERT_STRENGTH)),
-              );
-              if (module) {
-                const callee = comparisonExpression(
-                  n.expression,
-                ) as ts.PropertyAccessExpression;
+              const nativeAssertion = nativeAssertionIdentity(n);
+              if (nativeAssertion) {
                 const p = sf.getLineAndCharacterOfPosition(n.getStart(sf));
                 operations.set(
                   `${rel(sf)}:${p.line + 1}:${p.character + 1}`,
-                  `${module}.${callee.name.text}`,
+                  `${nativeAssertion.module}.${nativeAssertion.method}`,
                 );
               }
             }
