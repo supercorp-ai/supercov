@@ -626,6 +626,105 @@ pub struct PragmaHint {
     pub payload_sensitivity: Option<PayloadSensitivityEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct_return_sensitivity: Option<DirectReturnSensitivityEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_sensitivity: Option<CompletionSensitivityEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionSensitivityEvidence {
+    pub model: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub scope: Option<String>,
+    pub assertion_source: Option<String>,
+    pub target_source: Option<String>,
+    pub change_text: Option<String>,
+    pub change: Option<String>,
+    pub original: Option<CompletionCheck>,
+    pub omitted: Option<CompletionCheck>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionCheck {
+    pub method: String,
+    pub callback_source: String,
+    pub completion: String,
+    pub throw_source: Option<String>,
+    pub target_evaluations: u64,
+    pub outcome: String,
+}
+
+fn completion_evidence_issue(
+    hint: &PragmaHint,
+    e: &CompletionSensitivityEvidence,
+    site: &Site,
+    test: &TestFacts,
+) -> Option<String> {
+    let location_in = |location: &str, file: &str| {
+        location
+            .strip_prefix(&format!("{file}:"))
+            .and_then(|rest| rest.split_once(':'))
+            .is_some_and(|(line, column)| {
+                line.parse::<u32>().is_ok_and(|n| n > 0)
+                    && column.parse::<u32>().is_ok_and(|n| n > 0)
+            })
+    };
+    if e.model != "node-first-test-completion-v1"
+        || e.status != "source-checked"
+        || e.reason.is_some()
+        || e.scope.as_deref() != Some("first-synchronous-test-prefix")
+        || e.assertion_source != hint.assertion_source
+        || e.assertion_source
+            .as_ref()
+            .is_none_or(|s| !location_in(s, &test.file))
+        || e.target_source.as_ref().is_none_or(|s| {
+            !location_in(s, &site.file) || !s.starts_with(&format!("{}:{}:", site.file, site.line))
+        })
+        || e.change_text.as_ref().is_none_or(String::is_empty)
+        || e.change.as_deref() != Some("statement-omitted")
+        || !matches!(site.category.as_str(), "return" | "throw")
+        || hint.call_omission.is_some()
+        || hint.count_sensitivity.is_some()
+        || hint.payload_sensitivity.is_some()
+        || hint.direct_return_sensitivity.is_some()
+        || test.witness_issues.iter().any(|issue| {
+            issue.kind.applies_to_whole_test()
+                || (issue.source.is_some() && issue.source == hint.assertion_source)
+        })
+    {
+        return Some(
+            e.reason
+                .clone()
+                .unwrap_or_else(|| "unsupported-completion-evidence".into()),
+        );
+    }
+    let valid = |c: &CompletionCheck| {
+        let rejected = match (c.method.as_str(), c.completion.as_str()) {
+            ("throws", "normal") | ("doesNotThrow", "throw") => Some(true),
+            ("throws", "throw") | ("doesNotThrow", "normal") => Some(false),
+            _ => None,
+        };
+        rejected.is_some_and(|r| c.outcome == if r { "rejected" } else { "not-rejected" })
+            && hint.assertion_method.as_deref() == Some(c.method.as_str())
+            && (location_in(&c.callback_source, &test.file)
+                || location_in(&c.callback_source, &site.file))
+            && (1..=4096).contains(&c.target_evaluations)
+            && match (c.completion.as_str(), &c.throw_source) {
+                ("normal", None) => true,
+                ("throw", Some(s)) => location_in(s, &test.file) || location_in(s, &site.file),
+                _ => false,
+            }
+    };
+    if e.original
+        .as_ref()
+        .is_none_or(|c| !valid(c) || c.outcome != "not-rejected")
+        || e.omitted.as_ref().is_none_or(|c| !valid(c))
+    {
+        return Some("inconsistent-completion-predicate".into());
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1204,6 +1303,19 @@ pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaChec
                     hint.assertion_source.as_deref().unwrap(),
                     hint.assertion_method.as_deref().unwrap(),
                 ));
+                if recipe == "completion" {
+                    result.reason = "completion-sensitivity-unavailable".into();
+                    let Some(e) = &hint.completion_sensitivity else {
+                        return result;
+                    };
+                    if let Some(issue) = completion_evidence_issue(hint, e, site, test) {
+                        result.reason = issue;
+                        return result;
+                    }
+                    result.validation = HintValidation::AnalyzerSupported;
+                    result.reason = "modeled-completion-sensitivity".into();
+                    return result; // One exact omission/prefix, not general site or MC/DC credit.
+                }
                 if recipe == "value" {
                     if let (Some(direct), Some(payload)) =
                         (&hint.direct_return_sensitivity, &hint.payload_sensitivity)
@@ -2939,6 +3051,7 @@ mod tests {
             count_sensitivity: None,
             payload_sensitivity: None,
             direct_return_sensitivity: None,
+            completion_sensitivity: None,
         }
     }
 
@@ -3076,6 +3189,98 @@ mod tests {
                 "case {case}"
             );
         }
+    }
+
+    #[test]
+    fn completion_checks_keep_scope_and_predicate_consistency_without_promoting_sites() {
+        let mut hint = pragma_hint();
+        hint.check = Some("completion".into());
+        hint.assertion_method = Some("throws".into());
+        hint.completion_sensitivity = Some(serde_json::from_value(serde_json::json!({
+            "model":"node-first-test-completion-v1", "status":"source-checked",
+            "scope":"first-synchronous-test-prefix", "assertionSource":"tests/a.test.ts:7:3",
+            "targetSource":"src/a.ts:4:3", "changeText":"throw Error('boom');", "change":"statement-omitted",
+            "original":{"method":"throws", "callbackSource":"src/a.ts:3:1", "completion":"throw",
+                "throwSource":"src/a.ts:4:3", "targetEvaluations":1, "outcome":"not-rejected"},
+            "omitted":{"method":"throws", "callbackSource":"src/a.ts:3:1", "completion":"normal",
+                "targetEvaluations":1, "outcome":"rejected"}
+        })).unwrap());
+        let mut s = site("S1", "throw", vec![], &["T1"]);
+        s.line = 4;
+        let mut t = test("T1", vec![]);
+        t.file = "tests/a.test.ts".into();
+        let f = facts(vec![s], vec![t]);
+        let before = join(&f);
+        let result = check_pragma_hints(&f, &[hint.clone()]).remove(0);
+        assert_eq!(result.validation, HintValidation::AnalyzerSupported);
+        assert_eq!(result.reason, "modeled-completion-sensitivity");
+        assert!(result.strength.is_none());
+        assert!(result.observations.is_empty());
+        assert_eq!(join(&f), before);
+        for case in 0..20 {
+            let mut h = hint.clone();
+            let mut ff = f.clone();
+            let e = h.completion_sensitivity.as_mut().unwrap();
+            match case {
+                0 => h.witness = "unavailable".into(),
+                1 => h.assertion_source = Some("tests/a.test.ts:8:3".into()),
+                2 => e.original.as_mut().unwrap().outcome = "rejected".into(),
+                3 => e.omitted.as_mut().unwrap().outcome = "not-rejected".into(),
+                4 => e.original.as_mut().unwrap().throw_source = None,
+                5 => e.omitted.as_mut().unwrap().throw_source = Some("src/a.ts:4:3".into()),
+                6 => e.original.as_mut().unwrap().callback_source = "src/other.ts:3:1".into(),
+                7 => e.original.as_mut().unwrap().target_evaluations = 0,
+                8 => e.omitted.as_mut().unwrap().target_evaluations = 4097,
+                9 => e.scope = Some("whole-suite".into()),
+                10 => e.target_source = Some("src/a.ts:5:3".into()),
+                11 => h.assertion_method = Some("rejects".into()),
+                12 => e.change = Some("arbitrary-edit".into()),
+                13 => e.change_text = Some("".into()),
+                14 => e.original.as_mut().unwrap().completion = "rejection".into(),
+                15 => e.omitted.as_mut().unwrap().method = "doesNotThrow".into(),
+                16 => e.original.as_mut().unwrap().callback_source = "src/a.ts:0:0".into(),
+                17 => ff.tests[0]
+                    .witness_issues
+                    .push(rejected(WitnessIssueKind::CaptureUnavailable, None)),
+                18 => {
+                    let mut issue = rejected(WitnessIssueKind::CallFailed, None);
+                    issue.source = h.assertion_source.clone();
+                    ff.tests[0].witness_issues.push(issue);
+                }
+                19 => {
+                    h.payload_sensitivity = Some(
+                        serde_json::from_value(
+                            serde_json::json!({"model":"unused", "status":"unresolved"}),
+                        )
+                        .unwrap(),
+                    )
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                check_pragma_hints(&ff, &[h])[0].validation,
+                HintValidation::Unresolved,
+                "case {case}"
+            );
+        }
+        // An unchanged completion is also a checked answer for this one edit;
+        // it must not become whole-suite survival or ordinary assertion credit.
+        let e = hint.completion_sensitivity.as_mut().unwrap();
+        e.omitted = e.original.clone();
+        let local = check_pragma_hints(&f, &[hint.clone()]).remove(0);
+        assert_eq!(local.validation, HintValidation::AnalyzerSupported);
+        assert!(local.strength.is_none());
+        hint.assertion_method = Some("doesNotThrow".into());
+        let e = hint.completion_sensitivity.as_mut().unwrap();
+        for c in [&mut e.original, &mut e.omitted].into_iter().flatten() {
+            c.method = "doesNotThrow".into();
+            c.completion = "normal".into();
+            c.throw_source = None;
+        }
+        assert_eq!(
+            check_pragma_hints(&f, &[hint])[0].validation,
+            HintValidation::AnalyzerSupported
+        );
     }
 
     #[test]

@@ -30,15 +30,17 @@ different: their second operand can supply an actual error matcher, and string
 overloads also have an ambiguity check. That operand's producer is not attributed
 as the operation whose exception the assertion catches.
 
-The first operand of these four native exception methods remains an explicit
-completion-analysis limit. A recognizable function name is not enough: the
+The ordinary first-operand analysis of these four native exception methods
+remains an explicit completion-analysis limit. A recognizable function name is not enough: the
 analyzer must separate callback production from invocation, synchronous throws
 from promise rejection, and normal completion from the returned/fulfilled value.
 The ordinary returned-value model supplies no credit for that operand, including
 when a pragma names its producer. This also leaves genuine exception checks
 unresolved until their invocation/completion path is established; it does not
-report them as absent assertions. Error-matcher operands retain their separate
-analysis. No additional execution probes or test failures are introduced.
+report them as absent assertions. The checked synchronous completion recipe
+below can resolve one precise omission question separately. Error-matcher
+operands retain their separate analysis. No additional execution probes or test
+failures are introduced.
 
 Every passed archived test remains in the analysis inventory, including tests
 whose custom or aliased registration cannot be linked to a source body.
@@ -546,6 +548,59 @@ verified JavaScript implementation. Support never changes ordinary candidate
 strength, marks an MC/DC outcome executed, or supplies a global assertion score.
 `not-rejected` is local to the selected predicate, not whole-suite survival.
 All new work occurs after the run; hints remain inert comments.
+
+### Checked synchronous exception completion
+
+```ts
+// observes: src/validate.ts#validate throw Error('invalid'); check completion
+assert.throws(() => validate(badInput));
+
+// observes: src/operation.ts#operation return 101; check completion
+assert.doesNotThrow(operation);
+```
+
+`; check completion` asks whether replacing the selected complete `throw` or
+`return` statement with an empty statement (`;`) changes this assertion's
+outcome. The empty statement preserves a single-statement `if` body; it is not
+arbitrary token deletion, function removal, a changed error message or an MC/DC
+condition force. The hint must select exactly one source statement and attach
+to an existing assertion with its own passing witness.
+
+`hint.completionSensitivity` uses `node-first-test-completion-v1`. It shares the
+bounded source evaluator and declaration-only production-module/first
+synchronous native Node test-prefix scope with direct-return checks. It accepts
+one-argument native `throws` and `doesNotThrow`: no error matcher or asynchronous
+settlement is modeled. Source calls, immutable local aliases, source-created
+callback factories and inline test callbacks are followed through actual closure
+environments. Operand evaluation happens before the assertion's catch, while
+callback invocation happens inside it. The evaluator follows source `try`,
+`catch`, rethrow and `finally`; an evaluator limitation is not a JavaScript error
+that a catch or finally return can conceal.
+
+Unshadowed `Error` construction accepts at most one primitive message and no
+options. Only the fact of construction is represented, not properties, stack,
+formatting or matcher semantics. Unsupported operations on an original or
+changed path remain unresolved. A changed path that no longer supplies a source
+callback also remains unresolved; no callable is invented to finish the proof.
+Native assertion semantics, pristine builtins and isolated serial Node loading
+remain explicit model assumptions. This is not a formally verified JavaScript
+implementation, a general proof for every runtime, or an independently checked
+certificate of the entire source interpreter.
+
+The original and omitted paths each record callback location, `normal` or
+`throw` completion, the escaping throw's source where applicable, target visit
+count, and `rejected` or `not-rejected`. The original must agree with its passing
+witness. Rust validates scope, source identities and completion/predicate
+consistency. A caught inner throw can therefore receive a checked `not-rejected`
+answer even when another throw in the same function supplies the assertion's
+witness. A no-error assertion can ignore a normal return value, yet reject an
+omission that exposes a later throw.
+
+These are exact, scoped answers, not ordinary site-strength promotions.
+`not-rejected` does not mean the entire suite would pass. The comment cannot
+supply a missing assertion, an unexecuted MC/DC pair or a missing witness, and
+cannot make native tests fail. All added work is post-run analysis; there are no
+new test-time probes or executions of application source during the query.
 
 ### Awaited child-process capture helpers
 

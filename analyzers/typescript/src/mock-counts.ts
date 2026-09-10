@@ -190,8 +190,7 @@ export function sourceTestRows(
     const evidenceBindings: NonNullable<MockCountRowBinding["bindings"]> = [];
     for (const element of binding.name.elements) {
       const key = (element.propertyName ?? element.name) as
-        | ts.Identifier
-        | ts.StringLiteralLike;
+        ts.Identifier | ts.StringLiteralLike;
       if (!properties.has(key.text))
         return unsupported("missing-row-own-property");
       const value = properties.get(key.text)!;
@@ -250,6 +249,10 @@ interface Model {
   nativeTty?(expr: ts.Expression): boolean;
   nativeAssertion?(call: ts.CallExpression): boolean;
   globalString?(expr: ts.Expression): boolean;
+  nativeException?(
+    call: ts.CallExpression,
+  ): "throws" | "doesNotThrow" | undefined;
+  globalError?(expr: ts.Expression): boolean;
 }
 
 export interface CallOmissionEvidence {
@@ -277,6 +280,29 @@ interface OmissionTrial {
   originalWitness?: boolean;
   emptyMapCallback?: ts.ArrowFunction;
   directReturn?: { call: ts.CallExpression; target: ts.Expression };
+  completion?: { target: ts.Statement; omit: boolean };
+}
+
+export interface CompletionCheck {
+  method: "throws" | "doesNotThrow";
+  callbackSource: string;
+  completion: "normal" | "throw";
+  throwSource?: string;
+  targetEvaluations: number;
+  outcome: "rejected" | "not-rejected";
+}
+
+export interface CompletionSensitivityEvidence {
+  model: "node-first-test-completion-v1";
+  status: "source-checked" | "unresolved";
+  reason?: string;
+  scope?: "first-synchronous-test-prefix";
+  assertionSource?: string;
+  targetSource?: string;
+  changeText?: string;
+  change?: "statement-omitted";
+  original?: CompletionCheck;
+  omitted?: CompletionCheck;
 }
 
 export interface DirectReturnCheck {
@@ -377,9 +403,7 @@ function runMockCounts(
     | { kind: "count"; evidence: MockCountEvidence }
     | { kind: "history"; evidence: MockCountEvidence };
   type FunctionNode =
-    | ts.FunctionDeclaration
-    | ts.ArrowFunction
-    | ts.FunctionExpression;
+    ts.FunctionDeclaration | ts.ArrowFunction | ts.FunctionExpression;
   type Closure = {
     kind: "closure";
     node: FunctionNode;
@@ -404,11 +428,14 @@ function runMockCounts(
         selection: Omit<PayloadProjection, "argumentIndex" | "readAt">;
       }
     | { kind: "opaque-inspect-string" | "opaque-native-tty" }
+    | { kind: "native-error" }
     | { kind: "quoted-string" | "substring-pattern"; value: string }
     | { kind: "context"; mock: Mock };
   const checks = new Map<ts.CallExpression, MockCountEvidence>();
   const payloadChecks = new Map<ts.CallExpression, PayloadCheck>();
   const directReturnChecks = new Map<ts.CallExpression, DirectReturnCheck>();
+  const completionChecks = new Map<ts.CallExpression, CompletionCheck>();
+  let completionTargetEvaluations = 0;
   let activeDirectCalls = 0;
   let directTargetEvaluations = 0;
   const callArguments = new WeakMap<Call, Value[]>();
@@ -428,6 +455,13 @@ function runMockCounts(
   let budget = 4096;
   class Unsupported extends Error {}
   class ReachedAssertion extends Error {}
+  // A modeled language exception, never an evaluator error or control signal.
+  class ProgramThrow {
+    constructor(
+      readonly value: Value,
+      readonly source: string,
+    ) {}
+  }
   const fail = (node: ts.Node, why: string): never => {
     throw new Unsupported(`${why} at ${model.location(node)}`);
   };
@@ -688,6 +722,7 @@ function runMockCounts(
     return (
       primitive(value) ||
       value.kind === "closure" ||
+      value.kind === "native-error" ||
       value.kind === "opaque-inspect-string" ||
       value.kind === "quoted-string" ||
       ((value.kind === "object" || value.kind === "array") &&
@@ -745,14 +780,16 @@ function runMockCounts(
     depth: number,
   ): Value {
     const target = closure.node;
+    const testCallback =
+      !!trial?.completion && target.getSourceFile() === fn.getSourceFile();
     if (
       !target.body ||
-      !model.production(target) ||
+      (!model.production(target) && !testCallback) ||
       target.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ||
       ("asteriskToken" in target && target.asteriskToken)
     )
       return fail(at, "unsupported-call-target");
-    if (!stableTarget(target))
+    if (!testCallback && !stableTarget(target))
       return fail(at, "mutable-target-or-unsupported-module-initialization");
     if (args.some((arg) => !sourceValue(arg)))
       return fail(at, "escaping-nonprimitive-argument");
@@ -808,6 +845,20 @@ function runMockCounts(
   function evaluate(raw: ts.Expression, action: string, depth: number): Value {
     if (--budget < 0 || depth > 32) return fail(raw, "source-model-budget");
     const e = peel(raw);
+    if (
+      trial?.completion &&
+      (ts.isNewExpression(e) || ts.isCallExpression(e)) &&
+      model.globalError?.(e.expression)
+    ) {
+      // No custom constructor, options/cause object, coercion hooks or stack
+      // inspection. With no error matcher, only abrupt completion is observed.
+      if (e.arguments && e.arguments.length > 1)
+        return fail(e, "unsupported-error-constructor-options");
+      for (const arg of e.arguments ?? [])
+        if (!primitive(evaluate(arg, action, depth + 1)))
+          return fail(e, "unsupported-error-message-coercion");
+      return { kind: "native-error" };
+    }
     if (trial?.directReturn?.target === e && activeDirectCalls > 0)
       directTargetEvaluations++;
     if (trial?.condition?.node === e && trial.condition.value !== "invert")
@@ -869,12 +920,10 @@ function runMockCounts(
     if (ts.isObjectLiteralExpression(e)) {
       const properties = new Map<string, Value>();
       for (const item of e.properties) {
-        if (
-          !(
-            ts.isPropertyAssignment(item) ||
-            ts.isShorthandPropertyAssignment(item)
-          )
-        )
+        if (!(
+          ts.isPropertyAssignment(item) ||
+          ts.isShorthandPropertyAssignment(item)
+        ))
           return fail(item, "unsupported-object-member");
         const key = propertyName(item.name);
         if (key === "__proto__")
@@ -1264,6 +1313,37 @@ function runMockCounts(
       } else installed.set(base.mock.target, base.mock.previous);
       return undefined;
     }
+    const exceptionMethod = trial?.completion && model.nativeException?.(e);
+    if (exceptionMethod) {
+      if (initializing || e.arguments.length !== 1)
+        return fail(e, "unsupported-completion-assertion-shape");
+      // Evaluate the operand OUTSIDE the assertion's catch. A factory's own
+      // error is not a thrown result of the callback it was meant to produce.
+      const callback = evaluate(e.arguments[0], action, depth + 1);
+      if (primitive(callback) || callback.kind !== "closure")
+        return fail(e, "completion-operand-not-source-callback");
+      let thrown: ProgramThrow | undefined;
+      try {
+        invoke(callback, [], e, action, depth + 1);
+      } catch (error) {
+        if (!(error instanceof ProgramThrow)) throw error;
+        thrown = error;
+      }
+      const rejected = exceptionMethod === "throws" ? !thrown : !!thrown;
+      if (trial.assertion === e) {
+        completionChecks.set(e, {
+          method: exceptionMethod,
+          callbackSource: model.location(callback.node),
+          completion: thrown ? "throw" : "normal",
+          ...(thrown ? { throwSource: thrown.source } : {}),
+          targetEvaluations: completionTargetEvaluations,
+          outcome: rejected ? "rejected" : "not-rejected",
+        });
+        throw new ReachedAssertion();
+      }
+      if (rejected) return fail(e, "earlier-completion-assertion-rejects");
+      return undefined;
+    }
     const predicate = model.nativePredicate(e);
     if (predicate) {
       if (initializing) return fail(e, "effectful-module-initialization");
@@ -1441,6 +1521,10 @@ function runMockCounts(
     depth: number,
   ): { value: Value } | undefined {
     if (--budget < 0) return fail(statement, "source-model-budget");
+    if (trial?.completion?.target === statement) {
+      completionTargetEvaluations++;
+      if (trial.completion.omit) return;
+    }
     if (
       ts.isVariableStatement(statement) &&
       statement.declarationList.flags & ts.NodeFlags.Const
@@ -1452,7 +1536,10 @@ function runMockCounts(
       }
     } else if (ts.isExpressionStatement(statement))
       evaluate(statement.expression, action, depth + 1);
-    else if (ts.isReturnStatement(statement) && model.production(statement))
+    else if (
+      ts.isReturnStatement(statement) &&
+      (model.production(statement) || trial?.completion)
+    )
       return {
         value: statement.expression
           ? evaluate(statement.expression, action, depth + 1)
@@ -1460,7 +1547,7 @@ function runMockCounts(
       };
     else if (
       ts.isIfStatement(statement) &&
-      (model.production(statement) || trial?.payload)
+      (model.production(statement) || trial?.payload || trial?.completion)
     ) {
       const condition = evaluate(statement.expression, action, depth + 1);
       if (!primitive(condition))
@@ -1471,12 +1558,50 @@ function runMockCounts(
       if (branch) return execute(branch, action, depth + 1);
     } else if (
       ts.isBlock(statement) &&
-      (model.production(statement) || trial?.payload)
+      (model.production(statement) || trial?.payload || trial?.completion)
     ) {
       for (const child of statement.statements) {
         const returned = execute(child, action, depth + 1);
         if (returned) return returned;
       }
+    } else if (trial?.completion && ts.isThrowStatement(statement)) {
+      const value = evaluate(statement.expression, action, depth + 1);
+      if (!sourceValue(value))
+        return fail(statement, "unsupported-thrown-value");
+      throw new ProgramThrow(value, model.location(statement));
+    } else if (trial?.completion && ts.isTryStatement(statement)) {
+      let result: { value: Value } | undefined;
+      let thrown: ProgramThrow | undefined;
+      try {
+        result = execute(statement.tryBlock, action, depth + 1);
+      } catch (error) {
+        if (!(error instanceof ProgramThrow)) throw error;
+        thrown = error;
+      }
+      if (thrown && statement.catchClause) {
+        const previous = locals;
+        locals = new Map(locals);
+        try {
+          const binding = statement.catchClause.variableDeclaration;
+          if (binding)
+            bind(binding.name, binding, thrown.value, action, depth + 1);
+          thrown = undefined;
+          result = execute(statement.catchClause.block, action, depth + 1);
+        } catch (error) {
+          if (!(error instanceof ProgramThrow)) throw error;
+          thrown = error;
+        } finally {
+          locals = previous;
+        }
+      }
+      // An evaluator limitation is NEVER a catchable JavaScript exception.
+      // Nor may a finally return conceal an unsupported operation in the try.
+      if (statement.finallyBlock) {
+        const final = execute(statement.finallyBlock, action, depth + 1);
+        if (final) return final;
+      }
+      if (thrown) throw thrown;
+      return result;
     } else if (!ts.isEmptyStatement(statement))
       fail(statement, "unsupported-statement");
   }
@@ -1500,9 +1625,197 @@ function runMockCounts(
         execute(statement, model.location(statement), 0);
   } catch (error) {
     if (error instanceof Unsupported) limitation = error.message;
+    else if (error instanceof ProgramThrow)
+      limitation = `uncaught-source-exception-before-selected-assertion at ${error.source}`;
     else if (!(error instanceof ReachedAssertion)) throw error;
   }
-  return { checks, payloadChecks, directReturnChecks, limitation };
+  return {
+    checks,
+    payloadChecks,
+    directReturnChecks,
+    completionChecks,
+    limitation,
+  };
+}
+
+/** Shared environment gate for scoped source-prefix checks. No earlier test,
+ * opaque import or executable module setup can establish hidden state. */
+function firstSynchronousPrefixIssue(
+  ts: SyntaxAPI,
+  fn: ts.ArrowFunction,
+  production: ts.SourceFile,
+  model: Model & { nativeTest(call: ts.CallExpression): boolean },
+): string | undefined {
+  const sf = fn.getSourceFile(),
+    registration = fn.parent.parent;
+  if (!ts.isExpressionStatement(registration) || registration.parent !== sf)
+    return "registration-shape";
+  let found = false;
+  for (const statement of sf.statements) {
+    if (ts.isImportDeclaration(statement)) {
+      const c = statement.importClause;
+      if (!c || !ts.isStringLiteralLike(statement.moduleSpecifier))
+        return "import-outside-scope";
+      if (c.isTypeOnly) continue;
+      if (
+        [
+          "node:test",
+          "node:assert/strict",
+          "node:assert",
+          "assert/strict",
+          "assert",
+        ].includes(statement.moduleSpecifier.text)
+      )
+        continue;
+      const names = [
+        c.name,
+        ...(c.namedBindings && ts.isNamedImports(c.namedBindings)
+          ? c.namedBindings.elements
+              .filter((e) => !e.isTypeOnly)
+              .map((e) => e.name)
+          : []),
+      ].filter((n) => n !== undefined);
+      if (
+        !names.length ||
+        (c.namedBindings && ts.isNamespaceImport(c.namedBindings)) ||
+        names.some(
+          (name) => model.declaration(name)?.getSourceFile() !== production,
+        )
+      )
+        return "import-outside-scope";
+      continue;
+    }
+    if (
+      ts.isEmptyStatement(statement) ||
+      ts.isInterfaceDeclaration(statement) ||
+      ts.isTypeAliasDeclaration(statement)
+    )
+      continue;
+    if (statement === registration) {
+      found = true;
+      continue;
+    }
+    if (
+      !found ||
+      !ts.isExpressionStatement(statement) ||
+      !ts.isCallExpression(statement.expression) ||
+      !model.nativeTest(statement.expression) ||
+      statement.expression.arguments.length !== 2 ||
+      !ts.isStringLiteralLike(statement.expression.arguments[0]) ||
+      !ts.isArrowFunction(statement.expression.arguments[1])
+    )
+      return "setup-or-earlier-test";
+  }
+  if (!found) return "registration-not-found";
+  const peel = (raw: ts.Expression): ts.Expression => {
+    let e = raw;
+    while (
+      ts.isParenthesizedExpression(e) ||
+      ts.isAsExpression(e) ||
+      ts.isTypeAssertionExpression(e) ||
+      ts.isNonNullExpression(e) ||
+      ts.isSatisfiesExpression(e)
+    )
+      e = e.expression;
+    return e;
+  };
+  for (const statement of production.statements) {
+    if (
+      ts.isEmptyStatement(statement) ||
+      ts.isInterfaceDeclaration(statement) ||
+      ts.isTypeAliasDeclaration(statement)
+    )
+      continue;
+    if (ts.isFunctionDeclaration(statement) && statement.body) continue;
+    if (
+      !ts.isVariableStatement(statement) ||
+      !(statement.declarationList.flags & ts.NodeFlags.Const) ||
+      statement.declarationList.declarations.some(
+        (d) =>
+          !ts.isIdentifier(d.name) ||
+          !d.initializer ||
+          !ts.isArrowFunction(peel(d.initializer)),
+      )
+    )
+      return "production-initialization";
+  }
+}
+
+/** Omit one complete return/throw statement and compare the actual native
+ * synchronous completion predicate. Non-rejection is local to this prefix. */
+export function analyzeCompletionSensitivity(
+  ts: SyntaxAPI,
+  fn: ts.Node,
+  assertion: ts.CallExpression,
+  target: ts.Node,
+  model: Model & { nativeTest(call: ts.CallExpression): boolean },
+): CompletionSensitivityEvidence {
+  const base: CompletionSensitivityEvidence = {
+    model: "node-first-test-completion-v1",
+    status: "unresolved",
+  };
+  const limit = (reason: string) => ({ ...base, reason });
+  if (
+    !model.production(target) ||
+    !(ts.isThrowStatement(target) || ts.isReturnStatement(target)) ||
+    !ts.isArrowFunction(fn) ||
+    !ts.isBlock(fn.body) ||
+    fn.modifiers?.length ||
+    fn.parameters.length ||
+    !ts.isExpressionStatement(assertion.parent) ||
+    assertion.parent.parent !== fn.body ||
+    !ts.isCallExpression(fn.parent) ||
+    !model.nativeTest(fn.parent) ||
+    fn.parent.arguments.length !== 2 ||
+    fn.parent.arguments[1] !== fn ||
+    !ts.isStringLiteralLike(fn.parent.arguments[0]) ||
+    !model.nativeException?.(assertion) ||
+    assertion.arguments.length !== 1
+  )
+    return limit("completion-assertion-or-target-shape");
+  const production = target.getSourceFile();
+  const issue = firstSynchronousPrefixIssue(ts, fn, production, model);
+  if (issue) return limit(`completion-${issue}`);
+  const trial: OmissionTrial = {
+    assertion,
+    module: production,
+    completion: { target, omit: false },
+  };
+  const originalRun = runMockCounts(ts, fn, model, undefined, trial);
+  const original = originalRun.completionChecks.get(assertion);
+  if (
+    originalRun.limitation ||
+    !original ||
+    original.outcome !== "not-rejected" ||
+    !original.targetEvaluations
+  )
+    return limit(
+      originalRun.limitation ??
+        "completion-original-unavailable-or-target-not-executed",
+    );
+  const omittedRun = runMockCounts(ts, fn, model, undefined, {
+    ...trial,
+    completion: { target, omit: true },
+  });
+  const omitted = omittedRun.completionChecks.get(assertion);
+  if (
+    omittedRun.limitation ||
+    !omitted ||
+    !omitted.targetEvaluations ||
+    omitted.method !== original.method
+  )
+    return limit(omittedRun.limitation ?? "completion-omission-unavailable");
+  return {
+    ...base,
+    status: "source-checked",
+    scope: "first-synchronous-test-prefix",
+    assertionSource: model.location(assertion),
+    targetSource: model.location(target),
+    changeText: target.getText(),
+    change: "statement-omitted",
+    original,
+    omitted,
+  };
 }
 
 /** A direct value question in a declaration-only production module and the first
@@ -1553,89 +1866,8 @@ export function analyzeDirectReturnSensitivity(
     return limit("direct-return-assertion-shape");
   const sf = fn.getSourceFile(),
     production = target.getSourceFile();
-  const registration = fn.parent.parent;
-  if (!ts.isExpressionStatement(registration) || registration.parent !== sf)
-    return limit("direct-return-registration-shape");
-  let found = false;
-  for (const statement of sf.statements) {
-    if (ts.isImportDeclaration(statement)) {
-      const c = statement.importClause;
-      if (!c || !ts.isStringLiteralLike(statement.moduleSpecifier))
-        return limit("direct-return-import-outside-scope");
-      if (c.isTypeOnly) continue;
-      if (
-        [
-          "node:test",
-          "node:assert/strict",
-          "node:assert",
-          "assert/strict",
-          "assert",
-        ].includes(statement.moduleSpecifier.text)
-      )
-        continue;
-      const names = [
-        c.name,
-        ...(c.namedBindings && ts.isNamedImports(c.namedBindings)
-          ? c.namedBindings.elements
-              .filter((e) => !e.isTypeOnly)
-              .map((e) => e.name)
-          : []),
-      ].filter((n) => n !== undefined);
-      if (
-        !names.length ||
-        (c.namedBindings && ts.isNamespaceImport(c.namedBindings)) ||
-        names.some(
-          (name) => model.declaration(name)?.getSourceFile() !== production,
-        )
-      )
-        return limit("direct-return-import-outside-scope");
-      continue;
-    }
-    if (
-      ts.isEmptyStatement(statement) ||
-      ts.isInterfaceDeclaration(statement) ||
-      ts.isTypeAliasDeclaration(statement)
-    )
-      continue;
-    if (statement === registration) {
-      found = true;
-      continue;
-    }
-    if (
-      !found ||
-      !ts.isExpressionStatement(statement) ||
-      !ts.isCallExpression(statement.expression) ||
-      !model.nativeTest(statement.expression) ||
-      statement.expression.arguments.length !== 2 ||
-      !ts.isStringLiteralLike(statement.expression.arguments[0]) ||
-      !ts.isArrowFunction(statement.expression.arguments[1])
-    )
-      return limit("direct-return-setup-or-earlier-test");
-  }
-  if (!found) return limit("direct-return-registration-not-found");
-  // No persistent mutable objects, imported initializers or executable setup.
-  // Unsupported operations in a function body are rejected when the prefix
-  // reaches them, rather than assumed pure because the function has a safe name.
-  for (const statement of production.statements) {
-    if (
-      ts.isEmptyStatement(statement) ||
-      ts.isInterfaceDeclaration(statement) ||
-      ts.isTypeAliasDeclaration(statement)
-    )
-      continue;
-    if (ts.isFunctionDeclaration(statement) && statement.body) continue;
-    if (
-      !ts.isVariableStatement(statement) ||
-      !(statement.declarationList.flags & ts.NodeFlags.Const) ||
-      statement.declarationList.declarations.some(
-        (d) =>
-          !ts.isIdentifier(d.name) ||
-          !d.initializer ||
-          !ts.isArrowFunction(peel(d.initializer)),
-      )
-    )
-      return limit("direct-return-production-initialization");
-  }
+  const scopeIssue = firstSynchronousPrefixIssue(ts, fn, production, model);
+  if (scopeIssue) return limit(`direct-return-${scopeIssue}`);
   let actual = peel(assertion.arguments[0]);
   const aliases = new Set<ts.Declaration>();
   while (ts.isIdentifier(actual)) {

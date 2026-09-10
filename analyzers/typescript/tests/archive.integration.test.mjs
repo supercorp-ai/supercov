@@ -10,6 +10,7 @@ import "./unlinked-tests.integration.mjs";
 import "./assertion-roles.integration.mjs";
 import "./exception-roles.integration.mjs";
 import "./exception-first-operand.integration.mjs";
+import "./completion.integration.mjs";
 import "./awaited-assertions.integration.mjs";
 import "./awaited-capture.integration.mjs";
 import "./call-omission.integration.mjs";

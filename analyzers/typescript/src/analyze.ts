@@ -15,6 +15,7 @@ import {
   analyzeCountSensitivity,
   analyzePayloadSensitivity,
   analyzeDirectReturnSensitivity,
+  analyzeCompletionSensitivity,
   sourceTestRows,
   type MockCountEvidence,
 } from "./mock-counts.js";
@@ -546,9 +547,7 @@ export function analyzeWithFrontend(
     actual: ComparisonOperand;
     expected: ComparisonOperand;
     relation:
-      | "same-immutable-binding"
-      | "shared-input-through-await"
-      | "unresolved";
+      "same-immutable-binding" | "shared-input-through-await" | "unresolved";
   }
   type SourcePrimitive =
     | { kind: "number" | "string"; value: string }
@@ -1437,14 +1436,12 @@ export function analyzeWithFrontend(
   // A path into such an object that ends at a mock is a sink: `sink:mocks.b.c`.
   // ---------------------------------------------------------------------------
   function returnedObject(fn: ts.Node): ts.ObjectLiteralExpression | undefined {
-    if (
-      !(
-        ts.isArrowFunction(fn) ||
-        ts.isFunctionExpression(fn) ||
-        ts.isMethodDeclaration(fn) ||
-        ts.isFunctionDeclaration(fn)
-      )
-    )
+    if (!(
+      ts.isArrowFunction(fn) ||
+      ts.isFunctionExpression(fn) ||
+      ts.isMethodDeclaration(fn) ||
+      ts.isFunctionDeclaration(fn)
+    ))
       return undefined;
     const body = fn.body;
     if (!body) return undefined;
@@ -1855,12 +1852,10 @@ export function analyzeWithFrontend(
     const mocks =
       moduleMocksByFile.get(relative(root, id.getSourceFile().fileName)) ?? [];
     for (const m of mocks) {
-      if (
-        !(
-          (m.resolved && imp.resolved && m.resolved === imp.resolved) ||
-          m.spec === imp.spec
-        )
-      )
+      if (!(
+        (m.resolved && imp.resolved && m.resolved === imp.resolved) ||
+        m.spec === imp.spec
+      ))
         continue;
       for (const b of m.exports)
         if (b.sink && b.path.length === 1 && b.path[0] === imp.importedName)
@@ -2159,9 +2154,12 @@ export function analyzeWithFrontend(
           return;
         const specifier = imported.moduleSpecifier.text;
         if (
-          !["node:assert", "node:assert/strict", "assert", "assert/strict"].includes(
-            specifier,
-          )
+          ![
+            "node:assert",
+            "node:assert/strict",
+            "assert",
+            "assert/strict",
+          ].includes(specifier)
         )
           return;
         let module = specifier.startsWith("node:")
@@ -2182,7 +2180,10 @@ export function analyzeWithFrontend(
         return { module: "node:assert/strict", kind: "callable" };
       if (e.name.text === "default" && receiver.kind === "namespace")
         return { module: receiver.module, kind: "callable" };
-      if (e.name.text === "assert" || !Object.hasOwn(ASSERT_STRENGTH, e.name.text))
+      if (
+        e.name.text === "assert" ||
+        !Object.hasOwn(ASSERT_STRENGTH, e.name.text)
+      )
         return;
       return { module: receiver.module, kind: "method", method: e.name.text };
     }
@@ -2698,12 +2699,10 @@ export function analyzeWithFrontend(
           return fail("unsupported-exit-result-projection");
         field = path[0];
         for (const member of value.properties) {
-          if (
-            !(
-              ts.isPropertyAssignment(member) ||
-              ts.isShorthandPropertyAssignment(member)
-            )
-          )
+          if (!(
+            ts.isPropertyAssignment(member) ||
+            ts.isShorthandPropertyAssignment(member)
+          ))
             return fail("unsupported-resolved-object");
           const item = comparisonExpression(
             ts.isPropertyAssignment(member) ? member.initializer : member.name,
@@ -3772,6 +3771,13 @@ export function analyzeWithFrontend(
       (nativeImportedMethod(call, "node:assert/strict", ["match"])
         ? "node-literal-regexp"
         : undefined),
+    nativeException: (call: ts.CallExpression) => {
+      const method = nativeAssertionIdentity(call)?.method;
+      return method === "throws" || method === "doesNotThrow"
+        ? method
+        : undefined;
+    },
+    globalError: (expr: ts.Expression) => nativeGlobalValue(expr, "Error"),
     nativeTest: nativeTestRegistration,
     nativeInspect: (call: ts.CallExpression) =>
       nativeImportedMethod(call, "node:util", ["inspect"]),
@@ -4466,7 +4472,10 @@ export function analyzeWithFrontend(
       runtimeLines.every((l) => statics.some((s) => s.line === l))
     )
       runtimeLines.forEach((l) =>
-        staticLink.set(`${file}:${l}`, statics.find((s) => s.line === l)!),
+        staticLink.set(
+          `${file}:${l}`,
+          statics.find((s) => s.line === l)!,
+        ),
       );
     else if (runtimeLines.length === statics.length)
       runtimeLines.forEach((l, i) =>
@@ -5980,9 +5989,19 @@ export function analyzeWithFrontend(
     const st = rt && staticFor(rt),
       body = st && mockBodies.get(st);
     const target = siteNodes.get(hint.candidateSites[0]);
-    if (hint.check === "count" || hint.check === "value") {
+    if (
+      hint.check === "count" ||
+      hint.check === "value" ||
+      hint.check === "completion"
+    ) {
       const limit = (reason: string) => {
-        if (hint.check === "value")
+        if (hint.check === "completion")
+          hint.completionSensitivity = {
+            model: "node-first-test-completion-v1",
+            status: "unresolved",
+            reason,
+          };
+        else if (hint.check === "value")
           hint.payloadSensitivity = {
             model: "node-closed-payload-sensitivity-v2",
             status: "unresolved",
@@ -6017,6 +6036,16 @@ export function analyzeWithFrontend(
       };
       find(body);
       if (!assertion) continue;
+      if (hint.check === "completion") {
+        hint.completionSensitivity = analyzeCompletionSensitivity(
+          ts,
+          body,
+          assertion,
+          target,
+          { ...mockModel, location },
+        );
+        continue;
+      }
       const plan = sourceTestRows(ts, body, mockModel),
         row = plan?.rows.find((r) => r.evidence.title === rt.title);
       if (plan && (!row || plan.reason)) {
