@@ -95,6 +95,12 @@ function bindings. It assumes normal module loading and unmodified native
 assertion semantics. Unsupported shapes retain the existing candidate analysis,
 not a sensitivity proof. These query-time checks add no probes, and their
 bounded results remain unverified candidates, not a global assertion score.
+Within an accepted primitive model, `stuckTrueCaught` and `stuckFalseCaught`
+describe rejection of those two forced outcomes only. A rejected or incomplete
+model omits these fields: unknown is not a known non-rejection. Outside this
+model, the same fields are legacy branch-observation heuristics, not checked
+counterfactuals. Neither form predicts arbitrary edits such as changing a regex
+anchor or a comparison boundary merely because the containing site is `evident`.
 
 Child-exit observations retain `processExit` source evidence instead of assuming
 that every Promise containing an exit listener checks the covered process. The

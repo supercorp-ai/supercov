@@ -1461,7 +1461,7 @@ impl<'a> Join<'a> {
                         kind: ReasonKind::LimitOperandShape,
                         detail: Some("invalid or incomplete primitive decision evidence".into()),
                     },
-                    true,
+                    false,
                 );
             };
             let status = match (stuck_true, stuck_false) {
@@ -2055,7 +2055,29 @@ mod tests {
                 ReasonKind::LimitOperandShape,
                 "case {case}"
             );
+            // Rejected evidence establishes neither rejection nor survival.
+            assert_eq!(r[0].stuck_true_caught, None, "case {case}");
+            assert_eq!(r[0].stuck_false_caught, None, "case {case}");
+            let json = serde_json::to_value(&r[0]).unwrap();
+            assert!(json.get("stuckTrueCaught").is_none(), "case {case}");
+            assert!(json.get("stuckFalseCaught").is_none(), "case {case}");
         }
+    }
+
+    #[test]
+    fn primitive_sensitivity_keeps_one_sided_rejection_distinct_from_unknown() {
+        let n = |v: &str| SourcePrimitive::Number(v.into());
+        // Both original tests pass: 1 != 0 and 2 != 1. Forcing true fails the
+        // second test; forcing false is accepted by both modeled assertions.
+        let f = primitive_fixture(n("1"), n("2"), "node-not-same-value", n("0"), n("1"));
+        let r = join(&f);
+        assert_eq!(r[0].status, Status::Partial);
+        assert_eq!(r[0].stuck_true_caught, Some(true));
+        assert_eq!(r[0].stuck_false_caught, Some(false));
+        assert_eq!(
+            r[0].reason.as_ref().unwrap().kind,
+            ReasonKind::GapOutcomeNotAsserted
+        );
     }
 
     fn pragma_hint() -> PragmaHint {
