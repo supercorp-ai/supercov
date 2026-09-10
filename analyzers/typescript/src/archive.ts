@@ -14,6 +14,7 @@ export const PROTOCOL = {
   capabilities: [
     "requiresTotal-v1",
     "assertion-witness-issues-v1",
+    "complete-passed-test-inventory-v1",
     "assertion-hints-v1",
     "awaited-observation-sources-v1",
     "first-test-call-omission-v1",

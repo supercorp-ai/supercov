@@ -32,6 +32,12 @@ test("archive facts require the exact schema, rules, ABI and capabilities", () =
     {
       ...PROTOCOL,
       capabilities: PROTOCOL.capabilities.filter(
+        (cap) => cap !== "complete-passed-test-inventory-v1",
+      ),
+    },
+    {
+      ...PROTOCOL,
+      capabilities: PROTOCOL.capabilities.filter(
         (cap) => cap !== "first-test-direct-return-v1",
       ),
     },

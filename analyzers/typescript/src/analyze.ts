@@ -5431,42 +5431,63 @@ export function analyzeWithFrontend(
           },
     );
   }
-  const factTests = runtimeTests
-    .map((rt) => {
-      const st = staticFor(rt);
-      if (!st) return undefined;
-      const checked = runtimeCountObservations(st, rt).map((ob) => ({
-        ob,
-        kind: witnessIssue(rt.id, ob),
-      }));
-      const observations = checked
-        .filter(({ kind }) => !kind)
-        .map(({ ob }) => factObservation(ob));
-      // Missing transport applies to the whole test, even when no operand could
-      // be modeled. An empty phase file is different from no phase file.
-      const witnessIssues = [
-        ...(!runtimePhases.has(rt.id)
-          ? [{ kind: "capture-unavailable" as const }]
-          : []),
-        ...checked
-          .filter(({ kind }) => kind && kind !== "capture-unavailable")
-          .map(({ ob, kind }) => ({
-            kind: kind!,
-            source: ob.assertionSource,
-            operation: ob.assertionMethod,
-            observation: factObservation(ob),
-          })),
-      ];
+  const unlinkedTests = runtimeTests
+    .filter((rt) => !staticFor(rt))
+    .map((rt) => ({
+      id: rt.id,
+      file: rt.file,
+      title: rt.title ?? rt.name,
+      reason: "test-source-unlinked" as const,
+    }));
+  const factTests = runtimeTests.map((rt) => {
+    const st = staticFor(rt);
+    // A passed runtime attempt stays in the inventory even when source
+    // registration discovery failed. It is NOT an assertion-free test.
+    if (!st)
       return {
         id: rt.id,
-        file: st.file,
-        observations,
-        ...(witnessIssues.length ? { witnessIssues } : {}),
-        sinks: st.sinks,
-        rendered: [...st.rendered],
+        file: rt.file,
+        observations: [] as ReturnType<typeof factObservation>[],
+        sinks: [] as SinkBinding[],
+        rendered: [] as string[],
+        witnessIssues: [
+          { kind: "test-source-unlinked" as const },
+          ...(!runtimePhases.has(rt.id)
+            ? [{ kind: "capture-unavailable" as const }]
+            : []),
+        ],
       };
-    })
-    .filter((t) => t !== undefined);
+    const checked = runtimeCountObservations(st, rt).map((ob) => ({
+      ob,
+      kind: witnessIssue(rt.id, ob),
+    }));
+    const observations = checked
+      .filter(({ kind }) => !kind)
+      .map(({ ob }) => factObservation(ob));
+    // Missing transport applies to the whole test, even when no operand could
+    // be modeled. An empty phase file is different from no phase file.
+    const witnessIssues = [
+      ...(!runtimePhases.has(rt.id)
+        ? [{ kind: "capture-unavailable" as const }]
+        : []),
+      ...checked
+        .filter(({ kind }) => kind && kind !== "capture-unavailable")
+        .map(({ ob, kind }) => ({
+          kind: kind!,
+          source: ob.assertionSource,
+          operation: ob.assertionMethod,
+          observation: factObservation(ob),
+        })),
+    ];
+    return {
+      id: rt.id,
+      file: st.file,
+      observations,
+      ...(witnessIssues.length ? { witnessIssues } : {}),
+      sinks: st.sinks,
+      rendered: [...st.rendered],
+    };
+  });
   // vi.mock boundaries depend on the test file, not the test: one entry per (file, site) pair that has any
   const mocksByTestFile: Record<string, Record<string, Boundary[]>> = {};
   for (const file of new Set(factTests.map((t) => t.file))) {
@@ -5897,7 +5918,8 @@ export function analyzeWithFrontend(
       observationPolicy:
         "source-linked-v3: exact successful call witness; rejected witnesses retain typed provenance, not value credit",
       runtimeTests: runtimeTests.length,
-      linkedTests: factTests.length,
+      linkedTests: runtimeTests.length - unlinkedTests.length,
+      unlinkedTests,
       staticTests: staticTests.length,
       linkedByAssertionLines: linkedByPhases,
       linkedByTitle,

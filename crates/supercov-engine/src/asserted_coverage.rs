@@ -419,6 +419,9 @@ pub struct TestFacts {
 #[serde(rename_all = "kebab-case")]
 pub enum WitnessIssueKind {
     CaptureUnavailable,
+    /// Runtime attribution exists, but no source test body could be linked.
+    /// This is missing analysis, not evidence that the test contains no oracle.
+    TestSourceUnlinked,
     CallNotRecorded,
     CallIncomplete,
     MixedCallOutcomes,
@@ -427,6 +430,10 @@ pub enum WitnessIssueKind {
 }
 
 impl WitnessIssueKind {
+    fn applies_to_whole_test(self) -> bool {
+        matches!(self, Self::CaptureUnavailable | Self::TestSourceUnlinked)
+    }
+
     fn is_uncertain(self) -> bool {
         self != Self::CallFailed
     }
@@ -684,7 +691,7 @@ fn direct_return_evidence_issue(
         || !(site.kind == "decision" || site.category == "return")
         || hint.payload_sensitivity.is_some()
         || test.witness_issues.iter().any(|issue| {
-            issue.kind == WitnessIssueKind::CaptureUnavailable
+            issue.kind.applies_to_whole_test()
                 || (issue.source.is_some() && issue.source == hint.assertion_source)
         })
     {
@@ -1156,6 +1163,14 @@ pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaChec
                 result.reason = "no-owning-passed-test".into();
                 return result;
             };
+            if test
+                .witness_issues
+                .iter()
+                .any(|issue| issue.kind == WitnessIssueKind::TestSourceUnlinked)
+            {
+                result.reason = "test-source-unlinked".into();
+                return result;
+            }
             if hint.assertion_source.as_ref().is_none_or(String::is_empty)
                 || hint.assertion_method.as_ref().is_none_or(String::is_empty)
             {
@@ -2065,7 +2080,7 @@ impl<'a> Join<'a> {
             };
             for issue in &test.witness_issues {
                 let relevant = match &issue.observation {
-                    None => issue.kind == WitnessIssueKind::CaptureUnavailable,
+                    None => issue.kind.applies_to_whole_test(),
                     Some(ob) => self.issue_reaches(site, test, ob, &mut BTreeSet::new()),
                 };
                 if relevant {
@@ -3548,6 +3563,63 @@ mod tests {
         assert_eq!(after.witness_issues[0].test, "T");
         assert_eq!(summary(&f.sites, &join(&f)).limits, 1);
         assert_eq!(summary(&f.sites, &join(&f)).gaps, 0);
+    }
+
+    #[test]
+    fn unlinked_test_source_is_not_an_assertion_gap_or_pragma_permission() {
+        let mut missing = test("T1", vec![]);
+        missing.witness_issues.push(WitnessIssue {
+            kind: WitnessIssueKind::TestSourceUnlinked,
+            source: None,
+            operation: None,
+            observation: None,
+        });
+        let mut f = facts(
+            vec![
+                site("S1", "return", vec![boundary("return:handler")], &["T1"]),
+                site("uncovered", "return", vec![boundary("return:handler")], &[]),
+                site(
+                    "unrelated",
+                    "return",
+                    vec![boundary("return:handler")],
+                    &["T2"],
+                ),
+            ],
+            vec![missing, test("T2", vec![])],
+        );
+        let rows = join(&f);
+        assert_eq!(
+            rows[0].reason.as_ref().unwrap().kind,
+            ReasonKind::LimitAssertionWitness
+        );
+        assert_eq!(
+            rows[0].witness_issues[0].issue.kind,
+            WitnessIssueKind::TestSourceUnlinked
+        );
+        assert_eq!(rows[0].strength, None);
+        assert_eq!(
+            rows[1].reason.as_ref().unwrap().kind,
+            ReasonKind::GapNotReached
+        );
+        assert_eq!(
+            rows[2].reason.as_ref().unwrap().kind,
+            ReasonKind::GapNotAsserted
+        );
+        let mut hint = pragma_hint();
+        hint.assertion_source = Some("tests/a.test.ts:7:3".into());
+        for recipe in [None, Some("value"), Some("count"), Some("missing-call")] {
+            hint.check = recipe.map(String::from);
+            let result = check_pragma_hints(&f, &[hint.clone()]).remove(0);
+            assert_eq!(result.validation, HintValidation::Unresolved);
+            assert_eq!(result.reason, "test-source-unlinked");
+        }
+        // An independent positive observation is not erased by an unlinked test.
+        f.sites[0].covered_by.push("T2".into());
+        f.tests[1]
+            .observations
+            .push(observation("return:handler", Strength::Total));
+        assert_eq!(join(&f)[0].status, Status::Evident);
+        assert_eq!(join(&f)[0].witness_issues.len(), 1);
     }
 
     #[test]

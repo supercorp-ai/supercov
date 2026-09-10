@@ -14,6 +14,16 @@ code covered by that test unknown. Such sites report an operand-shape limit,
 not proof that an assertion is absent. This does not give those sites assertion
 credit or hide known execution gaps.
 
+Every passed archived test remains in the analysis inventory, including tests
+whose custom or aliased registration cannot be linked to a source body.
+Those entries have no invented observations and carry
+`witnessIssues: [{ kind: "test-source-unlinked" }]`. The corresponding
+`diagnostics.unlinkedTests` identifies the runtime attempts; `linkedTests` counts
+only successfully linked bodies. Covered sites retain the source-linking limit
+instead of treating missing analysis as an absent assertion. Known execution
+gaps and independently supported assertions remain separate. An inline hint
+cannot bypass a missing owning source link.
+
 Supported Node console-mock observations preserve the assertion's source projection:
 a call count, an argument, the whole history, or a slice or map. Their `mock` details
 retain the receiver and access path. Predicate strength applies to that projected

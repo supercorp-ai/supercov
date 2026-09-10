@@ -122,6 +122,35 @@ test("failed runtime tests cannot become facts and repeated calls do not retain 
   assert.equal(run(setup).facts.tests.length, 0);
 });
 
+test("passed attempts without a source link remain explicit unresolved test facts", (t) => {
+  const setup = input(t);
+  const baseline = run(setup);
+  const rows = setup.rows.map((r) => ({
+    ...r,
+    file: "tests/custom-registration.test.ts",
+  }));
+  json(resolve(setup.inputDirectory, "cov/index.json"), rows);
+  const result = run(setup);
+  assert.equal(result.facts.tests.length, rows.length);
+  assert.deepEqual(
+    result.facts.tests.map((t) => t.id),
+    rows.map((t) => t.id),
+  );
+  assert.equal(result.diagnostics.linkedTests, 0);
+  assert.equal(result.diagnostics.unlinkedTests.length, rows.length);
+  assert.deepEqual(result.facts.sites, baseline.facts.sites);
+  for (const fact of result.facts.tests) {
+    assert.equal(fact.file, rows[0].file);
+    assert.deepEqual(fact.observations, []);
+    assert.deepEqual(fact.witnessIssues, [{ kind: "test-source-unlinked" }]);
+  }
+  rmSync(resolve(setup.inputDirectory, "cov/T1.phases.json"));
+  assert.deepEqual(run(setup).facts.tests[0].witnessIssues, [
+    { kind: "test-source-unlinked" },
+    { kind: "capture-unavailable" },
+  ]);
+});
+
 test("the caller may explicitly supply the compiler API", (t) => {
   const setup = input(t);
   assert.equal(
