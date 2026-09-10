@@ -4029,10 +4029,6 @@ export function analyzeWithFrontend(
             rejectsChain ||
             ["rejects", "throws", "toThrow", "toThrowError"].includes(method);
           for (const arg of actuals) {
-            const exitSource = childExitSource(arg);
-            const o: Origin | undefined = exitSource
-              ? { kind: "process-exit-source", path: [] }
-              : originOf(arg);
             const unresolvedOperand = (shape: string) =>
               pending.push({
                 assertionSource: `${relative(root, sf.fileName)}:${sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1}:${sf.getLineAndCharacterOfPosition(node.getStart(sf)).character + 1}`,
@@ -4044,6 +4040,40 @@ export function analyzeWithFrontend(
                 where: where(node, method),
                 shape: `${arg.getText().replace(/\s+/g, " ").slice(0, 40)} [${shape}]`,
               });
+            if (
+              nativeAssertion &&
+              arg === node.arguments[0] &&
+              ["throws", "rejects", "doesNotThrow", "doesNotReject"].includes(
+                nativeAssertion.method,
+              )
+            ) {
+              // The operand supplies a callback or promise, not the value a
+              // normal value assertion reads. `doesNotThrow(fn)` ignores fn's
+              // result; `throws(factory())` catches the returned callback's
+              // exception, not an exception thrown while evaluating factory().
+              // Async variants additionally distinguish synchronous invocation,
+              // promise validation and settlement. The ordinary origin/owner
+              // model cannot establish those invocation and completion paths.
+              // Retain the passing assertion as a limit, including when its
+              // callable's source is recognizable; never invent return credit
+              // or convert the operand producer's return into a caught throw.
+              const completion =
+                nativeAssertion.method === "throws"
+                  ? "synchronous throw"
+                  : nativeAssertion.method === "doesNotThrow"
+                    ? "synchronous normal"
+                    : nativeAssertion.method === "rejects"
+                      ? "asynchronous rejection"
+                      : "asynchronous fulfillment";
+              unresolvedOperand(
+                `${completion} completion; callback/promise producer and invocation path unresolved`,
+              );
+              continue;
+            }
+            const exitSource = childExitSource(arg);
+            const o: Origin | undefined = exitSource
+              ? { kind: "process-exit-source", path: [] }
+              : originOf(arg);
             if (!o) {
               noteUnrecognized(arg, "no origin");
               unresolvedOperand("no origin");
@@ -4071,15 +4101,10 @@ export function analyzeWithFrontend(
               noteUnrecognized(arg, o.kind);
               unresolvedOperand(o.kind);
             }
-            // A native exception assertion's second operand supplies an error
-            // expectation or diagnostic, not the operation whose exception it
-            // catches. Do not invent a throw observation for that producer.
-            // First-operand callback/promise provenance remains a separate
-            // source-model concern; this does not add a new invocation link.
-            if (
-              observesThrow &&
-              (!nativeAssertion || arg === node.arguments[0])
-            )
+            // Native first-operand completion was handled above. Its second
+            // operand supplies an expectation/diagnostic, not a caught operation.
+            // Non-native inference remains separate from the native model.
+            if (observesThrow && !nativeAssertion)
               for (const b of [...bs])
                 if (b.boundary.startsWith("return:"))
                   bs.push({ boundary: "throw:" + b.boundary.slice(7) });

@@ -28,9 +28,17 @@ argument is not inspected after normal completion and receives no returned-value
 credit. Its evaluation can still have effects. `throws` and `rejects` are
 different: their second operand can supply an actual error matcher, and string
 overloads also have an ambiguity check. That operand's producer is not attributed
-as the operation whose exception the assertion catches. Callback/promise origin
-links can still be unresolved; these argument-role rules do not invent them or
-turn normal completion into a check of the callback's returned value.
+as the operation whose exception the assertion catches.
+
+The first operand of these four native exception methods remains an explicit
+completion-analysis limit. A recognizable function name is not enough: the
+analyzer must separate callback production from invocation, synchronous throws
+from promise rejection, and normal completion from the returned/fulfilled value.
+The ordinary returned-value model supplies no credit for that operand, including
+when a pragma names its producer. This also leaves genuine exception checks
+unresolved until their invocation/completion path is established; it does not
+report them as absent assertions. Error-matcher operands retain their separate
+analysis. No additional execution probes or test failures are introduced.
 
 Every passed archived test remains in the analysis inventory, including tests
 whose custom or aliased registration cannot be linked to a source body.
