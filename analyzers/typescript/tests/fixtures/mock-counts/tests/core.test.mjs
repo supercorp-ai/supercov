@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { nativeSharedLogger } from '../src/native-methods.mjs';
 import * as api from '../src/core.mjs';
 import { changed } from '../src/mutable.mjs';
 import { createLogger, createTagged, sharedLogger, fromModuleClosure, sideEffectArgs,
@@ -189,6 +190,12 @@ test('fresh array spread', (t) => {
   const logger = spreadLogger();
   logger.info(['first', 'second']);
   assert.equal(log.mock.callCount(), 1);
+});
+test('native factory method mutates shared receiver', (t) => {
+  const log = t.mock.method(console, 'log', () => {});
+  const logger = nativeSharedLogger();
+  logger.info('hello');
+  assert.equal(log.mock.callCount(), 0);
 });
 test('shared module object limit', (t) => {
   const log = t.mock.method(console, 'log', () => {});

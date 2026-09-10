@@ -69,7 +69,24 @@ test(
     const nativeNames = [...nativeOutput.matchAll(/^# Subtest: (.+)$/gm)].map(
       (match) => match[1],
     );
-    assert.equal(nativeNames.length, 51);
+    assert.equal(nativeNames.length, 52);
+    // Verify the native side effect separately from the captured count-only
+    // fixture: adding a value assertion there would introduce another oracle.
+    const nativeReceiverMutation = JSON.parse(
+      ok(
+        run(process.execPath, [
+          "--input-type=module",
+          "-e",
+          "import {nativeSharedLogger} from './src/native-methods.mjs'; const logger=nativeSharedLogger(); const before=Object.hasOwn(logger,'length'); logger.info('hello'); console.log(JSON.stringify({before,after:Object.hasOwn(logger,'length'),length:logger.length,same:logger===nativeSharedLogger()}));",
+        ]),
+      ),
+    );
+    assert.deepEqual(nativeReceiverMutation, {
+      before: false,
+      after: true,
+      length: 0,
+      same: true,
+    });
     const oracle = [];
     for (const [name, before, after, survives, file = "core.mjs"] of [
       [
@@ -333,7 +350,7 @@ test(
           2,
         ),
     );
-    assert.ok(page.items.length >= 50 && page.items.length <= 51);
+    assert.ok(page.items.length >= 51 && page.items.length <= 52);
     const sourceLines = readFileSync(
       resolve(root, "tests/core.test.mjs"),
       "utf8",
@@ -435,6 +452,7 @@ test(
       "replacement callback limit",
       "mutated snapshot limit",
       "shared module object limit",
+      "native factory method mutates shared receiver",
       "effectful module initialization limit",
       "getter initialization limit",
       "receiver this limit",
@@ -575,7 +593,7 @@ test(
           .flat()
           .filter((r) => r.status === "source-checked").length,
         sourceRowCheckedObservations: rows.length,
-        nativeTests: 51,
+        nativeTests: 52,
         archivedTests: page.items.length,
       }),
     );
