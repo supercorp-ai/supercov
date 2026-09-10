@@ -569,9 +569,10 @@ to an existing assertion with its own passing witness.
 `hint.completionSensitivity` uses `node-first-test-completion-v1`. It shares the
 bounded source evaluator and declaration-only production-module/first
 synchronous native Node test-prefix scope with direct-return checks. It accepts
-one-argument native `throws` and `doesNotThrow`: no error matcher or asynchronous
-settlement is modeled. Source calls, immutable local aliases, source-created
-callback factories and inline test callbacks are followed through actual closure
+one-argument native `throws` and `doesNotThrow`, plus the missing-exception
+shortcut for `throws` with a matcher and optional message described below.
+Asynchronous settlement is not modeled. Source calls, immutable local aliases,
+source-created callback factories and inline test callbacks follow actual closure
 environments. Operand evaluation happens before the assertion's catch, while
 callback invocation happens inside it. The evaluator follows source `try`,
 `catch`, rethrow and `finally`; an evaluator limitation is not a JavaScript error
@@ -580,8 +581,9 @@ that a catch or finally return can conceal.
 Unshadowed `Error` construction accepts at most one primitive message and no
 options. The model retains its primitive-derived message for native failure
 diagnostics, not general properties, stack or matcher semantics. Unsupported
-operations on an original or changed path remain unresolved. A changed path that no longer supplies a source
-callback also remains unresolved; no callable is invented to finish the proof.
+operations on an original or changed path remain unresolved. A changed path that
+no longer supplies a source callback also remains unresolved; no callable is
+invented to finish the proof.
 Native assertion semantics, pristine builtins and isolated serial Node loading
 remain explicit model assumptions. This is not a formally verified JavaScript
 implementation, a general proof for every runtime, or an independently checked
@@ -599,13 +601,14 @@ does not require this additional evidence.
 
 The original and omitted paths each record callback location, `normal` or
 `throw` completion, the escaping throw's source where applicable, target visit
-count, and `rejected` or `not-rejected`. The original must agree with its passing
-witness. A rejecting `doesNotThrow` path also records a `diagnostic` descriptor
+count, and a scoped outcome (`rejected` or `not-rejected` for single-argument
+forms). The original must agree with its passing witness. A rejecting
+`doesNotThrow` path also records a `diagnostic` descriptor
 with its basis and primitive message. Rust rejects missing or inconsistent
 descriptors, including older unconditional throw-to-rejection claims. Rust
 validates scope, source identities and completion/predicate consistency. A caught
-inner throw can therefore receive a checked `not-rejected`
-answer even when another throw in the same function supplies the assertion's
+inner throw can therefore receive a checked `not-rejected` answer even when
+another throw in the same function supplies the assertion's
 witness. A no-error assertion can ignore a normal return value, yet reject an
 omission that exposes a later throw.
 
@@ -614,6 +617,43 @@ These are exact, scoped answers, not ordinary site-strength promotions.
 supply a missing assertion, an unexecuted MC/DC pair or a missing witness, and
 cannot make native tests fail. All added work is post-run analysis; there are no
 new test-time probes or executions of application source during the query.
+
+#### Error matchers: a checked missing-exception shortcut
+
+```ts
+// observes: src/validate.ts#validate throw Error('invalid'); check completion
+assert.throws(() => validate(badInput), /invalid/);
+```
+
+If omitting the selected statement makes the callback complete normally, native
+`throws` does not execute its error-matching logic. The analyzer can establish
+rejection without interpreting an arbitrary regex or predicate body. It first
+evaluates all source arguments before invoking the callback, just as JavaScript
+does; a throwing matcher factory is not a callback exception or a passing witness.
+
+The original `CompletionCheck` records `outcome: "witnessed-pass"`, its matcher
+kind and argument source. This uses only the selected assertion's own archived
+pass, not a claim that matching was simulated. The changed check must have
+`completion: "normal"`, `outcome: "rejected"` and a
+`missingExceptionDiagnostic`. A changed callback that still throws remains
+unresolved; neither its matching result nor its survival is borrowed from the
+original witness. Earlier matcher assertions cannot borrow that witness either.
+
+Skipping the matcher is not enough by itself. Node still reads the matcher's
+`name` and formats a supplied message while reporting the missing exception.
+The descriptor records a safe name basis and primitive message. Supported bases
+include fresh regex/array values without a name, fresh source functions whose
+names are strings (without inventing their inferred spelling), pristine native
+Error constructors/instances, and fresh objects with absent or own primitive
+names. Explicit null/undefined matchers and the string message overload are also
+handled. Arbitrary name access, name/message conversion hooks and unsupported
+argument evaluation remain limits. Regex literals are represented without running
+them; the query does not call user matchers or conversion hooks.
+
+Rust requires matching argument source locations, the original passing witness,
+the changed normal completion, and consistent diagnostic metadata. This is
+still a bounded trusted source model, not a general interpreter certificate,
+whole-suite survival result or automatic site-credit promotion.
 
 ### Awaited child-process capture helpers
 

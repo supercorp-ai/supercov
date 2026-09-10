@@ -266,12 +266,152 @@ const cases = [
     assertion: "assert.throws(operation())",
     nativeFail: true,
   },
-  {
-    name: "error matcher needs its own predicate model",
+  ...[
+    [
+      "arbitrary literal regex",
+      "/^Error: b(?:oo)+m$/i",
+      "native-regexp",
+      "absent",
+    ],
+    [
+      "native Error constructor",
+      "Error",
+      "native-error-constructor",
+      "native-error-name",
+      { kind: "string", value: "Error" },
+    ],
+    [
+      "native Error instance",
+      "new Error('boom')",
+      "native-error",
+      "native-error-name",
+      { kind: "string", value: "Error" },
+    ],
+    [
+      "opaque predicate body",
+      "error => /^boom$/.test(error.message)",
+      "source-function",
+      "source-function-name",
+    ],
+    [
+      "named predicate",
+      "function accepts(error) { return error.message === 'boom'; }",
+      "source-function",
+      "source-function-name",
+    ],
+    [
+      "validation object without name",
+      "{ message: /boom/ }",
+      "object",
+      "absent",
+    ],
+    [
+      "validation object with name",
+      "{ name: 'Error', message: /boom/ }",
+      "object",
+      "own-primitive-name",
+      { kind: "string", value: "Error" },
+    ],
+    ["null matcher", "null", "none", "absent"],
+    ["undefined matcher", "undefined", "none", "absent"],
+    [
+      "string message overload",
+      "'must throw'",
+      "message-overload",
+      "absent",
+      undefined,
+      { kind: "string", value: "must throw" },
+    ],
+    [
+      "primitive third argument",
+      "/boom/, 42",
+      "native-regexp",
+      "absent",
+      undefined,
+      { kind: "number", value: 42 },
+    ],
+  ].map(([name, matcher, matcherKind, nameBasis, nameValue, message]) => ({
+    name: `missing exception skips matcher: ${name}`,
     source: "export function run() { throw Error('boom'); }",
     target: "throw Error('boom');",
+    assertion: `assert.throws(operation, ${matcher})`,
+    rejected: true,
+    matcherKind,
+    missingDiagnostic: {
+      nameBasis,
+      ...(nameValue ? { name: nameValue } : {}),
+      message: message ?? { kind: "undefined" },
+    },
+  })),
+  {
+    name: "a source matcher factory is evaluated before callback invocation",
+    source: "export function run() { throw Error('boom'); }",
+    target: "throw Error('boom');",
+    setup: "const makeMatcher = () => /boom/;",
+    assertion: "assert.throws(operation, makeMatcher())",
+    rejected: true,
+    matcherKind: "native-regexp",
+    missingDiagnostic: { nameBasis: "absent", message: { kind: "undefined" } },
+  },
+  {
+    name: "a fresh validation array has no diagnostic name",
+    source: "export function run() { throw [9]; }",
+    target: "throw [9];",
+    assertion: "assert.throws(operation, [9])",
+    rejected: true,
+    matcherKind: "array",
+    missingDiagnostic: { nameBasis: "absent", message: { kind: "undefined" } },
+  },
+  {
+    name: "matcher name conversion can terminate before missing-exception failure",
+    source: "export function run(error) { throw error; }",
+    target: "throw error;",
+    setup: "const expected = { name: { toString: () => process.exit(0) } };",
+    assertion: "assert.throws(() => operation(expected), expected)",
+    unsupported: /completion-missing-exception-name-coercion-unresolved/,
+    nativeOmission: { status: 0, reachedAfterAssertion: false },
+  },
+  {
+    name: "third message conversion can terminate before missing-exception failure",
+    source: "export function run() { throw Error('boom'); }",
+    target: "throw Error('boom');",
+    assertion:
+      "assert.throws(operation, /boom/, { toString: () => process.exit(0) })",
+    unsupported: /completion-missing-exception-message-coercion-unresolved/,
+    nativeOmission: { status: 0, reachedAfterAssertion: false },
+  },
+  {
+    name: "original matcher pass cannot answer a changed still-throwing path",
+    source:
+      "export function run() { try { throw Error('ignored'); } catch {} throw Error('observed'); }",
+    target: "throw Error('ignored');",
+    assertion: "assert.throws(operation, /observed/)",
+    unsupported: /completion-changed-error-matcher-unresolved/,
+    nativeOmission: { status: 0, reachedAfterAssertion: true },
+  },
+  {
+    name: "earlier matcher cannot borrow the selected assertion's witness",
+    source: "export function run() { throw Error('boom'); }",
+    target: "throw Error('boom');",
+    setup: "assert.throws(() => { throw Error('earlier'); }, /earlier/);",
     assertion: "assert.throws(operation, /boom/)",
-    unsupported: /completion-assertion-or-target-shape/,
+    unsupported: /completion-earlier-matcher-assertion-unresolved/,
+    nativeOmission: { status: 1, reachedAfterAssertion: false },
+  },
+  {
+    name: "matcher factory failure does not invoke the callback or create a witness",
+    source: "export function run() { throw Error('boom'); }",
+    target: "throw Error('boom');",
+    setup: "const makeMatcher = () => { throw Error('factory'); };",
+    assertion: "assert.throws(operation, makeMatcher())",
+    nativeFail: true,
+  },
+  {
+    name: "misleading predicate name without a passing witness is not evidence",
+    source: "export function run() { throw Error('boom'); }",
+    target: "throw Error('boom');",
+    assertion: "assert.throws(operation, function accepts() { return false; })",
+    nativeFail: true,
   },
   {
     name: "async callback has no synchronous exception proof",
@@ -441,7 +581,10 @@ ${c.nativeFail ? "test('passing companion', () => assert.ok(true));" : ""}`;
         const e = p.hint.completionSensitivity;
         assert.equal(e.scope, "first-synchronous-test-prefix");
         assert.equal(e.change, "statement-omitted");
-        assert.equal(e.original.outcome, "not-rejected");
+        assert.equal(
+          e.original.outcome,
+          c.matcherKind ? "witnessed-pass" : "not-rejected",
+        );
         assert.equal(
           e.omitted.outcome,
           c.rejected ? "rejected" : "not-rejected",
@@ -450,6 +593,14 @@ ${c.nativeFail ? "test('passing companion', () => assert.ok(true));" : ""}`;
         assert.equal(e.omitted.targetEvaluations, 1);
         assert.equal(e.original.diagnostic, undefined);
         assert.deepEqual(e.omitted.diagnostic, c.diagnostic);
+        assert.equal(e.original.matcher?.kind, c.matcherKind);
+        assert.equal(e.omitted.matcher?.kind, c.matcherKind);
+        assert.equal(e.original.matcher?.source, e.omitted.matcher?.source);
+        assert.equal(e.original.missingExceptionDiagnostic, undefined);
+        assert.deepEqual(
+          e.omitted.missingExceptionDiagnostic,
+          c.missingDiagnostic,
+        );
         // A checked exact edit remains separate from automatic per-site credit.
         const ordinary = query([
           "--analysis",

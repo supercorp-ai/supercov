@@ -655,7 +655,27 @@ pub struct CompletionCheck {
     pub target_evaluations: u64,
     pub outcome: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matcher: Option<CompletionMatcher>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing_exception_diagnostic: Option<MissingExceptionDiagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<CompletionDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletionMatcher {
+    pub source: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MissingExceptionDiagnostic {
+    pub name_basis: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<serde_json::Value>,
+    pub message: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -709,13 +729,75 @@ fn completion_evidence_issue(
                 .unwrap_or_else(|| "unsupported-completion-evidence".into()),
         );
     }
-    let valid = |c: &CompletionCheck| {
+    let valid_primitive = |value: &serde_json::Value| {
+        let mut budget = 16;
+        valid_payload(value, 0, &mut budget)
+            && matches!(
+                value["kind"].as_str(),
+                Some("undefined" | "null" | "string" | "number" | "boolean")
+            )
+    };
+    let valid = |c: &CompletionCheck, original: bool| {
         let rejected = match (c.method.as_str(), c.completion.as_str()) {
             ("throws", "normal") | ("doesNotThrow", "throw") => Some(true),
             ("throws", "throw") | ("doesNotThrow", "normal") => Some(false),
             _ => None,
         };
-        rejected.is_some_and(|r| c.outcome == if r { "rejected" } else { "not-rejected" })
+        let predicate_valid = if let Some(m) = &c.matcher {
+            c.method == "throws"
+                && location_in(&m.source, &test.file)
+                && matches!(
+                    m.kind.as_str(),
+                    "native-regexp"
+                        | "source-function"
+                        | "native-error-constructor"
+                        | "native-error"
+                        | "object"
+                        | "array"
+                        | "none"
+                        | "message-overload"
+                )
+                && c.diagnostic.is_none()
+                && if original {
+                    c.completion == "throw"
+                        && c.outcome == "witnessed-pass"
+                        && c.missing_exception_diagnostic.is_none()
+                } else {
+                    c.completion == "normal"
+                        && c.outcome == "rejected"
+                        && c.missing_exception_diagnostic.as_ref().is_some_and(|d| {
+                            valid_primitive(&d.message)
+                                && (m.kind != "message-overload" || d.message["kind"] == "string")
+                                && match (m.kind.as_str(), d.name_basis.as_str(), &d.name) {
+                                    (
+                                        "native-regexp" | "array" | "none" | "message-overload"
+                                        | "object",
+                                        "absent",
+                                        None,
+                                    ) => true,
+                                    ("source-function", "source-function-name", None) => true,
+                                    (
+                                        "native-error-constructor" | "native-error",
+                                        "native-error-name",
+                                        Some(name),
+                                    ) => {
+                                        valid_primitive(name)
+                                            && name["kind"] == "string"
+                                            && name["value"] == "Error"
+                                    }
+                                    ("object", "own-primitive-name", Some(name)) => {
+                                        valid_primitive(name)
+                                    }
+                                    _ => false,
+                                }
+                        })
+                }
+        } else {
+            c.missing_exception_diagnostic.is_none()
+                && rejected
+                    .is_some_and(|r| c.outcome == if r { "rejected" } else { "not-rejected" })
+        };
+        predicate_valid
             && if c.method == "doesNotThrow" && c.completion == "throw" {
                 c.diagnostic.as_ref().is_some_and(|d| {
                     let mut budget = 16;
@@ -745,12 +827,25 @@ fn completion_evidence_issue(
                 _ => false,
             }
     };
-    if e.original
-        .as_ref()
-        .is_none_or(|c| !valid(c) || c.outcome != "not-rejected")
-        || e.omitted.as_ref().is_none_or(|c| !valid(c))
+    if e.original.as_ref().is_none_or(|c| {
+        !valid(c, true) || !matches!(c.outcome.as_str(), "not-rejected" | "witnessed-pass")
+    }) || e.omitted.as_ref().is_none_or(|c| !valid(c, false))
     {
         return Some("inconsistent-completion-predicate".into());
+    }
+    // A matcher-backed question cannot lose/change the argument's source or
+    // borrow a witness for a changed still-throwing callback. Kind may change
+    // only because the same source expression was evaluated along a new path.
+    if e.original
+        .as_ref()
+        .and_then(|c| c.matcher.as_ref())
+        .map(|m| &m.source)
+        != e.omitted
+            .as_ref()
+            .and_then(|c| c.matcher.as_ref())
+            .map(|m| &m.source)
+    {
+        return Some("inconsistent-completion-matcher-source".into());
     }
     None
 }
@@ -3412,6 +3507,169 @@ mod tests {
             assert_eq!(
                 check_pragma_hints(&f, &[h])[0].validation,
                 HintValidation::Unresolved
+            );
+        }
+        assert_eq!(join(&f), before);
+    }
+
+    #[test]
+    fn completion_matcher_shortcut_uses_only_original_witness_and_safe_missing_diagnostic() {
+        let mut hint = pragma_hint();
+        hint.check = Some("completion".into());
+        hint.assertion_method = Some("throws".into());
+        hint.completion_sensitivity = Some(serde_json::from_value(serde_json::json!({
+            "model":"node-first-test-completion-v1", "status":"source-checked",
+            "scope":"first-synchronous-test-prefix", "assertionSource":"tests/a.test.ts:7:3",
+            "targetSource":"src/a.ts:4:3", "changeText":"throw Error('boom');", "change":"statement-omitted",
+            "original":{"method":"throws", "callbackSource":"src/a.ts:3:1", "completion":"throw",
+                "throwSource":"src/a.ts:4:3", "targetEvaluations":1, "outcome":"witnessed-pass",
+                "matcher":{"source":"tests/a.test.ts:7:28", "kind":"native-regexp"}},
+            "omitted":{"method":"throws", "callbackSource":"src/a.ts:3:1", "completion":"normal",
+                "targetEvaluations":1, "outcome":"rejected",
+                "matcher":{"source":"tests/a.test.ts:7:28", "kind":"native-regexp"},
+                "missingExceptionDiagnostic":{"nameBasis":"absent", "message":{"kind":"undefined"}}}
+        })).unwrap());
+        let mut s = site("S1", "throw", vec![], &["T1"]);
+        s.line = 4;
+        let mut t = test("T1", vec![]);
+        t.file = "tests/a.test.ts".into();
+        let f = facts(vec![s], vec![t]);
+        let before = join(&f);
+        for (kind, diagnostic) in [
+            (
+                "native-regexp",
+                serde_json::json!({"nameBasis":"absent", "message":{"kind":"undefined"}}),
+            ),
+            (
+                "source-function",
+                serde_json::json!({"nameBasis":"source-function-name", "message":{"kind":"string", "value":"required"}}),
+            ),
+            (
+                "native-error-constructor",
+                serde_json::json!({"nameBasis":"native-error-name", "name":{"kind":"string", "value":"Error"}, "message":{"kind":"undefined"}}),
+            ),
+            (
+                "native-error",
+                serde_json::json!({"nameBasis":"native-error-name", "name":{"kind":"string", "value":"Error"}, "message":{"kind":"undefined"}}),
+            ),
+            (
+                "object",
+                serde_json::json!({"nameBasis":"own-primitive-name", "name":{"kind":"string", "value":"Error"}, "message":{"kind":"number", "value":42}}),
+            ),
+            (
+                "object",
+                serde_json::json!({"nameBasis":"own-primitive-name", "name":{"kind":"null"}, "message":{"kind":"null"}}),
+            ),
+            (
+                "object",
+                serde_json::json!({"nameBasis":"absent", "message":{"kind":"undefined"}}),
+            ),
+            (
+                "array",
+                serde_json::json!({"nameBasis":"absent", "message":{"kind":"boolean", "value":false}}),
+            ),
+            (
+                "none",
+                serde_json::json!({"nameBasis":"absent", "message":{"kind":"undefined"}}),
+            ),
+            (
+                "message-overload",
+                serde_json::json!({"nameBasis":"absent", "message":{"kind":"string", "value":"required"}}),
+            ),
+        ] {
+            let mut h = hint.clone();
+            let e = h.completion_sensitivity.as_mut().unwrap();
+            for c in [&mut e.original, &mut e.omitted].into_iter().flatten() {
+                c.matcher.as_mut().unwrap().kind = kind.into();
+            }
+            e.omitted.as_mut().unwrap().missing_exception_diagnostic =
+                Some(serde_json::from_value(diagnostic).unwrap());
+            let result = check_pragma_hints(&f, &[h]).remove(0);
+            assert_eq!(
+                result.validation,
+                HintValidation::AnalyzerSupported,
+                "{kind}"
+            );
+            assert!(result.strength.is_none());
+            assert!(result.observations.is_empty());
+        }
+        for case in 0..20 {
+            let mut h = hint.clone();
+            let e = h.completion_sensitivity.as_mut().unwrap();
+            let original = e.original.as_mut().unwrap();
+            let omitted = e.omitted.as_mut().unwrap();
+            match case {
+                0 => h.witness = "unavailable".into(),
+                1 => original.outcome = "not-rejected".into(),
+                2 => omitted.outcome = "witnessed-pass".into(),
+                3 => {
+                    omitted.completion = "throw".into();
+                    omitted.throw_source = Some("src/a.ts:4:3".into());
+                }
+                4 => omitted.missing_exception_diagnostic = None,
+                5 => {
+                    original.missing_exception_diagnostic =
+                        omitted.missing_exception_diagnostic.clone()
+                }
+                6 => omitted.matcher = None,
+                7 => original.matcher = None,
+                8 => omitted.matcher.as_mut().unwrap().source = "tests/a.test.ts:8:28".into(),
+                9 => original.matcher.as_mut().unwrap().source = "tests/other.test.ts:7:28".into(),
+                10 => omitted.matcher.as_mut().unwrap().kind = "unknown".into(),
+                11 => {
+                    omitted
+                        .missing_exception_diagnostic
+                        .as_mut()
+                        .unwrap()
+                        .message = serde_json::json!({"kind":"object", "properties":[]})
+                }
+                12 => {
+                    omitted
+                        .missing_exception_diagnostic
+                        .as_mut()
+                        .unwrap()
+                        .name_basis = "source-function-name".into()
+                }
+                13 => {
+                    omitted.missing_exception_diagnostic.as_mut().unwrap().name =
+                        Some(serde_json::json!({"kind":"undefined"}))
+                }
+                14 => {
+                    omitted
+                        .missing_exception_diagnostic
+                        .as_mut()
+                        .unwrap()
+                        .message = serde_json::json!({"kind":"string", "value":42})
+                }
+                15 => omitted.matcher.as_mut().unwrap().kind = "message-overload".into(),
+                16 => {
+                    omitted.matcher.as_mut().unwrap().kind = "object".into();
+                    omitted
+                        .missing_exception_diagnostic
+                        .as_mut()
+                        .unwrap()
+                        .name_basis = "own-primitive-name".into();
+                    omitted.missing_exception_diagnostic.as_mut().unwrap().name =
+                        Some(serde_json::json!({"kind":"object", "properties":[]}));
+                }
+                17 => {
+                    omitted.matcher.as_mut().unwrap().kind = "native-error".into();
+                    omitted
+                        .missing_exception_diagnostic
+                        .as_mut()
+                        .unwrap()
+                        .name_basis = "native-error-name".into();
+                    omitted.missing_exception_diagnostic.as_mut().unwrap().name =
+                        Some(serde_json::json!({"kind":"string", "value":"Other"}));
+                }
+                18 => h.assertion_method = Some("doesNotThrow".into()),
+                19 => original.target_evaluations = 0,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                check_pragma_hints(&f, &[h])[0].validation,
+                HintValidation::Unresolved,
+                "case {case}"
             );
         }
         assert_eq!(join(&f), before);

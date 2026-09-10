@@ -289,7 +289,28 @@ export interface CompletionCheck {
   completion: "normal" | "throw";
   throwSource?: string;
   targetEvaluations: number;
-  outcome: "rejected" | "not-rejected";
+  outcome: "rejected" | "not-rejected" | "witnessed-pass";
+  matcher?: {
+    source: string;
+    kind:
+      | "native-regexp"
+      | "source-function"
+      | "native-error-constructor"
+      | "native-error"
+      | "object"
+      | "array"
+      | "none"
+      | "message-overload";
+  };
+  missingExceptionDiagnostic?: {
+    nameBasis:
+      | "absent"
+      | "source-function-name"
+      | "native-error-name"
+      | "own-primitive-name";
+    name?: PayloadValue;
+    message: PayloadValue;
+  };
   diagnostic?: {
     basis:
       | "native-error-message"
@@ -437,6 +458,7 @@ function runMockCounts(
       }
     | { kind: "opaque-inspect-string" | "opaque-native-tty" }
     | { kind: "native-error"; message: string }
+    | { kind: "native-regexp" | "native-error-constructor" }
     | { kind: "quoted-string" | "substring-pattern"; value: string }
     | { kind: "context"; mock: Mock };
   const checks = new Map<ts.CallExpression, MockCountEvidence>();
@@ -731,6 +753,8 @@ function runMockCounts(
       primitive(value) ||
       value.kind === "closure" ||
       value.kind === "native-error" ||
+      value.kind === "native-regexp" ||
+      value.kind === "native-error-constructor" ||
       value.kind === "opaque-inspect-string" ||
       value.kind === "quoted-string" ||
       ((value.kind === "object" || value.kind === "array") &&
@@ -853,6 +877,13 @@ function runMockCounts(
   function evaluate(raw: ts.Expression, action: string, depth: number): Value {
     if (--budget < 0 || depth > 32) return fail(raw, "source-model-budget");
     const e = peel(raw);
+    // Forming a native regex literal or reading the pristine Error constructor
+    // is distinct from executing a regex or invoking a matcher. The missing-
+    // exception shortcut needs only that formation and safe diagnostic metadata.
+    if (trial?.completion && ts.isRegularExpressionLiteral(e))
+      return { kind: "native-regexp" };
+    if (trial?.completion && model.globalError?.(e))
+      return { kind: "native-error-constructor" };
     if (
       trial?.completion &&
       (ts.isNewExpression(e) || ts.isCallExpression(e)) &&
@@ -1330,19 +1361,128 @@ function runMockCounts(
     }
     const exceptionMethod = trial?.completion && model.nativeException?.(e);
     if (exceptionMethod) {
-      if (initializing || e.arguments.length !== 1)
+      if (
+        initializing ||
+        !e.arguments.length ||
+        e.arguments.length > 3 ||
+        (exceptionMethod === "doesNotThrow" && e.arguments.length !== 1)
+      )
         return fail(e, "unsupported-completion-assertion-shape");
+      if (e.arguments.length > 1 && trial.assertion !== e)
+        return fail(e, "completion-earlier-matcher-assertion-unresolved");
       // Evaluate the operand OUTSIDE the assertion's catch. A factory's own
       // error is not a thrown result of the callback it was meant to produce.
-      const callback = evaluate(e.arguments[0], action, depth + 1);
+      // JS evaluates every argument before native getActual invokes the callback.
+      if (e.arguments.some(ts.isSpreadElement))
+        return fail(e, "unsupported-completion-argument-spread");
+      const args = argumentsOf(e, action, depth + 1);
+      const callback = args[0];
       if (primitive(callback) || callback.kind !== "closure")
         return fail(e, "completion-operand-not-source-callback");
+      let matcher: CompletionCheck["matcher"];
+      const expected = args[1];
+      if (args.length > 1) {
+        let kind: NonNullable<CompletionCheck["matcher"]>["kind"];
+        if (expected === null || expected === undefined) kind = "none";
+        else if (typeof expected === "string") {
+          if (args.length === 3)
+            return fail(e, "completion-invalid-message-overload");
+          kind = "message-overload";
+        } else if (primitive(expected))
+          return fail(e, "completion-invalid-error-matcher");
+        else if (expected.kind === "closure") kind = "source-function";
+        else if (
+          [
+            "native-regexp",
+            "native-error-constructor",
+            "native-error",
+            "object",
+            "array",
+          ].includes(expected.kind)
+        )
+          kind = expected.kind as typeof kind;
+        else return fail(e, "completion-error-matcher-value-unresolved");
+        matcher = { source: model.location(e.arguments[1]), kind };
+      }
       let thrown: ProgramThrow | undefined;
       try {
         invoke(callback, [], e, action, depth + 1);
       } catch (error) {
         if (!(error instanceof ProgramThrow)) throw error;
         thrown = error;
+      }
+      let missingExceptionDiagnostic: CompletionCheck["missingExceptionDiagnostic"];
+      if (matcher) {
+        if (!trial.completion!.omit && thrown) {
+          // Only the selected assertion can use its own archived passing witness.
+          // Do not execute or pretend to understand an arbitrary matcher body.
+          completionChecks.set(e, {
+            method: exceptionMethod,
+            callbackSource: model.location(callback.node),
+            completion: "throw",
+            throwSource: thrown.source,
+            targetEvaluations: completionTargetEvaluations,
+            outcome: "witnessed-pass",
+            matcher,
+          });
+          throw new ReachedAssertion();
+        }
+        if (thrown)
+          return fail(e, "completion-changed-error-matcher-unresolved");
+        // On normal completion, expectsError skips expectedException entirely.
+        // It still reads expected.name twice and formats a supplied message.
+        // Prove those operations safe; do not equate skipping the matcher body
+        // with skipping all application-observable work.
+        const message =
+          matcher.kind === "message-overload" ? expected : args[2];
+        if (!primitive(message))
+          return fail(
+            e,
+            "completion-missing-exception-message-coercion-unresolved",
+          );
+        const diagnostic = { message: describe(message) };
+        switch (matcher.kind) {
+          case "none":
+          case "message-overload":
+          case "native-regexp":
+          case "array":
+            missingExceptionDiagnostic = { ...diagnostic, nameBasis: "absent" };
+            break;
+          case "source-function":
+            // Fresh source function names (including inferred names) are strings.
+            // No specific inferred spelling is fabricated or needed here.
+            missingExceptionDiagnostic = {
+              ...diagnostic,
+              nameBasis: "source-function-name",
+            };
+            break;
+          case "native-error":
+          case "native-error-constructor":
+            missingExceptionDiagnostic = {
+              ...diagnostic,
+              nameBasis: "native-error-name",
+              name: describe("Error"),
+            };
+            break;
+          case "object": {
+            if (primitive(expected) || expected.kind !== "object")
+              return fail(e, "completion-missing-exception-matcher-kind");
+            accessible(expected, e);
+            const name = expected.properties.get("name");
+            if (!primitive(name))
+              return fail(
+                e,
+                "completion-missing-exception-name-coercion-unresolved",
+              );
+            missingExceptionDiagnostic = expected.properties.has("name")
+              ? {
+                  ...diagnostic,
+                  nameBasis: "own-primitive-name",
+                  name: describe(name),
+                }
+              : { ...diagnostic, nameBasis: "absent" };
+          }
+        }
       }
       let diagnostic: CompletionCheck["diagnostic"];
       if (exceptionMethod === "doesNotThrow" && thrown) {
@@ -1391,6 +1531,8 @@ function runMockCounts(
           completion: thrown ? "throw" : "normal",
           ...(thrown ? { throwSource: thrown.source } : {}),
           ...(diagnostic ? { diagnostic } : {}),
+          ...(matcher ? { matcher } : {}),
+          ...(missingExceptionDiagnostic ? { missingExceptionDiagnostic } : {}),
           targetEvaluations: completionTargetEvaluations,
           outcome: rejected ? "rejected" : "not-rejected",
         });
@@ -1825,7 +1967,10 @@ export function analyzeCompletionSensitivity(
     fn.parent.arguments[1] !== fn ||
     !ts.isStringLiteralLike(fn.parent.arguments[0]) ||
     !model.nativeException?.(assertion) ||
-    assertion.arguments.length !== 1
+    !assertion.arguments.length ||
+    assertion.arguments.length > 3 ||
+    (model.nativeException?.(assertion) === "doesNotThrow" &&
+      assertion.arguments.length !== 1)
   )
     return limit("completion-assertion-or-target-shape");
   const production = target.getSourceFile();
@@ -1841,7 +1986,7 @@ export function analyzeCompletionSensitivity(
   if (
     originalRun.limitation ||
     !original ||
-    original.outcome !== "not-rejected" ||
+    !["not-rejected", "witnessed-pass"].includes(original.outcome) ||
     !original.targetEvaluations
   )
     return limit(
