@@ -276,6 +276,38 @@ interface OmissionTrial {
   payload?: boolean;
   originalWitness?: boolean;
   emptyMapCallback?: ts.ArrowFunction;
+  directReturn?: { call: ts.CallExpression; target: ts.Expression };
+}
+
+export interface DirectReturnCheck {
+  predicate: string;
+  actual: PayloadValue;
+  expected: PayloadValue;
+  callSource: string;
+  targetEvaluations: number;
+  outcome: "rejected" | "not-rejected";
+}
+
+export interface DirectReturnSensitivityEvidence {
+  model: "node-first-test-direct-return-v1";
+  status: "source-checked" | "unresolved";
+  reason?: string;
+  scope?: "first-synchronous-test-prefix";
+  assertionSource?: string;
+  targetSource?: string;
+  changeSource?: string;
+  changeText?: string;
+  original?: DirectReturnCheck;
+  variants?: {
+    change:
+      | "condition-true"
+      | "condition-false"
+      | "condition-inverted"
+      | "boolean-literal-inverted";
+    status: "source-checked" | "unresolved";
+    reason?: string;
+    check?: DirectReturnCheck;
+  }[];
 }
 
 export interface PayloadValue {
@@ -376,6 +408,9 @@ function runMockCounts(
     | { kind: "context"; mock: Mock };
   const checks = new Map<ts.CallExpression, MockCountEvidence>();
   const payloadChecks = new Map<ts.CallExpression, PayloadCheck>();
+  const directReturnChecks = new Map<ts.CallExpression, DirectReturnCheck>();
+  let activeDirectCalls = 0;
+  let directTargetEvaluations = 0;
   const callArguments = new WeakMap<Call, Value[]>();
   const payloadReads = new Map<ts.Expression, PayloadProjection>();
   const copyCall = (call: Call): Call => {
@@ -773,8 +808,21 @@ function runMockCounts(
   function evaluate(raw: ts.Expression, action: string, depth: number): Value {
     if (--budget < 0 || depth > 32) return fail(raw, "source-model-budget");
     const e = peel(raw);
+    if (trial?.directReturn?.target === e && activeDirectCalls > 0)
+      directTargetEvaluations++;
     if (trial?.condition?.node === e && trial.condition.value !== "invert")
       return trial.condition.value;
+    if (
+      trial?.directReturn &&
+      ts.isPrefixUnaryExpression(e) &&
+      e.operator === ts.SyntaxKind.ExclamationToken
+    ) {
+      const value = evaluate(e.operand, action, depth + 1);
+      if (primitive(value)) return !value;
+      // ToBoolean on a fresh ordinary object/array never invokes conversion hooks.
+      if (value.kind === "object" || value.kind === "array") return false;
+      return fail(e, "unsupported-direct-return-truthiness");
+    }
     if (ts.isTypeOfExpression(e)) {
       const v = evaluate(e.expression, action, depth + 1);
       if (primitive(v)) return typeof v;
@@ -957,6 +1005,32 @@ function runMockCounts(
     // No source is executed and no test code is modified during this query.
     if (trial?.omit === e) return undefined;
     const callee = peel(e.expression);
+    if (
+      trial?.directReturn &&
+      ts.isPropertyAccessExpression(callee) &&
+      callee.name.text === "includes"
+    ) {
+      const base = evaluate(callee.expression, action, depth + 1);
+      if (primitive(base) || base.kind !== "array")
+        return fail(e, "unsupported-direct-return-includes-receiver");
+      accessible(base, e);
+      const args = argumentsOf(e, action, depth + 1);
+      if (
+        args.length !== 1 ||
+        !primitive(args[0]) ||
+        [...base.properties.values()].some((value) => !primitive(value))
+      )
+        return fail(e, "unsupported-direct-return-includes-input");
+      const sought = args[0];
+      return [...base.properties.values()].some(
+        (value) =>
+          value === sought ||
+          (typeof value === "number" &&
+            typeof sought === "number" &&
+            Number.isNaN(value) &&
+            Number.isNaN(sought)),
+      );
+    }
     if (trial?.payload && model.globalString?.(callee)) {
       if (e.arguments.length !== 1)
         return fail(e, "unsupported-string-coercion-arity");
@@ -1197,10 +1271,11 @@ function runMockCounts(
         trial &&
         predicate !== "node-same-value" &&
         !(
-          trial.payload &&
-          ["node-deep-strict-equality", "node-literal-regexp"].includes(
-            predicate,
-          )
+          (trial.payload &&
+            ["node-deep-strict-equality", "node-literal-regexp"].includes(
+              predicate,
+            )) ||
+          (trial.directReturn && predicate === "node-deep-strict-equality")
         )
       )
         return fail(e, "unsupported-trial-predicate");
@@ -1210,6 +1285,37 @@ function runMockCounts(
       if (values.length === 3 && !primitive(values[2]))
         return fail(e, "unsupported-assertion-message");
       const [a, b] = values;
+      if (trial?.directReturn) {
+        if (!independentLiteral(e.arguments[1]))
+          return fail(e, "direct-return-expectation-not-independent");
+        const actual = describe(a),
+          expected = describe(b);
+        const equal = equalPayload(
+          actual,
+          expected,
+          predicate === "node-deep-strict-equality",
+        );
+        if (equal === undefined)
+          return fail(e, "direct-return-predicate-undecidable-in-model");
+        if (trial.assertion === e) {
+          if (directTargetEvaluations === 0)
+            return fail(
+              e,
+              "direct-return-target-not-evaluated-by-selected-call",
+            );
+          directReturnChecks.set(e, {
+            predicate,
+            actual,
+            expected,
+            callSource: model.location(trial.directReturn.call),
+            targetEvaluations: directTargetEvaluations,
+            outcome: equal ? "not-rejected" : "rejected",
+          });
+          throw new ReachedAssertion();
+        }
+        if (!equal) return fail(e, "earlier-direct-return-assertion-rejects");
+        return undefined;
+      }
       if (
         trial?.payload &&
         !(!primitive(a) && a.kind === "count") &&
@@ -1317,10 +1423,16 @@ function runMockCounts(
     else target = evaluate(callee, action, depth + 1);
     if (primitive(target) || target.kind !== "closure")
       return fail(e, "unsupported-call-target");
-    return accessible(
-      invoke(target, argumentsOf(e, action, depth + 1), e, action, depth + 1),
-      e,
-    );
+    const selectedDirectCall = trial?.directReturn?.call === e;
+    if (selectedDirectCall) activeDirectCalls++;
+    try {
+      return accessible(
+        invoke(target, argumentsOf(e, action, depth + 1), e, action, depth + 1),
+        e,
+      );
+    } finally {
+      if (selectedDirectCall) activeDirectCalls--;
+    }
   }
 
   function execute(
@@ -1390,7 +1502,243 @@ function runMockCounts(
     if (error instanceof Unsupported) limitation = error.message;
     else if (!(error instanceof ReachedAssertion)) throw error;
   }
-  return { checks, payloadChecks, limitation };
+  return { checks, payloadChecks, directReturnChecks, limitation };
+}
+
+/** A direct value question in a declaration-only production module and the first
+ * synchronous test prefix. This shares the existing value evaluator; it does not
+ * execute source, infer a witness or generalize into whole-suite survival. */
+export function analyzeDirectReturnSensitivity(
+  ts: SyntaxAPI,
+  fn: ts.Node,
+  assertion: ts.CallExpression,
+  target: ts.Node,
+  model: Model & { nativeTest(call: ts.CallExpression): boolean },
+): DirectReturnSensitivityEvidence {
+  const base: DirectReturnSensitivityEvidence = {
+    model: "node-first-test-direct-return-v1",
+    status: "unresolved",
+  };
+  const limit = (reason: string) => ({ ...base, reason });
+  const peel = (raw: ts.Expression): ts.Expression => {
+    let e = raw;
+    while (
+      ts.isParenthesizedExpression(e) ||
+      ts.isAsExpression(e) ||
+      ts.isTypeAssertionExpression(e) ||
+      ts.isNonNullExpression(e) ||
+      ts.isSatisfiesExpression(e)
+    )
+      e = e.expression;
+    return e;
+  };
+  if (
+    !model.production(target) ||
+    !ts.isArrowFunction(fn) ||
+    !ts.isBlock(fn.body) ||
+    fn.modifiers?.length ||
+    fn.parameters.length ||
+    !ts.isExpressionStatement(assertion.parent) ||
+    assertion.parent.parent !== fn.body ||
+    !ts.isCallExpression(fn.parent) ||
+    !model.nativeTest(fn.parent) ||
+    fn.parent.arguments.length !== 2 ||
+    fn.parent.arguments[1] !== fn ||
+    !ts.isStringLiteralLike(fn.parent.arguments[0]) ||
+    !["node-same-value", "node-deep-strict-equality"].includes(
+      model.nativePredicate(assertion) ?? "",
+    ) ||
+    assertion.arguments.length !== 2
+  )
+    return limit("direct-return-assertion-shape");
+  const sf = fn.getSourceFile(),
+    production = target.getSourceFile();
+  const registration = fn.parent.parent;
+  if (!ts.isExpressionStatement(registration) || registration.parent !== sf)
+    return limit("direct-return-registration-shape");
+  let found = false;
+  for (const statement of sf.statements) {
+    if (ts.isImportDeclaration(statement)) {
+      const c = statement.importClause;
+      if (!c || !ts.isStringLiteralLike(statement.moduleSpecifier))
+        return limit("direct-return-import-outside-scope");
+      if (c.isTypeOnly) continue;
+      if (
+        [
+          "node:test",
+          "node:assert/strict",
+          "node:assert",
+          "assert/strict",
+          "assert",
+        ].includes(statement.moduleSpecifier.text)
+      )
+        continue;
+      const names = [
+        c.name,
+        ...(c.namedBindings && ts.isNamedImports(c.namedBindings)
+          ? c.namedBindings.elements
+              .filter((e) => !e.isTypeOnly)
+              .map((e) => e.name)
+          : []),
+      ].filter((n) => n !== undefined);
+      if (
+        !names.length ||
+        (c.namedBindings && ts.isNamespaceImport(c.namedBindings)) ||
+        names.some(
+          (name) => model.declaration(name)?.getSourceFile() !== production,
+        )
+      )
+        return limit("direct-return-import-outside-scope");
+      continue;
+    }
+    if (
+      ts.isEmptyStatement(statement) ||
+      ts.isInterfaceDeclaration(statement) ||
+      ts.isTypeAliasDeclaration(statement)
+    )
+      continue;
+    if (statement === registration) {
+      found = true;
+      continue;
+    }
+    if (
+      !found ||
+      !ts.isExpressionStatement(statement) ||
+      !ts.isCallExpression(statement.expression) ||
+      !model.nativeTest(statement.expression) ||
+      statement.expression.arguments.length !== 2 ||
+      !ts.isStringLiteralLike(statement.expression.arguments[0]) ||
+      !ts.isArrowFunction(statement.expression.arguments[1])
+    )
+      return limit("direct-return-setup-or-earlier-test");
+  }
+  if (!found) return limit("direct-return-registration-not-found");
+  // No persistent mutable objects, imported initializers or executable setup.
+  // Unsupported operations in a function body are rejected when the prefix
+  // reaches them, rather than assumed pure because the function has a safe name.
+  for (const statement of production.statements) {
+    if (
+      ts.isEmptyStatement(statement) ||
+      ts.isInterfaceDeclaration(statement) ||
+      ts.isTypeAliasDeclaration(statement)
+    )
+      continue;
+    if (ts.isFunctionDeclaration(statement) && statement.body) continue;
+    if (
+      !ts.isVariableStatement(statement) ||
+      !(statement.declarationList.flags & ts.NodeFlags.Const) ||
+      statement.declarationList.declarations.some(
+        (d) =>
+          !ts.isIdentifier(d.name) ||
+          !d.initializer ||
+          !ts.isArrowFunction(peel(d.initializer)),
+      )
+    )
+      return limit("direct-return-production-initialization");
+  }
+  let actual = peel(assertion.arguments[0]);
+  const aliases = new Set<ts.Declaration>();
+  while (ts.isIdentifier(actual)) {
+    const d = model.declaration(actual);
+    if (
+      !d ||
+      !ts.isVariableDeclaration(d) ||
+      aliases.has(d) ||
+      !ts.isIdentifier(d.name) ||
+      !(d.parent.flags & ts.NodeFlags.Const) ||
+      !d.initializer ||
+      d.getSourceFile() !== sf ||
+      d.getStart() >= assertion.getStart()
+    )
+      break;
+    aliases.add(d);
+    actual = peel(d.initializer);
+  }
+  if (
+    !ts.isCallExpression(actual) ||
+    actual.questionDotToken ||
+    !ts.isIdentifier(actual.expression) ||
+    model.declaration(actual.expression)?.getSourceFile() !== production
+  )
+    return limit("direct-return-operand-not-source-call");
+  let node = target;
+  if (ts.isReturnStatement(node) && node.expression)
+    node = peel(node.expression);
+  if (ts.isConditionalExpression(node)) node = node.condition;
+  const edits: {
+    change: NonNullable<
+      DirectReturnSensitivityEvidence["variants"]
+    >[number]["change"];
+    value: boolean | "invert";
+  }[] = [];
+  if (
+    ts.isBinaryExpression(node) &&
+    [
+      ts.SyntaxKind.EqualsEqualsEqualsToken,
+      ts.SyntaxKind.ExclamationEqualsEqualsToken,
+    ].includes(node.operatorToken.kind)
+  ) {
+    edits.push(
+      { change: "condition-true", value: true },
+      { change: "condition-false", value: false },
+      { change: "condition-inverted", value: "invert" },
+    );
+  } else if (
+    node.kind === ts.SyntaxKind.TrueKeyword ||
+    node.kind === ts.SyntaxKind.FalseKeyword
+  ) {
+    edits.push({
+      change: "boolean-literal-inverted",
+      value: node.kind !== ts.SyntaxKind.TrueKeyword,
+    });
+  } else return limit("direct-return-target-shape");
+  const expression = node as ts.Expression;
+  const trial: OmissionTrial = {
+    assertion,
+    module: production,
+    directReturn: { call: actual, target: expression },
+  };
+  const originalRun = runMockCounts(ts, fn, model, undefined, trial);
+  const original = originalRun.directReturnChecks.get(assertion);
+  if (
+    originalRun.limitation ||
+    !original ||
+    original.outcome !== "not-rejected"
+  )
+    return limit(
+      originalRun.limitation ?? "direct-return-original-unavailable",
+    );
+  const variants = edits.map((edit) => {
+    const changed = runMockCounts(ts, fn, model, undefined, {
+      ...trial,
+      condition: { node: expression, value: edit.value },
+    });
+    const check = changed.directReturnChecks.get(assertion);
+    if (
+      changed.limitation ||
+      !check ||
+      check.predicate !== original.predicate ||
+      JSON.stringify(check.expected) !== JSON.stringify(original.expected) ||
+      check.callSource !== original.callSource
+    )
+      return {
+        change: edit.change,
+        status: "unresolved" as const,
+        reason: changed.limitation ?? "direct-return-changed-unavailable",
+      };
+    return { change: edit.change, status: "source-checked" as const, check };
+  });
+  return {
+    ...base,
+    status: "source-checked",
+    scope: "first-synchronous-test-prefix",
+    assertionSource: model.location(assertion),
+    targetSource: model.location(target),
+    changeSource: model.location(expression),
+    changeText: expression.getText(),
+    original,
+    variants,
+  };
 }
 
 /** A hint selects this small proof recipe, never permission to assume shared state safe.
