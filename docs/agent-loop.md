@@ -64,7 +64,8 @@ This post-run query needs the matching source and a compatible
 project TypeScript API. An `evident` candidate is not a proof of safety; keep
 test gaps separate from analysis limits. Follow the returned evidence pointers
 and `pagination.nextOffset`, pinning `--analysis` and the run id while paging.
-See [assertion evidence](assertion-evidence.md) for requirements and examples.
+See [Understanding assertions](assertions.md) for the practical workflow and
+[assertion evidence](assertion-evidence.md) for the detailed requirements.
 
 ## Example
 
