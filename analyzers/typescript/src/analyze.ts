@@ -3930,13 +3930,19 @@ export function analyzeWithFrontend(
           method = "assert";
         if (method && ASSERT_STRENGTH[method]) {
           strength = ASSERT_STRENGTH[method];
-          // Unary native assertions inspect only their first argument. Their
-          // message is evaluated, but its returned value is not the predicate.
-          // This does not erase effects/throws from argument evaluation or
-          // assume the overload roles of exception assertions.
-          const unary = nativeAssertion?.method === "ok";
-          actuals = node.arguments.slice(0, unary ? 1 : 2);
-          expected = unary ? undefined : node.arguments[1];
+          // On a passing native ok/doesNotThrow/doesNotReject call, only the
+          // first argument participates in the success predicate. The no-error
+          // methods return before inspecting their optional matcher/message.
+          // Argument evaluation can still have effects or throw. Do not apply
+          // this rule to throws/rejects: their matcher and string-ambiguity
+          // checks can inspect the second value even when an error occurred.
+          const firstOperandOnly =
+            nativeAssertion !== undefined &&
+            ["ok", "doesNotThrow", "doesNotReject"].includes(
+              nativeAssertion.method,
+            );
+          actuals = node.arguments.slice(0, firstOperandOnly ? 1 : 2);
+          expected = firstOperandOnly ? undefined : node.arguments[1];
           negative = method === "doesNotMatch";
         } else if (ts.isPropertyAccessExpression(callee)) {
           // vitest/jest style: expect(actual)[.not][.resolves|.rejects].matcher(expected)
@@ -4065,8 +4071,15 @@ export function analyzeWithFrontend(
               noteUnrecognized(arg, o.kind);
               unresolvedOperand(o.kind);
             }
-            // rejects/throws: the function's throw sites are observed as well as (or instead of) its return
-            if (observesThrow)
+            // A native exception assertion's second operand supplies an error
+            // expectation or diagnostic, not the operation whose exception it
+            // catches. Do not invent a throw observation for that producer.
+            // First-operand callback/promise provenance remains a separate
+            // source-model concern; this does not add a new invocation link.
+            if (
+              observesThrow &&
+              (!nativeAssertion || arg === node.arguments[0])
+            )
               for (const b of [...bs])
                 if (b.boundary.startsWith("return:"))
                   bs.push({ boundary: "throw:" + b.boundary.slice(7) });

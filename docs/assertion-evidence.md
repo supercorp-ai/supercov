@@ -23,6 +23,15 @@ excluding its return value does not establish that removing the call is safe.
 Passing witnesses still require the exact source location and consistent passed
 outcomes; caught failed assertions and mixed outcomes do not supply them.
 
+For passing native `doesNotThrow` and `doesNotReject` calls, the optional second
+argument is not inspected after normal completion and receives no returned-value
+credit. Its evaluation can still have effects. `throws` and `rejects` are
+different: their second operand can supply an actual error matcher, and string
+overloads also have an ambiguity check. That operand's producer is not attributed
+as the operation whose exception the assertion catches. Callback/promise origin
+links can still be unresolved; these argument-role rules do not invent them or
+turn normal completion into a check of the callback's returned value.
+
 Every passed archived test remains in the analysis inventory, including tests
 whose custom or aliased registration cannot be linked to a source body.
 Those entries have no invented observations and carry
