@@ -100,6 +100,7 @@ try {
       `missing shipped analyzer input: ${file}`,
     );
   assert.ok(paths.has("docs/assertion-evidence.md"));
+  assert.ok(paths.has("docs/assertions.md"));
   assert.deepEqual(
     [...paths].filter((path) => path.startsWith("analyzers/typescript/dist/")).sort(),
     ["analyze.js", "archive.js", "awaited-observations.js", "build-identity.json", "compiler.js",

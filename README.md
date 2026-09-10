@@ -59,9 +59,10 @@ npx supercov runs latest assertions --evidence /tests --limit 5 --json
 This npm-only query uses the run archive and matching source; it adds no new
 test-time instrumentation. It requires a compatible project TypeScript compiler
 API (5.8.3 and native 7.0.2 are tested). Results are candidates, not proof
-that changes are safe or a verified assertion percentage. Follow
-[`assertion-evidence.md`](docs/assertion-evidence.md) for provenance, optional
-assertion hints, pagination, and limitations.
+that changes are safe or a verified assertion percentage. Start with
+[Understanding assertions](docs/assertions.md), then use the
+[evidence reference](docs/assertion-evidence.md) for provenance, optional hints,
+pagination, and limitations.
 
 ## Give Supercov a job
 
@@ -223,6 +224,7 @@ npx supercov clean             # remove all runs and the build cache
 
 - [Getting started](https://supercov.com/docs/getting-started)
 - [Agent workflow](https://supercov.com/docs/agent-loop)
+- [Understanding assertions](docs/assertions.md)
 - [Troubleshooting](https://supercov.com/docs/troubleshooting)
 - [CLI reference](https://supercov.com/docs/cli)
 - [Supported languages and test suites](https://supercov.com/docs/supported-suites)

@@ -1,5 +1,8 @@
 # Assertion evidence (JS/TS)
 
+Start with [Understanding assertions](assertions.md) for the practical workflow.
+This reference describes evidence fields, supported source models and their limits.
+
 Supercov can analyze which source behaviors existing assertions appear to check,
 using an ordinary run archive, its matching source, and the existing statement
 and assertion-phase evidence. This work happens after tests. It adds no new
