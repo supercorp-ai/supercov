@@ -1,7 +1,10 @@
 import type ts from "typescript";
 import type { Site } from "./types.js";
 import type { AwaitedObservationSource } from "./awaited-observations.js";
-import type { CallOmissionEvidence } from "./mock-counts.js";
+import type {
+  CallOmissionEvidence,
+  CountSensitivityEvidence,
+} from "./mock-counts.js";
 
 export type AssertionPhase = { source?: string; op: string; status?: string };
 export function assertionWitnessIssue(
@@ -43,7 +46,7 @@ interface Comment {
   candidateSites: string[];
   issue?: string;
   attachments: Attachment[];
-  check?: "missing-call";
+  check?: "missing-call" | "count";
 }
 export interface PragmaHint {
   id: string;
@@ -58,8 +61,9 @@ export interface PragmaHint {
   witness: "passed" | "unavailable";
   witnessIssue?: string;
   awaitedObservation?: AwaitedObservationSource;
-  check?: "missing-call";
+  check?: "missing-call" | "count";
   callOmission?: CallOmissionEvidence;
+  countSensitivity?: CountSensitivityEvidence;
 }
 
 /** Source hints are kept OUT of observations. A comment never adds a boundary. */
@@ -85,7 +89,9 @@ export function collectPragmas(
         const check =
           parts.length === 2 && parts[1].trim() === "missing call"
             ? ("missing-call" as const)
-            : undefined;
+            : parts.length === 2 && parts[1].trim() === "count"
+              ? ("count" as const)
+              : undefined;
         const checkIssue =
           parts.length > 1 && !check ? "unsupported-check-recipe" : undefined;
         const parsed = /^\/\/\s*observes:\s*(\S+?)#(\S+)(?:\s+(.+?))?\s*$/.exec(
@@ -112,7 +118,10 @@ export function collectPragmas(
                 (s) =>
                   s.file === target.file &&
                   // The recipe selects the emission, not a containing callback-return site.
-                  (!check || s.category === "log") &&
+                  (!check ||
+                    (check === "missing-call"
+                      ? s.category === "log"
+                      : s.kind === "decision" || s.category === "return")) &&
                   (s.owner === target.function || s.fn === target.function) &&
                   (!target.snippet || s.text.includes(target.snippet)),
               )

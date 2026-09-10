@@ -246,6 +246,10 @@ interface Model {
   globalConsole(expr: ts.Expression): boolean;
   production(node: ts.Node): boolean;
   site(call: ts.CallExpression): string | undefined;
+  nativeInspect?(call: ts.CallExpression): boolean;
+  nativeTty?(expr: ts.Expression): boolean;
+  nativeAssertion?(call: ts.CallExpression): boolean;
+  globalString?(expr: ts.Expression): boolean;
 }
 
 export interface CallOmissionEvidence {
@@ -267,6 +271,8 @@ interface OmissionTrial {
   assertion: ts.CallExpression;
   module: ts.SourceFile;
   omit?: ts.CallExpression;
+  allocations?: Set<ts.ObjectLiteralExpression>;
+  condition?: { node: ts.Expression; value: boolean | "invert" };
 }
 
 export function analyzeMockCounts(
@@ -312,6 +318,7 @@ function runMockCounts(
     kind: "object" | "array";
     properties: Map<string, Value>;
     moduleOwned: boolean;
+    allocation?: ts.ObjectLiteralExpression;
   };
   type Value =
     | Primitive
@@ -319,6 +326,7 @@ function runMockCounts(
     | Snapshot
     | Closure
     | Aggregate
+    | { kind: "opaque-inspect-string" | "opaque-native-tty" }
     | { kind: "context"; mock: Mock };
   const checks = new Map<ts.CallExpression, MockCountEvidence>();
   const installed = new Map<string, Mock | undefined>();
@@ -479,7 +487,9 @@ function runMockCounts(
       !primitive(value) &&
       (value.kind === "object" || value.kind === "array") &&
       value.moduleOwned &&
-      !trial
+      (!trial ||
+        (trial.allocations &&
+          (!value.allocation || !trial.allocations.has(value.allocation))))
     )
       return fail(node, "shared-module-object-history");
     return value;
@@ -490,6 +500,7 @@ function runMockCounts(
     return (
       primitive(value) ||
       value.kind === "closure" ||
+      value.kind === "opaque-inspect-string" ||
       ((value.kind === "object" || value.kind === "array") &&
         [...value.properties.values()].every(sourceValue))
     );
@@ -607,6 +618,18 @@ function runMockCounts(
   function evaluate(raw: ts.Expression, action: string, depth: number): Value {
     if (--budget < 0 || depth > 32) return fail(raw, "source-model-budget");
     const e = peel(raw);
+    if (trial?.condition?.node === e && trial.condition.value !== "invert")
+      return trial.condition.value;
+    if (ts.isTypeOfExpression(e)) {
+      const v = evaluate(e.expression, action, depth + 1);
+      if (primitive(v)) return typeof v;
+      if (v.kind === "object" || v.kind === "array") return "object";
+      if (v.kind === "closure") return "function";
+      if (v.kind === "opaque-inspect-string") return "string";
+      return fail(e, "unsupported-abstract-typeof");
+    }
+    if (trial?.allocations && model.nativeTty?.(e))
+      return { kind: "opaque-native-tty" };
     if (ts.isStringLiteralLike(e)) return e.text;
     if (ts.isNumericLiteral(e)) return Number(e.text);
     if (
@@ -623,6 +646,8 @@ function runMockCounts(
     if (e.kind === ts.SyntaxKind.NullKeyword) return null;
     if (ts.isIdentifier(e)) {
       const d = model.declaration(e);
+      if (e.text === "undefined" && (!d || d.getSourceFile().isDeclarationFile))
+        return undefined;
       if (d && locals.has(d)) return accessible(locals.get(d), e);
       if (d && model.production(d)) {
         const environment = moduleEnvironment(d, depth);
@@ -654,7 +679,12 @@ function runMockCounts(
           ),
         );
       }
-      return { kind: "object", properties, moduleOwned: initializing };
+      return {
+        kind: "object",
+        properties,
+        moduleOwned: initializing,
+        allocation: e,
+      };
     }
     if (ts.isArrayLiteralExpression(e)) {
       const properties = new Map<string, Value>();
@@ -684,9 +714,13 @@ function runMockCounts(
         right = evaluate(e.right, action, depth + 1);
       if (!primitive(left) || !primitive(right))
         return fail(e, "nonprimitive-comparison");
-      return e.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken
-        ? left === right
-        : left !== right;
+      const result =
+        e.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken
+          ? left === right
+          : left !== right;
+      return trial?.condition?.node === e && trial.condition.value === "invert"
+        ? !result
+        : result;
     }
     if (ts.isPropertyAccessExpression(e)) {
       const base = evaluate(e.expression, action, depth + 1);
@@ -713,6 +747,39 @@ function runMockCounts(
     // No source is executed and no test code is modified during this query.
     if (trial?.omit === e) return undefined;
     const callee = peel(e.expression);
+    if (trial?.allocations && model.nativeInspect?.(e)) {
+      const plain = (v: Value, level = 0): boolean => {
+        if (--budget < 0 || level > 32) return false;
+        return (
+          primitive(v) ||
+          ((v.kind === "object" || v.kind === "array") &&
+            !v.moduleOwned &&
+            [...v.properties.values()].every((p) => plain(p, level + 1)))
+        );
+      };
+      const args = argumentsOf(e, action, depth + 1);
+      if (
+        args.length !== 2 ||
+        !plain(args[0]) ||
+        primitive(args[1]) ||
+        args[1].kind !== "object" ||
+        args[1].moduleOwned
+      )
+        return fail(e, "unsupported-inspect-summary-input");
+      const options = args[1].properties,
+        colors = options.get("colors");
+      if (
+        options.size !== 3 ||
+        options.get("depth") !== null ||
+        typeof options.get("compact") !== "boolean" ||
+        !(
+          typeof colors === "boolean" ||
+          (!primitive(colors) && colors.kind === "opaque-native-tty")
+        )
+      )
+        return fail(e, "unsupported-inspect-summary-options");
+      return { kind: "opaque-inspect-string" };
+    }
     if (
       ts.isPropertyAccessExpression(callee) &&
       ["map", "slice"].includes(callee.name.text)
@@ -878,6 +945,8 @@ function runMockCounts(
     const predicate = model.nativePredicate(e);
     if (predicate) {
       if (initializing) return fail(e, "effectful-module-initialization");
+      if (trial && predicate !== "node-same-value")
+        return fail(e, "unsupported-trial-predicate");
       if (e.arguments.length < 2 || e.arguments.length > 3)
         return fail(e, "unsupported-comparison-arity");
       const values = e.arguments.map((arg) => evaluate(arg, action, depth + 1));
@@ -906,6 +975,8 @@ function runMockCounts(
         checks.set(e, { ...actual.evidence, expectedCount: expected });
       } else if (!primitive(a) || !primitive(b))
         return fail(e, "unsupported-comparison-operand");
+      else if (trial && !Object.is(a, b))
+        return fail(e, "earlier-primitive-assertion-rejects");
       if (trial?.assertion === e) throw new ReachedAssertion();
       return undefined;
     }
@@ -1217,5 +1288,669 @@ export function analyzeFirstTestOmission(
     expectedCount: before.expectedCount,
     originalCount: before.observedCount,
     omittedCount: after.observedCount,
+  };
+}
+
+type ScopeModel = Model & { nativeTest(call: ts.CallExpression): boolean };
+
+/** Allocation-specific permission for a closed, synchronous, nonescaping test
+ * module. This is not a general readonly inference from `const`. Native APIs,
+ * isolated module loading and pristine prototypes remain model assumptions. */
+function closedCountScope(
+  ts: SyntaxAPI,
+  sf: ts.SourceFile,
+  prod: ts.SourceFile,
+  model: ScopeModel,
+) {
+  const reject = (why: string): never => {
+    throw new Error(why);
+  };
+  let budget = 32768;
+  const walk = (n: ts.Node, f: (n: ts.Node) => void) => {
+    if (--budget < 0) reject("scope-budget");
+    f(n);
+    ts.forEachChild(n, (c) => walk(c, f));
+  };
+  const peel = (raw: ts.Expression): ts.Expression => {
+    let e = raw;
+    while (
+      ts.isParenthesizedExpression(e) ||
+      ts.isAsExpression(e) ||
+      ts.isSatisfiesExpression(e) ||
+      ts.isNonNullExpression(e)
+    )
+      e = e.expression;
+    return e;
+  };
+  const local = (n: ts.Node) => {
+    const d = model.declaration(n);
+    return d?.getSourceFile().isDeclarationFile ? undefined : d;
+  };
+  const erased = (s: ts.ImportDeclaration) => {
+    const c = s.importClause;
+    return (
+      !!c &&
+      (c.isTypeOnly ||
+        (!c.name &&
+          c.namedBindings &&
+          ts.isNamedImports(c.namedBindings) &&
+          c.namedBindings.elements.every((e) => {
+            const d = local(e.name);
+            return (
+              e.isTypeOnly ||
+              (!!d &&
+                (ts.isInterfaceDeclaration(d) || ts.isTypeAliasDeclaration(d)))
+            );
+          })))
+    );
+  };
+  try {
+    const allocations = new Set<ts.ObjectLiteralExpression>();
+    const shared = new Set<ts.VariableDeclaration>();
+    const calls: ts.CallExpression[] = [];
+    let factory: ts.ArrowFunction | undefined,
+      factoryBinding: ts.VariableDeclaration | undefined;
+    for (const s of prod.statements) {
+      if (
+        ts.isInterfaceDeclaration(s) ||
+        ts.isTypeAliasDeclaration(s) ||
+        ts.isEmptyStatement(s)
+      )
+        continue;
+      if (ts.isImportDeclaration(s)) {
+        if (erased(s)) continue;
+        if (
+          !ts.isStringLiteralLike(s.moduleSpecifier) ||
+          s.moduleSpecifier.text !== "node:util" ||
+          !s.importClause?.name ||
+          s.importClause.namedBindings
+        )
+          reject("scope-production-import");
+        continue;
+      }
+      if (
+        !ts.isVariableStatement(s) ||
+        !(s.declarationList.flags & ts.NodeFlags.Const)
+      )
+        return { reason: "scope-production-binding" };
+      for (const d of s.declarationList.declarations) {
+        if (!ts.isIdentifier(d.name) || !d.initializer)
+          return { reason: "scope-production-binding" };
+        const e = peel(d.initializer);
+        if (ts.isObjectLiteralExpression(e)) {
+          allocations.add(e);
+          shared.add(d);
+        }
+        if (s.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) {
+          if (factory || !ts.isArrowFunction(e))
+            return { reason: "scope-single-factory" };
+          factory = e;
+          factoryBinding = d;
+        }
+      }
+    }
+    if (!factory || !shared.size)
+      return { reason: "scope-private-allocations" };
+    const bannedNames = new Set([
+      "eval",
+      "Function",
+      "require",
+      "globalThis",
+      "global",
+      "__proto__",
+      "constructor",
+      "prototype",
+      "toString",
+      "valueOf",
+      "Symbol",
+    ]);
+    const noMutation = (n: ts.Node) => {
+      if (
+        (ts.isBinaryExpression(n) &&
+          n.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+          n.operatorToken.kind <= ts.SyntaxKind.LastAssignment) ||
+        ts.isDeleteExpression(n) ||
+        ts.isPostfixUnaryExpression(n) ||
+        (ts.isPrefixUnaryExpression(n) &&
+          [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(
+            n.operator,
+          )) ||
+        ts.isNewExpression(n) ||
+        ts.isAwaitExpression(n) ||
+        ts.isYieldExpression(n) ||
+        ts.isTaggedTemplateExpression(n) ||
+        n.kind === ts.SyntaxKind.ThisKeyword ||
+        ts.isGetAccessorDeclaration(n) ||
+        ts.isSetAccessorDeclaration(n) ||
+        ts.isComputedPropertyName(n) ||
+        (ts.isIdentifier(n) && bannedNames.has(n.text)) ||
+        ((ts.isArrowFunction(n) || ts.isFunctionExpression(n)) &&
+          (!!n.modifiers?.length ||
+            ("asteriskToken" in n && !!n.asteriskToken)))
+      )
+        reject("scope-effect-or-dynamic-escape");
+    };
+    walk(prod, (n) => {
+      noMutation(n);
+      if (ts.isCallExpression(n)) calls.push(n);
+      if (ts.isElementAccessExpression(n))
+        reject("scope-computed-production-read");
+    });
+    walk(sf, noMutation);
+    const origins = (
+      raw: ts.Expression | undefined,
+      active = new Set<ts.Node>(),
+    ): ts.ArrowFunction[] | undefined => {
+      if (!raw || --budget < 0 || active.has(raw)) return;
+      const e = peel(raw),
+        next = new Set(active).add(raw);
+      if (ts.isArrowFunction(e)) return [e];
+      if (ts.isIdentifier(e)) {
+        const d = local(e);
+        if (
+          d &&
+          ts.isVariableDeclaration(d) &&
+          d.initializer &&
+          d.parent.flags & ts.NodeFlags.Const
+        )
+          return origins(d.initializer, next);
+        if (
+          d &&
+          ts.isBindingElement(d) &&
+          ts.isObjectBindingPattern(d.parent) &&
+          ts.isParameter(d.parent.parent)
+        ) {
+          const p = d.parent.parent,
+            owner = p.parent,
+            binding = owner.parent;
+          if (
+            !ts.isArrowFunction(owner) ||
+            owner === factory ||
+            !ts.isVariableDeclaration(binding) ||
+            binding.initializer !== owner
+          )
+            return;
+          let direct = true;
+          walk(prod, (n) => {
+            if (
+              ts.isIdentifier(n) &&
+              local(n) === binding &&
+              n !== binding.name &&
+              !(ts.isCallExpression(n.parent) && n.parent.expression === n)
+            )
+              direct = false;
+          });
+          if (!direct) return;
+          const sites = calls.filter((c) => local(c.expression) === binding),
+            found: ts.ArrowFunction[] = [];
+          if (!sites.length) return;
+          const key = d.propertyName ?? d.name;
+          if (!(ts.isIdentifier(key) || ts.isStringLiteralLike(key))) return;
+          for (const c of sites) {
+            const arg =
+              c.arguments[owner.parameters.indexOf(p)] ?? p.initializer;
+            if (!arg) return;
+            const obj = peel(arg);
+            if (!ts.isObjectLiteralExpression(obj)) return;
+            let value = d.initializer;
+            const names = new Set<string>();
+            for (const member of obj.properties) {
+              if (
+                !ts.isPropertyAssignment(member) ||
+                !(
+                  ts.isIdentifier(member.name) ||
+                  ts.isStringLiteralLike(member.name)
+                ) ||
+                names.has(member.name.text)
+              )
+                return;
+              names.add(member.name.text);
+              if (member.name.text === key.text) value = member.initializer;
+            }
+            const targets = origins(value, next);
+            if (!targets) return;
+            found.push(...targets);
+          }
+          return found;
+        }
+      }
+      if (ts.isCallExpression(e)) {
+        const targets = origins(e.expression, next),
+          result: ts.ArrowFunction[] = [];
+        if (!targets) return;
+        for (const f of targets) {
+          let body: ts.Expression | undefined;
+          if (!ts.isBlock(f.body)) body = f.body;
+          else if (
+            f.body.statements.length === 1 &&
+            ts.isReturnStatement(f.body.statements[0])
+          )
+            body = f.body.statements[0].expression;
+          const target = origins(body, next);
+          if (!target) return;
+          result.push(...target);
+        }
+        return result;
+      }
+      return;
+    };
+    const methods = new Set<string>(),
+      sharedMethods = new Set<ts.ArrowFunction>();
+    for (const obj of allocations)
+      for (const prop of obj.properties) {
+        if (!ts.isPropertyAssignment(prop) || !ts.isIdentifier(prop.name))
+          return { reason: "scope-shared-member" };
+        const targets = origins(prop.initializer);
+        if (!targets?.length) return { reason: "scope-method-origin" };
+        methods.add(prop.name.text);
+        targets.forEach((t) => sharedMethods.add(t));
+      }
+    const callOrigins = new Map(calls.map((c) => [c, origins(c.expression)]));
+    const nativeMap = (c: ts.CallExpression) => {
+      if (
+        !ts.isPropertyAccessExpression(c.expression) ||
+        c.expression.name.text !== "map" ||
+        c.arguments.length !== 1 ||
+        !ts.isArrowFunction(c.arguments[0])
+      )
+        return false;
+      const p = local(c.expression.expression);
+      if (
+        !p ||
+        !ts.isParameter(p) ||
+        !ts.isIdentifier(p.name) ||
+        !ts.isArrowFunction(p.parent)
+      )
+        return false;
+      const owner = p.parent;
+      if (owner === factory || sharedMethods.has(owner)) return false;
+      const sites = calls.filter((call) =>
+        callOrigins.get(call)?.includes(owner),
+      );
+      return (
+        sites.length > 0 &&
+        sites.every((call) => {
+          const arg = call.arguments[owner.parameters.indexOf(p)];
+          if (!arg) return false;
+          const e = peel(arg),
+            d = local(e);
+          return (
+            ts.isArrayLiteralExpression(e) ||
+            (!!d &&
+              ts.isParameter(d) &&
+              !!d.dotDotDotToken &&
+              ts.isIdentifier(d.name))
+          );
+        })
+      );
+    };
+    walk(prod, (n) => {
+      if (
+        ts.isIdentifier(n) &&
+        shared.has(local(n) as ts.VariableDeclaration) &&
+        n !== (local(n) as ts.VariableDeclaration).name
+      ) {
+        let p: ts.Node = n;
+        while (
+          ts.isParenthesizedExpression(p.parent) ||
+          ts.isConditionalExpression(p.parent)
+        )
+          p = p.parent;
+        if (!ts.isReturnStatement(p.parent))
+          reject("scope-shared-object-escape");
+        let owner: ts.Node = p.parent;
+        while (owner.parent && !ts.isArrowFunction(owner)) owner = owner.parent;
+        if (owner !== factory) reject("scope-shared-object-escape");
+      }
+      if (
+        ts.isIdentifier(n) &&
+        local(n) === factoryBinding &&
+        n !== factoryBinding?.name
+      )
+        reject("scope-factory-reentry");
+      if (ts.isCallExpression(n)) {
+        const e = n.expression;
+        const console =
+          ts.isPropertyAccessExpression(e) &&
+          model.globalConsole(e.expression) &&
+          ["log", "error"].includes(e.name.text);
+        if (
+          !callOrigins.get(n)?.length &&
+          !console &&
+          !model.nativeInspect?.(n) &&
+          !nativeMap(n)
+        )
+          reject("scope-call-origin");
+      }
+    });
+    const callbacks: ts.ArrowFunction[] = [],
+      tables = new Set<ts.VariableDeclaration>();
+    const register = (s: ts.Statement) => {
+      if (!ts.isExpressionStatement(s) || !ts.isCallExpression(s.expression))
+        return reject("scope-registration");
+      const c = s.expression,
+        f = c.arguments[1];
+      if (
+        !model.nativeTest(c) ||
+        c.arguments.length !== 2 ||
+        !ts.isArrowFunction(f) ||
+        !ts.isBlock(f.body) ||
+        f.parameters.length !== 1 ||
+        !ts.isIdentifier(f.parameters[0].name) ||
+        f.parameters[0].initializer ||
+        f.parameters[0].dotDotDotToken
+      )
+        return reject("scope-registration");
+      const rows = sourceTestRows(ts, f, model);
+      if (rows?.reason || (!rows && !ts.isStringLiteralLike(c.arguments[0])))
+        return reject("scope-row-registration");
+      if (rows) {
+        const loop = c.parent.parent.parent;
+        if (!ts.isForOfStatement(loop)) return reject("scope-row-registration");
+        const table = local(loop.expression);
+        if (!table || !ts.isVariableDeclaration(table))
+          return reject("scope-row-registration");
+        tables.add(table);
+      }
+      callbacks.push(f);
+    };
+    // Check registrations first so only their proven exclusive literal tables are allowed.
+    for (const s of sf.statements) {
+      if (ts.isExpressionStatement(s)) register(s);
+      else if (ts.isForOfStatement(s)) {
+        if (!ts.isBlock(s.statement) || s.statement.statements.length !== 1)
+          return { reason: "scope-row-registration" };
+        register(s.statement.statements[0]);
+      }
+    }
+    for (const s of sf.statements) {
+      if (ts.isImportDeclaration(s)) {
+        if (erased(s)) continue;
+        if (!ts.isStringLiteralLike(s.moduleSpecifier) || !s.importClause)
+          return { reason: "scope-test-import" };
+        if (
+          [
+            "node:test",
+            "node:assert/strict",
+            "node:assert",
+            "assert/strict",
+            "assert",
+          ].includes(s.moduleSpecifier.text)
+        )
+          continue;
+        const names = s.importClause.namedBindings;
+        if (
+          s.importClause.name ||
+          !names ||
+          !ts.isNamedImports(names) ||
+          names.elements.some((e) => local(e.name) !== factoryBinding)
+        )
+          return { reason: "scope-test-import" };
+      } else if (ts.isVariableStatement(s)) {
+        if (s.declarationList.declarations.some((d) => !tables.has(d)))
+          return { reason: "scope-test-setup" };
+      } else if (
+        !ts.isExpressionStatement(s) &&
+        !ts.isForOfStatement(s) &&
+        !ts.isEmptyStatement(s)
+      )
+        return { reason: "scope-test-setup" };
+    }
+    const literal = (raw: ts.Expression): boolean => {
+      if (--budget < 0) return false;
+      const e = peel(raw);
+      if (
+        ts.isStringLiteralLike(e) ||
+        ts.isNumericLiteral(e) ||
+        [
+          ts.SyntaxKind.TrueKeyword,
+          ts.SyntaxKind.FalseKeyword,
+          ts.SyntaxKind.NullKeyword,
+        ].includes(e.kind)
+      )
+        return true;
+      if (ts.isArrayLiteralExpression(e)) return e.elements.every(literal);
+      return (
+        ts.isObjectLiteralExpression(e) &&
+        e.properties.every(
+          (p) =>
+            ts.isPropertyAssignment(p) &&
+            ts.isIdentifier(p.name) &&
+            literal(p.initializer),
+        )
+      );
+    };
+    for (const fn of callbacks) {
+      const receivers = new Set<ts.VariableDeclaration>(),
+        mocks = new Set<ts.VariableDeclaration>();
+      const row = sourceTestRows(ts, fn, model)?.rows[0];
+      walk(fn.body, (n) => {
+        if (!ts.isCallExpression(n)) return;
+        if (local(n.expression) === factoryBinding) {
+          const arg = n.arguments[0];
+          if (
+            n.arguments.length !== 1 ||
+            !ts.isObjectLiteralExpression(arg) ||
+            !arg.properties.every(
+              (p) =>
+                (ts.isPropertyAssignment(p) &&
+                  ts.isIdentifier(p.name) &&
+                  literal(p.initializer)) ||
+                (ts.isShorthandPropertyAssignment(p) &&
+                  !p.objectAssignmentInitializer &&
+                  !!row?.bindings.has(local(p.name)!)),
+            )
+          )
+            reject("scope-factory-input");
+          if (
+            !ts.isVariableDeclaration(n.parent) ||
+            !ts.isIdentifier(n.parent.name) ||
+            !(n.parent.parent.flags & ts.NodeFlags.Const)
+          )
+            return reject("scope-receiver-binding");
+          receivers.add(n.parent);
+        }
+        if (model.nativeMock(n)) {
+          const [receiver, method, replacement] = n.arguments;
+          if (
+            n.arguments.length !== 3 ||
+            !model.globalConsole(receiver) ||
+            !ts.isStringLiteralLike(method) ||
+            !["log", "error"].includes(method.text) ||
+            !ts.isArrowFunction(replacement) ||
+            replacement.parameters.length ||
+            !ts.isBlock(replacement.body) ||
+            replacement.body.statements.length ||
+            !ts.isVariableDeclaration(n.parent)
+          )
+            reject("scope-mock-installation");
+          if (ts.isVariableDeclaration(n.parent)) mocks.add(n.parent);
+        }
+      });
+      walk(fn.body, (n) => {
+        if (
+          ts.isIdentifier(n) &&
+          receivers.has(local(n) as ts.VariableDeclaration) &&
+          n !== (local(n) as ts.VariableDeclaration).name
+        ) {
+          const prop = n.parent,
+            call = prop.parent;
+          if (
+            !ts.isPropertyAccessExpression(prop) ||
+            prop.expression !== n ||
+            !methods.has(prop.name.text) ||
+            !ts.isCallExpression(call) ||
+            call.expression !== prop ||
+            !call.arguments.every(literal)
+          )
+            reject("scope-receiver-escape");
+        }
+        if (
+          ts.isIdentifier(n) &&
+          local(n) === factoryBinding &&
+          !(ts.isCallExpression(n.parent) && n.parent.expression === n)
+        )
+          reject("scope-factory-escape");
+        if (!ts.isCallExpression(n)) return;
+        const e = n.expression;
+        const source =
+          ts.isPropertyAccessExpression(e) &&
+          receivers.has(local(e.expression) as ts.VariableDeclaration);
+        let root: ts.Expression = e;
+        while (ts.isPropertyAccessExpression(root)) root = root.expression;
+        const mockRead =
+          mocks.has(local(root) as ts.VariableDeclaration) &&
+          ts.isPropertyAccessExpression(e) &&
+          ["callCount", "slice"].includes(e.name.text);
+        if (
+          !source &&
+          !mockRead &&
+          !model.nativeMock(n) &&
+          !model.nativeAssertion?.(n) &&
+          !model.globalString?.(e) &&
+          local(e) !== factoryBinding
+        )
+          reject("scope-test-call-origin");
+      });
+    }
+    return { allocations, callbacks };
+  } catch (error) {
+    return {
+      reason: error instanceof Error ? error.message : "scope-unavailable",
+    };
+  }
+}
+
+export interface CountSensitivityEvidence {
+  model: "node-closed-count-sensitivity-v1";
+  status: "source-checked" | "unresolved";
+  reason?: string;
+  scope?: "closed-synchronous-test-module";
+  assertionSource?: string;
+  targetSource?: string;
+  conditionSource?: string;
+  conditionText?: string;
+  allocations?: string[];
+  instance?: string;
+  expectedCount?: number;
+  originalCount?: number;
+  variants?: {
+    change: "condition-true" | "condition-false" | "condition-inverted";
+    status: "source-checked" | "unresolved";
+    reason?: string;
+    count?: number;
+    outcome?: "rejected" | "not-rejected";
+  }[];
+}
+
+/** A finite, explicit control-change question, not protection against arbitrary edits. */
+export function analyzeCountSensitivity(
+  ts: SyntaxAPI,
+  fn: ts.Node,
+  assertion: ts.CallExpression,
+  target: ts.Node,
+  model: ScopeModel,
+  row?: BoundRow,
+): CountSensitivityEvidence {
+  const base: CountSensitivityEvidence = {
+    model: "node-closed-count-sensitivity-v1",
+    status: "unresolved",
+  };
+  const limit = (reason: string) => ({ ...base, reason });
+  const production = target.getSourceFile();
+  if (
+    !model.production(target) ||
+    !ts.isArrowFunction(fn) ||
+    !ts.isBlock(fn.body) ||
+    assertion.parent.parent !== fn.body ||
+    model.nativePredicate(assertion) !== "node-same-value"
+  )
+    return limit("count-sensitivity-assertion-shape");
+  let condition: ts.Node = target;
+  if (ts.isReturnStatement(condition) && condition.expression)
+    condition = condition.expression;
+  if (ts.isConditionalExpression(condition)) condition = condition.condition;
+  if (ts.isIfStatement(condition)) condition = condition.expression;
+  // Exact primitive equality, without getters, calls, overloaded coercion or side effects.
+  if (
+    !ts.isBinaryExpression(condition) ||
+    ![
+      ts.SyntaxKind.EqualsEqualsEqualsToken,
+      ts.SyntaxKind.ExclamationEqualsEqualsToken,
+    ].includes(condition.operatorToken.kind) ||
+    ![condition.left, condition.right].every(
+      (e) =>
+        ts.isIdentifier(e) ||
+        ts.isStringLiteralLike(e) ||
+        ts.isNumericLiteral(e),
+    )
+  )
+    return limit("count-sensitivity-condition-shape");
+  const scope = closedCountScope(ts, fn.getSourceFile(), production, model);
+  if (!scope.allocations || !scope.callbacks?.includes(fn))
+    return limit(scope.reason ?? "count-sensitivity-scope");
+  const trial = {
+    assertion,
+    module: production,
+    allocations: scope.allocations,
+  };
+  const original = runMockCounts(ts, fn, model, row, trial),
+    before = original.checks.get(assertion);
+  if (
+    !before ||
+    original.limitation ||
+    before.observedCount !== before.expectedCount
+  )
+    return limit(
+      original.limitation ?? "count-sensitivity-original-unavailable",
+    );
+  const variants: NonNullable<CountSensitivityEvidence["variants"]> = [];
+  for (const value of [true, false, "invert"] as const) {
+    const changed = runMockCounts(ts, fn, model, row, {
+      ...trial,
+      condition: { node: condition, value },
+    });
+    const after = changed.checks.get(assertion),
+      change =
+        value === true
+          ? "condition-true"
+          : value === false
+            ? "condition-false"
+            : "condition-inverted";
+    if (
+      changed.limitation ||
+      !after ||
+      after.instance !== before.instance ||
+      after.expectedCount !== before.expectedCount
+    )
+      variants.push({
+        change,
+        status: "unresolved",
+        reason: changed.limitation ?? "count-sensitivity-changed-unavailable",
+      });
+    else
+      variants.push({
+        change,
+        status: "source-checked",
+        count: after.observedCount,
+        outcome:
+          after.observedCount === after.expectedCount
+            ? "not-rejected"
+            : "rejected",
+      });
+  }
+  return {
+    ...base,
+    status: "source-checked",
+    scope: "closed-synchronous-test-module",
+    assertionSource: model.location(assertion),
+    targetSource: model.location(target),
+    conditionSource: model.location(condition),
+    conditionText: condition.getText(),
+    allocations: [...scope.allocations].map(model.location),
+    instance: before.instance,
+    expectedCount: before.expectedCount,
+    originalCount: before.observedCount,
+    variants,
   };
 }

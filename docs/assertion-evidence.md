@@ -351,6 +351,47 @@ different scheduling contracts. The existing source-freshness checks still apply
 No mutation is executed during querying and no new test-time probe is installed.
 Invalid or unsupported hints only affect analysis; they never fail a test.
 
+### A checked count/routing question
+
+```ts
+// observes: src/logger.ts#selectLogger mode === 'quiet'; check count
+assert.equal(log.mock.callCount(), 1);
+```
+
+`; check count` selects a decision or a return containing a conditional expression.
+The bounded `node-closed-count-sensitivity-v1` model checks three explicit changes
+to the selected primitive equality: replace it with true, replace it with false,
+or invert it. Each change applies on every evaluation of that expression in the
+modeled prefix. This is not arbitrary-change or whole-site protection.
+
+Unlike the first-test omission recipe, this rule can handle later source-checked
+registration rows. It checks a closed synchronous test module, the sole imported
+production factory, source closure origins, nonescaping receivers and enumerated
+shared object allocations. Only those allocations receive permission; captured
+arrays/objects do not inherit a blanket shared-state exemption. Setup effects,
+hooks, native aliases, dynamic escape and unsupported calls remain unresolved.
+
+For call counts, `util.inspect` on bounded fresh plain data can be represented as
+an opaque string. Native TTY state remains opaque too. The model does not guess
+formatted bytes, and an opaque comparison or unsupported earlier assertion stops
+the selected variant. Earlier rejecting assertions are not credited to a later
+count assertion.
+
+The owning count assertion must have an exact passing witness and an independent
+integer expectation matching its modeled original count. `hint.countSensitivity`
+reports the checked source locations, allocations, mock instance, original and
+expected counts, and separate `condition-true`, `condition-false` and
+`condition-inverted` variants. Every variant has its own status and, when checked,
+count and `rejected`/`not-rejected` outcome. Partial results retain unknown variants.
+
+`validation: analyzer-supported` applies to these bounded results only. It never
+promotes ordinary observations, site strength or a global assertion score.
+`not-rejected` concerns the selected assertion, not the whole suite. The native
+API/compiler/pristine-environment and isolated-loading assumptions above still
+apply; this source checker is not a formally verified JavaScript semantics.
+Hints are inert comments. All additional work occurs during querying, with no
+new test-time probes or external user-maintained contract files.
+
 ### Awaited child-process capture helpers
 
 For a bounded Node `test` pattern, a hint can attach to an awaited helper that

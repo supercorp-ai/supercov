@@ -17,6 +17,7 @@ export const PROTOCOL = {
     "assertion-hints-v1",
     "awaited-observation-sources-v1",
     "first-test-call-omission-v1",
+    "closed-count-sensitivity-v1",
     "mock-observation-projections-v1",
     "assertion-comparison-relations-v2",
     "process-exit-source-v1",
@@ -228,12 +229,23 @@ function analyzeArchiveWithFrontend(
     atoms.forEach((n, i) => {
       const begin = sf.getLineAndCharacterOfPosition(n.getStart(sf)),
         end = sf.getLineAndCharacterOfPosition(n.getEnd());
-      // The flow pass resolves the actual AST owner; this fallback is only for presentation.
+      // This owner also participates in source-hint selection. Named arrow
+      // bindings must not be mislabeled <module> merely because they are not
+      // function declarations.
       let parent: ts.Node | undefined = n.parent,
         owner = "<module>";
       while (parent) {
         if (compiler.isFunctionDeclaration(parent) && parent.name) {
           owner = parent.name.text;
+          break;
+        }
+        if (
+          (compiler.isArrowFunction(parent) ||
+            compiler.isFunctionExpression(parent)) &&
+          compiler.isVariableDeclaration(parent.parent) &&
+          compiler.isIdentifier(parent.parent.name)
+        ) {
+          owner = parent.parent.name.text;
           break;
         }
         parent = parent.parent;

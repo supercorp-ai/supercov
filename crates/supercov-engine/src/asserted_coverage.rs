@@ -605,6 +605,36 @@ pub struct PragmaHint {
     pub check: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_omission: Option<CallOmissionEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count_sensitivity: Option<CountSensitivityEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CountSensitivityEvidence {
+    pub model: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub scope: Option<String>,
+    pub assertion_source: Option<String>,
+    pub target_source: Option<String>,
+    pub condition_source: Option<String>,
+    pub condition_text: Option<String>,
+    pub allocations: Option<Vec<String>>,
+    pub instance: Option<String>,
+    pub expected_count: Option<u64>,
+    pub original_count: Option<u64>,
+    pub variants: Option<Vec<CountSensitivityVariant>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CountSensitivityVariant {
+    pub change: String,
+    pub status: String,
+    pub reason: Option<String>,
+    pub count: Option<u64>,
+    pub outcome: Option<String>,
 }
 
 /// A bounded check of one specified edit, never general value or site credit.
@@ -787,6 +817,78 @@ pub fn check_pragma_hints(facts: &Facts, hints: &[PragmaHint]) -> Vec<PragmaChec
                     })
                 }) {
                     result.reason = "omission-count-assertion-not-modelled".into();
+                    return result;
+                }
+                if recipe == "count" {
+                    result.reason = "count-sensitivity-unavailable".into();
+                    let Some(check) = &hint.count_sensitivity else {
+                        return result;
+                    };
+                    let in_file = |s: &Option<String>| {
+                        s.as_ref()
+                            .is_some_and(|s| s.starts_with(&format!("{}:", site.file)))
+                    };
+                    if check.model != "node-closed-count-sensitivity-v1"
+                        || check.status != "source-checked"
+                        || check.reason.is_some()
+                        || check.scope.as_deref() != Some("closed-synchronous-test-module")
+                        || check.assertion_source != hint.assertion_source
+                        || !in_file(&check.target_source)
+                        || !in_file(&check.condition_source)
+                        || check.condition_text.as_ref().is_none_or(String::is_empty)
+                        || check.instance.as_ref().is_none_or(String::is_empty)
+                        || check.allocations.as_ref().is_none_or(|a| {
+                            a.is_empty()
+                                || a.iter().any(|s| !s.starts_with(&format!("{}:", site.file)))
+                        })
+                        || !(site.kind == "decision" || site.category == "return")
+                    {
+                        result.reason = check
+                            .reason
+                            .clone()
+                            .unwrap_or_else(|| "unsupported-count-sensitivity-evidence".into());
+                        return result;
+                    }
+                    let (Some(expected), Some(original), Some(variants)) =
+                        (check.expected_count, check.original_count, &check.variants)
+                    else {
+                        return result;
+                    };
+                    let expected_changes =
+                        ["condition-true", "condition-false", "condition-inverted"];
+                    if expected != original
+                        || variants.len() != 3
+                        || !expected_changes
+                            .iter()
+                            .all(|name| variants.iter().filter(|v| v.change == *name).count() == 1)
+                        || variants.iter().any(|v| match v.status.as_str() {
+                            "source-checked" => {
+                                v.reason.is_some()
+                                    || v.count.is_none()
+                                    || v.outcome.as_deref()
+                                        != Some(if v.count == Some(expected) {
+                                            "not-rejected"
+                                        } else {
+                                            "rejected"
+                                        })
+                            }
+                            "unresolved" => {
+                                v.reason.as_ref().is_none_or(String::is_empty)
+                                    || v.count.is_some()
+                                    || v.outcome.is_some()
+                            }
+                            _ => true,
+                        })
+                    {
+                        result.reason = "inconsistent-count-sensitivity-variants".into();
+                        return result;
+                    }
+                    if variants.iter().all(|v| v.status != "source-checked") {
+                        return result;
+                    }
+                    result.validation = HintValidation::AnalyzerSupported;
+                    result.reason = "modeled-count-sensitivity".into();
+                    // Explicit per-variant answers only; no join/whole-site credit.
                     return result;
                 }
                 let Some(check) = &hint.call_omission else {
@@ -2295,6 +2397,7 @@ mod tests {
             awaited_observation: None,
             check: None,
             call_omission: None,
+            count_sensitivity: None,
         }
     }
 
@@ -2368,6 +2471,70 @@ mod tests {
         assert_eq!(negative.validation, HintValidation::AnalyzerSupported);
         assert_eq!(negative.reason, "modeled-callback-omission-not-rejected");
         assert_eq!(negative.strength, None);
+    }
+
+    #[test]
+    fn count_sensitivity_keeps_variant_scope_and_requires_own_witness() {
+        let mut hint = pragma_hint();
+        hint.check = Some("count".into());
+        hint.count_sensitivity = Some(serde_json::from_value(serde_json::json!({
+            "model":"node-closed-count-sensitivity-v1", "status":"source-checked",
+            "scope":"closed-synchronous-test-module", "assertionSource":"tests/a.test.ts:7:3",
+            "targetSource":"src/a.ts:4:3", "conditionSource":"src/a.ts:4:3", "conditionText":"mode === 'quiet'",
+            "allocations":["src/a.ts:2:3"], "instance":"tests/a.test.ts:2:3", "expectedCount":1, "originalCount":1,
+            "variants":[
+                {"change":"condition-true","status":"source-checked","count":0,"outcome":"rejected"},
+                {"change":"condition-false","status":"source-checked","count":1,"outcome":"not-rejected"},
+                {"change":"condition-inverted","status":"unresolved","reason":"unsupported-prefix"}
+            ]
+        })).unwrap());
+        let mut ob = observation("stdout", Strength::Total);
+        ob.assertion_source = hint.assertion_source.clone();
+        ob.assertion_method = hint.assertion_method.clone();
+        ob.mock = Some(MockProjection {
+            target: "console.log".into(),
+            kind: "call-count".into(),
+            path: vec!["mock".into(), "callCount()".into()],
+            count_evidence: None,
+        });
+        ob.comparison = Some(serde_json::from_value(serde_json::json!({
+            "predicate":"node-same-value", "relation":"distinct-or-unknown",
+            "actual":{"source":"tests/a.test.ts:7:16"},"expected":{"source":"tests/a.test.ts:7:38"}
+        })).unwrap());
+        let mut s = site("S1", "condition", vec![boundary("stdout")], &["T1"]);
+        s.kind = "decision".into();
+        let f = facts(vec![s], vec![test("T1", vec![ob])]);
+        let before = serde_json::to_value(join(&f)).unwrap();
+        let result = &check_pragma_hints(&f, &[hint.clone()])[0];
+        assert_eq!(result.validation, HintValidation::AnalyzerSupported);
+        assert_eq!(result.reason, "modeled-count-sensitivity");
+        assert_eq!(result.strength, None);
+        assert_eq!(serde_json::to_value(join(&f)).unwrap(), before);
+        for case in 0..12 {
+            let mut h = hint.clone();
+            let mut input = f.clone();
+            let e = h.count_sensitivity.as_mut().unwrap();
+            match case {
+                0 => h.witness = "unavailable".into(),
+                1 => h.assertion_source = Some("tests/a.test.ts:8:3".into()),
+                2 => input.tests[0].observations.clear(),
+                3 => e.original_count = Some(9),
+                4 => e.variants.as_mut().unwrap()[0].count = Some(1),
+                5 => e.variants.as_mut().unwrap()[2].outcome = Some("rejected".into()),
+                6 => e.variants.as_mut().unwrap()[0].change = "arbitrary-edit".into(),
+                7 => e.allocations = Some(vec![]),
+                8 => e.target_source = Some("src/other.ts:4:3".into()),
+                9 => e.scope = Some("whole-repository".into()),
+                10 => input.sites[0].covered_by.clear(),
+                11 => e.variants.as_mut().unwrap()[0].change = "condition-false".into(),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                check_pragma_hints(&input, &[h])[0].validation,
+                HintValidation::Unresolved,
+                "case {case}"
+            );
+        }
     }
 
     #[test]

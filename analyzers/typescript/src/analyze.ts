@@ -12,6 +12,7 @@ import { awaitedObservationSource } from "./awaited-observations.js";
 import {
   analyzeMockCounts,
   analyzeFirstTestOmission,
+  analyzeCountSensitivity,
   sourceTestRows,
   type MockCountEvidence,
 } from "./mock-counts.js";
@@ -3650,6 +3651,41 @@ export function analyzeWithFrontend(
     unrecognized.set(key, (unrecognized.get(key) ?? 0) + 1);
   }
 
+  const nativeImportedMethod = (
+    call: ts.CallExpression,
+    module: string,
+    methods: string[],
+  ) => {
+    const callee = comparisonExpression(call.expression);
+    if (
+      !ts.isPropertyAccessExpression(callee) ||
+      !methods.includes(callee.name.text)
+    )
+      return false;
+    const receiver = comparisonExpression(callee.expression);
+    const d = checker.getSymbolAtLocation(receiver)?.declarations?.[0];
+    const imported =
+      d &&
+      (ts.isImportClause(d)
+        ? d.parent
+        : ts.isNamespaceImport(d)
+          ? d.parent.parent
+          : undefined);
+    return (
+      !!imported &&
+      ts.isStringLiteralLike(imported.moduleSpecifier) &&
+      imported.moduleSpecifier.text === module
+    );
+  };
+  const nativeGlobalValue = (expr: ts.Expression, name: string) => {
+    const e = comparisonExpression(expr),
+      d = declOf(e);
+    return (
+      ts.isIdentifier(e) &&
+      e.text === name &&
+      (!d || d.getSourceFile().isDeclarationFile)
+    );
+  };
   const mockModel = {
     declaration: declOf,
     location: comparisonLocation,
@@ -3657,6 +3693,23 @@ export function analyzeWithFrontend(
     nativePredicate: (call: ts.CallExpression) =>
       nativeComparison(call)?.predicate,
     nativeTest: nativeTestRegistration,
+    nativeInspect: (call: ts.CallExpression) =>
+      nativeImportedMethod(call, "node:util", ["inspect"]),
+    nativeTty: (expr: ts.Expression) =>
+      ts.isPropertyAccessExpression(expr) &&
+      expr.name.text === "isTTY" &&
+      ts.isPropertyAccessExpression(expr.expression) &&
+      expr.expression.name.text === "stderr" &&
+      nativeGlobalValue(expr.expression.expression, "process"),
+    nativeAssertion: (call: ts.CallExpression) =>
+      nativeImportedMethod(call, "node:assert/strict", [
+        "equal",
+        "strictEqual",
+        "deepEqual",
+        "deepStrictEqual",
+        "match",
+      ]),
+    globalString: (expr: ts.Expression) => nativeGlobalValue(expr, "String"),
     globalConsole: (expr: ts.Expression) => {
       const e = comparisonExpression(expr);
       const d = declOf(e);
@@ -5693,6 +5746,50 @@ export function analyzeWithFrontend(
     const st = rt && staticFor(rt),
       body = st && mockBodies.get(st);
     const target = siteNodes.get(hint.candidateSites[0]);
+    if (hint.check === "count") {
+      hint.countSensitivity = {
+        model: "node-closed-count-sensitivity-v1",
+        status: "unresolved",
+        reason: "count-sensitivity-source-or-runtime-unavailable",
+      };
+      if (
+        !rt ||
+        rt.runner !== "node:test" ||
+        !body ||
+        !target ||
+        (runtimeRowTitles.get(JSON.stringify([rt.file, rt.title])) ?? 0) !== 1
+      )
+        continue;
+      const location = (n: ts.Node) => {
+        const sf = n.getSourceFile(),
+          p = sf.getLineAndCharacterOfPosition(n.getStart(sf));
+        return `${rel(sf)}:${p.line + 1}:${p.character + 1}`;
+      };
+      let assertion: ts.CallExpression | undefined;
+      const find = (n: ts.Node) => {
+        if (ts.isCallExpression(n) && location(n) === hint.assertionSource)
+          assertion = n;
+        ts.forEachChild(n, find);
+      };
+      find(body);
+      if (!assertion) continue;
+      const plan = sourceTestRows(ts, body, mockModel),
+        row = plan?.rows.find((r) => r.evidence.title === rt.title);
+      if (plan && (!row || plan.reason)) {
+        hint.countSensitivity.reason =
+          plan.reason ?? "count-sensitivity-runtime-row-unavailable";
+        continue;
+      }
+      hint.countSensitivity = analyzeCountSensitivity(
+        ts,
+        body,
+        assertion,
+        target,
+        { ...mockModel, location },
+        row,
+      );
+      continue;
+    }
     hint.callOmission = {
       model: "node-first-test-call-omission-v1",
       status: "unresolved",
