@@ -6,13 +6,16 @@
 
 **Added**
 
-- Assertion inspection follows the CLI resource pattern: `runs <run> assertions`, `assertion <id>` and `source <path>`. Source prints as code with line numbers; `--json` retains structured data. The separate `inventory` command is removed.
+- Agent-authored assertion maps for JavaScript and TypeScript. Each test run creates `assertions.json`; an agent records which exact assertions observe which source statements. Start with `supercov docs assertion-agent`.
+- The regular coverage report shows agent-assessed assertion percentage beside Lines, Branches and MC/DC. Untouched maps and unresolved changes show explicit status instead of a misleading zero. This score does not prove mutation resistance or mapping completeness.
+- New runs reuse compatible mappings. Freshness is tracked per flow; changed files enter an impact queue. Read-only validation supplies acknowledgement tokens for the agent to save in the map.
+- Inspect assertions with `runs <run> assertions` and `assertion <id>`. Read matching current code with `source <path>`. File hashes support reuse without archiving the whole codebase.
+- Rust-generated JSON Schema, paginated validation, source diagnostics and CI gates for current mappings, passing evidence and percentage. Guides ship with installed packages. Async operands, parameterized tests, CommonJS matchers and Playwright fixtures retain exact assertion evidence.
 
-- Each normal test run creates `assertions.json`, automatically reusing the newest compatible map and preserving dirty review work. Maps publish atomically with run evidence; `assertions init` is removed.
+**Changed**
 
-- The regular coverage summary displays the current assertion percentage beside Lines, Branches and MC/DC, with incomplete-map and review status. All public guides are bundled in npm and native installs.
-- JS/TS assertion maps gain a Rust-generated editor schema, JSON-path syntax diagnostics, CI gates for freshness/completion/evidence/percentage, exact statement views and bundled agent instructions. Playwright fixture and CommonJS `expect` inventories match instrumentation; awaited operands now preserve evaluation order while recording exact assertion identity.
-- Replace experimental assertion inference with Rust-managed, agent-authored `assertions.json`: frozen run inputs, incremental carry, explicit review and separate assertion coverage. Ordinary phase links no longer award assertion credit.
+- Agent-authored maps replace experimental mechanical assertion inference. Ordinary execution-phase links no longer award assertion credit. Assertion analysis requires current source matching the run; rerun tests after edits to inherit mappings.
+
 ## 0.0.44
 
 **Fixed**
