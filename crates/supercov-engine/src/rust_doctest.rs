@@ -4515,6 +4515,7 @@ mod tests {
             pending_identity("decision", &key, start, end, "assertion").unwrap();
         let manifest = RustCompilerManifest {
             unmeasured_obligations: Vec::new(),
+            assertion_identities: Vec::new(),
             schema: "supercov-rust-manifest-candidate-v4".into(),
             model: "rust-source-v1".into(),
             crate_name: "doctest_bundle_2024".into(),
@@ -4839,6 +4840,7 @@ mod tests {
         branches.sort_by(|left, right| left.id.cmp(&right.id));
         let manifest = RustCompilerManifest {
             unmeasured_obligations: Vec::new(),
+            assertion_identities: Vec::new(),
             schema: "supercov-rust-manifest-candidate-v4".into(),
             model: "rust-source-v1".into(),
             crate_name: "doctest_bundle_2024".into(),

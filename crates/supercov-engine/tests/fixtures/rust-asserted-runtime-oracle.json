@@ -1,0 +1,292 @@
+{
+  "schema": 1,
+  "cargoMutantsVersion": "27.1.0",
+  "files": {
+    "Cargo.toml": "a1b65b2a38475eafdff77d4480ca305d707c23a035239083dafbea82a12ca524",
+    "src/lib.rs": "1dbeca2ca702205fbdc15a635e87446e203337d1d272c425aa41e8e9a39cdb5a",
+    "tests/contract.rs": "3bb5eb87bb63f44da34022465cad75f781ea7a83490b65dab0e1ef6888096511"
+  },
+  "outcomes": [
+    {
+      "name": "src/lib.rs:1:36: replace direct -> i32 with 0",
+      "function": "direct",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.162082,
+      "testSeconds": 0.541776625
+    },
+    {
+      "name": "src/lib.rs:1:36: replace direct -> i32 with 1",
+      "function": "direct",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.162886917,
+      "testSeconds": 0.591685208
+    },
+    {
+      "name": "src/lib.rs:1:36: replace direct -> i32 with -1",
+      "function": "direct",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.160961875,
+      "testSeconds": 0.641698417
+    },
+    {
+      "name": "src/lib.rs:1:42: replace * with + in direct",
+      "function": "direct",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.165632916,
+      "testSeconds": 0.640116333
+    },
+    {
+      "name": "src/lib.rs:1:42: replace * with / in direct",
+      "function": "direct",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.166428542,
+      "testSeconds": 0.693723333
+    },
+    {
+      "name": "src/lib.rs:2:41: replace precomputed -> i32 with 0",
+      "function": "precomputed",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.163156167,
+      "testSeconds": 0.583811667
+    },
+    {
+      "name": "src/lib.rs:2:41: replace precomputed -> i32 with 1",
+      "function": "precomputed",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.164326083,
+      "testSeconds": 0.537194791
+    },
+    {
+      "name": "src/lib.rs:2:41: replace precomputed -> i32 with -1",
+      "function": "precomputed",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.166084875,
+      "testSeconds": 0.693702417
+    },
+    {
+      "name": "src/lib.rs:2:47: replace * with + in precomputed",
+      "function": "precomputed",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.165152125,
+      "testSeconds": 0.597423333
+    },
+    {
+      "name": "src/lib.rs:2:47: replace * with / in precomputed",
+      "function": "precomputed",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.164330625,
+      "testSeconds": 0.651352417
+    },
+    {
+      "name": "src/lib.rs:3:35: replace smoke -> i32 with 0",
+      "function": "smoke",
+      "status": "MissedMutant",
+      "buildSeconds": 0.219302958,
+      "testSeconds": 0.644385542
+    },
+    {
+      "name": "src/lib.rs:3:35: replace smoke -> i32 with 1",
+      "function": "smoke",
+      "status": "MissedMutant",
+      "buildSeconds": 0.220364375,
+      "testSeconds": 0.596318125
+    },
+    {
+      "name": "src/lib.rs:3:35: replace smoke -> i32 with -1",
+      "function": "smoke",
+      "status": "MissedMutant",
+      "buildSeconds": 0.163443,
+      "testSeconds": 0.593046
+    },
+    {
+      "name": "src/lib.rs:3:41: replace * with + in smoke",
+      "function": "smoke",
+      "status": "MissedMutant",
+      "buildSeconds": 0.165491458,
+      "testSeconds": 0.589494666
+    },
+    {
+      "name": "src/lib.rs:3:41: replace * with / in smoke",
+      "function": "smoke",
+      "status": "MissedMutant",
+      "buildSeconds": 0.164290333,
+      "testSeconds": 0.6461365
+    },
+    {
+      "name": "src/lib.rs:4:39: replace discarded -> i32 with 0",
+      "function": "discarded",
+      "status": "MissedMutant",
+      "buildSeconds": 0.16656975,
+      "testSeconds": 0.757103375
+    },
+    {
+      "name": "src/lib.rs:4:39: replace discarded -> i32 with 1",
+      "function": "discarded",
+      "status": "MissedMutant",
+      "buildSeconds": 0.216742417,
+      "testSeconds": 0.59107525
+    },
+    {
+      "name": "src/lib.rs:4:39: replace discarded -> i32 with -1",
+      "function": "discarded",
+      "status": "MissedMutant",
+      "buildSeconds": 0.168972041,
+      "testSeconds": 0.592684792
+    },
+    {
+      "name": "src/lib.rs:4:45: replace * with + in discarded",
+      "function": "discarded",
+      "status": "MissedMutant",
+      "buildSeconds": 0.162407917,
+      "testSeconds": 0.638615791
+    },
+    {
+      "name": "src/lib.rs:4:45: replace * with / in discarded",
+      "function": "discarded",
+      "status": "MissedMutant",
+      "buildSeconds": 0.22060075,
+      "testSeconds": 0.533461833
+    },
+    {
+      "name": "src/lib.rs:5:36: replace masked -> i32 with 0",
+      "function": "masked",
+      "status": "MissedMutant",
+      "buildSeconds": 0.159188333,
+      "testSeconds": 0.648068291
+    },
+    {
+      "name": "src/lib.rs:5:36: replace masked -> i32 with 1",
+      "function": "masked",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.1624625,
+      "testSeconds": 0.588816291
+    },
+    {
+      "name": "src/lib.rs:5:36: replace masked -> i32 with -1",
+      "function": "masked",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.21777325,
+      "testSeconds": 0.550357833
+    },
+    {
+      "name": "src/lib.rs:5:42: replace * with + in masked",
+      "function": "masked",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.218151708,
+      "testSeconds": 0.591329458
+    },
+    {
+      "name": "src/lib.rs:5:42: replace * with / in masked",
+      "function": "masked",
+      "status": "MissedMutant",
+      "buildSeconds": 0.220914292,
+      "testSeconds": 0.587913458
+    },
+    {
+      "name": "src/lib.rs:6:34: replace weak -> i32 with 0",
+      "function": "weak",
+      "status": "MissedMutant",
+      "buildSeconds": 0.164837708,
+      "testSeconds": 0.595568166
+    },
+    {
+      "name": "src/lib.rs:6:34: replace weak -> i32 with 1",
+      "function": "weak",
+      "status": "MissedMutant",
+      "buildSeconds": 0.165845208,
+      "testSeconds": 0.599751834
+    },
+    {
+      "name": "src/lib.rs:6:34: replace weak -> i32 with -1",
+      "function": "weak",
+      "status": "MissedMutant",
+      "buildSeconds": 0.162543833,
+      "testSeconds": 0.652155125
+    },
+    {
+      "name": "src/lib.rs:6:40: replace * with + in weak",
+      "function": "weak",
+      "status": "MissedMutant",
+      "buildSeconds": 0.165261709,
+      "testSeconds": 0.596323208
+    },
+    {
+      "name": "src/lib.rs:6:40: replace * with / in weak",
+      "function": "weak",
+      "status": "MissedMutant",
+      "buildSeconds": 0.162071292,
+      "testSeconds": 0.64036725
+    },
+    {
+      "name": "src/lib.rs:7:38: replace threaded -> i32 with 0",
+      "function": "threaded",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.162313916,
+      "testSeconds": 0.598113667
+    },
+    {
+      "name": "src/lib.rs:7:38: replace threaded -> i32 with 1",
+      "function": "threaded",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.162154959,
+      "testSeconds": 0.542179958
+    },
+    {
+      "name": "src/lib.rs:7:38: replace threaded -> i32 with -1",
+      "function": "threaded",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.164476125,
+      "testSeconds": 1.021536708
+    },
+    {
+      "name": "src/lib.rs:7:44: replace * with + in threaded",
+      "function": "threaded",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.166694292,
+      "testSeconds": 0.542524916
+    },
+    {
+      "name": "src/lib.rs:7:44: replace * with / in threaded",
+      "function": "threaded",
+      "status": "CaughtMutant",
+      "buildSeconds": 0.16364175,
+      "testSeconds": 0.534551583
+    },
+    {
+      "name": "src/lib.rs:8:42: replace never_called -> i32 with 0",
+      "function": "never_called",
+      "status": "MissedMutant",
+      "buildSeconds": 0.162575167,
+      "testSeconds": 0.650518291
+    },
+    {
+      "name": "src/lib.rs:8:42: replace never_called -> i32 with 1",
+      "function": "never_called",
+      "status": "MissedMutant",
+      "buildSeconds": 0.161685583,
+      "testSeconds": 0.699824042
+    },
+    {
+      "name": "src/lib.rs:8:42: replace never_called -> i32 with -1",
+      "function": "never_called",
+      "status": "MissedMutant",
+      "buildSeconds": 0.165775209,
+      "testSeconds": 0.700161708
+    },
+    {
+      "name": "src/lib.rs:8:48: replace * with + in never_called",
+      "function": "never_called",
+      "status": "MissedMutant",
+      "buildSeconds": 0.217763459,
+      "testSeconds": 0.652993875
+    },
+    {
+      "name": "src/lib.rs:8:48: replace * with / in never_called",
+      "function": "never_called",
+      "status": "MissedMutant",
+      "buildSeconds": 0.21809225,
+      "testSeconds": 0.708476667
+    }
+  ],
+  "wallSeconds": 33.375
+}

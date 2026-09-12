@@ -1,0 +1,9 @@
+[package]
+name = "asserted_alias_fixture"
+version = "0.0.0"
+edition = "2024"
+
+[workspace]
+
+[lib]
+doctest = false

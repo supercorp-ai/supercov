@@ -1,0 +1,50 @@
+{
+  "runId": "run_2e5d74892cf7c201",
+  "analysisId": "5d438dbe4dfae123c34403fdcaeb20f2074d9cf666cfe3d0a14f7b943dc8be0a",
+  "reportSchema": 2,
+  "requests": 22,
+  "maxBytes": 65517,
+  "elapsedMs": 61642.582542,
+  "walked": {
+    "sites": {
+      "count": 636,
+      "pages": 17,
+      "noOmissionsOrDuplicates": true
+    },
+    "tests": {
+      "count": 82,
+      "pages": 1,
+      "noOmissionsOrDuplicates": true
+    },
+    "attempts": {
+      "count": 84,
+      "pages": 1,
+      "noOmissionsOrDuplicates": true
+    },
+    "executionLinks": {
+      "count": 84,
+      "pages": 1,
+      "noOmissionsOrDuplicates": true
+    },
+    "pragmas": {
+      "count": 2,
+      "pages": 1,
+      "noOmissionsOrDuplicates": true
+    }
+  },
+  "summary": {
+    "sites": 636,
+    "semanticallyVerifiedSites": 0,
+    "unverifiedSites": 636,
+    "pragmaHints": 2,
+    "contractualCandidates": {
+      "contractual": 352,
+      "evident": 66,
+      "partial": 8,
+      "presence": 0,
+      "unresolved": 278,
+      "gaps": 225,
+      "limits": 61
+    }
+  }
+}

@@ -1,0 +1,1887 @@
+{
+  "schema": 1,
+  "plan": {
+    "schema": 1,
+    "kind": "synthetic-scaling-not-accuracy",
+    "repetitions": 3,
+    "warmQueries": 3,
+    "binaries": {
+      "/Users/domas/Developer/supercorp/supercov-asserted-typescript-analyzer/target/release/supercov": "7cf5c35641a0da6f32d097f41670ffd1434c1b271d25b43acead4595c8059b6d",
+      "/Users/domas/Developer/supercorp/supercov-asserted-typescript-analyzer/target/release/examples/rust_asserted_runtime": "bac7810bab939183286f638f4c7ee2831c5c1fa865f7f86190fb294a70a2790b",
+      "/Users/domas/Developer/supercorp/supercov-asserted-typescript-analyzer/spikes/rustc-backend/target/release/supercov-rustc-backend-spike": "0e89d640db8c9d275988d2d5c1b249cf7d0c9e38f30a6af2d8f0e1942f8c4eeb"
+    },
+    "fixtures": [
+      {
+        "groups": 8,
+        "hashes": {
+          "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+          "src/lib.rs": "90882da23bf67e533df53222415567871a85055a766495e32d28a62f727ae310",
+          "tests/contract.rs": "89b1402efa7f66bb7aed932c25fa0ae21c996c0b61fae6e99bd180f31ebb02f4"
+        },
+        "sourceBytes": 4783,
+        "expected": {
+          "functions": 32,
+          "tests": 24,
+          "uncalled": 8,
+          "witnesses": 16,
+          "witnessedBoundaries": 8
+        }
+      },
+      {
+        "groups": 32,
+        "hashes": {
+          "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+          "src/lib.rs": "1aa7f17acb8111c45b8e4f5fda196373f7a63560bb61cf8725e1920aad9670c2",
+          "tests/contract.rs": "9e1e6500938f0d17713451c432eaa2a9848c8ba8a0d222757843f3b7d88316dc"
+        },
+        "sourceBytes": 19041,
+        "expected": {
+          "functions": 128,
+          "tests": 96,
+          "uncalled": 32,
+          "witnesses": 64,
+          "witnessedBoundaries": 32
+        }
+      },
+      {
+        "groups": 128,
+        "hashes": {
+          "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+          "src/lib.rs": "24691765d3ce47dc0720dc4f3f0883e2fae068d8175db1e671d34bd6f71b5c3b",
+          "tests/contract.rs": "235b95478f047d0effb1111db8a24810a9abde0b52ec098c1c78e2278d283850"
+        },
+        "sourceBytes": 76850,
+        "expected": {
+          "functions": 512,
+          "tests": 384,
+          "uncalled": 128,
+          "witnesses": 256,
+          "witnessedBoundaries": 128
+        }
+      }
+    ]
+  },
+  "results": {
+    "schema": 1,
+    "output": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-asserted-scaling-lbe2UW",
+    "allPairsMatched": true,
+    "summaries": [
+      {
+        "groups": 8,
+        "functions": 32,
+        "tests": 24,
+        "enabled": false,
+        "identityRecords": 0,
+        "witnesses": 0,
+        "compressedBytes": 20961,
+        "uncompressedBytes": 176636,
+        "medianPreExecutionSetupBuildMs": 4610.5,
+        "medianTestCommandMs": 692.9,
+        "medianEvidencePublicationMs": 12.3,
+        "medianPrivateRunProcessMs": 5860.905208000004,
+        "medianNativeBuildMs": 187.94525000000067,
+        "medianNativeCargoMs": 23.915124999999534,
+        "medianNativeBinaryMs": 2.3098749999990105,
+        "medianWarmQuery": {
+          "processMs": 34.98925000000236,
+          "archiveReadMs": 0.247583,
+          "evidenceDecodeMs": 0.30100000000000005,
+          "runtimeAnalyzeAndJoinMs": 0.08062499999999995,
+          "integrityMs": 8.397292,
+          "sourceReadMs": 17.851042,
+          "sourceAnalyzeMs": 3.324292,
+          "sourceJoinMs": 0.021124999999999998
+        }
+      },
+      {
+        "groups": 8,
+        "functions": 32,
+        "tests": 24,
+        "enabled": true,
+        "identityRecords": 56,
+        "witnesses": 16,
+        "compressedBytes": 22787,
+        "uncompressedBytes": 188706,
+        "medianPreExecutionSetupBuildMs": 4710,
+        "medianTestCommandMs": 861.8,
+        "medianEvidencePublicationMs": 12,
+        "medianPrivateRunProcessMs": 6071.622125,
+        "medianNativeBuildMs": 178.56575000000066,
+        "medianNativeCargoMs": 24.981542000001355,
+        "medianNativeBinaryMs": 2.331540999999561,
+        "medianWarmQuery": {
+          "processMs": 38.398832999999286,
+          "archiveReadMs": 0.260542,
+          "evidenceDecodeMs": 0.3571250000000001,
+          "runtimeAnalyzeAndJoinMs": 0.07850000000000001,
+          "integrityMs": 7.394292,
+          "sourceReadMs": 16.784917,
+          "sourceAnalyzeMs": 8.958541,
+          "sourceJoinMs": 0.023375
+        }
+      },
+      {
+        "groups": 32,
+        "functions": 128,
+        "tests": 96,
+        "enabled": false,
+        "identityRecords": 0,
+        "witnesses": 0,
+        "compressedBytes": 77063,
+        "uncompressedBytes": 696195,
+        "medianPreExecutionSetupBuildMs": 4632.5,
+        "medianTestCommandMs": 736.6,
+        "medianEvidencePublicationMs": 22.4,
+        "medianPrivateRunProcessMs": 6001.032290999996,
+        "medianNativeBuildMs": 233.08995900000446,
+        "medianNativeCargoMs": 27.73604200000409,
+        "medianNativeBinaryMs": 3.4857909999991534,
+        "medianWarmQuery": {
+          "processMs": 82.34354200000234,
+          "archiveReadMs": 0.7431249999999999,
+          "evidenceDecodeMs": 0.9790420000000002,
+          "runtimeAnalyzeAndJoinMs": 0.2576670000000001,
+          "integrityMs": 7.974416999999999,
+          "sourceReadMs": 17.7205,
+          "sourceAnalyzeMs": 48.547166000000004,
+          "sourceJoinMs": 0.070917
+        }
+      },
+      {
+        "groups": 32,
+        "functions": 128,
+        "tests": 96,
+        "enabled": true,
+        "identityRecords": 224,
+        "witnesses": 64,
+        "compressedBytes": 84139,
+        "uncompressedBytes": 744539,
+        "medianPreExecutionSetupBuildMs": 4681.299999999999,
+        "medianTestCommandMs": 698.9,
+        "medianEvidencePublicationMs": 23.8,
+        "medianPrivateRunProcessMs": 5982.204958000002,
+        "medianNativeBuildMs": 248.76666699998896,
+        "medianNativeCargoMs": 25.455291999998735,
+        "medianNativeBinaryMs": 3.4383749999979045,
+        "medianWarmQuery": {
+          "processMs": 189.42658299999312,
+          "archiveReadMs": 0.8033330000000001,
+          "evidenceDecodeMs": 1.2081250000000001,
+          "runtimeAnalyzeAndJoinMs": 0.2696670000000001,
+          "integrityMs": 8.0495,
+          "sourceReadMs": 18.086166000000002,
+          "sourceAnalyzeMs": 152.726459,
+          "sourceJoinMs": 0.090541
+        }
+      },
+      {
+        "groups": 128,
+        "functions": 512,
+        "tests": 384,
+        "enabled": false,
+        "identityRecords": 0,
+        "witnesses": 0,
+        "compressedBytes": 298388,
+        "uncompressedBytes": 2780792,
+        "medianPreExecutionSetupBuildMs": 5035.099999999999,
+        "medianTestCommandMs": 739.8,
+        "medianEvidencePublicationMs": 68.4,
+        "medianPrivateRunProcessMs": 6557.536374999996,
+        "medianNativeBuildMs": 423.62395800001104,
+        "medianNativeCargoMs": 30.850166999996873,
+        "medianNativeBinaryMs": 6.8617079999967245,
+        "medianWarmQuery": {
+          "processMs": 775.3356669999921,
+          "archiveReadMs": 2.7008330000000003,
+          "evidenceDecodeMs": 3.4079579999999994,
+          "runtimeAnalyzeAndJoinMs": 1.0257499999999995,
+          "integrityMs": 7.691708,
+          "sourceReadMs": 18.054667,
+          "sourceAnalyzeMs": 727.824709,
+          "sourceJoinMs": 0.279375
+        }
+      },
+      {
+        "groups": 128,
+        "functions": 512,
+        "tests": 384,
+        "enabled": true,
+        "identityRecords": 896,
+        "witnesses": 256,
+        "compressedBytes": 332106,
+        "uncompressedBytes": 2976204,
+        "medianPreExecutionSetupBuildMs": 4997.7,
+        "medianTestCommandMs": 789.7,
+        "medianEvidencePublicationMs": 74.2,
+        "medianPrivateRunProcessMs": 6501.475083999991,
+        "medianNativeBuildMs": 421.5938329999917,
+        "medianNativeCargoMs": 29.777624999987893,
+        "medianNativeBinaryMs": 6.924416000008932,
+        "medianWarmQuery": {
+          "processMs": 3623.734999999986,
+          "archiveReadMs": 2.9034579999999997,
+          "evidenceDecodeMs": 4.149042,
+          "runtimeAnalyzeAndJoinMs": 1.0940830000000004,
+          "integrityMs": 8.276917,
+          "sourceReadMs": 18.571832999999998,
+          "sourceAnalyzeMs": 3571.5205,
+          "sourceJoinMs": 0.355375
+        }
+      }
+    ],
+    "claims": {
+      "globalAssertionScore": null,
+      "mutationSpeedup": null,
+      "runtimeOverheadBoundEstablished": false,
+      "instrumentedBuildTimerIncludesExecution": true,
+      "workload": "synthetic, held out from earlier recognizer development"
+    }
+  },
+  "captures": [
+    {
+      "groups": 8,
+      "repetition": 0,
+      "enabled": false,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-jEhC6t",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "90882da23bf67e533df53222415567871a85055a766495e32d28a62f727ae310",
+        "tests/contract.rs": "89b1402efa7f66bb7aed932c25fa0ae21c996c0b61fae6e99bd180f31ebb02f4"
+      },
+      "sourceBytes": 4783,
+      "identityRecords": 0,
+      "sourceWitnesses": 0,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 29,
+        "uncompressedBytes": 176638,
+        "compressedBytes": 20960
+      },
+      "runPhases": {
+        "initializationMs": 4,
+        "workspacePreparationMs": 56.3,
+        "adapterSetupMs": 13.600000000000009,
+        "instrumentedBuildMs": 5401.3,
+        "testCommandMs": 717.4,
+        "evidencePublicationMs": 12.3,
+        "preExecutionSetupBuildMs": 4683.900000000001
+      },
+      "firstQuery": {
+        "processMs": 32.86833300000035,
+        "archiveReadMs": 0.263917,
+        "evidenceDecodeMs": 0.33095800000000003,
+        "runtimeAnalyzeAndJoinMs": 0.08283299999999993,
+        "integrityMs": 7.78525,
+        "sourceReadMs": 16.747917,
+        "sourceAnalyzeMs": 3.209,
+        "sourceJoinMs": 0.019666
+      },
+      "warmQueries": [
+        {
+          "processMs": 30.753917,
+          "archiveReadMs": 0.224333,
+          "evidenceDecodeMs": 0.28075000000000006,
+          "runtimeAnalyzeAndJoinMs": 0.07295799999999986,
+          "integrityMs": 6.836542000000001,
+          "sourceReadMs": 16.145209,
+          "sourceAnalyzeMs": 3.184,
+          "sourceJoinMs": 0.018333
+        },
+        {
+          "processMs": 31.895457999999962,
+          "archiveReadMs": 0.237167,
+          "evidenceDecodeMs": 0.28237500000000004,
+          "runtimeAnalyzeAndJoinMs": 0.07699999999999996,
+          "integrityMs": 6.765208,
+          "sourceReadMs": 17.219291000000002,
+          "sourceAnalyzeMs": 3.182583,
+          "sourceJoinMs": 0.021041999999999998
+        },
+        {
+          "processMs": 30.68708400000014,
+          "archiveReadMs": 0.247583,
+          "evidenceDecodeMs": 0.28441700000000003,
+          "runtimeAnalyzeAndJoinMs": 0.07266600000000001,
+          "integrityMs": 6.868583999999999,
+          "sourceReadMs": 15.865292,
+          "sourceAnalyzeMs": 3.3029159999999997,
+          "sourceJoinMs": 0.020583
+        }
+      ],
+      "timings": {
+        "native-build": 194.128125,
+        "native-cold": 570.712542,
+        "native-warm-0": 23.587625000000003,
+        "native-warm-1": 23.654915999999957,
+        "native-warm-2": 23.129790999999955,
+        "native-binary-0": 2.287666999999942,
+        "native-binary-1": 2.471125000000029,
+        "native-binary-2": 2.1949160000000347,
+        "locate-rustc": 8.56391700000006,
+        "locate-sysroot": 9.537292000000093,
+        "prepare-libtest": 1025.1142919999998,
+        "instrumented": 5972.382291999999,
+        "analyze": 32.86833300000035,
+        "query-warm-0": 30.753917,
+        "query-warm-1": 31.895457999999962,
+        "query-warm-2": 30.68708400000014
+      }
+    },
+    {
+      "groups": 8,
+      "repetition": 0,
+      "enabled": true,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-D12apo",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "90882da23bf67e533df53222415567871a85055a766495e32d28a62f727ae310",
+        "tests/contract.rs": "89b1402efa7f66bb7aed932c25fa0ae21c996c0b61fae6e99bd180f31ebb02f4"
+      },
+      "sourceBytes": 4783,
+      "identityRecords": 56,
+      "sourceWitnesses": 16,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 29,
+        "uncompressedBytes": 188706,
+        "compressedBytes": 22791
+      },
+      "runPhases": {
+        "initializationMs": 3.3,
+        "workspacePreparationMs": 58,
+        "adapterSetupMs": 8.700000000000003,
+        "instrumentedBuildMs": 5488,
+        "testCommandMs": 861.8,
+        "evidencePublicationMs": 11.6,
+        "preExecutionSetupBuildMs": 4626.2
+      },
+      "firstQuery": {
+        "processMs": 38.189125000000786,
+        "archiveReadMs": 0.26875,
+        "evidenceDecodeMs": 0.38862499999999994,
+        "runtimeAnalyzeAndJoinMs": 0.08270800000000011,
+        "integrityMs": 7.845167,
+        "sourceReadMs": 16.736125,
+        "sourceAnalyzeMs": 8.518667,
+        "sourceJoinMs": 0.021416
+      },
+      "warmQueries": [
+        {
+          "processMs": 34.736957999999504,
+          "archiveReadMs": 0.260542,
+          "evidenceDecodeMs": 0.332583,
+          "runtimeAnalyzeAndJoinMs": 0.07433299999999998,
+          "integrityMs": 6.614916999999999,
+          "sourceReadMs": 15.0655,
+          "sourceAnalyzeMs": 8.336500000000001,
+          "sourceJoinMs": 0.021792000000000002
+        },
+        {
+          "processMs": 36.94645800000035,
+          "archiveReadMs": 0.232292,
+          "evidenceDecodeMs": 0.317625,
+          "runtimeAnalyzeAndJoinMs": 0.07850000000000001,
+          "integrityMs": 7.126125,
+          "sourceReadMs": 16.747083999999997,
+          "sourceAnalyzeMs": 8.575917,
+          "sourceJoinMs": 0.023083
+        },
+        {
+          "processMs": 35.13749999999891,
+          "archiveReadMs": 0.247125,
+          "evidenceDecodeMs": 0.3259169999999999,
+          "runtimeAnalyzeAndJoinMs": 0.07187500000000002,
+          "integrityMs": 6.411583,
+          "sourceReadMs": 15.533292000000001,
+          "sourceAnalyzeMs": 8.285208,
+          "sourceJoinMs": 0.034625
+        }
+      ],
+      "timings": {
+        "native-build": 178.56575000000066,
+        "native-cold": 562.9810420000013,
+        "native-warm-0": 30.787082999999257,
+        "native-warm-1": 25.536917000001267,
+        "native-warm-2": 24.026957999998558,
+        "native-binary-0": 2.41295799999898,
+        "native-binary-1": 2.331540999999561,
+        "native-binary-2": 2.177417000000787,
+        "locate-rustc": 8.057167000000845,
+        "locate-sysroot": 9.192999999999302,
+        "prepare-libtest": 976.3885419999988,
+        "instrumented": 6071.622125,
+        "analyze": 38.189125000000786,
+        "query-warm-0": 34.736957999999504,
+        "query-warm-1": 36.94645800000035,
+        "query-warm-2": 35.13749999999891
+      }
+    },
+    {
+      "groups": 8,
+      "repetition": 1,
+      "enabled": true,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-n1hAaV",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "90882da23bf67e533df53222415567871a85055a766495e32d28a62f727ae310",
+        "tests/contract.rs": "89b1402efa7f66bb7aed932c25fa0ae21c996c0b61fae6e99bd180f31ebb02f4"
+      },
+      "sourceBytes": 4783,
+      "identityRecords": 56,
+      "sourceWitnesses": 16,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 29,
+        "uncompressedBytes": 188706,
+        "compressedBytes": 22784
+      },
+      "runPhases": {
+        "initializationMs": 9.4,
+        "workspacePreparationMs": 57,
+        "adapterSetupMs": 10.200000000000003,
+        "instrumentedBuildMs": 5383.8,
+        "testCommandMs": 673.8,
+        "evidencePublicationMs": 12,
+        "preExecutionSetupBuildMs": 4710
+      },
+      "firstQuery": {
+        "processMs": 39.2611250000009,
+        "archiveReadMs": 0.292125,
+        "evidenceDecodeMs": 0.38304199999999994,
+        "runtimeAnalyzeAndJoinMs": 0.08225000000000005,
+        "integrityMs": 8.360875,
+        "sourceReadMs": 17.147584000000002,
+        "sourceAnalyzeMs": 8.375542,
+        "sourceJoinMs": 0.023417
+      },
+      "warmQueries": [
+        {
+          "processMs": 38.398832999999286,
+          "archiveReadMs": 0.24191600000000002,
+          "evidenceDecodeMs": 0.34262500000000007,
+          "runtimeAnalyzeAndJoinMs": 0.08887499999999993,
+          "integrityMs": 7.394292,
+          "sourceReadMs": 16.839042,
+          "sourceAnalyzeMs": 8.958541,
+          "sourceJoinMs": 0.027166
+        },
+        {
+          "processMs": 37.46958299999824,
+          "archiveReadMs": 0.283417,
+          "evidenceDecodeMs": 0.3571250000000001,
+          "runtimeAnalyzeAndJoinMs": 0.0764999999999999,
+          "integrityMs": 7.0013749999999995,
+          "sourceReadMs": 16.74125,
+          "sourceAnalyzeMs": 8.522667,
+          "sourceJoinMs": 0.023375
+        },
+        {
+          "processMs": 43.173791000001074,
+          "archiveReadMs": 0.257875,
+          "evidenceDecodeMs": 0.36958299999999994,
+          "runtimeAnalyzeAndJoinMs": 0.08145900000000006,
+          "integrityMs": 9.144542,
+          "sourceReadMs": 19.711790999999998,
+          "sourceAnalyzeMs": 9.324167,
+          "sourceJoinMs": 0.02275
+        }
+      ],
+      "timings": {
+        "native-build": 174.52233400000114,
+        "native-cold": 559.5711249999986,
+        "native-warm-0": 30.979333000002953,
+        "native-warm-1": 25.623500000001513,
+        "native-warm-2": 23.906458000001294,
+        "native-binary-0": 2.326042000000598,
+        "native-binary-1": 2.39824999999837,
+        "native-binary-2": 2.1488749999989523,
+        "locate-rustc": 7.964791000002151,
+        "locate-sysroot": 9.037000000000262,
+        "prepare-libtest": 972.4644590000025,
+        "instrumented": 5982.047332999999,
+        "analyze": 39.2611250000009,
+        "query-warm-0": 38.398832999999286,
+        "query-warm-1": 37.46958299999824,
+        "query-warm-2": 43.173791000001074
+      }
+    },
+    {
+      "groups": 8,
+      "repetition": 1,
+      "enabled": false,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-u7iaCy",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "90882da23bf67e533df53222415567871a85055a766495e32d28a62f727ae310",
+        "tests/contract.rs": "89b1402efa7f66bb7aed932c25fa0ae21c996c0b61fae6e99bd180f31ebb02f4"
+      },
+      "sourceBytes": 4783,
+      "identityRecords": 0,
+      "sourceWitnesses": 0,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 29,
+        "uncompressedBytes": 176636,
+        "compressedBytes": 20961
+      },
+      "runPhases": {
+        "initializationMs": 4.2,
+        "workspacePreparationMs": 57.9,
+        "adapterSetupMs": 9.100000000000001,
+        "instrumentedBuildMs": 5279.1,
+        "testCommandMs": 692.9,
+        "evidencePublicationMs": 11.4,
+        "preExecutionSetupBuildMs": 4586.200000000001
+      },
+      "firstQuery": {
+        "processMs": 37.344750000000204,
+        "archiveReadMs": 0.28370799999999996,
+        "evidenceDecodeMs": 0.32445899999999994,
+        "runtimeAnalyzeAndJoinMs": 0.08337500000000009,
+        "integrityMs": 8.552125,
+        "sourceReadMs": 18.792083,
+        "sourceAnalyzeMs": 4.018542,
+        "sourceJoinMs": 0.022708
+      },
+      "warmQueries": [
+        {
+          "processMs": 37.02275000000009,
+          "archiveReadMs": 0.329333,
+          "evidenceDecodeMs": 0.344333,
+          "runtimeAnalyzeAndJoinMs": 0.10066699999999995,
+          "integrityMs": 8.926833,
+          "sourceReadMs": 19.350790999999997,
+          "sourceAnalyzeMs": 3.324292,
+          "sourceJoinMs": 0.021417
+        },
+        {
+          "processMs": 35.682833000002574,
+          "archiveReadMs": 0.24320799999999998,
+          "evidenceDecodeMs": 0.30100000000000005,
+          "runtimeAnalyzeAndJoinMs": 0.09012500000000001,
+          "integrityMs": 8.653834,
+          "sourceReadMs": 18.15775,
+          "sourceAnalyzeMs": 3.8396250000000003,
+          "sourceJoinMs": 0.019167
+        },
+        {
+          "processMs": 34.98925000000236,
+          "archiveReadMs": 0.369625,
+          "evidenceDecodeMs": 0.5604169999999999,
+          "runtimeAnalyzeAndJoinMs": 0.15495800000000004,
+          "integrityMs": 8.397292,
+          "sourceReadMs": 17.851042,
+          "sourceAnalyzeMs": 3.39675,
+          "sourceJoinMs": 0.021124999999999998
+        }
+      ],
+      "timings": {
+        "native-build": 187.94525000000067,
+        "native-cold": 521.5872909999998,
+        "native-warm-0": 26.902624999998807,
+        "native-warm-1": 23.915124999999534,
+        "native-warm-2": 23.683124999999563,
+        "native-binary-0": 2.625833000001876,
+        "native-binary-1": 2.2449580000029528,
+        "native-binary-2": 2.3098749999990105,
+        "locate-rustc": 8.578249999998661,
+        "locate-sysroot": 9.995957999999519,
+        "prepare-libtest": 1016.9445419999975,
+        "instrumented": 5855.487541999999,
+        "analyze": 37.344750000000204,
+        "query-warm-0": 37.02275000000009,
+        "query-warm-1": 35.682833000002574,
+        "query-warm-2": 34.98925000000236
+      }
+    },
+    {
+      "groups": 8,
+      "repetition": 2,
+      "enabled": false,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-noKfb1",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "90882da23bf67e533df53222415567871a85055a766495e32d28a62f727ae310",
+        "tests/contract.rs": "89b1402efa7f66bb7aed932c25fa0ae21c996c0b61fae6e99bd180f31ebb02f4"
+      },
+      "sourceBytes": 4783,
+      "identityRecords": 0,
+      "sourceWitnesses": 0,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 29,
+        "uncompressedBytes": 176636,
+        "compressedBytes": 20965
+      },
+      "runPhases": {
+        "initializationMs": 3.9,
+        "workspacePreparationMs": 51.9,
+        "adapterSetupMs": 8,
+        "instrumentedBuildMs": 5279.5,
+        "testCommandMs": 669,
+        "evidencePublicationMs": 12.5,
+        "preExecutionSetupBuildMs": 4610.5
+      },
+      "firstQuery": {
+        "processMs": 39.23329200000444,
+        "archiveReadMs": 0.27304199999999995,
+        "evidenceDecodeMs": 0.444,
+        "runtimeAnalyzeAndJoinMs": 0.08366600000000002,
+        "integrityMs": 9.204958,
+        "sourceReadMs": 19.841542,
+        "sourceAnalyzeMs": 3.405167,
+        "sourceJoinMs": 0.022375
+      },
+      "warmQueries": [
+        {
+          "processMs": 37.4494579999955,
+          "archiveReadMs": 0.254791,
+          "evidenceDecodeMs": 0.3133340000000001,
+          "runtimeAnalyzeAndJoinMs": 0.07970799999999989,
+          "integrityMs": 9.468292,
+          "sourceReadMs": 19.773084,
+          "sourceAnalyzeMs": 3.287875,
+          "sourceJoinMs": 0.021792000000000002
+        },
+        {
+          "processMs": 35.96216699999786,
+          "archiveReadMs": 0.322709,
+          "evidenceDecodeMs": 0.409083,
+          "runtimeAnalyzeAndJoinMs": 0.08391700000000002,
+          "integrityMs": 8.837665999999999,
+          "sourceReadMs": 17.5225,
+          "sourceAnalyzeMs": 3.755541,
+          "sourceJoinMs": 0.022584
+        },
+        {
+          "processMs": 33.99337500000547,
+          "archiveReadMs": 0.241583,
+          "evidenceDecodeMs": 0.300083,
+          "runtimeAnalyzeAndJoinMs": 0.08062499999999995,
+          "integrityMs": 7.5515,
+          "sourceReadMs": 17.975667,
+          "sourceAnalyzeMs": 3.6098749999999997,
+          "sourceJoinMs": 0.022
+        }
+      ],
+      "timings": {
+        "native-build": 181.08683400000155,
+        "native-cold": 706.8532909999994,
+        "native-warm-0": 29.11145899999974,
+        "native-warm-1": 27.287499999998545,
+        "native-warm-2": 24.67616600000474,
+        "native-binary-0": 2.4038330000039423,
+        "native-binary-1": 2.6097499999959837,
+        "native-binary-2": 2.2726669999974547,
+        "locate-rustc": 8.669583000002604,
+        "locate-sysroot": 9.545500000000175,
+        "prepare-libtest": 994.7006670000046,
+        "instrumented": 5860.905208000004,
+        "analyze": 39.23329200000444,
+        "query-warm-0": 37.4494579999955,
+        "query-warm-1": 35.96216699999786,
+        "query-warm-2": 33.99337500000547
+      }
+    },
+    {
+      "groups": 8,
+      "repetition": 2,
+      "enabled": true,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-KpbZEu",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "90882da23bf67e533df53222415567871a85055a766495e32d28a62f727ae310",
+        "tests/contract.rs": "89b1402efa7f66bb7aed932c25fa0ae21c996c0b61fae6e99bd180f31ebb02f4"
+      },
+      "sourceBytes": 4783,
+      "identityRecords": 56,
+      "sourceWitnesses": 16,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 29,
+        "uncompressedBytes": 188705,
+        "compressedBytes": 22787
+      },
+      "runPhases": {
+        "initializationMs": 3.7,
+        "workspacePreparationMs": 57.9,
+        "adapterSetupMs": 8.600000000000001,
+        "instrumentedBuildMs": 6179.9,
+        "testCommandMs": 1369.5,
+        "evidencePublicationMs": 12.9,
+        "preExecutionSetupBuildMs": 4810.4
+      },
+      "firstQuery": {
+        "processMs": 42.76708399999916,
+        "archiveReadMs": 0.315083,
+        "evidenceDecodeMs": 0.522333,
+        "runtimeAnalyzeAndJoinMs": 0.09699999999999998,
+        "integrityMs": 9.571375,
+        "sourceReadMs": 18.587542,
+        "sourceAnalyzeMs": 9.153709,
+        "sourceJoinMs": 0.028666999999999998
+      },
+      "warmQueries": [
+        {
+          "processMs": 40.204499999999825,
+          "archiveReadMs": 0.26887500000000003,
+          "evidenceDecodeMs": 0.37437500000000007,
+          "runtimeAnalyzeAndJoinMs": 0.07683299999999993,
+          "integrityMs": 7.710875,
+          "sourceReadMs": 17.877416,
+          "sourceAnalyzeMs": 9.207042,
+          "sourceJoinMs": 0.022500000000000003
+        },
+        {
+          "processMs": 39.56133299999783,
+          "archiveReadMs": 0.31462500000000004,
+          "evidenceDecodeMs": 0.39154100000000003,
+          "runtimeAnalyzeAndJoinMs": 0.08383399999999996,
+          "integrityMs": 7.9770840000000005,
+          "sourceReadMs": 16.784917,
+          "sourceAnalyzeMs": 9.183166,
+          "sourceJoinMs": 0.026958
+        },
+        {
+          "processMs": 41.04762499999924,
+          "archiveReadMs": 0.363041,
+          "evidenceDecodeMs": 0.408209,
+          "runtimeAnalyzeAndJoinMs": 0.09199999999999997,
+          "integrityMs": 8.741416000000001,
+          "sourceReadMs": 17.309292,
+          "sourceAnalyzeMs": 9.109957999999999,
+          "sourceJoinMs": 0.0335
+        }
+      ],
+      "timings": {
+        "native-build": 196.84504200000083,
+        "native-cold": 522.4782080000004,
+        "native-warm-0": 24.981542000001355,
+        "native-warm-1": 24.00591600000189,
+        "native-warm-2": 23.11216599999898,
+        "native-binary-0": 2.792874999999185,
+        "native-binary-1": 2.4276670000035665,
+        "native-binary-2": 2.105083000002196,
+        "locate-rustc": 9.38291699999536,
+        "locate-sysroot": 10.314165999996476,
+        "prepare-libtest": 1025.3349580000067,
+        "instrumented": 6777.229707999999,
+        "analyze": 42.76708399999916,
+        "query-warm-0": 40.204499999999825,
+        "query-warm-1": 39.56133299999783,
+        "query-warm-2": 41.04762499999924
+      }
+    },
+    {
+      "groups": 32,
+      "repetition": 0,
+      "enabled": false,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-NeaowZ",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "1aa7f17acb8111c45b8e4f5fda196373f7a63560bb61cf8725e1920aad9670c2",
+        "tests/contract.rs": "9e1e6500938f0d17713451c432eaa2a9848c8ba8a0d222757843f3b7d88316dc"
+      },
+      "sourceBytes": 19041,
+      "identityRecords": 0,
+      "sourceWitnesses": 0,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 101,
+        "uncompressedBytes": 696195,
+        "compressedBytes": 77063
+      },
+      "runPhases": {
+        "initializationMs": 3.7,
+        "workspacePreparationMs": 55.2,
+        "adapterSetupMs": 9.700000000000003,
+        "instrumentedBuildMs": 5626.8,
+        "testCommandMs": 736.6,
+        "evidencePublicationMs": 22.4,
+        "preExecutionSetupBuildMs": 4890.2
+      },
+      "firstQuery": {
+        "processMs": 84.4820830000026,
+        "archiveReadMs": 0.8005,
+        "evidenceDecodeMs": 0.9922920000000002,
+        "runtimeAnalyzeAndJoinMs": 0.24970799999999982,
+        "integrityMs": 8.022583,
+        "sourceReadMs": 17.491792,
+        "sourceAnalyzeMs": 49.946,
+        "sourceJoinMs": 0.080791
+      },
+      "warmQueries": [
+        {
+          "processMs": 86.36150000000634,
+          "archiveReadMs": 0.7431249999999999,
+          "evidenceDecodeMs": 1.072333,
+          "runtimeAnalyzeAndJoinMs": 0.27674999999999983,
+          "integrityMs": 8.369125,
+          "sourceReadMs": 18.779334000000002,
+          "sourceAnalyzeMs": 50.40195799999999,
+          "sourceJoinMs": 0.070958
+        },
+        {
+          "processMs": 88.35812499999884,
+          "archiveReadMs": 0.826125,
+          "evidenceDecodeMs": 0.9790420000000002,
+          "runtimeAnalyzeAndJoinMs": 0.3007909999999996,
+          "integrityMs": 8.089709000000001,
+          "sourceReadMs": 20.328083,
+          "sourceAnalyzeMs": 51.292375,
+          "sourceJoinMs": 0.10437500000000001
+        },
+        {
+          "processMs": 83.86141700000007,
+          "archiveReadMs": 0.757375,
+          "evidenceDecodeMs": 1.0037500000000001,
+          "runtimeAnalyzeAndJoinMs": 0.26150000000000007,
+          "integrityMs": 8.736042,
+          "sourceReadMs": 18.268290999999998,
+          "sourceAnalyzeMs": 47.804083,
+          "sourceJoinMs": 0.08600000000000001
+        }
+      ],
+      "timings": {
+        "native-build": 246.96275000000605,
+        "native-cold": 613.5122909999991,
+        "native-warm-0": 28.256292000005487,
+        "native-warm-1": 26.23887499999546,
+        "native-warm-2": 24.856250000004366,
+        "native-binary-0": 4.170832999996492,
+        "native-binary-1": 3.4857909999991534,
+        "native-binary-2": 3.8742090000014286,
+        "locate-rustc": 9.115791999996873,
+        "locate-sysroot": 10.15362499999901,
+        "prepare-libtest": 1020.1384580000013,
+        "instrumented": 6231.106290999996,
+        "analyze": 84.4820830000026,
+        "query-warm-0": 86.36150000000634,
+        "query-warm-1": 88.35812499999884,
+        "query-warm-2": 83.86141700000007
+      }
+    },
+    {
+      "groups": 32,
+      "repetition": 0,
+      "enabled": true,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-b6Vyaq",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "1aa7f17acb8111c45b8e4f5fda196373f7a63560bb61cf8725e1920aad9670c2",
+        "tests/contract.rs": "9e1e6500938f0d17713451c432eaa2a9848c8ba8a0d222757843f3b7d88316dc"
+      },
+      "sourceBytes": 19041,
+      "identityRecords": 224,
+      "sourceWitnesses": 64,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 101,
+        "uncompressedBytes": 744539,
+        "compressedBytes": 84151
+      },
+      "runPhases": {
+        "initializationMs": 3.5,
+        "workspacePreparationMs": 55.8,
+        "adapterSetupMs": 9.5,
+        "instrumentedBuildMs": 5496.7,
+        "testCommandMs": 732.1,
+        "evidencePublicationMs": 23.8,
+        "preExecutionSetupBuildMs": 4764.599999999999
+      },
+      "firstQuery": {
+        "processMs": 185.35537499999919,
+        "archiveReadMs": 0.843042,
+        "evidenceDecodeMs": 1.195541,
+        "runtimeAnalyzeAndJoinMs": 0.274,
+        "integrityMs": 8.782167000000001,
+        "sourceReadMs": 17.973541,
+        "sourceAnalyzeMs": 148.92654199999998,
+        "sourceJoinMs": 0.11625
+      },
+      "warmQueries": [
+        {
+          "processMs": 188.5587499999965,
+          "archiveReadMs": 0.761292,
+          "evidenceDecodeMs": 1.1905000000000001,
+          "runtimeAnalyzeAndJoinMs": 0.27295800000000026,
+          "integrityMs": 7.892875000000001,
+          "sourceReadMs": 17.661709000000002,
+          "sourceAnalyzeMs": 152.726459,
+          "sourceJoinMs": 0.089458
+        },
+        {
+          "processMs": 191.69700000000012,
+          "archiveReadMs": 0.8671669999999999,
+          "evidenceDecodeMs": 1.2747500000000005,
+          "runtimeAnalyzeAndJoinMs": 0.27904199999999957,
+          "integrityMs": 8.207917,
+          "sourceReadMs": 18.734666,
+          "sourceAnalyzeMs": 154.99675,
+          "sourceJoinMs": 0.09849999999999999
+        },
+        {
+          "processMs": 189.42658299999312,
+          "archiveReadMs": 0.8033330000000001,
+          "evidenceDecodeMs": 1.2286249999999999,
+          "runtimeAnalyzeAndJoinMs": 0.25512500000000005,
+          "integrityMs": 8.503749999999998,
+          "sourceReadMs": 18.721333,
+          "sourceAnalyzeMs": 152.42904099999998,
+          "sourceJoinMs": 0.093666
+        }
+      ],
+      "timings": {
+        "native-build": 264.15908299999865,
+        "native-cold": 524.5144169999985,
+        "native-warm-0": 26.644416999995883,
+        "native-warm-1": 25.30724999999802,
+        "native-warm-2": 25.142832999998063,
+        "native-binary-0": 3.2903340000048047,
+        "native-binary-1": 3.587582999993174,
+        "native-binary-2": 3.4133750000037253,
+        "locate-rustc": 9.007375000001048,
+        "locate-sysroot": 10.3559580000001,
+        "prepare-libtest": 1031.9683749999967,
+        "instrumented": 6121.792000000001,
+        "analyze": 185.35537499999919,
+        "query-warm-0": 188.5587499999965,
+        "query-warm-1": 191.69700000000012,
+        "query-warm-2": 189.42658299999312
+      }
+    },
+    {
+      "groups": 32,
+      "repetition": 1,
+      "enabled": true,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-z5iKW9",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "1aa7f17acb8111c45b8e4f5fda196373f7a63560bb61cf8725e1920aad9670c2",
+        "tests/contract.rs": "9e1e6500938f0d17713451c432eaa2a9848c8ba8a0d222757843f3b7d88316dc"
+      },
+      "sourceBytes": 19041,
+      "identityRecords": 224,
+      "sourceWitnesses": 64,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 101,
+        "uncompressedBytes": 744539,
+        "compressedBytes": 84139
+      },
+      "runPhases": {
+        "initializationMs": 3.4,
+        "workspacePreparationMs": 54.3,
+        "adapterSetupMs": 8.5,
+        "instrumentedBuildMs": 5366.4,
+        "testCommandMs": 685.1,
+        "evidencePublicationMs": 26.5,
+        "preExecutionSetupBuildMs": 4681.299999999999
+      },
+      "firstQuery": {
+        "processMs": 188.08683400000155,
+        "archiveReadMs": 0.989958,
+        "evidenceDecodeMs": 1.4540829999999998,
+        "runtimeAnalyzeAndJoinMs": 0.26683400000000024,
+        "integrityMs": 9.58675,
+        "sourceReadMs": 17.70575,
+        "sourceAnalyzeMs": 150.62104200000002,
+        "sourceJoinMs": 0.077709
+      },
+      "warmQueries": [
+        {
+          "processMs": 193.72500000000582,
+          "archiveReadMs": 0.8195830000000001,
+          "evidenceDecodeMs": 1.18525,
+          "runtimeAnalyzeAndJoinMs": 0.2611669999999995,
+          "integrityMs": 8.686667,
+          "sourceReadMs": 19.368750000000002,
+          "sourceAnalyzeMs": 155.646792,
+          "sourceJoinMs": 0.090875
+        },
+        {
+          "processMs": 194.68383300000278,
+          "archiveReadMs": 0.7797499999999999,
+          "evidenceDecodeMs": 1.2081250000000001,
+          "runtimeAnalyzeAndJoinMs": 0.27116699999999994,
+          "integrityMs": 7.873666,
+          "sourceReadMs": 17.939957999999997,
+          "sourceAnalyzeMs": 158.57425,
+          "sourceJoinMs": 0.090541
+        },
+        {
+          "processMs": 193.21916700000293,
+          "archiveReadMs": 1.170375,
+          "evidenceDecodeMs": 1.1945839999999999,
+          "runtimeAnalyzeAndJoinMs": 0.27862500000000034,
+          "integrityMs": 8.911999999999999,
+          "sourceReadMs": 20.409625000000002,
+          "sourceAnalyzeMs": 154.448625,
+          "sourceJoinMs": 0.08920900000000001
+        }
+      ],
+      "timings": {
+        "native-build": 248.76666699998896,
+        "native-cold": 519.6254170000029,
+        "native-warm-0": 25.80983300000662,
+        "native-warm-1": 26.58316599999671,
+        "native-warm-2": 25.455291999998735,
+        "native-binary-0": 3.809917000005953,
+        "native-binary-1": 3.8917919999948936,
+        "native-binary-2": 3.4807910000090487,
+        "locate-rustc": 8.799792000005255,
+        "locate-sysroot": 10.321374999999534,
+        "prepare-libtest": 995.2535830000124,
+        "instrumented": 5982.204958000002,
+        "analyze": 188.08683400000155,
+        "query-warm-0": 193.72500000000582,
+        "query-warm-1": 194.68383300000278,
+        "query-warm-2": 193.21916700000293
+      }
+    },
+    {
+      "groups": 32,
+      "repetition": 1,
+      "enabled": false,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-ksbSfy",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "1aa7f17acb8111c45b8e4f5fda196373f7a63560bb61cf8725e1920aad9670c2",
+        "tests/contract.rs": "9e1e6500938f0d17713451c432eaa2a9848c8ba8a0d222757843f3b7d88316dc"
+      },
+      "sourceBytes": 19041,
+      "identityRecords": 0,
+      "sourceWitnesses": 0,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 101,
+        "uncompressedBytes": 696195,
+        "compressedBytes": 77059
+      },
+      "runPhases": {
+        "initializationMs": 4,
+        "workspacePreparationMs": 52.5,
+        "adapterSetupMs": 8.5,
+        "instrumentedBuildMs": 5397.4,
+        "testCommandMs": 787.7,
+        "evidencePublicationMs": 24.7,
+        "preExecutionSetupBuildMs": 4609.7
+      },
+      "firstQuery": {
+        "processMs": 82.84441700000025,
+        "archiveReadMs": 0.947708,
+        "evidenceDecodeMs": 1.0077920000000002,
+        "runtimeAnalyzeAndJoinMs": 0.2829579999999998,
+        "integrityMs": 8.592292,
+        "sourceReadMs": 17.889792,
+        "sourceAnalyzeMs": 47.888124999999995,
+        "sourceJoinMs": 0.067208
+      },
+      "warmQueries": [
+        {
+          "processMs": 82.34354200000234,
+          "archiveReadMs": 0.7585839999999999,
+          "evidenceDecodeMs": 0.989833,
+          "runtimeAnalyzeAndJoinMs": 0.2545830000000002,
+          "integrityMs": 8.042417,
+          "sourceReadMs": 18.031875,
+          "sourceAnalyzeMs": 47.891749999999995,
+          "sourceJoinMs": 0.070166
+        },
+        {
+          "processMs": 81.54812500000116,
+          "archiveReadMs": 0.717333,
+          "evidenceDecodeMs": 0.9508749999999999,
+          "runtimeAnalyzeAndJoinMs": 0.2576670000000001,
+          "integrityMs": 7.622667,
+          "sourceReadMs": 17.417042000000002,
+          "sourceAnalyzeMs": 48.212333,
+          "sourceJoinMs": 0.068417
+        },
+        {
+          "processMs": 80.70954199999687,
+          "archiveReadMs": 0.723542,
+          "evidenceDecodeMs": 0.973375,
+          "runtimeAnalyzeAndJoinMs": 0.24933300000000003,
+          "integrityMs": 7.649917,
+          "sourceReadMs": 17.404708000000003,
+          "sourceAnalyzeMs": 47.3585,
+          "sourceJoinMs": 0.06958400000000001
+        }
+      ],
+      "timings": {
+        "native-build": 229.93458400000236,
+        "native-cold": 530.5661669999972,
+        "native-warm-0": 28.964833000005456,
+        "native-warm-1": 27.73604200000409,
+        "native-warm-2": 25.350459000008414,
+        "native-binary-0": 3.244250000003376,
+        "native-binary-1": 3.951792000007117,
+        "native-binary-2": 3.0848750000004657,
+        "locate-rustc": 9.01937499998894,
+        "locate-sysroot": 10.566208000003826,
+        "prepare-libtest": 1008.9492500000051,
+        "instrumented": 6001.032290999996,
+        "analyze": 82.84441700000025,
+        "query-warm-0": 82.34354200000234,
+        "query-warm-1": 81.54812500000116,
+        "query-warm-2": 80.70954199999687
+      }
+    },
+    {
+      "groups": 32,
+      "repetition": 2,
+      "enabled": false,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-iW6GDm",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "1aa7f17acb8111c45b8e4f5fda196373f7a63560bb61cf8725e1920aad9670c2",
+        "tests/contract.rs": "9e1e6500938f0d17713451c432eaa2a9848c8ba8a0d222757843f3b7d88316dc"
+      },
+      "sourceBytes": 19041,
+      "identityRecords": 0,
+      "sourceWitnesses": 0,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 101,
+        "uncompressedBytes": 696195,
+        "compressedBytes": 77067
+      },
+      "runPhases": {
+        "initializationMs": 3.9,
+        "workspacePreparationMs": 58.5,
+        "adapterSetupMs": 10.099999999999994,
+        "instrumentedBuildMs": 5318.8,
+        "testCommandMs": 686.3,
+        "evidencePublicationMs": 21.6,
+        "preExecutionSetupBuildMs": 4632.5
+      },
+      "firstQuery": {
+        "processMs": 81.98283300000185,
+        "archiveReadMs": 0.873791,
+        "evidenceDecodeMs": 1.045917,
+        "runtimeAnalyzeAndJoinMs": 0.27049999999999974,
+        "integrityMs": 8.295166,
+        "sourceReadMs": 17.450083000000003,
+        "sourceAnalyzeMs": 47.83875,
+        "sourceJoinMs": 0.074791
+      },
+      "warmQueries": [
+        {
+          "processMs": 82.22137499999371,
+          "archiveReadMs": 0.782791,
+          "evidenceDecodeMs": 1.0005,
+          "runtimeAnalyzeAndJoinMs": 0.2400420000000001,
+          "integrityMs": 7.911916,
+          "sourceReadMs": 17.194416,
+          "sourceAnalyzeMs": 48.827917,
+          "sourceJoinMs": 0.070958
+        },
+        {
+          "processMs": 82.34020900000178,
+          "archiveReadMs": 0.727333,
+          "evidenceDecodeMs": 0.9762500000000001,
+          "runtimeAnalyzeAndJoinMs": 0.26070799999999994,
+          "integrityMs": 7.859084,
+          "sourceReadMs": 17.470333,
+          "sourceAnalyzeMs": 48.547166000000004,
+          "sourceJoinMs": 0.065417
+        },
+        {
+          "processMs": 85.11145800001395,
+          "archiveReadMs": 0.7421249999999999,
+          "evidenceDecodeMs": 0.9641250000000001,
+          "runtimeAnalyzeAndJoinMs": 0.24666699999999997,
+          "integrityMs": 7.974416999999999,
+          "sourceReadMs": 17.7205,
+          "sourceAnalyzeMs": 50.704917,
+          "sourceJoinMs": 0.070917
+        }
+      ],
+      "timings": {
+        "native-build": 233.08995900000446,
+        "native-cold": 562.8225410000014,
+        "native-warm-0": 29.522790999995777,
+        "native-warm-1": 28.325333000000683,
+        "native-warm-2": 25.087249999996857,
+        "native-binary-0": 3.5096249999915017,
+        "native-binary-1": 3.3275830000056885,
+        "native-binary-2": 3.4052499999961583,
+        "locate-rustc": 8.5666249999922,
+        "locate-sysroot": 9.633042000001296,
+        "prepare-libtest": 993.7626669999881,
+        "instrumented": 5915.860625000001,
+        "analyze": 81.98283300000185,
+        "query-warm-0": 82.22137499999371,
+        "query-warm-1": 82.34020900000178,
+        "query-warm-2": 85.11145800001395
+      }
+    },
+    {
+      "groups": 32,
+      "repetition": 2,
+      "enabled": true,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-OrPS6T",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "1aa7f17acb8111c45b8e4f5fda196373f7a63560bb61cf8725e1920aad9670c2",
+        "tests/contract.rs": "9e1e6500938f0d17713451c432eaa2a9848c8ba8a0d222757843f3b7d88316dc"
+      },
+      "sourceBytes": 19041,
+      "identityRecords": 224,
+      "sourceWitnesses": 64,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 101,
+        "uncompressedBytes": 744539,
+        "compressedBytes": 84138
+      },
+      "runPhases": {
+        "initializationMs": 3.6,
+        "workspacePreparationMs": 61.6,
+        "adapterSetupMs": 9.100000000000001,
+        "instrumentedBuildMs": 5325.9,
+        "testCommandMs": 698.9,
+        "evidencePublicationMs": 23.7,
+        "preExecutionSetupBuildMs": 4627
+      },
+      "firstQuery": {
+        "processMs": 182.94674999998824,
+        "archiveReadMs": 0.809,
+        "evidenceDecodeMs": 1.239208,
+        "runtimeAnalyzeAndJoinMs": 0.2661249999999997,
+        "integrityMs": 8.013792,
+        "sourceReadMs": 17.625792,
+        "sourceAnalyzeMs": 148.066958,
+        "sourceJoinMs": 0.09225000000000001
+      },
+      "warmQueries": [
+        {
+          "processMs": 184.65662500000326,
+          "archiveReadMs": 0.748792,
+          "evidenceDecodeMs": 1.313708,
+          "runtimeAnalyzeAndJoinMs": 0.2696670000000001,
+          "integrityMs": 8.0495,
+          "sourceReadMs": 17.466791,
+          "sourceAnalyzeMs": 150.130292,
+          "sourceJoinMs": 0.08129199999999999
+        },
+        {
+          "processMs": 183.90212499999325,
+          "archiveReadMs": 0.786625,
+          "evidenceDecodeMs": 1.1461670000000002,
+          "runtimeAnalyzeAndJoinMs": 0.25945799999999997,
+          "integrityMs": 7.549542000000001,
+          "sourceReadMs": 18.086166000000002,
+          "sourceAnalyzeMs": 149.156542,
+          "sourceJoinMs": 0.093
+        },
+        {
+          "processMs": 182.49674999999115,
+          "archiveReadMs": 0.876292,
+          "evidenceDecodeMs": 1.2434580000000004,
+          "runtimeAnalyzeAndJoinMs": 0.25604199999999944,
+          "integrityMs": 7.625375,
+          "sourceReadMs": 17.255166999999997,
+          "sourceAnalyzeMs": 148.11320899999998,
+          "sourceJoinMs": 0.075833
+        }
+      ],
+      "timings": {
+        "native-build": 243.51391599999624,
+        "native-cold": 644.3520419999986,
+        "native-warm-0": 27.228207999985898,
+        "native-warm-1": 25.13208300000406,
+        "native-warm-2": 23.544167000000016,
+        "native-binary-0": 3.250957999989623,
+        "native-binary-1": 3.4383749999979045,
+        "native-binary-2": 3.312292000002344,
+        "locate-rustc": 8.54374999999709,
+        "locate-sysroot": 9.782667000006768,
+        "prepare-libtest": 993.5228340000031,
+        "instrumented": 5933.763208000004,
+        "analyze": 182.94674999998824,
+        "query-warm-0": 184.65662500000326,
+        "query-warm-1": 183.90212499999325,
+        "query-warm-2": 182.49674999999115
+      }
+    },
+    {
+      "groups": 128,
+      "repetition": 0,
+      "enabled": false,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-gOvy7n",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "24691765d3ce47dc0720dc4f3f0883e2fae068d8175db1e671d34bd6f71b5c3b",
+        "tests/contract.rs": "235b95478f047d0effb1111db8a24810a9abde0b52ec098c1c78e2278d283850"
+      },
+      "sourceBytes": 76850,
+      "identityRecords": 0,
+      "sourceWitnesses": 0,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 389,
+        "uncompressedBytes": 2780792,
+        "compressedBytes": 298416
+      },
+      "runPhases": {
+        "initializationMs": 5.2,
+        "workspacePreparationMs": 58.3,
+        "adapterSetupMs": 9.700000000000003,
+        "instrumentedBuildMs": 5774.9,
+        "testCommandMs": 739.8,
+        "evidencePublicationMs": 68.7,
+        "preExecutionSetupBuildMs": 5035.099999999999
+      },
+      "firstQuery": {
+        "processMs": 776.4360000000015,
+        "archiveReadMs": 2.960417,
+        "evidenceDecodeMs": 3.372583,
+        "runtimeAnalyzeAndJoinMs": 1.0801249999999998,
+        "integrityMs": 8.374958,
+        "sourceReadMs": 19.658875,
+        "sourceAnalyzeMs": 727.252416,
+        "sourceJoinMs": 0.261584
+      },
+      "warmQueries": [
+        {
+          "processMs": 777.3865829999995,
+          "archiveReadMs": 2.555291,
+          "evidenceDecodeMs": 3.540125,
+          "runtimeAnalyzeAndJoinMs": 1.1829999999999998,
+          "integrityMs": 7.908500000000001,
+          "sourceReadMs": 19.146083,
+          "sourceAnalyzeMs": 729.17225,
+          "sourceJoinMs": 0.26045799999999997
+        },
+        {
+          "processMs": 775.3356669999921,
+          "archiveReadMs": 2.8424169999999997,
+          "evidenceDecodeMs": 3.392458,
+          "runtimeAnalyzeAndJoinMs": 1.013459000000001,
+          "integrityMs": 8.421833999999999,
+          "sourceReadMs": 18.360791000000003,
+          "sourceAnalyzeMs": 727.824709,
+          "sourceJoinMs": 0.289541
+        },
+        {
+          "processMs": 779.3305419999961,
+          "archiveReadMs": 2.7051250000000002,
+          "evidenceDecodeMs": 3.434458,
+          "runtimeAnalyzeAndJoinMs": 1.1711670000000005,
+          "integrityMs": 8.068708,
+          "sourceReadMs": 19.107540999999998,
+          "sourceAnalyzeMs": 731.053,
+          "sourceJoinMs": 0.27225
+        }
+      ],
+      "timings": {
+        "native-build": 423.62395800001104,
+        "native-cold": 592.1964169999992,
+        "native-warm-0": 34.477542000007816,
+        "native-warm-1": 31.6160830000008,
+        "native-warm-2": 27.620083000001614,
+        "native-binary-0": 6.924708000005921,
+        "native-binary-1": 7.0373340000078315,
+        "native-binary-2": 6.8617079999967245,
+        "locate-rustc": 8.963707999995677,
+        "locate-sysroot": 9.646374999996624,
+        "prepare-libtest": 992.4741249999934,
+        "instrumented": 6535.955916999999,
+        "analyze": 776.4360000000015,
+        "query-warm-0": 777.3865829999995,
+        "query-warm-1": 775.3356669999921,
+        "query-warm-2": 779.3305419999961
+      }
+    },
+    {
+      "groups": 128,
+      "repetition": 0,
+      "enabled": true,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-H1NsOm",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "24691765d3ce47dc0720dc4f3f0883e2fae068d8175db1e671d34bd6f71b5c3b",
+        "tests/contract.rs": "235b95478f047d0effb1111db8a24810a9abde0b52ec098c1c78e2278d283850"
+      },
+      "sourceBytes": 76850,
+      "identityRecords": 896,
+      "sourceWitnesses": 256,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 389,
+        "uncompressedBytes": 2976204,
+        "compressedBytes": 332095
+      },
+      "runPhases": {
+        "initializationMs": 3.9,
+        "workspacePreparationMs": 56.3,
+        "adapterSetupMs": 10,
+        "instrumentedBuildMs": 5736.7,
+        "testCommandMs": 717.1,
+        "evidencePublicationMs": 75.4,
+        "preExecutionSetupBuildMs": 5019.599999999999
+      },
+      "firstQuery": {
+        "processMs": 3642.0699170000007,
+        "archiveReadMs": 3.0158329999999998,
+        "evidenceDecodeMs": 4.287917,
+        "runtimeAnalyzeAndJoinMs": 1.0954579999999998,
+        "integrityMs": 8.5425,
+        "sourceReadMs": 19.016125,
+        "sourceAnalyzeMs": 3589.547209,
+        "sourceJoinMs": 0.353666
+      },
+      "warmQueries": [
+        {
+          "processMs": 3667.7732079999987,
+          "archiveReadMs": 2.8666669999999996,
+          "evidenceDecodeMs": 4.306458,
+          "runtimeAnalyzeAndJoinMs": 1.0940830000000004,
+          "integrityMs": 8.447375,
+          "sourceReadMs": 19.056416,
+          "sourceAnalyzeMs": 3615.137458,
+          "sourceJoinMs": 0.457333
+        },
+        {
+          "processMs": 3652.1333339999983,
+          "archiveReadMs": 3.0508330000000004,
+          "evidenceDecodeMs": 4.149042,
+          "runtimeAnalyzeAndJoinMs": 1.1186660000000002,
+          "integrityMs": 8.459958,
+          "sourceReadMs": 19.194042000000003,
+          "sourceAnalyzeMs": 3599.761666,
+          "sourceJoinMs": 0.355375
+        },
+        {
+          "processMs": 3623.734999999986,
+          "archiveReadMs": 2.9034579999999997,
+          "evidenceDecodeMs": 4.035334000000001,
+          "runtimeAnalyzeAndJoinMs": 1.3094159999999997,
+          "integrityMs": 8.54325,
+          "sourceReadMs": 19.364375,
+          "sourceAnalyzeMs": 3571.5205,
+          "sourceJoinMs": 0.362959
+        }
+      ],
+      "timings": {
+        "native-build": 420.5279589999991,
+        "native-cold": 555.7722920000087,
+        "native-warm-0": 35.61966699999175,
+        "native-warm-1": 30.290416999996523,
+        "native-warm-2": 27.404040999987046,
+        "native-binary-0": 6.924416000008932,
+        "native-binary-1": 7.029167000000598,
+        "native-binary-2": 7.050707999995211,
+        "locate-rustc": 8.867333000001963,
+        "locate-sysroot": 9.603167000008398,
+        "prepare-libtest": 996.5192499999976,
+        "instrumented": 6501.475083999991,
+        "analyze": 3642.0699170000007,
+        "query-warm-0": 3667.7732079999987,
+        "query-warm-1": 3652.1333339999983,
+        "query-warm-2": 3623.734999999986
+      }
+    },
+    {
+      "groups": 128,
+      "repetition": 1,
+      "enabled": true,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-VSgkNS",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "24691765d3ce47dc0720dc4f3f0883e2fae068d8175db1e671d34bd6f71b5c3b",
+        "tests/contract.rs": "235b95478f047d0effb1111db8a24810a9abde0b52ec098c1c78e2278d283850"
+      },
+      "sourceBytes": 76850,
+      "identityRecords": 896,
+      "sourceWitnesses": 256,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 389,
+        "uncompressedBytes": 2976204,
+        "compressedBytes": 332106
+      },
+      "runPhases": {
+        "initializationMs": 3.5,
+        "workspacePreparationMs": 59.8,
+        "adapterSetupMs": 9.799999999999997,
+        "instrumentedBuildMs": 5787.4,
+        "testCommandMs": 789.7,
+        "evidencePublicationMs": 74.2,
+        "preExecutionSetupBuildMs": 4997.7
+      },
+      "firstQuery": {
+        "processMs": 3716.041750000004,
+        "archiveReadMs": 2.957,
+        "evidenceDecodeMs": 4.308375,
+        "runtimeAnalyzeAndJoinMs": 1.072,
+        "integrityMs": 9.367709,
+        "sourceReadMs": 18.967959,
+        "sourceAnalyzeMs": 3662.211667,
+        "sourceJoinMs": 0.309208
+      },
+      "warmQueries": [
+        {
+          "processMs": 3534.7582499999844,
+          "archiveReadMs": 2.86075,
+          "evidenceDecodeMs": 4.5141670000000005,
+          "runtimeAnalyzeAndJoinMs": 1.1256660000000007,
+          "integrityMs": 8.485707999999999,
+          "sourceReadMs": 18.768208,
+          "sourceAnalyzeMs": 3483.079,
+          "sourceJoinMs": 0.329875
+        },
+        {
+          "processMs": 3524.8705420000188,
+          "archiveReadMs": 2.797542,
+          "evidenceDecodeMs": 4.115958,
+          "runtimeAnalyzeAndJoinMs": 1.0352080000000008,
+          "integrityMs": 8.175875000000001,
+          "sourceReadMs": 18.313167,
+          "sourceAnalyzeMs": 3474.586583,
+          "sourceJoinMs": 0.34862499999999996
+        },
+        {
+          "processMs": 3665.9189170000027,
+          "archiveReadMs": 2.872042,
+          "evidenceDecodeMs": 4.211375,
+          "runtimeAnalyzeAndJoinMs": 1.0415,
+          "integrityMs": 8.276917,
+          "sourceReadMs": 18.544125,
+          "sourceAnalyzeMs": 3614.786584,
+          "sourceJoinMs": 0.31704200000000005
+        }
+      ],
+      "timings": {
+        "native-build": 435.2421669999894,
+        "native-cold": 626.1854579999927,
+        "native-warm-0": 30.095500000024913,
+        "native-warm-1": 29.777624999987893,
+        "native-warm-2": 27.98179199997685,
+        "native-binary-0": 6.922707999998238,
+        "native-binary-1": 7.109582999983104,
+        "native-binary-2": 7.063000000023749,
+        "locate-rustc": 8.733416999981273,
+        "locate-sysroot": 9.478332999977283,
+        "prepare-libtest": 994.7767910000111,
+        "instrumented": 6570.666499999992,
+        "analyze": 3716.041750000004,
+        "query-warm-0": 3534.7582499999844,
+        "query-warm-1": 3524.8705420000188,
+        "query-warm-2": 3665.9189170000027
+      }
+    },
+    {
+      "groups": 128,
+      "repetition": 1,
+      "enabled": false,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-iaJFeQ",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "24691765d3ce47dc0720dc4f3f0883e2fae068d8175db1e671d34bd6f71b5c3b",
+        "tests/contract.rs": "235b95478f047d0effb1111db8a24810a9abde0b52ec098c1c78e2278d283850"
+      },
+      "sourceBytes": 76850,
+      "identityRecords": 0,
+      "sourceWitnesses": 0,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 389,
+        "uncompressedBytes": 2780792,
+        "compressedBytes": 298388
+      },
+      "runPhases": {
+        "initializationMs": 3.6,
+        "workspacePreparationMs": 57.2,
+        "adapterSetupMs": 10.399999999999991,
+        "instrumentedBuildMs": 5791.3,
+        "testCommandMs": 712.9,
+        "evidencePublicationMs": 68.4,
+        "preExecutionSetupBuildMs": 5078.400000000001
+      },
+      "firstQuery": {
+        "processMs": 808.9137080000073,
+        "archiveReadMs": 2.724666,
+        "evidenceDecodeMs": 3.5330000000000004,
+        "runtimeAnalyzeAndJoinMs": 1.1436249999999992,
+        "integrityMs": 7.5265,
+        "sourceReadMs": 18.700792,
+        "sourceAnalyzeMs": 759.0538329999999,
+        "sourceJoinMs": 0.317417
+      },
+      "warmQueries": [
+        {
+          "processMs": 775.4837919999845,
+          "archiveReadMs": 2.753292,
+          "evidenceDecodeMs": 3.3732499999999996,
+          "runtimeAnalyzeAndJoinMs": 1.13875,
+          "integrityMs": 7.850375,
+          "sourceReadMs": 18.501209,
+          "sourceAnalyzeMs": 728.187209,
+          "sourceJoinMs": 0.32775000000000004
+        },
+        {
+          "processMs": 768.1655000000028,
+          "archiveReadMs": 2.660375,
+          "evidenceDecodeMs": 3.40275,
+          "runtimeAnalyzeAndJoinMs": 0.9826249999999996,
+          "integrityMs": 7.691708,
+          "sourceReadMs": 16.947457999999997,
+          "sourceAnalyzeMs": 723.0035,
+          "sourceJoinMs": 0.25275
+        },
+        {
+          "processMs": 772.3167919999978,
+          "archiveReadMs": 2.7008330000000003,
+          "evidenceDecodeMs": 3.4481669999999998,
+          "runtimeAnalyzeAndJoinMs": 1.0204999999999993,
+          "integrityMs": 7.587916999999999,
+          "sourceReadMs": 17.881125,
+          "sourceAnalyzeMs": 725.684167,
+          "sourceJoinMs": 0.259334
+        }
+      ],
+      "timings": {
+        "native-build": 438.0188339999877,
+        "native-cold": 634.09016599998,
+        "native-warm-0": 35.90391600001021,
+        "native-warm-1": 29.897792000003392,
+        "native-warm-2": 26.357499999983702,
+        "native-binary-0": 6.767083000013372,
+        "native-binary-1": 6.757874999981141,
+        "native-binary-2": 6.910707999981241,
+        "locate-rustc": 8.40179099998204,
+        "locate-sysroot": 9.283374999999069,
+        "prepare-libtest": 1075.2908330000064,
+        "instrumented": 6557.536374999996,
+        "analyze": 808.9137080000073,
+        "query-warm-0": 775.4837919999845,
+        "query-warm-1": 768.1655000000028,
+        "query-warm-2": 772.3167919999978
+      }
+    },
+    {
+      "groups": 128,
+      "repetition": 2,
+      "enabled": false,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-jiud6U",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "24691765d3ce47dc0720dc4f3f0883e2fae068d8175db1e671d34bd6f71b5c3b",
+        "tests/contract.rs": "235b95478f047d0effb1111db8a24810a9abde0b52ec098c1c78e2278d283850"
+      },
+      "sourceBytes": 76850,
+      "identityRecords": 0,
+      "sourceWitnesses": 0,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 389,
+        "uncompressedBytes": 2780792,
+        "compressedBytes": 298348
+      },
+      "runPhases": {
+        "initializationMs": 3.3,
+        "workspacePreparationMs": 54.4,
+        "adapterSetupMs": 9,
+        "instrumentedBuildMs": 5831.8,
+        "testCommandMs": 959.2,
+        "evidencePublicationMs": 65.4,
+        "preExecutionSetupBuildMs": 4872.6
+      },
+      "firstQuery": {
+        "processMs": 760.0753329999861,
+        "archiveReadMs": 2.630916,
+        "evidenceDecodeMs": 3.369917,
+        "runtimeAnalyzeAndJoinMs": 1.0323330000000004,
+        "integrityMs": 7.7115,
+        "sourceReadMs": 17.9285,
+        "sourceAnalyzeMs": 713.718834,
+        "sourceJoinMs": 0.31879199999999996
+      },
+      "warmQueries": [
+        {
+          "processMs": 756.6014999999898,
+          "archiveReadMs": 2.685,
+          "evidenceDecodeMs": 3.3477920000000005,
+          "runtimeAnalyzeAndJoinMs": 1.0257499999999995,
+          "integrityMs": 7.53,
+          "sourceReadMs": 18.054667,
+          "sourceAnalyzeMs": 710.865875,
+          "sourceJoinMs": 0.287833
+        },
+        {
+          "processMs": 767.2795420000039,
+          "archiveReadMs": 2.707334,
+          "evidenceDecodeMs": 3.4079579999999994,
+          "runtimeAnalyzeAndJoinMs": 1.008000000000001,
+          "integrityMs": 7.2135419999999995,
+          "sourceReadMs": 17.448458,
+          "sourceAnalyzeMs": 721.910167,
+          "sourceJoinMs": 0.279375
+        },
+        {
+          "processMs": 789.5702919999894,
+          "archiveReadMs": 2.516584,
+          "evidenceDecodeMs": 3.5812910000000002,
+          "runtimeAnalyzeAndJoinMs": 1.039084,
+          "integrityMs": 7.639791,
+          "sourceReadMs": 17.190375,
+          "sourceAnalyzeMs": 743.568416,
+          "sourceJoinMs": 0.305709
+        }
+      ],
+      "timings": {
+        "native-build": 406.9272920000076,
+        "native-cold": 554.0280419999908,
+        "native-warm-0": 34.27224999997998,
+        "native-warm-1": 30.850166999996873,
+        "native-warm-2": 26.673125000001164,
+        "native-binary-0": 6.795916999981273,
+        "native-binary-1": 6.801917000004323,
+        "native-binary-2": 6.880540999991354,
+        "locate-rustc": 8.455166999978246,
+        "locate-sysroot": 9.367916999995941,
+        "prepare-libtest": 979.0747090000077,
+        "instrumented": 6575.759541000007,
+        "analyze": 760.0753329999861,
+        "query-warm-0": 756.6014999999898,
+        "query-warm-1": 767.2795420000039,
+        "query-warm-2": 789.5702919999894
+      }
+    },
+    {
+      "groups": 128,
+      "repetition": 2,
+      "enabled": true,
+      "temporary": "/var/folders/4q/cdhj37516zzbc7z9ckrst0x40000gn/T/supercov-rust-asserted-mgLrff",
+      "sourceHashes": {
+        "Cargo.toml": "2c5ca3c87348447d3aea0510a790675762e3cf6298a40d6fe2146c331c7f37a2",
+        "src/lib.rs": "24691765d3ce47dc0720dc4f3f0883e2fae068d8175db1e671d34bd6f71b5c3b",
+        "tests/contract.rs": "235b95478f047d0effb1111db8a24810a9abde0b52ec098c1c78e2278d283850"
+      },
+      "sourceBytes": 76850,
+      "identityRecords": 896,
+      "sourceWitnesses": 256,
+      "rawEvidence": {
+        "schemaVersion": 3,
+        "format": "framed+gzip",
+        "file": "evidence.raw.gz",
+        "files": 389,
+        "uncompressedBytes": 2976204,
+        "compressedBytes": 332132
+      },
+      "runPhases": {
+        "initializationMs": 4.1,
+        "workspacePreparationMs": 52.7,
+        "adapterSetupMs": 8.699999999999996,
+        "instrumentedBuildMs": 5675.3,
+        "testCommandMs": 797.1,
+        "evidencePublicationMs": 74,
+        "preExecutionSetupBuildMs": 4878.2
+      },
+      "firstQuery": {
+        "processMs": 3520.853334000014,
+        "archiveReadMs": 3.021417,
+        "evidenceDecodeMs": 4.387791,
+        "runtimeAnalyzeAndJoinMs": 1.0334589999999988,
+        "integrityMs": 8.253207999999999,
+        "sourceReadMs": 17.357582999999998,
+        "sourceAnalyzeMs": 3471.042083,
+        "sourceJoinMs": 0.311333
+      },
+      "warmQueries": [
+        {
+          "processMs": 3633.227332999988,
+          "archiveReadMs": 2.94825,
+          "evidenceDecodeMs": 4.202083,
+          "runtimeAnalyzeAndJoinMs": 1.0095420000000015,
+          "integrityMs": 8.15475,
+          "sourceReadMs": 18.571832999999998,
+          "sourceAnalyzeMs": 3582.020917,
+          "sourceJoinMs": 0.336542
+        },
+        {
+          "processMs": 3606.142125000013,
+          "archiveReadMs": 2.964125,
+          "evidenceDecodeMs": 4.108499999999999,
+          "runtimeAnalyzeAndJoinMs": 1.083375000000001,
+          "integrityMs": 7.569208,
+          "sourceReadMs": 18.382833,
+          "sourceAnalyzeMs": 3555.462458,
+          "sourceJoinMs": 0.3585
+        },
+        {
+          "processMs": 3584.5377500000177,
+          "archiveReadMs": 3.302292,
+          "evidenceDecodeMs": 4.132791000000001,
+          "runtimeAnalyzeAndJoinMs": 1.0987919999999995,
+          "integrityMs": 8.013582999999999,
+          "sourceReadMs": 18.188291999999997,
+          "sourceAnalyzeMs": 3533.382417,
+          "sourceJoinMs": 0.382334
+        }
+      ],
+      "timings": {
+        "native-build": 421.5938329999917,
+        "native-cold": 587.2602500000212,
+        "native-warm-0": 35.928000000014435,
+        "native-warm-1": 29.075916000001598,
+        "native-warm-2": 25.696083000017097,
+        "native-binary-0": 6.595208999991883,
+        "native-binary-1": 6.718708000000333,
+        "native-binary-2": 6.450416999985464,
+        "locate-rustc": 7.93316699998104,
+        "locate-sysroot": 9.799874999996973,
+        "prepare-libtest": 982.1956660000142,
+        "instrumented": 6432.392458999995,
+        "analyze": 3520.853334000014,
+        "query-warm-0": 3633.227332999988,
+        "query-warm-1": 3606.142125000013,
+        "query-warm-2": 3584.5377500000177
+      }
+    }
+  ],
+  "sourceHashes": {
+    "scripts/rust-asserted-scaling-calibration.mjs": "cca2cb10869ee9d47b0a858d93b44c8940517d76e0d489c3081e386cba40ea56",
+    "scripts/rust-asserted-calibration-harness.mjs": "8789854e4476d25433d3f3d618f56593b98499581c06849c9612301c70eb32b2",
+    "crates/supercov-engine/examples/rust_asserted_runtime.rs": "acd7a3c706395455f32e021aeb521d0229a3c878553723ed891bc791e6794c2a",
+    "crates/supercov-engine/src/rust_asserted_source.rs": "31f8b5bafc7b5502561ac2dcec9034c0def5819554efeacd01ff25c473c9591b",
+    "spikes/rustc-backend/src/asserted_identities.rs": "5da253c26f67471626ad174f30126a8144c93d90d6095bc02c1191ac75cb21dd"
+  }
+}

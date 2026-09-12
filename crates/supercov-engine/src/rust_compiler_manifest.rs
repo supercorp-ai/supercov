@@ -57,6 +57,71 @@ pub struct RustCompilerManifest {
     /// Obligations the compiler frontend declined to measure exactly.
     #[serde(default)]
     pub unmeasured_obligations: Vec<String>,
+    /// Optional compile-time evidence. Not an obligation or a runtime probe.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assertion_identities: Vec<RustCompilerAssertionIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RustCompilerAssertionIdentity {
+    pub kind: String,
+    pub source_key: String,
+    pub start: u32,
+    pub end: u32,
+    pub owner: String,
+    pub target: String,
+    pub standard_equality: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolvedRustAssertionIdentities {
+    pub schema: String,
+    pub records: Vec<ResolvedRustAssertionIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResolvedRustAssertionIdentity {
+    pub kind: String,
+    pub file: String,
+    pub start: u32,
+    pub end: u32,
+    pub source: String,
+    pub owner: String,
+    /// Function obligation ID for calls; compiler DefPath for macros.
+    pub target: String,
+    /// rustc's assert_eq_macro diagnostic-item identity, not a name match.
+    pub standard_equality: bool,
+}
+
+impl ResolvedRustAssertionIdentities {
+    /// Archive-level structural checks. Exact full-file bytes are checked again
+    /// by the source consumer against the run fingerprint before using a record.
+    pub fn validate(&self, manifest: &CoverageManifest) -> Result<(), RustCompilerManifestError> {
+        if self.schema != "supercov-rust-assertion-identities-v1"
+            || self.records.iter().any(|r| {
+                !normalized_relative_path(&r.file, false)
+                    || r.start >= r.end
+                    || r.source.len() != (r.end - r.start) as usize
+                    || !valid_id(&r.owner, &["function"])
+                    || !manifest.points.iter().any(|p| {
+                        p.id == r.owner && p.kind == PointKind::Function && p.file == r.file
+                    })
+                    || match r.kind.as_str() {
+                        "call" => !valid_id(&r.target, &["function"]) || r.standard_equality,
+                        "macro" => r.target.is_empty() || r.target.chars().any(char::is_control),
+                        _ => true,
+                    }
+            })
+        {
+            return Err(RustCompilerManifestError::Invalid(
+                "malformed resolved compiler assertion identities".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -296,6 +361,7 @@ pub fn normalize_rust_compiler_candidates(
     let mut unmeasured_obligations = BTreeSet::new();
     let mut sources = BTreeMap::<String, RustCompilerSource>::new();
     let mut bound_bodies = 0_u64;
+    let mut assertion_identities = BTreeSet::new();
     for (manifest, snapshots) in candidates {
         manifest.validate()?;
         bound_bodies = bound_bodies.saturating_add(manifest.bound_bodies);
@@ -309,6 +375,7 @@ pub fn normalize_rust_compiler_candidates(
         crate_names.insert(manifest.crate_name);
         limitations.extend(manifest.limitations);
         unmeasured_obligations.extend(manifest.unmeasured_obligations);
+        assertion_identities.extend(manifest.assertion_identities);
         for (key, source) in snapshots.sources {
             if let Some(existing) = sources.insert(key.clone(), source.clone())
                 && existing != source
@@ -347,6 +414,7 @@ pub fn normalize_rust_compiler_candidates(
         selection_groups: groups.into_values().collect(),
         limitations: limitations.into_iter().collect(),
         unmeasured_obligations: unmeasured_obligations.into_iter().collect(),
+        assertion_identities: assertion_identities.into_iter().collect(),
     };
     manifest.normalize(&sources)
 }
@@ -596,6 +664,27 @@ impl RustCompilerManifest {
             return Err(invalid(
                 "a private candidate needs a crate identity and cannot claim completeness",
             ));
+        }
+        for identity in &self.assertion_identities {
+            if !source_range_for(&identity.source_key, identity.start, identity.end, None)
+                || !valid_id(&identity.owner, &["function"])
+                || !self.points.iter().any(|p| {
+                    p.id == identity.owner
+                        && p.kind == "function"
+                        && p.source_key == identity.source_key
+                })
+                || match identity.kind.as_str() {
+                    "call" => {
+                        !valid_id(&identity.target, &["function"]) || identity.standard_equality
+                    }
+                    "macro" => {
+                        identity.target.is_empty() || identity.target.chars().any(char::is_control)
+                    }
+                    _ => true,
+                }
+            {
+                return Err(invalid("malformed compiler assertion identity"));
+            }
         }
         if let Some(group) = pending_group
             && (!self.crate_name.starts_with("doctest_bundle_")
@@ -999,6 +1088,11 @@ impl RustCompilerManifest {
                 std::iter::once(group.source_key.as_str())
                     .chain(group.arms.iter().map(|arm| arm.body_source_key.as_str()))
             }))
+            .chain(
+                self.assertion_identities
+                    .iter()
+                    .map(|identity| identity.source_key.as_str()),
+            )
             .collect::<BTreeSet<_>>();
         let supplied_source_keys = sources.keys().map(String::as_str).collect::<BTreeSet<_>>();
         if supplied_source_keys != required_source_keys {
@@ -1238,6 +1332,36 @@ impl RustCompilerManifest {
             .collect();
 
         let (source_fingerprint, generated_source_files) = compiler_source_fingerprint(sources);
+        let mut scope = json!({
+            "language": "rust", "model": self.model, "crate": self.crate_name,
+            "measurementComplete": self.measurement_complete,
+            "sourceFingerprint": { "algorithm":"sha256", "digest":source_fingerprint,
+                "files":sources.len(), "generatedFiles":generated_source_files },
+        });
+        if !self.assertion_identities.is_empty() {
+            let records = self
+                .assertion_identities
+                .iter()
+                .map(|identity| {
+                    let (file, _, _, source) =
+                        location(&identity.source_key, identity.start, identity.end)?;
+                    Ok(ResolvedRustAssertionIdentity {
+                        kind: identity.kind.clone(),
+                        file,
+                        start: identity.start,
+                        end: identity.end,
+                        source,
+                        owner: identity.owner.clone(),
+                        target: identity.target.clone(),
+                        standard_equality: identity.standard_equality,
+                    })
+                })
+                .collect::<Result<Vec<_>, RustCompilerManifestError>>()?;
+            scope["assertionIdentities"] = json!(ResolvedRustAssertionIdentities {
+                schema: "supercov-rust-assertion-identities-v1".into(),
+                records,
+            });
+        }
         Ok(NormalizedRustCompilerManifest {
             manifest: CoverageManifest {
                 decisions,
@@ -1245,18 +1369,7 @@ impl RustCompilerManifest {
                 branches,
                 limitations,
                 unmeasured: self.unmeasured_obligations.clone(),
-                scope: Some(json!({
-                    "language": "rust",
-                    "model": self.model,
-                    "crate": self.crate_name,
-                    "measurementComplete": self.measurement_complete,
-                    "sourceFingerprint": {
-                        "algorithm": "sha256",
-                        "digest": source_fingerprint,
-                        "files": sources.len(),
-                        "generatedFiles": generated_source_files,
-                    },
-                })),
+                scope: Some(scope),
             },
             hit_obligations_by_ordinal: hit_obligations_by_ordinal
                 .into_iter()
@@ -1369,6 +1482,102 @@ mod tests {
             "selectionGroups": [],
             "limitations": ["RUST_PRIVATE_CANDIDATE: incomplete"]
         })
+    }
+
+    #[test]
+    fn optional_assertion_identities_are_strict_and_do_not_add_obligations() {
+        let mut raw = valid_manifest();
+        let identity = json!({"kind":"call", "sourceKey":"source:src/lib.rs",
+            "start":11,"end":16,"owner":raw["points"][0]["id"],
+            "target":"rs:function:000000000000000000000099","standardEquality":false});
+        let sources = BTreeMap::from([(
+            "source:src/lib.rs".into(),
+            RustCompilerSource {
+                file: "src/lib.rs".into(),
+                source: "0123456789 value and more source bytes".into(),
+            },
+        )]);
+        let before = RustCompilerManifest::parse(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let normalized_before = before.normalize(&sources).unwrap();
+        assert!(
+            serde_json::to_value(&before)
+                .unwrap()
+                .get("assertionIdentities")
+                .is_none()
+        );
+        assert!(
+            normalized_before
+                .manifest
+                .scope
+                .as_ref()
+                .unwrap()
+                .get("assertionIdentities")
+                .is_none()
+        );
+        raw["assertionIdentities"] = json!([identity]);
+        let candidate = RustCompilerManifest::parse(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let after = candidate.normalize(&sources).unwrap();
+        assert_eq!(before.points, candidate.points);
+        assert_eq!(before.decisions, candidate.decisions);
+        assert_eq!(
+            normalized_before.hit_obligations_by_ordinal,
+            after.hit_obligations_by_ordinal
+        );
+        let identities: ResolvedRustAssertionIdentities = serde_json::from_value(
+            after.manifest.scope.as_ref().unwrap()["assertionIdentities"].clone(),
+        )
+        .unwrap();
+        identities.validate(&after.manifest).unwrap();
+        assert_eq!(identities.records[0].source, "value");
+        for (field, invalid) in [
+            ("owner", json!("rs:function:000000000000000000000098")),
+            ("target", json!("a name is not a function identity")),
+            ("standardEquality", json!(true)),
+            ("kind", json!("guess")),
+            ("end", json!(11)),
+            ("sourceKey", json!("source:../other.rs")),
+            ("unexpected", json!(false)),
+        ] {
+            let mut changed = raw.clone();
+            changed["assertionIdentities"][0][field] = invalid;
+            assert!(
+                RustCompilerManifest::parse(&serde_json::to_vec(&changed).unwrap()).is_err(),
+                "{field}"
+            );
+        }
+        let mut outside = candidate.clone();
+        outside.assertion_identities[0].end = 1000;
+        assert!(outside.normalize(&sources).is_err());
+        let mut invalid = identities;
+        invalid.records[0].source.push('!');
+        assert!(invalid.validate(&after.manifest).is_err());
+    }
+
+    #[test]
+    fn assertion_identity_merge_deduplicates_exact_records_but_keeps_conflicts() {
+        let mut raw = valid_manifest();
+        raw["assertionIdentities"] = json!([{"kind":"call", "sourceKey":"source:src/lib.rs",
+            "start":11,"end":16,"owner":raw["points"][0]["id"],
+            "target":"rs:function:000000000000000000000099","standardEquality":false}]);
+        let first = RustCompilerManifest::parse(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        let mut other = first.clone();
+        other.assertion_identities[0].target = "rs:function:000000000000000000000098".into();
+        let sources = RustCompilerSourceSnapshots::parse(&serde_json::to_vec(&json!({
+            "schema":SOURCE_SNAPSHOT_SCHEMA,"crate":"fixture", "sources": {
+                "source:src/lib.rs":{"file":"src/lib.rs","source":"0123456789 value and more source bytes"}
+            }
+        })).unwrap()).unwrap();
+        let normalized = normalize_rust_compiler_candidates(vec![
+            (first.clone(), sources.clone()),
+            (first, sources.clone()),
+            (other, sources),
+        ])
+        .unwrap();
+        let records = normalized.manifest.scope.as_ref().unwrap()["assertionIdentities"]["records"]
+            .as_array()
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_ne!(records[0]["target"], records[1]["target"]);
     }
 
     #[test]

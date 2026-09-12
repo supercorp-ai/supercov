@@ -16,6 +16,10 @@ use crate::{
 pub struct RustPhaseProjection {
     pub phases: Vec<CoveragePhase>,
     pub phase_id_by_context: BTreeMap<u64, String>,
+    /// An assertion invocation that is itself a compiler-mapped statement. This
+    /// is an execution location, not proof that the statement read a hit's value.
+    /// Deliberately not inherited through native thread contexts or processes.
+    pub assertion_statement_by_context: BTreeMap<(u32, u64), String>,
     /// Thread phases are execution scope, not evidence-v3 phases: work under
     /// an accepted thread phase belongs to the nearest enclosing assertion
     /// phase or test, exactly as it did on the creating thread.
@@ -148,7 +152,20 @@ pub fn project_rust_assertion_phases(
 
     let mut ordered = definitions.values().copied().collect::<Vec<_>>();
     ordered.sort_by_key(|phase| phase.invocation_nonce);
+    let unmeasured: BTreeSet<_> = manifest.unmeasured.iter().collect();
+    let mut statement_sources = BTreeMap::<_, BTreeSet<_>>::new();
+    for point in &manifest.points {
+        if point.kind == crate::coverage_analysis::PointKind::Statement
+            && !unmeasured.contains(&point.id)
+        {
+            statement_sources
+                .entry((point.file.as_str(), point.line, point.column))
+                .or_default()
+                .insert(point.source.trim().trim_end_matches(';').trim());
+        }
+    }
     let mut phases = Vec::with_capacity(ordered.len());
+    let mut assertion_statement_by_context = BTreeMap::new();
     for phase in ordered {
         let decision = decisions.get(phase.decision_id.as_str()).ok_or_else(|| {
             RustTransportError::InvalidAssertionContext(format!(
@@ -161,6 +178,18 @@ pub fn project_rust_assertion_phases(
                 "phase {:016x} references non-assertion decision {}",
                 phase.child_context_id, phase.decision_id
             )));
+        }
+        // Do not label arbitrary nested assertion expressions as statements,
+        // nor infer a preceding producer statement from execution order. Both
+        // require more instrumentation/source analysis than this projection.
+        if statement_sources
+            .get(&(decision.file.as_str(), decision.line, decision.column))
+            .is_some_and(|sources| sources.contains(decision.source.trim()))
+        {
+            assertion_statement_by_context.insert(
+                (phase.process_id, phase.child_context_id),
+                format!("{}:{}:{}", decision.file, decision.line, decision.column),
+            );
         }
         let parent_context_id = collapse_thread_parents(phase.parent_context_id)?;
         let caused_by_phase_id = if parent_context_id == base_context_id {
@@ -197,6 +226,7 @@ pub fn project_rust_assertion_phases(
     Ok(RustPhaseProjection {
         phases,
         phase_id_by_context,
+        assertion_statement_by_context,
         thread_parent_by_context,
     })
 }

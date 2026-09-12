@@ -1,0 +1,11 @@
+pub fn chain(value: i32) -> i32 { value * 2 }
+pub fn boolean_chain(value: i32) -> bool { value > 0 }
+pub fn preserved_source(value: i32) -> i32 { value * 2 }
+pub fn source_replacement(value: i32) -> i32 { value * 2 }
+pub fn old_alias(value: i32) -> i32 { value * 2 }
+pub fn alias_replacement(value: i32) -> i32 { value * 2 }
+pub fn constant_shadow(value: i32) -> i32 { value * 2 }
+pub fn mutable_alias(value: i32) -> i32 { value * 2 }
+pub fn transformed_alias(value: i32) -> i32 { value * 2 }
+pub fn nested_alias(value: i32) -> i32 { value * 2 }
+pub fn never_called(value: i32) -> i32 { value * 2 }

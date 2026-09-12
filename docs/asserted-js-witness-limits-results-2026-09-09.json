@@ -1,0 +1,1275 @@
+{
+  "schema": 1,
+  "description": "JS-ASSERT-005 reporting calibration; not an assertion score or semantic accuracy claim",
+  "samples": {
+    "supergateway": {
+      "sites": 661,
+      "tests": 81,
+      "before": {
+        "contractual": 364,
+        "evident": 0,
+        "partial": 0,
+        "presence": 0,
+        "unresolved": 364,
+        "gaps": 298,
+        "limits": 66
+      },
+      "after": {
+        "contractual": 364,
+        "evident": 0,
+        "partial": 0,
+        "presence": 0,
+        "unresolved": 364,
+        "gaps": 13,
+        "limits": 351
+      },
+      "changedReasons": [
+        "S5",
+        "S6",
+        "S7",
+        "S8",
+        "S9",
+        "S10",
+        "S11",
+        "S12",
+        "S13",
+        "S15",
+        "S17",
+        "S19",
+        "S21",
+        "S22",
+        "S23",
+        "S24",
+        "S25",
+        "S26",
+        "S27",
+        "S28",
+        "S29",
+        "S30",
+        "S31",
+        "S32",
+        "S33",
+        "S34",
+        "S35",
+        "S36",
+        "S37",
+        "S38",
+        "S39",
+        "S40",
+        "S41",
+        "S43",
+        "S44",
+        "S45",
+        "S47",
+        "S53",
+        "S55",
+        "S56",
+        "S57",
+        "S58",
+        "S59",
+        "S60",
+        "S61",
+        "S62",
+        "S63",
+        "S65",
+        "S66",
+        "S67",
+        "S71",
+        "S72",
+        "S74",
+        "S75",
+        "S76",
+        "S77",
+        "S78",
+        "S79",
+        "S80",
+        "S81",
+        "S82",
+        "S83",
+        "S84",
+        "S85",
+        "S87",
+        "S89",
+        "S91",
+        "S92",
+        "S93",
+        "S94",
+        "S97",
+        "S98",
+        "S99",
+        "S100",
+        "S101",
+        "S102",
+        "S104",
+        "S106",
+        "S108",
+        "S109",
+        "S110",
+        "S111",
+        "S113",
+        "S115",
+        "S116",
+        "S117",
+        "S119",
+        "S120",
+        "S121",
+        "S122",
+        "S123",
+        "S124",
+        "S125",
+        "S126",
+        "S127",
+        "S128",
+        "S131",
+        "S132",
+        "S133",
+        "S136",
+        "S137",
+        "S139",
+        "S141",
+        "S142",
+        "S144",
+        "S145",
+        "S146",
+        "S147",
+        "S148",
+        "S149",
+        "S150",
+        "S151",
+        "S152",
+        "S153",
+        "S154",
+        "S155",
+        "S156",
+        "S157",
+        "S158",
+        "S160",
+        "S161",
+        "S162",
+        "S163",
+        "S164",
+        "S165",
+        "S166",
+        "S170",
+        "S171",
+        "S172",
+        "S173",
+        "S174",
+        "S175",
+        "S177",
+        "S178",
+        "S179",
+        "S180",
+        "S181",
+        "S182",
+        "S184",
+        "S185",
+        "S186",
+        "S187",
+        "S189",
+        "S190",
+        "S191",
+        "S193",
+        "S194",
+        "S195",
+        "S196",
+        "S197",
+        "S199",
+        "S200",
+        "S201",
+        "S202",
+        "S203",
+        "S204",
+        "S206",
+        "S207",
+        "S208",
+        "S209",
+        "S210",
+        "S212",
+        "S213",
+        "S215",
+        "S216",
+        "S217",
+        "S218",
+        "S221",
+        "S223",
+        "S225",
+        "S226",
+        "S227",
+        "S228",
+        "S230",
+        "S231",
+        "S232",
+        "S234",
+        "S236",
+        "S239",
+        "S242",
+        "S243",
+        "S244",
+        "S245",
+        "S246",
+        "S247",
+        "S248",
+        "S249",
+        "S250",
+        "S251",
+        "S252",
+        "S253",
+        "S254",
+        "S255",
+        "S256",
+        "S257",
+        "S259",
+        "S261",
+        "S263",
+        "S264",
+        "S265",
+        "S266",
+        "S268",
+        "S269",
+        "S270",
+        "S272",
+        "S273",
+        "S274",
+        "S275",
+        "S276",
+        "S277",
+        "S278",
+        "S279",
+        "S280",
+        "S281",
+        "S284",
+        "S285",
+        "S289",
+        "S290",
+        "S292",
+        "S294",
+        "S295",
+        "S297",
+        "S298",
+        "S299",
+        "S300",
+        "S301",
+        "S302",
+        "S303",
+        "S304",
+        "S305",
+        "S306",
+        "S307",
+        "S308",
+        "S309",
+        "S310",
+        "S311",
+        "S312",
+        "S313",
+        "S314",
+        "S315",
+        "S316",
+        "S317",
+        "S318",
+        "S319",
+        "S320",
+        "S322",
+        "S323",
+        "S324",
+        "S325",
+        "S326",
+        "S327",
+        "S328",
+        "S329",
+        "S330",
+        "S331",
+        "S332",
+        "S333",
+        "S334",
+        "S335",
+        "S336",
+        "S337",
+        "S338",
+        "S339",
+        "S340",
+        "S341",
+        "S342",
+        "S343",
+        "S344",
+        "S345",
+        "S346",
+        "S347",
+        "S348",
+        "S349",
+        "S350",
+        "S352",
+        "S353",
+        "S354",
+        "S355",
+        "S356",
+        "S358",
+        "S360",
+        "S361",
+        "S362",
+        "S364",
+        "S365",
+        "S366",
+        "S367",
+        "S368",
+        "S369",
+        "S370",
+        "S371",
+        "S372",
+        "S374",
+        "S375",
+        "S376",
+        "S379",
+        "S380",
+        "S382",
+        "S384",
+        "S385",
+        "S386",
+        "S387",
+        "S389",
+        "S391",
+        "S393",
+        "S394",
+        "S395",
+        "S396",
+        "S397",
+        "S398",
+        "S400",
+        "S401",
+        "S402",
+        "S403",
+        "S404",
+        "S405",
+        "S410",
+        "S412",
+        "S413",
+        "S414",
+        "S415",
+        "S416",
+        "S417",
+        "S422",
+        "S423",
+        "S424",
+        "S425",
+        "S426",
+        "S427",
+        "S431",
+        "S432",
+        "S433",
+        "S434",
+        "S437",
+        "S442",
+        "S443",
+        "S444",
+        "S445",
+        "S446",
+        "S447",
+        "S448",
+        "S449",
+        "S450",
+        "S451",
+        "S452",
+        "S453",
+        "S454",
+        "S456",
+        "S457",
+        "S458",
+        "S460",
+        "S462",
+        "S463",
+        "S464",
+        "S465",
+        "S466",
+        "S467",
+        "S468",
+        "S469",
+        "S471",
+        "S472",
+        "S473",
+        "S475",
+        "S476",
+        "S478",
+        "S479",
+        "S480",
+        "S481",
+        "S482",
+        "S483",
+        "S484",
+        "S486",
+        "S487",
+        "S488",
+        "S489",
+        "S490",
+        "S491",
+        "S492",
+        "S493",
+        "S494",
+        "S495",
+        "S496",
+        "S498",
+        "S499",
+        "S500",
+        "S501",
+        "S502",
+        "S505",
+        "S506",
+        "S508",
+        "S509",
+        "S510",
+        "S511",
+        "S512",
+        "S514",
+        "S515",
+        "S517",
+        "S518",
+        "S521",
+        "S525",
+        "S526",
+        "S527",
+        "S528",
+        "S530",
+        "S532",
+        "S534",
+        "S535",
+        "S536",
+        "S537",
+        "S539",
+        "S540",
+        "S541",
+        "S542",
+        "S543",
+        "S544",
+        "S545",
+        "S548",
+        "S549",
+        "S550",
+        "S553",
+        "S554",
+        "S555",
+        "S556",
+        "S557",
+        "S559",
+        "S561",
+        "S562",
+        "S563",
+        "S564",
+        "S565",
+        "S566",
+        "S567",
+        "S568",
+        "S569",
+        "S571",
+        "S573",
+        "S575",
+        "S576",
+        "S577",
+        "S578",
+        "S579",
+        "S580",
+        "S581",
+        "S582",
+        "S605",
+        "S606",
+        "S607",
+        "S608",
+        "S609",
+        "S610",
+        "S611",
+        "S613",
+        "S614",
+        "S615",
+        "S616",
+        "S617",
+        "S618",
+        "S619",
+        "S620",
+        "S621",
+        "S622",
+        "S623",
+        "S627",
+        "S630",
+        "S631",
+        "S632",
+        "S633",
+        "S634",
+        "S635",
+        "S636",
+        "S640",
+        "S644",
+        "S645",
+        "S646",
+        "S647",
+        "S650",
+        "S651",
+        "S652",
+        "S653",
+        "S656",
+        "S657",
+        "S660",
+        "S661"
+      ],
+      "sitesWithWitnessIssues": 636,
+      "unchangedCreditAndCoverage": true,
+      "changedReasonCount": 483
+    },
+    "essentialSeo": {
+      "sites": 1813,
+      "tests": 527,
+      "before": {
+        "contractual": 936,
+        "evident": 518,
+        "partial": 56,
+        "presence": 30,
+        "unresolved": 332,
+        "gaps": 357,
+        "limits": 61
+      },
+      "after": {
+        "contractual": 936,
+        "evident": 518,
+        "partial": 56,
+        "presence": 30,
+        "unresolved": 332,
+        "gaps": 334,
+        "limits": 84
+      },
+      "changedReasons": [
+        "S29",
+        "S214",
+        "S224",
+        "S226",
+        "S229",
+        "S230",
+        "S358",
+        "S414",
+        "S424",
+        "S425",
+        "S429",
+        "S564",
+        "S1121",
+        "S1134",
+        "S1458",
+        "S1596",
+        "S1601",
+        "S1609",
+        "S1610",
+        "S1613",
+        "S1656",
+        "S1661",
+        "S1665"
+      ],
+      "sitesWithWitnessIssues": 296,
+      "unchangedCreditAndCoverage": true,
+      "changedReasonCount": 23
+    }
+  },
+  "fixture": {
+    "runId": "run_89a16c1233d8f34c",
+    "protocol": {
+      "abi": 1,
+      "factsSchema": 1,
+      "rules": "source-linked-v3/archive-2",
+      "capabilities": [
+        "requiresTotal-v1",
+        "assertion-witness-issues-v1"
+      ]
+    },
+    "analyzer": {
+      "schema": 1,
+      "sourceSha256": "b435f3ec057cba7027ff4180da23851b2fa4922459231a89adc8188b5ce19ad1",
+      "compiledSha256": "730ecfd68573a773ab8d7d49b2479100053470cc88192307f634b8615d66cf66",
+      "compilerSha256": "dd17428736a07e1db1a138d8a14295ddb2699ba780ee15038acdd2c6da5373a0"
+    },
+    "evidenceSha256": "bbd50fbbcd65d03094cbdcf090e70f95bce42dd529c498711402fe10a2b58b6b",
+    "summary": {
+      "sites": 16,
+      "semanticallyVerifiedSites": 0,
+      "unverifiedSites": 16
+    },
+    "sites": [
+      {
+        "site": "src/cli.mjs#1",
+        "owner": "<module>",
+        "category": "io-call",
+        "candidate": {
+          "site": "src/cli.mjs#1",
+          "status": "unresolved",
+          "reason": {
+            "kind": "gap:not-reached"
+          },
+          "coveredBy": 0
+        }
+      },
+      {
+        "site": "src/cli.mjs#2",
+        "owner": "<module>",
+        "category": "state-write",
+        "candidate": {
+          "site": "src/cli.mjs#2",
+          "status": "unresolved",
+          "reason": {
+            "kind": "limit:internal-state"
+          },
+          "coveredBy": 0
+        }
+      },
+      {
+        "site": "src/core.mjs#1",
+        "owner": "exact",
+        "category": "return",
+        "candidate": {
+          "site": "src/core.mjs#1",
+          "status": "evident",
+          "strength": "value",
+          "coveredBy": 1,
+          "tests": [
+            "A2"
+          ]
+        }
+      },
+      {
+        "site": "src/core.mjs#2",
+        "owner": "discarded",
+        "category": "return",
+        "candidate": {
+          "site": "src/core.mjs#2",
+          "status": "unresolved",
+          "reason": {
+            "kind": "gap:not-asserted",
+            "detail": "return:discarded"
+          },
+          "coveredBy": 1
+        }
+      },
+      {
+        "site": "src/core.mjs#3",
+        "owner": "coerced",
+        "category": "return",
+        "candidate": {
+          "site": "src/core.mjs#3",
+          "status": "evident",
+          "strength": "value",
+          "coveredBy": 1,
+          "tests": [
+            "A8"
+          ]
+        }
+      },
+      {
+        "site": "src/core.mjs#4",
+        "owner": "sendStatus",
+        "category": "io-call",
+        "candidate": {
+          "site": "src/core.mjs#4",
+          "status": "unresolved",
+          "reason": {
+            "kind": "gap:not-asserted",
+            "detail": "client-status"
+          },
+          "coveredBy": 1
+        }
+      },
+      {
+        "site": "src/core.mjs#5",
+        "owner": "unchecked",
+        "category": "return",
+        "candidate": {
+          "site": "src/core.mjs#5",
+          "status": "unresolved",
+          "reason": {
+            "kind": "limit:assertion-witness",
+            "detail": "Assertion evidence is unavailable or inconclusive; see witnessIssues. This is not proof that the test lacks an assertion."
+          },
+          "coveredBy": 1,
+          "witnessIssues": [
+            {
+              "test": "A10",
+              "kind": "call-not-recorded",
+              "source": "tests/core.vitest.test.mjs:29:14",
+              "operation": "equal",
+              "observation": {
+                "boundary": "return:unchecked",
+                "facet": "",
+                "strength": "value",
+                "where": "tests/core.vitest.test.mjs:29 equal",
+                "negative": false,
+                "callList": false,
+                "weak": false,
+                "logSites": null,
+                "patternShared": false
+              }
+            }
+          ]
+        }
+      },
+      {
+        "site": "src/core.mjs#6",
+        "owner": "choose",
+        "category": "return",
+        "candidate": {
+          "site": "src/core.mjs#6",
+          "status": "evident",
+          "strength": "value",
+          "coveredBy": 2,
+          "tests": [
+            "A11",
+            "A12"
+          ]
+        }
+      },
+      {
+        "site": "src/core.mjs#7",
+        "owner": "choose",
+        "category": "return",
+        "candidate": {
+          "site": "src/core.mjs#7",
+          "status": "evident",
+          "strength": "value",
+          "coveredBy": 1,
+          "tests": [
+            "A12"
+          ]
+        }
+      },
+      {
+        "site": "src/core.mjs#8",
+        "owner": "overwritten",
+        "category": "return",
+        "candidate": {
+          "site": "src/core.mjs#8",
+          "status": "unresolved",
+          "reason": {
+            "kind": "gap:not-asserted",
+            "detail": "return:overwritten"
+          },
+          "coveredBy": 1
+        }
+      },
+      {
+        "site": "src/core.mjs#9",
+        "owner": "ignoredCallback",
+        "category": "return",
+        "candidate": {
+          "site": "src/core.mjs#9",
+          "status": "unresolved",
+          "reason": {
+            "kind": "gap:not-asserted",
+            "detail": "return:ignoredCallback"
+          },
+          "coveredBy": 2
+        }
+      },
+      {
+        "site": "src/core.mjs#10",
+        "owner": "caught",
+        "category": "return",
+        "candidate": {
+          "site": "src/core.mjs#10",
+          "status": "unresolved",
+          "reason": {
+            "kind": "gap:not-asserted",
+            "detail": "return:caught"
+          },
+          "coveredBy": 1,
+          "witnessIssues": [
+            {
+              "test": "A3",
+              "kind": "call-failed",
+              "source": "tests/core.vitest.test.mjs:43:9",
+              "operation": "equal",
+              "observation": {
+                "boundary": "return:caught",
+                "facet": "",
+                "strength": "value",
+                "where": "tests/core.vitest.test.mjs:43 equal",
+                "negative": false,
+                "callList": false,
+                "weak": false,
+                "logSites": null,
+                "patternShared": false
+              }
+            }
+          ]
+        }
+      },
+      {
+        "site": "src/core.mjs#11",
+        "owner": "sameLine",
+        "category": "return",
+        "candidate": {
+          "site": "src/core.mjs#11",
+          "status": "unresolved",
+          "reason": {
+            "kind": "limit:assertion-witness",
+            "detail": "Assertion evidence is unavailable or inconclusive; see witnessIssues. This is not proof that the test lacks an assertion."
+          },
+          "coveredBy": 1,
+          "witnessIssues": [
+            {
+              "test": "A4",
+              "kind": "call-not-recorded",
+              "source": "tests/core.vitest.test.mjs:46:26",
+              "operation": "equal",
+              "observation": {
+                "boundary": "return:sameLine",
+                "facet": "",
+                "strength": "value",
+                "where": "tests/core.vitest.test.mjs:46 equal",
+                "negative": false,
+                "callList": false,
+                "weak": false,
+                "logSites": null,
+                "patternShared": false
+              }
+            }
+          ]
+        }
+      },
+      {
+        "site": "src/core.mjs#12",
+        "owner": "retainedAlias",
+        "category": "return",
+        "candidate": {
+          "site": "src/core.mjs#12",
+          "status": "evident",
+          "strength": "value",
+          "coveredBy": 1,
+          "tests": [
+            "A5"
+          ]
+        }
+      },
+      {
+        "site": "src/typed.ts#1",
+        "owner": "twice",
+        "category": "return",
+        "candidate": {
+          "site": "src/typed.ts#1",
+          "status": "evident",
+          "strength": "value",
+          "coveredBy": 1,
+          "tests": [
+            "A1"
+          ]
+        }
+      },
+      {
+        "site": "6ab3ff654c22d057#0",
+        "owner": "choose",
+        "category": "condition",
+        "candidate": {
+          "site": "6ab3ff654c22d057#0",
+          "status": "evident",
+          "strength": "value",
+          "coveredBy": 2,
+          "stuckTrueCaught": true,
+          "stuckFalseCaught": true,
+          "absenceNeeded": false
+        }
+      }
+    ],
+    "attempts": [
+      {
+        "id": "A1",
+        "testId": "vitest:1391959042_0",
+        "name": "TypeScript return through ordinary source loading",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A2",
+        "testId": "vitest:1391959042_1",
+        "name": "exact return",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A3",
+        "testId": "vitest:1391959042_10",
+        "name": "caught failing assertion is not a passing oracle",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A4",
+        "testId": "vitest:1391959042_11",
+        "name": "same line is not the same assertion",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A5",
+        "testId": "vitest:1391959042_12",
+        "name": "constant alias and right comma operand are still checked",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A6",
+        "testId": "vitest:1391959042_13",
+        "name": "real subprocess exit and close-delimited pipe capture",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A7",
+        "testId": "vitest:1391959042_2",
+        "name": "discarded while evaluating assertion",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A8",
+        "testId": "vitest:1391959042_3",
+        "name": "coercion loses distinctions",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A9",
+        "testId": "vitest:1391959042_4",
+        "name": "a helper name is not its implementation",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A10",
+        "testId": "vitest:1391959042_5",
+        "name": "an assertion present in source but never run",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A11",
+        "testId": "vitest:1391959042_6",
+        "name": "decision true",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A12",
+        "testId": "vitest:1391959042_7",
+        "name": "decision false",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A13",
+        "testId": "vitest:1391959042_8",
+        "name": "overwrite loses the original return",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A14",
+        "testId": "vitest:1391959042_9",
+        "name": "a callback result can be ignored",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      }
+    ],
+    "tests": [
+      {
+        "id": "A1",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [
+          {
+            "boundary": "return:twice",
+            "facet": "",
+            "strength": "value",
+            "where": "tests/core.vitest.test.mjs:9 equal",
+            "assertionSource": "tests/core.vitest.test.mjs:9:3",
+            "assertionMethod": "equal"
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A2",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [
+          {
+            "boundary": "return:exact",
+            "facet": "",
+            "strength": "value",
+            "where": "tests/core.vitest.test.mjs:13 equal",
+            "assertionSource": "tests/core.vitest.test.mjs:13:3",
+            "assertionMethod": "equal"
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A3",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [],
+        "witnessIssues": [
+          {
+            "kind": "call-failed",
+            "source": "tests/core.vitest.test.mjs:43:9",
+            "operation": "equal",
+            "observation": {
+              "boundary": "return:caught",
+              "facet": "",
+              "strength": "value",
+              "where": "tests/core.vitest.test.mjs:43 equal",
+              "assertionSource": "tests/core.vitest.test.mjs:43:9",
+              "assertionMethod": "equal"
+            }
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A4",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [],
+        "witnessIssues": [
+          {
+            "kind": "call-not-recorded",
+            "source": "tests/core.vitest.test.mjs:46:26",
+            "operation": "equal",
+            "observation": {
+              "boundary": "return:sameLine",
+              "facet": "",
+              "strength": "value",
+              "where": "tests/core.vitest.test.mjs:46 equal",
+              "assertionSource": "tests/core.vitest.test.mjs:46:26",
+              "assertionMethod": "equal"
+            }
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A5",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [
+          {
+            "boundary": "return:retainedAlias",
+            "facet": "",
+            "strength": "value",
+            "where": "tests/core.vitest.test.mjs:50 equal",
+            "assertionSource": "tests/core.vitest.test.mjs:50:3",
+            "assertionMethod": "equal"
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A6",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [
+          {
+            "boundary": "exit",
+            "strength": "value",
+            "where": "tests/core.vitest.test.mjs:60 equal",
+            "assertionSource": "tests/core.vitest.test.mjs:60:3",
+            "assertionMethod": "equal"
+          },
+          {
+            "boundary": "stderr",
+            "strength": "presence",
+            "where": "tests/core.vitest.test.mjs:61 ok",
+            "assertionSource": "tests/core.vitest.test.mjs:61:3",
+            "assertionMethod": "ok",
+            "logSites": []
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A7",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A8",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [
+          {
+            "boundary": "return:coerced",
+            "facet": "",
+            "strength": "value",
+            "where": "tests/core.vitest.test.mjs:19 equal",
+            "assertionSource": "tests/core.vitest.test.mjs:19:3",
+            "assertionMethod": "equal"
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A9",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A10",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [],
+        "witnessIssues": [
+          {
+            "kind": "call-not-recorded",
+            "source": "tests/core.vitest.test.mjs:29:14",
+            "operation": "equal",
+            "observation": {
+              "boundary": "return:unchecked",
+              "facet": "",
+              "strength": "value",
+              "where": "tests/core.vitest.test.mjs:29 equal",
+              "assertionSource": "tests/core.vitest.test.mjs:29:14",
+              "assertionMethod": "equal"
+            }
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A11",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [
+          {
+            "boundary": "return:choose",
+            "facet": "",
+            "strength": "value",
+            "where": "tests/core.vitest.test.mjs:31 equal",
+            "assertionSource": "tests/core.vitest.test.mjs:31:31",
+            "assertionMethod": "equal",
+            "logSites": []
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A12",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [
+          {
+            "boundary": "return:choose",
+            "facet": "",
+            "strength": "value",
+            "where": "tests/core.vitest.test.mjs:32 equal",
+            "assertionSource": "tests/core.vitest.test.mjs:32:32",
+            "assertionMethod": "equal",
+            "logSites": []
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A13",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A14",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [],
+        "sinks": [],
+        "rendered": []
+      }
+    ],
+    "nativeOracle": [
+      {
+        "label": "overwritten return changes",
+        "survives": true,
+        "nativeStatus": 0,
+        "nativeVitestStatus": 0
+      },
+      {
+        "label": "ignoredCallback return changes",
+        "survives": true,
+        "nativeStatus": 0,
+        "nativeVitestStatus": 0
+      },
+      {
+        "label": "caught return changes",
+        "survives": true,
+        "nativeStatus": 0,
+        "nativeVitestStatus": 0
+      },
+      {
+        "label": "sameLine return changes",
+        "survives": true,
+        "nativeStatus": 0,
+        "nativeVitestStatus": 0
+      },
+      {
+        "label": "retainedAlias return changes",
+        "survives": false,
+        "nativeStatus": 1,
+        "nativeVitestStatus": 1
+      },
+      {
+        "label": "exact return changes",
+        "survives": false,
+        "nativeStatus": 1,
+        "nativeVitestStatus": 1
+      },
+      {
+        "label": "discarded return changes",
+        "survives": true,
+        "nativeStatus": 0,
+        "nativeVitestStatus": 0
+      },
+      {
+        "label": "truthy return changes",
+        "survives": true,
+        "nativeStatus": 0,
+        "nativeVitestStatus": 0
+      },
+      {
+        "label": "coerced predicate changes",
+        "survives": false,
+        "nativeStatus": 1,
+        "nativeVitestStatus": 1
+      },
+      {
+        "label": "fake fetch does not read status",
+        "survives": true,
+        "nativeStatus": 0,
+        "nativeVitestStatus": 0
+      },
+      {
+        "label": "unexecuted assertion",
+        "survives": true,
+        "nativeStatus": 0,
+        "nativeVitestStatus": 0
+      },
+      {
+        "label": "diagnostic preserves substring",
+        "survives": true,
+        "nativeStatus": 0,
+        "nativeVitestStatus": 0
+      },
+      {
+        "label": "diagnostic removes substring",
+        "survives": false,
+        "nativeStatus": 1,
+        "nativeVitestStatus": 1
+      },
+      {
+        "label": "exit status changes",
+        "survives": false,
+        "nativeStatus": 1,
+        "nativeVitestStatus": 1
+      }
+    ]
+  }
+}

@@ -1,0 +1,1342 @@
+{
+  "result": {
+    "runId": "run_3f16c4cdc4da76f6",
+    "experimental": true,
+    "protocol": {
+      "abi": 1,
+      "factsSchema": 1,
+      "rules": "prototype-7d838fa/archive-1",
+      "capabilities": [
+        "requiresTotal-v1"
+      ]
+    },
+    "analyzer": {
+      "schema": 1,
+      "sourceSha256": "3f1555b6c483e2f4e28c063d6191534975814c31613384fffb755d17a1a5934f",
+      "compiledSha256": "037f1d38381a9e3895dba5e7df56e359b90fdb6962a850b2f7fe23be7396ebba",
+      "compilerSha256": "dd17428736a07e1db1a138d8a14295ddb2699ba780ee15038acdd2c6da5373a0"
+    },
+    "evidenceSha256": "86cebe10a539f83c7d3f850dd33b33c8c355c2c5f44f9f64b93d1082290b7b28",
+    "runFingerprint": {
+      "algorithm": "sha256",
+      "source": "eada0c75153559f6e24eeca1b5161883592025104fe93fdcb43acb934fba4479",
+      "tests": "16897241711b2a66082b1e420c5c17cb2caed0a574af96d4b0a7b00e1b71f84c",
+      "dependencies": "996d56801e5fee1d152d7c85bb011a02e3ee3a1074c446b305cd773edd93587e",
+      "configuration": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "instrumenter": "d801e6835860f9901602ef3c1797ead29e5c6ee2cc7244b62638928786f820e1",
+      "execution": "ea181b19a2220f11495de97b00b3a696c66e245dfec17c8eb846a1c01aeee177",
+      "combined": "b80c2c207b32740a7e8f920b1eb1db073dbc20496917b6b73745fe62c781d757",
+      "sourceFiles": 3,
+      "testFiles": 2
+    },
+    "sourceFreshness": "matching-run-fingerprints-before-and-after-query",
+    "assertionScore": null,
+    "sourceScope": {
+      "version": 1,
+      "mode": "automatic",
+      "roots": [
+        "src"
+      ],
+      "entries": [
+        {
+          "file": "src/cli.mjs",
+          "status": "included",
+          "reason": "discovered package source root"
+        },
+        {
+          "file": "src/core.mjs",
+          "status": "included",
+          "reason": "discovered package source root"
+        },
+        {
+          "file": "src/typed.ts",
+          "status": "included",
+          "reason": "discovered package source root"
+        },
+        {
+          "file": "tests/core.test.mjs",
+          "status": "excluded",
+          "reason": "test or fixture source"
+        },
+        {
+          "file": "tests/core.vitest.test.mjs",
+          "status": "excluded",
+          "reason": "test or fixture source"
+        }
+      ]
+    },
+    "measurementLimitations": [],
+    "unmeasured": [],
+    "summary": {
+      "sites": 11,
+      "semanticallyVerifiedSites": 0,
+      "unverifiedSites": 11
+    },
+    "pagination": {
+      "offset": 0,
+      "limit": 1000,
+      "total": 11,
+      "returned": 11
+    },
+    "sites": [
+      {
+        "site": {
+          "id": "src/cli.mjs#1",
+          "file": "src/cli.mjs",
+          "category": "io-call",
+          "classification": "contractual",
+          "start": {
+            "line": 1,
+            "column": 1
+          },
+          "end": {
+            "line": 1,
+            "column": 39
+          },
+          "function": "<module>",
+          "owner": "<module>",
+          "exported": false,
+          "chain": [
+            "process",
+            "stderr",
+            "write"
+          ],
+          "method": "write",
+          "arg0": "'token: alpha\\n'",
+          "text": "process.stderr.write('token: alpha\\n')",
+          "kind": "effect",
+          "fn": "<module>",
+          "pos": 0,
+          "endPos": 38
+        },
+        "analysisCertainty": "unverified",
+        "candidate": {
+          "site": "src/cli.mjs#1",
+          "status": "unresolved",
+          "reason": {
+            "kind": "gap:not-reached"
+          },
+          "coveredBy": 0
+        },
+        "facts": {
+          "id": "src/cli.mjs#1",
+          "file": "src/cli.mjs",
+          "line": 1,
+          "kind": "effect",
+          "category": "io-call",
+          "classification": "contractual",
+          "owner": "<module>",
+          "method": "write",
+          "bounds": [
+            {
+              "boundary": "client-message"
+            }
+          ],
+          "directBounds": [
+            {
+              "boundary": "client-message"
+            }
+          ],
+          "reached": [],
+          "coveredBy": [],
+          "objectValuedReturn": false,
+          "unmodelledShapes": [],
+          "decision": null,
+          "derive": []
+        }
+      },
+      {
+        "site": {
+          "id": "src/cli.mjs#2",
+          "file": "src/cli.mjs",
+          "category": "state-write",
+          "classification": "contractual",
+          "start": {
+            "line": 2,
+            "column": 1
+          },
+          "end": {
+            "line": 2,
+            "column": 21
+          },
+          "function": "<module>",
+          "owner": "<module>",
+          "exported": false,
+          "note": "= property global",
+          "text": "process.exitCode = 3",
+          "kind": "effect",
+          "fn": "<module>",
+          "pos": 40,
+          "endPos": 60
+        },
+        "analysisCertainty": "unverified",
+        "candidate": {
+          "site": "src/cli.mjs#2",
+          "status": "unresolved",
+          "reason": {
+            "kind": "limit:internal-state"
+          },
+          "coveredBy": 0
+        },
+        "facts": {
+          "id": "src/cli.mjs#2",
+          "file": "src/cli.mjs",
+          "line": 2,
+          "kind": "effect",
+          "category": "state-write",
+          "classification": "contractual",
+          "owner": "<module>",
+          "method": null,
+          "bounds": [
+            {
+              "boundary": "internal"
+            }
+          ],
+          "directBounds": [
+            {
+              "boundary": "internal"
+            }
+          ],
+          "reached": [],
+          "coveredBy": [],
+          "objectValuedReturn": false,
+          "unmodelledShapes": [],
+          "decision": null,
+          "derive": [
+            {
+              "site": "src/cli.mjs#1",
+              "label": "read process",
+              "strength": null
+            }
+          ]
+        }
+      },
+      {
+        "site": {
+          "id": "src/core.mjs#1",
+          "file": "src/core.mjs",
+          "category": "return",
+          "classification": "contractual",
+          "start": {
+            "line": 2,
+            "column": 3
+          },
+          "end": {
+            "line": 2,
+            "column": 12
+          },
+          "function": "exact",
+          "owner": "exact",
+          "exported": true,
+          "text": "return 4;",
+          "kind": "effect",
+          "fn": "exact",
+          "pos": 28,
+          "endPos": 37
+        },
+        "analysisCertainty": "unverified",
+        "candidate": {
+          "site": "src/core.mjs#1",
+          "status": "evident",
+          "strength": "value",
+          "coveredBy": 1,
+          "tests": [
+            "A2"
+          ]
+        },
+        "facts": {
+          "id": "src/core.mjs#1",
+          "file": "src/core.mjs",
+          "line": 2,
+          "kind": "effect",
+          "category": "return",
+          "classification": "contractual",
+          "owner": "exact",
+          "method": null,
+          "bounds": [
+            {
+              "boundary": "return:exact"
+            }
+          ],
+          "directBounds": [
+            {
+              "boundary": "return:exact"
+            }
+          ],
+          "reached": [],
+          "coveredBy": [
+            "A2"
+          ],
+          "objectValuedReturn": false,
+          "unmodelledShapes": [],
+          "decision": null,
+          "derive": []
+        }
+      },
+      {
+        "site": {
+          "id": "src/core.mjs#2",
+          "file": "src/core.mjs",
+          "category": "return",
+          "classification": "contractual",
+          "start": {
+            "line": 5,
+            "column": 3
+          },
+          "end": {
+            "line": 5,
+            "column": 12
+          },
+          "function": "discarded",
+          "owner": "discarded",
+          "exported": true,
+          "text": "return 4;",
+          "kind": "effect",
+          "fn": "discarded",
+          "pos": 72,
+          "endPos": 81
+        },
+        "analysisCertainty": "unverified",
+        "candidate": {
+          "site": "src/core.mjs#2",
+          "status": "evident",
+          "strength": "value",
+          "coveredBy": 1,
+          "tests": [
+            "A3"
+          ]
+        },
+        "facts": {
+          "id": "src/core.mjs#2",
+          "file": "src/core.mjs",
+          "line": 5,
+          "kind": "effect",
+          "category": "return",
+          "classification": "contractual",
+          "owner": "discarded",
+          "method": null,
+          "bounds": [
+            {
+              "boundary": "return:discarded"
+            }
+          ],
+          "directBounds": [
+            {
+              "boundary": "return:discarded"
+            }
+          ],
+          "reached": [],
+          "coveredBy": [
+            "A3"
+          ],
+          "objectValuedReturn": false,
+          "unmodelledShapes": [],
+          "decision": null,
+          "derive": []
+        }
+      },
+      {
+        "site": {
+          "id": "src/core.mjs#3",
+          "file": "src/core.mjs",
+          "category": "return",
+          "classification": "contractual",
+          "start": {
+            "line": 8,
+            "column": 3
+          },
+          "end": {
+            "line": 8,
+            "column": 12
+          },
+          "function": "coerced",
+          "owner": "coerced",
+          "exported": true,
+          "text": "return 4;",
+          "kind": "effect",
+          "fn": "coerced",
+          "pos": 114,
+          "endPos": 123
+        },
+        "analysisCertainty": "unverified",
+        "candidate": {
+          "site": "src/core.mjs#3",
+          "status": "evident",
+          "strength": "value",
+          "coveredBy": 1,
+          "tests": [
+            "A4"
+          ]
+        },
+        "facts": {
+          "id": "src/core.mjs#3",
+          "file": "src/core.mjs",
+          "line": 8,
+          "kind": "effect",
+          "category": "return",
+          "classification": "contractual",
+          "owner": "coerced",
+          "method": null,
+          "bounds": [
+            {
+              "boundary": "return:coerced"
+            }
+          ],
+          "directBounds": [
+            {
+              "boundary": "return:coerced"
+            }
+          ],
+          "reached": [],
+          "coveredBy": [
+            "A4"
+          ],
+          "objectValuedReturn": false,
+          "unmodelledShapes": [],
+          "decision": null,
+          "derive": []
+        }
+      },
+      {
+        "site": {
+          "id": "src/core.mjs#4",
+          "file": "src/core.mjs",
+          "category": "io-call",
+          "classification": "contractual",
+          "start": {
+            "line": 11,
+            "column": 3
+          },
+          "end": {
+            "line": 11,
+            "column": 23
+          },
+          "function": "sendStatus",
+          "owner": "sendStatus",
+          "exported": true,
+          "chain": [
+            "response",
+            "status"
+          ],
+          "method": "status",
+          "arg0": "201",
+          "text": "response.status(201)",
+          "kind": "effect",
+          "fn": "sendStatus",
+          "pos": 167,
+          "endPos": 187
+        },
+        "analysisCertainty": "unverified",
+        "candidate": {
+          "site": "src/core.mjs#4",
+          "status": "evident",
+          "strength": "value",
+          "coveredBy": 1,
+          "tests": [
+            "A5"
+          ]
+        },
+        "facts": {
+          "id": "src/core.mjs#4",
+          "file": "src/core.mjs",
+          "line": 11,
+          "kind": "effect",
+          "category": "io-call",
+          "classification": "contractual",
+          "owner": "sendStatus",
+          "method": "status",
+          "bounds": [
+            {
+              "boundary": "client-status"
+            }
+          ],
+          "directBounds": [
+            {
+              "boundary": "client-status"
+            }
+          ],
+          "reached": [],
+          "coveredBy": [
+            "A5"
+          ],
+          "objectValuedReturn": false,
+          "unmodelledShapes": [],
+          "decision": null,
+          "derive": []
+        }
+      },
+      {
+        "site": {
+          "id": "src/core.mjs#5",
+          "file": "src/core.mjs",
+          "category": "return",
+          "classification": "contractual",
+          "start": {
+            "line": 14,
+            "column": 3
+          },
+          "end": {
+            "line": 14,
+            "column": 12
+          },
+          "function": "unchecked",
+          "owner": "unchecked",
+          "exported": true,
+          "text": "return 4;",
+          "kind": "effect",
+          "fn": "unchecked",
+          "pos": 223,
+          "endPos": 232
+        },
+        "analysisCertainty": "unverified",
+        "candidate": {
+          "site": "src/core.mjs#5",
+          "status": "evident",
+          "strength": "value",
+          "coveredBy": 1,
+          "tests": [
+            "A6"
+          ]
+        },
+        "facts": {
+          "id": "src/core.mjs#5",
+          "file": "src/core.mjs",
+          "line": 14,
+          "kind": "effect",
+          "category": "return",
+          "classification": "contractual",
+          "owner": "unchecked",
+          "method": null,
+          "bounds": [
+            {
+              "boundary": "return:unchecked"
+            }
+          ],
+          "directBounds": [
+            {
+              "boundary": "return:unchecked"
+            }
+          ],
+          "reached": [],
+          "coveredBy": [
+            "A6"
+          ],
+          "objectValuedReturn": false,
+          "unmodelledShapes": [],
+          "decision": null,
+          "derive": []
+        }
+      },
+      {
+        "site": {
+          "id": "src/core.mjs#6",
+          "file": "src/core.mjs",
+          "category": "return",
+          "classification": "contractual",
+          "start": {
+            "line": 17,
+            "column": 13
+          },
+          "end": {
+            "line": 17,
+            "column": 26
+          },
+          "function": "choose",
+          "owner": "choose",
+          "exported": true,
+          "text": "return 'yes';",
+          "kind": "effect",
+          "fn": "choose",
+          "pos": 278,
+          "endPos": 291
+        },
+        "analysisCertainty": "unverified",
+        "candidate": {
+          "site": "src/core.mjs#6",
+          "status": "evident",
+          "strength": "value",
+          "coveredBy": 2,
+          "tests": [
+            "A7",
+            "A8"
+          ]
+        },
+        "facts": {
+          "id": "src/core.mjs#6",
+          "file": "src/core.mjs",
+          "line": 17,
+          "kind": "effect",
+          "category": "return",
+          "classification": "contractual",
+          "owner": "choose",
+          "method": null,
+          "bounds": [
+            {
+              "boundary": "return:choose"
+            }
+          ],
+          "directBounds": [
+            {
+              "boundary": "return:choose"
+            }
+          ],
+          "reached": [],
+          "coveredBy": [
+            "A7",
+            "A8"
+          ],
+          "objectValuedReturn": false,
+          "unmodelledShapes": [],
+          "decision": null,
+          "derive": []
+        }
+      },
+      {
+        "site": {
+          "id": "src/core.mjs#7",
+          "file": "src/core.mjs",
+          "category": "return",
+          "classification": "contractual",
+          "start": {
+            "line": 18,
+            "column": 3
+          },
+          "end": {
+            "line": 18,
+            "column": 15
+          },
+          "function": "choose",
+          "owner": "choose",
+          "exported": true,
+          "text": "return 'no';",
+          "kind": "effect",
+          "fn": "choose",
+          "pos": 294,
+          "endPos": 306
+        },
+        "analysisCertainty": "unverified",
+        "candidate": {
+          "site": "src/core.mjs#7",
+          "status": "evident",
+          "strength": "value",
+          "coveredBy": 1,
+          "tests": [
+            "A8"
+          ]
+        },
+        "facts": {
+          "id": "src/core.mjs#7",
+          "file": "src/core.mjs",
+          "line": 18,
+          "kind": "effect",
+          "category": "return",
+          "classification": "contractual",
+          "owner": "choose",
+          "method": null,
+          "bounds": [
+            {
+              "boundary": "return:choose"
+            }
+          ],
+          "directBounds": [
+            {
+              "boundary": "return:choose"
+            }
+          ],
+          "reached": [],
+          "coveredBy": [
+            "A8"
+          ],
+          "objectValuedReturn": false,
+          "unmodelledShapes": [],
+          "decision": null,
+          "derive": []
+        }
+      },
+      {
+        "site": {
+          "id": "src/typed.ts#1",
+          "file": "src/typed.ts",
+          "category": "return",
+          "classification": "contractual",
+          "start": {
+            "line": 2,
+            "column": 3
+          },
+          "end": {
+            "line": 2,
+            "column": 20
+          },
+          "function": "twice",
+          "owner": "twice",
+          "exported": true,
+          "text": "return value * 2;",
+          "kind": "effect",
+          "fn": "twice",
+          "pos": 49,
+          "endPos": 66
+        },
+        "analysisCertainty": "unverified",
+        "candidate": {
+          "site": "src/typed.ts#1",
+          "status": "evident",
+          "strength": "value",
+          "coveredBy": 1,
+          "tests": [
+            "A1"
+          ]
+        },
+        "facts": {
+          "id": "src/typed.ts#1",
+          "file": "src/typed.ts",
+          "line": 2,
+          "kind": "effect",
+          "category": "return",
+          "classification": "contractual",
+          "owner": "twice",
+          "method": null,
+          "bounds": [
+            {
+              "boundary": "return:twice"
+            }
+          ],
+          "directBounds": [
+            {
+              "boundary": "return:twice"
+            }
+          ],
+          "reached": [],
+          "coveredBy": [
+            "A1"
+          ],
+          "objectValuedReturn": false,
+          "unmodelledShapes": [],
+          "decision": null,
+          "derive": []
+        }
+      },
+      {
+        "site": {
+          "id": "6ab3ff654c22d057#0",
+          "file": "src/core.mjs",
+          "kind": "decision",
+          "category": "condition",
+          "classification": "contractual",
+          "start": {
+            "line": 17,
+            "column": 7
+          },
+          "end": {
+            "line": 17,
+            "column": 11
+          },
+          "pos": 272,
+          "endPos": 276,
+          "text": "flag",
+          "fn": "choose",
+          "owner": "choose",
+          "exported": false
+        },
+        "analysisCertainty": "unverified",
+        "candidate": {
+          "site": "6ab3ff654c22d057#0",
+          "status": "evident",
+          "strength": "value",
+          "coveredBy": 2,
+          "stuckTrueCaught": true,
+          "stuckFalseCaught": true,
+          "absenceNeeded": false
+        },
+        "facts": {
+          "id": "6ab3ff654c22d057#0",
+          "file": "src/core.mjs",
+          "line": 17,
+          "kind": "decision",
+          "category": "condition",
+          "classification": "contractual",
+          "owner": "choose",
+          "method": null,
+          "bounds": [
+            {
+              "boundary": "internal"
+            }
+          ],
+          "directBounds": [
+            {
+              "boundary": "internal"
+            }
+          ],
+          "reached": [],
+          "coveredBy": [
+            "A7",
+            "A8"
+          ],
+          "objectValuedReturn": false,
+          "unmodelledShapes": [],
+          "decision": {
+            "carrier": null,
+            "valueFlow": null,
+            "then": [
+              "src/core.mjs#6"
+            ],
+            "else": [
+              "src/core.mjs#7"
+            ],
+            "earlyExitDownstream": [
+              "src/core.mjs#7"
+            ],
+            "loopBody": null,
+            "defaultKept": null,
+            "objectValued": null,
+            "outcomes": {
+              "true": [
+                "A7"
+              ],
+              "false": [
+                "A8"
+              ]
+            },
+            "selected": null
+          },
+          "derive": []
+        }
+      }
+    ],
+    "tests": [
+      {
+        "id": "A1",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [
+          {
+            "boundary": "return:twice",
+            "facet": "",
+            "strength": "value",
+            "where": "tests/core.vitest.test.mjs:8 equal"
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A2",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [
+          {
+            "boundary": "return:exact",
+            "facet": "",
+            "strength": "value",
+            "where": "tests/core.vitest.test.mjs:12 equal"
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A3",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [
+          {
+            "boundary": "return:discarded",
+            "facet": "",
+            "strength": "value",
+            "where": "tests/core.vitest.test.mjs:15 equal"
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A4",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [
+          {
+            "boundary": "return:coerced",
+            "facet": "",
+            "strength": "value",
+            "where": "tests/core.vitest.test.mjs:18 equal"
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A5",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [
+          {
+            "boundary": "client-status",
+            "strength": "presence",
+            "where": "tests/core.vitest.test.mjs:23 await",
+            "implicit": true
+          },
+          {
+            "boundary": "client-status",
+            "strength": "value",
+            "where": "tests/core.vitest.test.mjs:24 equal"
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A6",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [
+          {
+            "boundary": "return:unchecked",
+            "facet": "",
+            "strength": "value",
+            "where": "tests/core.vitest.test.mjs:28 equal"
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A7",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [
+          {
+            "boundary": "return:choose",
+            "facet": "",
+            "strength": "value",
+            "where": "tests/core.vitest.test.mjs:30 equal",
+            "logSites": []
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      },
+      {
+        "id": "A8",
+        "file": "tests/core.vitest.test.mjs",
+        "observations": [
+          {
+            "boundary": "return:choose",
+            "facet": "",
+            "strength": "value",
+            "where": "tests/core.vitest.test.mjs:31 equal",
+            "logSites": []
+          }
+        ],
+        "sinks": [],
+        "rendered": []
+      }
+    ],
+    "attempts": [
+      {
+        "id": "A1",
+        "testId": "vitest:1391959042_0",
+        "name": "TypeScript return through ordinary source loading",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A2",
+        "testId": "vitest:1391959042_1",
+        "name": "exact return",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A3",
+        "testId": "vitest:1391959042_2",
+        "name": "discarded while evaluating assertion",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A4",
+        "testId": "vitest:1391959042_3",
+        "name": "coercion loses distinctions",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A5",
+        "testId": "vitest:1391959042_4",
+        "name": "a helper name is not its implementation",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A6",
+        "testId": "vitest:1391959042_5",
+        "name": "an assertion present in source but never run",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A7",
+        "testId": "vitest:1391959042_6",
+        "name": "decision true",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      },
+      {
+        "id": "A8",
+        "testId": "vitest:1391959042_7",
+        "name": "decision false",
+        "file": "tests/core.vitest.test.mjs",
+        "retry": 0
+      }
+    ],
+    "executionLinks": [
+      {
+        "attempt": "A1",
+        "point": "7b06a2690070bbcc",
+        "location": {
+          "id": "7b06a2690070bbcc",
+          "kind": "function",
+          "file": "src/typed.ts",
+          "line": 1,
+          "column": 8,
+          "source": "function twice(value: number): number {\n  return value * 2;\n}",
+          "label": "twice"
+        },
+        "phase": "03c04bf71db3725e0aa5966a-0:assertion:1",
+        "statement": "tests/core.vitest.test.mjs:1:1",
+        "operation": "node:assert/strict.equal",
+        "assertionSource": "tests/core.vitest.test.mjs:8:3",
+        "meaning": "execution-only"
+      },
+      {
+        "attempt": "A1",
+        "point": "183b7b0d7e72c7fc",
+        "location": {
+          "id": "183b7b0d7e72c7fc",
+          "kind": "statement",
+          "file": "src/typed.ts",
+          "line": 2,
+          "column": 3,
+          "source": "return value * 2;"
+        },
+        "phase": "03c04bf71db3725e0aa5966a-0:assertion:1",
+        "statement": "tests/core.vitest.test.mjs:1:1",
+        "operation": "node:assert/strict.equal",
+        "assertionSource": "tests/core.vitest.test.mjs:8:3",
+        "meaning": "execution-only"
+      },
+      {
+        "attempt": "A2",
+        "point": "6967b6cd3a4eb844",
+        "location": {
+          "id": "6967b6cd3a4eb844",
+          "kind": "function",
+          "file": "src/core.mjs",
+          "line": 1,
+          "column": 8,
+          "source": "function exact() {\n  return 4;\n}",
+          "label": "exact"
+        },
+        "phase": "a4a305a8072e24535b00721a-0:assertion:1",
+        "statement": "tests/core.vitest.test.mjs:1:1",
+        "operation": "node:assert/strict.equal",
+        "assertionSource": "tests/core.vitest.test.mjs:12:3",
+        "meaning": "execution-only"
+      },
+      {
+        "attempt": "A2",
+        "point": "d23cb892229b9437",
+        "location": {
+          "id": "d23cb892229b9437",
+          "kind": "statement",
+          "file": "src/core.mjs",
+          "line": 2,
+          "column": 3,
+          "source": "return 4;"
+        },
+        "phase": "a4a305a8072e24535b00721a-0:assertion:1",
+        "statement": "tests/core.vitest.test.mjs:1:1",
+        "operation": "node:assert/strict.equal",
+        "assertionSource": "tests/core.vitest.test.mjs:12:3",
+        "meaning": "execution-only"
+      },
+      {
+        "attempt": "A3",
+        "point": "de500784899d2d65",
+        "location": {
+          "id": "de500784899d2d65",
+          "kind": "function",
+          "file": "src/core.mjs",
+          "line": 4,
+          "column": 8,
+          "source": "function discarded() {\n  return 4;\n}",
+          "label": "discarded"
+        },
+        "phase": "92877cdd2c42697a0a82f7be-0:assertion:1",
+        "statement": "tests/core.vitest.test.mjs:1:1",
+        "operation": "node:assert/strict.equal",
+        "assertionSource": "tests/core.vitest.test.mjs:15:3",
+        "meaning": "execution-only"
+      },
+      {
+        "attempt": "A3",
+        "point": "483f9d218516e4d9",
+        "location": {
+          "id": "483f9d218516e4d9",
+          "kind": "statement",
+          "file": "src/core.mjs",
+          "line": 5,
+          "column": 3,
+          "source": "return 4;"
+        },
+        "phase": "92877cdd2c42697a0a82f7be-0:assertion:1",
+        "statement": "tests/core.vitest.test.mjs:1:1",
+        "operation": "node:assert/strict.equal",
+        "assertionSource": "tests/core.vitest.test.mjs:15:3",
+        "meaning": "execution-only"
+      },
+      {
+        "attempt": "A4",
+        "point": "c84bb0d98e68db59",
+        "location": {
+          "id": "c84bb0d98e68db59",
+          "kind": "function",
+          "file": "src/core.mjs",
+          "line": 7,
+          "column": 8,
+          "source": "function coerced() {\n  return 4;\n}",
+          "label": "coerced"
+        },
+        "phase": "9bf1cc496a8c430f2b101aad-0:assertion:1",
+        "statement": "tests/core.vitest.test.mjs:1:1",
+        "operation": "node:assert/strict.equal",
+        "assertionSource": "tests/core.vitest.test.mjs:18:3",
+        "meaning": "execution-only"
+      },
+      {
+        "attempt": "A4",
+        "point": "df95d791af78ce7e",
+        "location": {
+          "id": "df95d791af78ce7e",
+          "kind": "statement",
+          "file": "src/core.mjs",
+          "line": 8,
+          "column": 3,
+          "source": "return 4;"
+        },
+        "phase": "9bf1cc496a8c430f2b101aad-0:assertion:1",
+        "statement": "tests/core.vitest.test.mjs:1:1",
+        "operation": "node:assert/strict.equal",
+        "assertionSource": "tests/core.vitest.test.mjs:18:3",
+        "meaning": "execution-only"
+      },
+      {
+        "attempt": "A7",
+        "point": "10ff2e244b87f2bb",
+        "location": {
+          "id": "10ff2e244b87f2bb",
+          "kind": "function",
+          "file": "src/core.mjs",
+          "line": 16,
+          "column": 8,
+          "source": "function choose(flag) {\n  if (flag) return 'yes';\n  return 'no';\n}",
+          "label": "choose"
+        },
+        "phase": "4bb53aea798cbd96b4ce186f-0:assertion:1",
+        "statement": "tests/core.vitest.test.mjs:1:1",
+        "operation": "node:assert/strict.equal",
+        "assertionSource": "tests/core.vitest.test.mjs:30:31",
+        "meaning": "execution-only"
+      },
+      {
+        "attempt": "A7",
+        "point": "328f36300e2678a4",
+        "location": {
+          "id": "328f36300e2678a4",
+          "kind": "statement",
+          "file": "src/core.mjs",
+          "line": 17,
+          "column": 3,
+          "source": "if (flag) return 'yes';"
+        },
+        "phase": "4bb53aea798cbd96b4ce186f-0:assertion:1",
+        "statement": "tests/core.vitest.test.mjs:1:1",
+        "operation": "node:assert/strict.equal",
+        "assertionSource": "tests/core.vitest.test.mjs:30:31",
+        "meaning": "execution-only"
+      },
+      {
+        "attempt": "A7",
+        "point": "6ab3ff654c22d057",
+        "location": {
+          "id": "6ab3ff654c22d057",
+          "file": "src/core.mjs",
+          "line": 17,
+          "column": 7,
+          "source": "flag",
+          "conditions": [
+            "flag"
+          ],
+          "kind": "if"
+        },
+        "phase": "4bb53aea798cbd96b4ce186f-0:assertion:1",
+        "statement": "tests/core.vitest.test.mjs:1:1",
+        "operation": "node:assert/strict.equal",
+        "assertionSource": "tests/core.vitest.test.mjs:30:31",
+        "meaning": "execution-only"
+      },
+      {
+        "attempt": "A7",
+        "point": "eee5512ad9346c03",
+        "location": {
+          "id": "eee5512ad9346c03",
+          "kind": "statement",
+          "file": "src/core.mjs",
+          "line": 17,
+          "column": 13,
+          "source": "return 'yes';"
+        },
+        "phase": "4bb53aea798cbd96b4ce186f-0:assertion:1",
+        "statement": "tests/core.vitest.test.mjs:1:1",
+        "operation": "node:assert/strict.equal",
+        "assertionSource": "tests/core.vitest.test.mjs:30:31",
+        "meaning": "execution-only"
+      },
+      {
+        "attempt": "A8",
+        "point": "10ff2e244b87f2bb",
+        "location": {
+          "id": "10ff2e244b87f2bb",
+          "kind": "function",
+          "file": "src/core.mjs",
+          "line": 16,
+          "column": 8,
+          "source": "function choose(flag) {\n  if (flag) return 'yes';\n  return 'no';\n}",
+          "label": "choose"
+        },
+        "phase": "02925470fb92a8564e350cca-0:assertion:1",
+        "statement": "tests/core.vitest.test.mjs:1:1",
+        "operation": "node:assert/strict.equal",
+        "assertionSource": "tests/core.vitest.test.mjs:31:32",
+        "meaning": "execution-only"
+      },
+      {
+        "attempt": "A8",
+        "point": "328f36300e2678a4",
+        "location": {
+          "id": "328f36300e2678a4",
+          "kind": "statement",
+          "file": "src/core.mjs",
+          "line": 17,
+          "column": 3,
+          "source": "if (flag) return 'yes';"
+        },
+        "phase": "02925470fb92a8564e350cca-0:assertion:1",
+        "statement": "tests/core.vitest.test.mjs:1:1",
+        "operation": "node:assert/strict.equal",
+        "assertionSource": "tests/core.vitest.test.mjs:31:32",
+        "meaning": "execution-only"
+      },
+      {
+        "attempt": "A8",
+        "point": "6ab3ff654c22d057",
+        "location": {
+          "id": "6ab3ff654c22d057",
+          "file": "src/core.mjs",
+          "line": 17,
+          "column": 7,
+          "source": "flag",
+          "conditions": [
+            "flag"
+          ],
+          "kind": "if"
+        },
+        "phase": "02925470fb92a8564e350cca-0:assertion:1",
+        "statement": "tests/core.vitest.test.mjs:1:1",
+        "operation": "node:assert/strict.equal",
+        "assertionSource": "tests/core.vitest.test.mjs:31:32",
+        "meaning": "execution-only"
+      },
+      {
+        "attempt": "A8",
+        "point": "f86d074a3cf97a8e",
+        "location": {
+          "id": "f86d074a3cf97a8e",
+          "kind": "statement",
+          "file": "src/core.mjs",
+          "line": 18,
+          "column": 3,
+          "source": "return 'no';"
+        },
+        "phase": "02925470fb92a8564e350cca-0:assertion:1",
+        "statement": "tests/core.vitest.test.mjs:1:1",
+        "operation": "node:assert/strict.equal",
+        "assertionSource": "tests/core.vitest.test.mjs:31:32",
+        "meaning": "execution-only"
+      }
+    ],
+    "diagnostics": {
+      "runtimeTests": 8,
+      "linkedTests": 8,
+      "staticTests": 9,
+      "linkedByAssertionLines": 7,
+      "linkedByTitle": 1,
+      "linkWarnings": [],
+      "unrecognizedOperands": [],
+      "compilerVersion": "5.8.3"
+    },
+    "limitations": [
+      "Experimental candidate analysis: no site has a checked semantic proof; no assertion percentage is reported.",
+      "Phase/statement execution is not data dependence. Legacy helper-name and flow rules remain unverified.",
+      "Logical-value operand sites and type-dependent effect classifications are not yet a complete denominator."
+    ]
+  },
+  "oracle": [
+    {
+      "label": "exact return changes",
+      "survives": false,
+      "nativeStatus": 1,
+      "nativeVitestStatus": 1
+    },
+    {
+      "label": "discarded return changes",
+      "survives": true,
+      "nativeStatus": 0,
+      "nativeVitestStatus": 0
+    },
+    {
+      "label": "truthy return changes",
+      "survives": true,
+      "nativeStatus": 0,
+      "nativeVitestStatus": 0
+    },
+    {
+      "label": "coerced predicate changes",
+      "survives": false,
+      "nativeStatus": 1,
+      "nativeVitestStatus": 1
+    },
+    {
+      "label": "fake fetch does not read status",
+      "survives": true,
+      "nativeStatus": 0,
+      "nativeVitestStatus": 0
+    },
+    {
+      "label": "unexecuted assertion",
+      "survives": true,
+      "nativeStatus": 0,
+      "nativeVitestStatus": 0
+    },
+    {
+      "label": "diagnostic preserves substring",
+      "survives": true,
+      "nativeStatus": 0,
+      "nativeVitestStatus": 0
+    },
+    {
+      "label": "diagnostic removes substring",
+      "survives": false,
+      "nativeStatus": 1,
+      "nativeVitestStatus": 1
+    },
+    {
+      "label": "exit status changes",
+      "survives": false,
+      "nativeStatus": 1,
+      "nativeVitestStatus": 1
+    }
+  ]
+}

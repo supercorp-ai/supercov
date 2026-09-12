@@ -46,6 +46,8 @@ jobs:
       - run: python3 -m pip install --user --break-system-packages cargo-zigbuild ziglang
       - run: cargo-zigbuild --version && python3 -m ziglang version
       - run: npm ci --omit=optional
+      - run: npm --prefix analyzers/typescript ci --ignore-scripts
+      - run: npm run build:asserted-typescript
       - run: cargo zigbuild --release --target ${{ matrix.target }}.2.28 -p supercov
       - name: The binary's real glibc floor
         run: node scripts/elf-glibc-floor.mjs target/${{ matrix.target }}/release/supercov --max 2.28
@@ -83,6 +85,8 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: rustc --version && cargo --version && ldd --version | head -1
       - run: npm ci --omit=optional
+      - run: npm --prefix analyzers/typescript ci --ignore-scripts
+      - run: npm run build:asserted-typescript
       - run: cargo build --release --target ${{ matrix.target }} -p supercov
       - name: The binary's real glibc floor
         run: node scripts/elf-glibc-floor.mjs target/${{ matrix.target }}/release/supercov --max 2.28

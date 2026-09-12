@@ -100,6 +100,8 @@ pub struct RuntimeEvent {
     pub phase_id: Option<String>,
     /// Position ("file:line:column") of the test-file statement that was executing when the
     /// event was recorded; set by the statement markers the assertion pass adds to test modules.
+    /// Rust currently supplies only exact assertion-as-statement invocations on the same
+    /// process/context, not preceding producer statements or inherited thread/process locations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statement_id: Option<String>,
     pub environment: String,
@@ -164,6 +166,9 @@ pub struct ServerRecord {
     pub timestamp_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase_id: Option<String>,
+    /// The producing test statement, under this record's exact execution scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<ExecutionScope>,
 }
@@ -1470,7 +1475,7 @@ fn create_coverage_view_with_model(
                 id: record_id,
                 vector: decision,
                 timestamp_ms,
-                statement_id: None,
+                statement_id: record.statement_id.clone(),
                 phase_id: record.phase_id.clone(),
                 environment: "server".into(),
             };
@@ -2172,13 +2177,23 @@ fn validate_rust_compiler_scope(manifest: &CoverageManifest) -> Result<(), Repor
         .as_ref()
         .and_then(Value::as_object)
         .ok_or_else(|| ReportError::InvalidArchive("missing Rust compiler source scope".into()))?;
-    let expected = BTreeSet::from([
+    let mut expected = BTreeSet::from([
         "crate",
         "language",
         "measurementComplete",
         "model",
         "sourceFingerprint",
     ]);
+    if let Some(value) = scope.get("assertionIdentities") {
+        expected.insert("assertionIdentities");
+        let identities: crate::rust_compiler_manifest::ResolvedRustAssertionIdentities =
+            serde_json::from_value(value.clone()).map_err(|e| {
+                ReportError::InvalidArchive(format!("invalid assertion identities: {e}"))
+            })?;
+        identities.validate(manifest).map_err(|e| {
+            ReportError::InvalidArchive(format!("invalid assertion identities: {e}"))
+        })?;
+    }
     if scope.keys().map(String::as_str).collect::<BTreeSet<_>>() != expected
         || scope.get("language").and_then(Value::as_str) != Some("rust")
         || scope.get("model").and_then(Value::as_str) != Some("rust-source-v1")
@@ -3177,6 +3192,23 @@ mod tests {
             })),
         };
         validate_rust_compiler_scope(&manifest).unwrap();
+
+        // The optional extension does not open the scope to arbitrary keys or
+        // unvalidated records, and legacy archives still need no such field.
+        let mut extended = manifest.clone();
+        extended.scope.as_mut().unwrap()["assertionIdentities"] = serde_json::json!({
+            "schema":"supercov-rust-assertion-identities-v1", "records":[]
+        });
+        validate_rust_compiler_scope(&extended).unwrap();
+        for value in [
+            Value::Null,
+            serde_json::json!({"schema":"unknown", "records":[]}),
+            serde_json::json!({"schema":"supercov-rust-assertion-identities-v1", "records":[], "extra":true}),
+            serde_json::json!({"schema":"supercov-rust-assertion-identities-v1", "records":[{}]}),
+        ] {
+            extended.scope.as_mut().unwrap()["assertionIdentities"] = value;
+            assert!(validate_rust_compiler_scope(&extended).is_err());
+        }
 
         manifest.scope.as_mut().unwrap()["sourceFingerprint"]["digest"] =
             Value::String("not-a-digest".into());

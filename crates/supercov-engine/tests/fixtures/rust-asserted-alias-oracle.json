@@ -1,0 +1,514 @@
+{
+  "schema": 1,
+  "cargoMutantsVersion": "27.1.0",
+  "files": {
+    "Cargo.toml": "1cd02994a9d7f7aafa8bbdb9897ccfc8ca66c8b790fc89fc56c4834294d3286d",
+    "src/lib.rs": "83dd91843746ff976d251402ed9c3c6241d08dfbd89f4bb93ed3726044c27ddb",
+    "tests/contract.rs": "54ee2bd87774b17c294b2fcadd35c601c189aa8f2197b2d8ba778f0127f8d55c"
+  },
+  "totals": {
+    "mutants": 55,
+    "caught": 25,
+    "survived": 30,
+    "unviable": 0,
+    "timeouts": 0
+  },
+  "wallSeconds": 43.753366625,
+  "outcomes": [
+    {
+      "name": "src/lib.rs:1:35: replace chain -> i32 with 0",
+      "function": "chain",
+      "location": {
+        "line": 1,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:1:35: replace chain -> i32 with 1",
+      "function": "chain",
+      "location": {
+        "line": 1,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:1:35: replace chain -> i32 with -1",
+      "function": "chain",
+      "location": {
+        "line": 1,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:1:41: replace * with + in chain",
+      "function": "chain",
+      "location": {
+        "line": 1,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:1:41: replace * with / in chain",
+      "function": "chain",
+      "location": {
+        "line": 1,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:2:44: replace boolean_chain -> bool with true",
+      "function": "boolean_chain",
+      "location": {
+        "line": 2,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:2:44: replace boolean_chain -> bool with false",
+      "function": "boolean_chain",
+      "location": {
+        "line": 2,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:2:50: replace > with == in boolean_chain",
+      "function": "boolean_chain",
+      "location": {
+        "line": 2,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:2:50: replace > with < in boolean_chain",
+      "function": "boolean_chain",
+      "location": {
+        "line": 2,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:2:50: replace > with >= in boolean_chain",
+      "function": "boolean_chain",
+      "location": {
+        "line": 2,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:3:46: replace preserved_source -> i32 with 0",
+      "function": "preserved_source",
+      "location": {
+        "line": 3,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:3:46: replace preserved_source -> i32 with 1",
+      "function": "preserved_source",
+      "location": {
+        "line": 3,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:3:46: replace preserved_source -> i32 with -1",
+      "function": "preserved_source",
+      "location": {
+        "line": 3,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:3:52: replace * with + in preserved_source",
+      "function": "preserved_source",
+      "location": {
+        "line": 3,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:3:52: replace * with / in preserved_source",
+      "function": "preserved_source",
+      "location": {
+        "line": 3,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:4:48: replace source_replacement -> i32 with 0",
+      "function": "source_replacement",
+      "location": {
+        "line": 4,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:4:48: replace source_replacement -> i32 with 1",
+      "function": "source_replacement",
+      "location": {
+        "line": 4,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:4:48: replace source_replacement -> i32 with -1",
+      "function": "source_replacement",
+      "location": {
+        "line": 4,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:4:54: replace * with + in source_replacement",
+      "function": "source_replacement",
+      "location": {
+        "line": 4,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:4:54: replace * with / in source_replacement",
+      "function": "source_replacement",
+      "location": {
+        "line": 4,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:5:39: replace old_alias -> i32 with 0",
+      "function": "old_alias",
+      "location": {
+        "line": 5,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:5:39: replace old_alias -> i32 with 1",
+      "function": "old_alias",
+      "location": {
+        "line": 5,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:5:39: replace old_alias -> i32 with -1",
+      "function": "old_alias",
+      "location": {
+        "line": 5,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:5:45: replace * with + in old_alias",
+      "function": "old_alias",
+      "location": {
+        "line": 5,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:5:45: replace * with / in old_alias",
+      "function": "old_alias",
+      "location": {
+        "line": 5,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:6:47: replace alias_replacement -> i32 with 0",
+      "function": "alias_replacement",
+      "location": {
+        "line": 6,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:6:47: replace alias_replacement -> i32 with 1",
+      "function": "alias_replacement",
+      "location": {
+        "line": 6,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:6:47: replace alias_replacement -> i32 with -1",
+      "function": "alias_replacement",
+      "location": {
+        "line": 6,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:6:53: replace * with + in alias_replacement",
+      "function": "alias_replacement",
+      "location": {
+        "line": 6,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:6:53: replace * with / in alias_replacement",
+      "function": "alias_replacement",
+      "location": {
+        "line": 6,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:7:45: replace constant_shadow -> i32 with 0",
+      "function": "constant_shadow",
+      "location": {
+        "line": 7,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:7:45: replace constant_shadow -> i32 with 1",
+      "function": "constant_shadow",
+      "location": {
+        "line": 7,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:7:45: replace constant_shadow -> i32 with -1",
+      "function": "constant_shadow",
+      "location": {
+        "line": 7,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:7:51: replace * with + in constant_shadow",
+      "function": "constant_shadow",
+      "location": {
+        "line": 7,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:7:51: replace * with / in constant_shadow",
+      "function": "constant_shadow",
+      "location": {
+        "line": 7,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:8:43: replace mutable_alias -> i32 with 0",
+      "function": "mutable_alias",
+      "location": {
+        "line": 8,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:8:43: replace mutable_alias -> i32 with 1",
+      "function": "mutable_alias",
+      "location": {
+        "line": 8,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:8:43: replace mutable_alias -> i32 with -1",
+      "function": "mutable_alias",
+      "location": {
+        "line": 8,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:8:49: replace * with + in mutable_alias",
+      "function": "mutable_alias",
+      "location": {
+        "line": 8,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:8:49: replace * with / in mutable_alias",
+      "function": "mutable_alias",
+      "location": {
+        "line": 8,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:9:47: replace transformed_alias -> i32 with 0",
+      "function": "transformed_alias",
+      "location": {
+        "line": 9,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:9:47: replace transformed_alias -> i32 with 1",
+      "function": "transformed_alias",
+      "location": {
+        "line": 9,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:9:47: replace transformed_alias -> i32 with -1",
+      "function": "transformed_alias",
+      "location": {
+        "line": 9,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:9:53: replace * with + in transformed_alias",
+      "function": "transformed_alias",
+      "location": {
+        "line": 9,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:9:53: replace * with / in transformed_alias",
+      "function": "transformed_alias",
+      "location": {
+        "line": 9,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:10:42: replace nested_alias -> i32 with 0",
+      "function": "nested_alias",
+      "location": {
+        "line": 10,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:10:42: replace nested_alias -> i32 with 1",
+      "function": "nested_alias",
+      "location": {
+        "line": 10,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:10:42: replace nested_alias -> i32 with -1",
+      "function": "nested_alias",
+      "location": {
+        "line": 10,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:10:48: replace * with + in nested_alias",
+      "function": "nested_alias",
+      "location": {
+        "line": 10,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:10:48: replace * with / in nested_alias",
+      "function": "nested_alias",
+      "location": {
+        "line": 10,
+        "column": 1
+      },
+      "status": "CaughtMutant"
+    },
+    {
+      "name": "src/lib.rs:11:42: replace never_called -> i32 with 0",
+      "function": "never_called",
+      "location": {
+        "line": 11,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:11:42: replace never_called -> i32 with 1",
+      "function": "never_called",
+      "location": {
+        "line": 11,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:11:42: replace never_called -> i32 with -1",
+      "function": "never_called",
+      "location": {
+        "line": 11,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:11:48: replace * with + in never_called",
+      "function": "never_called",
+      "location": {
+        "line": 11,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    },
+    {
+      "name": "src/lib.rs:11:48: replace * with / in never_called",
+      "function": "never_called",
+      "location": {
+        "line": 11,
+        "column": 1
+      },
+      "status": "MissedMutant"
+    }
+  ]
+}

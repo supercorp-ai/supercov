@@ -1,0 +1,718 @@
+{
+  "description": "Post-fix calibration, not a semantic accuracy or performance benchmark. All candidate conclusions remain unverified. CLI/header runs are bounded slices, not the full suite.",
+  "sampleComparison": {
+    "supergateway": {
+      "sites": 661,
+      "tests": 81,
+      "oldObservations": 852,
+      "newObservations": 0,
+      "removedObservations": 852,
+      "addedObservations": 0,
+      "changedTests": 80,
+      "changedSites": 2,
+      "suppressedObservations": 155,
+      "oldCandidates": {
+        "contractual": 364,
+        "evident": 190,
+        "partial": 23,
+        "presence": 17,
+        "unresolved": 134
+      },
+      "newCandidates": {
+        "contractual": 364,
+        "evident": 0,
+        "partial": 0,
+        "presence": 0,
+        "unresolved": 364,
+        "gaps": 298,
+        "limits": 66
+      },
+      "caveat": "No phase files in this legacy capture. Gap/limit classification is not reliable after suppression; JS-ASSERT-005."
+    },
+    "essentialSeo": {
+      "sites": 1813,
+      "tests": 527,
+      "oldObservations": 1697,
+      "newObservations": 1019,
+      "removedObservations": 678,
+      "addedObservations": 0,
+      "changedTests": 289,
+      "changedSites": 175,
+      "suppressedObservations": 223,
+      "oldCandidates": {
+        "contractual": 936,
+        "evident": 563,
+        "partial": 55,
+        "presence": 31,
+        "unresolved": 287
+      },
+      "newCandidates": {
+        "contractual": 936,
+        "evident": 518,
+        "partial": 56,
+        "presence": 30,
+        "unresolved": 332,
+        "gaps": 357,
+        "limits": 61
+      }
+    }
+  },
+  "supergatewayFresh": {
+    "sourceRoot": "/Users/domas/Developer/supercorp/supergateway",
+    "transpileOnly": true,
+    "testFile": "tests/gatewayE2e.test.ts",
+    "cli": {
+      "pattern": "CLI rejects|CLI none logging",
+      "nativePassed": 9,
+      "instrumentedPassed": 9,
+      "nativeRunnerDurationMs": 2006.671916,
+      "instrumentedRunnerDurationMs": 2589.062583,
+      "supercovTimingsMs": {
+        "initialization": 177.9,
+        "workspace": 1344.5,
+        "setup": 27.8,
+        "build": 0,
+        "tests": 2631,
+        "evidence": 79,
+        "total": 4462.6
+      },
+      "query": {
+        "runId": "run_f8ae7f30ff5349ca",
+        "evidenceSha256": "4b7eb69e797879e1eecd456ceb3549069b1ca044ab1add7ca224dfa0294f7418",
+        "runFingerprint": {
+          "algorithm": "sha256",
+          "source": "0445ec55847cbc3e564779e9901ad013c0bf9ed158121b03408dcd95d4015423",
+          "tests": "36dc3dbad5849a73632e2f0f36e60f6ea211b4abe97fe375eb47601fc7247ff0",
+          "dependencies": "bcbb49c01d8fb45d1d7935c8869596d10d3bdeefa5030e334eebeee769ebdd40",
+          "configuration": "3bd5c5fc3c06ff5687677a9dacab15cd614c237a8f111a06e9a4928e13c9d8e5",
+          "instrumenter": "d801e6835860f9901602ef3c1797ead29e5c6ee2cc7244b62638928786f820e1",
+          "execution": "fa942c9068444fda9d65f1e64cf0966387fb6b1b0e65091172f38a3241eb6954",
+          "combined": "122db3c302fe65932010ecc83b464a1d5f608eab36fcb957041aa95acdf17ee8",
+          "sourceFiles": 16,
+          "testFiles": 74
+        },
+        "analyzer": {
+          "schema": 1,
+          "sourceSha256": "dc9b4677efac99deccfc086f050694650ce4f7ee09c2cdd41fa93b08f78ee4dd",
+          "compiledSha256": "2b0fbc5166d03db41a8935777f13e735467d470c06e09540ca056e30e3c78ab2",
+          "compilerSha256": "dd17428736a07e1db1a138d8a14295ddb2699ba780ee15038acdd2c6da5373a0"
+        },
+        "protocol": {
+          "abi": 1,
+          "factsSchema": 1,
+          "rules": "source-linked-v2/archive-2",
+          "capabilities": [
+            "requiresTotal-v1"
+          ]
+        },
+        "summary": {
+          "sites": 636,
+          "semanticallyVerifiedSites": 0,
+          "unverifiedSites": 636
+        },
+        "attempts": [
+          {
+            "id": "A1",
+            "testId": "node:test:cfc6227f66259220b589d66a",
+            "name": "CLI none logging suppresses diagnostics without changing failure status",
+            "file": "tests/gatewayE2e.test.ts",
+            "retry": 0
+          },
+          {
+            "id": "A2",
+            "testId": "node:test:ae02521e0fa041afa77df275",
+            "name": "CLI rejects zero session timeout",
+            "file": "tests/gatewayE2e.test.ts",
+            "retry": 0
+          },
+          {
+            "id": "A3",
+            "testId": "node:test:243e2644f377f2c411a23bd2",
+            "name": "CLI rejects no input",
+            "file": "tests/gatewayE2e.test.ts",
+            "retry": 0
+          },
+          {
+            "id": "A4",
+            "testId": "node:test:ef8202c2b41d6d70c23ee2cd",
+            "name": "CLI rejects unsupported stdio output",
+            "file": "tests/gatewayE2e.test.ts",
+            "retry": 0
+          },
+          {
+            "id": "A5",
+            "testId": "node:test:3a6842475411ada5800b9560",
+            "name": "CLI rejects unsupported SSE output",
+            "file": "tests/gatewayE2e.test.ts",
+            "retry": 0
+          },
+          {
+            "id": "A6",
+            "testId": "node:test:67dbcc7663f6687191d4a9ce",
+            "name": "CLI rejects unsupported HTTP output",
+            "file": "tests/gatewayE2e.test.ts",
+            "retry": 0
+          },
+          {
+            "id": "A7",
+            "testId": "node:test:6cddfad7f116abbfb7a4725d",
+            "name": "CLI rejects invalid upstream URL",
+            "file": "tests/gatewayE2e.test.ts",
+            "retry": 0
+          },
+          {
+            "id": "A8",
+            "testId": "node:test:cc0a30beb58665a02dfa80dd",
+            "name": "CLI rejects conflicting inputs",
+            "file": "tests/gatewayE2e.test.ts",
+            "retry": 0
+          },
+          {
+            "id": "A9",
+            "testId": "node:test:2fdddac7734e0eb524d9137f",
+            "name": "CLI rejects negative session timeout",
+            "file": "tests/gatewayE2e.test.ts",
+            "retry": 0
+          }
+        ],
+        "observationCount": 0,
+        "executionLinkCount": 0,
+        "limitations": [
+          "js-sites-mutator-needs-types",
+          "js-sites-state-call-needs-types",
+          "js-sites-this-call-needs-types",
+          "Experimental candidate analysis: no site has a checked semantic proof; no assertion percentage is reported.",
+          "Phase/statement execution is not data dependence. Candidate flow rules remain unverified; helper-name contracts and temporal value inference are disabled.",
+          "Logical-value operand sites and type-dependent effect classifications are not yet a complete denominator."
+        ],
+        "diagnostics": {
+          "suppressedObservations": [],
+          "observationPolicy": "source-linked-v2: exact successful call witness; no name-only helpers or execution-to-value fallback",
+          "runtimeTests": 9,
+          "linkedTests": 9,
+          "staticTests": 11,
+          "linkedByAssertionLines": 9,
+          "linkedByTitle": 0,
+          "linkWarnings": [],
+          "unrecognizedOperands": [
+            {
+              "shape": "invalidInit.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "invalidInit.messages[N].error.code  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "healthyInit.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "invalidRequest.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "invalidRequest.messages[N].error.code  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "stale.response.status  [localfn:rpc]",
+              "count": 4
+            },
+            {
+              "shape": "recovered.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "recovered.response.headers.get(…)  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "(await gateway.exited).code  [localfn:launchGateway]",
+              "count": 4
+            },
+            {
+              "shape": "gateway.errors()  [localfn:launchGateway]",
+              "count": 9
+            },
+            {
+              "shape": "gateway.output()  [localfn:launchGateway]",
+              "count": 3
+            },
+            {
+              "shape": "health.status  [import:fetch]",
+              "count": 2
+            },
+            {
+              "shape": "await health.text()  [import:fetch]",
+              "count": 3
+            },
+            {
+              "shape": "health.headers.get(…)  [import:fetch]",
+              "count": 6
+            },
+            {
+              "shape": "response.headers.get(…)  [import:fetch]",
+              "count": 1
+            },
+            {
+              "shape": "allowed ? origin : null  [no origin]",
+              "count": 1
+            },
+            {
+              "shape": "response.status  [import:fetch]",
+              "count": 2
+            },
+            {
+              "shape": "stateful ? N : N  [no origin]",
+              "count": 1
+            },
+            {
+              "shape": "await response.text()  [import:fetch]",
+              "count": 2
+            },
+            {
+              "shape": "stateful ? /Invalid or missing session ID/ :   [no origin]",
+              "count": 1
+            },
+            {
+              "shape": "bad.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "bad.messages[N].error.code  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "badInit.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "init.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "init.messages[N].result.serverInfo.name  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "Boolean(session)  [no origin]",
+              "count": 1
+            },
+            {
+              "shape": "tools.response.status  [localfn:rpc]",
+              "count": 2
+            },
+            {
+              "shape": "tools.messages[N].result.tools.some( (tool: {  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "ended.status  [import:fetch]",
+              "count": 2
+            },
+            {
+              "shape": "session  [localfn:rpc]",
+              "count": 3
+            },
+            {
+              "shape": "fresh.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "fresh.response.headers.get(…)  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "stream.status  [import:fetch]",
+              "count": 1
+            },
+            {
+              "shape": "new RegExp(…)  [new:RegExp]",
+              "count": 1
+            },
+            {
+              "shape": "stillAlive.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "init.result.serverInfo.name  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "reply.result.content  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "unsupported.error.code  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "unsupported.error.message  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "unknown.error.code  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "unknown.error.message  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "bridge.output()  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "(await bridge.exited).code  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "(await request({ ...initialize(), id: N })).r  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "seenHeaders.length > N  [no origin]",
+              "count": 1
+            },
+            {
+              "shape": "failure.error.code  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "failure.error.message  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "recovered.result.tools.some( (tool: { name: s  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "withHealthAndCors ? N : N  [no origin]",
+              "count": 1
+            },
+            {
+              "shape": "withHealthAndCors ? … : null  [no origin]",
+              "count": 1
+            },
+            {
+              "shape": "initialized.id  [import:once]",
+              "count": 1
+            },
+            {
+              "shape": "initialized.result.serverInfo.name  [import:once]",
+              "count": 1
+            },
+            {
+              "shape": "alive.result.tools.some( (tool: { name: strin  [import:once]",
+              "count": 1
+            }
+          ],
+          "compilerVersion": "5.8.3"
+        }
+      }
+    },
+    "headers": {
+      "pattern": "health, headers, CORS",
+      "nativePassed": 2,
+      "instrumentedPassed": 2,
+      "nativeRunnerDurationMs": 1725.067125,
+      "instrumentedRunnerDurationMs": 1894.538083,
+      "supercovTimingsMs": {
+        "initialization": 168.4,
+        "workspace": 1335.6,
+        "setup": 26.6,
+        "build": 0,
+        "tests": 1933,
+        "evidence": 67,
+        "total": 3731
+      },
+      "query": {
+        "runId": "run_a80b6a217f192d25",
+        "evidenceSha256": "bee0a139ab2d843e80160d5ffafada4aa0a3d6e14c9112fb868c7da55fc792b3",
+        "runFingerprint": {
+          "algorithm": "sha256",
+          "source": "0445ec55847cbc3e564779e9901ad013c0bf9ed158121b03408dcd95d4015423",
+          "tests": "36dc3dbad5849a73632e2f0f36e60f6ea211b4abe97fe375eb47601fc7247ff0",
+          "dependencies": "bcbb49c01d8fb45d1d7935c8869596d10d3bdeefa5030e334eebeee769ebdd40",
+          "configuration": "3bd5c5fc3c06ff5687677a9dacab15cd614c237a8f111a06e9a4928e13c9d8e5",
+          "instrumenter": "d801e6835860f9901602ef3c1797ead29e5c6ee2cc7244b62638928786f820e1",
+          "execution": "fa942c9068444fda9d65f1e64cf0966387fb6b1b0e65091172f38a3241eb6954",
+          "combined": "122db3c302fe65932010ecc83b464a1d5f608eab36fcb957041aa95acdf17ee8",
+          "sourceFiles": 16,
+          "testFiles": 74
+        },
+        "analyzer": {
+          "schema": 1,
+          "sourceSha256": "dc9b4677efac99deccfc086f050694650ce4f7ee09c2cdd41fa93b08f78ee4dd",
+          "compiledSha256": "2b0fbc5166d03db41a8935777f13e735467d470c06e09540ca056e30e3c78ab2",
+          "compilerSha256": "dd17428736a07e1db1a138d8a14295ddb2699ba780ee15038acdd2c6da5373a0"
+        },
+        "protocol": {
+          "abi": 1,
+          "factsSchema": 1,
+          "rules": "source-linked-v2/archive-2",
+          "capabilities": [
+            "requiresTotal-v1"
+          ]
+        },
+        "summary": {
+          "sites": 636,
+          "semanticallyVerifiedSites": 0,
+          "unverifiedSites": 636
+        },
+        "attempts": [
+          {
+            "id": "A1",
+            "testId": "node:test:debeee140e689f4ea7d35011",
+            "name": "stateless HTTP: health, headers, CORS and session validation",
+            "file": "tests/gatewayE2e.test.ts",
+            "retry": 0
+          },
+          {
+            "id": "A2",
+            "testId": "node:test:f831547dd25185ce9ec7fa10",
+            "name": "stateful HTTP: health, headers, CORS and session validation",
+            "file": "tests/gatewayE2e.test.ts",
+            "retry": 0
+          }
+        ],
+        "observationCount": 0,
+        "executionLinkCount": 0,
+        "limitations": [
+          "js-sites-mutator-needs-types",
+          "js-sites-state-call-needs-types",
+          "js-sites-this-call-needs-types",
+          "Experimental candidate analysis: no site has a checked semantic proof; no assertion percentage is reported.",
+          "Phase/statement execution is not data dependence. Candidate flow rules remain unverified; helper-name contracts and temporal value inference are disabled.",
+          "Logical-value operand sites and type-dependent effect classifications are not yet a complete denominator."
+        ],
+        "diagnostics": {
+          "suppressedObservations": [],
+          "observationPolicy": "source-linked-v2: exact successful call witness; no name-only helpers or execution-to-value fallback",
+          "runtimeTests": 2,
+          "linkedTests": 2,
+          "staticTests": 11,
+          "linkedByAssertionLines": 2,
+          "linkedByTitle": 0,
+          "linkWarnings": [],
+          "unrecognizedOperands": [
+            {
+              "shape": "invalidInit.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "invalidInit.messages[N].error.code  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "healthyInit.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "invalidRequest.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "invalidRequest.messages[N].error.code  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "stale.response.status  [localfn:rpc]",
+              "count": 4
+            },
+            {
+              "shape": "recovered.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "recovered.response.headers.get(…)  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "(await gateway.exited).code  [localfn:launchGateway]",
+              "count": 4
+            },
+            {
+              "shape": "gateway.errors()  [localfn:launchGateway]",
+              "count": 9
+            },
+            {
+              "shape": "gateway.output()  [localfn:launchGateway]",
+              "count": 3
+            },
+            {
+              "shape": "health.status  [import:fetch]",
+              "count": 2
+            },
+            {
+              "shape": "await health.text()  [import:fetch]",
+              "count": 3
+            },
+            {
+              "shape": "health.headers.get(…)  [import:fetch]",
+              "count": 6
+            },
+            {
+              "shape": "response.headers.get(…)  [import:fetch]",
+              "count": 1
+            },
+            {
+              "shape": "allowed ? origin : null  [no origin]",
+              "count": 1
+            },
+            {
+              "shape": "response.status  [import:fetch]",
+              "count": 2
+            },
+            {
+              "shape": "stateful ? N : N  [no origin]",
+              "count": 1
+            },
+            {
+              "shape": "await response.text()  [import:fetch]",
+              "count": 2
+            },
+            {
+              "shape": "stateful ? /Invalid or missing session ID/ :   [no origin]",
+              "count": 1
+            },
+            {
+              "shape": "bad.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "bad.messages[N].error.code  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "badInit.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "init.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "init.messages[N].result.serverInfo.name  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "Boolean(session)  [no origin]",
+              "count": 1
+            },
+            {
+              "shape": "tools.response.status  [localfn:rpc]",
+              "count": 2
+            },
+            {
+              "shape": "tools.messages[N].result.tools.some( (tool: {  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "ended.status  [import:fetch]",
+              "count": 2
+            },
+            {
+              "shape": "session  [localfn:rpc]",
+              "count": 3
+            },
+            {
+              "shape": "fresh.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "fresh.response.headers.get(…)  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "stream.status  [import:fetch]",
+              "count": 1
+            },
+            {
+              "shape": "new RegExp(…)  [new:RegExp]",
+              "count": 1
+            },
+            {
+              "shape": "stillAlive.response.status  [localfn:rpc]",
+              "count": 1
+            },
+            {
+              "shape": "init.result.serverInfo.name  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "reply.result.content  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "unsupported.error.code  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "unsupported.error.message  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "unknown.error.code  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "unknown.error.message  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "bridge.output()  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "(await bridge.exited).code  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "(await request({ ...initialize(), id: N })).r  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "seenHeaders.length > N  [no origin]",
+              "count": 1
+            },
+            {
+              "shape": "failure.error.code  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "failure.error.message  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "recovered.result.tools.some( (tool: { name: s  [localfn:launchGateway]",
+              "count": 1
+            },
+            {
+              "shape": "withHealthAndCors ? N : N  [no origin]",
+              "count": 1
+            },
+            {
+              "shape": "withHealthAndCors ? … : null  [no origin]",
+              "count": 1
+            },
+            {
+              "shape": "initialized.id  [import:once]",
+              "count": 1
+            },
+            {
+              "shape": "initialized.result.serverInfo.name  [import:once]",
+              "count": 1
+            },
+            {
+              "shape": "alive.result.tools.some( (tool: { name: strin  [import:once]",
+              "count": 1
+            }
+          ],
+          "compilerVersion": "5.8.3"
+        }
+      }
+    }
+  }
+}

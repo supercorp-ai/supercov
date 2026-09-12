@@ -39,6 +39,8 @@ pub mod ruby_run;
 pub mod run_merge;
 pub mod run_query;
 pub mod run_store;
+pub mod rust_asserted_coverage;
+pub mod rust_asserted_source;
 pub mod rust_build_cache;
 mod rust_cargo_config_model;
 pub mod rust_cargo_configuration;
