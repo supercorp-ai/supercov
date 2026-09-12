@@ -31,8 +31,18 @@ exact detail IDs, invalid options, full flow details, matching test names and
 source access during malformed map edits. All three text views were checked
 against Supergateway's archived `run_1d377c69729e4e0d`.
 
-The installed-package check for this follow-up is pending. Earlier platform
+`npm run test:native-package` passed for code commit `bf956b4`: the packed macOS
+arm64 npm install exercised the new resources for JavaScript and TypeScript;
+release-set, wheel, gem and corruption checks also passed. Earlier platform
 artifacts below are historical; build new artifacts from the final release commit.
+
+Source-storage research subsequently found a release issue in capture scope:
+the Supergateway archive includes 46 files and 299 assertion sites from an
+unrelated nested `.claude/worktrees` checkout. File discovery must exclude
+unrelated nested checkouts without excluding real workspace packages. Add a
+regression and verify a fresh Supergateway run before publishing. Do not rewrite
+old archives to hide the issue. Measurements and storage alternatives are in
+[the source snapshot research](source-snapshot-storage-research-2026-09-12.md).
 
 ## Automatic map creation follow-up, 2026-09-12
 
