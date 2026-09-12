@@ -9,7 +9,7 @@
   "execution": {
     "exitCode": 0,
     "sourceUnchanged": true,
-    "publishedFiles": ["evidence.raw.gz", "run.json"],
+    "publishedFiles": ["assertions.json", "assertions.state.json", "evidence.raw.gz", "run.json"],
     "looseEvidenceRetained": false,
     "terminalWorkRetained": false,
     "metadata": {
