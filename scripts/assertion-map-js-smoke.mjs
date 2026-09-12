@@ -64,7 +64,8 @@ export function assertionMapSmoke({ root, launcher, env, runner = 'node', typesc
   ok('--', ...(runner === 'node' ? [process.execPath, '--test', testFile] : ['npm', 'test']));
   const run = data('runs').runs[0].id;
   const query = (...args) => data('runs', run, 'assertions', ...args);
-  const init = query('init');
+  const init = query();
+  assert.equal(init.inheritance.from, null);
   const map = JSON.parse(readFileSync(init.map, 'utf8'));
   assert.equal(map.assertions.length, 3, `${runner}/${ext}: ${JSON.stringify(map)}`);
   const statements = query('report', '--view', 'statements', '--limit', '100').items;

@@ -20,7 +20,8 @@ try {
       pilot.ok('--', process.execPath, '--test', pilot.testFile);
       const run = latestRun(root);
       const q = (...args) => JSON.parse(pilot.ok('runs', run, 'assertions', ...args, '--json').stdout).data;
-      const inherited = q('init', '--from', pilot.run);
+      const inherited = q();
+      assert.equal(inherited.inheritance.from, pilot.run);
       assert.equal(q().summary.unobservedAssertions, 1);
       assert.equal(q().summary.assertions, 5);
       assert(q().summary.dirtyFlows > 0, 'changed test setup invalidates watched flows');

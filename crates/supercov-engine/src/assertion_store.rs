@@ -7,7 +7,7 @@ use crate::{
     },
     evidence_archive::read_archive,
     lifecycle::atomic_write,
-    run_store::StoredRun,
+    run_store::{RunMetadata, StoredRun, discover_runs},
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -24,6 +24,9 @@ pub struct RunInputs {
     pub evidence_digest: String,
 }
 pub fn load_inputs(run: &StoredRun) -> Result<RunInputs, String> {
+    load_optional_inputs(run)?.ok_or_else(|| "This older run has no frozen assertion inputs. Run tests once with this version of Supercov".into())
+}
+fn load_optional_inputs(run: &StoredRun) -> Result<Option<RunInputs>, String> {
     if run.metadata.merged == Some(true) {
         return Err(
             "Use a single run for assertion maps; merged runs have multiple input snapshots".into(),
@@ -32,7 +35,9 @@ pub fn load_inputs(run: &StoredRun) -> Result<RunInputs, String> {
     let bytes = fs::read(&run.evidence_path).map_err(|e| e.to_string())?;
     let evidence_digest = format!("{:x}", Sha256::digest(&bytes));
     let entries = read_archive(&run.evidence_path).map_err(|e| e.to_string())?;
-    let input = entries.iter().find(|e| e.path == ARCHIVE_PATH).ok_or("This older run has no frozen assertion inputs. Run tests once with this version of Supercov")?;
+    let Some(input) = entries.iter().find(|e| e.path == ARCHIVE_PATH) else {
+        return Ok(None);
+    };
     let inputs: Inputs = serde_json::from_slice(&input.contents).map_err(|e| e.to_string())?;
     if inputs.schema_version != 1 {
         return Err("Unsupported assertion input schema".into());
@@ -48,15 +53,15 @@ pub fn load_inputs(run: &StoredRun) -> Result<RunInputs, String> {
     if fs::read(&run.evidence_path).map_err(|e| e.to_string())? != bytes {
         return Err("Run archive changed during read".into());
     }
-    Ok(RunInputs {
+    Ok(Some(RunInputs {
         inputs,
         evidence_digest,
-    })
+    }))
 }
 pub fn load(run: &StoredRun, input: &RunInputs) -> Result<(AssertionMap, State), String> {
     let read = |file: &str| {
         fs::read(run.directory.join(file))
-            .map_err(|e| format!("{file}: {e}; use assertions init first"))
+            .map_err(|e| format!("{file}: {e}; new test runs create assertion maps automatically"))
     };
     let map = model::parse(&read(MAP_FILE)?).map_err(|e| format!("{MAP_FILE}: {e}"))?;
     let state: State =
@@ -66,7 +71,7 @@ pub fn load(run: &StoredRun, input: &RunInputs) -> Result<(AssertionMap, State),
         || state.evidence_digest != input.evidence_digest
     {
         return Err(
-            "Assertion state belongs to different run evidence; initialize or carry into this run"
+            "Assertion state belongs to different run evidence; rerun tests to create a bound map"
                 .into(),
         );
     }
@@ -82,58 +87,95 @@ fn write_json(
     bytes.push(b'\n');
     atomic_write(root, &run.directory.join(name), &bytes).map_err(|e| e.to_string())
 }
-/// Creation never overwrites authored work. A map without state after a failed
-/// second write is recoverable via init, which retains the existing JSON.
-pub fn initialize(
+/// Create the map inside the unpublished run directory. The lifecycle publishes
+/// evidence, map and review state together with one directory rename. Older
+/// archives without frozen inputs and merged runs retain their existing behavior.
+pub(crate) fn prepare_publication(
     root: &Path,
-    run: &StoredRun,
-    previous: Option<&StoredRun>,
-) -> Result<Value, String> {
-    let input = load_inputs(run)?;
-    if run.directory.join(STATE_FILE).exists() {
-        return Err("This run already has assertion state; edit its map and use review".into());
+    directory: &Path,
+    metadata: &RunMetadata,
+) -> Result<(), String> {
+    if metadata.merged == Some(true) {
+        return Ok(());
     }
-    let (map, state) = if let Some(old_run) = previous {
-        if old_run.id == run.id {
-            return Err("Cannot inherit from the same run".into());
-        }
-        if run.directory.join(MAP_FILE).exists() {
-            return Err("Refusing to replace an existing assertion map".into());
-        }
-        let old = load_inputs(old_run)?;
-        let (map, state) = load(old_run, &old)?;
-        let a = &old_run.metadata.integrity.fingerprint;
-        let b = &run.metadata.integrity.fingerprint;
-        // Execution fingerprint also contains source hashes. Compare context
-        // components separately so source edits only dirty affected watches.
-        let context_changed = a.configuration != b.configuration
-            || a.dependencies != b.dependencies
-            || a.instrumenter != b.instrumenter
-            || old_run.metadata.command != run.metadata.command
-            || old.inputs.language != input.inputs.language
-            || old.inputs.context_digest != input.inputs.context_digest;
-        model::carry(
-            &map,
-            &state,
-            &old.inputs,
-            &input.inputs,
-            &input.evidence_digest,
-            context_changed,
-        )?
-    } else if run.directory.join(MAP_FILE).exists() {
-        let map = model::parse(&fs::read(run.directory.join(MAP_FILE)).map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-        (map, seed(&input.inputs, &input.evidence_digest).1)
-    } else {
-        seed(&input.inputs, &input.evidence_digest)
+    let run = StoredRun {
+        id: metadata.id.clone(),
+        directory: directory.into(),
+        evidence_path: directory.join("evidence.raw.gz"),
+        metadata_path: directory.join("run.json"),
+        query_index_path: directory.join(crate::run_store::RUST_QUERY_INDEX_FILE),
+        metadata: metadata.clone(),
     };
-    if !run.directory.join(MAP_FILE).exists() {
-        write_json(root, run, MAP_FILE, &map)?;
+    let Some(input) = load_optional_inputs(&run)? else {
+        return Ok(());
+    };
+    // Refuse replacement even if this helper is accidentally called twice.
+    if directory.join(MAP_FILE).exists() || directory.join(STATE_FILE).exists() {
+        return Err("Refusing to replace an existing assertion map or review state".into());
     }
-    write_json(root, run, STATE_FILE, &state)?;
-    Ok(
-        json!({"map":run.directory.join(MAP_FILE),"state":run.directory.join(STATE_FILE),"assertions":map.assertions.len(),"retiredAssertions":map.retired_assertions.len(),"scopeReview":state.scope_review}),
-    )
+    let inventory = discover_runs(root).map_err(|e| e.to_string())?;
+    let mut inheritance = Inheritance::default();
+    let mut inherited = None;
+    for previous in &inventory.runs {
+        if previous.id == run.id
+            || previous.metadata.merged == Some(true)
+            || previous.metadata.command != metadata.command
+            || (!previous.directory.join(MAP_FILE).exists()
+                && !previous.directory.join(STATE_FILE).exists())
+        {
+            continue;
+        }
+        let attempt = (|| {
+            let old = load_inputs(previous)?;
+            if old.inputs.language != input.inputs.language {
+                return Ok(None);
+            }
+            let (map, state) = load(previous, &old)?;
+            let a = &previous.metadata.integrity.fingerprint;
+            let b = &metadata.integrity.fingerprint;
+            // Source hashes are checked through anchors/watches by carry. Only
+            // execution context changes invalidate every inherited flow.
+            let context_changed = a.configuration != b.configuration
+                || a.dependencies != b.dependencies
+                || a.instrumenter != b.instrumenter
+                || old.inputs.context_digest != input.inputs.context_digest;
+            model::carry(
+                &map,
+                &state,
+                &old.inputs,
+                &input.inputs,
+                &input.evidence_digest,
+                context_changed,
+            )
+            .map(Some)
+        })();
+        match attempt {
+            Ok(Some(pair)) => {
+                inheritance.from = Some(previous.id.clone());
+                inherited = Some(pair);
+                break;
+            }
+            Ok(None) => (),
+            Err(reason) => inheritance.skipped.push(SkippedMap {
+                run: previous.id.clone(),
+                reason,
+            }),
+        }
+    }
+    let (map, mut state) = inherited.unwrap_or_else(|| seed(&input.inputs, &input.evidence_digest));
+    // A malformed newer map might contain changed claims. An older fallback
+    // preserves work, but must not silently restore its previous credit.
+    if !inheritance.skipped.is_empty() {
+        for review in state.reviews.values_mut() {
+            review
+                .reasons
+                .insert("newer assertion map could not be reused; review inherited claims".into());
+        }
+    }
+    state.inheritance = Some(inheritance);
+    write_json(root, &run, MAP_FILE, &map)?;
+    write_json(root, &run, STATE_FILE, &state)?;
+    Ok(())
 }
 pub fn acknowledge(
     root: &Path,
@@ -214,6 +256,7 @@ pub fn report(run: &StoredRun) -> Result<Value, String> {
         &coverage,
         run.metadata.test_exit_code == Some(0),
     );
+    report["inheritance"] = json!(state.inheritance);
     report["revision"] = json!(digest(&(&map, &state, &input.evidence_digest)));
     Ok(report)
 }

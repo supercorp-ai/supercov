@@ -16,8 +16,12 @@ try {
   writeFileSync(join(root, "tests/core.test.js"), "import assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { value } from '../src/core.js';\ntest('value', () => {\n  assert.equal(value(), 1);\n});\n");
   const first = run();
   assert.equal(coverageQuery(root, first).data.confidence.lines.asserted, 0);
-  assert.equal(coverageQuery(root, first).data.assertionCoverage, undefined);
-  const initialized = query(first, "init");
+  const automatic = coverageQuery(root, first).data.assertionCoverage;
+  assert.equal(automatic.summary.statements.percentage, 0);
+  assert.equal(automatic.summary.unmappedAssertions, 1);
+  assert.equal(automatic.inheritance.from, null);
+  const initialized = query(first);
+  assert.equal(initialized.map, automatic.map);
   const map = read(initialized.map);
   assert.equal(map.assertions.length, 1);
   const a = map.assertions[0];
@@ -54,17 +58,21 @@ try {
   write(initialized.map, map);
   query(first, "review", "--all");
   assert.equal(coverageQuery(root, first).data.assertionCoverage.summary.statements.percentage, 100);
+  const firstMapBytes = readFileSync(initialized.map);
+  const firstStatePath = join(root, '.supercov/runs', first, 'assertions.state.json');
+  const firstStateBytes = readFileSync(firstStatePath);
   const frozen = query(first, "source", "--file", "src/core.js").items;
   assert.equal(frozen[1].text, "  return 1;");
-  assert.notEqual(executeSupercov(root, ["runs",first,"assertions","init"]).status, 0, "init must preserve authored work");
+  assert.notEqual(executeSupercov(root, ["runs",first,"assertions","init"]).status, 0, "the init command is removed");
   assert.notEqual(executeSupercov(root, ["runs",first,"asserted"]).status, 0, "legacy analyzer command is gone");
   const second = run();
-  query(second, "init", "--from", first);
+  assert.equal(query(second).inheritance.from, first);
   assert.equal(query(second).summary.dirtyFlows, 0);
   assert.equal(query(second).summary.lines.asserted, 1);
   writeFileSync(join(root,"src/core.js"), "export function value() {\n  return 2 - 1;\n}\n");
   const third = run();
-  const carried = query(third,"init","--from",second);
+  const carried = query(third);
+  assert.equal(carried.inheritance.from, second);
   report = query(third);
   assert.equal(report.summary.dirtyFlows,1);
   assert.equal(report.summary.lines.asserted,0);
@@ -76,7 +84,53 @@ try {
   query(third,"review","--flow",`${a.id}/return-value`);
   assert.equal(query(third).summary.lines.asserted,1);
   assert.equal(read(initialized.map).assertions[0].flows[0].nodes[0].at.text,"return 1;");
-  console.log(JSON.stringify({pilot:"assertion-map-cli",runs:3,assertions:1,creditedLines:1,inheritance:"unchanged reused; edited flow dirty until review",archivedSources:"preserved"}));
+  // A different test command starts its own map and cannot eclipse this suite.
+  requireSupercov(root, ["--", "node", "--test", "tests/core.test.js"]);
+  const focused = latestRun(root);
+  assert.equal(query(focused).inheritance.from, null);
+  const fourth = run();
+  assert.equal(query(fourth).inheritance.from, third);
+  assert.equal(query(fourth).summary.statements.asserted, 1);
+
+  // Newer malformed work stays untouched. An older fallback requires review.
+  writeFileSync(query(fourth).map, "{broken JSON");
+  const fallback = run();
+  const recovered = query(fallback);
+  assert.equal(recovered.inheritance.from, third);
+  assert.equal(recovered.inheritance.skipped[0].run, fourth);
+  assert.equal(recovered.summary.dirtyFlows, 1);
+  assert.equal(recovered.summary.statements.asserted, 0);
+  assert.match(requireSupercov(root, ["runs", fallback]).stdout, /Map reuse skipped 1 prior map/);
+  assert.equal(readFileSync(join(root, '.supercov/runs', fourth, 'assertions.json'), 'utf8'), '{broken JSON');
+  const stillDirty = run();
+  assert.equal(query(stillDirty).inheritance.from, fallback);
+  assert.equal(query(stillDirty).summary.dirtyFlows, 1, 'fallback review requirement persists');
+  query(stillDirty, "review", "--all");
+  assert.equal(query(stillDirty).summary.statements.asserted, 1);
+
+  // Exact moves remap both assertion and statement anchors automatically.
+  const testPath = join(root, 'tests/core.test.js');
+  const corePath = join(root, 'src/core.js');
+  writeFileSync(testPath, '\n' + readFileSync(testPath, 'utf8'));
+  writeFileSync(corePath, '\n' + readFileSync(corePath, 'utf8'));
+  const moved = run();
+  const movedReport = query(moved);
+  const movedMap = read(movedReport.map);
+  assert.equal(movedMap.assertions[0].id, a.id);
+  assert.equal(movedMap.assertions[0].at.line, 6);
+  assert.equal(movedMap.assertions[0].flows[0].nodes[0].at.line, 3);
+  assert.equal(movedReport.summary.statements.asserted, 1);
+
+  // Failed runs still have maps, but cannot inherit passing execution credit.
+  writeFileSync(corePath, readFileSync(corePath, 'utf8').replace('return 2 - 1;', 'return 2;'));
+  assert.notEqual(executeSupercov(root, ["--", "node", "--test"]).status, 0);
+  const failed = latestRun(root);
+  assert.equal(query(failed).inheritance.from, moved);
+  assert.equal(query(failed).summary.runPassed, false);
+  assert.equal(query(failed).summary.statements.asserted, 0);
+  assert.deepEqual(readFileSync(initialized.map), firstMapBytes);
+  assert.deepEqual(readFileSync(firstStatePath), firstStateBytes);
+  console.log(JSON.stringify({pilot:"assertion-map-cli",runs:9,assertions:1,creditedLines:1,inheritance:"unchanged reused; edited flow dirty until review",archivedSources:"preserved"}));
 } finally { rmSync(root,{recursive:true,force:true}); }
 
 const rustRoot = mkdtempSync(join(tmpdir(), "supercov-assertion-map-rust-"));
@@ -87,7 +141,7 @@ try {
   requireSupercov(rustRoot,["--","cargo","test"]);
   const run=latestRun(rustRoot);
   const queryRust=(...args)=>coverageQuery(rustRoot,run,"assertions",...args).data;
-  const init=queryRust("init");
+  const init=queryRust();
   const sites=queryRust("--view","assertions").items;
   assert.equal(sites.length,2);
   assert(sites.every(a=>a.observedPassingTests.length===1),JSON.stringify(sites));

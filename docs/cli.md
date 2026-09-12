@@ -72,7 +72,7 @@ npx supercov runs <run-id> [query] [options]
 | `kinds` | Group coverage by test level, such as unit or E2E |
 | `runners` | Group coverage by test runner |
 | `scope` | Review included, excluded, and ambiguous source files |
-| `assertions` | Initialize, validate, review and report agent-authored assertion maps |
+| `assertions` | Inspect, validate, review and report the automatically created assertion map |
 | `minimize` | Find a small test subset that preserves a coverage target |
 
 Common examples:

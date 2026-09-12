@@ -48,10 +48,11 @@ npx supercov -- bundle exec rspec
 
 ## Map what assertions check
 
-After a regular run, an agent can author the optional assertion map:
+Each normal test run creates an assertion map automatically. An agent can
+optionally fill in what the assertions check:
 
 ```sh
-npx supercov runs latest assertions init --json
+npx supercov runs latest assertions --json
 # Pin the returned run ID, edit assertions.json, then validate and acknowledge:
 npx supercov runs <run> assertions validate --json
 npx supercov runs <run> assertions review --all
@@ -59,8 +60,8 @@ npx supercov runs <run> assertions check --require-complete --require-observed -
 npx supercov runs <run>  # includes the assertion percentage in the regular report
 ```
 
-After code or tests change, run tests again and use `assertions init --from
-<previous-run>` to reuse the previous map and identify dirty flows. Rust owns
+After code or tests change, run the same test command again. Supercov reuses the
+newest available map for that command and language and identifies dirty flows. Rust owns
 validation, change tracking and reporting; the agent supplies semantic reasoning.
 The score is agent-assessed and separate from MC/DC. See
 [assertion maps](docs/assertion-maps.md) for the format and JS/TS limits, or run

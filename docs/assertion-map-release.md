@@ -2,12 +2,40 @@
 
 Release candidate **0.0.45** integrates main `1f393c4` and replaces the old
 assertion analyzer with agent-authored maps. The released Node registration,
-worker-attempt and source-location safeguards are retained. Candidate code is
-commit `0b6394a3c37a51a1d332c25b7e42789ef7fd4393` on
-`codex/agent-assertion-maps`. This checklist records preparation and validation;
-no release tag or publication has been made.
+worker-attempt and source-location safeguards are retained. The previously
+verified baseline is commit `0b6394a3c37a51a1d332c25b7e42789ef7fd4393` on
+`codex/agent-assertion-maps`. The branch now additionally creates and carries maps
+automatically; see the follow-up below. This checklist records preparation and
+validation; no release tag or publication has been made.
 
-## Verification, 2026-09-12
+## Automatic map creation follow-up, 2026-09-12
+
+Each normal run now publishes `assertions.json` and `assertions.state.json`
+together with its evidence. The newest available map with the same command and
+language is carried automatically. `assertions init` is removed. Fresh assertions
+start unmapped; exact moves retain identity; changed or ambiguous claims require
+review. Failed runs get maps without inheriting a passing score. If a newer map
+is malformed, an older fallback preserves work but requires review. Reports
+expose the map path, inheritance source and skipped-map diagnostics.
+
+`npm run check` passed after this change: 484 Rust tests, 22 runtime tests,
+all six JS/TS configurations, schema, embedded assets, formatting, clippy and
+package preflight. The six JS/TS configurations also passed on Node 22.23.1.
+The nine-run lifecycle regression checks automatic creation, unchanged reuse,
+command isolation, source relocation, dirty-state persistence, malformed-map
+fallback and failed runs. Old map and state files remain byte-for-byte unchanged.
+The publication tests exercise final-rename and invalid-input failure paths.
+
+A fresh Supergateway WebSocket lifecycle run, `run_1d377c69729e4e0d`, passed and
+automatically inherited the 544 assertion entries from `run_a7a997bb35c093ec`.
+No initialization command was used. Its 790 measured statement anchors resolve;
+the inventory is still unmapped and correctly reports 0% assertion coverage.
+
+The native package check for this follow-up is pending. The platform CI and
+native artifacts recorded below belong to the earlier baseline, not this change.
+Rebuild the release artifacts from the final selected commit before publishing.
+
+## Baseline verification, 2026-09-12
 
 Environment: macOS arm64, Node 24.18.0, Rust 1.95.0. The JS/TS runner matrix
 uses TypeScript 7.0.2, Vitest 4.1.11, Jest 30.5.1 and Playwright 1.62.1.
@@ -87,7 +115,9 @@ The native matrix above produced and verified the complete 0.0.45 artifact
 set from the corrected candidate. Publication remains a separate action:
 recheck that the version is unused, select the release commit on main, then
 follow the existing tag and trusted-publishing workflow. The validated
-workflow run can supply the 0.0.45 native artifacts. Do not reuse 0.0.44 binaries.
+workflow run records the baseline artifacts only. The automatic-map follow-up
+requires a fresh native artifact set from its final release commit. Do not reuse
+the baseline artifacts or 0.0.44 binaries.
 
 The support claim is an agent-authored assessment with mechanical bookkeeping
 and exact execution evidence. Optional, nested or unrecognized assertion forms

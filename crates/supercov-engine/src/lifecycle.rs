@@ -595,7 +595,7 @@ fn file_sha256(path: &Path) -> Result<[u8; 32], LifecycleError> {
     Ok(hash.finalize().into())
 }
 
-/// Publish both immutable run files with one final directory rename.
+/// Publish immutable run evidence and its initial assertion map/state together.
 pub fn publish_run(
     root: &Path,
     metadata: &RunMetadata,
@@ -648,6 +648,12 @@ pub(crate) fn publish_run_with_fault(
     let mut json = serde_json::to_vec_pretty(metadata).map_err(LifecycleError::Metadata)?;
     json.push(b'\n');
     atomic_write(root, &staging.join("run.json"), &json)?;
+    if let Err(reason) = crate::assertion_store::prepare_publication(root, &staging, metadata) {
+        let _ = remove_stored_tree_deferred(root, &staging);
+        return Err(LifecycleError::InvalidState(format!(
+            "assertion map publication: {reason}"
+        )));
+    }
     sync_directory(&staging)?;
     let runs = destination.parent().expect("runs parent");
     fs::create_dir_all(runs).map_err(|source| io_error(runs, source))?;
@@ -978,6 +984,24 @@ mod tests {
         }
     }
 
+    fn evidence(root: &Path) -> (PathBuf, u64) {
+        use crate::evidence_archive::{EvidenceArchiveEntry, write_archive};
+        let mut entries = ["manifest.json", "frontend.json", "coverage-model.json"]
+            .into_iter()
+            .map(|path| EvidenceArchiveEntry {
+                path: path.into(),
+                contents: b"{}".to_vec(),
+            })
+            .collect::<Vec<_>>();
+        let inputs =
+            crate::assertion_inputs::capture(root, "javascript", [PathBuf::from("src/index.js")])
+                .unwrap();
+        entries = crate::assertion_inputs::append(entries, &inputs).unwrap();
+        let path = root.join("evidence.gz");
+        let metadata = write_archive(entries, &path).unwrap();
+        (path, metadata.compressed_bytes)
+    }
+
     #[test]
     fn defers_only_owned_storage_and_sweeps_without_touching_source() {
         let root = project();
@@ -1023,16 +1047,17 @@ mod tests {
     fn publishes_both_required_files_with_one_visible_rename() {
         let root = project();
         let id = "2026-01-01T00-00-00-000Z";
-        let evidence = root.join("evidence.gz");
-        fs::write(&evidence, b"evidence").unwrap();
-        let published = publish_run(&root, &metadata(id, 8), &evidence).unwrap();
+        let (evidence, bytes) = evidence(&root);
+        let published = publish_run(&root, &metadata(id, bytes), &evidence).unwrap();
         assert!(published.join("run.json").is_file());
         assert_eq!(
             fs::read(published.join("evidence.raw.gz")).unwrap(),
-            b"evidence"
+            fs::read(&evidence).unwrap()
         );
+        assert!(published.join("assertions.json").is_file());
+        assert!(published.join("assertions.state.json").is_file());
         assert!(matches!(
-            publish_run(&root, &metadata(id, 8), &evidence),
+            publish_run(&root, &metadata(id, bytes), &evidence),
             Err(LifecycleError::PublicationExists(_))
         ));
         fs::remove_dir_all(root).unwrap();
@@ -1042,11 +1067,10 @@ mod tests {
     fn final_rename_failure_exposes_no_run_and_removes_staging() {
         let root = project();
         let id = "2026-01-01T00-00-00-000Z";
-        let evidence = root.join("evidence.gz");
-        fs::write(&evidence, b"evidence").unwrap();
+        let (evidence, bytes) = evidence(&root);
         let error = publish_run_with_fault(
             &root,
-            &metadata(id, 8),
+            &metadata(id, bytes),
             &evidence,
             Some(RunPublicationFault::FinalRename),
         )
@@ -1069,6 +1093,32 @@ mod tests {
     }
 
     #[test]
+    fn malformed_assertion_inputs_expose_no_partial_run() {
+        use crate::evidence_archive::{read_archive, write_archive};
+        let root = project();
+        let id = "2026-01-01T00-00-00-000Z";
+        let (evidence, _) = evidence(&root);
+        let mut entries = read_archive(&evidence).unwrap();
+        entries
+            .iter_mut()
+            .find(|e| e.path == crate::assertion_inputs::ARCHIVE_PATH)
+            .unwrap()
+            .contents = b"{broken".to_vec();
+        let raw = write_archive(entries, &evidence).unwrap();
+        let error = publish_run(&root, &metadata(id, raw.compressed_bytes), &evidence).unwrap_err();
+        assert!(error.to_string().contains("assertion map publication"));
+        assert!(!root.join(".supercov/runs").join(id).exists());
+        assert!(
+            !root
+                .join(".supercov/work")
+                .join(id)
+                .join("run-publication")
+                .exists()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn recovers_dead_unpublished_and_fully_published_runs_from_derived_paths() {
         let root = project();
         let dead = "2026-01-01T00-00-00-000Z";
@@ -1083,9 +1133,8 @@ mod tests {
             fs::create_dir_all(root.join(".supercov/evidence").join(id)).unwrap();
             write_run_state(&root, &state(&root, id, RunStateStatus::Testing, u32::MAX)).unwrap();
         }
-        let evidence = root.join("published.gz");
-        fs::write(&evidence, b"evidence").unwrap();
-        publish_run(&root, &metadata(published, 8), &evidence).unwrap();
+        let (evidence, bytes) = evidence(&root);
+        publish_run(&root, &metadata(published, bytes), &evidence).unwrap();
         assert_eq!(
             recover_abandoned_runs(&root, "recovered").unwrap(),
             [dead, published]

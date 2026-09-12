@@ -2095,7 +2095,7 @@ fn execute_public_query(
                         data.command.clone_from(&run.metadata.command);
                         if run.directory.join(supercov_engine::assertion_store::MAP_FILE).exists() {
                             data.assertion_coverage = Some(match supercov_engine::assertion_store::report(run) {
-                                Ok(report) => serde_json::json!({"available":true,"summary":report["summary"],"basis":report["basis"],"revision":report["revision"],"validationErrors":report["validationErrors"],"scope":"whole archived run; independent of structural query filters"}),
+                                Ok(report) => serde_json::json!({"available":true,"summary":report["summary"],"basis":report["basis"],"revision":report["revision"],"inheritance":report["inheritance"],"map":run.directory.join(supercov_engine::assertion_store::MAP_FILE),"validationErrors":report["validationErrors"],"scope":"whole archived run; independent of structural query filters"}),
                                 Err(error) => serde_json::json!({"available":false,"error":error}),
                             });
                         }

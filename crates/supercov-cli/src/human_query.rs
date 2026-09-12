@@ -1410,6 +1410,14 @@ fn assertion_summary_lines(report: &serde_json::Value) -> Vec<String> {
             summary["runPassed"]
         ));
     }
+    let skipped = report["inheritance"]["skipped"]
+        .as_array()
+        .map_or(0, Vec::len);
+    if skipped > 0 {
+        lines.push(format!(
+            "             Map reuse skipped {skipped} prior map(s); inspect the assertions report for details"
+        ));
+    }
     lines
 }
 
@@ -1437,6 +1445,9 @@ mod tests {
         let lines = assertion_summary_lines(&report);
         assert!(lines[1].contains("2 dirty flow(s)"));
         assert!(lines[2].contains("Review needed: 1 validation error(s), 1 scope change(s)"));
+        report["inheritance"] =
+            serde_json::json!({"from":null,"skipped":[{"run":"older","reason":"bad JSON"}]});
+        assert!(assertion_summary_lines(&report)[3].contains("Map reuse skipped 1 prior map(s)"));
         assert_eq!(
             assertion_summary_lines(&serde_json::json!({"available":false,"error":"bad JSON"})),
             vec!["  Assertions unavailable: bad JSON"]

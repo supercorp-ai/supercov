@@ -13,13 +13,12 @@ schema                      JSON Schema from Rust types; raw JSON without --json
 validate --file <path>       Standalone JSON syntax and field types (no run needed).
 
 Run actions:
-init [--from <older-run>]    Create assertions.json, or carry an older map.
 validate                    Check syntax, IDs, links, frozen references and state binding.
 review --all|--flow <A/F>    Record agent review (repeat --flow); not semantic proof.
 review --ack-scope          Acknowledge classified scope changes; combine with flows.
-inventory [--file <path>]  Recognized assertion locations in frozen inputs.
+inventory [--file <path>]   Optional raw list of assertions found in saved test code.
 files                       List frozen input paths and their byte sizes.
-source --file <path>        Frozen source lines; --offset is zero-based.
+source --file <path>        Read source saved at run time, not today's checkout.
 report [--view <view>]      summary (default), assertions, statements, tests,
                             creditedLines, unassertedLines; optional --file filter.
 check                       Fail on invalid references, dirty flows, failed run,
@@ -32,6 +31,8 @@ check                       Fail on invalid references, dirty flows, failed run,
 --offset <n> --limit <n>     Page inventory, source or report array views (limit 1..1000).
 --json                      Standard structured result envelope.
 
+Each new test run creates assertions.json and reuses the newest available map
+for the same command and language. No init step is needed.
 Edit the run's assertions.json directly, then validate, review and check.
 Exit 0 means the requested check passed; exit 2 means invalid input or an unmet gate.
 Pin a run ID while authoring. See docs/assertion-maps.md and docs/assertion-agent.md.
@@ -43,7 +44,6 @@ struct Options {
     require_observed: bool,
     archived: bool,
     minimum: Option<f64>,
-    from: Option<String>,
     file: Option<String>,
     view: String,
     flows: BTreeSet<String>,
@@ -59,7 +59,6 @@ fn parse(args: &[String]) -> Result<Options, String> {
         require_observed: false,
         archived: false,
         minimum: None,
-        from: None,
         file: None,
         view: "summary".into(),
         flows: BTreeSet::new(),
@@ -84,14 +83,13 @@ fn parse(args: &[String]) -> Result<Options, String> {
             "--require-observed" => o.require_observed = true,
             "--archived" => o.archived = true,
             "--ack-scope" => o.ack = true,
-            "--from" | "--file" | "--view" | "--flow" | "--offset" | "--limit" | "--min" => {
+            "--file" | "--view" | "--flow" | "--offset" | "--limit" | "--min" => {
                 let value = args
                     .next()
                     .filter(|v| !v.starts_with('-'))
                     .ok_or_else(|| format!("{arg} requires a value"))?;
                 match arg.as_str() {
                     "--min" => o.minimum = Some(value.parse().map_err(|_| "Invalid minimum")?),
-                    "--from" => o.from = Some(value.clone()),
                     "--file" => o.file = Some(value.clone()),
                     "--view" => o.view = value.clone(),
                     "--flow" => {
@@ -107,7 +105,7 @@ fn parse(args: &[String]) -> Result<Options, String> {
     }
     if !matches!(
         o.action.as_str(),
-        "report" | "init" | "review" | "validate" | "inventory" | "source" | "check" | "files"
+        "report" | "review" | "validate" | "inventory" | "source" | "check" | "files"
     ) {
         return Err("Unknown assertions action".into());
     }
@@ -124,7 +122,6 @@ fn parse(args: &[String]) -> Result<Options, String> {
         ("--require-complete", o.action == "check"),
         ("--require-observed", o.action == "check"),
         ("--archived", o.action == "check"),
-        ("--from", o.action == "init"),
         ("--all", o.action == "review"),
         ("--ack-scope", o.action == "review"),
         (
@@ -198,14 +195,6 @@ pub fn command(args: &[String]) -> ExitCode {
         let run = select_run(&inventory, Some(&args[0])).map_err(|e| e.to_string())?;
         let mut check_report = None;
         let mut data = match o.action.as_str() {
-            "init" => maps::initialize(
-                &root,
-                run,
-                o.from
-                    .as_ref()
-                    .map(|s| select_run(&inventory, Some(s)).map_err(|e| e.to_string()))
-                    .transpose()?,
-            )?,
             "review" => maps::acknowledge(&root, run, &o.flows, o.all, o.ack)?,
             "source" | "inventory" | "files" => {
                 let input = maps::load_inputs(run)?;
@@ -283,6 +272,7 @@ pub fn command(args: &[String]) -> ExitCode {
                     "validationErrors",
                     "limitations",
                     "revision",
+                    "inheritance",
                 ] {
                     data[key] = report[key].clone();
                 }
@@ -383,7 +373,7 @@ fn check_failures(report: &Value, working_tree: &Value, o: &Options) -> Vec<Stri
     }
     if !o.archived && working_tree["stale"] != false {
         failures.push(
-            "Working tree is stale or its integrity is unavailable; run tests and carry the map"
+            "Working tree is stale or its integrity is unavailable; rerun tests to refresh the map automatically"
                 .into(),
         );
     }
@@ -452,7 +442,7 @@ mod tests {
         for args in [
             vec!["review"],
             vec!["report", "--from", "old"],
-            vec!["init", "--flow", "a/f"],
+            vec!["init"],
             vec!["review", "--all", "--flow", "a/f"],
             vec!["source"],
             vec!["report", "--limit", "0"],

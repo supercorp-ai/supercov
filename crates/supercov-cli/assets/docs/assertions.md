@@ -7,10 +7,12 @@ percentage in the regular coverage report.
 
 ```sh supercov
 npx supercov -- npm test
-npx supercov runs latest assertions init --json
+npx supercov runs latest assertions --json
 ```
 
-Pin the run ID returned by `init`. Ask your agent to follow
+The run creates the map automatically, reusing the newest available map for the
+same test command and language. Pin the returned run ID and edit `data.map`.
+Ask your agent to follow
 `supercov docs assertion-agent`, read the frozen source, and complete the map.
 Then validate and acknowledge the reviewed flows:
 
@@ -65,8 +67,8 @@ whether a test needs another scenario or a stronger assertion. The model owns
 the semantic assessment; Supercov validates syntax, source references, evidence
 and freshness without reconstructing the reasoning.
 
-After changing code or tests, run the suite again and initialize its new map
-with `assertions init --from <previous-run>`. Unchanged entries carry forward;
+After changing code or tests, run the same suite command again. Its new map
+automatically carries forward unchanged entries;
 changed or ambiguous references stay dirty until reviewed. See the
 [map reference](assertion-maps.md) for the format, commands and limitations.
 

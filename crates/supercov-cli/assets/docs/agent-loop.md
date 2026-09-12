@@ -53,17 +53,17 @@ The `line` query is useful before writing a test because it shows which tests
 already reach that line. Extending a nearby test is often better than adding a
 duplicate.
 
-To inspect what tests assert, initialize the optional agent-authored map:
+Every new test run creates `assertions.json`. To investigate what tests assert:
 
 ```sh
-npx supercov runs latest assertions init --json
-npx supercov runs latest assertions inventory --json
+npx supercov runs latest assertions --json
+# Pin data.run and edit the file at data.map.
 ```
 
 Read the run's frozen sources, edit its `assertions.json`, declare credited nodes
 and broader watch inputs, then acknowledge reviewed flows with `assertions review
---all` or repeated `--flow ASSERTION/FLOW`. After the next normal run, use
-`assertions init --from <previous-run>` and repair only affected entries. Supercov
+--all` or repeated `--flow ASSERTION/FLOW`. After the next run of
+the same command, its map automatically inherits prior work; repair affected entries. Supercov
 validates references and freshness, while the agent owns semantic meaning.
 Run `supercov docs assertion-agent` for the full mapping instructions. Validate
 with `runs <run> assertions validate`, acknowledge reviewed flows, then use

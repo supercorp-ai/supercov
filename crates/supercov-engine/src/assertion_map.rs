@@ -238,6 +238,20 @@ pub struct State {
     pub evidence_digest: String,
     pub reviews: BTreeMap<String, Review>,
     pub scope_review: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inheritance: Option<Inheritance>,
+}
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Inheritance {
+    pub from: Option<String>,
+    pub skipped: Vec<SkippedMap>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkippedMap {
+    pub run: String,
+    pub reason: String,
 }
 pub fn flow_key(a: &Assertion, f: &Flow) -> String {
     format!("{}/{}", a.id, f.id)
@@ -272,6 +286,7 @@ pub fn seed(inputs: &Inputs, evidence_digest: &str) -> (AssertionMap, State) {
             evidence_digest: evidence_digest.into(),
             reviews: BTreeMap::new(),
             scope_review: BTreeSet::new(),
+            inheritance: None,
         },
     )
 }

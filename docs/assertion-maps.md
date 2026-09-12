@@ -1,7 +1,7 @@
 # Agent-authored assertion maps
 
 Run the normal test command through Supercov first. It collects structural
-coverage and freezes source inputs. An external coding agent can then edit one
+coverage, freezes source inputs and creates an assertion map. An external coding agent can then edit one
 run-owned `assertions.json`; Supercov has no embedded model and does not infer or
 reconstruct its semantic edges. This release work targets JavaScript and TypeScript. Format validation,
 review tracking and reporting all run in Rust.
@@ -10,10 +10,9 @@ review tracking and reporting all run in Rust.
 supercov -- npm test
 supercov runs --json
 # Choose a concrete run ID from the response:
-supercov runs <run> assertions init --json
-supercov runs <run> assertions inventory --limit 100 --json
+supercov runs <run> assertions --json
 supercov runs <run> assertions source --file src/example.ts --limit 100 --json
-# Edit the map path returned by init:
+# Edit the map path returned as data.map:
 supercov runs <run> assertions validate --json
 supercov runs <run> assertions review --all --json
 supercov runs <run> assertions check --require-complete --require-observed --json
@@ -33,7 +32,8 @@ lack this input snapshot need one regular test run with this version.
 ## Where the percentage appears
 
 `supercov runs <run>` (or `runs latest`) automatically shows an **Assertions**
-row beside Lines, Branches and MC/DC whenever the run has `assertions.json`.
+row beside Lines, Branches and MC/DC. New normal runs always have
+`assertions.json`; a fresh unmapped map starts at 0% when statements are measured.
 For example, a reviewed map crediting 32 of 40 measured statements displays:
 
 ```text
@@ -59,6 +59,24 @@ It does not rerun tests or invoke a model. This keeps edits visible immediately;
 there is no saved percentage to regenerate. Query time scales with archive and
 map size. The existing stale-source warning still applies to old runs; use
 `assertions check` to gate development against the current checkout.
+
+## Optional inspection commands
+
+The normal workflow needs no inventory-building command. The automatically
+created map already lists the recognized assertion sites.
+
+- `assertions inventory`: the raw list of assertion expressions recognized in
+  the saved test source, with exact locations and operation names. Use it to
+  compare the authored map against discovery; it does not trace flows or imply
+  the assertion executed. `report --view assertions` adds mapping/review status
+  and passing execution witnesses.
+- `assertions source --file src/example.ts`: numbered lines from the source
+  archived with this run, even if that file has since changed or been deleted.
+  This lets the agent trace the exact code that ran. `--offset` is zero-based.
+- `assertions files`: the available archived paths and their byte sizes.
+
+These read-only helpers are optional. The assertion map remains an ordinary JSON
+file that the agent edits directly.
 
 ## File format
 
@@ -118,7 +136,6 @@ assertion expression and operation that matches a passing runtime occurrence.
 
 ```sh
 supercov -- npm test
-supercov runs <run> assertions init --from <previous-run>
 supercov runs <run> assertions --view assertions --json
 # Repair only affected explanations/anchors in the new map, then:
 supercov runs <run> assertions review --flow a_example/return-value
@@ -126,9 +143,32 @@ supercov runs <run> assertions review --flow a_example/return-value
 supercov runs <run> assertions review --ack-scope
 ```
 
-Initialization is optional and explicit; it never overwrites an existing map or
-state. The previous run remains intact. Unchanged, unambiguous source fragments
-relocate and retain their IDs. Unique exact file renames work too. New assertions
+Map creation is automatic, including for failed test runs. The map and its
+Rust-owned review state are published together with the run, so an interrupted
+publication cannot expose a half-created map. Authoring the semantic flows
+remains optional; there is no `assertions init` command.
+
+Supercov selects the newest available map in this project's run store with the
+same test command (exact argument list) and language. A focused test command
+keeps a separate history from the full suite. Without an earlier compatible map,
+all recognized assertions start unmapped. A mapless older run is skipped. The
+previous run remains intact; new runs never modify its map or state. Finish
+reviewing the newest map before rerunning; later edits to older maps are not
+automatically merged into the newest history.
+
+`data.inheritance.from` identifies the selected run, or is null for a fresh map.
+If a newer candidate is malformed or has invalid state/evidence binding,
+Supercov tries an older one and records the errors in `data.inheritance.skipped`.
+Any inherited flows then require explicit review before credit can return.
+Existing dirty flags remain latched. If no candidate can be read, the new map
+starts unmapped and earlier files stay available for manual recovery.
+
+Only the map's reasoning and review metadata carry forward. Assertion
+occurrences and statement execution always come from the new run's evidence;
+a failed run never inherits a passing score. Merged runs have multiple source
+snapshots and are excluded; investigate their individual runs instead.
+
+Unchanged, unambiguous source fragments relocate and retain their IDs. Unique exact file renames work too. New assertions
 start unmapped. A sole changed/replacement assertion in a file retains its ID and
 explanation as a dirty review suggestion. Deleted or ambiguously matched assertions are retained
 with their full explanations in `retiredAssertions`; the agent can reuse those
@@ -141,9 +181,10 @@ clear its siblings. A failed reference check leaves the review state unchanged.
 
 Unassigned source changes enter `scopeReview`, which blocks score credit until
 the agent has classified them. Span comparison is deliberately conservative:
-multiple separated edits can produce extra scope-review work. Changed run
-commands, dependencies, configuration, instrumenter, language or captured
-environment digest dirty every flow. Environment values are not stored. Inputs
+multiple separated edits can produce extra scope-review work. Changed
+dependencies, configuration, instrumenter or captured environment digest dirty
+every inherited flow. A different command or language starts a
+separate map history. Environment values are not stored. Inputs
 outside the project's discovered source/configuration scope, external services
 and undeclared fixtures require the agent's attention; this is not dependency
 discovery.

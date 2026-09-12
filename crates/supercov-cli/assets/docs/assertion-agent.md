@@ -10,13 +10,13 @@ tracks evidence and changes. Read this guide with `supercov docs assertion-agent
    is no suitable fresh run. Use the full suite when you want a suite-wide score.
 2. Run `supercov runs --json` and pin a concrete run ID. Do not keep using `latest`
    while editing, because another run can change its meaning.
-3. Run `supercov runs <run> assertions init --json`. For an incremental
-   investigation, use `init --from <previous-run>` instead. Edit the map path in
-   the response. Keep the old run and its map.
+3. Run `supercov runs <run> assertions --json`. The run already created its map,
+   automatically carrying the newest available map for the same command and
+   language. Edit `data.map`; read `data.inheritance` for the source run and any
+   skipped-map errors. Keep the old run and its map.
 4. Read `supercov docs assertion-maps` and page all of:
 
    ```sh
-   supercov runs <run> assertions inventory --limit 100 --json
    supercov runs <run> assertions report --view assertions --limit 100 --json
    supercov runs <run> assertions report --view statements --limit 100 --json
    supercov runs <run> assertions report --view tests --limit 100 --json
@@ -30,7 +30,12 @@ tracks evidence and changes. Read this guide with `supercov docs assertion-agent
 
 Read the archived files with
 `supercov runs <run> assertions source --file <path> --offset 0 --limit 100 --json`.
-Use `assertions files` to discover frozen paths. Add `--file <path>` to inventory
+This command reads the archived source as it was when the tests ran, with line
+numbers; it never reads today's checkout. Use `assertions files` to discover
+frozen paths. `assertions inventory` is an optional raw discovery view of the
+assertion calls recognized in saved test code; those sites already seed the map.
+It is useful when checking missing or unsupported assertion forms.
+Add `--file <path>` to inventory
 or assertion/statement report pages to focus an investigation; summary counts
 still cover the whole run. The file path is project-relative. Use frozen sources even when today's checkout
 has changed. Read test setup, input values, mocks, callbacks, called functions,
@@ -38,7 +43,7 @@ branches and any helpers that matter to this assertion.
 
 For each assertion:
 
-- Preserve its ID and exact `at` anchor from `init`/`inventory`. It identifies the
+- Preserve its ID and exact `at` anchor from the automatically created map. It identifies the
   complete assertion call, usually without a trailing semicolon. Do not replace
   it with a test declaration or another expression at the same coordinate.
 - State the property actually checked in `observes`: equality of a field, array
@@ -104,7 +109,7 @@ claims. A green check is meaningful only alongside honest authored reasoning.
 
 ## Continue after code or test changes
 
-Run tests again and initialize the new map with `--from <old-run>`. Read the new
+Run the same test command again. Its new map automatically inherits prior work. Read the new
 summary, assertion rows, new sites and `retiredAssertions`. Retain unchanged
 explanations. Repair dirty flow anchors and reasoning; resolve ambiguous identity
 suggestions using the old explanation and the new test. A changed assertion can

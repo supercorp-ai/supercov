@@ -6,6 +6,8 @@
 
 **Added**
 
+- Each normal test run creates `assertions.json`, automatically reusing the newest compatible map and preserving dirty review work. Maps publish atomically with run evidence; `assertions init` is removed.
+
 - The regular coverage summary displays the current assertion percentage beside Lines, Branches and MC/DC, with incomplete-map and review status. All public guides are bundled in npm and native installs.
 - JS/TS assertion maps gain a Rust-generated editor schema, JSON-path syntax diagnostics, CI gates for freshness/completion/evidence/percentage, exact statement views and bundled agent instructions. Playwright fixture and CommonJS `expect` inventories match instrumentation; awaited operands now preserve evaluation order while recording exact assertion identity.
 - Replace experimental assertion inference with Rust-managed, agent-authored `assertions.json`: frozen run inputs, incremental carry, explicit review and separate assertion coverage. Ordinary phase links no longer award assertion credit.
