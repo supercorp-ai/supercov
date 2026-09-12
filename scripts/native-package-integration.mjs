@@ -144,8 +144,10 @@ try {
   for (const typescript of [false, true]) {
     assertionMapSmoke({ root: resolve(consumer, typescript ? 'map-ts' : 'map-js'), launcher: executable, env: consumerEnv, typescript });
   }
-  for (const topic of ['assertion-maps', 'assertion-agent']) {
-    assert.match(run(process.execPath, [executable, 'docs', topic], { cwd: consumer, env: consumerEnv }), /assertions/);
+  for (const file of primary.files.filter(file => file.startsWith('docs/'))) {
+    const topic = file.slice(5, -3);
+    assert.equal(run(process.execPath, [executable, 'docs', topic], { cwd: consumer, env: consumerEnv }),
+      readFileSync(resolve(consumer, 'node_modules/supercov', file), 'utf8').trim());
   }
   const installedSchema = JSON.parse(readFileSync(resolve(consumer, 'node_modules/supercov/schemas/assertions.schema.json'), 'utf8'));
   assert.deepEqual(JSON.parse(run(process.execPath, [executable, 'assertions', 'schema'], { cwd: consumer, env: consumerEnv })), installedSchema);

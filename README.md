@@ -1,6 +1,6 @@
-![Supercov: Coverage for coding agents working overnight](https://raw.githubusercontent.com/supercorp-ai/supercov/main/supercov.jpg)
+![Coverage for coding agents and software factories 🌙](https://raw.githubusercontent.com/supercorp-ai/supercov/main/supercov.jpg)
 
-**Coverage for coding agents working overnight.**
+**Coverage for coding agents and software factories 🌙**
 
 **Supercov gives your coding agent the next useful test to write.** It runs the test command you already use, records local coverage evidence, and turns uncovered paths into small, actionable queries. Your agent writes a focused test, reruns the suite, proves what improved, and keeps going while useful gaps remain.
 
@@ -9,6 +9,9 @@ No account, config file, import, custom reporter, or hosted service is required.
 [Website](https://supercov.com) · [Documentation](https://supercov.com/docs) · [npm](https://www.npmjs.com/package/supercov) · [GitHub](https://github.com/supercorp-ai/supercov)
 
 Supported by [Supercorp](https://supercorp.ai).
+
+[Agent workflow](https://supercov.com/docs/agent-loop): ask your coding agent
+to add a test in your own project, with a recorded example to follow along.
 
 ## Start with the suite you already have
 
@@ -53,7 +56,7 @@ npx supercov runs latest assertions init --json
 npx supercov runs <run> assertions validate --json
 npx supercov runs <run> assertions review --all
 npx supercov runs <run> assertions check --require-complete --require-observed --json
-npx supercov runs <run> assertions
+npx supercov runs <run>  # includes the assertion percentage in the regular report
 ```
 
 After code or tests change, run tests again and use `assertions init --from
@@ -224,6 +227,7 @@ npx supercov clean             # remove all runs and the build cache
 
 - [Getting started](https://supercov.com/docs/getting-started)
 - [Agent workflow](https://supercov.com/docs/agent-loop)
+- [Understanding assertions](docs/assertions.md)
 - [Troubleshooting](https://supercov.com/docs/troubleshooting)
 - [CLI reference](https://supercov.com/docs/cli)
 - [Supported languages and test suites](https://supercov.com/docs/supported-suites)

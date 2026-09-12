@@ -26,11 +26,22 @@ function sourceFiles(root, extension) {
 assert.deepEqual(manifest.files, [
   "bin",
   "runtime/javascript",
+  "docs/getting-started.md",
   "docs/agent-loop.md",
+  "docs/assertions.md",
+  "docs/assertion-evidence.md",
   "docs/assertion-maps.md",
   "docs/assertion-agent.md",
+  "docs/troubleshooting.md",
+  "docs/cli.md",
+  "docs/coverage-model.md",
+  "docs/evidence.md",
+  "docs/supported-suites.md",
+  "docs/verification.md",
+  "docs/performance.md",
+  "docs/workspace-isolation.md",
   "schemas",
-  "README.md",
+  "README.md"
 ]);
 assert.equal(
   manifest.dependencies,

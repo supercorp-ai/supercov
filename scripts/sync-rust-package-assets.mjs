@@ -6,8 +6,20 @@ import { dirname, resolve } from "node:path";
 
 const repository = resolve(import.meta.dirname, "..");
 const mappings = [
+  ["docs/getting-started.md", "crates/supercov-cli/assets/docs/getting-started.md"],
+  ["docs/agent-loop.md", "crates/supercov-cli/assets/docs/agent-loop.md"],
+  ["docs/assertions.md", "crates/supercov-cli/assets/docs/assertions.md"],
+  ["docs/assertion-evidence.md", "crates/supercov-cli/assets/docs/assertion-evidence.md"],
   ["docs/assertion-maps.md", "crates/supercov-cli/assets/docs/assertion-maps.md"],
   ["docs/assertion-agent.md", "crates/supercov-cli/assets/docs/assertion-agent.md"],
+  ["docs/troubleshooting.md", "crates/supercov-cli/assets/docs/troubleshooting.md"],
+  ["docs/cli.md", "crates/supercov-cli/assets/docs/cli.md"],
+  ["docs/coverage-model.md", "crates/supercov-cli/assets/docs/coverage-model.md"],
+  ["docs/evidence.md", "crates/supercov-cli/assets/docs/evidence.md"],
+  ["docs/supported-suites.md", "crates/supercov-cli/assets/docs/supported-suites.md"],
+  ["docs/verification.md", "crates/supercov-cli/assets/docs/verification.md"],
+  ["docs/performance.md", "crates/supercov-cli/assets/docs/performance.md"],
+  ["docs/workspace-isolation.md", "crates/supercov-cli/assets/docs/workspace-isolation.md"],
   ["contracts/v1/contract.json", "crates/supercov-contracts/assets/v1/contract.json"],
   ["contracts/probe-v2/contract.json", "crates/supercov-contracts/assets/probe-v2/contract.json"],
   ["contracts/frontend-v2/contract.json", "crates/supercov-contracts/assets/frontend-v2/contract.json"],

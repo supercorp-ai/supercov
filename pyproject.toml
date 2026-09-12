@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "supercov-cli"
 dynamic = ["version"]
-description = "Zero-configuration, runner-aware structural and MC/DC coverage"
+description = "Coverage for coding agents and software factories 🌙"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"

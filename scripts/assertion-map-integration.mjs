@@ -16,6 +16,7 @@ try {
   writeFileSync(join(root, "tests/core.test.js"), "import assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { value } from '../src/core.js';\ntest('value', () => {\n  assert.equal(value(), 1);\n});\n");
   const first = run();
   assert.equal(coverageQuery(root, first).data.confidence.lines.asserted, 0);
+  assert.equal(coverageQuery(root, first).data.assertionCoverage, undefined);
   const initialized = query(first, "init");
   const map = read(initialized.map);
   assert.equal(map.assertions.length, 1);
@@ -28,6 +29,7 @@ try {
   ], edges: [], countsAsAsserted: ["return"], watch: [{kind:"file", file:"src/core.js"}, {kind:"file", file:"tests/core.test.js"}] }];
   write(initialized.map, map);
   assert.equal(query(first).summary.lines.asserted, 0, "editing a map is not review acknowledgement");
+  assert.match(requireSupercov(root, ["runs", first]).stdout, /Assertions 0\.00% \(0\/1\)/);
   query(first, "review", "--all");
   let report = query(first);
   assert.equal(report.summary.lines.asserted, 1, JSON.stringify(report));
@@ -35,6 +37,23 @@ try {
   assert.equal(report.summary.dirtyFlows, 0);
   assert.equal(query(first, "--view", "creditedLines").items[0].assertions[0], a.id);
   assert.equal(coverageQuery(root, first).data.assertionCoverage.summary.lines.asserted, 1);
+  const regular = coverageQuery(root, first).data.assertionCoverage;
+  assert.equal(regular.summary.statements.percentage, 100);
+  assert.equal(regular.revision, report.revision);
+  assert.match(requireSupercov(root, ["runs", first]).stdout, /Assertions 100\.00% \(1\/1\)/);
+  // The regular report must refresh after map edits without rerunning tests.
+  a.flows[0].explanation += " Reviewed again.";
+  write(initialized.map, map);
+  const edited = coverageQuery(root, first).data.assertionCoverage;
+  assert.notEqual(edited.revision, regular.revision);
+  assert.equal(edited.summary.statements.percentage, 0);
+  assert.match(requireSupercov(root, ["runs", first]).stdout, /1 dirty flow\(s\)/);
+  writeFileSync(initialized.map, "{broken JSON");
+  assert.equal(coverageQuery(root, first).data.assertionCoverage.available, false);
+  assert.match(requireSupercov(root, ["runs", first]).stdout, /Assertions unavailable: assertions.json/);
+  write(initialized.map, map);
+  query(first, "review", "--all");
+  assert.equal(coverageQuery(root, first).data.assertionCoverage.summary.statements.percentage, 100);
   const frozen = query(first, "source", "--file", "src/core.js").items;
   assert.equal(frozen[1].text, "  return 1;");
   assert.notEqual(executeSupercov(root, ["runs",first,"assertions","init"]).status, 0, "init must preserve authored work");

@@ -30,6 +30,36 @@ replaces the immutable archive or MC/DC evidence. Source is stored once in the
 compressed archive's `assertion-inputs.json`, not once per flow. Old runs that
 lack this input snapshot need one regular test run with this version.
 
+## Where the percentage appears
+
+`supercov runs <run>` (or `runs latest`) automatically shows an **Assertions**
+row beside Lines, Branches and MC/DC whenever the run has `assertions.json`.
+For example, a reviewed map crediting 32 of 40 measured statements displays:
+
+```text
+  Assertions 80.00% (32/40) — agent-assessed statements, whole archived run
+```
+
+The numerator is the union of explicitly credited measured statements, so
+multiple assertions checking the same statement do not inflate the score.
+Unmapped, dirty or execution-ineligible flows do not count. The denominator is
+all measured statements, including statements no test reached. A run with no
+measured statements shows `n/a`, never 100%. Invalid JSON shows an unavailable
+message. Incomplete maps and pending review are visible below the row.
+
+JSON consumers read
+`data.assertionCoverage.summary.statements.{asserted,total,percentage}`.
+`revision` changes with map, review state or evidence. The detailed
+`runs <run> assertions` command exposes the same summary and pageable statement
+and assertion views. All assertion scores describe the whole archived run,
+independently of structural query filters.
+
+The CLI recalculates from local map, state and archived evidence on each query.
+It does not rerun tests or invoke a model. This keeps edits visible immediately;
+there is no saved percentage to regenerate. Query time scales with archive and
+map size. The existing stale-source warning still applies to old runs; use
+`assertions check` to gate development against the current checkout.
+
 ## File format
 
 This example shows a return-value observation. Every `text` must match that

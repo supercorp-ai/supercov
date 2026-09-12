@@ -1,7 +1,7 @@
 {
   "name": "supercov",
-  "version": "0.0.42",
-  "description": "Zero-edit, runner-aware coverage completeness for JavaScript, TypeScript, Rust, Python, and Ruby test suites",
+  "version": "0.0.44",
+  "description": "Coverage for coding agents and software factories \ud83c\udf19",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -15,9 +15,20 @@
   "files": [
     "bin",
     "runtime/javascript",
+    "docs/getting-started.md",
     "docs/agent-loop.md",
+    "docs/assertions.md",
+    "docs/assertion-evidence.md",
     "docs/assertion-maps.md",
     "docs/assertion-agent.md",
+    "docs/troubleshooting.md",
+    "docs/cli.md",
+    "docs/coverage-model.md",
+    "docs/evidence.md",
+    "docs/supported-suites.md",
+    "docs/verification.md",
+    "docs/performance.md",
+    "docs/workspace-isolation.md",
     "schemas",
     "README.md"
   ],
@@ -81,14 +92,14 @@
     "sync:assertion-schema": "cargo build -p supercov && node scripts/assertion-map-schema.mjs"
   },
   "optionalDependencies": {
-    "@supercov/cli-darwin-arm64": "0.0.42",
-    "@supercov/cli-darwin-x64": "0.0.42",
-    "@supercov/cli-linux-arm64-gnu": "0.0.42",
-    "@supercov/cli-linux-arm64-musl": "0.0.42",
-    "@supercov/cli-linux-x64-gnu": "0.0.42",
-    "@supercov/cli-linux-x64-musl": "0.0.42",
-    "@supercov/cli-win32-arm64": "0.0.42",
-    "@supercov/cli-win32-x64": "0.0.42"
+    "@supercov/cli-darwin-arm64": "0.0.44",
+    "@supercov/cli-darwin-x64": "0.0.44",
+    "@supercov/cli-linux-arm64-gnu": "0.0.44",
+    "@supercov/cli-linux-arm64-musl": "0.0.44",
+    "@supercov/cli-linux-x64-gnu": "0.0.44",
+    "@supercov/cli-linux-x64-musl": "0.0.44",
+    "@supercov/cli-win32-arm64": "0.0.44",
+    "@supercov/cli-win32-x64": "0.0.44"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.55.0",

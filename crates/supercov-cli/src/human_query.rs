@@ -528,15 +528,7 @@ fn render_coverage(request: &IndexedQueryRequest, output: &IndexedQueryOutput) -
                 ),
             ]);
             if let Some(assertions) = &data.assertion_coverage {
-                if let Some(pct) = assertions["summary"]["statements"]["percentage"].as_f64() {
-                    lines.push(format!("  Assertions {:.1}% ({}/{}) — agent-assessed statements, whole archived run; {} dirty flow(s)", pct,
-                        assertions["summary"]["statements"]["asserted"], assertions["summary"]["statements"]["total"], assertions["summary"]["dirtyFlows"]));
-                } else {
-                    lines.push(format!(
-                        "  Assertions unavailable: {}",
-                        assertions.get("error").unwrap_or(&serde_json::Value::Null)
-                    ));
-                }
+                lines.extend(assertion_summary_lines(assertions));
             }
             if data.coverage_by_kind.iter().any(|kind| kind.tests > 0) {
                 lines.extend([String::new(), "By test kind".into()]);
@@ -1388,9 +1380,68 @@ pub fn render_human(invocation: &PublicQueryInvocation, output: &PublicQueryOutp
     }
 }
 
+fn assertion_summary_lines(report: &serde_json::Value) -> Vec<String> {
+    if let Some(error) = report["error"].as_str() {
+        return vec![format!("  Assertions unavailable: {error}")];
+    }
+    let summary = &report["summary"];
+    let statements = &summary["statements"];
+    let score = match statements["percentage"].as_f64() {
+        Some(pct) => format!(
+            "{pct:.2}% ({}/{})",
+            statements["asserted"], statements["total"]
+        ),
+        None => "n/a (no measured statements)".into(),
+    };
+    let mut lines = vec![format!(
+        "  Assertions {score} — agent-assessed statements, whole archived run"
+    )];
+    if summary["inventoryMappingComplete"] != true {
+        lines.push(format!(
+            "             Map incomplete; {} unmapped assertion(s), {} missing site(s), {} dirty flow(s)",
+            summary["unmappedAssertions"], summary["missingInventoryAssertions"], summary["dirtyFlows"]
+        ));
+    }
+    let errors = report["validationErrors"].as_array().map_or(0, Vec::len);
+    let scope = summary["scopeReview"].as_array().map_or(0, Vec::len);
+    if errors > 0 || scope > 0 || summary["runPassed"] == false {
+        lines.push(format!(
+            "             Review needed: {errors} validation error(s), {scope} scope change(s); run passed={}",
+            summary["runPassed"]
+        ));
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assertion_summary_distinguishes_scores_empty_denominators_and_invalid_maps() {
+        let mut report = serde_json::json!({"summary": {
+            "statements": {"asserted": 1, "total": 4, "percentage": 25.0},
+            "inventoryMappingComplete": true, "runPassed": true
+        }});
+        assert_eq!(
+            assertion_summary_lines(&report),
+            vec!["  Assertions 25.00% (1/4) — agent-assessed statements, whole archived run"]
+        );
+        report["summary"]["statements"] =
+            serde_json::json!({"asserted":0,"total":0,"percentage":null});
+        assert!(assertion_summary_lines(&report)[0].contains("n/a (no measured statements)"));
+        report["summary"]["inventoryMappingComplete"] = false.into();
+        report["summary"]["dirtyFlows"] = 2.into();
+        report["summary"]["scopeReview"] = serde_json::json!(["tests/a.js"]);
+        report["validationErrors"] = serde_json::json!(["bad anchor"]);
+        let lines = assertion_summary_lines(&report);
+        assert!(lines[1].contains("2 dirty flow(s)"));
+        assert!(lines[2].contains("Review needed: 1 validation error(s), 1 scope change(s)"));
+        assert_eq!(
+            assertion_summary_lines(&serde_json::json!({"available":false,"error":"bad JSON"})),
+            vec!["  Assertions unavailable: bad JSON"]
+        );
+    }
 
     fn request() -> IndexedQueryRequest {
         IndexedQueryRequest {

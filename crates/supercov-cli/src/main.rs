@@ -84,6 +84,8 @@ Guides:
 const DOC_TOPICS: &[&str] = &[
     "getting-started",
     "agent-loop",
+    "assertions",
+    "assertion-evidence",
     "assertion-maps",
     "assertion-agent",
     "troubleshooting",
@@ -398,8 +400,20 @@ fn docs_command(arguments: Vec<String>) -> ExitCode {
         return ExitCode::from(2);
     }
     let embedded = match topic.as_str() {
+        "getting-started" => Some(include_str!("../assets/docs/getting-started.md")),
+        "agent-loop" => Some(include_str!("../assets/docs/agent-loop.md")),
+        "assertions" => Some(include_str!("../assets/docs/assertions.md")),
+        "assertion-evidence" => Some(include_str!("../assets/docs/assertion-evidence.md")),
         "assertion-maps" => Some(include_str!("../assets/docs/assertion-maps.md")),
         "assertion-agent" => Some(include_str!("../assets/docs/assertion-agent.md")),
+        "troubleshooting" => Some(include_str!("../assets/docs/troubleshooting.md")),
+        "cli" => Some(include_str!("../assets/docs/cli.md")),
+        "coverage-model" => Some(include_str!("../assets/docs/coverage-model.md")),
+        "evidence" => Some(include_str!("../assets/docs/evidence.md")),
+        "supported-suites" => Some(include_str!("../assets/docs/supported-suites.md")),
+        "verification" => Some(include_str!("../assets/docs/verification.md")),
+        "performance" => Some(include_str!("../assets/docs/performance.md")),
+        "workspace-isolation" => Some(include_str!("../assets/docs/workspace-isolation.md")),
         _ => None,
     };
     if let Some(markdown) = embedded {
@@ -2081,7 +2095,7 @@ fn execute_public_query(
                         data.command.clone_from(&run.metadata.command);
                         if run.directory.join(supercov_engine::assertion_store::MAP_FILE).exists() {
                             data.assertion_coverage = Some(match supercov_engine::assertion_store::report(run) {
-                                Ok(report) => serde_json::json!({"summary":report["summary"],"basis":report["basis"],"validationErrors":report["validationErrors"],"scope":"whole archived run; independent of structural query filters"}),
+                                Ok(report) => serde_json::json!({"available":true,"summary":report["summary"],"basis":report["basis"],"revision":report["revision"],"validationErrors":report["validationErrors"],"scope":"whole archived run; independent of structural query filters"}),
                                 Err(error) => serde_json::json!({"available":false,"error":error}),
                             });
                         }

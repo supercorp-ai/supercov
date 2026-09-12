@@ -6,22 +6,36 @@
 
 - JS/TS assertion maps gain a Rust-generated editor schema, JSON-path syntax diagnostics, CI gates for freshness/completion/evidence/percentage, exact statement views and bundled agent instructions. Playwright fixture and CommonJS `expect` inventories match instrumentation; awaited operands now preserve evaluation order while recording exact assertion identity.
 - Replace experimental assertion inference with Rust-managed, agent-authored `assertions.json`: frozen run inputs, incremental carry, explicit review and separate assertion coverage. Ordinary phase links no longer award assertion credit.
-- On Windows, the Rust test processes are placed in a Job Object that ends them when Supercov ends, however it ends.
-- `npm run oracle:rust` compares Rust coverage per file against `cargo llvm-cov` over 26 crates and flags the differences.
-
-**Changed**
-
-- Ruby on 3.4+ reads line events alone from `Coverage`. Sampling its branch and method tables at every test phase was 80% of the time a Ruby suite spent under Supercov (five samples per test at ~2 ms each with 550 files loaded); a branch body's or method body's first statement now proves the branch, method and decision outcome, and the rest is probed. Coverage numbers are unchanged; Ruby 3.3 keeps the old path.
+## 0.0.44
 
 **Fixed**
 
-- Rust: `cargo test foo`, `-- --skip name`, `-- --exact name` and `-- --ignored` were parsed and never applied; Supercov ran every test. The oracle caught it on tokio.
-- A SIGTERM, SIGHUP or SIGINT to Supercov no longer leaves its current Rust test process running.
-- A Rust function's obligation is reported at its `fn` line, not at its doc comment.
-- Ruby test-unit: the adapter attached before test-unit had loaded `TestResult`, so its result hooks never installed — a failing test was reported as passed, and every run read Incomplete with a blocking limitation.
-- Found by sweeping Rails, Rack, RSpec, Minitest, test-unit and Cucumber (4,332 files) with the probes: `@@var ||= x` raised under measurement because the probe read the class variable first; a file that needed no insertions was compiled as ASCII-8BIT and lost its UTF-8 regexps and literals; a `case/in` clause with a guard and no body did not compile with its probes; the arm of an `if x and false` or `if x or true`, which Ruby never compiles, counted as uncoverable code.
-- Ruby code inside a `Ractor.new` block used to raise under Supercov, because a probe there reads a global a non-main Ractor cannot see. Such blocks now get no probes; their lines are still counted and what only a probe could prove is declared unmeasured at the block.
-- Jest suites had no per-test identity in this frontend: every line was run-level "background" and nothing linked to an assertion, while the docs said "exact per test". A Jest run now gets its own configuration (the user's, read the way Jest reads it, plus Supercov's adapter and reporter), exact test identity including `test.each`, outcomes from the reporter, and assertion phases for Jest's global `expect`.
+- Repeated Node test registrations no longer overwrite one another's evidence. Same-name loop entries, nested subtests and worker executions retain distinct attempts. Rerun tests to collect evidence missing from older archives.
+- Preserve test provenance in paths containing parentheses and retain passed tests whose source registration cannot be resolved. Unsupported assertion operands report analysis limits instead of misleading missing-test claims.
+- Bind awaited native assertions to their own source witnesses. Resolve native assertion imports and distinguish checked operands from diagnostic arguments, self-comparisons and shared-input comparisons.
+
+**Added**
+
+- Query-time analysis of bounded console-mock histories, selected counts and payloads, primitive decisions, direct returns and synchronous exception completion. Inline `observes` hints can guide supported checks against an existing passing assertion; they do not change test outcomes or replace missing assertions.
+- Decision evidence distinguishes bounded source-model results from branch-observation heuristics. Unsupported cases remain unresolved; assertion evidence is not a global assertion score or a guarantee that arbitrary edits are safe.
+
+## 0.0.43
+
+**Added**
+
+- npm JS/TS assertion evidence: `runs <run> assertions`, pageable `--evidence`, and validated `--pragmas` with passing-assertion witnesses. Supports TypeScript 5.8.3 and native 7.0.2 across supported platforms, including Alpine and Windows. Source/compiler freshness is checked. Existing probes are retained; results are candidates, not a verified safety percentage.
+- Python and Ruby link pre-assertion execution evidence to passing assertions: pytest, unittest, Minitest, RSpec, Cucumber and test-unit.
+- A reproducible checkout walkthrough demonstrates coverage gaps and stronger assertions. Public guides ship with installed packages.
+
+**Changed**
+
+- Ruby 3.4+ avoids repeated branch/method-table sampling without changing coverage results; Ruby 3.3 retains its existing path.
+
+**Fixed**
+
+- Rust test filters are honored, function locations exclude doc comments, and interrupted runs clean up test processes, including through Windows Job Objects.
+- Ruby test-unit outcomes, class-variable assignments, UTF-8 source, guarded pattern matching and constant boolean arms are handled correctly. Ractor blocks retain line coverage with explicit probe limitations.
+- Jest preserves user configuration and records exact per-test identities, parameterized tests, retries, final outcomes and assertion phases.
 
 ## 0.0.42
 

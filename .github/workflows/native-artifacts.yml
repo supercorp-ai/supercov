@@ -103,6 +103,18 @@ jobs:
       - name: Packed install, real JS/TS runs and assertion map gates
         if: matrix.packedInstall
         run: node scripts/native-package-integration.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }}
+      - name: JS/TS assertion maps on Alpine
+        if: matrix.musl
+        shell: bash
+        run: |
+          git archive HEAD | docker run --rm -i \
+            --mount "type=bind,source=$PWD/target/${{ matrix.target }}/release/${{ matrix.executable }},target=/supercov,readonly" \
+            node:24-alpine sh -ec '
+              mkdir /workspace
+              tar -xf - -C /workspace
+              cd /workspace
+              node scripts/assertion-map-alpine-integration.mjs /supercov
+            '
       - name: Stage native package
         run: node scripts/package-native.mjs --target ${{ matrix.target }} --binary target/${{ matrix.target }}/release/${{ matrix.executable }} --out native-dist
       - name: Pack native package
