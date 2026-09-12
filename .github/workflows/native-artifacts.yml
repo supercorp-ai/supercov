@@ -91,6 +91,9 @@ jobs:
       - name: Verify Windows npm command invocation before compiling
         if: runner.os == 'Windows'
         run: node scripts/native-package-integration.mjs --npm-preflight
+      - name: Verify Windows frozen-input path normalization
+        if: runner.os == 'Windows'
+        run: cargo test --target ${{ matrix.target }} -p supercov-engine --test assertion_maps frozen_inputs_accept_absolute_relative_and_windows_verbatim_paths_once
       - name: Build native binary
         if: matrix.musl != true && !matrix.glibc
         run: cargo build --release --target ${{ matrix.target }} -p supercov

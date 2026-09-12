@@ -3,6 +3,7 @@
 use crate::{
     assertion_map::{Anchor, Files, Inputs, InventorySite, local_path},
     evidence_archive::EvidenceArchiveEntry,
+    workspace::{canonicalize_simplified, simplified},
 };
 use std::{
     collections::BTreeSet,
@@ -26,7 +27,7 @@ pub fn capture_with_expect_modules(
     paths: impl IntoIterator<Item = PathBuf>,
     expect_modules: &[String],
 ) -> Result<Inputs, String> {
-    let root = root.canonicalize().map_err(|e| e.to_string())?;
+    let root = canonicalize_simplified(root).map_err(|e| e.to_string())?;
     // Store only a digest of environment inputs, never their values. Engine
     // run IDs, working directories and shell nesting are not semantic inputs.
     let environment = std::env::vars()
@@ -40,23 +41,25 @@ pub fn capture_with_expect_modules(
     if language == "javascript" {
         inputs.limitations.push("Optional assertion calls are inventoried but currently have no injected phase. Unrecognized custom assertion wrappers and dynamically selected matchers may be absent. Use check --require-observed to detect inventoried sites without passing evidence.".into());
     }
-    for path in paths.into_iter().collect::<BTreeSet<_>>() {
+    for path in paths.into_iter().map(simplified).collect::<BTreeSet<_>>() {
         let full = root.join(&path);
         if !full.exists() {
             continue;
         }
         let relative = full
             .strip_prefix(&root)
-            .map_err(|e| e.to_string())?
+            .map_err(|_| format!("assertion input outside project: {}", full.display()))?
             .to_string_lossy()
             .replace('\\', "/");
         if !local_path(&relative)
-            || !full
-                .canonicalize()
+            || !canonicalize_simplified(&full)
                 .map_err(|e| e.to_string())?
                 .starts_with(&root)
         {
             return Err(format!("assertion input outside project: {relative}"));
+        }
+        if inputs.files.contains_key(&relative) {
+            continue;
         }
         let bytes = fs::read(&full).map_err(|e| format!("{relative}: {e}"))?;
         let Ok(text) = String::from_utf8(bytes) else {
