@@ -11,6 +11,7 @@ import {
   encodeCoverageScope,
 } from "../../runtime/javascript/transport.mjs";
 import { inferTestProvenance } from "../../runtime/javascript/provenance.mjs";
+import { callerLocation } from "../../runtime/javascript/runnerEvidence.mjs";
 import {
   discoverWorkspaceMapping,
   guestCoverageEnvironment,
@@ -18,6 +19,59 @@ import {
   wrapCapabilityObject,
   wrapImportedCapability,
 } from "../../runtime/javascript/launchSupervisor.mjs";
+
+test("test registration parses whole paths and never substitutes a deeper stack frame", () => {
+  const original = Error.prepareStackTrace;
+  try {
+    for (const [frame, file] of [
+      ["at file:///project%20(ü)/tests/nodeTest.mjs:12:3", "file:///project%20(ü)/tests/nodeTest.mjs"],
+      ["at register (/project (ü)/tests/runnerEvidence.mjs:12:3)", "/project (ü)/tests/runnerEvidence.mjs"],
+      ["at async /project (ü)/tests/runtime.mjs:12:3", "/project (ü)/tests/runtime.mjs"],
+      ["at register (C:\\project (ü)\\tests\\nodeTest.cjs:12:3)", "C:\\project (ü)\\tests\\nodeTest.cjs"],
+      ["at register (\\\\server\\share (ü)\\tests\\nodeTest.cjs:12:3)", "\\\\server\\share (ü)\\tests\\nodeTest.cjs"],
+      ["at file://server/share%20(ü)/tests/nodeTest.mjs:12:3", "file://server/share%20(ü)/tests/nodeTest.mjs"],
+    ]) {
+      Error.prepareStackTrace = () => `Error\n    ${frame}\n    at /wrong/deeper.mjs:99:1`;
+      assert.deepEqual(callerLocation(), { file, line: 12, column: 3 });
+    }
+    for (const formatter of [
+      () => [],
+      () => "Error\n    at opaque\n    at /wrong/deeper.mjs:99:1",
+      () => { throw new Error("formatter"); },
+    ]) {
+      Error.prepareStackTrace = formatter;
+      assert.deepEqual(callerLocation(), {});
+      assert.equal(Error.prepareStackTrace, formatter);
+    }
+  } finally {
+    Error.prepareStackTrace = original;
+  }
+});
+
+test("native assertion fallback tolerates opaque or throwing stack formatters", () => {
+  const adapter = pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/nodeAssertAdapter.mjs")).href;
+  const runtime = pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/runtime.mjs")).href;
+  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+    import native from 'node:assert/strict';
+    import { createNodeAssertAdapter } from ${JSON.stringify(adapter)};
+    import { withCoverageCarrier, takeNodeAssertionPhases } from ${JSON.stringify(runtime)};
+    const assert = createNodeAssertAdapter(native, 'node:assert/strict');
+    const scope = { version: 1, runId: 'r', workerId: 'w', testId: 't', testKey: 'k', retry: 0, attemptId: 'a' };
+    const original = Error.prepareStackTrace;
+    const formatters = [() => [], () => 'opaque stack', () => { throw new Error('formatter'); }];
+    for (const formatter of formatters) {
+      Error.prepareStackTrace = formatter;
+      await withCoverageCarrier({ version: 1, scope }, async () => { assert.equal(await Promise.resolve(4), 4); });
+      if (Error.prepareStackTrace !== formatter) throw new Error('formatter was replaced');
+    }
+    Error.prepareStackTrace = original;
+    process.stdout.write(JSON.stringify(takeNodeAssertionPhases(scope)));
+  `], { encoding: "utf8", timeout: 10000 });
+  assert.equal(child.status, 0, child.stderr);
+  const phases = JSON.parse(child.stdout);
+  assert.equal(phases.length, 3);
+  assert.ok(phases.every(p => p.status === "passed" && p.source === undefined));
+});
 
 test("a phase is only honoured for the attempt that minted it", async () => {
   // A browser context shared by a whole worker keeps the previous test's last
@@ -29,6 +83,86 @@ test("a phase is only honoured for the attempt that minted it", async () => {
   assert.equal(runtime.phaseBelongsToAttempt("attempt-a:phase:2", "attempt"), false);
   assert.equal(runtime.phaseBelongsToAttempt(undefined, "attempt-a"), false);
   assert.equal(runtime.phaseBelongsToAttempt("attempt-a:phase:2", ""), false);
+});
+
+test("lexical native phases do not format an unused fallback stack or duplicate witnesses", () => {
+  const adapter = pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/nodeAssertAdapter.mjs")).href;
+  const runtime = pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/runtime.mjs")).href;
+  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+    import native from 'node:assert/strict';
+    import { createNodeAssertAdapter } from ${JSON.stringify(adapter)};
+    import { bindNodeAssertionPhase, withCoverageCarrier, takeNodeAssertionPhases } from ${JSON.stringify(runtime)};
+    const assert = createNodeAssertAdapter(native, 'node:assert/strict');
+    const scope = { version: 1, runId: 'r', workerId: 'w', testId: 't', testKey: 'k', retry: 0, attemptId: 'a' };
+    let formatted = 0;
+    const original = Error.prepareStackTrace;
+    Error.prepareStackTrace = () => { formatted++; return 'opaque'; };
+    await withCoverageCarrier({ version: 1, scope }, async () => {
+      for (let n = 0; n < 100; n++)
+        bindNodeAssertionPhase('node:assert/strict.equal', 'tests/a.mjs:1:1', assert, 'equal')(await Promise.resolve(4), 4);
+    });
+    Error.prepareStackTrace = original;
+    process.stdout.write(JSON.stringify({ formatted, phases: takeNodeAssertionPhases(scope) }));
+  `], { encoding: "utf8", timeout: 10000 });
+  assert.equal(child.status, 0, child.stderr);
+  const result = JSON.parse(child.stdout);
+  assert.equal(result.formatted, 0);
+  assert.equal(result.phases.length, 100);
+  assert.ok(result.phases.every(p => p.source === "tests/a.mjs:1:1" && p.status === "passed"));
+});
+
+test("awaited assertion binding preserves call-reference evaluation and attempt identity", () => {
+  const runtime = pathToFileURL(resolve(import.meta.dirname, "../../runtime/javascript/runtime.mjs")).href;
+  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+    import { bindNodeAssertionPhase, withCoverageCarrier, coverageCarrier, takeNodeAssertionPhases } from ${JSON.stringify(runtime)};
+    const scope = id => ({ version: 1, runId: 'r', workerId: 'w', testId: id, testKey: id, retry: 0, attemptId: id });
+    const a = scope('a'), b = scope('b');
+    const events = [];
+    const sentinel = new Error('target failure');
+    let gets = 0;
+    const receiver = { get equal() {
+      gets++;
+      events.push('get');
+      return function (value) {
+        if (this !== receiver || value !== 4) throw new Error('changed call reference');
+        events.push('invoke:' + coverageCarrier().scope.attemptId);
+        return undefined;
+      };
+    } };
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const pending = withCoverageCarrier({ version: 1, scope: a }, async () => {
+      const result = bindNodeAssertionPhase('node:assert.equal', 'a:1:1', receiver, 'equal')(await gate);
+      if (result !== undefined) throw new Error('changed return value');
+    });
+    await withCoverageCarrier({ version: 1, scope: b }, async () => {
+      const value = await Promise.resolve(4);
+      if (coverageCarrier().phaseId) throw new Error('borrowed phase');
+      bindNodeAssertionPhase('node:assert.equal', 'b:1:1', receiver, 'equal')(value);
+      try { bindNodeAssertionPhase('node:assert.equal', 'b:2:1', () => { throw sentinel; })(value); }
+      catch (error) { if (error !== sentinel) throw error; }
+      try { bindNodeAssertionPhase('node:assert.equal', 'b:3:1', receiver, 'equal')(await Promise.reject(sentinel)); }
+      catch (error) { if (error !== sentinel) throw error; }
+      // Calling a non-function evaluates its arguments before throwing TypeError.
+      try { bindNodeAssertionPhase('node:assert.equal', 'b:4:1', { equal: 42 }, 'equal')(events.push('noncallable argument')); }
+      catch (error) { if (!(error instanceof TypeError)) throw error; }
+      // A throwing property access, in contrast, happens before the arguments.
+      try { bindNodeAssertionPhase('node:assert.equal', 'b:5:1', { get equal() { throw sentinel; } }, 'equal')(events.push('forbidden argument')); }
+      catch (error) { if (error !== sentinel) throw error; }
+    });
+    Object.defineProperty(receiver, 'equal', { value: () => { throw new Error('target was re-read'); } });
+    release(4);
+    await pending;
+    if (gets !== 3) throw new Error('getter was not read exactly once per reference');
+    process.stdout.write(JSON.stringify({ events, a: takeNodeAssertionPhases(a), b: takeNodeAssertionPhases(b) }));
+  `], { encoding: "utf8", timeout: 10000 });
+  assert.equal(child.status, 0, child.stderr);
+  const result = JSON.parse(child.stdout);
+  assert.deepEqual(result.events, ["get", "get", "invoke:b", "get", "noncallable argument", "invoke:a"]);
+  assert.deepEqual(result.a.map(p => [p.source, p.status]), [["a:1:1", "passed"]]);
+  assert.deepEqual(result.b.map(p => [p.source, p.status]), [
+    ["b:1:1", "passed"], ["b:2:1", "failed"], ["b:4:1", "failed"],
+  ]);
 });
 
 test("coverage scopes round-trip without losing worker, retry, or phase identity", () => {

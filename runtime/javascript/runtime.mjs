@@ -717,9 +717,11 @@ function withCoverageCarrier(carrier, callback) {
 function assertionPhaseState(scope) {
   const key = attemptKey(scope);
   const existing = state.assertionPhases.get(key);
-  if (existing)
+  if (existing) {
+    existing.phaseIds ??= new Set(existing.phases.filter(phase => phase.kind === "assertion").map(phase => phase.id));
     return existing;
-  const created = { counter: 0, phases: [] };
+  }
+  const created = { counter: 0, phases: [], phaseIds: new Set() };
   state.assertionPhases.set(key, created);
   return created;
 }
@@ -749,9 +751,13 @@ function withNodeAssertionPhase(operation, source, callback) {
   const scope = context.scope;
   if (!scope)
     return callback();
-  const existing = context.phaseId ? assertionPhaseState(scope).phases.find((phase2) => phase2.id === context.phaseId && phase2.kind === "assertion") : void 0;
+  const existing = context.phaseId && assertionPhaseState(scope).phaseIds.has(context.phaseId);
   if (existing)
     return callback();
+  // A lexical occurrence already identifies its source. Stack fallback is lazy
+  // and qualified so transformed coordinates cannot impersonate original ones.
+  if (typeof source === "function")
+    source = source();
   const bridged = (_a8 = runtimeGlobal.__SUPERCOV_ASSERTION_PHASE_BRIDGE__) == null ? void 0 : _a8.call(runtimeGlobal, operation, source, callback);
   if (bridged == null ? void 0 : bridged.handled)
     return bridged.value;
@@ -764,6 +770,7 @@ function withNodeAssertionPhase(operation, source, callback) {
     startedAtMs: Date.now()
   });
   attempt.phases.push(phase);
+  attempt.phaseIds.add(phase.id);
   try {
     const result = withCoverageCarrier({ version: 1, scope, phaseId: phase.id }, callback);
     if (result && typeof result.then === "function")
@@ -783,7 +790,7 @@ function withNodeAssertionPhase(operation, source, callback) {
 }
 // Callee binding preserves receiver, getter/evaluation order, spreads and the
 // original await/yield placement. Only the matcher call opens the phase.
-function bindNodeAssertionPhase(operation, source, target, property) {
+function bindNodeAssertionPhase(operation, source, target, property = null) {
   const callback = property === null ? target : target[property];
   const receiver = property === null ? undefined : target;
   return (...args) => withNodeAssertionPhase(operation, source, () => Reflect.apply(callback, receiver, args));

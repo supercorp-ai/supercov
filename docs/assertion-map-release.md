@@ -1,8 +1,10 @@
 # JS/TS assertion map release readiness
 
-This feature is ready for a release-candidate review. The local gates below pass;
-publishing still requires the repository's native artifact/release workflow and
-a version bump. No tag, push or publication was performed by this investigation.
+The feature passes the local gates below. A release-base integration remains:
+this experimental branch still declares 0.0.42, while the npm registry and
+remote tags report 0.0.44 (checked on 2026-09-12). Do not publish this branch as
+0.0.42 or choose an already published version. Reconcile it with current main,
+then run the native artifact/release workflow and choose an unused version. No tag, push or publication was performed by this investigation.
 Ruby/Python adapter work is outside this release scope.
 
 ## Local verification, 2026-09-12
@@ -15,7 +17,7 @@ assertion-map matrix also passed locally under Node 22.23.1.
 | --- | --- |
 | Rust formatting and clippy with warnings denied | Passed |
 | Workspace Rust tests | 481 passed |
-| JavaScript runtime tests | 15 passed |
+| JavaScript runtime tests | 22 passed |
 | Assertion map lifecycle | Init, exact source anchors, edit/review, carry, dirty-state persistence and selective repair passed |
 | JS/TS assertion map matrix | Node ESM/CJS/native TS; Vitest TS with parameterized cases; Jest CJS named imports with parameterized cases; Playwright TS with a custom fixture module |
 | Awaited operands and rejection assertions | Exact passing site identity and statement credit passed in all six configurations |
@@ -26,7 +28,7 @@ assertion-map matrix also passed locally under Node 22.23.1.
 
 A real Supergateway `tests/websocketLifecycle.test.ts` trial passed normally and
 under Supercov using `node --import tsx --test --experimental-test-module-mocks`.
-Run `run_f9ce4f5166866ba3` has passing identities for all five assertions,
+Run `run_bc08d137feebc233` has passing identities for all five assertions,
 including the awaited WebSocket broadcast check. All 790 measured statement
 anchors resolve against frozen source. This is a single-test trial, not a
 completed suite map: inventory contains 544 project assertion sites, and entries
@@ -61,17 +63,22 @@ the remote matrix has not been dispatched or observed passing in this task.
    checkpoint. The `runs <run> asserted` command is removed; ordinary assertion
    phase links no longer earn credit. Legacy confidence JSON fields remain zero
    for compatibility. Agent maps are optional and require frozen run inputs.
-2. Confirm the intended support claim: an agent-authored assessment with exact
+2. Reconcile the feature with current main (`1f393c4` at audit time), preserving
+   published fixes while removing the superseded semantic analyzer. The Node
+   registration/worker identity, source-path parsing and lazy qualified stack
+   fallback fixes from 0.0.44 have been ported into this branch with their
+   regression tests. A full main/release integration is still outstanding.
+3. Confirm the intended support claim: an agent-authored assessment with exact
    occurrence/execution evidence and mechanical bookkeeping checks. Optional,
    nested or unrecognized assertions can lack individual identities. Generated
    sources, browser transports and unusual loaders need representative map
    trials before broader support is advertised. No gate proves the causal graph
    or mutation resistance.
-3. Let the Node 22/24 PR jobs and full native artifact matrix pass on the final
+4. Let the Node 22/24 PR jobs and full native artifact matrix pass on the final
    commit. A local macOS package test does not replace Linux/Windows validation.
    Run the repository's full release checks for any broader changes bundled into
    this release; this task's adapter work concentrated on JS/TS.
-4. Use `npm run release:bump -- 0.0.42 <next-version>` with the chosen version, check the
+5. Use `npm run release:bump -- <current-branch-version> <unused-next-version>` with the chosen version, check the
    resulting package versions/lockfiles, move the intended Unreleased notes into
    the new version section, then follow the existing
    tag and trusted-publishing workflow. Do not reuse old native binaries: the
