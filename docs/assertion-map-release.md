@@ -1,14 +1,46 @@
 # JS/TS assertion map release readiness
 
-Release candidate **0.0.45** integrates main `1f393c4` and replaces the old
-assertion analyzer with agent-authored maps. The released Node registration,
-worker-attempt and source-location safeguards are retained. The previously
-verified baseline is commit `0b6394a3c37a51a1d332c25b7e42789ef7fd4393` on
-`codex/agent-assertion-maps`. The branch now additionally creates and carries maps
-automatically and uses current project source with per-run file hashes; see the follow-ups below. This checklist records preparation and
-validation; no release tag or publication has been made.
+**0.0.45 is published.** [Release v0.0.45](https://github.com/supercorp-ai/supercov/releases/tag/v0.0.45)
+points to `9f712bdf8821c7c6673d7ee88698f2f206e59311`, also merged into `main`.
+It replaces the old assertion analyzer with agent-authored maps while retaining
+the released Node registration, worker-attempt and source-location safeguards.
+The current interface is described in [assertion maps](assertion-maps.md) and
+[the agent workflow](assertion-agent.md). The candidate and earlier follow-up
+sections below are historical records, including commands and release conditions
+that have since changed.
 
-## Current schema-2 flow, 2026-09-12
+## Publication verification, 2026-09-13
+
+- [Linux Node 22/24 CI](https://github.com/supercorp-ai/supercov/actions/runs/34717782551)
+  passed. All local release gates passed: the full pipeline found an outdated
+  run-store snapshot, its expectation was updated for the two automatic map
+  files, and that check plus every remaining gate passed.
+- [The native matrix](https://github.com/supercorp-ai/supercov/actions/runs/34717784237)
+  passed on all eight targets, including installed JS/TS assertion maps and
+  verification of the complete release set. Its source is `43373b2`; the sole
+  later candidate change is `tests/golden/engine-contract-v1.json`. All runtime,
+  build, workflow and package inputs are identical. The release reused these
+  validated artifacts and verified the set again from the tag.
+- [Publication](https://github.com/supercorp-ai/supercov/actions/runs/34718585934)
+  succeeded on npm, PyPI, RubyGems and crates.io. Registry readbacks confirmed
+  the primary npm package, eight native npm packages, eight wheels, seven gems
+  and all three crates at 0.0.45. npm integrity, wheel/gem hashes and all 23
+  GitHub release attachment hashes match the validated artifacts.
+- [Actual npm installs](https://github.com/supercorp-ai/supercov/actions/runs/34718681658)
+  passed on all eight platforms. Immediate post-publication installs initially
+  missed native packages while registry metadata propagated; fresh installs
+  passed after propagation, with no artifact changes. A separate clean npm
+  install on macOS ARM64 passed the complete JS and TS assertion-map workflow,
+  including numeric reports, syntax, acknowledgement, threshold and stale-source
+  checks.
+- An optimized local query of a 590 KB map containing 500 assertions, 500 flows
+  and 500 credited statements took about 0.29 seconds; validation took about
+  0.12 seconds. This is one populated fixture, not a general scalability claim.
+
+These checks validate the shipped implementation and distribution. They do not
+measure model accuracy or establish semantic completeness or mutation resistance.
+
+## Schema-2 candidate verification, 2026-09-12
 
 The active contract is now [assertion maps](assertion-maps.md) and
 [the agent workflow](assertion-agent.md). The sections below record historical
