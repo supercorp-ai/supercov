@@ -1,6 +1,6 @@
 {
   "name": "supercov",
-  "version": "0.0.44",
+  "version": "0.0.45",
   "description": "Coverage for coding agents and software factories \ud83c\udf19",
   "license": "MIT",
   "repository": {
@@ -92,14 +92,14 @@
     "sync:assertion-schema": "cargo build -p supercov && node scripts/assertion-map-schema.mjs"
   },
   "optionalDependencies": {
-    "@supercov/cli-darwin-arm64": "0.0.44",
-    "@supercov/cli-darwin-x64": "0.0.44",
-    "@supercov/cli-linux-arm64-gnu": "0.0.44",
-    "@supercov/cli-linux-arm64-musl": "0.0.44",
-    "@supercov/cli-linux-x64-gnu": "0.0.44",
-    "@supercov/cli-linux-x64-musl": "0.0.44",
-    "@supercov/cli-win32-arm64": "0.0.44",
-    "@supercov/cli-win32-x64": "0.0.44"
+    "@supercov/cli-darwin-arm64": "0.0.45",
+    "@supercov/cli-darwin-x64": "0.0.45",
+    "@supercov/cli-linux-arm64-gnu": "0.0.45",
+    "@supercov/cli-linux-arm64-musl": "0.0.45",
+    "@supercov/cli-linux-x64-gnu": "0.0.45",
+    "@supercov/cli-linux-x64-musl": "0.0.45",
+    "@supercov/cli-win32-arm64": "0.0.45",
+    "@supercov/cli-win32-x64": "0.0.45"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.55.0",
